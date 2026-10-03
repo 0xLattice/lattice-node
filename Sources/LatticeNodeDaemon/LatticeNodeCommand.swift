@@ -12,10 +12,10 @@ import UInt256
 struct LatticeNodeCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "lattice-node",
-        abstract: "Run a Nexus node"
+        abstract: "Run one Nexus-rooted hosted tree"
     )
 
-    @Option(help: "Storage directory; defaults to ~/.lattice/chains/<chain-path>")
+    @Option(help: "Hosted-tree storage directory; defaults to ~/.lattice/chains/Nexus")
     var dataDirectory: String?
 
     @Option(help: "Process identity key file; created with mode 0600 when absent")
@@ -35,7 +35,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         }
     }
 
-    @Option(help: "Same-chain overlay listen port")
+    @Option(help: "Hosted-tree overlay listen port")
     var listenPort: UInt16 = 4001
 
     @Option(help: "Loopback HTTP API port")
@@ -56,7 +56,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Per-netgroup overlay connection cap (both directions). Defaults to the total connection cap (no effective throttle): a low value breaks proxy-fronted nodes where every connection shares one address, and buys little since bad data is rejected on verification and outbound sync slots are separately reserved. For a real per-source admission cost on a public direct-IP node, set --minimum-peer-key-bits (a grinding price) instead of lowering this.")
     var overlayMaxConnectionsPerNetgroup = IvyConfig.defaultMaxConnections
 
-    @Option(help: "Seconds with no newly accepted block after which the node widens its peer search: re-dial the configured peers it holds no session with, plus one provider lookup for this chain's genesis. An eclipse only works while a node keeps asking the same peers, so a node making no progress goes looking for others. Staleness is measured from this node's own verified tip, never from a peer's claimed height. Discovery only — it never disconnects, scores or prefers a peer, and has no bearing on validation or fork choice. 0 disables it.")
+    @Option(help: "Seconds with no newly accepted Nexus block after which the node widens its peer search: re-dial configured peers without a session and look up providers of Nexus genesis. The node also announces each hosted chain by genesis. Staleness is measured from the verified local tip. Discovery never affects validation or fork choice. 0 disables search.")
     var peerSearchInterval: Double = 600
 
     @Option(help: "Public read-only HTTP port; binds all interfaces and serves ONLY the bounded GET read routes (the read-replica allowlist, enforced in code). Chain data is public; this exposes no operator or write surface.")
@@ -73,9 +73,6 @@ struct LatticeNodeCommand: AsyncParsableCommand {
 
     @Option(help: "Self-described publicly reachable host for overlay announcements (NAT/proxy-fronted nodes announce an unreachable observed address otherwise). Host only; the overlay listen port applies.")
     var externalAddress: String?
-
-    @Option(help: "Operator-declared browsable base URL for this chain's public read surface (e.g. https://toy.example.com — a TLS-fronted hostname a browser can dial, distinct from the IP-literal P2P plane). Advertised through the parent rendezvous so explorers can reach this chain; consumers verify the served genesis against the parent's on-chain anchor. Leave unset for nodes without a public TLS surface.")
-    var publicReadUrl: String?
 
     mutating func run() async throws {
         let processStartTime = Date()
@@ -119,7 +116,6 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             minPeerKeyBits: minimumPeerKeyBits,
             overlayMaxConnectionsPerNetgroup: overlayMaxConnectionsPerNetgroup,
             externalAddress: externalAddress,
-            publicReadURL: publicReadUrl,
             peerSearchInterval: peerSearchInterval,
             hostedChildren: hosted.map(\.path),
             childSpecs: Dictionary(hosted.compactMap { entry in entry.spec.map { (entry.path, $0) } }) { first, _ in first }
@@ -244,10 +240,8 @@ func makeApplication(
         healthSnapshot: { await reads.readSnapshot() }
     )
     // Operator surface below: registered ONLY on this loopback application.
-    // /status stays on the reconciling status() (expires the mempool, prunes
-    // stale child-intents) — existing operational clients poll it to observe
-    // mempool drain, and depend on that reconciliation. It is an internal
-    // endpoint; the public status surface is /health.
+    // /status reads the live runtime status and template digest. It is an
+    // internal endpoint; the public status surface is /health.
     router.get("status") { request, context in
         try json(await status(), request: request, context: context)
     }
@@ -706,14 +700,6 @@ private func serviceCall<Value: Encodable, Context: RequestContext>(
             request: request,
             context: context
         )
-    } catch NodeAPIError.childIntentLimitReached {
-        throw HTTPError(.tooManyRequests, message: "childIntentLimitReached")
-    } catch NodeAPIError.noDeploymentAvailable {
-        throw HTTPError(.conflict, message: "noDeploymentAvailable")
-    } catch let error as NodeAPIError
-    where error == .mempoolUnavailable || error == .parentUnavailable
-        || error == .shuttingDown {
-        throw HTTPError(.serviceUnavailable, message: reason(error))
     } catch let error as NodeAPIError {
         throw HTTPError(.badRequest, message: reason(error))
     } catch let error as MiningTemplateError {

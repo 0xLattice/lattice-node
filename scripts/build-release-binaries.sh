@@ -4,7 +4,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-PRODUCTS=(lattice-node lattice-mining-coordinator lattice-miner)
+PRODUCTS=(lattice lattice-node lattice-mining-coordinator lattice-miner)
 BUILD_ROOT="${RELEASE_BUILD_ROOT:-$PWD/.build}"
 ARTIFACT_ROOT="${RELEASE_ARTIFACT_ROOT:-$PWD/.build}"
 if [[ "${SKIP_SWIFT_BUILD:-0}" == "1" ]]; then

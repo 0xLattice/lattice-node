@@ -82,15 +82,9 @@ jobs:
       - name: Run tests
         run: swift test --skip LatticeNodeSimulationTests
 
-      - name: Run optimized multichain E2E
-        env:
-          E2E_NODE_BIN: ${{ github.workspace }}/.build/release/lattice-node
-          E2E_COORDINATOR_BIN: ${{ github.workspace }}/.build/release/lattice-mining-coordinator
-          E2E_MINER_BIN: ${{ github.workspace }}/.build/release/lattice-miner
-        run: swift test --skip-build --filter LatticeNodeE2ETests
-
       - name: Verify executables run
         run: |
+          swift run lattice --help
           swift run lattice-node --help
           swift run lattice-mining-coordinator --help
           swift run lattice-miner --help
@@ -133,18 +127,12 @@ jobs:
       - name: Run tests
         run: swift test --skip LatticeNodeSimulationTests
 
-      - name: Run optimized multichain E2E
-        env:
-          E2E_NODE_BIN: ${{ github.workspace }}/.build/release/lattice-node
-          E2E_COORDINATOR_BIN: ${{ github.workspace }}/.build/release/lattice-mining-coordinator
-          E2E_MINER_BIN: ${{ github.workspace }}/.build/release/lattice-miner
-        run: swift test --skip-build --filter LatticeNodeE2ETests
-
       - name: Run tests with code coverage
         run: swift test --enable-code-coverage --skip LatticeNodeE2ETests --skip LatticeNodeSimulationTests
 
       - name: Verify executables run
         run: |
+          swift run lattice --help
           swift run lattice-node --help
           swift run lattice-mining-coordinator --help
           swift run lattice-miner --help
@@ -253,8 +241,10 @@ jobs:
       - name: Resolve dependencies
         run: swift package resolve
 
-      - name: Run core driver tests under ASan + UBSan
-        run: swift test --sanitize address --sanitize undefined --filter CoreDriver
+      - name: Run node runtime tests under ASan + UBSan
+        run: |
+          swift test list | grep -q '^LatticeNodeTests\.NodeRuntime'
+          swift test --sanitize address --sanitize undefined --filter NodeRuntime
 
   static-analysis:
     runs-on: macos-15
@@ -325,3 +315,11 @@ jobs:
 
       - name: Assert the read-replica nginx allowlist boundary
         run: bash deploy/read-replica/test-allowlist.sh
+
+  deployment-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate one-process deployment configuration
+        run: .github/scripts/check-deploy-config.sh

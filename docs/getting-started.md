@@ -1,184 +1,185 @@
 # Getting started
 
+## Requirements
+
+- Swift 6.1 or newer for a source build
+- SQLite development headers on Linux
+- `curl` and `jq` for the examples
+
+The repository builds four executables:
+
+- `lattice-node` — one full-node process for a hosted chain tree;
+- `lattice` — topology, lifecycle, key, transaction, and mining CLI;
+- `lattice-mining-coordinator` — assigns nonce ranges and submits results;
+- `lattice-miner` — stateless CPU nonce worker.
+
 ## Build
 
-Requires Swift 6.1 or newer.
-
 ```bash
-git clone https://github.com/adalinxx/lattice-node.git
-cd lattice-node
 swift build
+swift test
 ```
 
-The package builds four executables:
+For a production binary, use `swift build -c release` or a verified release
+archive.
 
-- `lattice-node` — one chain process.
-- `lattice-mining-coordinator` — node-facing work scheduler.
-- `lattice-miner` — stateless nonce-range worker.
-- `lattice-proof-verifier` — proof verification utility.
-
-## Start Nexus
+## Initialize a host
 
 ```bash
-swift run lattice-node \
-  --chain-path Nexus \
-  --listen-port 4001 \
-  --rpc-port 8080
+mkdir -p ./node-data
+swift run lattice init --root ./node-data
 ```
 
-The default storage path is `~/.lattice/chains/Nexus`. On its first start the
-node creates a mode-0600 `process.key`, constructs the deterministic Nexus
-genesis, and verifies its CID:
+This creates:
 
-`bafyreigsvcxa7kveg7ywaykwqqwvakgtcujds634k4cc6mejyh43pmoqny`
-
-The RPC server listens on loopback. Non-loopback `--rpc-bind` values are
-rejected because the current HTTP surface is unauthenticated.
-
-## Bootstrap peers
-
-A Nexus process started with no peer source of its own dials the default
-bootstrap peers built into the binary, so a fresh node joins the network with
-no flags. They are a discovery convenience only: a default peer is admitted,
-verified, and weighed exactly like any other peer, gets no validation shortcut
-and no fork-choice influence, and is dropped like any stranger if it serves a
-different chain.
-
-Any peer you supply REPLACES the built-in set — the two are never merged:
-
-```bash
-swift run lattice-node \
-  --chain-path Nexus \
-  --peer <public-key>@192.0.2.10:4001 \
-  --peer <public-key>@198.51.100.20:4001
+```text
+node-data/
+  lattice.json
+  identity/Nexus.key
 ```
 
-To start with no bootstrap peers at all — a private or isolated network —
-disable them explicitly:
-
-```bash
-swift run lattice-node --chain-path Nexus --no-default-peers
-```
-
-The defaults are the root chain's. A child process never receives them; give a
-child its own `--peer` endpoints, which must serve that child's chain.
-
-A bootstrap peer that goes away is re-dialled under backoff for the life of the
-process, so a node that loses its peers keeps trying to find them again.
-
-Peer identity admission uses `--minimum-peer-key-bits` (default `0`). Generated
-process identities work at that default. Set a nonzero threshold only when every
-peer that must connect has deliberately generated a qualifying identity.
-
-## Check status
-
-```bash
-curl http://127.0.0.1:8080/health
-curl http://127.0.0.1:8080/status
-```
-
-Both endpoints return the process phase, absolute chain path, pinned Nexus
-genesis CID, tip, height, and bounded service counts.
-
-## Run external mining
-
-The coordinator obtains Nexus templates and gives immutable nonce ranges to
-external workers:
-
-```bash
-swift run lattice-mining-coordinator \
-  --node http://127.0.0.1:8080 \
-  --worker-executable .build/debug/lattice-miner \
-  --workers 2
-```
-
-Use `--once` for one bounded coordinator batch. `lattice-miner` is not a
-node-facing daemon; the coordinator launches it with a concrete work ID, block,
-target, start nonce, and count.
-
-`--recipient <chain path>=<address>` (repeat once per chain) names where that
-chain's block reward and fees go. Omit it and the chain's reward and fees burn;
-the coordinator has no identity or private-key flag. Create an address with
-`lattice key generate --out key.json`.
-
-## Start a child process
-
-All chain paths are absolute and Nexus-inclusive. A child runs in the same
-process as its parent: list both chains in a `lattice.json` and start the tree
-host.
+The initial topology is flat because one process owns the whole tree:
 
 ```json
 {
-  "chains": {
-    "Nexus": {"listen": 4001, "rpc": 8080},
-    "Nexus/Payments": {"listen": 4101, "rpc": 8180}
+  "listen": 4001,
+  "rpc": 8080
+}
+```
+
+`listen` is the Ivy overlay. `rpc` is the loopback operator API. Add explicit
+bootstrap peers with `peers`, or leave the field absent to use the built-in
+Nexus bootstrap set.
+
+## Start and inspect the node
+
+```bash
+swift run lattice up --root ./node-data
+swift run lattice status --root ./node-data
+curl -s http://127.0.0.1:8080/health | jq
+```
+
+Stop it with:
+
+```bash
+swift run lattice down --root ./node-data
+```
+
+For foreground/container operation:
+
+```bash
+swift run lattice up --root ./node-data --foreground
+```
+
+## Add a child
+
+```bash
+swift run lattice child create Nexus/Payments \
+  --root ./node-data \
+  --block-time 10000 \
+  --reward 1000
+```
+
+The CLI writes `specs/Nexus%2FPayments.json`, appends the path to
+`hostedChains`, and restarts the process if it is running. The next mining
+template that can carry the child builds its genesis from the spec and the
+parent's executed state.
+
+Nested paths must be added parent first:
+
+```bash
+swift run lattice child create Nexus/Payments/Rollups \
+  --root ./node-data \
+  --reward 1000
+```
+
+The nested genesis waits until `Nexus/Payments` has executed a block of its
+own. A reward-free parent whose state never changes cannot host a nested child;
+that is a consensus consequence, not an availability error.
+
+## Configure mining
+
+Add a `mine` object to `lattice.json`:
+
+```json
+{
+  "listen": 4001,
+  "rpc": 8080,
+  "hostedChains": ["Nexus/Payments"],
+  "mine": {
+    "worker": "cpu",
+    "workers": 2,
+    "batchSize": 2000000,
+    "recipients": {
+      "Nexus": "<nexus-address>",
+      "Nexus/Payments": "<payments-address>"
+    }
   }
 }
 ```
 
+Then start the mining loop:
+
 ```bash
-swift run lattice-node --config lattice.json
+swift run lattice mine start --root ./node-data
+swift run lattice mine status --root ./node-data
 ```
 
-Each chain keeps its storage in `chains/<path>` and its identity in
-`identity/<path>.key` beside the file. The child initially reports
-`awaitingGenesis`. To give a new chain its genesis:
+An omitted recipient burns that chain's block reward and fees. A nested parent
+should have a valid recipient and a positive reward so its state advances.
 
-1. Build the self-contained child genesis offline from a seed: the child spec,
-   an optional premine recipient, and a timestamp. The same seed always yields
-   the same genesis CID.
-2. Write that seed as `child-genesis.json` into the child's data directory
-   (`chains/Nexus/Payments`) before starting the child. The node reads the file only at startup, so a
-   child that was already running must be restarted after the file is written.
-3. Construct and sign a parent transaction carrying the genesis CID in a
-   `GenesisAction` for directory `Payments`.
-4. `POST /transactions` on the parent with that transaction.
-5. Mine the parent with `lattice-mining-coordinator` as usual; the transaction
-   is selected like any other.
+## Send transactions
 
-A child started with the seed retries until the parent's record lands. A child
-also tries to fetch the recorded genesis block by CID from child-overlay peers,
-but a brand-new chain has no peer serving it, so the first node of a new chain
-needs the seed. Either way, the child imports the genesis only after its
-authenticated parent confirms that exact record. The child does not accept
-opaque genesis bytes on its command line. `lattice child deploy` performs all
-of these steps for a local tree.
+Create a spending key:
 
-## Testing an application
+```bash
+swift run lattice key generate --out ./spend-key.json
+```
 
-Create a child chain with testing-oriented rewards, limits, and target cadence.
-Nexus retains its one pinned genesis. The testing chain's address is
-still a normal absolute path such as `Nexus/MyAppTest`, and it exercises the
-same child-deployment and merged-mining rules as any production child.
+Submit a transfer to any hosted level through the one RPC listener:
 
-## Storage
+```bash
+swift run lattice tx send \
+  --root ./node-data \
+  --chain Nexus/Payments \
+  --key ./spend-key.json \
+  --to <address> \
+  --amount 10
+```
 
-Each process owns one directory:
+## Public reads
+
+The operator RPC remains loopback-only. Set `publicRead` in `lattice.json` to
+open the code-enforced GET-only read surface on all interfaces:
+
+```json
+{
+  "listen": 4001,
+  "rpc": 8080,
+  "publicRead": 8081,
+  "publicReadRate": 25,
+  "publicReadExpensiveRate": 1,
+  "publicReadMaxRate": 200
+}
+```
+
+Use `?chainPath=Nexus/Payments` to select a child on routes that accept a
+chain. Unknown or unhosted paths return 404.
+
+## Storage and upgrades
+
+The running tree stores data under `node-data/chains/Nexus/`:
 
 ```text
-~/.lattice/chains/Nexus/
-  process.key
-  state.db
-  volumes.db
+state.db
+volumes.db
+header-evidence.db
+storage.lock
 ```
 
-For a custom location:
+There are no migrations. On an incompatible schema or protocol cutover, stop
+the node and wipe the complete tree storage with `lattice wipe`. Identity,
+specs, and `lattice.json` remain outside that directory.
 
-```bash
-lattice-node \
-  --chain-path Nexus \
-  --data-directory /var/lib/lattice/chains/Nexus
-```
-
-The current store does not import legacy layouts. During migration, back up any
-identity key you want to retain, stop the process, and delete the entire
-configured storage directory. Do not preserve only `state.db` or only
-`volumes.db`.
-
-## Next steps
-
-- [HTTP API](rpc-api.md)
-- [Architecture](architecture.md)
-- [Operations](operations.md)
-- [Deployment](../deploy/README.md)
-- [Chain addressing](design/chain-addressing.md)
+Continue with the [operator CLI](operator-cli.md), [RPC API](rpc-api.md), and
+[operations runbook](operations.md).

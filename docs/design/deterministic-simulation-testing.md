@@ -1,8 +1,10 @@
 # Deterministic Simulation Testing
 
-> **Status: proposed concept.** The normative consensus rules belong in
-> Lattice's specification. This document states the testing problem those rules
-> leave open in `lattice-node` and the concept that would close it.
+> **Status: implemented outcome, historical proposal.** The `LatticeNodeSim`
+> harness and seeded simulation suites now cover this testing gap. The design
+> below is retained as rationale and includes prototype component names that no
+> longer exist. See [testing](../testing.md) for the commands and current test
+> inventory.
 
 ## Problem
 
@@ -162,7 +164,7 @@ Without control, the repository pays for this class three times:
 
 **A simulation run is a pure function of its seed.**
 
-- One run hosts one or many nodes, each made of its real chain processes.
+- One run hosts one or many nodes, each made of its real hosted chain levels.
 - The nodes are connected through simulated versions of everything a node does
   not decide for itself.
 - The seed chooses every outcome the production system leaves to its
@@ -213,7 +215,7 @@ by editing node state:
   node's internals.
 
 A fault schedule is part of the run, not a separate script. The same seed
-decides both the workload (transactions, mined blocks, child deployments,
+decides both the workload (transactions, mined blocks, child genesis events,
 joins) and the faults interleaved with it.
 
 ### Invariants are checked continuously
@@ -276,7 +278,7 @@ node's observable behaviour against it; it does not restate it.
    alone, it weighs excluded subtrees and never descends into them.
 
    Sources: Lattice spec §9.2, §9.4, §9.9 and §12.5 (items 4–6, 10); Lattice
-   [consensus-fork-choice](https://github.com/adalinxx/Lattice/blob/38.0.0/docs/consensus-fork-choice.md);
+   [consensus-fork-choice](https://github.com/adalinxx/Lattice/blob/43.1.0/docs/consensus-fork-choice.md);
    the properties in [proof-derived child work](proof-derived-work.md).
 2. **One grind is counted once per location.**
    - A verified observation of a root whose root hash clears the terminal
@@ -549,7 +551,7 @@ because boundary-focused testing needed the same things:
   which fails or parks a chosen store, merge, advance or batch pin.
 - **Precedent for seeded runs.** Lattice's `LatticeSim` drives the real
   `ChainState` fork choice from a seed and requires "the same trace
-  byte-for-byte" ([consensus simulator](https://github.com/adalinxx/Lattice/blob/38.0.0/docs/consensus-simulator.md)).
+  byte-for-byte" ([consensus simulator](https://github.com/adalinxx/Lattice/blob/43.1.0/docs/consensus-simulator.md)).
   The wire fuzzers use a portable seeded generator rather than the system one.
 
 ### Where no seam exists

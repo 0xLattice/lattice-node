@@ -13,7 +13,7 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
     private struct Harness {
         var host: NodeCore
         let storage: NodeStorage
-        let headers: HeaderContentStore
+        let headers: HeaderEvidenceStore
         /// The runtime's mining FIFO.
         var jobs: [NodeRuntime.RuntimeJob] = []
         /// Every reply and announce the mining effects gave.
@@ -41,9 +41,9 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
             while !pending.isEmpty {
                 let effects = host.step(pending.removeFirst(), now: NodeRuntime.now())
                 for case .persist(let batch) in effects {
-                    for (_, level) in batch.levels {
-                        try await storage.persistChainBatch(level, logID: host.logID, headers: headers)
-                    }
+                    try await storage.persistNodeBatch(
+                        batch, logID: host.logID, headers: headers
+                    )
                 }
                 for effect in effects {
                     switch effect {
@@ -112,10 +112,10 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
         return Harness(
             host: try await NodeRuntime.boot(
                 storage: storage, configuration: configuration, coreConfig: config,
-                headers: try HeaderContentStore(directory: configuration.storagePath)
+                headers: try HeaderEvidenceStore(directory: configuration.storagePath)
             ),
             storage: storage,
-            headers: try HeaderContentStore(directory: storageDirectory)
+            headers: try HeaderEvidenceStore(directory: storageDirectory)
         )
     }
 

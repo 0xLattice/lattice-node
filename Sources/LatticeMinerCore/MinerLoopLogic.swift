@@ -13,8 +13,7 @@ public struct TemplateResponse: Decodable, Sendable, Equatable {
     /// whose blockHex is not a decodable Block.
     public let prefixHex: String
     public let searchTarget: String
-    /// Every target this work can clear, easiest first (`searchTarget`
-    /// leads). Just `searchTarget` when a node predates the field.
+    /// Every target this work can clear, easiest first (`searchTarget` leads).
     public let targets: [String]
     public let chainPath: [String]
     public let expiresInMilliseconds: UInt64
@@ -75,25 +74,25 @@ public struct TemplateResponse: Decodable, Sendable, Equatable {
             UInt256.self,
             forKey: .searchTarget
         ).toHexString()
-        targets = try container.decodeIfPresent(
-            [UInt256].self,
-            forKey: .targets
-        )?.map { $0.toHexString() } ?? [searchTarget]
+        targets = try container.decode([UInt256].self, forKey: .targets)
+            .map { $0.toHexString() }
         chainPath = try container.decode([String].self, forKey: .chainPath)
         expiresInMilliseconds = try container.decode(
             UInt64.self,
             forKey: .expiresInMilliseconds
         )
-        // The node's template digest changes whenever a template built now
-        // would differ — a child's candidate as much as this chain's tip —
-        // and the status route serves the same digest. A node predating it
-        // exposes only the tip, so that stays the fallback.
-        let digest = try container.decodeIfPresent(
-            String.self,
-            forKey: .templateDigest
-        )
-        staleToken = digest.flatMap { $0.isEmpty ? nil : $0 }
-            ?? block.parent?.rawCID ?? workID
+        // The digest changes whenever a template built now would differ — a
+        // child's candidate as much as Nexus's tip — and `/status` serves the
+        // same value.
+        let digest = try container.decode(String.self, forKey: .templateDigest)
+        guard !digest.isEmpty else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .templateDigest,
+                in: container,
+                debugDescription: "Template digest is empty"
+            )
+        }
+        staleToken = digest
     }
 }
 

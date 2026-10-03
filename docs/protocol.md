@@ -7,7 +7,8 @@ document records how `lattice-node` realizes that boundary.
 
 ## Chain identity
 
-A process owns exactly one absolute Nexus-inclusive path:
+A process hosts one Nexus-rooted tree. Every level has one absolute
+Nexus-inclusive path:
 
 ```text
 Nexus
@@ -15,9 +16,10 @@ Nexus/Payments
 Nexus/Payments/Receipts
 ```
 
-The path is immutable setup, not transaction-selected routing state. A process
-never embeds child runtimes. Nested child commitments are data; each child
-process validates its own sparse route and chooses its own canonical projection.
+The root and operator-selected descendants run as independent consensus levels
+inside one `NodeCore`. Paths are immutable setup and signed transaction replay
+protection; the shared overlay and HTTP surface use them for routing. Each
+level validates its own sparse route and chooses its own canonical projection.
 
 The pinned Nexus genesis CID is:
 
@@ -30,9 +32,10 @@ It contains the deterministic premine transaction for public key
 On an empty store, the node constructs it locally, recomputes its CID, and
 uses it only for configured root bootstrap. The CID is a trust anchor, never a
 peer-admission signature permit. Every transaction in any genesis has empty
-signers and signatures; an exact configured Nexus CID or parent `GenesisAction`
-CID authorizes that genesis. Ordinary post-genesis transactions, including
-transactions carrying `GenesisAction`s, remain signature-strict.
+signers and signatures. Nexus is admitted only at the configured CID. A child
+root is built from its configured spec and the parent's entering state, then
+admitted only with a valid mined directory proof. Ordinary post-genesis
+transactions remain signature-strict.
 
 This genesis is a storage cutover. Existing node data is not migrated; remove
 the old chain directory before starting this version.
@@ -42,7 +45,8 @@ the old chain directory before starting this version.
 HTTP messages carry concrete transaction bodies with their
 signatures. A cashew header alone is not a complete transaction payload.
 `lattice-node` binds the concrete body back to its CID before admission, then
-Lattice validates the transaction for the process's absolute path.
+Lattice validates the transaction for its signed absolute path, which the host
+must serve.
 
 Lattice accepts both the current domain-separated transaction preimage and the
 historical body-CID preimage. Mixed multisignature envelopes are valid when each
@@ -80,88 +84,31 @@ is accepted and connected. No node-local work floor exists: any filter on work
 that can reach fork choice would be consensus-relevant, so the chain's own
 target is the only work gate.
 
-Parent canonicity never affects work. A node hosts a child chain only
-together with every ancestor, one level per chain in one process, and a child
-level reads its parent facts from its co-hosted parent level's own validated
-state: the genesis the parent recorded for the child's directory, whether the
-parent executed a block producing a state, and the run reports of spec §9.10
-for the child's directory. The parent level cannot declare the child valid or
-choose the child's tip. A run report names a quantity, and only a quantity:
-the child binds it — its own directory, the block THIS chain's verified
-carrier proof says that carrier commits (a report naming any other block is
-refused), one of the carrier's grinds already credited there — and derives
-the credit itself, `runWork − ownWork`,
-under an identity keyed by the carrier and directory, applied only as a
-strict increase and never revoked. The quantity is the node's own
-computation over its own parent chain: the same parent level that answers
-state continuity, which gates minting outright, so no new trust class is
-introduced. Every child block anchors its
-`parentState` directly to the PARENT CHAIN'S GENESIS — not to its predecessor:
-the state must be reachable from the empty state through the parent's connected,
-EXECUTED same-chain graph, which is to say it is a state real parent history
-actually produced.
+Parent canonicity never affects work. A node hosts a child only with every
+ancestor, and the child reads two narrow facts from its co-hosted parent: the
+set of states produced by fully executed parent blocks, and attributed runs
+for its directory under spec §9.10. The parent cannot declare the child valid
+or choose its tip.
 
-Anchoring to the predecessor instead would make this an induction, and the
-induction has no base. The weighed tier never runs these checks, so a weighed
-predecessor proves nothing about its own `parentState`; a block could match its
-unchecked predecessor and be imported on no evidence at all. Every block
-therefore proves its own anchor, at every height, block 1 included — there is no
-height-1 exemption, and none is needed, because the executed-from-genesis
-frontier answers the question without walking the chain.
+Every child block anchors its `parentState` directly to the parent chain's
+executed-from-genesis set. The continuity link therefore runs from the empty
+state to the named state; it is not a link from the child's predecessor. A
+weighed but unexecuted parent block issues no fact. A child block whose required
+state is not yet present parks and is retried when its parent level executes
+more history. Child genesis follows the same anchor rule.
 
-Execution is required because a parent attests that it PRODUCED a state, and the
-weighed tier records a DECLARED post-state without running it — attesting an
-unexecuted claim would let a forged `receiptState` settle a withdrawal that was
-never paid.
+A run report names a quantity only. The child binds it to its own directory,
+the block named by a verified carrier proof, and a grind already credited at
+that location. It derives `runWork - ownWork` under an identity keyed by the
+carrier and directory, accepts only strict increases, and never revokes it.
 
-Because that anchor is the only continuity question the protocol defines, it is
-also the only continuity question a parent level answers. (A parent level also
-reports runs for the directories it hosts: it pushes the changed run of each served
-directory's nearest carrier after every accepted import and after every
-credit it is itself handed by its own parent — so a run flows down every
-level without a re-read — for each run a child could actually credit (its
-`runWork` exceeds its `ownWork`), once per value it reaches, into the
-co-hosted child's ordered mailbox; and a child reads the runs of carriers
-from its co-hosted parent level itself: a block's carriers when it imports a
-block they carried, and its recent carriers when it starts, so a push it
-could not yet bind or one it missed while stopped is recovered without
-waiting for the next parent block. Those report work; they answer nothing
-about continuity or validity.) A
-requirement naming any other `from` is malformed, not merely unusual: no
-correct child can produce one, and answering it would mean running a general
-ancestry walk on the parent's consensus actor. Refusing the shape is not a
-budget — the question the protocol actually asks is still answered in full,
-and identically on every node — which is why the answer needs no visit
-ceiling: it walks no chain and is independent of height. A truncated answer
-would have been worse than a refusal: a refused question is retried, while a
-truncated one is silently wrong and splits honest nodes by local policy.
-
-A restarted child recomputes fork choice entirely from its durable fact log:
-accepted blocks, proof-derived work, and the attributed work-only batches it
-credited from parent run reports. A block its parent carried is a network
-block: imported weighed on the verified proof — in fork choice with its work
-at once, executed when the chain would step into it — never held back for a
-continuity fact or a rule not yet met. Its carrier evidence is recorded
-with the acceptance, and the proofs this chain composes for its own
-children follow from it. A carrier this chain refused, or one Lattice
-returns relay-only, records nothing: this chain has no reader for it.
-Only the parent facts it answers —
-the genesis links a child's first block anchors to — wait for its
-validation, since a child must not anchor to state this chain has not
-executed. When this host mined the grind, the parent level hands the
-carried block and its proof to the co-hosted child level in memory before
-it imports and commits its own block: one grind is one subtree insert,
-children first. A crash between the two loses only the parent block, as a
-solo miner that crashes before broadcasting loses its block; a handoff is
-not retried. A stopping host refuses template and work requests on every
-level before it stops any, so no grind is handed to a stopping level. Any other
-carried block arrives through ordinary acquisition: the child overlay
-announces it or the predecessor walk reaches it, and a block reached without
-its proof is looked up by CID in the overlay peers' child-evidence indexes.
-When import needs a genesis or continuity fact the parent level does not
-hold yet, the block parks on that fact and is readied again when the parent
-level's tip moves; nothing is asked of a peer, and no answer crosses the
-network.
+A locally submitted grind is one `NodeCore` step. The root and every carried
+block whose target the hash meets contribute to one path-keyed `NodeBatch`;
+all affected facts and cursors commit together before any new snapshot is
+published. A remotely learned carried block follows the same acquisition and
+proof path on the shared overlay. A missing proof is requested with the child
+header from a peer that streamed it; no peer can provide the parent-state
+verdict.
 
 `parentState` commits the carrier's `prevState`. It is not a parent-block
 backlink and is never inverted to discover ancestry.
@@ -173,62 +120,50 @@ All ingress follows one sequence:
 ```text
 acquire
   -> verify
-  -> store sparse validation content and complete selected volumes
-  -> retain required roots
-  -> atomically stage one immutable Lattice batch
-  -> apply that exact batch
-  -> project one chain
+  -> produce one path-keyed NodeBatch
+  -> retain complete selected volumes and header evidence
+  -> atomically commit every affected level and cursor
+  -> publish the resulting level snapshots
 ```
 
-The stage callback is the durability boundary. Success means the complete batch
-is durable; failure exposes none of it. Live execution and recovery both apply
-the same staged facts. Publication, proof replay, and other post-commit network
-effects cannot rewrite an already durable import result.
-
-Each path stores operational metadata and Volume-root references in `state.db`,
-and every content-addressed byte in `volumes.db`. VolumeBroker is the only
-durable local CID-to-bytes store. The node owns acquisition, authentication,
-pruning, routing, and operational projections. Lattice owns accepted
-consensus facts and never uses storage presence or peer identity as validity.
+The transaction is the durability boundary. Success means the complete tree
+batch is durable; failure publishes none of it and stops the runtime. Live
+execution and recovery consume the same immutable facts. Path-keyed facts,
+indexes, and cursors share `state.db`; content lives in `volumes.db`; incomplete
+header boundaries and child proofs live in `header-evidence.db`.
 
 ## Network plane
 
-Each chain has one Ivy network plane: the public same-chain overlay, which
-exchanges announcements, same-path content, and child-evidence index roots.
+The process has one Ivy network plane. Sync messages carry an absolute path,
+and a peer session serves every level both hosts. The overlay exchanges
+transaction announcements, path-scoped sync messages, and content.
+
+Provider discovery is keyed only by chain genesis: the node periodically
+announces Nexus and each active hosted child genesis. It does not publish a
+provider record per block or state. When verified Nexus progress stalls, it
+retries disconnected bootstrap peers and a bounded set of providers found for
+the Nexus genesis.
 
 Parent facts, run reports and merged-mining candidates never cross a network
 plane: they pass in-process between co-hosted levels.
 
-The overlay currently requires node protocol version 5; mixed-version peers
+The overlay currently requires node protocol version 6; mixed-version peers
 refuse the session.
 
-One overlay request topic is answered in its full form so older peers still
-sync from this node: the accepted-leaves page. A node sends the accepted-leaves
-request only as a one-shot, cursor-less frontier pull, when a peer's announced
-height is within the range-sync depth threshold of its own fetched tip; the
-cursored descent it answers is never sent. Header-graph range sync
-(common-ancestor negotiation plus forward pages), live announcements and the
-predecessor walk carry sync.
+A level's weigh log streams header and proof entries by position. Stream pages
+carry IDs only. `getData` and `getAncestors` return bounded header entries that
+contain the canonical block bytes, an optional child index, the credited
+`ChildBlockProof` values for that block, and a genesis spec when needed. The
+receiver verifies every header and proof before adding it to its own log.
+Durable sync cursors are written in the same tree-wide transaction as the
+facts they pass.
 
-Child-block proofs travel through each child node's child-evidence index: a
-cashew dictionary keyed by child block CID whose values are the block's proof
-set, keyed by grind (`rootCID`), each naming the `ChildEvidenceVolume` that
-carries the proof. A proof enters the index only when it contributes work to
-its block. Every trie node and every proof set is its own Volume, so the index
-root is independent of insertion order and equal sets have equal roots. A node
-pushes its root (`lattice.overlay.child-evidence.root.v1`, one CID) when a
-session becomes ready and whenever the root changes; the receiver keeps each
-peer's latest root. One serial worker then reads peers' roots as ordinary
-Volumes through one budgeted session per peer: it looks up the blocks parked
-on a missing proof (one proof each per pass; the rest arrive by the walk once
-the block is admitted and indexed), and walks the peer's trie against its own, skipping equal
-subtrees and descending only into blocks it holds, to fetch the proofs it
-lacks. Each proof fetched is admitted as a weighed package seed. A proof that
-does not bind its key and grind, or that contributes no work to a held block,
-is blamed on the sole supplier of a complete fetch, whose session is recycled
-and root dropped; content that is unavailable or incomplete is never blamed.
-No local witness-size limit applies to a proof from a peer's index: one within
-the protocol cap that weighs is admitted.
+Verified child proofs are indexed locally by chain path, child CID, and grind
+root in `header-evidence.db`. The index is recovery and serving evidence, not a
+second network or consensus authority. A restart refuses unreadable or
+misindexed proof rows. When serving a child header, the node attaches the
+proofs it has already verified; a receiver missing a streamed proof requests
+the corresponding header entry from the peer that advertised it.
 
 Peer content exchange is Volume-native. An announcer names one complete Volume
 by its root CID and must serve that Volume from the exact authenticated session
@@ -236,32 +171,16 @@ that made the claim. Each connection must complete a compatible hello before it
 may request a Volume, including a same-key replacement connection. Entry CIDs,
 bounded framing, and atomic publication are transport/storage details; node
 protocol messages never request arbitrary CID selections.
-Merged-mining candidates pass in-process. Each hosted child level keeps one
-pre-built candidate against a provisional carrier on its parent level's
-validated tip, for the miner's recipients and minimum work for the child's
-subtree. It rebuilds that candidate — one build at a time, a change during a
-build running one more — when the parent's tip, its own state or the plan
-changes, under its own lease only and reading its parent without taking the
-parent's gate or lease. The parent's template path reads each hosted child's
-latest candidate without waiting on the child: no parent path awaits a
-child, so no child can stall parent consensus. A child learns of a carry
-this host mined from the parent level's in-memory handoff, and of any other
-from its overlay. A template carries
-at most one candidate per directory, built on its current tip's post-state,
-never the block the branch already carries for that directory (a
-children-only carrier leaves the post-state, so that candidate still fits;
-carried again it would only be credited once more). A sibling of the carried
-block, built before the child imports it, is carried like any candidate: the
-child's fork choice settles the siblings, as stale blocks settle in
-conventional merged mining.
-A child builds no candidate while its execution walk is stepping, or while its validated
-tip is behind its weighed tip and the walk can still step; it builds again
-when the walk decides, on the tip it reached, and it rebuilds only when an
-input of the candidate changed.
-Candidates are
-not miner-work durability: the child keeps a candidate's content by its own
-bounded budget, oldest first, until the carried block's import owns the
-roots or the budget sheds it.
+Merged-mining candidates pass in-process. One template job reads an immutable
+epoch copy of every hosted level and recursively builds at most one candidate
+per directory. A child with an executed tip builds on that tip; a child with
+no root builds a genesis from its configured spec and the carrier's entering
+state; a root that is weighed but not yet executed waits. Nested genesis waits
+until its parent has executed a block of its own. A sibling built before a
+child imports another carried block is ordinary fork input: the child's fork
+choice settles it just as it settles stale blocks in conventional merged
+mining. Candidate content is retained with the issued work and becomes durable
+only if the submitted grind actually secures that level.
 
 Each candidate-root content session uses the node's `NodeResourcePolicy` for
 archive bytes, Volume count, and member count. `ChainSpec.maxBlockSize` remains
@@ -275,49 +194,6 @@ Hierarchy authorization comes from the host, not from a process key choosing
 a branch: a child level trusts only the parent level it is co-hosted with,
 read in-process, and no network peer holds a parent or child role. CAS bytes are non-secret availability and grant no validity:
 the consumer verifies every CID and the exact Lattice evidence it reads.
-
-### Child-evidence availability
-
-The root-independent direct edge is derived from an ordinary child-evidence
-Volume. Its canonical one-entry manifest commits only the child CID and proof
-envelope; no duplicate direct-edge Volume exists.
-Child-chain validation Volumes are acquired from the child chain's exact
-same-chain advertisers. A parent
-persists the edge when it issues the child commitment; a child persists the
-incoming edge when it validates that commitment. Children never return edge
-inventories or topology to parents.
-
-On the same-chain overlay, a child advertises a child-evidence Volume whose
-envelope contains only the complete structural work proof. Parent validity
-verdicts are never serialized into the Volume. Nexus neither keeps nor reads a
-child-evidence index.
-
-Ivy streams each complete Volume as an ordered, bounded sequence of frames.
-Refusing a globally valid archive because it exceeds a local
-application bound, or because receive capacity is temporarily full, is
-reputation-neutral and retried; malformed framing remains punishable.
-Ivy owns request deadlines and session fencing,
-while the node caps concurrent acquisition and recycles a silent or malformed
-session. Exact-announcer binding provides accountability and prevents one peer
-from making the node search the wider network for arbitrary roots; it is not a
-source of content validity.
-
-For child genesis, the parent level answers positively only for an exact
-`(directory, child CID, empty parent state)` tuple recorded by a
-`GenesisAction` in an accepted parent block; a self-contained child genesis
-commits to the empty parent state. For a non-genesis block, equal parent-state
-references need no fact; otherwise the parent level answers positively only
-when it executed, from its genesis, a block producing the block's
-`parentState`. Both are reads of the parent level's own state in the same
-process: nothing is sent, signed, or portable. Parent canonicity does not
-affect reachability.
-
-Child work is derived directly from the candidate's content-addressed directory
-proof. A carrier need not be imported or valid on its own chain: the root grind
-must be real, beat the terminal target, and commit uniquely to the child along
-the directory path. Once the child is accepted and connected, that contribution
-is ordinary chain-local GHOST input. There is no live parent-work stream or
-consensus-readiness handshake.
 
 ### Transaction pool
 
@@ -367,10 +243,9 @@ node partitions those recipients through the hierarchy, carries a child's
 block only when it pays the recipient named for that chain, and issues only
 the final parent template.
 
-There is no template mode. A transaction carrying a `GenesisAction` is selected
-like any other pooled transaction. A child genesis is self-contained, so a
-template never carries one; merged-mining templates attach only ongoing
-direct-child candidates supplied by their processes.
+There is no template mode or deployment transaction. A merged-mining template
+may carry a child genesis when that hosted level has no root and has a
+configured spec; later templates carry ordinary child candidates.
 
 ## HTTP surface
 
@@ -379,7 +254,7 @@ loopback only and refuses any other bind address; it carries the writes and
 the operator-only reads:
 
 ```text
-GET  /status              (with the template digest; reconciling)
+GET  /status              (with the template digest)
 GET  /metrics
 POST /transactions
 POST /mining/templates
@@ -397,7 +272,7 @@ GET /transactions/:cid, /accounts/:owner
 GET /api/block/latest, /api/block/:id, /api/block/:id/transactions,
     /api/block/:id/children, /api/transaction/:cid, /api/state/account/:addr,
     /api/mempool, /api/peers, /api/chain/info, /api/chain/spec,
-    /api/chain/genesis, /api/chain/children, /api/chain/endpoints
+    /api/chain/genesis
 ```
 
 See [RPC API](rpc-api.md) for DTOs and [Architecture](architecture.md) for

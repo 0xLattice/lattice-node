@@ -296,7 +296,6 @@ final class MiningTemplateRequestBodyTests: XCTestCase {
     func testMinimumWorkReachesTheRequestAsASearchPlanOnly() throws {
         let body = try object(MiningTemplateRequestBody.make(
             recipients: [],
-            deployment: false,
             minimumWork: ["Nexus=2^8"]
         ))
         XCTAssertEqual((body["minimumWork"] as? [Any])?.count, 1)
@@ -311,7 +310,6 @@ final class MiningTemplateRequestBodyTests: XCTestCase {
     func testRecipientsReachTheRequestOncePerChain() throws {
         let body = try object(MiningTemplateRequestBody.make(
             recipients: ["Nexus=addr-a", "Nexus/Payments=addr-b"],
-            deployment: false,
             minimumWork: []
         ))
         let recipients = try XCTUnwrap(body["recipients"] as? [[String: Any]])
@@ -322,7 +320,6 @@ final class MiningTemplateRequestBodyTests: XCTestCase {
         for malformed in [["Nexus=a", "Nexus=b"], ["Nexus="], ["Other=a"], ["Nexus"]] {
             XCTAssertThrowsError(try MiningTemplateRequestBody.make(
                 recipients: malformed,
-                deployment: false,
                 minimumWork: []
             ), "\(malformed)")
         }
@@ -498,12 +495,12 @@ final class MiningCoordinatorTests: XCTestCase {
         XCTAssertEqual(merged?.targets, [UInt256(1_000), UInt256(10)])
         XCTAssertEqual(merged?.targetHex, hex(1_000))
 
-        let legacy = MiningCoordinatorWork(template: TemplateResponse(
+        let singleTarget = MiningCoordinatorWork(template: TemplateResponse(
             workID: "candidate-cid",
             blockHex: "00",
             searchTarget: hex(1_000)
         ))
-        XCTAssertEqual(legacy?.targets, [UInt256(1_000)])
+        XCTAssertEqual(singleTarget?.targets, [UInt256(1_000)])
 
         XCTAssertNil(MiningCoordinatorWork(template: TemplateResponse(
             workID: "candidate-cid",

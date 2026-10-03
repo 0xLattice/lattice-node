@@ -86,4 +86,8 @@ fi
 export LATTICE_TSAN_STRESS=1
 export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=1:exitcode=66:history_size=7}"
 
-swift test --sanitize thread --filter CoreDriver
+if ! swift test list | grep -q '^LatticeNodeTests\.NodeRuntime'; then
+    echo "TSan filter matched no NodeRuntime tests" >&2
+    exit 1
+fi
+swift test --sanitize thread --filter NodeRuntime

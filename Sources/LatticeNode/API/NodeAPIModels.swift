@@ -87,6 +87,7 @@ public struct MiningTemplateRequest: Codable, Sendable {
         case recipients
         case minimumWork
         case rewards
+        case mode
     }
 
     public init(from decoder: any Decoder) throws {
@@ -98,6 +99,13 @@ public struct MiningTemplateRequest: Codable, Sendable {
                 forKey: .rewards,
                 in: container,
                 debugDescription: "\"rewards\" was replaced by \"recipients\""
+            )
+        }
+        guard !container.contains(.mode) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .mode,
+                in: container,
+                debugDescription: "Mining template modes do not exist"
             )
         }
         recipients = try container.decodeIfPresent(
@@ -184,11 +192,7 @@ public enum WorkDisposition: String, Codable, Sendable {
     /// it carries advanced and no Nexus block was mined. The work stays open.
     case childOnly
     case duplicate
-    case unavailable
-    case temporarilyInvalid
-    case proofOfWorkInvalid
     case invalid
-    case localFailure
 }
 
 public struct SubmitWorkResponse: Codable, Sendable {
@@ -228,28 +232,13 @@ public struct NodeStatusResponse: Codable, Sendable, Equatable {
 }
 
 public enum NodeAPIError: Error, Equatable, Sendable {
-    case unresolvedChainSpec
     case invalidRecipientPlan
     case invalidMinimumWork
     case minimumWorkPlanTooLarge
     case requestTooLarge
-    case invalidChildDirectory
-    case invalidChildGenesis
-    case invalidChildPolicyModules
-    case childIntentTooLarge
-    case childIntentLimitReached
-    case childCandidateLimitReached
-    case invalidParentCarrier
-    case parentCarrierRequired
     case unresolvedTransactionContent
     case templateContextChanged
     case invalidWorkID
     case timestampOverflow
     case templateTooLarge
-    case noDeploymentAvailable
-    case mempoolUnavailable
-    case parentUnavailable
-    case validateWalkInProgress
-    /// The host is stopping: mining ingress is closed.
-    case shuttingDown
 }

@@ -1,16 +1,17 @@
 import Foundation
 import Ivy
 import Lattice
+import LatticeNodeCore
 import XCTest
 @testable import LatticeBlockTree
 @testable import LatticeNode
 
 /// The checks boot runs on state.db: a store from another schema, network or
-/// chain is refused before any DDL, and the normalized indexes must be
+/// network is refused before any DDL, and the normalized indexes must be
 /// exactly what the journaled batches imply.
 final class NodeStoreBootTests: XCTestCase {
-    private func store(_ path: URL, genesis: String = NexusGenesis.expectedBlockHash, chain: [String] = ["Nexus"]) throws -> NodeStore {
-        try NodeStore(databasePath: path, nexusGenesisCID: genesis, chainPath: chain)
+    private func store(_ path: URL, genesis: String = NexusGenesis.expectedBlockHash) throws -> NodeStore {
+        try NodeStore(databasePath: path, nexusGenesisCID: genesis)
     }
 
     private func blockBatch(_ hash: String) -> BlockImportBatch {
@@ -46,7 +47,7 @@ final class NodeStoreBootTests: XCTestCase {
         XCTAssertEqual(tables, ["legacy_state"])
     }
 
-    func testMetadataRejectsWrongEpochRootAndPath() throws {
+    func testMetadataRejectsWrongEpochAndRoot() throws {
         let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         _ = try store(path)
         let database = try NodeSQLite(path: path.path)
@@ -62,12 +63,9 @@ final class NodeStoreBootTests: XCTestCase {
             "UPDATE node_metadata SET schema_epoch = ?1 WHERE singleton = 1",
             params: [.int(NodeStore.currentSchemaEpoch)]
         )
-        for attempt in [
-            { try self.store(path, genesis: "different-root") },
-            { try self.store(path, chain: ["Nexus", "Payments"]) },
-        ] {
-            XCTAssertThrowsError(try attempt()) { error in
-                guard case NodeStoreError.wipeRequired = error else { return XCTFail("got \(error)") }
+        XCTAssertThrowsError(try store(path, genesis: "different-root")) { error in
+            guard case NodeStoreError.wipeRequired = error else {
+                return XCTFail("got \(error)")
             }
         }
     }
@@ -78,8 +76,11 @@ final class NodeStoreBootTests: XCTestCase {
         try await store.stageChainFacts([blockBatch("child")], volumeRoots: [], logID: "log")
         try await store.auditNormalizedIndexes()
         _ = try NodeSQLite(path: path.path).execute(
-            "INSERT INTO admission_facts (fact_id, payload) VALUES (?1, ?2)",
-            params: [.blob(Data("extra-id".utf8)), .blob(Data("extra".utf8))]
+            "INSERT INTO admission_facts (chain_path, fact_id, payload) VALUES (?1, ?2, ?3)",
+            params: [
+                .text("Nexus"), .blob(Data("extra-id".utf8)),
+                .blob(Data("extra".utf8)),
+            ]
         )
         await expectCorrupt(store)
     }
@@ -95,36 +96,78 @@ final class NodeStoreBootTests: XCTestCase {
         await expectCorrupt(store)
     }
 
-    func testBootAuditsHostedChildNormalizedIndexes() async throws {
-        let storage = temporaryDirectory(create: true)
-        let alpha = ["Nexus", "Alpha"]
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"], storagePath: storage,
-            privateKeyHex: String(repeating: "01", count: 32),
-            hostedChildren: [alpha]
-        )
-        let child = try XCTUnwrap(NodeRuntime.levelStores(configuration)[alpha])
-        try await child.stageChainFacts([blockBatch("accepted")], volumeRoots: [], logID: "log")
-        let database = try NodeSQLite(
-            path: storage.appendingPathComponent("levels/Nexus.Alpha/state.db").path
-        )
-        _ = try database.execute(
-            "DELETE FROM accepted_blocks WHERE block_cid = ?1", params: [.text("accepted")]
+    func testStreamCursorsCommitWithFactsAndSurviveReopen() async throws {
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
+        let initial = try store(path)
+        let cursors = [
+            "peer-a": StreamCursor(logID: "remote-log", position: 17),
+            "peer-b": StreamCursor(logID: "other-log", position: 4),
+        ]
+        try await initial.stageChainFacts(
+            [blockBatch("accepted")], volumeRoots: [], logID: "local-log",
+            cursors: cursors
         )
 
+        let reopened = try store(path)
+        let restored = try await reopened.chainCursors()
+        XCTAssertEqual(restored, cursors)
+
+        let advanced = StreamCursor(logID: "remote-log", position: 23)
+        try await reopened.stageChainFacts(
+            [], volumeRoots: [], logID: "local-log",
+            cursors: ["peer-a": advanced]
+        )
+        let updated = try await reopened.chainCursors()
+        XCTAssertEqual(updated["peer-a"], advanced)
+    }
+
+    func testWholeTreeStepRollsBackAtomically() async throws {
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
+        let store = try store(path)
         do {
-            _ = try await NodeStorage.open(configuration: configuration)
-            XCTFail("expected child index corruption to fail boot")
-        } catch NodeStoreError.corrupt {
+            try await store.stageNodeFacts([
+                NodeFactBatch(
+                    path: ["Nexus"], facts: [blockBatch("root")],
+                    volumeRoots: [], cursors: [:]
+                ),
+                NodeFactBatch(
+                    path: ["Nexus", "Alpha"], facts: [blockBatch("child")],
+                    volumeRoots: [],
+                    cursors: ["peer": StreamCursor(logID: "", position: 1)]
+                ),
+            ], logID: "local-log")
+            XCTFail("expected malformed child cursor to abort the transaction")
+        } catch NodeStoreError.invalidConfiguration {
         } catch {
-            XCTFail("expected corruption, got \(error)")
+            XCTFail("unexpected error: \(error)")
         }
+
+        let staged = try await store.stagedImports()
+        XCTAssertTrue(staged.isEmpty)
+        let logID = try await store.chainLogID()
+        XCTAssertNil(logID)
+    }
+
+    func testAuditIncludesHostedChildNormalizedIndexes() async throws {
+        let directory = temporaryDirectory(create: true)
+        let path = directory.appendingPathComponent("state.db")
+        let store = try store(path)
+        let alpha = ["Nexus", "Alpha"]
+        try await store.stageChainFacts(
+            [blockBatch("accepted")], volumeRoots: [], logID: "log", at: alpha
+        )
+        let database = try NodeSQLite(path: path.path)
+        _ = try database.execute(
+            "DELETE FROM accepted_blocks WHERE chain_path = ?1 AND block_cid = ?2",
+            params: [.text("Nexus/Alpha"), .text("accepted")]
+        )
+        await expectCorrupt(store)
     }
 
     func testCorruptSavedChildProofFailsToLoad() throws {
         let directory = temporaryDirectory(create: true)
-        let headers = try HeaderContentStore(directory: directory)
-        let database = try NodeSQLite(path: directory.appendingPathComponent(HeaderContentStore.fileName).path)
+        let headers = try HeaderEvidenceStore(directory: directory)
+        let database = try NodeSQLite(path: directory.appendingPathComponent(HeaderEvidenceStore.fileName).path)
         _ = try database.execute(
             "INSERT INTO child_proofs (chain, child, root, bytes) VALUES (?1, ?2, ?3, ?4)",
             params: [
@@ -135,6 +178,50 @@ final class NodeStoreBootTests: XCTestCase {
 
         XCTAssertThrowsError(try headers.proofs()) { error in
             guard case NodeStoreError.corrupt = error else { return XCTFail("got \(error)") }
+        }
+    }
+
+    func testSavedChildProofMustMatchItsIndex() throws {
+        let directory = temporaryDirectory(create: true)
+        let headers = try HeaderEvidenceStore(directory: directory)
+        let database = try NodeSQLite(
+            path: directory.appendingPathComponent(HeaderEvidenceStore.fileName).path
+        )
+        let proof = ChildBlockProof(
+            rootCID: NexusGenesis.expectedBlockHash,
+            directoryPath: ["Alpha"],
+            entries: []
+        )
+        _ = try database.execute(
+            "INSERT INTO child_proofs (chain, child, root, bytes) VALUES (?1, ?2, ?3, ?4)",
+            params: [
+                .text("Nexus/Alpha"), .text("child"), .text("wrong-root"),
+                .blob(try proof.serialize()),
+            ]
+        )
+
+        XCTAssertThrowsError(try headers.proofs()) { error in
+            guard case NodeStoreError.corrupt = error else { return XCTFail("got \(error)") }
+        }
+    }
+
+    func testHeaderEvidenceRejectsUnknownSchemaAndWrongNetwork() throws {
+        let unknownDirectory = temporaryDirectory(create: true)
+        let unknown = try NodeSQLite(
+            path: unknownDirectory.appendingPathComponent(HeaderEvidenceStore.fileName).path
+        )
+        _ = try unknown.execute("CREATE TABLE old_headers (cid TEXT PRIMARY KEY)")
+        XCTAssertThrowsError(try HeaderEvidenceStore(directory: unknownDirectory)) { error in
+            guard case NodeStoreError.wipeRequired = error else { return XCTFail("got \(error)") }
+        }
+
+        let networkDirectory = temporaryDirectory(create: true)
+        _ = try HeaderEvidenceStore(directory: networkDirectory)
+        XCTAssertThrowsError(try HeaderEvidenceStore(
+            directory: networkDirectory,
+            nexusGenesisCID: "wrong-network"
+        )) { error in
+            guard case NodeStoreError.wipeRequired = error else { return XCTFail("got \(error)") }
         }
     }
 }

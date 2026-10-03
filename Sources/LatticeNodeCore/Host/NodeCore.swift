@@ -74,8 +74,8 @@ public struct MinedGrind: Sendable {
 }
 
 public enum NodeEffect: Sendable {
-    /// Every level's writes of one step, in one transaction, before any
-    /// later effect of the step.
+    /// Every level's fact writes of one step in one transaction. The shell
+    /// durably stages referenced header evidence immediately before it.
     case persist(NodeBatch)
     /// Every level effect but `connect`.
     case level(ChainPath, ChainEffect)

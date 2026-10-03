@@ -108,23 +108,6 @@ final class MetricsTests: XCTestCase {
         }
     }
 
-    func testMetricsExposeExecutionWalkCounters() throws {
-        let rendered = renderNodeMetrics(NodeMetricsSample(
-            chainPath: ["Nexus", "Payments"],
-            validatedTipHeight: 1,
-            weighedTipHeight: 1,
-            overlayPeers: 0,
-            mempoolTransactions: 0,
-            processStartTime: Date(timeIntervalSince1970: 0),
-            executionWalkParked: 4,
-            candidateSessionReads: 5
-        ))
-        let samples = try parseExposition(rendered)
-        let chain = "chain=\"Nexus/Payments\""
-        XCTAssertEqual(samples["lattice_validate_walk_parked_total{\(chain)}"], "4")
-        XCTAssertEqual(samples["lattice_candidate_session_reads_total{\(chain)}"], "5")
-    }
-
     func testMetricsEscapeOperatorSuppliedChainPath() async throws {
         // Renderer: every escape the format defines, plus a CRLF, whose line
         // feed must not survive as a raw newline inside a label value.

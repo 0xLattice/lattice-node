@@ -16,7 +16,6 @@ extension LatticeNodeCommand {
     /// Run the configured chain tree until SIGTERM/SIGINT. The loopback API
     /// reads published snapshots and submits core events; the public listener
     /// serves the same read routes without the write surface.
-    // PENDING: per-peer summaries in `api/peers` (count only).
     func runNodeRuntime(
         configuration: NodeConfiguration,
         publicReadLimits: PublicReadRateLimits,
@@ -56,11 +55,11 @@ extension LatticeNodeCommand {
         let publicReadApp = publicReadPort.map { port in
             makePublicReadApplication(
                 reads: runtime.reads,
-            levelReads: Array(runtime.levelReads.values),
+                levelReads: Array(runtime.levelReads.values),
                 host: "0.0.0.0",
                 port: Int(port),
                 peers: peers,
-                    limits: publicReadLimits
+                limits: publicReadLimits
             )
         }
         print("lattice-node (node runtime)")

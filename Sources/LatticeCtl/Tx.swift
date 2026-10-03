@@ -215,8 +215,7 @@ struct TxOptions: ParsableArguments {
         let topology = try Topology.load(root: rootOption.layout.root).validated()
         // A child chain is a level of the one process: its reads and
         // writes go to the Nexus RPC, by chain path.
-        guard let target = topology.chains[chain]
-            ?? (topology.chains["Nexus"]?.children?.contains(chain) == true ? topology.chains["Nexus"] : nil) else {
+        guard chain == ChainAddress.nexus || (topology.hostedChains ?? []).contains(chain) else {
             throw CtlError("\(chain) is not in the tree")
         }
         let path = chain.components(separatedBy: "/")
@@ -225,7 +224,7 @@ struct TxOptions: ParsableArguments {
             signerNonce = nonce
         } else {
             signerNonce = try await nextNonce(
-                rpc: target.rpc, address: signer.address, chain: chain
+                rpc: topology.rpc, address: signer.address, chain: chain
             )
         }
         var actions = accountActions
@@ -249,7 +248,7 @@ struct TxOptions: ParsableArguments {
             throw CtlError("signing failed; check the key file")
         }
         let response: SubmitTransactionResponse = try await post(
-            rpc: target.rpc, path: "transactions",
+            rpc: topology.rpc, path: "transactions",
             body: SubmitTransactionRequest(transaction: Transaction(
                 signatures: [signer.publicKey: signature], body: header
             ))

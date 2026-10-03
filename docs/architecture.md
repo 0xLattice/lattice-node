@@ -16,7 +16,8 @@ lattice-node
 
 The process has one identity, one Ivy overlay, one RPC listener, one content
 store, and one serial runtime loop. Each hosted path still has independent
-consensus state, fork choice, sync state, mempool, and durable fact journal.
+consensus state, fork choice, sync state, mempool, and a path-keyed stream in
+the node's fact journal.
 Messages, transactions, reads, and mining work identify the path they concern.
 
 ## Dependency direction
@@ -102,37 +103,40 @@ LatticeNode/
 
 ## Storage and recovery
 
-`NodeStorage` is the runtime's storage gateway. It owns the root `NodeStore`,
-the shared `DiskBroker`, retained-root scopes, and the durable local mempool
-journal. Hosted children use their own `NodeStore` journals under `levels/`.
+`NodeStorage` is the runtime's storage gateway. It owns one tree-wide
+`NodeStore`, the shared `DiskBroker`, retained-root scopes, and the durable
+local mempool journal. Facts, accepted-block indexes, and stream cursors carry
+their absolute chain path.
 
-`HeaderContentStore` is a deliberate sidecar for weighed header material and
+`HeaderEvidenceStore` is a deliberate sidecar for weighed header material and
 credited child proofs. A sync header can arrive before the full block Volume,
 so this data cannot be inserted into the immutable Volume store as though it
-were a complete boundary. The existing `core-headers.db` filename is retained
-as an on-disk compatibility name even though the Swift type is now explicit.
+were a complete boundary.
 
 ```text
 <storage>/
-  state.db                         root chain facts and indexes
-  volumes.db                       shared materialized content
-  core-headers.db                  header material and child proofs
-  levels/Nexus.Alpha/state.db      one hosted-child fact journal
-  levels/Nexus.Alpha.Beta/state.db one nested-child fact journal
+  state.db             facts, indexes, cursors, and local mempool for the tree
+  volumes.db           shared materialized content and retained roots
+  header-evidence.db   incomplete header boundaries and child proofs
 ```
 
-Persistence is content-first: referenced Volumes and header material become
-durable before the fact transaction that names them. A crash may therefore
-leave retained content that no fact references, but it cannot leave a durable
-fact whose required content was never stored.
+Persistence is content-first: referenced Volumes and header evidence become
+durable before the fact transaction that names them. The complete `NodeBatch`
+then commits in one SQLite transaction across every affected chain path,
+including each path's sync cursors. A crash may leave retained content that no
+fact references, but it cannot leave a durable fact without its content or a
+parent-level half of a multi-level grind.
 
 `BootRecovery` validates the databases and retained roots before networking
-starts. `NodeRuntime.boot` then rebuilds every `ChainCore` by replaying its
-fact journal. Saved child proofs are required to decode successfully; startup
-fails rather than serving child headers without their proofs.
+starts. `NodeRuntime.boot` then rebuilds every `ChainCore` from one ordered
+scan grouped by path. The evidence sidecar has its own schema epoch and Nexus
+identity, and saved child proofs must decode, match their indexes, and cover
+every durable child work fact. Startup fails rather than serving child headers
+without their proofs.
 
-Legacy storage is not migrated in place. `state.db`, `volumes.db`, the header
-sidecar, and child-level journals are one recovery unit.
+There are no storage migrations. `state.db`, `volumes.db`, and
+`header-evidence.db` are one recovery unit and must be wiped together on a
+schema cutover.
 
 ## Networking and synchronization
 

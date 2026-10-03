@@ -2,34 +2,26 @@
 //
 // One lattice-node process hosts every chain in the tree; a child
 // reads its parent facts in-process.
-// This file makes that tree a value: each entry is one chain, parents are
-// derived from chain paths, and every verb reconciles against it rather than
-// accumulating flag invocations.
+// This file makes that host a value: process settings live once, and hosted
+// child paths are levels of that process rather than process-shaped entries.
 
 import Foundation
 import Lattice
 import LatticeNode
 
-public struct TopologyChain: Codable, Sendable {
+public struct Topology: Codable, Sendable {
     public var listen: UInt16
     public var rpc: UInt16
-    /// Overlay bootstrap peers as `publicKey@host:port`. Only meaningful
-    /// entries for this chain's own path; children of a local parent are
-    /// wired to it automatically.
+    /// Overlay bootstrap peers as `publicKey@host:port`.
     public var peers: [String]?
     /// Public read-only HTTP port (the node's `--public-read-port`): binds
     /// all interfaces and serves only the bounded GET read routes. Absent =
-    /// no public read listener for this chain's process.
+    /// no public read listener for this hosted tree.
     public var publicRead: UInt16?
     /// Self-described publicly reachable host (the node's
     /// `--external-address`) for overlay announcements from NAT/proxy-fronted
     /// processes. Host only; the chain's listen port applies.
     public var externalAddress: String?
-    /// Operator-declared browsable base URL (the node's `--public-read-url`)
-    /// for this chain's public read surface: a TLS-fronted hostname a browser
-    /// can dial, advertised through the parent rendezvous. Distinct from
-    /// `externalAddress`, which the P2P plane constrains to IP literals.
-    public var publicReadUrl: String?
     /// Per-client arrival-rate ceilings for the public read listener (the
     /// node's `--public-read-rate` / `--public-read-expensive-rate`), in
     /// requests per second. The client is the peer socket address, so a host
@@ -42,32 +34,97 @@ public struct TopologyChain: Codable, Sendable {
     /// requests per second. Address-agnostic, so it stays correct behind such
     /// a proxy. Absent = the node's default; `0` disables it.
     public var publicReadMaxRate: Double?
-    /// On the Nexus entry: the child chains the one process hosts as levels,
-    /// by path (e.g. `["Nexus/Alpha"]`), a parent before its children. A
-    /// child has no process, ports or peers of its own.
-    public var children: [String]?
+    /// Child chains this process hosts as levels, parent before child.
+    public var hostedChains: [String]?
+    public var mine: TopologyMine?
 
     public init(
         listen: UInt16, rpc: UInt16, peers: [String]? = nil,
         publicRead: UInt16? = nil, externalAddress: String? = nil,
-        publicReadUrl: String? = nil, publicReadRate: Double? = nil,
+        publicReadRate: Double? = nil,
         publicReadExpensiveRate: Double? = nil,
-        publicReadMaxRate: Double? = nil
+        publicReadMaxRate: Double? = nil, hostedChains: [String]? = nil,
+        mine: TopologyMine? = nil
     ) {
         self.listen = listen
         self.rpc = rpc
         self.peers = peers
         self.publicRead = publicRead
         self.externalAddress = externalAddress
-        self.publicReadUrl = publicReadUrl
         self.publicReadRate = publicReadRate
         self.publicReadExpensiveRate = publicReadExpensiveRate
         self.publicReadMaxRate = publicReadMaxRate
+        self.hostedChains = hostedChains
+        self.mine = mine
+    }
+
+    public static let fileName = "lattice.json"
+
+    public static func load(root: URL) throws -> Topology {
+        let url = root.appendingPathComponent(fileName)
+        guard let data = try? Data(contentsOf: url) else {
+            throw CtlError("no \(fileName) in \(root.path); run `lattice init` first")
+        }
+        return try JSONDecoder().decode(Topology.self, from: data)
+    }
+
+    public func save(root: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+        try writeDurably(
+            encoder.encode(self), to: root.appendingPathComponent(Self.fileName)
+        )
+    }
+
+    public func validated() throws -> Topology {
+        var listed: Set<String> = [ChainAddress.nexus]
+        for child in hostedChains ?? [] {
+            guard let childAddress = ChainAddress(string: child), childAddress.key == child,
+                  !childAddress.isNexus, let parent = childAddress.parent, listed.contains(parent.key),
+                  listed.insert(child).inserted else {
+                throw CtlError("hosted chain \(child) is not a new Nexus-rooted path listed after its parent")
+            }
+        }
+        var ports: Set<UInt16> = []
+        for port in [listen, rpc] + (publicRead.map { [$0] } ?? []) {
+            guard port != 0, ports.insert(port).inserted else {
+                throw CtlError("port \(port) is zero or used twice")
+            }
+        }
+        for (name, rate) in [
+            ("publicReadRate", publicReadRate),
+            ("publicReadExpensiveRate", publicReadExpensiveRate),
+            ("publicReadMaxRate", publicReadMaxRate),
+        ] {
+            if let rate, !rate.isFinite || rate < 0 {
+                throw CtlError("\(name) must be finite and nonnegative")
+            }
+        }
+        if let workers = mine?.workers, workers < 1 {
+            throw CtlError("mine.workers must be at least 1")
+        }
+        if let batchSize = mine?.batchSize, batchSize < 1 {
+            throw CtlError("mine.batchSize must be at least 1")
+        }
+        for path in Set((mine?.recipients ?? [:]).keys)
+            .union((mine?.minWork ?? [:]).keys) where !listed.contains(path) {
+            throw CtlError("mining configuration names unhosted chain \(path)")
+        }
+        if let timeout = mine?.templateTimeoutSeconds, timeout < 1 {
+            throw CtlError("mine.templateTimeoutSeconds must be at least 1; a zero timeout can never observe a template expiry, so no round deadline could be derived and the miner would never mine")
+        }
+        if let timeout = mine?.templateTimeoutSeconds,
+           timeout > TopologyMine.maximumTemplateTimeoutSeconds {
+            throw CtlError("mine.templateTimeoutSeconds must be at most \(TopologyMine.maximumTemplateTimeoutSeconds); the coordinator's own template fetch is fixed at that, so a longer probe would observe expiries for rounds that then die fetching the same template")
+        }
+        if let multiplier = mine?.roundDeadlineMultiplier, multiplier < 1 {
+            throw CtlError("mine.roundDeadlineMultiplier must be at least 1; a round deadline shorter than the round's own bound would kill every healthy round")
+        }
+        return self
     }
 }
 
-public struct TopologyMine: Codable {
-    public var chain: String
+public struct TopologyMine: Codable, Sendable {
     /// "cpu" or a path to any contract-conforming worker executable.
     public var worker: String?
     public var workers: Int?
@@ -110,14 +167,13 @@ public struct TopologyMine: Codable {
     public var roundDeadlineMultiplier: Int?
 
     public init(
-        chain: String, worker: String? = nil, workers: Int? = nil,
+        worker: String? = nil, workers: Int? = nil,
         batchSize: UInt64? = nil, recipients: [String: String]? = nil,
         minWork: [String: String]? = nil,
         minBlockIntervalSeconds: UInt64? = nil,
         templateTimeoutSeconds: UInt64? = nil,
         roundDeadlineMultiplier: Int? = nil
     ) {
-        self.chain = chain
         self.worker = worker
         self.workers = workers
         self.batchSize = batchSize
@@ -129,34 +185,31 @@ public struct TopologyMine: Codable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case chain, worker, workers, batchSize, recipients, minWork
+        case worker, workers, batchSize, recipients, minWork
         case minBlockIntervalSeconds, templateTimeoutSeconds
         case roundDeadlineMultiplier
     }
 
-    private enum ReplacedKeys: String, CodingKey {
-        case rewards
+    private enum RetiredKeys: String, CodingKey {
+        case chain, rewards
     }
 
     public init(from decoder: any Decoder) throws {
-        // The pre-signed reward batch this replaced. Refused loudly, so an
-        // old tree fails instead of silently mining to no one.
-        let replaced = try decoder.container(keyedBy: ReplacedKeys.self)
-        guard !replaced.contains(.rewards) else {
-            throw CtlError("mine.rewards was replaced by mine.recipients: a map from chain path to the address paid that chain's block reward and fees")
+        let retired = try decoder.container(keyedBy: RetiredKeys.self)
+        for key in [RetiredKeys.chain, .rewards] where retired.contains(key) {
+            throw DecodingError.dataCorruptedError(
+                forKey: key,
+                in: retired,
+                debugDescription: "Retired mining configuration key \(key.stringValue); this release accepts only the current topology format"
+            )
         }
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
-            chain: try container.decode(String.self, forKey: .chain),
             worker: try container.decodeIfPresent(String.self, forKey: .worker),
             workers: try container.decodeIfPresent(Int.self, forKey: .workers),
             batchSize: try container.decodeIfPresent(UInt64.self, forKey: .batchSize),
-            recipients: try container.decodeIfPresent(
-                [String: String].self, forKey: .recipients
-            ),
-            minWork: try container.decodeIfPresent(
-                [String: String].self, forKey: .minWork
-            ),
+            recipients: try container.decodeIfPresent([String: String].self, forKey: .recipients),
+            minWork: try container.decodeIfPresent([String: String].self, forKey: .minWork),
             minBlockIntervalSeconds: try container.decodeIfPresent(
                 UInt64.self, forKey: .minBlockIntervalSeconds
             ),
@@ -168,6 +221,7 @@ public struct TopologyMine: Codable {
             )
         )
     }
+
 
     /// The default behind `templateTimeoutSeconds`: the `URLRequest` default
     /// that the coordinator's own template fetch runs under, having set no
@@ -231,93 +285,6 @@ public struct TopologyMine: Codable {
     }
 }
 
-public struct Topology: Codable {
-    /// Chain path key (e.g. "Nexus", "Nexus/Payments") to process settings.
-    public var chains: [String: TopologyChain]
-    public var mine: TopologyMine?
-
-    public init(
-        chains: [String: TopologyChain], mine: TopologyMine? = nil
-    ) {
-        self.chains = chains
-        self.mine = mine
-    }
-
-    public static let fileName = "lattice.json"
-
-    public static func load(root: URL) throws -> Topology {
-        let url = root.appendingPathComponent(fileName)
-        guard let data = try? Data(contentsOf: url) else {
-            throw CtlError("no \(fileName) in \(root.path); run `lattice init` first")
-        }
-        return try JSONDecoder().decode(Topology.self, from: data)
-    }
-
-    public func save(root: URL) throws {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        try writeDurably(
-            encoder.encode(self), to: root.appendingPathComponent(Self.fileName)
-        )
-    }
-
-    public func validated() throws -> Topology {
-        var ports: Set<UInt16> = []
-        for (path, chain) in chains {
-            guard let address = ChainAddress(string: path),
-                  address.key == path,
-                  address.components.allSatisfy({
-                      $0 != "." && $0 != ".." && !$0.contains("/")
-                  }) else {
-                throw CtlError("chain path is not absolute and Nexus-rooted: \(path)")
-            }
-            guard address.isNexus else {
-                throw CtlError("\(path): list a child chain under the Nexus entry's children, not as a chain of its own")
-            }
-            var listed: Set<String> = [path]
-            for child in chain.children ?? [] {
-                guard let childAddress = ChainAddress(string: child), childAddress.key == child,
-                      !childAddress.isNexus, let parent = childAddress.parent, listed.contains(parent.key),
-                      listed.insert(child).inserted else {
-                    throw CtlError("\(path): child \(child) is not a new Nexus-rooted path listed after its parent")
-                }
-            }
-            for port in [chain.listen, chain.rpc]
-                + (chain.publicRead.map { [$0] } ?? []) {
-                guard ports.insert(port).inserted else {
-                    throw CtlError("port \(port) is used twice")
-                }
-            }
-        }
-        if let mine, chains[mine.chain] == nil {
-            throw CtlError("mine.chain \(mine.chain) is not in the tree")
-        }
-        if let timeout = mine?.templateTimeoutSeconds, timeout < 1 {
-            throw CtlError("mine.templateTimeoutSeconds must be at least 1; a zero timeout can never observe a template expiry, so no round deadline could be derived and the miner would never mine")
-        }
-        if let timeout = mine?.templateTimeoutSeconds,
-           timeout > TopologyMine.maximumTemplateTimeoutSeconds {
-            throw CtlError("mine.templateTimeoutSeconds must be at most \(TopologyMine.maximumTemplateTimeoutSeconds); the coordinator's own template fetch is fixed at that, so a longer probe would observe expiries for rounds that then die fetching the same template")
-        }
-        if let multiplier = mine?.roundDeadlineMultiplier, multiplier < 1 {
-            throw CtlError("mine.roundDeadlineMultiplier must be at least 1; a round deadline shorter than the round's own bound would kill every healthy round")
-        }
-        return self
-    }
-}
-
-public enum HostLayoutError: Error, Equatable, CustomStringConvertible {
-    /// A pre-encoding identity key file that several chains map to.
-    case ambiguousLegacyIdentityKey(file: String, paths: [String])
-
-    public var description: String {
-        switch self {
-        case .ambiguousLegacyIdentityKey(let file, let paths):
-            "identity key \(file) could belong to any of \(paths.joined(separator: ", ")); rename it to the right chain's identityKey file by hand"
-        }
-    }
-}
-
 public struct CtlError: Error, CustomStringConvertible {
     public let description: String
     public init(_ description: String) { self.description = description }
@@ -338,40 +305,11 @@ public struct HostLayout: Sendable {
         root.appendingPathComponent("specs").appendingPathComponent(Self.encoded(path) + ".json")
     }
 
-    /// Percent-encoded: `-` is a legal directory atom,
-    /// so flattening `/` to `-` gave `Nexus/A/B` and `Nexus/A-B` one key,
-    /// and one process cannot host two levels with one key.
+    /// The one process identity. Callers pass `Nexus`; the parameter keeps
+    /// filesystem helpers explicit about what the file belongs to.
     public func identityKey(for path: String) -> URL {
         root.appendingPathComponent("identity")
             .appendingPathComponent(Self.encoded(path) + ".key")
-    }
-
-    /// Renames each chain's key file from the old flattened name to
-    /// `identityKey(for:)`, so an upgraded host keeps its identities. A
-    /// flattened name that more than one of `paths` maps to is ambiguous and
-    /// is refused rather than guessed.
-    public func migrateIdentityKeys(for paths: some Collection<String>) throws {
-        let manager = FileManager.default
-        for path in paths {
-            let flattened = path.replacingOccurrences(of: "/", with: "-")
-            let legacy = root.appendingPathComponent("identity")
-                .appendingPathComponent(flattened + ".key")
-            let current = identityKey(for: path)
-            guard legacy.path != current.path,
-                  manager.fileExists(atPath: legacy.path),
-                  !manager.fileExists(atPath: current.path) else {
-                continue
-            }
-            let sharing = paths.filter {
-                $0.replacingOccurrences(of: "/", with: "-") == flattened
-            }
-            guard sharing.count == 1 else {
-                throw HostLayoutError.ambiguousLegacyIdentityKey(
-                    file: legacy.path, paths: sharing.sorted()
-                )
-            }
-            try manager.moveItem(at: legacy, to: current)
-        }
     }
 
     public func chainDirectory(for path: String) -> URL {

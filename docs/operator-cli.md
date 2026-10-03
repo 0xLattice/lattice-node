@@ -1,291 +1,177 @@
-# Operator CLI (`lattice`)
+# Operator CLI
 
-`lattice` operates one host's chain tree from a single declarative file. One
-`lattice-node` process (`lattice-node --config lattice.json`) hosts every chain
-in the tree; a child reads its parent facts from its co-hosted parent level
-in-process. The CLI makes that tree a value — `lattice.json` — and every
-verb reconciles reality against it. No remote control plane: state lives in
-the file, one pidfile (`run/lattice-node.pid`), and each chain's own storage.
+`lattice` is the declarative front door for one host. It reads one
+`lattice.json`, owns no resident state, and reconciles one `lattice-node`
+process that hosts the configured Nexus-rooted tree.
 
-## Quickstart: join the network and mine
+Every command accepts `--root <directory>`. The current directory is the
+default.
 
-```bash
-mkdir /var/lib/lattice && cd /var/lib/lattice
-
-# Scaffold: directories, a Nexus identity (0600, outside wipeable chain
-# storage), lattice.json, and your shareable peer string.
-# --peer is optional: without it the node uses its built-in bootstrap peers.
-lattice init --peer <pubkey>@lattice-mainnet-iad.fly.dev:4001
-
-lattice up          # start the tree; children are wired automatically
-lattice status      # phase / height / tip / mempool per chain, local RPC only
-
-# A key on a TRUSTED machine; only its address goes to the miner.
-lattice key generate --out reward-key.json
-# then add to lattice.json:
-#   "mine": {"chain": "Nexus", "worker": "cpu", "workers": 4,
-#            "recipients": {"Nexus": "<address>"}}
-
-lattice mine start
-lattice mine status  # running or not, and who each chain pays
-```
-
-## `lattice.json`
+## Topology
 
 ```json
 {
-  "chains": {
-    "Nexus":            {"listen": 4001, "rpc": 8080,
-                         "peers": ["<pubkey>@host:4001"]},
-    "Nexus/Market":     {"listen": 4101, "rpc": 8103}
-  },
+  "listen": 4001,
+  "rpc": 8080,
+  "peers": ["<public-key>@node.example:4001"],
+  "externalAddress": "192.0.2.10",
+  "publicRead": 8081,
+  "publicReadRate": 25,
+  "publicReadExpensiveRate": 1,
+  "publicReadMaxRate": 200,
+  "hostedChains": [
+    "Nexus/Alpha",
+    "Nexus/Alpha/Beta"
+  ],
   "mine": {
-    "chain": "Nexus",
     "worker": "cpu",
-    "workers": 4,
-    "batchSize": 2000000000,
-    "recipients": {"Nexus": "<address>", "Nexus/Market": "<address>"},
-    "minWork": {"Nexus": "2^32"},
-    "roundDeadlineMultiplier": 10
+    "workers": 2,
+    "batchSize": 2000000,
+    "recipients": {
+      "Nexus": "<address>",
+      "Nexus/Alpha": "<address>",
+      "Nexus/Alpha/Beta": "<address>"
+    },
+    "minBlockIntervalSeconds": 10
   }
 }
 ```
 
-- Every key in `chains` is an absolute Nexus-rooted path; a child requires its
-  immediate parent in the same file (the node wires each child to its
-  co-hosted parent level in-process — you never wire it by hand).
-- `peers` is that chain's overlay bootstrap peers. Omit it and a Nexus process
-  uses the default bootstrap peers built into the binary; a list REPLACES them;
-  an explicitly empty `"peers": []` means no bootstrap peers at all. Child
-  chains never receive the root defaults, so a child that needs peers names its
-  own. Defaults are discovery only — no trust, no fork-choice influence — and a
-  peer that goes away is re-dialled under backoff for the life of the process.
-- Ports must be unique across the file. `.` and `..` path atoms are rejected.
-- `publicRead` is that chain's public read port (the node's
-  `--public-read-port`). `publicReadRate`, `publicReadExpensiveRate` and
-  `publicReadMaxRate` are its arrival-rate ceilings in requests per second
-  (defaults 25, 1, 200); omit them for the node's defaults, `0` to disable one.
-  The first two are **per client**, and the client is the peer socket address —
-  the node has no trusted header and never reads a forwarded-for one. So on a
-  host behind a proxy that presents one address for every client (fly's `http`
-  handler, for example), set both to `0` or the whole internet is throttled as
-  a single user; `publicReadMaxRate` is address-agnostic and still bounds the
-  listener. `/health` is exempt from all three.
-- `worker` is `"cpu"` (the bundled `lattice-miner`) or a path to any
-  executable honoring the [worker contract](mining-workers.md) — a GPU worker
-  slots in here.
-- `recipients` is optional: chain path → the address that chain's blocks pay
-  their reward and fees to, passed to the coordinator as `--recipient`. A chain
-  left out mines to no one (its reward and fees burn). The retired `rewards`
-  key is refused by name.
-- `minWork` is optional: chain path → minimum work per block (`2^N` or a
-  decimal integer), passed to the coordinator as `--min-work`. It filters
-  which hashes the miner searches for and submits — the miner's choice, never
-  a validity rule — while blocks still commit their scheduled target, and
-  matters most on a chain launched at the maximum target, where it is what
-  keeps a fresh chain from bursting. Under the scheduled target a filter that
-  paces blocks near the target rate leaves committed difficulty where the
-  chain's anchor put it. See [operations.md](operations.md#minimum-work-per-block).
-- `minBlockIntervalSeconds` is optional: the shortest gap between the template
-  builds of two consecutive parent blocks this miner produces. It is a floor,
-  never a fixed block time — a round that already ran longer waits not at all,
-  so the cadence stops binding by itself once the schedule alone is slower.
-  It is an alternative to `minWork` for holding a fresh chain's rate, and the
-  two interact: set it to exactly `targetBlockTime` and blocks land exactly on
-  schedule, so drift stays zero and difficulty never moves off the anchor.
-  Set it below the target block time, or leave it out, if you want the
-  schedule to converge. (Under the
-  windowed retarget this was worse than a nuisance — the feedback loop never
-  closed, and difficulty ran away. The absolute schedule has no such loop,
-  because it measures elapsed time against height rather than reading recent
-  solve times, but pacing is still the honest way to hold a rate.) Pacing
-  fixes the spacing and leaves the work to the schedule.
-  Only a parent block starts a hold — but the hold withholds the next round
-  entirely, and on a merged-mining tree a child's blocks are co-mined by that
-  same round. So the cadence throttles the whole subtree, not just the parent:
-  a child chain gets none of this miner's hashing until the hold expires, and
-  its own retarget will read the resulting gaps. Set it with the tree in mind.
-- `templateTimeoutSeconds` is optional (default `60`): how long to wait for the
-  node to ANSWER a template request. This bounds how long the node takes to
-  BUILD a template, which is a different quantity from the template lifetime
-  the answer reports and is not bounded by it — a node can spend longer
-  assembling a template than the template is then valid for. **Set it above
-  what `POST /mining/templates` actually costs on this host.** Below that,
-  no round deadline can be derived and the miner does not mine at all, logging
-  `NOT MINING` and retrying; a compiled-in 15s sitting under a 16.6s build is
-  exactly how that happened once.
+This is intentionally one schema, without legacy decoding:
 
-  **The usable range is 1–60, and it is only usefully adjusted downward.** The
-  coordinator's own template fetch is fixed at 60s and is not settable at all,
-  so a probe tolerating more would observe an expiry for rounds that then die
-  fetching the same template. Which means a host needing longer than 60s to
-  build a template **cannot be fixed with this setting** — below the build cost
-  it wedges, above 60 every round dies in the coordinator. That host needs the
-  build itself to get faster (#154). Values outside 1–60 are refused rather
-  than left as advice.
-- `roundDeadlineMultiplier` is optional (default `10`): headroom on the
-  mining round deadline. `mine run` bounds every coordinator round by the
-  node's advertised template expiry plus the longest round that has actually
-  completed (capped at one more expiry, so a slow round cannot ratchet the
-  bound upward), times this. A round that overruns is killed — process group and
-  all — logged as `ROUND DEADLINE EXCEEDED`, and the loop continues without
-  paying anyone. Raise it where rounds legitimately run long;
-  lower it to notice a wedged round sooner. Values below `1` are refused
-  by name.
+- `listen`, `rpc`, `peers`, public-read policy, and identity apply once to the
+  process;
+- `hostedChains` lists child paths parent before child;
+- mining maps are keyed by hosted absolute path;
+- ports must be nonzero and unique;
+- rates must be finite and nonnegative;
+- unknown paths in mining policy are rejected.
 
-## Verbs
+## Lifecycle
 
-| Verb | What it does |
+| Command | Effect |
 |---|---|
-| `init [--peer …]` | Scaffold the root, mint identities, write `lattice.json`, print peer strings. Without `--peer` the tree carries no `peers` key, so the node uses its built-in default bootstrap peers. |
-| `identity` | Every chain's public key and peer string (no log scraping). |
-| `up [--foreground]` | Start the one `lattice-node` hosting the tree under a spawn lock. The node reads `lattice.json` once, at start: if it already runs but `lattice.json` now lists a different set of chains, `up` restarts it (`down` + `up`) so it hosts them; there is no runtime attach. `--foreground` stays as PID 1 and restarts it if it exits (containers). |
-| `down` | Stop the tree (the node stops its chains children first). SIGTERM, then SIGKILL after a grace. Also stops chain processes an older one-process-per-chain `lattice` left running. |
-| `status` | One table for the tree, from local loopback RPC only. |
-| `mine start/stop/status` | Supervised mining (below). `stop` is graceful: the in-flight batch finishes. |
-| `key generate --out <file>` | Create a wallet key file (address, private and public key, mode 0600). `tx` and `child deploy` sign with it; its address is what `mine.recipients` names. |
-| `child deploy` | Create a new child of a running local parent (below). |
-| `child adopt <path>` | Join an *existing* child: adds it to the tree and, if the node runs, restarts it to host the child; genesis is re-derived through the authenticated parent link, never copied from a node. |
-| `tx send/deposit/receipt/withdraw` | Sign a transaction with a key file and submit it to one chain in the tree (below). |
-| `wipe <chain>` | Remove one stopped chain's state under the spawn lock, refused while any node holds its storage lock (`state.db` + `volumes.db` as a unit). Identity is never touched — a wiped Nexus recreates the pinned genesis; a wiped child returns to `awaitingGenesis`. |
-| `emit-systemd` | Print units that run `up --foreground` and `mine run` under systemd. |
+| `lattice init` | Create `lattice.json` and the process identity, refusing to overwrite a topology. |
+| `lattice up` | Start the one node process in the background. Restart it when the configured hosted path set changed. |
+| `lattice up --foreground` | Supervise the node for container or init-system use. |
+| `lattice status` | Read every hosted level from the one loopback RPC. |
+| `lattice down` | Stop the node process under the spawn lock. |
+| `lattice wipe` | Remove the complete stopped tree storage. Preserve identity, specs, and topology. |
+| `lattice identity` | Print the process public key and peer string. |
 
-All verbs take `--root` (default: current directory).
-
-## Mining and rewards
-
-`mine start` runs one coordinator batch per round beside the configured
-chain's node. Each block pays the recipient `mine.recipients` names for its
-chain the block reward plus its fees; the recipient is a header field the proof
-of work covers, so nothing is signed on the mining host and there is no batch
-or cursor to keep:
-
-- Worker or node failures retry in place, forever.
-- Run one miner recipient plan per node. A node serves one plan at a time (the
-  recipients and minimum work a template names for child chains), so miners with
-  different plans on one node thrash and their templates mostly carry no
-  child blocks. See [operations.md](operations.md#external-mining-services).
-
-## Deploying a child chain
+Examples:
 
 ```bash
-# spec.json: the child's ChainSpec (JSON). premine is a BLOCK COUNT; the
-# credited amount is the reward schedule summed over that many blocks.
-lattice child deploy Market \
-  --spec spec.json \
-  --fund funded-key.json \
-  --premine-to <address>       # optional: credit the premine in genesis
-# nested children: --parent Nexus/Market
+lattice init --root /var/lib/lattice
+lattice up --root /var/lib/lattice
+lattice status --root /var/lib/lattice
+lattice down --root /var/lib/lattice
 ```
 
-The full arc runs in one command: the self-contained child genesis is built
-locally from a seed (spec, `--premine-to`, timestamp) → a `GenesisAction`
-anchor for its CID is signed by `--fund` (the key stays on this machine) → the
-seed and the signed anchor are written durably under the root
-(`pending-deploy/Nexus%2FMarket.json` for `Nexus/Market`) → the anchor is
-submitted to the parent → ordinary one-round coordinator runs are driven from
-the tree root (or `--external-mining-wait-seconds` of polling) until the parent
-lists the recorded CID → the child's data directory is seeded with
-`child-genesis.json`, the child appears in `lattice.json` with auto-allocated
-ports, the running node is restarted so it hosts the child (configuration
-takes effect on restart; nothing is attached to a running node), and the child
-comes up `active` on that genesis CID. If the parent does not record the
-anchor, **nothing is added to the tree or started**.
+The PID file names the executable as well as the PID, so a recycled PID is not
+signalled. Start, stop, restart, child creation, and wipe share one spawn lock.
+Storage also has its own writer lock; `wipe` refuses if any node still owns it.
 
-An interrupted or timed-out deploy is resumable, never lost: once submitted,
-the anchor can still land after the command dies, and the pending file is the
-only copy of the seed its CID depends on. Re-run the same command (same
-`--spec` and `--premine-to`; different ones are refused while a deploy is
-pending) and it resumes that pending deploy instead of building a new genesis:
-
-- anchor already recorded: submission is skipped; the child is added and started.
-- anchor still pooled, or never accepted: the identical signed transaction is
-  resubmitted, then the command waits for it as before.
-- `--nonce`, `--fee` or `--fund` changed: another anchor is signed for the same
-  genesis, appended to the pending file, and submitted. This is how to fix a
-  nonce the key has not reached (pooled as future, never mined) or a fee too
-  low to mine. A new nonce, or a different `--fund`, is admitted alongside the
-  earlier anchor rather than replacing it; only a same-nonce, same-signer
-  anchor is a replacement, and that one must pay a strictly higher fee.
-  Re-running with the values an earlier run used resubmits that earlier
-  anchor instead of signing again, so a correction never strands it. At most
-  one anchor per directory can ever be recorded, so the extra ones are inert.
-- the parent refuses it: the deploy stays pending and the refusal is printed;
-  re-run with corrected values. A parent refusing a *fresh* anchor removes its
-  pending file, since that transaction never reached the network.
-
-The pending file is removed once the child is in `lattice.json` with its seed
-in `chains/<path>/child-genesis.json`. `wipe` never touches `pending-deploy/`.
-Deleting it by hand abandons that genesis even though an earlier anchor for it
-(one with a future nonce included) can still be recorded later. If two *fresh*
-deploys of the same child start together, only one claims the pending file and
-the other stops without submitting; a resumed run writes to the file it just
-read, so it does not contend for the claim.
-
-Notes:
-- `--fund` must be a funded key on the parent chain; `--nonce` defaults to 0
-  and must be the key's next expected nonce (a reused key needs the real one).
-- The gate is the parent's committed record of the genesis CID, read through
-  its `/api/chain/children` listing, not mempool drain. That listing returns at
-  most 100 children, so on a parent with more children the gate can miss a
-  recorded child and report that the anchor was not recorded.
-- On a network whose target is too hard for ad-hoc CPU rounds, pass
-  `--external-mining-wait-seconds <n>` to wait for already-running miners to
-  record the anchor instead of driving local rounds.
-- The command prints the `genesis` CID and `seed` JSON, flushed, before
-  submitting the anchor. The copy a re-run resumes from is the pending file
-  above, which is already on disk by then.
-- A child with no funded account cannot transact — use `--premine-to`.
-
-## Transactions
-
-`tx` signs with a `lattice key generate` key file (the key stays on this host) and
-submits to the named chain's loopback RPC, which validates against current
-state before pooling. `--nonce` defaults to the chain's next expected nonce
-for the key; pass it explicitly to queue several transactions before the
-first is mined. `--fee` adds an explicit signer debit.
+## Child chains
 
 ```bash
-# plain transfer
-lattice tx send --chain Nexus/Market --key alice.json --to <address> --amount 40
-
-# parent/child value exchange, in protocol order; the three legs share one
-# identity: demander / demand / swap-nonce
-lattice tx deposit  --chain Nexus/Market --key seller.json \
-  --swap-nonce 7 --demand 60 --lock 100            # seller locks 100 on the child
-lattice tx receipt  --chain Nexus        --key buyer.json \
-  --swap-nonce 7 --demand 60 --demander <seller> --directory Market
-                                                   # buyer pays 60 on the parent
-lattice tx withdraw --chain Nexus/Market --key buyer.json \
-  --swap-nonce 7 --demand 60 --demander <seller> --amount 100
-                                                   # buyer claims the locked 100
+lattice child create Nexus/Alpha \
+  --root /var/lib/lattice \
+  --block-time 10000 \
+  --reward 1000 \
+  --premine 0
 ```
 
-Submitting a withdrawal before the child's parent-state view carries the
-receipt is not an error: the pool holds it as temporarily unavailable, and it
-becomes eligible for a block once a carrier links that state. A transaction
-that spends a balance it does not yet have is different — that one is refused
-outright, so a dependent spend has to wait for the credit it depends on.
+Or provide a complete `ChainSpec` JSON:
 
-## Runbook proof
+```bash
+lattice child create Nexus/Alpha \
+  --root /var/lib/lattice \
+  --spec alpha-spec.json
+```
 
-The E2E suite drives exactly these flows against real processes: a second
-host `init --peer`s the first, syncs Nexus, `child adopt`s its child chain
-and syncs that too; and full token swaps through `tx` — deposit locked on a
-child (and on a grandchild under a nested parent), receipt paid one level up,
-withdrawal claimed against the parent's receipt state, and dependent spends
-proving the credited balances
-(`Tests/LatticeNodeE2ETests/LatticeCtlE2ETests.swift`).
+Creation writes one immutable spec and adds the path to `hostedChains`. The
+node builds the genesis candidate from that spec when the parent has an
+executed state it can commit, and ordinary merged mining secures it. There is
+no child-deploy command or parent authorization transaction.
 
-## Troubleshooting
+For a nested child, create the parent first. Its genesis is not eligible until
+the parent has executed a block. Give a chain positive rewards before relying
+on it as a parent; a reward-free, transaction-free chain never changes state.
 
-- **`status` says `running, rpc unreachable`** — the process is up but not
-  serving yet (recovery), or the pidfile survived a crash; check
-  `log/lattice-node.log` under the root.
-- **Child stuck `awaitingGenesis`** — its anchor never landed, or the parent
-  link is wrong; see the child-chain section of
-  [operations.md](operations.md).
-- **Blocks mined but no reward credited** — the chain has no entry in
-  `mine.recipients`, so its reward and fees burn; `lattice mine status`
-  lists the configured recipients.
-- **Identity key refused on load** — it is group/other-readable; `chmod 600`.
+## Mining
+
+| Command | Effect |
+|---|---|
+| `lattice mine start` | Start the background coordinator loop. |
+| `lattice mine status` | Show its PID and configured recipients. |
+| `lattice mine stop` | Finish or bound the active round, then stop. |
+
+`mine.worker` is `cpu` for the bundled worker or an executable path implementing
+the worker contract. `mine.recipients` controls each chain's reward and fee
+recipient; an omitted path burns that payout. `mine.minWork` is a local search
+filter, not a committed consensus target. `mine.minBlockIntervalSeconds` is a
+floor on template spacing and releases itself when rounds run longer.
+
+The mining loop probes the node for the template expiry and places a deadline
+around each coordinator process group. A timeout is logged loudly and the next
+round retries.
+
+## Spending keys and transactions
+
+```bash
+lattice key generate --out ./wallet.json
+```
+
+Key files are created mode `0600`, and transaction commands refuse a
+group/other-readable key.
+
+```bash
+lattice tx send \
+  --root /var/lib/lattice \
+  --chain Nexus/Alpha \
+  --key ./wallet.json \
+  --to <address> \
+  --amount 25 \
+  --fee 1
+```
+
+`tx deposit`, `tx receipt`, and `tx withdraw` expose the three cross-level
+exchange actions. All submissions use the one RPC listener and carry their
+absolute chain path. The CLI rejects a path this host does not serve; the node
+also returns 404 for an unhosted path.
+
+## systemd
+
+Generate foreground units from the configured topology:
+
+```bash
+lattice emit-systemd --root /var/lib/lattice \
+  > /etc/systemd/system/lattice.generated.units
+```
+
+The checked-in examples are [deploy/lattice-node.service](../deploy/lattice-node.service)
+and [deploy/lattice-mining-coordinator.service](../deploy/lattice-mining-coordinator.service).
+The coordinator unit requires a nonempty `RECIPIENT_ARGS` in
+`/etc/lattice/mining.env` so production mining cannot silently burn all
+rewards.
+
+## Layout
+
+```text
+<root>/
+  lattice.json
+  identity/Nexus.key
+  specs/Nexus%2FAlpha.json
+  chains/Nexus/
+    state.db
+    volumes.db
+    header-evidence.db
+    storage.lock
+  run/
+  log/
+```
+
+There is no per-chain process, port, key, or child `state.db`. The path in
+`specs/` identifies a level; runtime facts for every level share the one tree
+journal.

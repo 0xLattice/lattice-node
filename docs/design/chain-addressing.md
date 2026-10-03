@@ -11,10 +11,10 @@ Nexus/Payments
 Nexus/Payments/Rollups
 ```
 
-`Payments` and `Payments/Rollups` are invalid as chain paths even when sent to a
-Nexus process. The `Nexus` component is never implicit.
-This keeps process configuration, transaction replay protection, peer
-handshakes, storage scopes, metrics, and API payloads on one representation.
+`Payments` and `Payments/Rollups` are invalid even when sent to a host that
+serves Nexus. The `Nexus` component is never implicit. This keeps topology,
+transaction replay protection, wire routing, storage scopes, metrics, and API
+payloads on one representation.
 
 ## Directory versus chain path
 
@@ -62,16 +62,17 @@ nexus/Payments
 
 ## Where paths are load-bearing
 
-- `--chain-path` fixes the one chain owned by a process.
-- `TransactionBody.chainPath` is signed replay protection and must equal that
-  process path exactly.
-- `ChainHandshake.chainPath` prevents same-overlay peers for different chains from
-  being confused.
+- `lattice.json.hostedChains` lists the child paths one process serves, parent
+  first; Nexus is implicit as the root.
+- `TransactionBody.chainPath` is signed replay protection and must name a path
+  hosted by the receiving process.
+- The handshake pins Nexus and the protocol revision; routed sync frames carry
+  their level's full path on the one shared overlay.
 - Mining reward routing uses full paths so each reward reaches one exact chain.
-- Hierarchy messages carry full child paths, while direct-child lookup uses the
-  final directory only after the parent relationship is authenticated.
-- Durable retention scopes combine the pinned Nexus genesis CID with the full
-  path, preventing leaf-name collisions.
+- Direct-child lookup uses the final directory only after the co-hosted parent
+  relationship is established by the topology.
+- Durable facts and cursors are keyed by full path, preventing leaf-name
+  collisions inside the shared store.
 
 ## Nexus root bootstrap
 

@@ -32,8 +32,8 @@ struct DurableLocalTransaction: Sendable {
     let transaction: Transaction
 }
 
-/// The node runtime's storage gateway: the root fact journal, hosted-level
-/// journals, Volume store and local mempool journal, opened and reconciled
+/// The node runtime's storage gateway: one hosted-tree fact journal, the
+/// Volume store and local mempool journal, opened and reconciled
 /// at boot. It decides nothing; the core does.
 public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     public nonisolated let configuration: NodeConfiguration
@@ -95,15 +95,18 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         )
     }
 
-    /// Same-chain content serving reads only this storage's durable local tiers.
+    /// Hosted-tree content serving reads only this storage's durable local tiers.
     public func content(_ cids: Set<String>) async -> [String: Data] {
         await fetch(cids)
     }
 
     /// Ungated: whether `cid` is a durably accepted block. Public read RPC uses
     /// this as the canonical-data gate before serving decoded block content.
-    public func hasAcceptedBlock(_ cid: String) async -> Bool {
-        (try? await store.hasAcceptedBlock(cid)) ?? false
+    public func hasAcceptedBlock(
+        _ cid: String,
+        at chainPath: [String] = ["Nexus"]
+    ) async -> Bool {
+        (try? await store.hasAcceptedBlock(cid, at: chainPath)) ?? false
     }
 
     public func fetch(_ cids: Set<String>) async -> [String: Data] {

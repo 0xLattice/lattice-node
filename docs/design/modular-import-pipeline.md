@@ -1,152 +1,97 @@
-# Composable Node Architecture
+# Composable hosted-tree architecture
 
 The consensus details of proof-derived work and parent-state continuity live in
 [proof-derived child work](proof-derived-work.md).
 
 ## Mental model
 
-One process owns one chain. Shared transport routes messages by absolute chain
-path, while each chain has an isolated Ivy namespace, Tally scope, accepted
-graph, mempool, and Volume pruning policy.
+One process owns one Nexus-rooted tree. Each hosted path has isolated consensus
+state, fork choice, sync state, and mempool inside a shared `NodeCore`. The host
+provides one Ivy overlay, one content layer, and one durable journal.
 
-The node composes six orthogonal capabilities:
+The node composes six capabilities:
 
-1. **Gossip and sync** discover accepted block CIDs and transaction Volume roots.
-2. **Acquisition** resolves the complete Volumes needed by one candidate.
-3. **Validation** asks Lattice for a typed, immutable import result.
-4. **Persistence** atomically records semantic facts and retains selected
-   Volumes through VolumeBroker.
-5. **Insertion** updates the accepted same-chain graph with proof-derived work.
-6. **Consensus** recomputes hierarchical GHOST from the accepted graph; its
-   chosen tip is derived state and is never a separate source of truth.
+1. **Gossip and sync** discover accepted block CIDs and transaction Volume
+   roots, routed by absolute chain path.
+2. **Acquisition** resolves the complete Volumes needed by a candidate.
+3. **Validation** asks Lattice for typed immutable facts.
+4. **Persistence** retains content, then atomically records every affected
+   level and cursor in one `NodeBatch` transaction.
+5. **Insertion** updates each accepted same-chain graph with proof-derived
+   work.
+6. **Consensus** recomputes hierarchical GHOST; the chosen tip is derived
+   state, never another source of truth.
 
-These are capabilities, not a mandatory universal pipeline. Restart replays
-durable facts directly. Transaction gossip uses discovery, acquisition,
-validation, and mempool retention without touching consensus. Parent evidence
-uses hierarchy routing and validation without importing parent state.
+These are capabilities, not one mandatory pipeline. Restart replays durable
+facts directly. Transaction gossip uses acquisition, validation, and mempool
+retention without touching fork choice. Parent continuity and run attribution
+are in-process reads between co-hosted levels.
 
 ## Orchestration state
 
-The network actor owns transport ordering, but independent semantic state
-machines remain small reducers:
+One serial runtime loop owns `NodeCore.step`. Network inputs, completed worker
+jobs, timers, and RPC writes become events. Effects execute in a fixed order:
+persist, publish, then network and background work. A failed persist is
+fail-stop, so no later effect can expose a step that was not durable.
 
-- `BlockFetcher` owns candidate/provider/dependency scheduling.
-- `ParentEvidenceFlow` owns session-local evidence ordering, backpressure, and
-  reservation fencing.
-- `RangeSync` owns the single forward-apply range-sync slot and the bounds
-  that shape its paging.
+Per-level reducers remain small:
 
-These reducers perform neither Ivy I/O nor Lattice consensus. The parent
-evidence inbox row and scan watermark intentionally remain one NodeStore
-transaction: splitting that durability boundary would permit a crash to skip
-evidence.
+- header sync owns pending headers, range paging, and proof waits;
+- body acquisition owns candidate/provider/dependency scheduling;
+- mining owns mempool state and epoch-fenced template jobs.
 
-Child candidates need no reducer, because nothing is reserved. Each child
-pushes its candidate whenever one of its inputs changes; the parent keeps only
-the latest candidate per child peer, and a template takes at most one held
-candidate per directory, built on the current tip's post-state, never the block
-the branch already carries. The child keeps what it
-built in its own budgeted offer store, oldest offer evicted first. When the
-configured parent's evidence names one of those candidates carried, its row
-becomes a handoff: newer offers no longer evict it, a separate handoff budget
-bounds it, and the carried block's import takes over its roots.
+Worker tasks never mutate the core. They return events to the serial loop, and
+stale epoch work is discarded before it runs.
 
 ## Content boundary
 
-Ivy and VolumeBroker form the IPFS-like boundary for Lattice:
+Ivy and VolumeBroker form the content-addressed boundary:
 
 - peers advertise and request complete Volume roots, not loose CIDs;
-- temporary Volumes may live only in a bounded `MemoryBroker`;
-- selected content is retained through VolumeBroker;
-- malformed or incomplete content is attributed to the exact supplier, then
-  reacquired from another advertised provider;
+- selected content is retained in the one durable content store;
+- malformed complete content is attributed to its exact supplier;
+- incomplete or unavailable content is retried without a validity verdict;
 - validation bytes have no second local CAS.
 
-Content availability and consensus evidence are independent. Any peer may serve
-content-addressed bytes. Only the configured immediate-parent session may answer
-an exact genesis or parent-state continuity query. The unsigned answer is
-non-portable; ordinary peers can provide the underlying Volumes but never the
-parent's verdict.
+Content availability and consensus evidence remain distinct. Any compatible
+peer can serve bytes. Only the co-hosted parent level can supply a parent-state
+continuity fact, and that fact is not serialized or portable.
 
 ## Import boundary
 
-Acquisition produces an immutable candidate attempt containing:
-
-- the candidate block Volume;
-- the sparse root-to-child proof Volume;
-- any locally constructed genesis or continuity fact acknowledged by the
-  authenticated immediate-parent session;
-- exact provider attribution.
-
-Lattice then verifies:
-
-- the sparse directory path and target-derived work;
-- local block validity and state transition;
-- same-chain predecessor connectivity;
-- genesis authorization for a child root;
-- transitive immediate-parent state continuity when the parent-state CID
-  changes.
-
-The proof itself establishes physical work. A carrier does not have to be valid,
-accepted, connected, or canonical. The derived work fact becomes fork-choice
-input only when its child block is accepted and connected.
+Acquisition yields the candidate block, its directory proof when it is a child,
+and the content needed for state execution. Lattice verifies work, linkage,
+state transition, same-chain connectivity, and parent-state continuity. A
+carrier need not be accepted on its own chain for its physical work to be real;
+the derived work affects child fork choice only after the child block is
+accepted and connected.
 
 ## Atomic mutation
 
-`NodeStorage` serializes the small semantic commit:
+One core turn can touch several levels:
 
 ```text
 preflight
-  -> reserve exact BlockImportBatch
-  -> persist batch in state.db
-  -> apply the same batch to ChainState
-  -> publish the resulting effects asynchronously
+  -> create one NodeBatch keyed by path
+  -> retain content and header evidence
+  -> commit all facts and cursors in one state.db transaction
+  -> publish every resulting level snapshot
 ```
 
-The batch contains accepted graph facts, state snapshots, hierarchy facts, and
-one exact proof-derived `ChainWorkFact`. Crash recovery replays those facts and
-recomputes the same tip. Network cursors, provider caches, and canonical choice
-are rebuildable projections.
+Success means the complete tree step is durable. Failure exposes none of the
+fact rows. Recovery replays the same path-keyed batches and recomputes the same
+tips. Provider caches and canonical projections are rebuildable.
 
 ## Hierarchy boundary
 
-The parent learns nothing from its children. It:
+The parent does not choose child consensus. It exposes validated state
+continuity and attributed runs for directories it hosts. The child validates
+its own content-bound proof and applies those facts to its own graph.
 
-- commits child data in ordinary block state;
-- serves complete committed Volumes;
-- answers whether one parent state is transitively reachable from another in
-  its connected accepted graph;
-- acknowledges an exact continuity or genesis query from that graph;
-- maintains run state for the directories it hosts and serves each
-  carrier's run report to that directory's children (spec §9.10).
+Child genesis is built from an operator-configured spec and the carrier's
+entering state; it needs no deployment transaction. A nested child waits until
+its parent has executed a block of its own, because that produces the distinct
+parent state its genesis must name.
 
-It does not ingest child consensus, child payloads, child provider state, or
-child weights. A grandchild repeats the same immediate-parent rule; no ancestor
-proof protocol or descendant-tree export exists.
-
-## Failure semantics
-
-| Failure | Result |
-|---|---|
-| Provider timeout or partial Volume | Retry another exact advertiser; no blame for absence |
-| Malformed or wrong complete Volume | Penalize the supplier and retry discovery |
-| Missing predecessor | Park the candidate and acquire that predecessor |
-| Missing parent continuity fact | Park on the fact; the co-hosted parent level's tip change re-readies it |
-| Invalid proof or state transition | Reject that candidate |
-| Crash after durable batch | Replay facts and recompute fork choice |
-| Parent offline after facts are known | Keep verified history and consensus active |
-
-## Non-negotiable invariants
-
-- One physical grind is counted once.
-- Different root grinds sum.
-- Canonicity never changes weight.
-- Work affects a chain only after the corresponding block is connected.
-- Parent continuity is reflexive or transitively forward, never merely
-  "different" and never restricted to a direct step.
-- Volume identity is the storage and network boundary.
-- Pruning depth and serving policy are local and non-consensus.
-- No minimum-work import floor exists. Any filter on work that can reach
-  fork choice is consensus-relevant — two nodes with different floors could
-  select different tips — so the node ships none: the chain's own target is
-  the only work gate.
+The result is one operational unit with independent consensus decisions:
+recursive commitments, one shared host, and one atomic durability boundary.

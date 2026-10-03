@@ -1,4 +1,4 @@
-// lattice: operator front door for a host's chain-process tree.
+// lattice: operator front door for one host's chain tree.
 //
 // Verbs are orthogonal along the architecture's own separations: the tree
 // (init/up/down/status/wipe), identity/custody (identity, key), roles
@@ -93,11 +93,8 @@ struct Init: AsyncParsableCommand {
             throw CtlError("\(Topology.fileName) already exists; edit it directly")
         }
         let topology = try Topology(
-            chains: ["Nexus": TopologyChain(
-                listen: 4001, rpc: 8080,
-                peers: peer.isEmpty ? nil : peer
-            )],
-            mine: nil
+            listen: 4001, rpc: 8080,
+            peers: peer.isEmpty ? nil : peer
         ).validated()
         try topology.save(root: layout.root)
         let pubkey = try publicKey(
@@ -111,7 +108,7 @@ struct Init: AsyncParsableCommand {
 
 struct Identity: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Show each chain process's public key and peer string."
+        abstract: "Show the node process's public key and peer string."
     )
 
     @OptionGroup var rootOption: RootOption
@@ -119,13 +116,9 @@ struct Identity: AsyncParsableCommand {
     func run() async throws {
         let layout = rootOption.layout
         let topology = try Topology.load(root: layout.root).validated()
-        try layout.migrateIdentityKeys(for: topology.chains.keys)
-        for path in topology.chains.keys.sorted() {
-            let pubkey = try publicKey(
-                ofIdentity: layout.identityKey(for: path)
-            )
-            let listen = topology.chains[path]!.listen
-            print("\(path): \(pubkey)@<this-host>:\(listen)")
-        }
+        let pubkey = try publicKey(
+            ofIdentity: layout.identityKey(for: ChainAddress.nexus)
+        )
+        print("Nexus: \(pubkey)@<this-host>:\(topology.listen)")
     }
 }

@@ -53,9 +53,6 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
     @Flag(name: .long, help: "Disable the best-effort freshness probe for this run.")
     var noStaleProbe = false
 
-    @Flag(name: .long, help: "Mine one pending child deployment subtree instead of normal work.")
-    var deployment = false
-
     func run() async throws {
         guard let apiBaseURL = URL(string: node) else {
             throw ValidationError("Invalid --node URL: \(node)")
@@ -67,7 +64,6 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
             apiBaseURL: apiBaseURL,
             templateRequestBody: try Self.loadTemplateRequest(
                 recipients: recipient,
-                deployment: deployment,
                 minimumWork: minWork
             )
         )
@@ -183,13 +179,11 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
 
     private static func loadTemplateRequest(
         recipients: [String],
-        deployment: Bool,
         minimumWork: [String]
     ) throws -> Data {
         do {
             return try MiningTemplateRequestBody.make(
                 recipients: recipients,
-                deployment: deployment,
                 minimumWork: minimumWork
             )
         } catch let refusal as MiningTemplateRequestBody.Refusal {

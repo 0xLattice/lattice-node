@@ -40,7 +40,6 @@ struct Child: AsyncParsableCommand {
         func run() async throws {
             let layout = rootOption.layout
             var topology = try Topology.load(root: layout.root)
-            guard var nexus = topology.chains["Nexus"] else { throw CtlError("the tree has no Nexus chain") }
             let chainSpec: ChainSpec
             if let spec {
                 chainSpec = try JSONDecoder().decode(ChainSpec.self, from: Data(contentsOf: URL(fileURLWithPath: spec)))
@@ -51,12 +50,11 @@ struct Child: AsyncParsableCommand {
                 )
             }
             // A chain is created once: its spec fixes its genesis.
-            guard !(nexus.children ?? []).contains(path),
+            guard !(topology.hostedChains ?? []).contains(path),
                   !FileManager.default.fileExists(atPath: layout.childSpec(for: path).path) else {
                 throw CtlError("\(path) already exists; a child chain is created once")
             }
-            nexus.children = (nexus.children ?? []) + [path]
-            topology.chains["Nexus"] = nexus
+            topology.hostedChains = (topology.hostedChains ?? []) + [path]
             _ = try topology.validated()
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys, .prettyPrinted]

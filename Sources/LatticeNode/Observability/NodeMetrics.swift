@@ -12,14 +12,6 @@ struct NodeMetricsSample: Sendable {
     let overlayPeers: Int
     let mempoolTransactions: Int
     let processStartTime: Date
-    /// Validate-walk passes parked on a non-verdict (§9.9): a stall the
-    /// operator must be able to see, since nothing re-arms it on its own.
-    let executionWalkParked: UInt64
-    /// CIDs network block admission requested from candidates' sessions after
-    /// local storage missed, cache hits included, admission path only. A block
-    /// admitted in order costs a small constant; growth per block with chain
-    /// depth is an acquisition defect.
-    let candidateSessionReads: UInt64
 
     init(
         chainPath: [String],
@@ -27,9 +19,7 @@ struct NodeMetricsSample: Sendable {
         weighedTipHeight: UInt64?,
         overlayPeers: Int,
         mempoolTransactions: Int,
-        processStartTime: Date,
-        executionWalkParked: UInt64 = 0,
-        candidateSessionReads: UInt64 = 0
+        processStartTime: Date
     ) {
         self.chainPath = chainPath
         self.validatedTipHeight = validatedTipHeight
@@ -37,8 +27,6 @@ struct NodeMetricsSample: Sendable {
         self.overlayPeers = overlayPeers
         self.mempoolTransactions = mempoolTransactions
         self.processStartTime = processStartTime
-        self.executionWalkParked = executionWalkParked
-        self.candidateSessionReads = candidateSessionReads
     }
 }
 
@@ -61,25 +49,13 @@ func renderNodeMetrics(_ sample: NodeMetricsSample) -> String {
     )
     family(
         "lattice_overlay_peers",
-        "Authenticated same-chain overlay peers; the parent/child fact-plane link is not counted.",
+        "Authenticated hosted-tree overlay peers; in-process parent/child links are not counted.",
         [(chain, String(sample.overlayPeers))]
     )
     family(
         "lattice_mempool_transactions",
         "Transactions in the mempool.",
         [(chain, String(sample.mempoolTransactions))]
-    )
-    family(
-        "lattice_validate_walk_parked_total",
-        "Validate-walk passes parked on a non-verdict (a stall nothing re-arms on its own).",
-        [(chain, String(sample.executionWalkParked))],
-        type: "counter"
-    )
-    family(
-        "lattice_candidate_session_reads_total",
-        "CIDs network block admission requested from candidate sessions after local storage missed (session cache hits included; admission path only).",
-        [(chain, String(sample.candidateSessionReads))],
-        type: "counter"
     )
     family(
         "process_start_time_seconds",

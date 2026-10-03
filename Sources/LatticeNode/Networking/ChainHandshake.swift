@@ -8,16 +8,13 @@ public enum ChainHandshakeError: Error, Equatable, Sendable {
     case wrongChainPath
 }
 
-/// Authenticated application handshake for the same-chain overlay.
+/// Authenticated application handshake for the shared hosted-tree overlay.
 /// Synchronization state is advertised separately because
 /// competing roots on one child path remain ordinary fork-choice candidates.
 public struct ChainHandshake: Codable, Equatable, Sendable {
-    /// Version 5: blocks commit a `rewardRecipient` credited the reward plus
-    /// fees, and transactions carry no `fee` (Lattice 39 flag day); child-block
-    /// proofs are exchanged through each node's child-evidence index
-    /// (`lattice.overlay.child-evidence.root.v1`), and the portable-attachment
-    /// topics are gone.
-    public static let protocolVersion: UInt16 = 5
+    /// Version 6: one process hosts a Nexus-rooted tree on one overlay. There
+    /// is no per-chain endpoint or public-read URL in the session handshake.
+    public static let protocolVersion: UInt16 = 6
     /// Deliberately tight pre-decode guard: `decode` runs on an UNAUTHENTICATED
     /// peer's bytes, so unlike post-session messages (bounded by the transport
     /// frame) this caps unauthenticated JSON parse work. A hello is only a version
@@ -28,23 +25,13 @@ public struct ChainHandshake: Codable, Equatable, Sendable {
     public let version: UInt16
     public let nexusGenesisCID: String
     public let chainPath: [String]
-    /// Operator-declared public read URL for this node's chain (the browsable
-    /// HTTPS base a browser can dial — a TLS-fronted hostname, not the P2P
-    /// address, which Ivy constrains to IP literals). Optional and tolerant:
-    /// absent on legacy hellos, ignored by legacy decoders, and self-declared —
-    /// a consumer must verify the served genesis against the parent's on-chain
-    /// anchor before trusting one.
-    public let publicReadURL: String?
-
     public init(
         nexusGenesisCID: String,
-        chainPath: [String],
-        publicReadURL: String? = nil
+        chainPath: [String]
     ) {
         version = Self.protocolVersion
         self.nexusGenesisCID = nexusGenesisCID
         self.chainPath = chainPath
-        self.publicReadURL = publicReadURL
     }
 
     public func encode() throws -> Data {

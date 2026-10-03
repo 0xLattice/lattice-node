@@ -1,5 +1,10 @@
 # Deferred Execution (Weigh on Possession, Execute on Selection)
 
+> **Status: implemented design rationale.** The current implementation is
+> `HeaderSync` plus `BodyPipeline`; some component names and measurements below
+> describe the earlier prototype. See [body acquisition](block-fetching.md) for
+> the concise current boundary.
+
 ## Model
 
 Any peer may lie, withhold, stall, or be honestly pruned; a withholding

@@ -211,9 +211,7 @@ extension NodeRuntime {
             weighedTipHeight: snapshot?.bestHeaderHeight,
             overlayPeers: peers,
             mempoolTransactions: snapshot?.mempoolCount ?? 0,
-            processStartTime: processStartTime,
-            executionWalkParked: 0,
-            candidateSessionReads: 0
+            processStartTime: processStartTime
         ))
     }
 
@@ -451,10 +449,9 @@ extension NodeRuntime {
         }
     }
 
-    /// The template digest without children (the runtime hosts none): the
-    /// tip and the transactions a template selects from (the pool's ready
-    /// and future entries). A template carries the digest of the inputs its
-    /// job read; status serves the current one.
+    /// The template digest over the root and every hosted child: each tip,
+    /// best header, and transaction set a template job reads. Status serves
+    /// the current value.
     static func templateDigest(
         tip: String, mempool: Mempool, levels: [(actOn: String, best: String, pool: Mempool)] = []
     ) -> String {

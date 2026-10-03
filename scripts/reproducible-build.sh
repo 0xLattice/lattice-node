@@ -6,7 +6,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-PRODUCTS=(lattice-node lattice-mining-coordinator lattice-miner)
+PRODUCTS=(lattice lattice-node lattice-mining-coordinator lattice-miner)
 default_build_root="$PWD/.build"
 if [[ "${REPRO_IN_CONTAINER:-0}" != "1" && "$(uname -s)" == "Darwin" && "$PWD" != /Users/* ]]; then
   # Docker Desktop does not always share /private/tmp mounts back to the host.

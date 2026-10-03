@@ -1,4 +1,4 @@
-# Stage 1: Build
+# Stage 1: build the node, operator CLI, coordinator, and worker.
 FROM swift:6.1-jammy AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

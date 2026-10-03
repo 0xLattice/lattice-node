@@ -1,130 +1,60 @@
-# Block Fetching
+# Body Acquisition
 
-## Goal
+This document describes the implemented boundary between weighed headers and
+full block execution. The historical `BlockFetcher` state machine no longer
+exists; acquisition is split deliberately between `BodyPipeline`, the runtime,
+and the shared content layer.
 
-`BlockFetcher` is the per-chain black box between networking/storage and
-block import. It accumulates verifiable facts until it can produce one
-complete, immutable import input.
+## Ownership
 
-Acquisition must be independent of event arrival order. Evidence arriving
-before content, content arriving during import, reconnects, recursive
-predecessor recovery, and backpressure must all converge to the same eventual
-acquisition graph. Intermediate import attempts may differ because the node
-acts on facts as soon as they arrive.
+`HeaderSync` acquires and verifies headers. Once fork choice has selected a
+best chain, `BodyPipeline` names the next bounded window of
+weighed-but-unexecuted block CIDs. It owns only deterministic scheduling state:
 
-## Boundary
+- bodies requested from the content layer;
+- bodies that arrived and are ready to connect;
+- the single connect job currently running;
+- retry backoff for temporarily unavailable content; and
+- child blocks waiting for a co-hosted parent-state fact.
 
-The fetcher owns:
+Provider discovery, fetching, CID verification, and provider suppression live
+in the shared content layer. `NodeRuntime` executes those effects and returns
+plain events to the core. Lattice alone decides whether a complete block is
+valid and records the resulting consensus facts.
 
-- block Volume availability;
-- live exact Volume providers;
-- authenticated evidence packages, distinct by root CID;
-- known same-chain predecessor dependencies;
-- bounded acquisition retries;
-- import attempt revisions and stale-completion rejection.
+## Flow
 
-The fetcher does not own:
+```text
+verified header -> fork choice -> bounded body window
+                                 -> fetch Volume by block CID
+                                 -> connect next block in parent order
+                                 -> persist facts and referenced content
+                                 -> publish the new read snapshot
+```
 
-- evidence authority or signature verification;
-- work totals or parent-state reachability;
-- fork choice or hierarchical GHOST;
-- transaction-pool processing;
-- child-candidate construction;
-- peer reputation policy;
-- accepted-block or proof publication.
-
-Evidence is authenticated before entering the fetcher. Consensus remains the
-only authority that decides whether a complete candidate is accepted. The
-fetcher references no Ivy type, and the network runtime keeps no
-candidate-acquisition state machine of its own beyond the fetcher it drives.
+Only the selected chain is executed. Losing headers retain their verified work
+and can become selected later without having consumed state-execution work in
+advance. A missing body is an availability wait, never peer blame. If a
+connect attempt lacks content, the block is retried with bounded exponential
+backoff. If a child block lacks a parent-state continuity fact, it remains
+ready and is retried when the co-hosted parent advances.
 
 ## Invariants
 
-1. Content and providers are shared by block CID.
-2. Parent evidence remains distinct by root CID.
-3. A provider supplies verifiable data, never authority.
-4. A package supplies authority context, never data availability.
-5. A provider advertisement is scoped to its exact Volume CID. Discover a
-   predecessor as its own Volume; never manufacture a provider record for it
-   from a descendant advertisement.
-6. Verified bytes are materialized only through `VolumeBroker`.
-7. Missing-predecessor traversal is iterative and bounded.
-8. A retry obligation is not discarded until its replacement work is safely
-   scheduled or the obligation is explicitly invalidated.
-9. Import completions remain authoritative for their exact active attempt
-   even when providers or evidence arrive concurrently. Only a runtime reset
-   makes a completion stale.
-10. Every retained collection has an explicit bound.
+1. Headers are weighed before body execution and fork choice does not depend
+   on body arrival order.
+2. Bodies connect one at a time, in parent order, along the current best chain.
+3. Every requested, arrived, parked, or parent-waiting set is bounded by the
+   configured body window.
+4. Complete Volumes are CID-verified and materialized through the one shared
+   content store.
+5. Worker tasks never mutate consensus state. Their results return as events
+   to the serial runtime loop.
+6. Content and header evidence are durable before the tree-wide fact
+   transaction that names them, and state is published only after that
+   transaction commits.
 
-## Model
-
-Each block CID has one acquisition record:
-
-```text
-BlockRecord
-├── verified content state
-├── live exact Volume providers
-├── evidence attempts keyed by root CID
-├── known predecessor CID
-├── active import revisions
-└── bounded retry/frontier state
-```
-
-Every event merges a fact and invokes one idempotent `advance` operation.
-`advance` schedules a complete attempt when it has a content route and the
-required evidence. A missing predecessor creates an independent acquisition
-record for that predecessor and parks the descendant until consensus connects
-the edge. Queues schedule work; they are not semantic state.
-
-## Contract
-
-The fetcher accepts:
-
-- a block Volume announcement and exact provider, whether from a live
-  announcement, a range-sync page, or a frontier pull;
-- an authenticated evidence package;
-- provider connection and disconnection;
-- parent evidence and proofs from peers' child-evidence indexes;
-- a recovered durable predecessor obligation;
-- a fetch completion;
-- an import completion;
-- a bounded retry tick.
-
-It produces a complete import value containing:
-
-- an opaque ticket and revision;
-- the block header;
-- an optional authenticated child package;
-- a root-scoped content source;
-- a bounded root-scoped Cashew content source.
-
-The import result and resulting content attribution are returned to the
-fetcher. The fetcher interprets only their scheduling consequences:
-accepted, missing predecessor, missing content, missing evidence, retry later,
-or invalid content.
-
-## Transport and storage
-
-The fetcher depends on a narrow Volume-fetching protocol rather than Ivy
-directly. The production adapter tries live exact providers, then advertised
-public pins/provider discovery. Complete Volumes are CID-validated before
-VolumeBroker stores them.
-
-Malformed or incomplete responses remain attributable to their serving peer.
-The fetcher then retries another provider or discovery route. Attribution is
-returned to the runtime; Tally policy remains outside the module.
-
-## Concurrency
-
-The runtime actor owns the synchronous reducer and therefore its semantic
-state. Lazy content resolution and import execute outside the reducer. Each
-operation carries an exact active-attempt ticket. Concurrent facts merge into
-the record and may schedule follow-up work, but do not invalidate an import
-that may already have staged durable consensus state.
-
-This gives three rules:
-
-1. facts merge synchronously inside the actor;
-2. expensive work runs asynchronously outside the actor;
-3. results mutate state only when their active-attempt ticket and runtime
-   generation remain current.
+Child work proof acquisition is a separate concern. A child header carries
+bounded inline `ChildBlockProof` values, while `ChildProofSync` can consult the
+durable local evidence index for proofs this node already learned. Peers supply
+verifiable bytes, never a validity verdict or remote parent-state authority.

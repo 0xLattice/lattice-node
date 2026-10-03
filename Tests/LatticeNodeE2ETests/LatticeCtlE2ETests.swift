@@ -3,6 +3,7 @@ import Foundation
 import FoundationNetworking
 #endif
 import Lattice
+import LatticeCtlCore
 import LatticeMinerCore
 import LatticeNode
 import XCTest
@@ -223,8 +224,7 @@ final class LatticeCtlE2ETests: XCTestCase {
     }
 
     /// Brings up one CLI-managed host mining Nexus with rewards to `miner`
-    /// (none when nil: they burn), and each chain in `recipients` to its
-    /// key, then deploys a premined child.
+    /// (none when nil: they burn).
     ///
     /// Pass a Nexus `miner` only when the test spends Nexus rewards. A
     /// credited recipient changes Nexus's post-state on every block, and at
@@ -236,43 +236,31 @@ final class LatticeCtlE2ETests: XCTestCase {
     /// transaction pooled, can lose it on every block. At Nexus's real
     /// target a child rides child-only carriers, which leave Nexus's
     /// post-state alone.
-    private func bringUpMiningHost(
-        miner: TestKey?,
-        recipients: [String: TestKey] = [:]
-    ) async throws -> CtlHost {
+    private func bringUpMiningHost(miner: TestKey?) async throws -> CtlHost {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("lattice-node-e2e-ctl-\(UUID().uuidString)")
         try FileManager.default.createDirectory(
             at: root, withIntermediateDirectories: true
         )
         _ = try await runCtl(["init"], root: root)
-        let ports = randomPorts(3)
+        let ports = randomPorts(2)
         let topologyURL = root.appendingPathComponent("lattice.json")
-        var topology = try JSONSerialization.jsonObject(
-            with: Data(contentsOf: topologyURL)
-        ) as! [String: Any]
-        var chains = topology["chains"] as! [String: Any]
-        var nexus = chains["Nexus"] as! [String: Any]
-        nexus["listen"] = Int(ports[0])
-        nexus["fact"] = Int(ports[1])
-        nexus["rpc"] = Int(ports[2])
+        var topology = try JSONDecoder().decode(
+            Topology.self, from: Data(contentsOf: topologyURL)
+        )
+        topology.listen = ports[0]
+        topology.rpc = ports[1]
         // Explicitly empty: this host seeds itself, so the shipped default
         // bootstrap peers must not send it at the public network.
-        nexus["peers"] = [String]()
-        chains["Nexus"] = nexus
-        topology["chains"] = chains
-        topology["mine"] = [
-            "chain": "Nexus", "worker": "cpu", "workers": 1,
-            "batchSize": 100_000,
-            "recipients": recipients.mapValues(\.address).merging(
-                miner.map { ["Nexus": $0.address] } ?? [:]
-            ) { current, _ in current },
-        ] as [String: Any]
-        try JSONSerialization.data(withJSONObject: topology)
-            .write(to: topologyURL)
+        topology.peers = []
+        topology.mine = TopologyMine(
+            worker: "cpu", workers: 1, batchSize: 100_000,
+            recipients: miner.map { ["Nexus": $0.address] }
+        )
+        try topology.validated().save(root: root)
 
         _ = try await runCtl(["up"], root: root)
-        let host = CtlHost(root: root, nexusRPC: ports[2])
+        let host = CtlHost(root: root, nexusRPC: ports[1])
         hosts.append(host)
         try await waitFor("Nexus active") {
             await self.health(host.nexusRPC)?["phase"] as? String == "active"
@@ -322,10 +310,13 @@ final class LatticeCtlE2ETests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: scratch) }
         let miner = try await makeKey(scratch, "alpha-miner")
         let recipient = try await makeKey(scratch, "alpha-recipient")
-        let host = try await bringUpMiningHost(miner: nil, recipients: [alpha: miner])
+        let host = try await bringUpMiningHost(miner: nil)
         _ = try await runCtl(["child", "create", alpha, "--block-time", "1000", "--reward", "100"], root: host.root)
         let again = try await runCtl(["child", "create", alpha], root: host.root, expectFailure: true)
         XCTAssertTrue(again.contains("already exists"), "a second create is refused: \(again)")
+        var topology = try Topology.load(root: host.root)
+        topology.mine?.recipients = [alpha: miner.address]
+        try topology.validated().save(root: host.root)
         try await waitFor("Nexus active after the restart") {
             await self.health(host.nexusRPC)?["phase"] as? String == "active"
         }

@@ -40,9 +40,9 @@ public enum NodeRuntimeError: Error, Equatable, Sendable {
 ///
 /// Network and fetch effects spawn tasks that only post events back, so no
 /// suspension ever interleaves two steps.
-// Child levels: the operator's `hostedChildren`, each journaling its facts in
-// its own state.db under `levels/` (until the P4 fact store); their verified
-// proofs are kept in memory for `lookupProofs` and serving.
+/// Child levels are journaled with Nexus in the one hosted-tree fact store;
+/// their verified proofs are kept in the evidence sidecar for lookup and
+/// serving across restarts.
 public final class NodeRuntime: Sendable {
     public let published: PublishedValue<ChainSnapshot>
     let readView: PublishedValue<NodeReadView>
@@ -64,6 +64,7 @@ public final class NodeRuntime: Sendable {
     private let ivy: Ivy
     private let delegate: NodeRuntimeIvyDelegate
     private let gate: NodeRuntimeInputGate
+    private let maintenance: Task<Void, Never>
 
     /// How many overlay messages may wait for the loop before a delivering
     /// connection is held back.
@@ -86,6 +87,10 @@ public final class NodeRuntime: Sendable {
         case answer(UInt64, Result<NodeRuntimeReply, any Error>)
         /// An announced transaction's fetch ended: the transaction, or nil.
         case transactionFetched(cid: String, NodeEvent?)
+        /// Periodic provider announcement and stalled-peer search.
+        case maintenance
+        /// The network I/O started by a maintenance turn ended.
+        case maintenanceFinished
         case stop
     }
 
@@ -98,8 +103,15 @@ public final class NodeRuntime: Sendable {
         workers: Int = max(1, ProcessInfo.processInfo.activeProcessorCount - 1),
         failStop: @escaping @Sendable (any Error) -> Void = { fatalError("node runtime: persist failed: \($0)") }
     ) async throws -> NodeRuntime {
-        let headers = try HeaderContentStore(directory: configuration.storagePath)
-        let core = try await boot(storage: storage, configuration: configuration, coreConfig: coreConfig, headers: headers)
+        let headers = try HeaderEvidenceStore(
+            directory: configuration.storagePath,
+            nexusGenesisCID: configuration.nexusGenesisCID
+        )
+        let proofs = try headers.proofs()
+        let core = try await boot(
+            storage: storage, configuration: configuration,
+            coreConfig: coreConfig, headers: headers, proofs: proofs
+        )
         let overlay = try overlay ?? OverlayConfiguration(configuration).overlay
         let runtime = NodeRuntime(
             core: core,
@@ -111,7 +123,7 @@ public final class NodeRuntime: Sendable {
             workers: workers,
             // A store that cannot read its proofs fails the boot: it would
             // serve child headers without them.
-            proofs: try headers.proofs(),
+            proofs: proofs,
             failStop: failStop
         )
         await runtime.ivy.installNodeRuntime(
@@ -136,41 +148,43 @@ public final class NodeRuntime: Sendable {
             await runtime.stop()
             throw error
         }
+        runtime.inputs.yield(.maintenance)
         return runtime
     }
 
     /// Rebuild the core from the durable facts, rooted at the configured
     /// Nexus genesis and nothing else.
-    // PENDING #72 (decision 18d): the configured root genesis CID moves into
-    // `ChainRuntimeContext`, and Lattice refuses any other root itself.
-    ///
     /// The weigh log is derived from the fact log; its id is the one state.db
     /// recorded with its first fact (a fresh store: a new one, recorded with
     /// the first fact it journals).
-    // PENDING P4 (one store): `ChainBatch.cursors` are not journaled yet,
-    // so a restart reads each peer's log from 0 again (IDs only).
     static func boot(
         storage: NodeStorage,
         configuration: NodeConfiguration,
         coreConfig: ChainCoreConfig,
-        headers: HeaderContentStore
+        headers: HeaderEvidenceStore,
+        proofs suppliedProofs: SavedChildProofs? = nil
     ) async throws -> NodeCore {
         guard configuration.address.isNexus else { throw NodeRuntimeError.notNexus }
         let logID = try await storage.chainLogID() ?? UUID().uuidString.lowercased()
+        let facts = try await storage.nodeFacts()
+        let proofs = try suppliedProofs ?? headers.proofs()
+        try validateSavedProofCoverage(facts: facts, proofs: proofs)
+        var cursors: [ChainPath: [String: StreamCursor]] = [:]
+        for path in [configuration.chainPath] + configuration.hostedChildren {
+            cursors[path] = try await storage.chainCursors(at: path)
+        }
         // The context pins the Nexus genesis: a store holding another root
         // fails the restore.
         let root = try ChainCore.restore(
-            replaying: try await storage.chainFacts(),
+            replaying: facts[configuration.chainPath] ?? [],
             context: try configuration.runtimeContext,
             specs: [NexusGenesis.spec],
-            config: coreConfig
+            config: coreConfig,
+            cursors: cursors[configuration.chainPath] ?? [:]
         )
-        let stores = try levelStores(configuration)
-        var facts: [ChainPath: [BlockImportBatch]] = [:]
         var specs: [ChainPath: [ChainSpec]] = [:]
-        for (path, store) in stores {
-            let batches = try await store.stagedImports().map(\.batch)
-            facts[path] = batches
+        for path in configuration.hostedChildren {
+            let batches = facts[path] ?? []
             for case .block(let block) in batches.flatMap(\.facts) where block.parentBlockHash == nil {
                 guard let spec = try await storage.chainGenesisSpec(block.blockHash, headers: headers) else {
                     throw NodeStorageError.missingMaterializedVolume(block.blockHash)
@@ -180,35 +194,38 @@ public final class NodeRuntime: Sendable {
         }
         return try NodeCore.restore(
             root: root,
-            facts: facts, specs: specs, hosted: Set(stores.keys), config: coreConfig, logID: logID
+            facts: facts, specs: specs, hosted: Set(configuration.hostedChildren), config: coreConfig,
+            logID: logID, cursors: cursors
         )
     }
 
-    /// Each hosted child level's own journal, under `levels/`.
-    static func levelStores(_ configuration: NodeConfiguration) throws -> [ChainPath: NodeStore] {
-        var stores: [ChainPath: NodeStore] = [:]
-        for path in configuration.hostedChildren {
-            let directory = configuration.storagePath.appendingPathComponent("levels")
-                .appendingPathComponent(path.joined(separator: "."))
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            stores[path] = try NodeStore(
-                databasePath: directory.appendingPathComponent("state.db"),
-                nexusGenesisCID: configuration.nexusGenesisCID,
-                chainPath: path
-            )
+    /// Every durable child work fact must retain the exact proof that produced
+    /// it. Without this check, deleting or losing the evidence sidecar could
+    /// restart successfully and relay child headers that no peer can weigh.
+    static func validateSavedProofCoverage(
+        facts: [ChainPath: [BlockImportBatch]],
+        proofs: SavedChildProofs
+    ) throws {
+        for (path, batches) in facts where path.count > 1 {
+            for case .work(let work) in batches.flatMap(\.facts) {
+                guard proofs[path]?[work.blockHash]?[work.contribution.id] != nil else {
+                    throw NodeStoreError.corrupt(
+                        "a durable child work fact is missing its saved proof"
+                    )
+                }
+            }
         }
-        return stores
     }
 
     private init(
         core: NodeCore,
         storage: NodeStorage,
-        headers: HeaderContentStore,
+        headers: HeaderEvidenceStore,
         configuration: NodeConfiguration,
         ivy: Ivy,
         helloTimeout: Duration,
         workers: Int,
-        proofs: [ChainPath: [String: [String: ChildBlockProof]]],
+        proofs: SavedChildProofs,
         failStop: @escaping @Sendable (any Error) -> Void
     ) {
         let (stream, inputs) = AsyncStream<Input>.makeStream()
@@ -218,15 +235,15 @@ public final class NodeRuntime: Sendable {
         self.readView = readView
         self.configuration = configuration
         reads = Self.reads(storage: storage, configuration: configuration, published: published, view: readView)
-        let levelStores = (try? Self.levelStores(configuration)) ?? [:]
         var outputs: [ChainPath: LevelOutput] = [core.rootPath: LevelOutput(published: published, view: readView)]
         var levelReads: [ChainPath: ChainReads] = [:]
-        for (path, store) in levelStores {
+        for path in core.ordered where path != core.rootPath {
             let output = LevelOutput(published: PublishedValue(core.levels[path]?.snapshot), view: PublishedValue())
             outputs[path] = output
             levelReads[path] = Self.reads(
                 storage: storage, configuration: configuration, published: output.published, view: output.view,
-                chainPath: path, accepted: { (try? await store.hasAcceptedBlock($0)) ?? false }
+                chainPath: path,
+                accepted: { await storage.hasAcceptedBlock($0, at: path) }
             )
         }
         self.outputs = outputs
@@ -236,6 +253,14 @@ public final class NodeRuntime: Sendable {
         let gate = NodeRuntimeInputGate(capacity: Self.networkCapacity)
         self.gate = gate
         delegate = NodeRuntimeIvyDelegate(gate: gate) { inputs.yield(.network($0)) }
+        let cadence = max(1, min(configuration.peerSearchInterval > 0
+            ? configuration.peerSearchInterval : 600, 600))
+        maintenance = Task {
+            while !Task.isCancelled {
+                guard await Timers.sleep(nanoseconds: UInt64(cadence * 1_000_000_000)) else { return }
+                inputs.yield(.maintenance)
+            }
+        }
         let initial = Loop(
             core: core,
             storage: storage,
@@ -251,7 +276,6 @@ public final class NodeRuntime: Sendable {
             gate: gate,
             helloTimeout: helloTimeout,
             remote: IvyRootContentSource(ivy: ivy, policy: configuration.resourcePolicy),
-            levelStores: levelStores,
             proofs: proofs,
             workers: max(1, workers),
             failStop: failStop
@@ -275,6 +299,7 @@ public final class NodeRuntime: Sendable {
 
     /// Stop the overlay, then the loop; joins both.
     public func stop() async {
+        maintenance.cancel()
         // Free the delegates waiting for room first: stopping Ivy waits for
         // its deliveries.
         await gate.close()
@@ -295,7 +320,7 @@ extension NodeRuntime {
     struct Loop: Sendable {
         var core: NodeCore
         let storage: NodeStorage
-        let headers: HeaderContentStore
+        let headers: HeaderEvidenceStore
         let ivy: Ivy
         let hello: Data?
         let configuration: NodeConfiguration
@@ -306,11 +331,9 @@ extension NodeRuntime {
         let remote: IvyRootContentSource
         let workers: Int
         let failStop: @Sendable (any Error) -> Void
-        /// Each hosted child level's journal.
-        let levelStores: [ChainPath: NodeStore]
         /// Each child level's verified proofs, by block and root: what
         /// `lookupProofs` answers and a served child header carries.
-        var proofs: [ChainPath: [String: [String: ChildBlockProof]]] = [:]
+        var proofs: SavedChildProofs = [:]
 
         /// One overlay session per peer key; the core sees `(key, id)`.
         var sessions: [String: Session] = [:]
@@ -334,6 +357,10 @@ extension NodeRuntime {
         /// that has a job.
         var preflightLevels: [ChainPath: (epoch: UInt64, level: ChainLevel)] = [:]
         var views: [ChainPath: NodeReadView] = [:]
+        var rootHighWater: UInt64
+        var lastProgressAt: Int64
+        var lastPeerSearchAt: Int64 = 0
+        var maintenanceInFlight = false
 
 
         /// A bounded set, oldest out.
@@ -376,7 +403,7 @@ extension NodeRuntime {
         init(
             core: NodeCore,
             storage: NodeStorage,
-            headers: HeaderContentStore,
+            headers: HeaderEvidenceStore,
             ivy: Ivy,
             hello: Data?,
             configuration: NodeConfiguration,
@@ -385,12 +412,10 @@ extension NodeRuntime {
             gate: NodeRuntimeInputGate,
             helloTimeout: Duration,
             remote: IvyRootContentSource,
-            levelStores: [ChainPath: NodeStore],
-            proofs: [ChainPath: [String: [String: ChildBlockProof]]],
+            proofs: SavedChildProofs,
             workers: Int,
             failStop: @escaping @Sendable (any Error) -> Void
         ) {
-            self.levelStores = levelStores
             self.proofs = proofs
             self.gate = gate
             self.helloTimeout = helloTimeout
@@ -405,6 +430,8 @@ extension NodeRuntime {
             self.remote = remote
             self.workers = workers
             self.failStop = failStop
+            rootHighWater = core.levels[core.rootPath]?.snapshot.actOnHeight ?? 0
+            lastProgressAt = NodeRuntime.now()
         }
 
         /// Returns false once the loop must end.
@@ -457,6 +484,69 @@ extension NodeRuntime {
                 recentlyFetched.insert(cid)
                 guard let event else { return true }
                 return await step(event)
+            case .maintenance:
+                startNetworkMaintenance()
+                return true
+            case .maintenanceFinished:
+                maintenanceInFlight = false
+                return true
+            }
+        }
+
+        /// Snapshot the discovery plan on the serial loop, then perform its
+        /// potentially slow dials outside it. A dead bootstrap endpoint must
+        /// never pause consensus, RPC writes, or persistence while connect
+        /// timeouts expire.
+        private mutating func startNetworkMaintenance() {
+            let now = NodeRuntime.now()
+            let rootHeight = core.levels[core.rootPath]?.snapshot.actOnHeight ?? 0
+            if rootHeight > rootHighWater {
+                rootHighWater = rootHeight
+                lastProgressAt = now
+            }
+            guard !maintenanceInFlight else { return }
+            maintenanceInFlight = true
+
+            let expiry = UInt64(max(0, now / 1_000)) + 1_200
+            let announced = core.ordered.compactMap { path -> String? in
+                guard let level = core.levels[path] else { return nil }
+                return path == core.rootPath
+                    ? configuration.nexusGenesisCID
+                    : level.tree.canonicalBlockHash(atHeight: 0)
+            }
+
+            // Conversion from an operator-supplied Double must not trap even
+            // for a finite but unreasonably large value.
+            let maximumSeconds = Double(Int64.max / 1_000)
+            let interval = Int64(min(configuration.peerSearchInterval, maximumSeconds) * 1_000)
+            let shouldSearch = interval > 0 && now - lastProgressAt >= interval
+                && now - lastPeerSearchAt >= interval
+            if shouldSearch { lastPeerSearchAt = now }
+            let (ivy, inputs, bootstrap, nexus) = (
+                ivy, inputs, configuration.bootstrapPeers,
+                configuration.nexusGenesisCID
+            )
+            spawn {
+                for genesis in announced {
+                    await ivy.announceProvider(rootCID: genesis, expiresAt: expiry)
+                }
+                if shouldSearch {
+                    var connected = Set((await ivy.connectedPeers).map(\.publicKey))
+                    for endpoint in bootstrap where !connected.contains(endpoint.publicKey) {
+                        do {
+                            try await ivy.connect(to: endpoint)
+                            connected.insert(endpoint.publicKey)
+                        } catch {}
+                    }
+                    for endpoint in (await ivy.discoverProviders(rootCID: nexus)).prefix(4)
+                    where !connected.contains(endpoint.publicKey) {
+                        do {
+                            try await ivy.connect(to: endpoint)
+                            connected.insert(endpoint.publicKey)
+                        } catch {}
+                    }
+                }
+                inputs.yield(.maintenanceFinished)
             }
         }
 
@@ -606,9 +696,11 @@ extension NodeRuntime {
         private mutating func step(_ event: NodeEvent) async -> Bool {
             let effects = core.step(event, now: NodeRuntime.now())
             SyncTrace.log(chain: core.rootPath, "node-runtime step \(String(describing: event).prefix(160)) -> \(effects.map { String(describing: $0).prefix(80) })")
-            // Persist, then publish, then everything else, each in order.
+            // Referenced evidence, then the facts transaction, then publish,
+            // then everything else, each in order.
             func rank(_ effect: NodeEffect) -> Int {
                 switch effect {
+                case .level(_, .indexProof): -1
                 case .persist, .level(_, .mining(.poolChanged)): 0
                 case .level(_, .publish): 1
                 default: 2
@@ -629,32 +721,27 @@ extension NodeRuntime {
         private mutating func execute(_ effect: NodeEffect) async -> Bool {
             switch effect {
             case .persist(let batch):
-                // Parent level before child, each into its own journal
-                // (PENDING P4: one transaction across levels). A crash
-                // between two writes leaves a child missing facts its parent
-                // has, never the reverse: restore takes it as a child that
-                // has not heard of them yet, and sync brings them again.
+                var roots: [ChainPath: [String]] = [:]
+                var persistedBodyKeys: [BodyKey] = []
                 for (path, levelBatch) in batch.levels.sorted(by: { $0.path.count < $1.path.count }) {
                     // A validated block's body roots are journaled with its
                     // validation, so they stay retained across restarts.
-                    let validated = levelBatch.facts.flatMap(\.facts).compactMap { fact -> BodyKey? in
+                    let keys = levelBatch.facts.flatMap(\.facts).compactMap { fact -> BodyKey? in
                         guard case .validation(let validation) = fact else { return nil }
                         return BodyKey(path: path, cid: validation.blockHash)
                     }
-                    do {
-                        try await storage.persistChainBatch(
-                            levelBatch,
-                            logID: core.logID,
-                            headers: headers,
-                            bodyRoots: validated.flatMap { bodyRoots[$0] ?? [] },
-                            into: path == core.rootPath ? nil : levelStores[path]
-                        )
-                        for key in validated { bodyRoots[key] = nil }
-                    } catch {
-                        // Fail-stop: no later effect of this step may run.
-                        failStop(error)
-                        return false
-                    }
+                    persistedBodyKeys.append(contentsOf: keys)
+                    roots[path] = keys.flatMap { bodyRoots[$0] ?? [] }
+                }
+                do {
+                    try await storage.persistNodeBatch(
+                        batch, logID: core.logID, headers: headers, bodyRoots: roots
+                    )
+                    for key in persistedBodyKeys { bodyRoots[key] = nil }
+                } catch {
+                    // Fail-stop: no later effect of this step may run.
+                    failStop(error)
+                    return false
                 }
             case .level(let path, let effect):
                 return await execute(effect, at: path)

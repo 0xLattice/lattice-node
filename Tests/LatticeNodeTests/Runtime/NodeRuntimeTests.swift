@@ -80,7 +80,7 @@ final class NodeRuntimeTests: XCTestCase {
         let reopened = try await NodeStorage.open(configuration: joiner.configuration)
         let host = try await NodeRuntime.boot(
             storage: reopened, configuration: joiner.configuration, coreConfig: .init(),
-            headers: try HeaderContentStore(directory: joiner.configuration.storagePath)
+            headers: try HeaderEvidenceStore(directory: joiner.configuration.storagePath)
         )
         let snapshot = try XCTUnwrap(host.levels[host.rootPath]?.snapshot)
         XCTAssertEqual(snapshot.actOnTip, tipCID)

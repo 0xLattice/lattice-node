@@ -81,8 +81,8 @@ carrier's grinds already credited there — and credits `runWork − ownWork`
 under `AttributedRunIdentity(carrier, directory)`: a contribution separate
 from any grind, keyed by the carrier, ratcheting on its own value
 (idempotent, monotone, refused rather than saturated, never revoked). The
-quantity is the parent process's word, the trust the child already extends to
-it for state continuity; the location and the binding are checked locally,
+quantity is the co-hosted parent level's word, the trust the child already
+extends to it for state continuity; the location and binding are checked locally,
 and a verified path can replace the reported one with no consensus change.
 The identity's encoded key deliberately keeps the old name `committerBlockHash`,
 so durable facts are byte-identical across the carrier rename.
@@ -94,28 +94,16 @@ under its own identity, and is never a projection of the parent's weight.
 
 ## Parent-state continuity
 
-For a non-genesis child candidate `C` with same-chain predecessor `P`:
+Every child block anchors its `parentState` independently. When the field is
+not the empty state, the child requires a `ParentStateContinuityLink` from the
+empty state to that exact CID, and its co-hosted immediate parent answers true
+only when some block in the parent's executed-from-genesis set produced it.
+A weighed-only post-state claim is insufficient. Parent canonicity does not
+alter a state that was actually executed on any valid branch.
 
-```
-old = P.parentState
-new = C.parentState
-```
-
-Continuity succeeds when `old == new`, or when the immediate parent's accepted
-state-transition graph contains a connected path:
-
-```
-P1.prevState == old
-Pi.parent == CID(Pi-1)
-Pi.prevState == Pi-1.postState
-Pk.postState == new
-```
-
-This is reflexive, transitive reachability, not direct adjacency. A connected,
-state-valid noncanonical parent branch is sufficient; parent canonicity does
-not alter the fact. Backward, sideways, unrelated, or disconnected movement is
-invalid. Repeated state roots use existential reachability rather than a
-hidden arrival-dependent anchor.
+A non-genesis block that commits no parent state may use the empty state and
+needs no fact. A child genesis naming the empty state is invalid: genesis must
+anchor to a real state produced by its parent.
 
 The terminal directory carrier binds `child.parentState == carrier.prevState`.
 That binding is not an anchor and never was: the carrier need not be a valid
@@ -130,28 +118,22 @@ any `VerifiedWorkContribution` is minted, so a failure withholds the work
 contribution and the import together. Work crediting and the vertical
 binding are therefore one check.
 
-Each chain process durably records every connected block after
-semantic validation. That recovered `ChainBlockFact` graph is the transition
-store; no second delta database or header replay protocol exists.
-
-Equal-state movement needs no fact. Otherwise the child sends the exact
-`(old, new)` pair over its authenticated immediate-parent session. The parent
-answers positively only when its own recovered graph contains the forward path.
-The child then constructs the non-Codable
-`ParentStateContinuityLink(parentPath, old, new)` locally for this import
-attempt. The acknowledgement is unsigned, session-bound, and not portable.
-Silence or timeout means retryable unavailability.
+Each chain level durably records validation facts for executed blocks. That
+recovered executed set answers continuity; no second delta database or header
+replay protocol exists. The child constructs
+`ParentStateContinuityLink(parentPath, empty, parentState)` locally for the
+import attempt. The fact is in-process and non-portable. A missing state is
+retryable unavailability while the parent is still advancing.
 
 Grandparent validity follows by induction. A parent block cannot enter the
-parent process's durable graph until that process has applied the same rule
+parent level's durable graph until that level has applied the same rule
 against its immediate parent. The child never receives the grandparent tree,
 header path, or verdict. Nexus terminates the induction.
 
-Child genesis uses the same narrow boundary. The parent answers only when an
-accepted parent block contains the exact `GenesisAction(directory, childCID)`.
-A child genesis is self-contained and commits to the empty parent state, so
-the fact binds that empty state. A structural carrier that was not
-accepted on the parent chain can prove work but cannot authorize deployment.
+Child genesis needs no deployment verdict. The host builds it from the
+configured spec and the carrier's entering parent state. A valid mined
+root-to-child proof supplies its work, and the child level validates and
+chooses it like any other child root.
 
 Arbitrary peers may supply any required content-addressed Volume. They never
 supply a validity verdict. A node hosts every child with its whole ancestry
@@ -163,28 +145,26 @@ this design forbids.
 
 ## Data and process boundaries
 
-- `ChildBlockProof` and its canonical proof-only
-  `ChildValidationPackageEnvelope` carry securing-work evidence.
-- `ChildEvidenceVolume` remains the one canonical Volume boundary. Ivy and
-  VolumeBroker move Volumes, not loose CIDs or a second local CAS.
-- Each chain derives validity from its own acquired Volumes. Cross-chain
-  continuity and deployment use only an exact positive acknowledgement from
-  the authenticated immediate-parent process's recovered validated graph.
-- Temporary acquired Volumes may be resolved in memory and discarded. Durable
-  facts retain every Volume needed to replay or regenerate their verification.
-- Proofs are regenerated from retained root, intermediate carrier, children
-  trie, and terminal closure when that full closure exists; otherwise they are
-  reacquired through normal advertised-Volume discovery.
+- `ChildBlockProof` is the canonical securing-work evidence. Header pages carry
+  a bounded set of proofs inline with each child header.
+- Each chain derives validity from content-addressed Volumes it acquires and
+  verifies. Ivy and VolumeBroker move complete Volumes; there is no second
+  validation CAS.
+- Cross-chain continuity reads only the co-hosted immediate parent's recovered
+  validated graph; child genesis needs no deployment acknowledgement.
+- The host records weighed headers, child indexes, and credited proofs in its
+  durable `header-evidence.db` sidecar. That sidecar is local scheduling and
+  serving state, not portable authority.
+- Proofs learned from peers or produced by local merged mining are verified
+  before credit. A node can later serve the exact saved proof with the child
+  header or find it through its local evidence index.
 - Gossip, sync, acquisition, and persistence may run asynchronously.
   Chain insertion and fork choice consume only complete, durable import
   batches.
-- A child advances its parent-evidence scan cursor only through evidence it
-  has imported or durably retained. Its node-local inbox capacity applies
-  backpressure without eviction, cursor advance, or peer punishment.
-- Nothing reserves a child candidate. When the configured parent's evidence
-  names a candidate this chain built as carried, that candidate becomes a
-  handoff under its own storage budget, and the carried block's import takes
-  over its roots.
+- Stream cursors advance in the same tree-wide transaction as the facts they
+  cover, so a crash cannot skip imported evidence.
+- Candidate content is retained with issued mining work; a submitted grind
+  transfers the roots only for levels whose targets it actually meets.
 
 Unknown-child proofs are bounded per peer and globally. Triggered sync is
 rate- and concurrency-limited. A valid proof for a child that has not yet
@@ -220,4 +200,4 @@ with the production descent, weight index, or arithmetic, must agree with
 `ChainState` on the golden, differential, and replay fixtures. Its
 `LatticeSim` harness quantifies the deterministic tie-break and no-finality
 tradeoffs under deep-reorg, selfish-mining, and balancing strategies (see the
-[adversarial report](https://github.com/adalinxx/Lattice/blob/38.0.0/docs/consensus/adversarial-report.md)).
+[adversarial report](https://github.com/adalinxx/Lattice/blob/43.1.0/docs/consensus/adversarial-report.md)).

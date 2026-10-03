@@ -1,5 +1,5 @@
 [Unit]
-Description=Lattice Nexus chain process
+Description=Lattice hosted chain tree
 After=network-online.target
 Wants=network-online.target
 
@@ -7,13 +7,8 @@ Wants=network-online.target
 Type=simple
 User=lattice
 Group=lattice
-# The external coordinator in lattice-miner.service uses the loopback API.
-ExecStart=/usr/local/bin/lattice-node \
-  --data-directory /var/lib/lattice/chains/Nexus \
-  --identity-key /var/lib/lattice/identity/nexus.key \
-  --listen-port 4001 \
-  --rpc-port 8080 \
-  --rpc-bind 127.0.0.1
+ExecStart=/usr/local/bin/lattice up --foreground --root /var/lib/lattice
+ExecStop=/usr/local/bin/lattice down --root /var/lib/lattice
 Restart=always
 RestartSec=5
 LimitNOFILE=65536

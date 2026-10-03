@@ -29,8 +29,10 @@ final class MinerLoopLogicTests: XCTestCase {
             let workID: String
             let block: Block
             let searchTarget: UInt256
+            let targets: [UInt256]
             let chainPath: [String]
             let expiresInMilliseconds: UInt64
+            let templateDigest: String
         }
         let decoded = try JSONDecoder().decode(
             TemplateResponse.self,
@@ -38,18 +40,19 @@ final class MinerLoopLogicTests: XCTestCase {
                 workID: "candidate",
                 block: block,
                 searchTarget: UInt256(255),
+                targets: [UInt256(255)],
                 chainPath: ["Nexus"],
-                expiresInMilliseconds: 30_000
+                expiresInMilliseconds: 30_000,
+                templateDigest: "digest"
             ))
         )
 
         XCTAssertEqual(decoded.workID, "candidate")
         XCTAssertEqual(decoded.searchTarget, UInt256(255).toHexString())
-        // A node that predates `targets` advertises only the search target.
         XCTAssertEqual(decoded.targets, [UInt256(255).toHexString()])
         XCTAssertEqual(decoded.chainPath, ["Nexus"])
         XCTAssertEqual(decoded.expiresInMilliseconds, 30_000)
-        XCTAssertEqual(decoded.staleToken, "candidate")
+        XCTAssertEqual(decoded.staleToken, "digest")
         XCTAssertEqual(Data(hex: decoded.blockHex), block.toData())
     }
 
@@ -67,6 +70,7 @@ final class MinerLoopLogicTests: XCTestCase {
             let workID: String
             let block: Block
             let searchTarget: UInt256
+            let targets: [UInt256]
             let chainPath: [String]
             let expiresInMilliseconds: UInt64
             let templateDigest: String
@@ -77,29 +81,25 @@ final class MinerLoopLogicTests: XCTestCase {
                 workID: "candidate",
                 block: block,
                 searchTarget: UInt256(255),
+                targets: [UInt256(255)],
                 chainPath: ["Nexus"],
                 expiresInMilliseconds: 30_000,
                 templateDigest: "d1"
             ))
         )
         XCTAssertEqual(decoded.staleToken, "d1")
-        // An empty digest is no digest: the coordinator's status probe treats
-        // it the same way, so the two never disagree into a refetch loop.
-        let emptyDigest = try JSONDecoder().decode(
+        XCTAssertThrowsError(try JSONDecoder().decode(
             TemplateResponse.self,
             from: JSONEncoder().encode(WireTemplate(
                 workID: "candidate",
                 block: block,
                 searchTarget: UInt256(255),
+                targets: [UInt256(255)],
                 chainPath: ["Nexus"],
                 expiresInMilliseconds: 30_000,
                 templateDigest: ""
             ))
-        )
-        XCTAssertEqual(
-            emptyDigest.staleToken,
-            block.parent?.rawCID ?? "candidate"
-        )
+        ))
     }
 
     func testParseMinimumWorkAcceptsPowersOfTwoAndDecimals() {

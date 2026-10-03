@@ -1,150 +1,125 @@
 # Deployment
 
-The tracked deployment assets target the current one-process/one-chain daemon.
-Scripts for faucets, embedded trees, and workers that talk directly to nodes
-were removed because those roles do not exist in Lattice.
+The tracked deployment assets run one `lattice-node` process for a complete
+Nexus-rooted tree. The process has one identity, overlay, operator RPC,
+optional public-read listener, content store, and path-keyed fact journal.
+Mining remains external: one coordinator assigns nonce ranges to stateless
+workers.
 
-## Rules that every deployment must preserve
+## Required invariants
 
-1. `lattice-node` runs Nexus and every configured child level in one node
-   runtime.
-2. Keep the unauthenticated HTTP API on loopback. To serve public reads
-   directly, use `--public-read-port`: a second listener on all interfaces
-   carrying ONLY the bounded GET read routes (the read-replica allowlist,
-   enforced in code) — chain data is public; the operator/write surface
-   never leaves loopback. That listener carries its own arrival-rate ceilings
-   (`--public-read-rate` 25/s per client, `--public-read-expensive-rate` 1/s
-   per client, `--public-read-max-rate` 200/s for the whole listener; `0`
-   disables one), the same numbers `read-replica/nginx.conf` enforces for the
-   proxied path. **Behind a proxy that presents one address for every client,
-   set the two per-client rates to `0`**: the node has no trusted header and
-   never reads a forwarded-for one, so its only client identity is the peer
-   socket — which there identifies the proxy, and a per-client limit keyed on
-   it throttles the whole internet as one user. The listener-wide ceiling is
-   address-agnostic and stays on. `GET`/`HEAD` `/health` is exempt from all
-   three, so public load can never throttle a platform health check into
-   depooling the machine; its cost is bounded instead by serving it from a
-   short-TTL cached snapshot, so a flood costs one read per interval.
-3. Expose the same-chain overlay port of each chain.
-4. Run `lattice-mining-coordinator` and external `lattice-miner` workers as
-   separate processes from the node.
-5. Treat `state.db` and `volumes.db` as one backup and recovery unit.
-6. Use the single pinned Nexus genesis CID:
+1. List hosted child paths parent first in the flat `hostedChains` array.
+2. Keep the operator RPC on loopback. Publish only the GET-only read listener
+   or the checked-in nginx allowlist.
+3. Expose one overlay port for the tree, not one port per hosted chain.
+4. Treat `state.db`, `volumes.db`, and `header-evidence.db` as one recovery
+   unit.
+5. Use one reviewed revision for the node, coordinator, workers, CLI, and
+   deployment image.
+6. Pin Nexus to
    `bafyreigsvcxa7kveg7ywaykwqqwvakgtcujds634k4cc6mejyh43pmoqny`.
-
-Deploy a child chain with testing-oriented parameters when an application needs
-a testing network. Nexus keeps the same pinned genesis in every deployment.
+7. Start with a fresh runtime store after any incompatible release. There are
+   no storage migrations or compatibility readers.
 
 ## systemd
 
-Install the release binaries:
+Install all four release binaries from the same build:
 
 ```bash
+sudo install -m 0755 .build/release/lattice /usr/local/bin/lattice
 sudo install -m 0755 .build/release/lattice-node /usr/local/bin/lattice-node
 sudo install -m 0755 .build/release/lattice-mining-coordinator \
   /usr/local/bin/lattice-mining-coordinator
 sudo install -m 0755 .build/release/lattice-miner /usr/local/bin/lattice-miner
 ```
 
-Or upgrade a host in place from a released image, no local build or docker
-needed (stop the node/miner first, restart after):
+Initialize `/var/lib/lattice`, edit the generated flat topology, and verify it
+before starting the unit:
 
 ```bash
-bash deploy/upgrade-binaries.sh sha-<release>
+sudo -u lattice lattice init --root /var/lib/lattice \
+  --peer '<public-key>@<host>:4001'
+sudo -u lattice lattice status --root /var/lib/lattice
 ```
 
-To pay mining rewards, generate a key with `lattice key generate` on a trusted
-machine (only its address ships to the miner) and run
-[mine-supervisor.py](mine-supervisor.py) beside the coordinator with
-`RECIPIENTS=Nexus=<address>`; see the "Mining rewards" section of
-[docs/operations.md](../docs/operations.md).
+For a hosted child, create its immutable spec with `lattice child create` or
+place the spec under `/var/lib/lattice/specs` and add the absolute path to
+`hostedChains`. A nested child needs its parent to have executed a block of its
+own; configure a positive parent reward when the parent otherwise has no state
+changes.
 
-Then install [lattice-node.service](lattice-node.service) and
-[lattice-miner.service](lattice-miner.service). The latter runs the coordinator
-and launches external workers; its historical filename remains only so existing
-unit-install automation does not need a rename.
+Install [lattice-node.service](lattice-node.service) and
+[lattice-mining-coordinator.service](lattice-mining-coordinator.service). The
+coordinator requires `/etc/lattice/mining.env`:
 
-Keep the node identity outside wipeable chain state:
+```text
+RECIPIENT_ARGS=--recipient Nexus=<address> --recipient Nexus/Alpha=<address>
+```
+
+Protect the file as mode `0640`. Omit a recipient only when burning that
+chain's payout is intentional.
+
+For a bare-metal binary refresh from GHCR, install `crane` from a separately
+verified source and pass [upgrade-binaries.sh](upgrade-binaries.sh) the image's
+immutable `sha256:...` digest. The script refuses mutable tags and never changes
+the data directory.
+
+The persistent layout is:
 
 ```text
 /var/lib/lattice/
-  identity/nexus.key
+  lattice.json
+  identity/Nexus.key
+  specs/
   chains/Nexus/
     state.db
     volumes.db
+    header-evidence.db
 ```
 
-## Container entrypoint
+The single `chains/Nexus` directory contains facts for every hosted path.
+There are no per-child databases or identity keys.
 
-[entrypoint.sh](entrypoint.sh) dispatches explicitly to `lattice-node`,
-`lattice-mining-coordinator`, or `lattice-miner`. Bare arguments default to the
-node for image compatibility.
+## Containers and Fly
 
-Example Nexus process:
+Both deployment Dockerfiles build the repository checkout directly, so the
+image cannot silently inherit an older node binary.
+
+- `read-replica/` builds a Nexus follower plus nginx. The node RPC remains on
+  loopback; nginx exposes only bounded GET routes on port 8081.
+- `testnet-follower/` builds all binaries and writes one flat `lattice.json`
+  from `NEXUS_PEERS`, `EXTERNAL_HOST`, and parent-first `HOSTED_CHAINS`.
+
+Deploy from the repository root so each Dockerfile can copy the reviewed
+sources:
 
 ```bash
-docker run --network host \
-  -v lattice-data:/home/lattice/.lattice \
-  ghcr.io/adalinxx/lattice-node:2.0.0 \
-  lattice-node \
-  --data-directory /home/lattice/.lattice/chains/Nexus \
-  --identity-key /home/lattice/.lattice/identity/nexus.key \
-  --listen-port 4001 \
-  --rpc-port 8080
+fly deploy -c deploy/read-replica/fly.toml .
+fly deploy -c deploy/testnet-follower/fly.toml .
 ```
 
-Run the coordinator in the same network namespace so the node API remains
-loopback-only:
+Run the allowlist test whenever public routes change:
 
 ```bash
-docker run --network host \
-  ghcr.io/adalinxx/lattice-node:2.0.0 \
-  lattice-mining-coordinator \
-  --node http://127.0.0.1:8080 \
-  --worker-executable /usr/local/bin/lattice-miner \
-  --workers 2
+bash deploy/read-replica/test-allowlist.sh
 ```
 
-## Destructive migration
+The public-read listener or proxy must never expose `/status`, `/metrics`,
+`/core/snapshot`, or any POST route.
 
-Stop the node and coordinator, preserve an identity key only if desired, and
-remove the whole process storage directory:
+## Flag-day upgrades
+
+There is no in-place migration. For an incompatible schema, consensus, or
+wire cutover, stop both units, preserve only identity/config/specs, wipe the
+whole runtime tree with the CLI, install one release, and restart:
 
 ```bash
-sudo systemctl stop lattice-miner lattice-node
-sudo rm -rf /var/lib/lattice/chains/Nexus
-sudo systemctl start lattice-node lattice-miner
+sudo systemctl stop lattice-mining-coordinator lattice-node
+sudo -u lattice lattice wipe --root /var/lib/lattice
+sudo systemctl start lattice-node lattice-mining-coordinator
 ```
 
-Do not keep a legacy database, `state.db`, or `volumes.db` across this migration.
-Nexus recreates the exact pinned genesis; child processes return to
-`awaitingGenesis` and reacquire an authenticated parent link.
-
-## Read replica (public read surface)
-
-`read-replica/` is the public read surface for the explorer (lattice.build).
-It is a normal lattice-node — dialing the backbones and syncing — with an nginx
-**allowlist** proxy in front: the node's HTTP API stays loopback-only (rule 3),
-and nginx exposes ONLY the bounded GET read routes (`/health`,
-`/transactions/:cid`, `/accounts/:owner`, `/api/*`), returning 403 for
-everything else — crucially `/status` (gated + mutating) and every write POST.
-
-- `Dockerfile` — `FROM ghcr.io/adalinxx/lattice-node:sha-<...>` + nginx. Bump the
-  pinned sha on each read-RPC release so the allowlist matches the node's routes.
-- `nginx.conf` — the allowlist itself (the auditor-required public/internal
-  boundary). Any route change must land with its allowlist change in the same diff.
-  It also holds the per-client rate and in-flight limits (429). Behind fly-proxy
-  every connection comes from the proxy, so limits key on `Fly-Client-IP`,
-  trusted only from fly-proxy's egress range; the comments there give the analysis.
-- `entrypoint.sh` — starts nginx, then the node in the foreground.
-- `fly.toml` — the fly app (`lattice-mainnet-read`); 443/80 → nginx (8081). Keep
-  the `http` handler on both ports: it overwrites any client-sent `Fly-Client-IP`.
-- `test-allowlist.sh` — asserts the boundary (allowed routes proxy through, denied
-  routes 403) and the limits (bursts get 429, the expensive routes trip first,
-  clients are limited independently, a spoofed header from an untrusted source
-  does not split the budget) by running the real `nginx.conf` against a stub
-  upstream in Docker.
-  Runs in CI (`read-replica-allowlist` job); run locally with
-  `bash deploy/read-replica/test-allowlist.sh`.
-
-Deploy: `flyctl deploy ./deploy/read-replica --config ./deploy/read-replica/fly.toml -a lattice-mainnet-read`.
+Never combine databases from different snapshots. For ordinary backups, stop
+the processes and snapshot `lattice.json`, `identity`, `specs`, and
+`chains/Nexus` together. See [the operations runbook](../docs/operations.md)
+for preflight, recovery, discovery, mining, and alerting details.

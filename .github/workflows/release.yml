@@ -11,16 +11,6 @@ on:
         type: string
   pull_request:
     branches: [main]
-    paths:
-      - '.github/workflows/release.yml'
-      - '.github/scripts/build-release-artifacts.sh'
-      - '.github/scripts/check-release-artifact-bindings.sh'
-      - '.github/scripts/smoke-lattice-node.sh'
-      - 'scripts/build-release-binaries.sh'
-      - 'scripts/install-linux-build-dependencies.sh'
-      - 'scripts/reproducible-build.sh'
-      - 'docs/release-verification.md'
-      - 'docs/reproducible-builds.md'
 
 permissions:
   contents: read
@@ -64,7 +54,7 @@ jobs:
             SOURCE_DATE_EPOCH="$source_epoch" \
             .github/scripts/build-release-artifacts.sh
 
-      - name: Run archived-node multichain E2E
+      - name: Run archived operator multichain E2E
         shell: bash
         env:
           ARCHIVE_PATH: ${{ steps.build.outputs.archive_path }}
@@ -76,10 +66,12 @@ jobs:
           trap 'rm -rf "$extract_root"' EXIT
           tar -xzf "$ARCHIVE_PATH" -C "$extract_root"
           E2E_NODE_BIN="$extract_root/$bundle_name/bin/lattice-node" \
-            E2E_COORDINATOR_BIN="$extract_root/$bundle_name/bin/lattice-mining-coordinator" \
-            E2E_MINER_BIN="$extract_root/$bundle_name/bin/lattice-miner" \
-            E2E_TIME_SCALE=3 \
-            swift test --filter LatticeNodeE2ETests
+          E2E_COORDINATOR_BIN="$extract_root/$bundle_name/bin/lattice-mining-coordinator" \
+          E2E_MINER_BIN="$extract_root/$bundle_name/bin/lattice-miner" \
+          E2E_CTL_BIN="$extract_root/$bundle_name/bin/lattice" \
+          E2E_CTL=1 \
+          E2E_TIME_SCALE=3 \
+            swift test --filter LatticeCtlE2ETests
 
       - name: Verify release artifact bindings
         run: .github/scripts/check-release-artifact-bindings.sh --self-test "${{ steps.build.outputs.manifest_path }}"
@@ -152,7 +144,7 @@ jobs:
           RELEASE_PLATFORM: macos-arm64
         run: .github/scripts/build-release-artifacts.sh
 
-      - name: Run archived-node multichain E2E
+      - name: Run archived operator multichain E2E
         env:
           ARCHIVE_PATH: ${{ steps.build.outputs.archive_path }}
         run: |
@@ -163,10 +155,12 @@ jobs:
           trap 'rm -rf "$extract_root"' EXIT
           tar -xzf "$ARCHIVE_PATH" -C "$extract_root"
           E2E_NODE_BIN="$extract_root/$bundle_name/bin/lattice-node" \
-            E2E_COORDINATOR_BIN="$extract_root/$bundle_name/bin/lattice-mining-coordinator" \
-            E2E_MINER_BIN="$extract_root/$bundle_name/bin/lattice-miner" \
-            E2E_TIME_SCALE=3 \
-            swift test --filter LatticeNodeE2ETests
+          E2E_COORDINATOR_BIN="$extract_root/$bundle_name/bin/lattice-mining-coordinator" \
+          E2E_MINER_BIN="$extract_root/$bundle_name/bin/lattice-miner" \
+          E2E_CTL_BIN="$extract_root/$bundle_name/bin/lattice" \
+          E2E_CTL=1 \
+          E2E_TIME_SCALE=3 \
+            swift test --filter LatticeCtlE2ETests
 
       - name: Verify release artifact bindings
         run: .github/scripts/check-release-artifact-bindings.sh --self-test "${{ steps.build.outputs.manifest_path }}"

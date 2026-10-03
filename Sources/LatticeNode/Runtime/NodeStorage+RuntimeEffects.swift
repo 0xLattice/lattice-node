@@ -8,9 +8,10 @@ import cashew
 /// Volume broker of an opened `NodeStorage`, used as the effect executor's
 /// persistence and content layer. Nothing here decides anything.
 extension NodeStorage {
-    /// Boot replay: every durable fact batch, to rebuild `ChainCore` from.
-    nonisolated func chainFacts() async throws -> [BlockImportBatch] {
-        try await store.stagedImports().map(\.batch)
+    /// Boot replay: every durable fact batch, grouped by hosted level.
+    nonisolated func nodeFacts() async throws -> [ChainPath: [BlockImportBatch]] {
+        Dictionary(grouping: try await store.stagedImports(), by: \.chainPath)
+            .mapValues { $0.map(\.batch) }
     }
 
     /// The weigh log id state.db recorded with its first chain fact.
@@ -18,33 +19,43 @@ extension NodeStorage {
         try await store.chainLogID()
     }
 
-    /// `ChainEffect.persist`: content first — post-states into the Volume store,
-    /// header bytes into the header store, both durable and the Volume roots
-    /// retained — then the batch's facts in one state.db transaction, with
-    /// every root they reference: the post-states' and `bodyRoots`, the
-    /// stored bodies of the blocks it validates. Boot keeps exactly the
-    /// journaled roots retained.
-    nonisolated func persistChainBatch(
-        _ batch: ChainBatch,
+    nonisolated func chainCursors(at path: ChainPath) async throws -> [String: StreamCursor] {
+        try await store.chainCursors(at: path)
+    }
+
+    /// `NodeEffect.persist`: content first for every affected level, then the
+    /// complete node step's facts and cursors in one state.db transaction.
+    nonisolated func persistNodeBatch(
+        _ batch: NodeBatch,
         logID: String,
-        headers: HeaderContentStore,
-        bodyRoots: [String] = [],
-        into levelStore: NodeStore? = nil
+        headers: HeaderEvidenceStore,
+        bodyRoots: [ChainPath: [String]] = [:]
     ) async throws {
-        let storage = NodeImportStorage(storage: broker)
-        for state in batch.states {
-            try await Self.storeExecutedState(state, in: storage)
+        var durable: [NodeFactBatch] = []
+        for (path, level) in batch.levels.sorted(by: {
+            $0.path.count != $1.path.count
+                ? $0.path.count < $1.path.count
+                : $0.path.joined(separator: "/") < $1.path.joined(separator: "/")
+        }) {
+            let storage = NodeImportStorage(storage: broker)
+            for state in level.states {
+                try await Self.storeExecutedState(state, in: storage)
+            }
+            // A child genesis's spec: what restore holds as its root's.
+            for spec in level.headers.compactMap(\.spec) {
+                try await VolumeImpl<ChainSpec>(node: spec).store(storer: storage)
+            }
+            try headers.store(level.headers)
+            let roots = await storage.takeStoredVolumeRoots() + (bodyRoots[path] ?? [])
+            try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots)
+            durable.append(NodeFactBatch(
+                path: path,
+                facts: level.facts,
+                volumeRoots: roots,
+                cursors: level.cursors
+            ))
         }
-        // A child genesis's spec: what a restore holds as its root's.
-        for spec in batch.headers.compactMap(\.spec) {
-            try await VolumeImpl<ChainSpec>(node: spec).store(storer: storage)
-        }
-        try headers.store(batch.headers)
-        let roots = await storage.takeStoredVolumeRoots() + bodyRoots
-        try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots)
-        // PENDING #72 / decision 18d: genesis links are deleted; a Nexus-only
-        // runtime issues none it would need to keep.
-        try await (levelStore ?? store).stageChainFacts(batch.facts, volumeRoots: roots, logID: logID)
+        try await store.stageNodeFacts(durable, logID: logID)
     }
 
     /// `ChainEffect.fetchBody`: the block's Volume and the nested Volumes its
@@ -134,12 +145,12 @@ extension NodeStorage {
     /// The spec a stored genesis header names, from local content.
     /// A child genesis header lives in the header store (its body may not be
     /// fetched yet); its spec Volume was stored with it.
-    nonisolated func chainGenesisSpec(_ cid: String, headers: HeaderContentStore) async throws -> ChainSpec? {
+    nonisolated func chainGenesisSpec(_ cid: String, headers: HeaderEvidenceStore) async throws -> ChainSpec? {
         guard let block = await chainHeader(cid, headers: headers)?.block else { return nil }
         return try await block.spec.resolve(fetcher: localFetcher).node
     }
 
-    nonisolated func chainHeader(_ cid: String, headers: HeaderContentStore) async -> (block: Block, children: FlatDictionary<BlockHeader>)? {
+    nonisolated func chainHeader(_ cid: String, headers: HeaderEvidenceStore) async -> (block: Block, children: FlatDictionary<BlockHeader>)? {
         if let stored = headers.header(cid) { return stored }
         guard let blockBytes = try? await localFetcher.fetch(rawCid: cid),
               let block = Block(data: blockBytes),

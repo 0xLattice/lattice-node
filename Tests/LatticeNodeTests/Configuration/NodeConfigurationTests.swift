@@ -80,34 +80,26 @@ final class NodeConfigurationTests: XCTestCase {
         )
     }
 
-    func testPublicReadURLIsNormalizedAndMustBeBrowsable() throws {
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: URL(fileURLWithPath: "/tmp/lattice-node-test"),
-            privateKeyHex: String(repeating: "01", count: 32),
-            publicReadURL: " https://toy.example/ "
-        )
-        XCTAssertEqual(configuration.publicReadURL, "https://toy.example")
-
-        let undeclared = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: URL(fileURLWithPath: "/tmp/lattice-node-test"),
+    func testHostedChildrenMustBeUniqueAndParentFirst() throws {
+        let arguments = (
+            storagePath: FileManager.default.temporaryDirectory,
             privateKeyHex: String(repeating: "01", count: 32)
         )
-        XCTAssertNil(undeclared.publicReadURL)
-
-        // Operator input fails loudly: a declared-but-unbrowsable URL is a
-        // deployment mistake, not tolerable wire noise.
+        XCTAssertNoThrow(try NodeConfiguration(
+            chainPath: ["Nexus"], storagePath: arguments.storagePath,
+            privateKeyHex: arguments.privateKeyHex,
+            hostedChildren: [["Nexus", "Alpha"], ["Nexus", "Alpha", "Beta"]]
+        ))
         XCTAssertThrowsError(try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: URL(fileURLWithPath: "/tmp/lattice-node-test"),
-            privateKeyHex: String(repeating: "01", count: 32),
-            publicReadURL: "toy.example"
-        )) { error in
-            XCTAssertEqual(
-                error as? NodeConfigurationError,
-                .invalidPublicReadURL
-            )
-        }
+            chainPath: ["Nexus"], storagePath: arguments.storagePath,
+            privateKeyHex: arguments.privateKeyHex,
+            hostedChildren: [["Nexus", "Alpha", "Beta"], ["Nexus", "Alpha"]]
+        ))
+        XCTAssertThrowsError(try NodeConfiguration(
+            chainPath: ["Nexus"], storagePath: arguments.storagePath,
+            privateKeyHex: arguments.privateKeyHex,
+            hostedChildren: [["Nexus", "Alpha"], ["Nexus", "Alpha"]]
+        ))
     }
+
 }

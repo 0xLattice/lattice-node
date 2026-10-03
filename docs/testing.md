@@ -1,149 +1,91 @@
 # Testing
 
-Run the complete node, daemon, coordinator, and worker suite with:
+The default local suite covers the production runtime, storage, HTTP surface,
+mining components, and fast deterministic core tests:
 
 ```sh
-swift test
+swift test --skip LatticeNodeSimulationTests
 ```
 
-The suites are grouped by the boundary they actually cross:
+The long deterministic simulator has its own CI lane. Run the same five-seed
+profile locally with:
 
-- `NodeStoreTests`: atomic import, crash recovery, retained hierarchy
-  evidence, immutable-index audit, and Volume ownership.
-- `NodeStorageTests`: one-path import, restart, child bootstrap, proof composition, cancellation, and explicit local-versus-network acquisition boundaries.
-- `NetworkTrust*Tests` (FrontierSync, Evidence, Candidate, ReadURL,
-  HierarchySession, over the shared `NetworkTrustTestCase`): real-network
-  integration tests, not E2E. They exercise
-  bounded/canonical wire input, real peer-to-runtime async delegate
-  delivery, root-scoped content attribution, lifecycle fencing, child-proof
-  lookup through peers' child-evidence indexes, and immediate-parent facts
-  read from the co-hosted parent level (`LocalParentLevel`).
-- `MultichainInvariantTests`: direct-parent-only package acceptance, ancestor-path rejection, and durable exact-edge recovery across process reopen.
-- `ChainServiceTests`: transaction, child-deploy, template, work-submission, reconciliation ordering, and publication despite optional hierarchy availability failures.
-- `DaemonHTTPTests`: real loopback HTTP route contracts.
-- `LatticeNodeE2ETests`: black-box independent node processes. Tests may only
-  start, stop, suspend, and configure shipped processes; call public HTTP
-  endpoints; run the shipped miner/coordinator; or participate as a real Ivy
-  peer. A transparent TCP fault proxy may cut and heal a real node link without
-  inspecting or altering its protocol bytes. Tests never instantiate
-  `NodeStorage`, mutate stores, install runtime callbacks, or seed internal
-  consensus state. They exercise direct-child
-  bootstrap/restart, proof availability from same-chain peers, parent-fact
-  retry across disconnect, reopen with every source offline, three-level proof
-  traversal, a suspended
-  non-responsive authenticated sibling, durable side-branch bootstrap after a
-  reorg, same-path higher-work and equal-work CID-tie convergence, and a live competing-genesis
-  reorg followed by noncanonical parent descendants that must remain at their
-  own locations instead of flowing through an ancestor carrier; a second
-  same-path replica reconnects late and reaches the same result from its
-  durable cursor and the parent's current export. The exchange
-  scenarios run real Nexus and child
-  daemons: one pits wrong-withdrawer, replay, and overclaim withdrawals against
-  a fee-prioritized valid variable-rate claim, while another settles two child
-  chains through one co-signed Nexus transaction, moves Nexus to a strictly
-  heavier conflicting-nonce branch that excludes the settlement, and spends
-  both already-withdrawn child proceeds from the winning parent branch. These
-  tests use only public HTTP APIs and Ivy sockets; they do not inject parent
-  packages in-process. The operator-CLI scenarios (`LatticeCtlE2ETests`,
-  opt-in with `E2E_CTL=1`, their own CI lane) drive the shipped `lattice`
-  verbs with real CPU mining: multichain hosts that sync, child and grandchild
-  token swaps, deploy interruption and resumption, and §9.10 run attribution
-  through three nodes across a middle-chain outage — full Nexus blocks mined
-  by hand through the coordinator's RPC carry both descendants, Nexus then
-  mines alone while the middle chain's node is down, the returning node is
-  credited that work and pushes it to the grandchild, and the grandchild's
-  credit survives a crash restart
-  (`testNexusWorkReachesTheGrandchildAcrossAMiddleChainOutage`). The
-  coordinator is stopped for that phase because it hunts the easiest target
-  and so also produces child-only carriers, whose child blocks have no
-  connected parent-chain block (run carrier) to be credited through. A second scenario keeps the coordinator
-  mining and stops the middle chain's node mid-round, the deploy case that
-  cut a deferred parent-carried block off from its retry: after the restart
-  the node must be credited the outage work, which only that block's
-  carrier can deliver
-  (`testChildStoppedDuringCoMiningIsCreditedAfterRestart`).
-- `LatticeMinerCoreTests` and `LatticeMiningCoordinatorTests`: nonce search, work allocation, staleness, subprocess cancellation, and current RPC payloads.
+```sh
+SIM_SEEDS=5 swift test --filter LatticeNodeSimulationTests
+```
 
-The test bar is boundary-focused rather than timing-focused. Tests inject missing
-content, blocked acquisition, cancellation, restart, and publication failure at
-the component that owns the consequence. In particular, they preserve these
-cross-component invariants:
+## Suite ownership
 
-- only traced network import may acquire remote content; RPC, mining, and
-  reconciliation fail locally rather than fetching peers;
-- securing work comes only from a verified directory proof, while
-  parent-state continuity comes only from an exact authenticated reachability
-  fact; neither data availability nor parent canonicity substitutes for either;
-- each root-scoped acquisition gets an independent cashew coalescer, so one
-  candidate cannot inherit another candidate's Ivy attribution;
-- a provisional carrier can be served only as its leased request root and
-  is never persisted;
-- a durable canonical commit reserves reconciliation before a later template
-  or transaction can observe the new chain state;
-- optional child-proof materialization never suppresses canonical publication;
-- a verified observation of one physical grind whose root hash clears the
-  terminal child's target credits exactly `workForTarget` of the root-most
-  target it cleared along that proof, raised if greater by the terminal
-  child's own (never a max over every cleared target; Lattice 35.0.1, spec
-  §9.5); an observation that does not clear the terminal target credits
-  nothing; one chain-local location holds the strongest such observation;
-  distinct grinds sum, and replay cannot multiply weight;
-- nothing flows upstream: child topology and derived weight stay in the child
-  process and are never returned to a parent; a parent maintains run state only
-  for the directories it hosts (spec §9.10) and serves it downstream;
-- an offer this chain built is kept by its own budget, oldest first, and
-  admission releases it only once the carried block's import owns its roots
-  (`testOfferBudgetEvictsTheOldestOfferWhole`,
-  `testAdmissionReleasesAnOfferOnlyOnceItsBatchOwnsEveryRoot`);
-- the template digest changes with the tip, the mempool and the child
-  candidates held, and status serves what the template carries, so a miner
-  refreshes its work for a change at any level
-  (`testTemplateDigestTracksTipMempoolAndChildCandidates`,
-  `testTemplateDigestIsTheStaleTokenWhenPresent`);
-- successor attachments received before child genesis wait on their exact
-  same-chain predecessor instead of being misclassified as malformed genesis;
-- a suspended authenticated direct child cannot block a healthy sibling's
-  bounded root round;
-- parent-state continuity is reflexive and transitive over connected, executed
-  parent history, including noncanonical branches, and exact parent facts may
-  be relayed by same-chain peers after restart;
-- a parent's run report is credited only at the child block it commits, bound
-  to the child's own directory and to one of the carrier's grinds already
-  credited there, as `runWork − ownWork` under an identity keyed by the
-  carrier and directory, once — a repeat is refused, never doubled — and the
-  credit survives the child's restart from its durable fact log
-  (`testParentRunWorkIsCreditedAtTheChildBlockItCommits` in the multichain
-  invariants), and importing a block a parent block carried asks the parent
-  for that carrier's run, so a push made before the block was held here,
-  or one missed while away, never waits for the next parent block; a
-  parent-carried block is imported weighed on its proof, its relay link
-  persisted with the acceptance; decided is exactly the set the fetcher
-  never retries; no import of a block reached through an overlay peer's
-  child-evidence index uses `ImportMode.full`
-  (`testDecidedIsExactlyWhatTheFetcherNeverRetries`,
-  `testColdSyncResolvesAChildProofThroughPeerIndexesAndBlamesJunk`); a run
-  flows through every level — what Nexus attributes to the middle chain's
-  committing block reaches the grandchild, and the middle chain's service
-  pushes the run that credit changed to its own children, through their
-  mailboxes, without waiting for a re-read
-  (`testParentRunWorkPropagatesTwoLevelsDown`); a hosted child credits the
-  runs its parent sends in order
-  (`testParentAdmissionsCreditTheChildThroughItsMailboxInOrder`) and
-  re-reads its recent carriers' runs when it restarts
-  (`testRestartedChildRereadsTheRunsOfItsRecentCarriers`);
-- staged facts and retained Volume roots reopen together, or recovery fails
-  closed.
+- `LatticeNodeTests` covers the production shell: configuration, HTTP and
+  public-read boundaries, wire codecs and fuzzing, metrics, runtime job order,
+  merged mining, whole-tree restart, storage audits, retained content, and
+  corruption refusal.
+- `LatticeNodeSimulationTests` drives the synchronous core through partitions,
+  loss, delay, crashes, invalid peers, reorgs, body unavailability, proof
+  contention, and transaction workloads. The same seed reproduces the same
+  run.
+- `LatticeMinerCoreTests` and `LatticeMiningCoordinatorTests` cover target
+  parsing, template freshness, nonce-range allocation, worker lifecycle,
+  cancellation, and the current unversioned mining payloads.
+- `LatticeNodeE2ETests` contains the opt-in `LatticeCtlE2ETests`. These launch
+  the shipped `lattice`, `lattice-node`, coordinator, and miner as external
+  processes, mine real blocks, create and resume a child chain, submit signed
+  transactions, and verify state after restart.
 
-Keep concurrency tests deterministic: assert explicit latches, persisted
-facts, or recorded content requests. Cashew owns the lower-level best-effort
-batching algorithm tests; lattice-node tests the source and root boundaries
-that decide which content is allowed to batch.
+Support utilities live under `Tests/LatticeNodeTests/Support`; they are test
+infrastructure, not alternate runtime implementations.
 
-Consensus validation and signature compatibility live in the Lattice dependency and are tested in that repository; the direct process E2E additionally confirms that a legacy body-CID signature still reaches that validator through public node ingress. Storage and transport primitives are likewise tested in VolumeBroker, cashew, Ivy, and Tally. This repository pins those released revisions and tests their node-facing integration; their complete suites remain owned by their own release gates.
+## Operator E2E
 
-During release-bundle assembly, `.github/scripts/smoke-lattice-node.sh` runs
-against the bundle's node, coordinator, and miner. After the archive is
-assembled, the release workflow extracts it and reruns `LatticeNodeE2ETests`
-against the archived `lattice-node` executable. The smoke test verifies the
-exact Nexus genesis, mines and persists one block through the external mining
-pipeline, then restarts the shipped node and verifies the same tip.
+Build the optimized binaries and test bundle first, then opt in explicitly:
+
+```sh
+swift build -c release -Xswiftc -warnings-as-errors
+swift build --build-tests -Xswiftc -warnings-as-errors
+
+E2E_CTL=1 \
+E2E_CTL_BIN="$PWD/.build/release/lattice" \
+E2E_NODE_BIN="$PWD/.build/release/lattice-node" \
+E2E_COORDINATOR_BIN="$PWD/.build/release/lattice-mining-coordinator" \
+E2E_MINER_BIN="$PWD/.build/release/lattice-miner" \
+swift test --skip-build --filter LatticeCtlE2ETests
+```
+
+The E2E suite retains its temporary roots on failure and prints their paths.
+Set `LATTICE_SYNC_TRACE=1` when diagnosing a sync failure.
+
+## Invariants pinned here
+
+Tests require, among other things, that:
+
+- Nexus reconstructs to the exact configured genesis CID;
+- one `NodeBatch` commits facts and stream cursors for every affected path in
+  one SQLite transaction;
+- restart rebuilds Nexus and hosted children from the tree-wide journal;
+- saved proof bytes decode and match their path, child, and grind indexes;
+- normalized fact and accepted-block indexes exactly match immutable batches;
+- an unknown hosted path is a 404 and `/v1/...` routes do not exist;
+- a nested child genesis waits until its parent has executed a block of its
+  own;
+- the mining template digest changes for relevant input at any hosted level;
+- submitted work stores only child blocks whose target the grind meets;
+- no snapshot is published before the facts and referenced evidence are
+  durable;
+- network and pending queues remain bounded, and honest peers are not blamed
+  for availability failures.
+
+Consensus validation and signature rules are owned and tested by the pinned
+Lattice dependency. VolumeBroker, cashew, Ivy, and Tally own their storage and
+transport primitive suites; this repository tests the node-facing integration.
+
+## CI and release gates
+
+Pull requests run strict-concurrency builds on Linux and macOS, unit/integration
+tests, the simulator, wire fuzzing, SwiftLint, deployment configuration checks,
+the nginx public-read allowlist, Docker builds, reproducible Linux builds, and
+the dedicated operator E2E lane. Sanitizers run on main and merge-queue pushes.
+
+Release jobs run on every pull request as well as release events. They package
+all four operator binaries, run the genesis/mining/restart smoke, extract the
+archive, and run the opt-in operator E2E against the archived binaries. Linux
+also executes every shipped binary in a container with no Swift toolchain.

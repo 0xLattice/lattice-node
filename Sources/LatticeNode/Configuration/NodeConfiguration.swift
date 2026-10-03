@@ -35,7 +35,6 @@ public enum NodeConfigurationError: Error, Equatable, CustomStringConvertible {
     case invalidChainPath
     case invalidPrivateKey
     case invalidPorts
-    case invalidPublicReadURL
 
     public var description: String {
         switch self {
@@ -43,8 +42,6 @@ public enum NodeConfigurationError: Error, Equatable, CustomStringConvertible {
             "chain path must be Nexus-rooted, consensus-valid, and fit the setup wire frame"
         case .invalidPrivateKey: "process private key must be a 32-byte Ed25519 key"
         case .invalidPorts: "overlay and RPC ports must be nonzero and distinct"
-        case .invalidPublicReadURL:
-            "the public read URL must be an absolute http(s) base URL with a host and no credentials, query, or fragment"
         }
     }
 }
@@ -80,15 +77,6 @@ public struct NodeConfiguration: Sendable {
     /// address; this is the node's self-description. Optional: direct-IP
     /// nodes need none.
     public let externalAddress: String?
-    /// Operator-declared public read URL for THIS chain's browsable HTTP
-    /// surface (e.g. "https://toy.example.com"): a TLS-fronted base a browser
-    /// can dial. Distinct from `externalAddress` on purpose — the P2P plane
-    /// traffics in IP literals (netgroup hardening), which a browser cannot
-    /// use, so browsability is its own self-description. Advertised through
-    /// the parent rendezvous; consumers verify the served genesis against the
-    /// parent's on-chain anchor before trusting it. Optional: nodes without a
-    /// public TLS surface declare nothing and stay non-browsable.
-    public let publicReadURL: String?
     /// Seconds with no newly accepted block after which this node widens its
     /// peer search: re-dial the configured peers it holds no session with, and
     /// dial a few endpoints from one provider lookup. An eclipse only works
@@ -96,7 +84,8 @@ public struct NodeConfiguration: Sendable {
     /// stopped making progress is the one that most needs others. Staleness is
     /// measured from this node's own verified tip, never from a peer's claimed
     /// height. Discovery only: nothing here disconnects, scores or prefers a
-    /// peer, and it has no bearing on validation or fork choice. `0` disables.
+    /// peer, and it has no bearing on validation or fork choice. `0` disables
+    /// stalled-peer search; provider announcements continue.
     public let peerSearchInterval: TimeInterval
     public let resourcePolicy: NodeResourcePolicy
     /// The child chains this process hosts as levels under Nexus (operator
@@ -122,21 +111,21 @@ public struct NodeConfiguration: Sendable {
         minPeerKeyBits: Int = 0,
         overlayMaxConnectionsPerNetgroup: Int = IvyConfig.defaultMaxConnections,
         externalAddress: String? = nil,
-        publicReadURL: String? = nil,
         peerSearchInterval: TimeInterval = 600,
         resourcePolicy: NodeResourcePolicy = .default,
         hostedChildren: [[String]] = [],
         childSpecs: [[String]: ChainSpec] = [:]
     ) throws {
+        guard let address = ChainAddress(chainPath), address.isNexus else {
+            throw NodeConfigurationError.invalidChainPath
+        }
+        var listed: Set<[String]> = [chainPath]
         for child in hostedChildren {
             guard child.count > 1, (try? ChainRuntimeContext(path: child)) != nil,
-                  child.dropLast().count == 1 || hostedChildren.contains(Array(child.dropLast())),
-                  child.first == chainPath.first else {
+                  listed.contains(Array(child.dropLast())),
+                  listed.insert(child).inserted else {
                 throw NodeConfigurationError.invalidChainPath
             }
-        }
-        guard let address = ChainAddress(chainPath) else {
-            throw NodeConfigurationError.invalidChainPath
         }
         guard (try? ChainHandshake(
             nexusGenesisCID: NexusGenesis.expectedBlockHash,
@@ -153,17 +142,6 @@ public struct NodeConfiguration: Sendable {
               listenPort != rpcPort else {
             throw NodeConfigurationError.invalidPorts
         }
-        // Operator input fails loudly (unlike wire ingest, which is tolerant):
-        // a declared-but-invalid URL is a deployment mistake, not peer noise.
-        let declaredReadURL: String?
-        if let publicReadURL {
-            guard let normalized = normalizedPublicReadURL(publicReadURL) else {
-                throw NodeConfigurationError.invalidPublicReadURL
-            }
-            declaredReadURL = normalized
-        } else {
-            declaredReadURL = nil
-        }
 
         self.address = address
         self.storagePath = storagePath
@@ -177,11 +155,11 @@ public struct NodeConfiguration: Sendable {
         self.minPeerKeyBits = minPeerKeyBits
         self.overlayMaxConnectionsPerNetgroup = max(1, overlayMaxConnectionsPerNetgroup)
         self.externalAddress = externalAddress
-        self.publicReadURL = declaredReadURL
-        self.peerSearchInterval = max(0, peerSearchInterval)
+        self.peerSearchInterval = peerSearchInterval.isFinite
+            ? max(0, peerSearchInterval) : 0
         self.resourcePolicy = resourcePolicy
         self.childSpecs = childSpecs.filter { hostedChildren.contains($0.key) }
-        self.hostedChildren = hostedChildren.sorted { $0.count != $1.count ? $0.count < $1.count : $0.joined(separator: "/") < $1.joined(separator: "/") }
+        self.hostedChildren = hostedChildren
     }
 
     public var chainPath: [String] { address.components }

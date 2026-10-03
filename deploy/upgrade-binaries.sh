@@ -4,40 +4,36 @@
 # binaries are installed from it. For bare-metal / rented-GPU hosts (e.g.
 # the vast.ai miner box) that run the binaries directly.
 #
-#   usage: upgrade-binaries.sh <image-tag>        e.g. upgrade-binaries.sh sha-888bab7
+#   usage: upgrade-binaries.sh <image-digest>
+#   example: upgrade-binaries.sh sha256:<64 lowercase hex digits>
 #
 # Stop the node and miner first (`lattice mine stop`, `lattice down`);
 # restart them after (`lattice up`, `lattice mine start`).
 #
-# This swaps binaries only — it never touches the data directory, and it
-# cannot tell whether the target image is one you can roll back from. Some
-# upgrades are ONE-WAY: once the node accepts a block, the previous image can
-# no longer open that data directory, and it reports `corrupt` rather than
-# offering a reset. Executed-state attestation is one such step. Before an
-# upgrade you have not already rolled elsewhere, snapshot `state.db` and
-# `volumes.db` TOGETHER (a matched pair is the only way back) — see "Upgrading
-# to executed-state attestation is one-way" in docs/operations.md.
+# This swaps binaries only — it never touches the data directory and cannot
+# decide whether the target release is storage-compatible. Before an upgrade,
+# stop the processes and snapshot lattice.json, identity, specs, and the whole
+# chains/Nexus directory together. For an incompatible schema, consensus, or
+# wire cutover, follow the release notes and run `lattice wipe` before restart;
+# there is no in-place migration or mixed-database recovery.
 set -eu
 
-TAG="${1:?usage: upgrade-binaries.sh <image-tag, e.g. sha-888bab7>}"
-IMAGE="ghcr.io/adalinxx/lattice-node:${TAG}"
+DIGEST="${1:?usage: upgrade-binaries.sh <sha256:image-digest>}"
+if ! printf '%s\n' "$DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+    echo "image reference must be an immutable sha256 digest" >&2
+    exit 2
+fi
+IMAGE="ghcr.io/adalinxx/lattice-node@${DIGEST}"
 BIN_DIR="${BIN_DIR:-/usr/local/bin}"
 BINARIES="lattice-node lattice lattice-mining-coordinator lattice-miner"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-if command -v crane >/dev/null 2>&1; then
-    CRANE="$(command -v crane)"
-else
-    case "$(uname -m)" in
-        x86_64) CRANE_ARCH="x86_64" ;;
-        aarch64) CRANE_ARCH="arm64" ;;
-        *) echo "unsupported arch $(uname -m)" >&2; exit 1 ;;
-    esac
-    curl -fsSL "https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_${CRANE_ARCH}.tar.gz" \
-        | tar -xz -C "$WORK" crane
-    CRANE="$WORK/crane"
+CRANE="$(command -v crane || true)"
+if [ -z "$CRANE" ]; then
+    echo "crane is required; install and verify it separately before upgrading" >&2
+    exit 1
 fi
 
 "$CRANE" export "$IMAGE" - \

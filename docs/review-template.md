@@ -12,7 +12,7 @@ Crash boundaries:
 Fault injection:
 Parent/child independence impact:
 Ingress equivalence impact:
-Schema and wire migration:
+Schema and wire cutover:
 Rollback plan:
 ```
 

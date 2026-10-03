@@ -107,7 +107,8 @@ public enum ChainEffect: Sendable {
     /// and answer `proofVerified`.
     case verifyProof(ChildProofJob)
     /// A child level: write a credited proof to the local evidence index, so
-    /// this node serves it. Emitted after the step's `persist`.
+    /// this node serves it. The core emits it beside the fact batch; the shell
+    /// stages the evidence before committing that batch.
     case indexProof(childCID: String, ChildBlockProof)
     /// The answer to a mined grind (`NodeEvent.mined` with a reply ID): at
     /// once unless its root waits to execute, then from its verdict.
@@ -466,8 +467,6 @@ public struct ChainCore: Sendable {
     /// live announcer.
     private mutating func drop(_ peer: PeerID, _ turn: inout Turn) {
         guard sync.peers.removeValue(forKey: peer) != nil else { return }
-        // Until the store keeps cursors (P4), only those it handed back
-        // outlive their session.
         if !sync.knownCursors.contains(peer.key), !sync.peers.keys.contains(where: { $0.key == peer.key }) {
             sync.cursors[peer.key] = nil
         }

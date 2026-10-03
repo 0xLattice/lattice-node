@@ -1,16 +1,17 @@
 # Lattice Documentation
 
-**Lattice** commits a recursive content-addressed hierarchy while each process
-validates and chooses exactly one absolute chain path. The single outer root is
+**Lattice** commits a recursive content-addressed hierarchy while one node
+process validates a selected Nexus-rooted chain tree. The single outer root is
 **Nexus**. The canonical rationale and runtime ownership live in Lattice's
-[philosophy](https://github.com/adalinxx/Lattice/blob/38.0.0/docs/philosophy.md)
-and [foundational architecture](https://github.com/adalinxx/Lattice/blob/38.0.0/docs/foundational-architecture.md).
+[philosophy](https://github.com/adalinxx/Lattice/blob/43.1.0/docs/philosophy.md)
+and [foundational architecture](https://github.com/adalinxx/Lattice/blob/43.1.0/docs/foundational-architecture.md).
 
-> **One process, one chain.** Every process owns one absolute Nexus-inclusive
-> path and a matched `state.db` + `volumes.db` durability pair. External
+> **One process, one hosted tree.** Every process owns one identity, overlay,
+> `state.db`, `volumes.db`, and `header-evidence.db`. Paths select levels inside
+> the process; a complete node step commits atomically across them. External
 > `lattice-miner` workers search work issued by Nexus through the coordinator.
 > Child chains provide opt-in throughput and testing networks while deciding
-> validity and fork choice independently from authenticated parent evidence.
+> validity and fork choice independently from narrow co-hosted parent facts.
 > See [Getting started](getting-started.md).
 
 Start here, then follow the path that matches what you're doing.
@@ -19,17 +20,17 @@ Start here, then follow the path that matches what you're doing.
 
 | I want to… | Read |
 |---|---|
-| Understand what Lattice is and why it exists | [Lattice philosophy](https://github.com/adalinxx/Lattice/blob/38.0.0/docs/philosophy.md) · [README](../README.md) |
+| Understand what Lattice is and why it exists | [Lattice philosophy](https://github.com/adalinxx/Lattice/blob/43.1.0/docs/philosophy.md) · [README](../README.md) |
 | Run a node for the first time | [Getting started](getting-started.md) |
 | Call the HTTP API | [RPC API reference](rpc-api.md) |
 | Bring up and operate a multi-chain host | [Operator CLI](operator-cli.md) |
 | Operate a node in production | [Operations runbook](operations.md) · [Deployment](../deploy/README.md) |
 | Deploy or manage child chains | [Deployment runbook](../deploy/README.md) |
-| Understand the protocol in depth | [Lattice specification](https://github.com/adalinxx/Lattice/blob/38.0.0/docs/spec.md) · [Node boundary](protocol.md) |
+| Understand the protocol in depth | [Lattice specification](https://github.com/adalinxx/Lattice/blob/43.1.0/docs/spec.md) · [Node boundary](protocol.md) |
 | Understand the node's internals | [Architecture](architecture.md) |
-| Understand recursive commitments and process boundaries | [Node consequences](design/fractal-structure.md) |
+| Understand recursive commitments and level boundaries | [Node consequences](design/fractal-structure.md) |
 | Understand chain paths and directories | [Chain addressing model](design/chain-addressing.md) |
-| Understand how blocks are fetched for import | [Block fetching](design/block-fetching.md) |
+| Understand how selected block bodies are acquired | [Body acquisition](design/block-fetching.md) |
 | Understand the composable node architecture | [Composable node architecture](design/modular-import-pipeline.md) |
 | Understand parent authority and process boundaries | [Process trust model](design/process-trust-model.md) |
 | Understand proof-derived child work and parent-state continuity | [Proof-derived child work](design/proof-derived-work.md) |
@@ -40,9 +41,9 @@ Start here, then follow the path that matches what you're doing.
 
 ## Canonical references
 
-- **[Lattice specification](https://github.com/adalinxx/Lattice/blob/38.0.0/docs/spec.md)** — the normative protocol and consensus rules.
+- **[Lattice specification](https://github.com/adalinxx/Lattice/blob/43.1.0/docs/spec.md)** — the normative protocol and consensus rules.
 - **[protocol.md](protocol.md)** — the node's transport, durability, and RPC boundary around Lattice.
-- **[architecture.md](architecture.md)** — how the node is built: actors, the storage broker cascade, and the per-process chain topology.
+- **[architecture.md](architecture.md)** — how the node is built: deterministic core, runtime adapters, tree-wide storage, and process topology.
 - **[rpc-api.md](rpc-api.md)** — the HTTP API, endpoint by endpoint. The single source of truth for the API.
 - **[operations.md](operations.md)** — monitoring, recovery, security, and environment variables for running a node.
 
@@ -50,12 +51,12 @@ Start here, then follow the path that matches what you're doing.
 
 Background on *why* things are shaped the way they are — design notes, not API or operational references.
 
-- [design/fractal-structure.md](design/fractal-structure.md) — node consequences of recursive commitments and independent processes.
+- [design/fractal-structure.md](design/fractal-structure.md) — node consequences of recursive commitments and independent levels.
 - [design/chain-addressing.md](design/chain-addressing.md) — the chain path / directory mental model.
-- [design/block-fetching.md](design/block-fetching.md) — the event-order-independent boundary between Volume availability and block import.
+- [design/block-fetching.md](design/block-fetching.md) — the implemented boundary between weighed headers, body acquisition, and ordered execution.
 - [design/modular-import-pipeline.md](design/modular-import-pipeline.md) — orthogonal node capabilities, atomic Lattice semantics, and asynchronous selected-Volume persistence.
 - [design/process-trust-model.md](design/process-trust-model.md) — co-hosted parent authority, in-process parent facts, loopback evidence, and independent content verification.
 - [design/mining-role-boundaries.md](design/mining-role-boundaries.md) — the node/coordinator/worker mining contract.
 - [design/consensus-fork-choice.md](design/consensus-fork-choice.md) — the node's operational duties around Lattice-owned consensus.
 - [design/proof-derived-work.md](design/proof-derived-work.md) — proof-derived child work, run attribution, and parent-state continuity.
-- [design/deterministic-simulation-testing.md](design/deterministic-simulation-testing.md) — the ordering, crash, partition, skew and peer-misbehaviour failures existing tiers cannot control, and the seeded simulation concept that would.
+- [design/deterministic-simulation-testing.md](design/deterministic-simulation-testing.md) — rationale for the implemented seeded simulator covering ordering, crash, partition, skew, and peer misbehaviour.

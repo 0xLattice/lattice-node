@@ -5,22 +5,19 @@ import UInt256
 import VolumeBroker
 import cashew
 
-struct AcceptedLeafPage: Sendable, Equatable {
-    let snapshotSequence: Int64
-    let blockCIDs: [String]
-}
-
 struct AcceptedBlockRecord: Hashable {
     let blockCID: String
     let parentCID: String?
 }
 
 private struct PersistedAcceptedBlock: Hashable {
+    let chainPath: String
     let blockCID: String
     let parentCID: String?
     let admissionSequence: Int64
 
-    init(blockCID: String, parentCID: String?, admissionSequence: Int64) {
+    init(chainPath: String, blockCID: String, parentCID: String?, admissionSequence: Int64) {
+        self.chainPath = chainPath
         self.blockCID = blockCID
         self.parentCID = parentCID
         self.admissionSequence = admissionSequence
@@ -28,6 +25,7 @@ private struct PersistedAcceptedBlock: Hashable {
 
     init(_ row: AcceptedBlockRow) throws {
         self.init(
+            chainPath: try row.chainPath,
             blockCID: try row.blockCID,
             parentCID: try row.parentCID,
             admissionSequence: try row.admissionSequence
@@ -46,6 +44,7 @@ struct AcceptedBlockRow: NodeStoreRecord {
 
     init(_ row: Row) { self.row = row }
 
+    var chainPath: String { get throws { try row.nonEmptyText("chain_path") } }
     var blockCID: String { get throws { try row.nonEmptyText("block_cid") } }
     var canonicalBlockCID: String { get throws { try row.cid("block_cid") } }
     var parentCID: String? {
@@ -73,21 +72,16 @@ struct AcceptedBlockRow: NodeStoreRecord {
 }
 
 extension NodeStore {
-    /// The cursor-less (frontier) leaf page: ?1 = snapshot admission sequence,
-    /// ?2 = limit. Served by the partial index `accepted_blocks_frontier`.
-    /// Leaf-ness is the maintained `leaf` flag; under a snapshot a block whose
-    /// only children were admitted after the snapshot reads as a non-leaf,
-    /// which only ever hides a leaf from an older page walk.
-    static let frontierLeafPageSQL =
-        "SELECT block_cid FROM accepted_blocks AS block WHERE block.leaf = 1 AND block.admission_seq <= ?1 ORDER BY block.admission_seq DESC, block.block_cid DESC LIMIT ?2"
-
-    func hasAcceptedBlock(_ blockCID: String) throws -> Bool {
+    func hasAcceptedBlock(
+        _ blockCID: String,
+        at chainPath: [String] = ["Nexus"]
+    ) throws -> Bool {
         guard CIDIdentity.isCanonical(blockCID) else {
             throw NodeStoreError.corrupt("invalid accepted block lookup")
         }
         return try !database.query(
-            "SELECT 1 FROM accepted_blocks WHERE block_cid = ?1 LIMIT 1",
-            params: [.text(blockCID)]
+            "SELECT 1 FROM accepted_blocks WHERE chain_path = ?1 AND block_cid = ?2 LIMIT 1",
+            params: [.text(chainPath.joined(separator: "/")), .text(blockCID)]
         ).isEmpty
     }
 
@@ -112,14 +106,15 @@ extension NodeStore {
     /// Owner: ImportJournal.stage — caller holds the transaction.
     func persistAcceptedBlockRows(
         _ blocks: [AcceptedBlockRecord],
+        at chainPath: String,
         admissionSequence: Int64,
         status: BlockStatus
     ) throws {
         for block in blocks {
             let row = try database.row(
                 AcceptedBlockRow.self,
-                "SELECT block_cid, parent_cid, admission_seq FROM accepted_blocks WHERE block_cid = ?1",
-                params: [.text(block.blockCID)]
+                "SELECT chain_path, block_cid, parent_cid, admission_seq FROM accepted_blocks WHERE chain_path = ?1 AND block_cid = ?2",
+                params: [.text(chainPath), .text(block.blockCID)]
             )
             if let row {
                 let persisted = try PersistedAcceptedBlock(row)
@@ -134,8 +129,9 @@ extension NodeStore {
             // disconnected segments), and inserting a child retires its
             // parent's leaf flag.
             try database.execute(
-                "INSERT INTO accepted_blocks (block_cid, parent_cid, admission_seq, validated, leaf) VALUES (?1, ?2, ?3, ?4, CASE WHEN EXISTS (SELECT 1 FROM accepted_blocks WHERE parent_cid = ?1) THEN 0 ELSE 1 END)",
+                "INSERT INTO accepted_blocks (chain_path, block_cid, parent_cid, admission_seq, validated, leaf) VALUES (?1, ?2, ?3, ?4, ?5, CASE WHEN EXISTS (SELECT 1 FROM accepted_blocks WHERE chain_path = ?1 AND parent_cid = ?2) THEN 0 ELSE 1 END)",
                 params: [
+                    .text(chainPath),
                     .text(block.blockCID),
                     block.parentCID.map(NodeSQLiteValue.text) ?? .null,
                     .int(admissionSequence),
@@ -144,8 +140,8 @@ extension NodeStore {
             )
             if let parentCID = block.parentCID {
                 try database.execute(
-                    "UPDATE accepted_blocks SET leaf = 0 WHERE block_cid = ?1 AND leaf = 1",
-                    params: [.text(parentCID)]
+                    "UPDATE accepted_blocks SET leaf = 0 WHERE chain_path = ?1 AND block_cid = ?2 AND leaf = 1",
+                    params: [.text(chainPath), .text(parentCID)]
                 )
             }
         }
@@ -154,15 +150,18 @@ extension NodeStore {
     func auditAcceptedBlocks(staged: [StagedImport]) throws {
         var expectedAcceptedBlocks: [String: PersistedAcceptedBlock] = [:]
         for admission in staged {
+            let chainPath = admission.chainPath.joined(separator: "/")
             for block in try Self.acceptedBlocks(in: admission.batch) {
-                if let existing = expectedAcceptedBlocks[block.blockCID] {
+                let key = chainPath + "\u{0}" + block.blockCID
+                if let existing = expectedAcceptedBlocks[key] {
                     guard existing.parentCID == block.parentCID else {
                         throw NodeStoreError.corrupt(
                             "admission batches disagree about an accepted block parent"
                         )
                     }
                 } else {
-                    expectedAcceptedBlocks[block.blockCID] = PersistedAcceptedBlock(
+                    expectedAcceptedBlocks[key] = PersistedAcceptedBlock(
+                        chainPath: chainPath,
                         blockCID: block.blockCID,
                         parentCID: block.parentCID,
                         admissionSequence: admission.sequence
@@ -175,12 +174,13 @@ extension NodeStore {
         var leafFlags: [String: Bool] = [:]
         for row in try database.rows(
             AcceptedBlockRow.self,
-            "SELECT block_cid, parent_cid, admission_seq, validated, leaf FROM accepted_blocks"
+            "SELECT chain_path, block_cid, parent_cid, admission_seq, validated, leaf FROM accepted_blocks"
         ) {
             let block = try PersistedAcceptedBlock(row)
             _ = try row.status
-            actualAcceptedBlocks[block.blockCID] = block
-            leafFlags[block.blockCID] = try row.leaf
+            let key = block.chainPath + "\u{0}" + block.blockCID
+            actualAcceptedBlocks[key] = block
+            leafFlags[key] = try row.leaf
         }
         guard actualAcceptedBlocks == expectedAcceptedBlocks else {
             throw NodeStoreError.corrupt(
@@ -190,18 +190,29 @@ extension NodeStore {
         var childrenByParent: [String: [String]] = [:]
         for block in actualAcceptedBlocks.values {
             if let parentCID = block.parentCID {
-                childrenByParent[parentCID, default: []].append(block.blockCID)
+                let parentKey = block.chainPath + "\u{0}" + parentCID
+                childrenByParent[parentKey, default: []].append(block.blockCID)
             }
         }
         // The maintained leaf flag is a derived index over the parent links
         // verified above, so a disagreeing row is repaired from that truth,
         // never a wipe: only the disagreeing rows are rewritten.
-        for (cid, leaf) in leafFlags.sorted(by: { $0.key < $1.key })
-        where leaf != (childrenByParent[cid] == nil) {
-            syncTrace("boot audit: repairing leaf flag block=\(cid.prefix(12))")
+        for (key, leaf) in leafFlags.sorted(by: { $0.key < $1.key })
+        where leaf != (childrenByParent[key] == nil) {
+            let parts = key.split(separator: "\u{0}", maxSplits: 1).map(String.init)
+            guard parts.count == 2 else {
+                throw NodeStoreError.corrupt("invalid accepted-block audit key")
+            }
+            SyncTrace.log(
+                chain: parts[0].split(separator: "/").map(String.init),
+                "boot audit: repairing leaf flag block=\(parts[1].prefix(12))"
+            )
             try database.execute(
-                "UPDATE accepted_blocks SET leaf = ?1 WHERE block_cid = ?2",
-                params: [.int(childrenByParent[cid] == nil ? 1 : 0), .text(cid)]
+                "UPDATE accepted_blocks SET leaf = ?1 WHERE chain_path = ?2 AND block_cid = ?3",
+                params: [
+                    .int(childrenByParent[key] == nil ? 1 : 0),
+                    .text(parts[0]), .text(parts[1]),
+                ]
             )
         }
     }

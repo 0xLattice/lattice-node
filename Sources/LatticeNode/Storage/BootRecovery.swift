@@ -3,7 +3,7 @@ import Lattice
 import VolumeBroker
 import cashew
 
-/// Boot recovery for one chain's storage: everything `NodeStorage.open`
+/// Boot recovery for one hosted tree's storage: everything `NodeStorage.open`
 /// does before the runtime starts. Content is retained before the facts that
 /// reference it, so boot only re-asserts the retained roots the journal
 /// names; an empty journal is seeded with the configured Nexus genesis.
@@ -19,7 +19,7 @@ enum BootRecovery {
         let directoryLock: StorageDirectoryLock
     }
 
-    /// The two stores, and the retention scopes derived from the chain's
+    /// The two stores, and the retention scopes derived from the tree's
     /// identity.
     private struct Stores {
         let broker: DiskBroker
@@ -34,9 +34,7 @@ enum BootRecovery {
         let directoryLock = try lockStorageDirectory(configuration: configuration)
         let stores = try openStores(configuration: configuration)
         let constantRoots = try await materializeConstantRoots(stores)
-        try await reconcileRetainedRoots(
-            stores, constantRoots: constantRoots, levels: Array(NodeRuntime.levelStores(configuration).values)
-        )
+        try await reconcileRetainedRoots(stores, constantRoots: constantRoots)
         try await pinMempool(stores)
         try await seedNexusGenesis(stores, configuration: configuration)
         return Result(
@@ -87,8 +85,7 @@ enum BootRecovery {
         let liveMempoolOwner = retentionScope + ":live-mempool"
         let store = try NodeStore(
             databasePath: configuration.storagePath.appendingPathComponent("state.db"),
-            nexusGenesisCID: configuration.nexusGenesisCID,
-            chainPath: configuration.chainPath
+            nexusGenesisCID: configuration.nexusGenesisCID
         )
         return Stores(
             broker: broker,
@@ -119,16 +116,10 @@ enum BootRecovery {
     /// exactly what its facts name.
     private static func reconcileRetainedRoots(
         _ stores: Stores,
-        constantRoots: [String],
-        levels: [NodeStore]
+        constantRoots: [String]
     ) async throws {
-        var staged = try await stores.store.stagedImports()
+        let staged = try await stores.store.stagedImports()
         try await stores.store.auditNormalizedIndexes()
-        // Hosted child levels share the scope: their journals' roots too.
-        for level in levels {
-            staged += try await level.stagedImports()
-            try await level.auditNormalizedIndexes()
-        }
         let roots = Set(staged.flatMap(\.volumeRoots)).union(constantRoots).sorted()
         for root in roots {
             guard await stores.broker.fetchVolumeLocal(root: root) != nil else {

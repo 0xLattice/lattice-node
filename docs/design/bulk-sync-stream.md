@@ -1,5 +1,10 @@
 # Sync Is Header-Graph Acquisition; Bodies Are Deferred
 
+> **Status: historical rationale.** The shipped form is the weighed-header log,
+> bounded header pages, `HeaderSync`, and `BodyPipeline` described in
+> [architecture](../architecture.md) and [body acquisition](block-fetching.md).
+> Names and wire sketches below predate that implementation.
+>
 > **Supersedes** the earlier "ordered stream" framing of this document. The
 > stream framing solved the right diagnosis (below-the-tip is not the live
 > edge) with a heavier mechanism than needed. The model here is simpler and

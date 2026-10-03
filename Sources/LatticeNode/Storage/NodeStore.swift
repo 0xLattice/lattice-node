@@ -9,9 +9,6 @@ enum NodeStoreError: Error, Equatable, LocalizedError {
     case invalidConfiguration(String)
     case wipeRequired(String)
     case conflictingImportFact
-    case conflictingImportBatch
-    case conflictingIssuedChildProof
-    case invalidIssuedChildProof(String)
     case corrupt(String)
     /// A column of one row could not be read as the type its table declares
     /// for it (missing, NULL where required, wrong storage class, or outside
@@ -25,15 +22,9 @@ enum NodeStoreError: Error, Equatable, LocalizedError {
         case .invalidConfiguration(let reason):
             "Invalid node store configuration: \(reason)"
         case .wipeRequired(let reason):
-            "The node store is incompatible (\(reason)); stop the process, delete its entire configured storage directory (state.db and volumes.db), and restart."
+            "The node store is incompatible (\(reason)); stop the process, wipe its complete configured storage directory, and restart."
         case .conflictingImportFact:
             "Conflicting bytes for an immutable chain fact."
-        case .conflictingImportBatch:
-            "An admission batch was replayed with different Volume roots."
-        case .conflictingIssuedChildProof:
-            "A locally issued child proof was replayed with different bytes."
-        case .invalidIssuedChildProof(let childCID):
-            "The proof cached for child \(childCID) does not prove that child from this chain path."
         case .corrupt(let reason):
             "The node store is corrupt: \(reason)"
         case .malformedRow(let table, let column):
@@ -42,25 +33,19 @@ enum NodeStoreError: Error, Equatable, LocalizedError {
     }
 }
 
-/// Node-owned immutable facts and availability indexes for one absolute path.
+/// Node-owned immutable facts and availability indexes for one hosted tree.
 actor NodeStore {
     let database: NodeSQLite
     let nexusGenesisCID: String
-    let chainPath: [String]
 
     init(
         databasePath: URL,
-        nexusGenesisCID: String,
-        chainPath: [String]
+        nexusGenesisCID: String
     ) throws {
         guard !nexusGenesisCID.isEmpty else {
             throw NodeStoreError.invalidConfiguration("Nexus genesis CID is empty")
         }
-        guard chainPath.first == "Nexus", chainPath.allSatisfy({ !$0.isEmpty }) else {
-            throw NodeStoreError.invalidConfiguration("chainPath must be absolute and begin with Nexus")
-        }
         let database = try NodeSQLite(path: databasePath.path)
-        let pathData = try Self.encode(chainPath)
         let tableNames = Set(try database.rows(
             from: "sqlite_master",
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
@@ -70,16 +55,14 @@ actor NodeStore {
             try Self.createSchema(
                 in: database,
                 schemaEpoch: Self.currentSchemaEpoch,
-                nexusGenesisCID: nexusGenesisCID,
-                chainPath: pathData
+                nexusGenesisCID: nexusGenesisCID
             )
         } else {
             try Self.validateMetadata(
                 in: database,
                 tableNames: tableNames,
                 schemaEpoch: Self.currentSchemaEpoch,
-                nexusGenesisCID: nexusGenesisCID,
-                chainPath: pathData
+                nexusGenesisCID: nexusGenesisCID
             )
             guard tableNames == Self.expectedTables else {
                 throw NodeStoreError.wipeRequired("schema tables are missing or unexpected")
@@ -92,7 +75,6 @@ actor NodeStore {
 
         self.database = database
         self.nexusGenesisCID = nexusGenesisCID
-        self.chainPath = chainPath
     }
 
 
@@ -133,7 +115,7 @@ actor NodeImportStorage: VolumeStorer {
 }
 
 
-/// The legacy owner pins as VolumeBroker retained roots: one scope per owner
+/// Owner pins represented as VolumeBroker retained roots: one scope per owner
 /// name. Merges and advances on one scope are serialized by their callers
 /// (the process mutation gate, or boot's storage-directory lock). Sets, not
 /// counts: a root retained twice under one owner is released by one release.

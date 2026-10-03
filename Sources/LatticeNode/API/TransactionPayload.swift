@@ -3,14 +3,8 @@ import Lattice
 import cashew
 
 public enum NodeAPILimits {
-    /// Fits beneath the HTTP upload ceiling and leaves hierarchy-frame room for
-    /// the provisional parent carrier and framing.
+    /// Fits beneath the HTTP upload ceiling and leaves protocol framing room.
     public static let maximumPayloadBytes = 1 << 20
-
-    /// A child intent may carry one consensus-sized genesis block and every
-    /// immutable policy module named by its spec. The daemon applies this cap
-    /// while collecting the request body, before JSON decoding.
-    public static let maximumChildIntentPayloadBytes = 64 << 20
 }
 
 public enum ContentBoundTransactionError: Error, Equatable, Sendable {

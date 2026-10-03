@@ -39,7 +39,7 @@ final class MergedMiningTests: XCTestCase {
 
         // A restart serves Alpha's headers with their proofs at once, and
         // resumes both chains where they were.
-        let storedProofs = try HeaderContentStore(directory: storageDirectory).proofs()
+        let storedProofs = try HeaderEvidenceStore(directory: storageDirectory).proofs()
         XCTAssertFalse((storedProofs[Self.alpha] ?? [:]).isEmpty, "Alpha's credited proofs survive the restart")
         let reopened = try await NodeStorage.open(configuration: configuration)
         let restarted = try await NodeRuntime.start(storage: reopened, configuration: configuration, overlay: overlay)

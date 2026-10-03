@@ -1,28 +1,26 @@
-# Recursive commitments, independent processes
+# Recursive commitments, independent levels
 
-The canonical design rationale is in Lattice's
-[philosophy](https://github.com/adalinxx/Lattice/blob/38.0.0/docs/philosophy.md)
-and [foundational architecture](https://github.com/adalinxx/Lattice/blob/38.0.0/docs/foundational-architecture.md).
-This page records only the consequences for `lattice-node`.
+The canonical consensus rationale lives in Lattice's
+[philosophy](https://github.com/adalinxx/Lattice/blob/43.1.0/docs/philosophy.md)
+and [foundational architecture](https://github.com/adalinxx/Lattice/blob/43.1.0/docs/foundational-architecture.md).
+This page records the node consequence.
 
-The hierarchy is recursive data, not a recursive runtime. A mined root may
-commit a child candidate that commits another child candidate, but one process
-validates and chooses exactly one absolute path. A process never embeds a child
-validator or runs fork choice for a descendant.
+The hierarchy is recursive data hosted by one tree runtime. A mined Nexus root
+may commit a child candidate that commits another child candidate. One process
+hosts every selected level and its ancestry, while each level validates its own
+blocks and chooses its own canonical projection.
 
 That gives the node four rules:
 
 1. Every public chain identity is an absolute Nexus-inclusive path.
-2. Cross-chain evidence travels only between authenticated immediate-parent and
-   direct-child processes; a provider supplies availability, not validity.
+2. Cross-chain facts pass in-process between co-hosted parent and child levels;
+   arbitrary peers provide availability, not a parent verdict.
 3. Lattice validates one sparse root-to-candidate route and updates only the
-   accepted forest for that process's path.
-4. A child's directory proof derives its own physical work, and the parent
-   block that commits it — by parent pointer — credits its run of indirectly
-   committing descendants to that child block, once (spec §9.10); the parent's
-   canonical tip is never a command to change child state or fork choice.
+   accepted graph for that level.
+4. A child's directory proof derives its physical work, and parent descendants
+   credit the carrier's run once under spec §9.10. Parent canonicity never
+   commands child fork choice.
 
-The compact model is: **recursive commitments, independent decisions**. See
-[chain addressing](chain-addressing.md) and the
-[process trust model](process-trust-model.md) for the node interfaces that
-preserve it.
+The compact model is: **recursive commitments, co-hosted independent
+decisions**. See [chain addressing](chain-addressing.md) and the
+[process trust model](process-trust-model.md).

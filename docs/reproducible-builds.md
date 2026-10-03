@@ -3,7 +3,7 @@
 Lattice Linux release binaries are expected to be byte-reproducible from the
 tagged source checkout and pinned `Package.resolved`.
 
-To verify the node, coordinator, and worker binaries, run the same Docker-backed check as CI:
+To verify all four operator binaries, run the same Docker-backed check as CI:
 
 ```bash
 git checkout <release-tag>
@@ -11,10 +11,10 @@ scripts/reproducible-build.sh
 ```
 
 The script archives committed `HEAD`, builds `lattice-node`,
-`lattice-mining-coordinator`, and `lattice-miner` in two clean containers from
+`lattice`, `lattice-mining-coordinator`, and `lattice-miner` in two clean containers from
 the immutable `swift@sha256:f5697100d3e66326314fb63a393b1dea2eb694fdcab689b03abc5b50b514ef6e`
 image at the same canonical source path, then compares SHA-256 hashes for all
-three release artifacts. This is the Swift 6.1.3 Jammy Linux/amd64 manifest
+four release artifacts. This is the Swift 6.1.3 Jammy Linux/amd64 manifest
 pinned for the release. The script also forces `linux/amd64`, including on
 Apple Silicon, and installs Linux dependencies from the immutable
 `https://snapshot.ubuntu.com/ubuntu/20260702T024019Z` snapshot. These inputs

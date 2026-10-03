@@ -258,9 +258,7 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
         for iteration in 0..<Self.messagesPerCodec {
             let hello = ChainHandshake(
                 nexusGenesisCID: randomCID(&generator),
-                chainPath: randomChainPath(&generator, minimumCount: 1),
-                publicReadURL: randomBool(&generator)
-                    ? "https://hello\(generator.next() % 1000).example" : nil
+                chainPath: randomChainPath(&generator, minimumCount: 1)
             )
             let bytes = try hello.encode()
             let decoded = try ChainHandshake.decode(bytes)

@@ -1,172 +1,163 @@
 # lattice-node
 
-`lattice-node` runs one chain in the Lattice hierarchy. Lattice has one root,
-**Nexus**, and every other chain is a descendant secured through merged proof of
-work. A process owns exactly one chain, one durable store, and one same-chain
-overlay.
+`lattice-node` is the full node for Lattice: a Nexus-rooted tree of
+proof-of-work chains secured by recursive merged mining.
+
+One process hosts one selected chain tree. It has one process identity, Ivy
+overlay, content store, fact journal, RPC listener, and public-read listener.
+Each hosted path still has independent consensus state, fork choice, sync,
+mempool, and mining candidates inside that process.
 
 ## Architecture at a glance
 
-- **One process, one chain.** Run another `lattice-node` process for every child.
-  A parent owns no child state or child fork-choice view.
-- **Absolute chain paths.** Every path includes `Nexus` as its first component:
-  `Nexus`, `Nexus/Payments`, or `Nexus/Payments/Rollups`. A path that omits
-  `Nexus` is invalid. A child `directory` such as `Payments` is only the final edge
-  label under a known parent.
-- **One network plane per chain.** The public Ivy overlay carries same-chain
-  blocks, content, and the carrier evidence that arrives with them. A child
-  reads its parent's facts in-process from the co-hosted parent level.
-- **External mining.** The node creates templates, validates submitted work,
-  persists accepted blocks, and publishes them. `lattice-mining-coordinator`
-  schedules nonce ranges and external `lattice-miner` workers search them.
-- **Content-addressed durability.** Each process stores protocol state in
-  `state.db` and materialized content volumes in `volumes.db`.
+- **Absolute paths.** `Nexus`, `Nexus/Payments`, and
+  `Nexus/Payments/Rollups` are valid chain paths.
+- **One process, one tree.** A child and every hosted ancestor run as levels of
+  the same `NodeCore`; the wire carries a chain path where routing is needed.
+- **One durable step.** `state.db` commits all levels touched by one core step
+  in one SQLite transaction. `volumes.db` stores content, and
+  `header-evidence.db` stores incomplete header boundaries and child proofs.
+- **One overlay with discovery.** Every peer follows Nexus. Nodes announce one
+  provider record for each hosted chain genesis and widen peer search when the
+  verified Nexus tip stops progressing.
+- **External mining.** The node owns templates and validation,
+  `lattice-mining-coordinator` owns ranges, and stateless `lattice-miner`
+  workers search nonces.
 
-Testing networks are ordinary child chains with testing-oriented economics and
-cadence. Nexus has one genesis and no alternate network mode.
+The detailed implementation map is in [docs/architecture.md](docs/architecture.md).
 
-## Build and run
+## Build and start
 
 ```bash
 git clone https://github.com/adalinxx/lattice-node.git
 cd lattice-node
 swift build
 
-# Nexus. Its default storage is ~/.lattice/chains/Nexus.
-swift run lattice-node \
-  --chain-path Nexus \
-  --listen-port 4001 \
-  --rpc-port 8080
-
-# Add same-chain peers explicitly when needed.
-swift run lattice-node \
-  --chain-path Nexus \
-  --peer <public-key>@<host>:4001
+mkdir -p node-data
+swift run lattice init --root node-data
+swift run lattice up --root node-data
+swift run lattice status --root node-data
 ```
 
-RPC is intentionally loopback-only. The daemon rejects non-loopback
-`--rpc-bind` values.
-
-A child runs in the same `lattice-node` process as its ancestry. List every
-chain of the tree in a `lattice.json` and host it with `--config`:
+`lattice init` writes a flat `lattice.json`:
 
 ```json
 {
-  "chains": {
-    "Nexus": {"listen": 4001, "rpc": 8080},
-    "Nexus/Payments": {"listen": 4101, "rpc": 8180}
+  "listen": 4001,
+  "rpc": 8080
+}
+```
+
+Add peers as `publicKey@host:port`. The RPC server is loopback-only. A separate
+optional public-read port exposes only bounded GET routes.
+
+The daemon can also be run directly:
+
+```bash
+swift run lattice-node \
+  --data-directory ./node-data/chains/Nexus \
+  --identity-key ./node-data/identity/Nexus.key \
+  --listen-port 4001 \
+  --rpc-port 8080 \
+  --peer <public-key>@<host>:4001
+```
+
+## Host a child chain
+
+```bash
+swift run lattice child create Nexus/Payments \
+  --root node-data \
+  --reward 1000 \
+  --block-time 10000
+```
+
+This writes one child spec, appends `Nexus/Payments` to `hostedChains`, and
+restarts a running host. The child genesis is built as a candidate from that
+spec and mined through its parent's child commitment. It needs no parent
+deployment transaction or authorization record.
+
+List nested paths parent first. A nested genesis can be built only after its
+parent has executed a block of its own. A parent whose reward is zero and whose
+state never changes cannot supply that distinct parent state, so give a chain
+positive rewards before using it as a parent.
+
+## Mine the tree
+
+The operator CLI reads mining policy from `lattice.json`:
+
+```json
+{
+  "listen": 4001,
+  "rpc": 8080,
+  "hostedChains": ["Nexus/Payments"],
+  "mine": {
+    "worker": "cpu",
+    "workers": 2,
+    "recipients": {
+      "Nexus": "<nexus-address>",
+      "Nexus/Payments": "<payments-address>"
+    }
   }
 }
 ```
 
 ```bash
-swift run lattice-node --config lattice.json
+swift run lattice mine start --root node-data
+swift run lattice mine status --root node-data
 ```
 
-The child starts in `awaitingGenesis`. A child genesis is self-contained: it is
-built offline and deterministically from a seed (the child `ChainSpec`, an
-optional premine recipient, and a timestamp), and the parent only records its
-CID. Submit a separately signed parent transaction carrying the matching
-`GenesisAction`; ordinary mining includes it like any other transaction. The
-child activates on events, not a polling loop: on its start, on each parent
-tip change, on a child-overlay peer's hello, and on a slow retry after a
-failed fetch. Each time it reads the CID its co-hosted parent level anchored
-for its directory. With `child-genesis.json` in its data directory (re-read on
-every trigger) it rebuilds the genesis from that seed and requires the anchored
-CID; without a seed, or when the seed is unreadable or builds another CID, it
-fetches the genesis block by the anchored CID from child-overlay peers, which
-a brand-new chain does not yet have. Either way, it becomes active only after a
-local read of its co-hosted parent confirms that the parent still anchors and
-recorded exactly that CID. There is no opaque serialized bootstrap channel. `lattice child deploy` runs the whole flow; see the
-[operator CLI](docs/operator-cli.md).
-
-## Mining
-
-Run the coordinator against the Nexus loopback API and point it at the external
-worker executable:
-
-```bash
-swift run lattice-mining-coordinator \
-  --node http://127.0.0.1:8080 \
-  --worker-executable .build/debug/lattice-miner \
-  --workers 2
-```
-
-`lattice-miner` is deliberately a small worker. It receives one immutable
-block/range assignment, searches nonces, and reports the result. It never owns
-chain state, wallet keys, child topology, proofs, or publication.
-
-Templates have no deployment mode: a parent transaction carrying a
-`GenesisAction` is selected from the pool like any other transaction.
+Every grind is checked against every hosted target. Configure a recipient for
+each chain whose rewards and fees should be paid; an omitted recipient burns
+that chain's payout.
 
 ## HTTP API
 
-Each process exposes only its configured chain at the loopback address. Requests
-cannot select a second chain at runtime.
+The API has one unversioned route set. There are no `/v1` aliases.
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/health` | GET | Process and chain status |
-| `/status` | GET | Same structured status response |
-| `/transactions` | POST | Submit a content-bound signed transaction |
-| `/mining/templates` | POST | Create Nexus work and gather direct-child candidates |
+| `/health` | GET | Process and selected-chain health |
+| `/status` | GET | Operator status for the hosted tree |
+| `/transactions` | POST | Submit a signed transaction |
+| `/mining/templates` | POST | Build merged-mining work |
 | `/mining/work` | POST | Submit a nonce for issued work |
+| `/api/...` | GET | Explorer and chain reads |
 
-See [docs/rpc-api.md](docs/rpc-api.md) for request and response shapes.
+Use `?chainPath=Nexus/Payments` on chain-selectable reads. A submitted
+transaction selects its level with `body.chainPath`; an unhosted path returns
+404. See [docs/rpc-api.md](docs/rpc-api.md).
 
 ## Nexus genesis
 
-Nexus starts from one deterministic local bootstrap block. Its sole unsigned
-transaction credits the premine; the node recomputes the block CID locally and
-requires the exact configured value:
+Nexus is pinned to the deterministic local genesis CID:
 
 `bafyreigsvcxa7kveg7ywaykwqqwvakgtcujds634k4cc6mejyh43pmoqny`
 
-| Parameter | Value |
-|---|---:|
-| Owner public key | `ed01fe416588df6e7fa5213c0d3e430f504bb5203172120c86b874826b55f53bdb7d` |
-| Timestamp | `0` |
-| Target | `UInt256.max` |
-| Target block time | `3,600,000 ms` |
-| Initial reward | `1,048,576` |
-| Halving interval | `876,600` blocks |
-| Premine | `175,320` reward-block equivalents |
-| Half-life | `120` blocks |
-| Maximum transactions | `5,000` per block |
-| Maximum state growth | `3,000,000` bytes per block |
-| Maximum block size | `1,000,000` bytes |
+Its timestamp remains `0`. The full constants are documented in
+[docs/protocol.md](docs/protocol.md).
 
-All other transactions, including ordinary child-genesis transactions and the
-parent transaction that anchors a child, follow normal signature rules.
+## Storage compatibility
 
-## Storage migration
-
-The new store is intentionally incompatible with legacy node data. Stop the
-process and remove the **entire configured storage directory**, including both
-`state.db` and `volumes.db`; do not retain a legacy database or content volume.
-On the next Nexus start, the node recreates the exact pinned genesis above.
+There are no storage migrations or compatibility modes. A schema, consensus,
+or wire cutover is a flag day: stop the node, back up the identity separately
+if needed, and wipe the complete hosted-tree storage directory. Never combine
+`state.db`, `volumes.db`, or `header-evidence.db` from different snapshots.
 
 ```bash
-rm -rf /var/lib/lattice/chains/Nexus
-lattice-node --chain-path Nexus \
-  --data-directory /var/lib/lattice/chains/Nexus
+lattice down --root /var/lib/lattice
+lattice wipe --root /var/lib/lattice
+lattice up --root /var/lib/lattice
 ```
-
-Back up any identity key you intend to reuse before removing a directory, or
-place it outside the storage directory and pass `--identity-key` explicitly.
 
 ## Documentation
 
 - [Getting started](docs/getting-started.md)
 - [Architecture](docs/architecture.md)
-- [Protocol reference](docs/protocol.md)
+- [Protocol and node boundary](docs/protocol.md)
 - [RPC API](docs/rpc-api.md)
+- [Operator CLI](docs/operator-cli.md)
 - [Operations](docs/operations.md)
 - [Deployment](deploy/README.md)
-- [Chain addressing](docs/design/chain-addressing.md)
 
-## Dependencies
-
-The protocol packages are maintained under [adalinxx](https://github.com/adalinxx):
-Lattice, Ivy, Tally, VolumeBroker, and cashew. `Package.swift` is the authority
-for the exact compatible revisions or release tags.
+`Package.swift` and `Package.resolved` are the authority for dependency
+versions.

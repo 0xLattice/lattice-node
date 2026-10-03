@@ -590,7 +590,6 @@ public enum MiningTemplateRequestBody {
 
     public static func make(
         recipients: [String],
-        deployment: Bool,
         minimumWork: [String]
     ) throws -> Data {
         guard let recipientField = MinerLoopLogic.recipientField(recipients) else {
@@ -599,7 +598,6 @@ public enum MiningTemplateRequestBody {
             )
         }
         var object: [String: Any] = ["recipients": recipientField]
-        if deployment { object["mode"] = "deployment" }
         if !minimumWork.isEmpty {
             guard let field = MinerLoopLogic.minimumWorkField(minimumWork) else {
                 throw Refusal(

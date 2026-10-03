@@ -2,27 +2,18 @@ app = "lattice-mainnet-testnet"
 primary_region = "iad"
 
 [build]
-  dockerfile = "Dockerfile"
+  # Deploy from the repository root:
+  # fly deploy -c deploy/testnet-follower/fly.toml .
+  dockerfile = "deploy/testnet-follower/Dockerfile"
 
 [env]
-  # The descending path this host follows, outermost first. Ports are
-  # assigned by position, and the [[services]] blocks below hardcode the
-  # result, so APPEND ONLY: inserting or reordering a path silently re-points
-  # 443 at a different chain.
-  CHILD_PATHS = "Nexus/testnet Nexus/testnet/swap"
+  # Hosted levels, outermost first. Every level shares one overlay and one
+  # public read listener; select a child with ?chainPath=Nexus/testnet.
+  HOSTED_CHAINS = "Nexus/testnet Nexus/testnet/swap"
   # The P2P self-description must be an IP literal (Ivy netgroup hardening
   # rejects hostnames): the app's dedicated IPv4 (`fly ips list`).
   EXTERNAL_HOST = "169.155.61.57"
-  # The browsable self-description is the TLS-fronted hostname (fly terminates
-  # TLS by SNI; the bare IP has no cert). Advertised through the parent
-  # rendezvous so the explorer can reach the child chain.
-  # One browsable URL per path, in the same order. fly terminates TLS by SNI
-  # on any port, so a deeper chain gets its own port on the same hostname;
-  # the bare IP has no cert and is not usable here.
-  PUBLIC_READ_URLS = "https://lattice-mainnet-testnet.fly.dev https://lattice-mainnet-testnet.fly.dev:8443"
-  # Field diagnosis for the catch-up stall: `lattice up` discards child
-  # stderr, so trace to a file on the volume. Remove when the stall class
-  # is closed.
+  # Optional bounded sync trace for field diagnosis.
   LATTICE_SYNC_TRACE = "/data/log/sync-trace.log"
   NEXUS_PEERS = "139b8f3639e7c515417c63bd3a652a5c6fd4a1a2d0baed8e33ea63047995fe64@lattice-mainnet-iad.fly.dev:4001 35edf67bfe3d612aeb1f0e25da9d3f0ced44dbf79d34f00c548cf9005be6eb7d@lattice-mainnet-ams.fly.dev:4001 9cace839489acb30385a9f20025cb9d6365283c81dce14cadab26507065acd4e@lattice-mainnet-sjc.fly.dev:4001"
 
@@ -37,21 +28,7 @@ primary_region = "iad"
   [[services.ports]]
     port = 4001
 
-# Child overlay: the NAT'd origin child node dials in here.
-[[services]]
-  protocol = "tcp"
-  internal_port = 4101
-  [[services.ports]]
-    port = 4101
-
-# Grandchild overlay: same story one level down.
-[[services]]
-  protocol = "tcp"
-  internal_port = 4201
-  [[services.ports]]
-    port = 4201
-
-# Public read surface for the child chain: 443/80 -> --public-read-port.
+# Public read surface for every hosted level: 443/80 -> one listener.
 [[services]]
   protocol = "tcp"
   internal_port = 8081
@@ -67,24 +44,8 @@ primary_region = "iad"
     grace_period = "60s"
     path = "/health"
 
-# Public read surface for the grandchild: 8443 -> its --public-read-port.
-[[services]]
-  protocol = "tcp"
-  internal_port = 8082
-  [[services.ports]]
-    port = 8443
-    handlers = ["tls", "http"]
-  [[services.http_checks]]
-    interval = "15s"
-    timeout = "5s"
-    grace_period = "60s"
-    path = "/health"
-
-# Each chain in CHILD_PATHS is a full process (two SQLite stores, an Ivy
-# overlay, two HTTP listeners). Fly OOM-kills the MACHINE rather than the
-# process that overran, so a third chain peaking during a cold sync would
-# take the Nexus and child followers down with it — and the explorer reads
-# from those. Headroom is cheaper than that outage.
+# One process hosts the whole tree. Keep headroom for cold-sync execution and
+# the shared content store.
 [[vm]]
   size = "shared-cpu-1x"
   memory = "2gb"

@@ -70,14 +70,6 @@ let package = Package(
                 .product(name: "UInt256", package: "UInt256"),
             ]),
         .target(
-            name: "LatticeNodeStore",
-            dependencies: [
-                "CSQLite",
-                "LatticeNodeCore",
-                .product(name: "Lattice", package: "lattice"),
-                .product(name: "cashew", package: "cashew"),
-            ]),
-        .target(
             name: "LatticeNodeSim",
             dependencies: [
                 "LatticeNodeCore",
@@ -194,16 +186,6 @@ let package = Package(
         .testTarget(
             name: "LatticeNodeSimulationTests",
             dependencies: [
-                "LatticeNodeCore",
-                "LatticeNodeSim",
-                .product(name: "Lattice", package: "lattice"),
-                .product(name: "cashew", package: "cashew"),
-                .product(name: "UInt256", package: "UInt256"),
-            ]),
-        .testTarget(
-            name: "LatticeNodeStoreTests",
-            dependencies: [
-                "LatticeNodeStore",
                 "LatticeNodeCore",
                 "LatticeNodeSim",
                 .product(name: "Lattice", package: "lattice"),

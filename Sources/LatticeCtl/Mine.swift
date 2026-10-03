@@ -1,4 +1,4 @@
-// Mining role: coordinator + worker beside a chain's node, one --once batch
+// Mining role: coordinator + worker beside the hosted tree, one --once batch
 // per round. Each block pays the configured recipient for its chain (the
 // block's `rewardRecipient`); a chain with none burns its reward and fees.
 
@@ -14,7 +14,7 @@ import LatticeProcessWait
 
 struct Mine: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Mine beside a chain in the tree.",
+        abstract: "Merged-mine the hosted tree.",
         subcommands: [Start.self, Run.self, Stop.self, MineStatus.self]
     )
 
@@ -97,7 +97,7 @@ struct Mine: AsyncParsableCommand {
             let running = runningPid(layout, "mine").map { "running (pid \($0))" }
                 ?? "stopped"
             print("mining: \(running)")
-            print("chain:  \(settings.mine.chain)")
+            print("chain:  Nexus and configured hosted descendants")
             let recipients = settings.mine.recipientEntries
             if recipients.isEmpty {
                 print("recipients: none configured (rewards and fees burn)")
@@ -143,7 +143,6 @@ struct Mine: AsyncParsableCommand {
             var unusableTemplateSince: ContinuousClock.Instant?
             let templateRequestBody = try MiningTemplateRequestBody.make(
                 recipients: settings.mine.recipientEntries,
-                deployment: false,
                 minimumWork: settings.mine.minimumWorkEntries
             )
             log("mining loop start"
@@ -301,7 +300,6 @@ func minerSettings(_ layout: HostLayout) throws -> MinerSettings {
     guard let mine = topology.mine else {
         throw CtlError("no [mine] section in \(Topology.fileName)")
     }
-    let chain = topology.chains[mine.chain]!
     let worker: URL
     if let path = mine.worker, path != "cpu" {
         worker = URL(fileURLWithPath: path)
@@ -319,7 +317,7 @@ func minerSettings(_ layout: HostLayout) throws -> MinerSettings {
         throw CtlError("mine.minWork maps chain paths to work per block, as 2^N or a positive decimal integer")
     }
     return MinerSettings(
-        mine: mine, rpc: chain.rpc, workerExecutable: worker
+        mine: mine, rpc: topology.rpc, workerExecutable: worker
     )
 }
 

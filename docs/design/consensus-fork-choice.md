@@ -1,12 +1,12 @@
 # Consensus and fork-choice ownership
 
 Consensus is defined by Lattice, not by `lattice-node`. The canonical rules are
-the [protocol specification](https://github.com/adalinxx/Lattice/blob/38.0.0/docs/spec.md)
-and [work and fork-choice rationale](https://github.com/adalinxx/Lattice/blob/38.0.0/docs/consensus-fork-choice.md).
+the [protocol specification](https://github.com/adalinxx/Lattice/blob/43.1.0/docs/spec.md)
+and [work and fork-choice rationale](https://github.com/adalinxx/Lattice/blob/43.1.0/docs/consensus-fork-choice.md).
 
 The node owns only the operational boundary around those rules:
 
-- authenticate immediate-parent and direct-child processes;
+- route facts between co-hosted parent and child levels;
 - acquire the exact sparse evidence Lattice requests;
 - persist accepted fact batches before exposing their effects;
 - retain and replay the same immutable facts after restart;

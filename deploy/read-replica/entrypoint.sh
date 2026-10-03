@@ -11,7 +11,7 @@ set -e
 nginx -c /etc/nginx/nginx.conf
 
 exec /usr/local/bin/lattice-node \
-    --data-directory /data/chains/Nexus-v3 \
+    --data-directory /data/chains/Nexus \
     --identity-key /data/identity/nexus.key \
     --listen-port 4001 \
     --rpc-port 8080 \

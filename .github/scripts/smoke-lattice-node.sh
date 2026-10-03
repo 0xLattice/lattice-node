@@ -2,16 +2,18 @@
 # Exercise the shipped node, coordinator, and worker as one mining pipeline.
 set -euo pipefail
 
-node_binary="${1:?usage: smoke-lattice-node.sh <lattice-node> <lattice-mining-coordinator> <lattice-miner>}"
-coordinator_binary="${2:?usage: smoke-lattice-node.sh <lattice-node> <lattice-mining-coordinator> <lattice-miner>}"
-miner_binary="${3:?usage: smoke-lattice-node.sh <lattice-node> <lattice-mining-coordinator> <lattice-miner>}"
+node_binary="${1:?usage: smoke-lattice-node.sh <lattice-node> <lattice-mining-coordinator> <lattice-miner> <lattice>}"
+coordinator_binary="${2:?usage: smoke-lattice-node.sh <lattice-node> <lattice-mining-coordinator> <lattice-miner> <lattice>}"
+miner_binary="${3:?usage: smoke-lattice-node.sh <lattice-node> <lattice-mining-coordinator> <lattice-miner> <lattice>}"
+ctl_binary="${4:?usage: smoke-lattice-node.sh <lattice-node> <lattice-mining-coordinator> <lattice-miner> <lattice>}"
 
-for binary in "$node_binary" "$coordinator_binary" "$miner_binary"; do
+for binary in "$node_binary" "$coordinator_binary" "$miner_binary" "$ctl_binary"; do
     [[ -x "$binary" ]] || {
         echo "artifact smoke requires an executable: $binary" >&2
         exit 1
     }
 done
+"$ctl_binary" --help >/dev/null
 for command in curl jq; do
     command -v "$command" >/dev/null 2>&1 || {
         echo "artifact smoke requires $command" >&2
@@ -19,7 +21,7 @@ for command in curl jq; do
     }
 done
 
-readonly expected_genesis="bafyreick4k7a6bxz4huqx4wiu3z5yph4tnpl4zvq2pi6xv3ouribtvzs24"
+readonly expected_genesis="bafyreigsvcxa7kveg7ywaykwqqwvakgtcujds634k4cc6mejyh43pmoqny"
 readonly tmp="$(mktemp -d)"
 readonly port="$((20000 + RANDOM % 20000))"
 readonly rpc_port="$((port + 2))"

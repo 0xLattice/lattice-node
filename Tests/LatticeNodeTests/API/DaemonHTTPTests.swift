@@ -86,17 +86,22 @@ final class DaemonHTTPTests: XCTestCase {
     }
 
     func testMiningTemplateRequestJSONDefaults() throws {
-        let legacy = try JSONDecoder().decode(
+        let empty = try JSONDecoder().decode(
             MiningTemplateRequest.self,
             from: Data("{}".utf8)
         )
-        XCTAssertTrue(legacy.recipients.isEmpty)
+        XCTAssertTrue(empty.recipients.isEmpty)
 
         let decoded = try JSONDecoder().decode(
             MiningTemplateRequest.self,
             from: JSONEncoder().encode(MiningTemplateRequest())
         )
         XCTAssertTrue(decoded.recipients.isEmpty)
+
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            MiningTemplateRequest.self,
+            from: Data(#"{"mode":"deployment"}"#.utf8)
+        ))
     }
 
     func testMiningTemplateAndWorkRoutesRoundTrip() async throws {

@@ -378,8 +378,7 @@ public struct ChainReads: Sendable {
         )
     }
 
-    /// Ungated mempool snapshot: the pool's live CIDs (never the gated,
-    /// mempool-reconciling `transactionInventoryRoots()`), hard-capped at 200.
+    /// Ungated mempool snapshot: the pool's live CIDs, hard-capped at 200.
     public func explorerMempool() async -> ExplorerMempool {
         let pool = await mempool(true)
         let cids = pool.cids

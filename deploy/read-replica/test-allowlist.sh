@@ -76,9 +76,8 @@ echo "== allowed: bounded GET reads reach the node (200) =="
 check GET  /health                 200 "health"
 check GET  "/transactions/$CID" 200 "tx by cid"
 check GET  "/accounts/$CID"     200 "account"
-check GET  /api/chain/children     200 "explorer api"
+check GET  /api/chain/info         200 "explorer api"
 check GET  /api/block/latest       200 "explorer api"
-check GET  "/api/chain/endpoints?chainPath=Nexus/Child" 200 "endpoint discovery"
 check GET  /api/block/1/transactions 200 "block transactions"
 check GET  /api/block/1/children   200 "block children"
 
@@ -92,7 +91,7 @@ check GET  /                       403 "root"
 check POST /transactions           403 "write POST"
 check POST "/transactions/$CID"    403 "POST to an allowlisted read route"
 check POST /api/block/latest       403 "POST to /api"
-check POST /api/chain/endpoints    403 "POST to endpoint discovery"
+check POST /api/chain/info         403 "POST to chain metadata"
 check POST /api/block/1/transactions 403 "POST to block transactions"
 
 ok()  { echo "  ok   $1"; }
@@ -132,7 +131,7 @@ fire() {
 
 # Each block below uses its own client addresses, so none spends another's budget.
 echo "== rate limits: per client, keyed on Fly-Client-IP from a trusted source =="
-got=$(fire inside 198.51.100.1 /api/block/latest 1 198.51.100.1 "/api/chain/endpoints?chainPath=Nexus/Child" 1)
+got=$(fire inside 198.51.100.1 /api/block/latest 1 198.51.100.1 "/api/block/1/transactions?limit=100" 1)
 if [ "$(count "$got" 200)" -eq 2 ]; then
   ok "one request succeeds on a general route and on an expensive route"
 else
@@ -149,25 +148,25 @@ fi
 drain
 
 got=$(fire inside \
-  198.51.100.4 "/api/chain/endpoints?chainPath=Nexus/Child" 30 \
+  198.51.100.4 "/api/block/1/children" 30 \
   198.51.100.10 "/api/block/1/transactions?limit=100" 30 \
   198.51.100.5 /api/block/latest 30)
-endpoints=$(count "$(lines "$got" 1,30)" 429)
+children=$(count "$(lines "$got" 1,30)" 429)
 blocktxs=$(count "$(lines "$got" 31,60)" 429)
 general=$(count "$(lines "$got" 61,90)" 429)
-if [ "$endpoints" -gt 0 ] && [ "$blocktxs" -gt 0 ] && [ "$general" -eq 0 ]; then
-  ok "30 requests trip the expensive routes (429s: endpoints $endpoints, block txs $blocktxs) but not a general route"
+if [ "$children" -gt 0 ] && [ "$blocktxs" -gt 0 ] && [ "$general" -eq 0 ]; then
+  ok "30 requests trip the expensive routes (429s: children $children, block txs $blocktxs) but not a general route"
 else
-  bad "30 requests should trip only the expensive routes (429s: endpoints $endpoints, block txs $blocktxs, general $general)"
+  bad "30 requests should trip only the expensive routes (429s: children $children, block txs $blocktxs, general $general)"
 fi
 drain
 
 # A bursts, B sends one, A sends two more: B must pass while A is still limited
 # (two, because at most one of A's can land on a refill).
 got=$(fire inside \
-  198.51.100.6 "/api/chain/endpoints?chainPath=Nexus/Child" 30 \
-  198.51.100.7 "/api/chain/endpoints?chainPath=Nexus/Child" 1 \
-  198.51.100.6 "/api/chain/endpoints?chainPath=Nexus/Child" 2)
+  198.51.100.6 "/api/block/1/children" 30 \
+  198.51.100.7 "/api/block/1/children" 1 \
+  198.51.100.6 "/api/block/1/children" 2)
 a=$(count "$(lines "$got" 1,30)" 429)
 b=$(lines "$got" 31)
 a_after=$(count "$(lines "$got" 32,33)" 429)

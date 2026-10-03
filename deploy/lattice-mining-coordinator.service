@@ -1,5 +1,5 @@
 [Unit]
-Description=Lattice external mining coordinator and workers
+Description=Lattice mining coordinator and external workers
 After=lattice-node.service
 Wants=lattice-node.service
 
@@ -7,12 +7,15 @@ Wants=lattice-node.service
 Type=simple
 User=lattice
 Group=lattice
-# The coordinator owns node transport and range allocation. External
-# lattice-miner processes receive immutable nonce assignments.
+# Required file, created mode 0640. Example:
+# RECIPIENT_ARGS=--recipient Nexus=bafy... --recipient Nexus/Alpha=bafy...
+EnvironmentFile=/etc/lattice/mining.env
+ExecStartPre=/bin/sh -c 'test -n "$RECIPIENT_ARGS"'
 ExecStart=/usr/local/bin/lattice-mining-coordinator \
   --node http://127.0.0.1:8080 \
   --worker-executable /usr/local/bin/lattice-miner \
-  --workers 2
+  --workers 2 \
+  $RECIPIENT_ARGS
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
@@ -21,7 +24,7 @@ WorkingDirectory=/var/lib/lattice
 
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=lattice-miner
+SyslogIdentifier=lattice-mining-coordinator
 
 [Install]
 WantedBy=multi-user.target

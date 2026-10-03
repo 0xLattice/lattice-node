@@ -142,9 +142,8 @@ func health(rpc: UInt16, chain: String = "Nexus") async -> [String: Any]? {
 /// The pidfile and log name of the one daemon hosting the whole tree.
 let hostProcessName = "lattice-node"
 
-/// Starts the one `lattice-node`, for the tree's Nexus chain (the node hosts
-/// no child chain yet). The chain set it starts with is recorded beside its
-/// pidfile.
+/// Starts the one `lattice-node` for the configured hosted tree. The chain
+/// set it starts with is recorded beside its pidfile.
 func spawnHost(layout: HostLayout) throws {
     let manager = FileManager.default
     for directory in [
@@ -155,31 +154,28 @@ func spawnHost(layout: HostLayout) throws {
             at: directory, withIntermediateDirectories: true
         )
     }
-    let chains = try hostedPaths(Topology.load(root: layout.root))
+    let topology = try Topology.load(root: layout.root).validated()
+    let chains = hostedPaths(topology)
     try Data(chains.joined(separator: "\n").utf8).write(
         to: hostedChainsFile(layout), options: .atomic
     )
     let process = Process()
     process.executableURL = try nodeBinary()
-    guard let nexus = try Topology.load(root: layout.root).chains["Nexus"] else {
-        throw CtlError("the tree has no Nexus chain")
-    }
     var arguments = [
         "--data-directory", layout.chainDirectory(for: "Nexus").path,
         "--identity-key", layout.identityKey(for: "Nexus").path,
-        "--listen-port", String(nexus.listen),
-        "--rpc-port", String(nexus.rpc),
+        "--listen-port", String(topology.listen),
+        "--rpc-port", String(topology.rpc),
     ]
-    if let peers = nexus.peers {
+    if let peers = topology.peers {
         arguments += peers.isEmpty ? ["--no-default-peers"] : ["--peer"] + peers
     }
-    if let port = nexus.publicRead { arguments += ["--public-read-port", String(port)] }
-    if let host = nexus.externalAddress { arguments += ["--external-address", host] }
-    if let url = nexus.publicReadUrl { arguments += ["--public-read-url", url] }
-    if let rate = nexus.publicReadRate { arguments += ["--public-read-rate", String(rate)] }
-    if let rate = nexus.publicReadExpensiveRate { arguments += ["--public-read-expensive-rate", String(rate)] }
-    if let rate = nexus.publicReadMaxRate { arguments += ["--public-read-max-rate", String(rate)] }
-    for child in nexus.children ?? [] {
+    if let port = topology.publicRead { arguments += ["--public-read-port", String(port)] }
+    if let host = topology.externalAddress { arguments += ["--external-address", host] }
+    if let rate = topology.publicReadRate { arguments += ["--public-read-rate", String(rate)] }
+    if let rate = topology.publicReadExpensiveRate { arguments += ["--public-read-expensive-rate", String(rate)] }
+    if let rate = topology.publicReadMaxRate { arguments += ["--public-read-max-rate", String(rate)] }
+    for child in topology.hostedChains ?? [] {
         let spec = layout.childSpec(for: child)
         arguments += ["--host-chain", FileManager.default.fileExists(atPath: spec.path) ? "\(child)=\(spec.path)" : child]
     }
@@ -199,7 +195,7 @@ func spawnHost(layout: HostLayout) throws {
 
 /// Every chain path the one process hosts: Nexus and its listed children.
 func hostedPaths(_ topology: Topology) -> [String] {
-    (topology.chains.keys + topology.chains.values.flatMap { $0.children ?? [] }).sorted()
+    [ChainAddress.nexus] + (topology.hostedChains ?? [])
 }
 
 private func hostedChainsFile(_ layout: HostLayout) -> URL {
@@ -274,6 +270,49 @@ struct Up: AsyncParsableCommand {
     func run() async throws {
         let layout = rootOption.layout
         let topology = try Topology.load(root: layout.root).validated()
+        guard foreground else {
+            try await reconcileHost(layout, topology: topology)
+            return
+        }
+
+        // As container PID 1 or a systemd foreground process, own the child
+        // shutdown too. Otherwise terminating this supervisor makes the
+        // runtime kill lattice-node instead of giving SQLite and Ivy a clean
+        // stop.
+        let stopRequested = InterruptFlag()
+        signal(SIGTERM, SIG_IGN)
+        signal(SIGINT, SIG_IGN)
+        let termination = DispatchSource.makeSignalSource(signal: SIGTERM)
+        let interrupt = DispatchSource.makeSignalSource(signal: SIGINT)
+        termination.setEventHandler { stopRequested.raise() }
+        interrupt.setEventHandler { stopRequested.raise() }
+        termination.resume()
+        interrupt.resume()
+        defer {
+            termination.cancel()
+            interrupt.cancel()
+        }
+
+        try await reconcileHost(layout, topology: topology)
+        while !stopRequested.isRaised {
+            try await Task.sleep(for: .seconds(1))
+            guard !stopRequested.isRaised else { break }
+            try await withSpawnLock(layout) {
+                guard runningPid(layout, hostProcessName) == nil else { return }
+                print("exited; restarting")
+                try spawnHost(layout: layout)
+            }
+        }
+        try await withSpawnLock(layout) {
+            _ = try await stopProcess(layout, hostProcessName)
+        }
+        print("stopped")
+    }
+
+    private func reconcileHost(
+        _ layout: HostLayout,
+        topology: Topology
+    ) async throws {
         try await withSpawnLock(layout) {
             if let pid = runningPid(layout, hostProcessName) {
                 guard hostedChains(layout) != Set(hostedPaths(topology)) else {
@@ -286,21 +325,12 @@ struct Up: AsyncParsableCommand {
             try spawnHost(layout: layout)
             print("started \(hostedPaths(topology).count) chain(s) (pid \(runningPid(layout, hostProcessName) ?? -1))")
         }
-        guard foreground else { return }
-        while true {
-            try await Task.sleep(for: .seconds(10))
-            try await withSpawnLock(layout) {
-                guard runningPid(layout, hostProcessName) == nil else { return }
-                print("exited; restarting")
-                try spawnHost(layout: layout)
-            }
-        }
     }
 }
 
 struct Down: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Stop the process hosting the tree; it stops the chains children first."
+        abstract: "Stop the one process hosting the tree."
     )
 
     @OptionGroup var rootOption: RootOption
@@ -311,14 +341,6 @@ struct Down: AsyncParsableCommand {
         // this stops. A running `up --foreground` respawns once the lock is
         // released, as documented: it is the supervisor, so stop it first.
         try await withSpawnLock(layout) {
-            // An upgrade from one process per chain can leave those processes
-            // running under their own pidfiles, children after parents.
-            let legacy = ((try? Topology.load(root: layout.root))?.chains.keys)
-                .map { $0.sorted().reversed() } ?? []
-            for path in legacy where runningPid(layout, path) != nil {
-                print("warning: \(path) still runs as its own process from an older lattice; stopping it")
-                try await stopProcess(layout, path)
-            }
             guard runningPid(layout, hostProcessName) != nil else { return }
             try await stopProcess(layout, hostProcessName)
             print("stopped")
@@ -337,13 +359,12 @@ struct Status: AsyncParsableCommand {
         let layout = rootOption.layout
         let topology = try Topology.load(root: layout.root).validated()
         let running = runningPid(layout, hostProcessName) != nil
-        let nexusRPC = topology.chains["Nexus"]?.rpc ?? 0
         for path in hostedPaths(topology) {
             guard running else {
                 print("\(path): down")
                 continue
             }
-            guard let health = await health(rpc: topology.chains[path]?.rpc ?? nexusRPC, chain: path) else {
+            guard let health = await health(rpc: topology.rpc, chain: path) else {
                 print("\(path): running, rpc unreachable")
                 continue
             }
@@ -358,27 +379,21 @@ struct Status: AsyncParsableCommand {
 
 struct Wipe: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Remove one chain's state (state.db + volumes.db as a unit); identity is preserved."
+        abstract: "Remove the hosted tree's complete storage; identity and configuration are preserved."
     )
 
     @OptionGroup var rootOption: RootOption
-
-    @Argument(help: "Chain path to wipe (e.g. Nexus).")
-    var chain: String
 
     func run() async throws {
         let layout = rootOption.layout
         // Under the spawn lock, so no `up` or restart starts the tree while
         // its chain state is being removed.
         try await withSpawnLock(layout) {
-            let topology = try Topology.load(root: layout.root).validated()
-            guard topology.chains[chain] != nil else {
-                throw CtlError("\(chain) is not in the tree")
-            }
+            _ = try Topology.load(root: layout.root).validated()
             guard runningPid(layout, hostProcessName) == nil else {
                 throw CtlError("the tree is running; `lattice down` first")
             }
-            let directory = layout.chainDirectory(for: chain)
+            let directory = layout.chainDirectory(for: ChainAddress.nexus)
                 .standardizedFileURL
             let container = layout.root.appendingPathComponent("chains")
                 .standardizedFileURL
@@ -392,11 +407,13 @@ struct Wipe: AsyncParsableCommand {
                 lock = FileManager.default.fileExists(atPath: directory.path)
                     ? try StorageDirectoryLock(directory: directory) : nil
             } catch StorageDirectoryLockError.alreadyLocked {
-                throw CtlError("\(chain) storage is in use by a running node; `lattice down` first")
+                throw CtlError("tree storage is in use by a running node; `lattice down` first")
             }
-            try? FileManager.default.removeItem(at: directory)
+            if FileManager.default.fileExists(atPath: directory.path) {
+                try FileManager.default.removeItem(at: directory)
+            }
             _ = lock
-            print("\(chain): chain state wiped; identity preserved")
+            print("hosted tree storage wiped; identity and lattice.json preserved")
         }
     }
 }

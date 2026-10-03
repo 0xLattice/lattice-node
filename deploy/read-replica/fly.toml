@@ -2,7 +2,9 @@ app = "lattice-mainnet-read"
 primary_region = "iad"
 
 [build]
-  dockerfile = "Dockerfile"
+  # Deploy from the repository root:
+  # fly deploy -c deploy/read-replica/fly.toml .
+  dockerfile = "deploy/read-replica/Dockerfile"
 
 [[mounts]]
   source = "lattice_read_data"

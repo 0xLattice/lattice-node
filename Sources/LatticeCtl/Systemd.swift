@@ -24,7 +24,7 @@ struct EmitSystemd: AsyncParsableCommand {
         print("""
         # lattice-tree.service
         [Unit]
-        Description=Lattice chain-process tree (\(topology.chains.count) chains)
+        Description=Lattice hosted chain tree (\(1 + (topology.hostedChains?.count ?? 0)) chains)
         After=network-online.target
 
         [Service]

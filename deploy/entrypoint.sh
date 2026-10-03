@@ -1,5 +1,5 @@
 #!/bin/sh
-# Container entrypoint for the one-chain node and external mining binaries.
+# Container entrypoint for the one-process hosted tree and external mining binaries.
 #
 #   docker run <image> --flags...                        -> lattice-node
 #   docker run <image> lattice-node --flags...           -> lattice-node

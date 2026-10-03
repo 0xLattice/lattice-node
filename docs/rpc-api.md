@@ -1,47 +1,54 @@
-# Lattice Node HTTP API
+# HTTP API
 
-This is the HTTP surface of the current one-process/one-chain daemon.
+Base operator URL: `http://127.0.0.1:<rpc-port>`
 
-Base URL: `http://127.0.0.1:<rpc-port>`
+The API has one unversioned route set. `/v1/...` does not exist. The operator
+listener is unauthenticated and loopback-only. The optional public-read
+listener registers only the GET routes in the read table below.
 
-The operator listener is unauthenticated and therefore loopback-only. Put a
-same-host authenticated proxy in front of it if another machine must call it;
-the daemon itself rejects non-loopback bind addresses. A second, public
-read-only listener (`--public-read-port`) serves the bounded `GET` allowlist
-in the "Public reads" routes below on all interfaces, with per-address and
-listener-wide rate limits; it exposes no write or operator route.
+Requests and responses are JSON unless noted. Operator POSTs require
+`Content-Type: application/json` and a loopback `Host` authority.
 
-Every request targets the chain owned by that process. There is no `chainPath`
-query selector. Whenever a path appears in a body or response, it is an
-absolute array whose first element is `"Nexus"`; paths that omit it are rejected.
+## Selecting a hosted chain
 
-Requests are JSON. Transaction-bearing fields use a content-bound form so the
-receiver can reconstruct and verify the transaction body CID:
+GET routes accept an optional absolute query value:
 
-```json
-{
-  "signatures": {"<public-key-hex>": "<signature-hex>"},
-  "body": {
-    "accountActions": [],
-    "actions": [],
-    "depositActions": [],
-    "genesisActions": [],
-    "receiptActions": [],
-    "withdrawalActions": [],
-    "signers": [],
-    "nonce": 0,
-    "chainPath": ["Nexus"]
-  }
-}
+```text
+?chainPath=Nexus/Alpha
 ```
 
-## Status
+Omitting it selects Nexus. A named path must be hosted by this process or the
+request returns 404.
 
-### `GET /health`
+Transactions carry `body.chainPath`; the node routes them to that level.
+Mining templates are requested at Nexus and can carry every hosted descendant.
 
-### `GET /status`
+## Read routes
 
-Both routes return the same chain-process status:
+| Route | Purpose | Public-read listener |
+|---|---|---|
+| `GET /health` | Published chain and mempool status | yes |
+| `GET /transactions/:cid` | Content-verified transaction by CID | yes |
+| `GET /accounts/:owner?block=<cid>` | Account balance and next nonce at an accepted block | yes |
+| `GET /api/block/latest` | Latest executed block summary | yes |
+| `GET /api/block/:height-or-cid` | Block detail | yes |
+| `GET /api/block/:cid/transactions` | Paginated block transactions | yes |
+| `GET /api/block/:cid/children` | Bounded child commitments | yes |
+| `GET /api/transaction/:cid` | Explorer transaction model | yes |
+| `GET /api/state/account/:addr` | Account at the current executed tip | yes |
+| `GET /api/mempool` | Bounded mempool listing | yes |
+| `GET /api/peers` | Ready peer count | yes |
+| `GET /api/chain/info` | Chain metadata | yes |
+| `GET /api/chain/spec` | Active chain spec | yes |
+| `GET /api/chain/genesis` | Selected genesis CID | yes |
+| `GET /status` | Operator status including template digest | no |
+| `GET /metrics` | Prometheus exposition | no |
+| `GET /core/snapshot` | Internal root snapshot | no |
+
+Block transaction pages accept `offset` and `limit`; limits are capped at
+100. CID and response sizes are bounded before decoding.
+
+## Health and status
 
 ```json
 {
@@ -50,39 +57,40 @@ Both routes return the same chain-process status:
   "nexusGenesisCID": "bafyreigsvcxa7kveg7ywaykwqqwvakgtcujds634k4cc6mejyh43pmoqny",
   "tipCID": "<cid>",
   "height": 42,
-  "revision": 57,
+  "revision": null,
   "mempoolCount": 3,
   "mempoolBytes": 2048,
-  "templateDigest": "<hex>"
+  "templateDigest": null
 }
 ```
 
-`templateDigest` names every input of a mining template on this chain — the
-validated tip, the transactions a template selects from, and the child
-candidates built on that tip — and is the same value the template response
-carries, so a miner comparing the two learns its work is stale for a change
-at any level of the hierarchy. `/status` serves it; `/health`, the
-non-mutating public read, omits it. Absent before the chain has a tip.
+`/health` reads an immutable published view and never enters the core loop. Its
+`templateDigest` is null. `/status` uses the root runtime's current template
+digest so a miner can detect any hosted-tree input change.
 
-A child reports `phase: "awaitingGenesis"`, with null tip and height, until its
-authenticated immediate parent confirms the recorded genesis CID and the child
-imports that genesis.
-After bootstrap, it reports `phase: "active"` from its durable accepted graph;
-parent connectivity does not change the meaning of proof-derived work.
+A hosted child with no executed genesis reports `awaitingGenesis` and null tip
+fields. A child genesis is a normal child root secured by a proof from a mined
+ancestor grind; no deployment endpoint or parent authorization transaction is
+involved.
 
-`revision` is the local consensus mutation watermark.
-
-## Transactions
+## Submit a transaction
 
 ### `POST /transactions`
-
-Submit one signed transaction whose body path exactly matches this process.
 
 ```json
 {
   "transaction": {
     "signatures": {"<public-key-hex>": "<signature-hex>"},
-    "body": {"chainPath": ["Nexus"], "...": "other TransactionBody fields"}
+    "body": {
+      "accountActions": [],
+      "actions": [],
+      "depositActions": [],
+      "receiptActions": [],
+      "withdrawalActions": [],
+      "signers": ["<address>"],
+      "nonce": 0,
+      "chainPath": ["Nexus", "Alpha"]
+    }
   }
 }
 ```
@@ -97,168 +105,83 @@ Response:
 }
 ```
 
-The premine is never accepted through RPC. It exists only in the locally
-constructed Nexus bootstrap block whose recomputed CID matches the configured
-trust anchor.
+The body is content-bound and the signature, nonce, funding, fee, and path are
+validated before admission. An unhosted path returns 404.
 
-## Mining
-
-Mining is an external pipeline: the node issues and later validates work,
-`lattice-mining-coordinator` schedules ranges, and `lattice-miner` workers
-search those ranges.
+## Request mining work
 
 ### `POST /mining/templates`
-
-Issue bounded, expiring work. This public route is Nexus-only; the template
-reads each co-hosted child level's pre-built candidate in-process while it is
-assembled.
 
 ```json
 {
   "recipients": [
     {"chainPath": ["Nexus"], "address": "<address>"},
-    {"chainPath": ["Nexus", "Payments"], "address": "<address>"}
+    {"chainPath": ["Nexus", "Alpha"], "address": "<address>"}
   ],
-  "minimumWork": [{"chainPath": ["Nexus"], "work": "0x100000000"}]
+  "minimumWork": [
+    {"chainPath": ["Nexus"], "work": "0x100000000"}
+  ]
 }
 ```
 
-`recipients` and `minimumWork` are the only request fields and may be empty or
-absent; other fields are ignored, except `rewards`: a request that still
-carries the retired signed-reward field is refused (`400`), so an old miner
-fails instead of silently mining to no one.
+`recipients` names the reward and fee destination by absolute path. A missing
+entry burns that level's payout. Each block commits its recipient in its
+proof-of-work preimage.
 
-Each recipient names where one chain's block reward and fees go: at most one
-per chain, each `chainPath` absolute and naming this chain or a descendant,
-each `address` a canonical address. The block commits it as
-`rewardRecipient`, which the proof-of-work preimage covers, and consensus
-credits it exactly the block reward plus the block's fees (the debits and
-withdrawals its transactions destroy, minus the credits and deposits they
-create). A chain with no recipient mines to no one: its reward and fees burn.
-Anything else is refused as `invalidRecipientPlan`. The recipient is a header
-field, not a transaction, so it signs nothing and takes no transaction slot;
-process identity is never converted into wallet identity. A hosted child's
-snapshot is carried only when it pays the recipient the plan names for that
-chain. There is no template mode: transactions carrying a
-`GenesisAction` are selected from the pool like any other transaction.
+`minimumWork` is a miner-local search filter. It can demand harder hashes than
+the scheduled target but cannot make consensus easier and is not committed as
+the chain's target.
 
-`minimumWork` is the requesting miner's own minimum work per block, for this
-chain and for chains merged-mined under it (`work` is a hex `UInt256`; each
-`chainPath` is absolute and must name this chain or a descendant, at most
-once). The named chain's candidate still commits its scheduled target; its
-search threshold becomes `min(scheduled target, floor(2^256 / work) - 1)` —
-harder than the schedule, never easier — and each descendant entry travels
-with the parent's plan to its co-hosted child level in-process. A child level
-returns a witness naming the block that sets its search target. Where that
-witness names a filtered descendant, the Nexus re-derives the descendant's
-threshold from it; for every other filtered chain two or more levels down it
-caps `searchTarget` at that entry's `floor(2^256 / work) - 1` outright. That
-fails closed against a child level that ignores the entry. It is
-stricter than needed when the chain is absent from the template, and whenever
-that filter does not bind (the chain's committed target is at or harder than
-the filter target): each child
-returns a single witness, so a non-binding filtered chain two or more levels
-down is normally left unnamed and still caps the search. Removing that
-over-strictness needs a child to return one witness per filtered path in its
-subtree, a change to the child candidate format that this API does not
-make. It is a template choice of the miner that asked,
-not consensus: import, validation, and fork choice are untouched, and a
-block from any other miner at the scheduled target is still accepted. Absent,
-templates are exactly the schedule.
+The response contains:
 
-A minimum-work filter is a RATE control and nothing else. A block always
-commits its scheduled target; declining easier hashes only makes this miner's
-blocks take longer to find, and the absolute schedule then reads that arrival
-rate and moves difficulty accordingly. There is deliberately no field that
-commits a filter target into a block: difficulty is what the chain reads from
-observed timing, never what a miner declares. A request from an older miner
-carrying `commitMinimumWorkTarget` decodes and is ignored.
+- `workID` — opaque issued-work identifier;
+- `block` — complete nonce-zero Nexus candidate carrying child candidates;
+- `searchTarget` — the easiest threshold that can advance at least one carried
+  level, constrained by the request's minimum-work plan;
+- `targets` — thresholds useful to the worker;
+- `chainPath` — `['Nexus']`;
+- `expiresInMilliseconds` — remaining lifetime;
+- `templateDigest` — fingerprint of the complete hosted tree's template
+  inputs.
 
-Response fields:
+A new transaction or candidate at any hosted level changes the digest, even if
+the Nexus tip did not move.
 
-- `workID`: CID of the nonce-zero candidate. When the request carries
-  `minimumWork`, the CID is followed by `-` and a digest of it: the block does
-  not change with the miner's filter, so two
-  requests with different filters must not share one work item and its
-  `searchTarget`. Treat it as opaque.
-- `block`: the complete candidate block.
-- `searchTarget`: the threshold the miner must hit. It is the easiest
-  (numerically largest) of the Nexus candidate's own threshold and the search
-  targets of the attached child candidates, each of which already accounts for
-  its own descendants. A nonce that meets `searchTarget` but not the Nexus
-  threshold can still advance a descendant chain. Where any chain's minimum
-  work is harder than its committed target, `searchTarget` is no easier than
-  the hardest such threshold: one nonce commits every chain, and a hash above
-  it could clear that chain's committed target without its minimum work.
-- `targets`: every threshold a nonce for this work can clear — the Nexus root
-  and each direct child — easiest first, so it begins with `searchTarget`.
-  They are thresholds, never the blocks' committed targets. The list is
-  complete only when no direct child carries children of its own; otherwise
-  it is `searchTarget` alone.
-- `chainPath`: always `["Nexus"]` on this route.
-- `expiresInMilliseconds`: template lifetime.
-- `templateDigest`: the digest described under `/status`; the miner's
-  stale token. A node predating it serves none, and the miner falls back to
-  the template's parent CID.
+## Submit mining work
 
 ### `POST /mining/work`
 
 ```json
-{"workID": "<workID from the template>", "nonce": 123456}
+{"workID": "<opaque work id>", "nonce": 123456}
 ```
 
-Response fields are `accepted`, `disposition`, `tipCID`,
-`parentGenesisLinks`, and `durableChildProofs`. Child-proof
-delivery is asynchronous; this field acknowledges local durability, not remote
-receipt.
+Response:
+
+```json
+{
+  "accepted": true,
+  "disposition": "canonicalized",
+  "tipCID": "<cid>",
+  "durableChildProofs": []
+}
+```
+
 Possible dispositions are `canonicalized`, `acceptedSide`, `childOnly`,
-`duplicate`, `unavailable`, `temporarilyInvalid`, `proofOfWorkInvalid`,
-`invalid`, and `localFailure`.
-A `childOnly` share missed Nexus's own target and cleared only child targets: the
-children it carries advanced, no Nexus block was imported, and it leaves the work open until it
-expires: a later nonce for the same `workID` that clears a harder target is
-still submittable. Any other disposition consumes the work.
-A submission the node refuses before import returns `400 Bad Request` with
-`{"error":{"message":"<case>"}}`, where `<case>` is `unknownWork`, `expired`,
-or `missesSearchTarget`. The refusal is final; the coordinator reports the case
-as the disposition instead of retrying. Only `expired` also drops the work.
+`duplicate`, and `invalid`. `childOnly` means the hash missed Nexus but met at
+least one carried child target. The node stores only child blocks actually
+secured by that hash.
 
-## Child genesis
+The reply is sent after the resulting node step is durable. Every affected
+level's facts and stream cursors commit in one `state.db` transaction.
 
-No RPC route builds or carries a child genesis. A child genesis is
-self-contained: it commits to the empty parent state and uses the maximum
-target, so it is built offline and deterministically from a seed (the child
-`ChainSpec`, an optional premine recipient, and a timestamp). The parent only
-records its CID. The deployer constructs and signs an ordinary parent
-transaction containing `GenesisAction(directory, blockCID)` and submits it
-through `POST /transactions`. Mining templates select it like any other
-transaction; the accepted parent block records `directory -> genesisCID` in the
-parent's committed genesis state. The parent's `GET /api/chain/children`
-returns at most 100 of those entries with no offset, so on a parent with more
-children a recorded child can be absent from it.
+## Errors
 
-A child level (`Nexus/Payments`, hosted with its parent from `lattice.json`)
-stays `awaitingGenesis` until it can import
-that genesis. On its start, each parent tip change, each child-overlay peer
-hello, and a slow retry after a failed fetch, it reads the CID its co-hosted
-parent level anchored under its directory. If its data directory contains the
-seed as `child-genesis.json` (re-read each time) and the seed builds that CID,
-it rebuilds the genesis from the seed; otherwise it fetches the genesis block by
-that CID from child-overlay peers. Either way it imports the genesis only after
-its co-hosted parent level shows that it still anchors and recorded exactly that
-CID.
-`lattice child deploy` performs these steps; see [Operator CLI](operator-cli.md).
+- `400 Bad Request` — malformed JSON, invalid content, policy refusal, or
+  invalid work;
+- `404 Not Found` — unknown resource or unhosted `chainPath`;
+- `415 Unsupported Media Type` — operator POST without JSON content type;
+- `429 Too Many Requests` — mempool or public-read rate limit;
+- `503 Service Unavailable` — stopping process or transient core context.
 
-## Errors and limits
-
-- Malformed or invalid requests return `400 Bad Request`.
-- Requests that require an active child before genesis return `409 Conflict`.
-- Consensus-producing requests return `503 Service Unavailable` only when the
-  process is not active or the requested local resource is temporarily
-  unavailable.
-- A full transaction pool returns `429 Too Many Requests`.
-- A temporarily unavailable transaction policy returns `503 Service
-  Unavailable`.
-- Request bodies are bounded to 2 MiB, Hummingbird's default upload limit.
-  Within that, a transaction submission and a template request's recipients
-  are each bounded to 1 MiB once re-encoded.
+Error bodies use Hummingbird's JSON error envelope and preserve the named
+refusal where available.
