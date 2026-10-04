@@ -4,7 +4,9 @@ primary_region = "iad"
 [build]
   # Deploy from the repository root:
   # fly deploy -c deploy/read-replica/fly.toml .
-  dockerfile = "deploy/read-replica/Dockerfile"
+  # flyctl resolves this path relative to this file's directory; the build
+  # context is the trailing `.` (the repository root).
+  dockerfile = "Dockerfile"
 
 [[mounts]]
   source = "lattice_read_data"
