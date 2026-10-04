@@ -257,7 +257,10 @@ public final class NodeRuntime: Sendable {
         let gate = NodeRuntimeInputGate(capacity: Self.networkCapacity)
         self.gate = gate
         let readEndpoints = ReadEndpointDirectory(
-            transport: .overlay(ivy),
+            // A configured peer is never closed by a lookup.
+            transport: .overlay(ivy, keep: Set(configuration.bootstrapPeers.compactMap {
+                (try? PeerKey($0.publicKey))?.hex
+            })),
             nexusGenesisCID: configuration.nexusGenesisCID,
             ownKey: configuration.processPublicKey
         )

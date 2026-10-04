@@ -184,7 +184,6 @@ extension NodeRuntime {
         )
     }
 
-    /// `/status`: the read snapshot with the template digest.
     /// The read URLs declared for `chainPath`, a child of a level this node
     /// hosts that the parent recently committed (or this node hosts): this
     /// node's own when it hosts the child, then what the child's other hosts
@@ -203,6 +202,7 @@ extension NodeRuntime {
         return ExplorerChainEndpoints(chainPath: chainPath, committedBlock: committed, endpoints: endpoints)
     }
 
+    /// `/status`: the read snapshot with the template digest.
     public func status() async -> NodeStatusResponse {
         let read = await reads.readSnapshot()
         return NodeStatusResponse(

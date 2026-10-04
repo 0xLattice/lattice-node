@@ -59,7 +59,7 @@ struct ReadEndpointTransport: Sendable {
     let release: @Sendable (PeerEndpoint) async -> Void
 
     /// The node's overlay: providers from the DHT, a dial when no session.
-    static func overlay(_ ivy: Ivy) -> ReadEndpointTransport {
+    static func overlay(_ ivy: Ivy, keep: Set<String> = []) -> ReadEndpointTransport {
         ReadEndpointTransport(
             providers: { await ivy.discoverProviders(rootCID: $0) },
             ask: { provider, request in
@@ -75,7 +75,7 @@ struct ReadEndpointTransport: Sendable {
                 return dialed
             },
             release: { provider in
-                guard let key = try? PeerKey(provider.publicKey) else { return }
+                guard let key = try? PeerKey(provider.publicKey), !keep.contains(key.hex) else { return }
                 await ivy.disconnect(PeerID(publicKey: key.hex))
             }
         )
@@ -106,6 +106,8 @@ actor ReadEndpointDirectory {
     /// Each request in flight: its lookup and the peer it was sent to.
     private var requests: [UInt64: (lookup: UInt64, peerKey: String)] = [:]
     private var nextID: UInt64 = 1
+    /// Lookups holding each session they dialed: closed only when none does.
+    private var dialHolds: [PeerEndpoint: Int] = [:]
 
     private struct Lookup {
         let chainPath: [String]
@@ -220,11 +222,19 @@ actor ReadEndpointDirectory {
     }
 
     private func dialed(_ lookupID: UInt64, _ provider: PeerEndpoint) async {
+        dialHolds[provider, default: 0] += 1
         if lookups[lookupID] != nil {
             lookups[lookupID]?.dialed.append(provider)
         } else {
-            await transport.release(provider)
+            await drop(provider)
         }
+    }
+
+    /// One lookup's hold on a dialed session ends; the last one closes it.
+    private func drop(_ provider: PeerEndpoint) async {
+        let holds = (dialHolds[provider] ?? 1) - 1
+        dialHolds[provider] = holds > 0 ? holds : nil
+        if holds <= 0 { await transport.release(provider) }
     }
 
     /// Answer a peer's request: a URL only for a level this node hosts.
@@ -242,10 +252,9 @@ actor ReadEndpointDirectory {
         lookups[lookupID] = nil
         requests = requests.filter { $0.value.lookup != lookupID }
         for ask in lookup.asks { ask.cancel() }
-        let transport = transport
         let dialed = lookup.dialed
         if !dialed.isEmpty {
-            Task { for provider in dialed { await transport.release(provider) } }
+            Task { for provider in dialed { await self.drop(provider) } }
         }
         waiter.resume(returning: lookup.urls)
     }
