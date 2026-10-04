@@ -23,7 +23,6 @@ COPY deploy/testnet-follower/entrypoint.sh /usr/local/bin/testnet-follower-entry
 RUN chmod +x /usr/local/bin/testnet-follower-entrypoint \
     && useradd -m -s /bin/bash lattice \
     && install -d -o lattice -g lattice /data
-USER lattice
 
 # One overlay and one public read listener serve the complete hosted tree.
 EXPOSE 4001 8081
