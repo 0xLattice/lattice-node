@@ -15,6 +15,10 @@ on:
 permissions:
   contents: read
 
+# Tests and smokes must never start a node on the built-in public peers.
+env:
+  LATTICE_FORBID_DEFAULT_PEERS: "1"
+
 jobs:
   build-linux-release-artifacts:
     runs-on: ubuntu-latest

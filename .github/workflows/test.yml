@@ -11,6 +11,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Tests and smokes must never start a node on the built-in public peers.
+env:
+  LATTICE_FORBID_DEFAULT_PEERS: "1"
+
 jobs:
   strict-concurrency:
     runs-on: ubuntu-latest

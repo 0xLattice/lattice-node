@@ -8,6 +8,10 @@ on:
     - cron: "17 6 * * *"
   workflow_dispatch:
 
+# Tests and smokes must never start a node on the built-in public peers.
+env:
+  LATTICE_FORBID_DEFAULT_PEERS: "1"
+
 jobs:
   simulate-linux:
     runs-on: ubuntu-latest
