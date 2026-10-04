@@ -15,9 +15,9 @@ enum SyncTrace {
         let fd: Int32
         let cap: Int64
 
-        func write(_ line: String) {
+        func append(_ line: String) {
             var bytes = Array(line.utf8)
-            _ = bytes.withUnsafeMutableBytes { Foundation.write(fd, $0.baseAddress, $0.count) }
+            _ = bytes.withUnsafeMutableBytes { write(fd, $0.baseAddress, $0.count) }
             guard cap > 0 else { return }
             var info = stat()
             if fstat(fd, &info) == 0, Int64(info.st_size) > cap {
@@ -41,7 +41,7 @@ enum SyncTrace {
 
     static func log(chain: [String], _ message: @autoclosure () -> String) {
         guard let destination else { return }
-        destination.write(
+        destination.append(
             "sync-trace \(Date().timeIntervalSince1970) \(ProcessInfo.processInfo.processIdentifier) [\(chain.joined(separator: "/"))] \(message())\n"
         )
     }
