@@ -1,6 +1,7 @@
 import Crypto
 import Foundation
 import Ivy
+import Synchronization
 import XCTest
 @testable import LatticeNode
 
@@ -61,11 +62,10 @@ final class ReadEndpointTests: XCTestCase {
         func release(_ provider: PeerEndpoint) { released.append(provider.publicKey) }
     }
 
-    private final class Clock: @unchecked Sendable {
-        private let lock = NSLock()
-        private var seconds = 1_000.0
-        func now() -> Double { lock.withLock { seconds } }
-        func advance(_ by: Double) { lock.withLock { seconds += by } }
+    private final class Clock: Sendable {
+        private let seconds = Mutex(1_000.0)
+        func now() -> Double { seconds.withLock { $0 } }
+        func advance(_ by: Double) { seconds.withLock { $0 += by } }
     }
 
     private func directory(
