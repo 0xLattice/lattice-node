@@ -101,6 +101,8 @@ public final class NodeRuntime: Sendable {
         overlay: IvyConfig? = nil,
         coreConfig: ChainCoreConfig = ChainCoreConfig(),
         workers: Int = max(1, ProcessInfo.processInfo.activeProcessorCount - 1),
+        // Fail-stop is for local storage failure only: everything a step
+        // persists is validated by the core, so peer input cannot reach it.
         failStop: @escaping @Sendable (any Error) -> Void = { fatalError("node runtime: persist failed: \($0)") }
     ) async throws -> NodeRuntime {
         let headers = try HeaderEvidenceStore(
