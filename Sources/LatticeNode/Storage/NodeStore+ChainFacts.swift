@@ -139,8 +139,10 @@ extension NodeStore {
                         )
                     }
                 }
+                // An empty log id is an ended cursor: the peer does not run
+                // this level (`StreamPage` with no log). It is a valid state.
                 for (peerKey, cursor) in level.cursors.sorted(by: { $0.key < $1.key }) {
-                    guard !peerKey.isEmpty, !cursor.logID.isEmpty,
+                    guard !peerKey.isEmpty,
                           let position = Int64(exactly: cursor.position) else {
                         throw NodeStoreError.invalidConfiguration(
                             "stream cursor is malformed"
@@ -233,6 +235,6 @@ struct StreamCursorRow: NodeStoreRecord {
 
     init(_ row: Row) { self.row = row }
     var peerKey: String { get throws { try row.nonEmptyText("peer_key") } }
-    var logID: String { get throws { try row.nonEmptyText("log_id") } }
+    var logID: String { get throws { try row.text("log_id") } }
     var position: UInt64 { get throws { try row.uint64("position") } }
 }

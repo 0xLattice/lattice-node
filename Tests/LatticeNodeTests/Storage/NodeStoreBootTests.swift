@@ -144,6 +144,20 @@ final class NodeStoreBootTests: XCTestCase {
         XCTAssertEqual(updated["peer-a"], advanced)
     }
 
+    /// A peer that does not run a level answers with no log; the core ends
+    /// that cursor (empty log id). Persisting it must not fail the step:
+    /// it crashed a node hosting a child that had no genesis yet.
+    func testAnEndedCursorForAnUnhostedLevelPersistsAndSurvivesReopen() async throws {
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
+        let child: ChainPath = ["Nexus", "testnet"]
+        let ended = ["peer": StreamCursor(logID: "", position: 0)]
+        try await store(path).stageNodeFacts([
+            NodeFactBatch(path: child, facts: [], volumeRoots: [], cursors: ended),
+        ], logID: "local-log")
+        let restored = try await store(path).chainCursors(at: child)
+        XCTAssertEqual(restored, ended)
+    }
+
     func testWholeTreeStepRollsBackAtomically() async throws {
         let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         let store = try store(path)
@@ -156,7 +170,7 @@ final class NodeStoreBootTests: XCTestCase {
                 NodeFactBatch(
                     path: ["Nexus", "Alpha"], facts: [blockBatch("child")],
                     volumeRoots: [],
-                    cursors: ["peer": StreamCursor(logID: "", position: 1)]
+                    cursors: ["": StreamCursor(logID: "remote-log", position: 1)]
                 ),
             ], logID: "local-log")
             XCTFail("expected malformed child cursor to abort the transaction")
