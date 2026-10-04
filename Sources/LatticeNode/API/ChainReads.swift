@@ -25,6 +25,9 @@ public struct ChainReads: Sendable {
     private static let maximumReadResponseBytes = Int(IvyConfig.defaultProtocolMaxFrameSize)
     private static let maximumExplorerPageLimit = 100
     private static let maximumExplorerMempoolListing = 200
+    /// Each listed height costs three local reads (index, block, transactions
+    /// root), and the list is billed as a cheap read: a page stays small.
+    public static let maximumExplorerBlocksPage = 25
 
     private static func boundedExplorerLimit(_ limit: Int) -> Int {
         min(max(limit, 0), maximumExplorerPageLimit)
@@ -185,7 +188,7 @@ public struct ChainReads: Sendable {
     /// past the tip), newest first. Reads each block and its transactions
     /// dictionary root (for the count) — never a transaction body.
     public func explorerBlocks(before: UInt64?, limit: Int) async -> ExplorerBlocksPage {
-        let boundedLimit = Self.boundedExplorerLimit(limit)
+        let boundedLimit = min(max(limit, 0), Self.maximumExplorerBlocksPage)
         guard let tipHeight = await tip().height else {
             return ExplorerBlocksPage(blocks: [], nextBefore: nil)
         }

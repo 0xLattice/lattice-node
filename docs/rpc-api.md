@@ -65,11 +65,11 @@ at any hosted level (`?chainPath=`). It returns
 `rewardRecipient`. Rows are read from block headers and the transactions
 dictionary root only — no transaction body — so there is no `rewardCredited`
 (read `/api/block/:height-or-cid` for it). `before` (default: tip + 1, and
-clamped to it) is exclusive; `limit` defaults to 10 and is capped at 100; at
+clamped to it) is exclusive; `limit` defaults to 10 and is capped at 25; at
 most `limit` heights are visited, and a height whose block this node does not
 hold is omitted. Pass `nextBefore` as the next page's `before`; it is null
-once height 0 is listed. A non-numeric `before` or a non-positive `limit` is
-400.
+once height 0 is listed. A non-numeric `before`, or a non-numeric or
+non-positive `limit`, is 400.
 
 `/api/block/:cid/children` works at any hosted level (`?chainPath=`). Each
 entry is the child's `directory` and committed `blockHash`; `height` and

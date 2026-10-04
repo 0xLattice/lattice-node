@@ -446,7 +446,9 @@ private func addPublicReadRoutes<Context: RequestContext>(
         guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
             throw HTTPError(.notFound)
         }
-        let limit = try explorerParseLimit(request, defaultValue: 10, cap: 100)
+        let limit = try explorerParseLimit(
+            request, defaultValue: 10, cap: ChainReads.maximumExplorerBlocksPage
+        )
         var before: UInt64?
         if let raw = request.uri.queryParameters["before"] {
             guard let parsed = UInt64(raw) else { throw HTTPError(.badRequest) }

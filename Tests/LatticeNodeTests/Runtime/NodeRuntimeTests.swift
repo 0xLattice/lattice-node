@@ -486,12 +486,12 @@ final class NodeRuntimeTests: XCTestCase {
         for cid in Set(roots) where alreadyBare[cid] == nil {
             try await bare.store(volume: SerializedVolume(root: cid, entries: [cid: try XCTUnwrap(held[cid])]))
         }
-        let heights = all.blocks.map(\.hash).reversed() as [String]
+        let cidsByHeight = all.blocks.map(\.hash).reversed() as [String]
         let bareReads = ChainReads(
             storage: bare,
             accepted: { _ in true },
             tip: { await reads.tip() },
-            canonicalCID: { heights.indices.contains(Int($0)) ? heights[Int($0)] : nil },
+            canonicalCID: { cidsByHeight.indices.contains(Int($0)) ? cidsByHeight[Int($0)] : nil },
             mempool: { _ in ChainReads.MempoolListing(count: 0, bytes: 0, cids: []) }
         )
         let barePage = await bareReads.explorerBlocks(before: nil, limit: 10)
@@ -502,7 +502,7 @@ final class NodeRuntimeTests: XCTestCase {
             "the bare store really lacks the bodies the detail read needs"
         )
 
-        // The limit is capped at 100 heights visited.
+        // The limit is capped at 25 heights visited.
         let tall = ChainReads(
             storage: storage,
             tip: { ChainStatus(
@@ -514,8 +514,8 @@ final class NodeRuntimeTests: XCTestCase {
             mempool: { _ in ChainReads.MempoolListing(count: 0, bytes: 0, cids: []) }
         )
         let capped = await tall.explorerBlocks(before: nil, limit: 1_000)
-        XCTAssertEqual(capped.blocks.count, 100)
-        XCTAssertEqual(capped.nextBefore, 401)
+        XCTAssertEqual(capped.blocks.count, 25)
+        XCTAssertEqual(capped.nextBefore, 476)
         await runtime.stop()
     }
 
