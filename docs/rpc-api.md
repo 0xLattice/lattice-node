@@ -54,7 +54,7 @@ Block transaction pages accept `offset` and `limit`; limits are capped at
 {
   "phase": "active",
   "chainPath": ["Nexus"],
-  "nexusGenesisCID": "bafyreiea6sw7enxfy7wn6jwc2ubtplkhp2buierain3lb3roqo6n4bjyvm",
+  "nexusGenesisCID": "bafyreiggtg4ezifboyekbf4gxst2jr3mpjqcxsbmopy7w6fp46g4ngpgxa",
   "tipCID": "<cid>",
   "height": 42,
   "revision": null,
