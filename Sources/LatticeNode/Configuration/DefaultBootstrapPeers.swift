@@ -70,4 +70,18 @@ public enum DefaultBootstrapPeers {
         guard ChainAddress(chainPath)?.isNexus == true else { return [] }
         return nexus
     }
+
+    /// Environment variable that test and CI runs set to `1` so a node that
+    /// would fall back to the built-in peers refuses to start instead of
+    /// joining the public network. Unset, nothing changes.
+    public static let forbidEnvironmentKey = "LATTICE_FORBID_DEFAULT_PEERS"
+
+    /// True when `configured` (as passed to `resolved`) would select the
+    /// built-in peers while `environment` forbids them.
+    public static func forbidden(
+        configured: [PeerEndpoint]?,
+        environment: [String: String]
+    ) -> Bool {
+        configured == nil && environment[forbidEnvironmentKey] == "1"
+    }
 }

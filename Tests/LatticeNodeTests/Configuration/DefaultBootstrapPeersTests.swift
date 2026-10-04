@@ -119,6 +119,21 @@ final class DefaultBootstrapPeersTests: XCTestCase {
         )
     }
 
+    /// LATTICE_FORBID_DEFAULT_PEERS=1 trips exactly when the built-in set
+    /// would be used; an explicit list (even empty) never trips it.
+    func testForbidDefaultPeersGuard() throws {
+        let forbid = [DefaultBootstrapPeers.forbidEnvironmentKey: "1"]
+        XCTAssertTrue(DefaultBootstrapPeers.forbidden(configured: nil, environment: forbid))
+        XCTAssertFalse(DefaultBootstrapPeers.forbidden(configured: [], environment: forbid))
+        XCTAssertFalse(DefaultBootstrapPeers.forbidden(
+            configured: [try operatorPeer(1)], environment: forbid
+        ))
+        XCTAssertFalse(DefaultBootstrapPeers.forbidden(configured: nil, environment: [:]))
+        XCTAssertFalse(DefaultBootstrapPeers.forbidden(
+            configured: nil, environment: [DefaultBootstrapPeers.forbidEnvironmentKey: "0"]
+        ))
+    }
+
     /// A fresh node with nothing configured joins through the shipped set.
     func testDefaultsAreUsedWhenNothingIsConfigured() {
         let resolved = DefaultBootstrapPeers.resolved(

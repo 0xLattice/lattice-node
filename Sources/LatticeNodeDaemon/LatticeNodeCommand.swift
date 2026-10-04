@@ -99,9 +99,18 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         // An operator peer source is authoritative: a supplied list replaces
         // the built-in defaults, and --no-default-peers expresses the empty
         // one. Only "nothing configured at all" falls back to the defaults.
+        let configuredPeers = explicitPeers.isEmpty && !noDefaultPeers ? nil : explicitPeers
+        if DefaultBootstrapPeers.forbidden(
+            configured: configuredPeers,
+            environment: ProcessInfo.processInfo.environment
+        ) {
+            throw ValidationError(
+                "\(DefaultBootstrapPeers.forbidEnvironmentKey)=1: pass --peer or --no-default-peers"
+            )
+        }
         let overlayPeers = DefaultBootstrapPeers.resolved(
             chainPath: address.components,
-            configured: explicitPeers.isEmpty && !noDefaultPeers ? nil : explicitPeers
+            configured: configuredPeers
         )
 
         // Each spec file read once: the paths and specs agree.
