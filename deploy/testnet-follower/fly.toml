@@ -4,7 +4,9 @@ primary_region = "iad"
 [build]
   # Deploy from the repository root:
   # fly deploy -c deploy/testnet-follower/fly.toml .
-  dockerfile = "deploy/testnet-follower/Dockerfile"
+  # flyctl resolves this path relative to this file's directory; the build
+  # context is the trailing `.` (the repository root).
+  dockerfile = "Dockerfile"
 
 [env]
   # Hosted levels, outermost first. Every level shares one overlay and one

@@ -49,7 +49,7 @@ any GPU host starts; an older pin runs the old genesis.
 ## 3. Stop every miner
 
 Stop the Mac miner (`lattice mine stop --root ~/lattice-mac-node/nexus`) and
-destroy or stop any GPU host. Nothing may mine until step 8.
+destroy or stop any GPU host. Nothing may mine until step 9.
 
 ## 4. Re-capture machine configs
 
@@ -150,7 +150,8 @@ fly machine update <machine id> -a <app> --machine-config /tmp/relaunch/<app>.wi
 ```
 
 The wipe removes only `/data/chains`; the identity at `/data/identity`
-survives. fly-proxy auto-starts a stopped backbone on any inbound traffic,
+survives, and so do old files under `/data/log`. Do not read a stale log
+there as output of the new node. fly-proxy auto-starts a stopped backbone on any inbound traffic,
 which is why the wipe runs inside the machine's own start: whichever way it
 starts, it wipes first, and the 120-second sleep keeps every backbone silent
 until all three are wiped. Because the wipe config already carries the new
@@ -167,22 +168,30 @@ fly machine update <machine id> -a <app> --machine-config /tmp/relaunch/<app>.re
 ## 6. Read replica and follower
 
 These are built from the repository by `fly deploy`. Deploy both from the
-relaunch commit, naming the Dockerfile on the command line so the path is
-resolved from the repository root:
+relaunch commit, from the repository root:
 
 ```bash
-fly deploy -c deploy/read-replica/fly.toml --dockerfile deploy/read-replica/Dockerfile .
-fly deploy -c deploy/testnet-follower/fly.toml --dockerfile deploy/testnet-follower/Dockerfile .
+fly deploy -c deploy/read-replica/fly.toml .
+fly deploy -c deploy/testnet-follower/fly.toml .
 ```
 
+flyctl takes the Dockerfile from the toml's `[build] dockerfile`, resolved
+relative to the toml's directory, and ignores `--dockerfile`; the trailing
+`.` keeps the build context at the repository root, which the Dockerfiles
+copy `Package.swift` and `Sources` from.
+
 The new node refuses storage from another Nexus genesis ("wipe required")
-and crash-loops until wiped; it never serves the old chain. The deploy also
+and crash-loops until wiped; it never serves the old chain. So each
+`fly deploy` reports failure when its health checks time out. That is
+expected: the new image is applied to the machine regardless. The deploy also
 drops the follower's retired env (`CHILD_PATHS`, `PUBLIC_READ_URLS`) and its
 `4101`/`4201`/`8082` services, and the follower now writes the one-process
 `lattice.json` from `HOSTED_CHAINS`.
 
 Then wipe each one the same way: capture the deployed config, wrap its
-entrypoint, start it, confirm it booted fresh, and restore `init` to `{}`:
+entrypoint, start it, confirm it booted fresh, and restore `init` to the
+image's real entrypoint. Restoring `init` to `{}` does not work: fly keeps
+the existing wrapper, so a later restart would wipe again.
 
 ```bash
 fly machines list -a lattice-mainnet-read --json | jq '.[0].config' > /tmp/relaunch/lattice-mainnet-read.deployed.json
@@ -190,7 +199,16 @@ jq '.init = {entrypoint: ["/bin/sh", "-c",
       "rm -rf /data/chains && sleep 120 && exec \"$@\"",
       "sh", "/usr/local/bin/read-replica-entrypoint"]}' \
   /tmp/relaunch/lattice-mainnet-read.deployed.json > /tmp/relaunch/lattice-mainnet-read.wipe.json
-jq '.init = {}' /tmp/relaunch/lattice-mainnet-read.deployed.json > /tmp/relaunch/lattice-mainnet-read.restore.json
+jq '.init = {entrypoint: ["/usr/local/bin/read-replica-entrypoint"]}' \
+  /tmp/relaunch/lattice-mainnet-read.deployed.json > /tmp/relaunch/lattice-mainnet-read.restore.json
+```
+
+Apply the wipe config, skipping health checks (the machine is not healthy
+until it has wiped and booted), then start it:
+
+```bash
+fly machine update <machine id> -a lattice-mainnet-read --machine-config /tmp/relaunch/lattice-mainnet-read.wipe.json --skip-health-checks --yes
+fly machine start <machine id> -a lattice-mainnet-read
 ```
 
 The follower is identical with `lattice-mainnet-testnet` and
@@ -217,6 +235,10 @@ done
 
 Do not mine until all five agree. A host still on the old chain shows a
 different `nexusGenesisCID`, or does not answer.
+
+Once they agree, finish steps 8 and 9 without delay. The genesis starts at
+the easiest target, so until our miner runs anyone, including a stray test
+run, can mine block 1.
 
 ## 8. Mac node
 
@@ -261,6 +283,11 @@ Under ASERT there are no pacing or minimum-work knobs: leave `minWork` and
 `minBlockIntervalSeconds` out of `lattice.json`, and leave
 `CARRIER_PACE_SECONDS` unset on GPU hosts. Pacing at the target block time
 freezes the schedule; ASERT finds the hashrate on its own.
+
+Before starting, stop every miner process on the mining host, not only the
+one `lattice mine stop` knows about. A miner left running from an earlier
+build mines the old rules; check with `pgrep -fl 'lattice.*mine'` and kill
+anything listed.
 
 ```bash
 lattice mine start --root ~/lattice-mac-node/nexus
