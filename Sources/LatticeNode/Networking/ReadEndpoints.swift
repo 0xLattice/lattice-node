@@ -178,7 +178,7 @@ actor ReadEndpointDirectory {
         let transport = transport
         let discovery = Task {
             let providers = await transport.providers(key)
-            await self.ask(lookupID, providers)
+            self.ask(lookupID, providers)
         }
         let (seconds, attoseconds) = deadline.components
         let nanoseconds = UInt64(max(0, seconds)) * 1_000_000_000 + UInt64(max(0, attoseconds) / 1_000_000_000)
