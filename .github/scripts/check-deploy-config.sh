@@ -15,6 +15,12 @@ mkdir -p "$tmp_dir/bin" "$tmp_dir/root"
 printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "$*" > "$LATTICE_TEST_ARGS"' \
     > "$tmp_dir/bin/lattice"
 chmod +x "$tmp_dir/bin/lattice"
+# The entrypoint runs as root in the image; on the runner, owning the volume
+# is a no-op and dropping privileges just runs the wrapped command.
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$tmp_dir/bin/chown"
+printf '%s\n' '#!/bin/sh' 'while [ "${1#--}" != "$1" ]; do shift; done' 'exec "$@"' \
+    > "$tmp_dir/bin/setpriv"
+chmod +x "$tmp_dir/bin/chown" "$tmp_dir/bin/setpriv"
 
 PATH="$tmp_dir/bin:$PATH" \
 LATTICE_ROOT="$tmp_dir/root" \
