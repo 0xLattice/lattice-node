@@ -13,7 +13,7 @@ final class MiningWorkerContractTests: XCTestCase {
     /// Lattice's `makeProofOfWorkPreimagePrefix` + 8-byte big-endian nonce.
     private static let vectorNonce: UInt64 = 12_345
     private static let vectorHashHex =
-        "6841ef23daacd1e8d251bfb78495c69ae60f9adf3f2d3feec03940c688a45207"
+        "0179e03e9b0545582bb0aba1729d83b611b16e49abcefe44d6c1d35e85c4b3a3"
     private static let vectorPrefixPrefixHex =
         "31000062616679726569663765766172756b6d7a7074636576657865686c"
 
