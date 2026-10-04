@@ -718,7 +718,7 @@ extension NodeRuntime {
 
         private mutating func step(_ event: NodeEvent) async -> Bool {
             let effects = core.step(event, now: NodeRuntime.now())
-            SyncTrace.log(chain: core.rootPath, "node-runtime step \(String(describing: event).prefix(160)) -> \(effects.map { String(describing: $0).prefix(80) })")
+            SyncTrace.log(chain: core.rootPath, "node-runtime step \(String(describing: event).prefix(160)) -> \(effects.map { $0.traceLabel.prefix(80) })")
             // Referenced evidence, then the facts transaction, then publish,
             // then everything else, each in order.
             func rank(_ effect: NodeEffect) -> Int {

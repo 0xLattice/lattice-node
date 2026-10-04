@@ -86,6 +86,19 @@ public enum NodeEffect: Sendable {
     case wakeAt(Int64)
 }
 
+extension NodeEffect {
+    /// A diagnostic label whose cost is bounded by the effect's own fields.
+    /// A child connect's parent facts are the parent level's whole tree, so
+    /// reflecting them costs O(parent chain) per child block: they are
+    /// named, never described.
+    public var traceLabel: String {
+        guard case .connect(let path, let job, let parentFacts) = self else {
+            return String(describing: self)
+        }
+        return "connect(\(path), blockHash: \(job.blockHash), parentFacts: \(parentFacts == nil ? "nil" : "parent tree"))"
+    }
+}
+
 /// The root level a host runs: its chain, its configured genesis and spec,
 /// and the id of its weigh log.
 public struct ChainLevelRecord: Sendable {
