@@ -5,6 +5,7 @@ import Darwin
 import Glibc
 #endif
 import Lattice
+import UInt256
 import cashew
 @testable import LatticeNode
 
@@ -24,12 +25,19 @@ extension NodeRuntime {
     func mineBlock(_ request: MiningTemplateRequest = MiningTemplateRequest()) async throws -> Block {
         let template = try await miningTemplate(request)
         var nonce: UInt64 = 0
-        // The hardest threshold: the root's own, which every carried
-        // child's easier target also meets.
-        let target = template.targets.min() ?? template.searchTarget
+        // The hardest threshold: the advertised ones and every carried
+        // block's own target. A child's target can be harder than the
+        // root's, and work whose child carries children advertises only its
+        // search target.
+        let target = min(Self.hardestTarget(template.block), template.targets.min() ?? template.searchTarget)
         while template.block.replacingNonce(nonce).proofOfWorkHash() > target { nonce += 1 }
         _ = try await submitWork(SubmitWorkRequest(workID: template.workID, nonce: nonce))
         return template.block.replacingNonce(nonce)
+    }
+
+    private static func hardestTarget(_ block: Block) -> UInt256 {
+        let children = block.children.node?.entries.values.compactMap(\.node) ?? []
+        return children.map(hardestTarget).reduce(block.target, min)
     }
 }
 
