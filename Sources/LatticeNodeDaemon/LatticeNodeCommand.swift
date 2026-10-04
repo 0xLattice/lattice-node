@@ -441,6 +441,24 @@ private func addPublicReadRoutes<Context: RequestContext>(
             context: context
         )
     }
+    router.get("api/blocks") { request, context in
+        let service = try byPath(request)
+        guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
+            throw HTTPError(.notFound)
+        }
+        let limit = try explorerParseLimit(request, defaultValue: 10, cap: 100)
+        var before: UInt64?
+        if let raw = request.uri.queryParameters["before"] {
+            guard let parsed = UInt64(raw) else { throw HTTPError(.badRequest) }
+            before = parsed
+        }
+        return try jsonCached(
+            await service.explorerBlocks(before: before, limit: limit),
+            cacheControl: statusCacheControl,
+            request: request,
+            context: context
+        )
+    }
     router.get("api/block/:id") { request, context in
         let service = try byPath(request)
         guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {

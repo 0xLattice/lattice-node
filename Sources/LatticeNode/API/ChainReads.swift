@@ -181,6 +181,38 @@ public struct ChainReads: Sendable {
         )
     }
 
+    /// A page of canonical block summaries below height `before` (default:
+    /// past the tip), newest first. Reads each block and its transactions
+    /// dictionary root (for the count) — never a transaction body.
+    public func explorerBlocks(before: UInt64?, limit: Int) async -> ExplorerBlocksPage {
+        let boundedLimit = Self.boundedExplorerLimit(limit)
+        guard let tipHeight = await tip().height else {
+            return ExplorerBlocksPage(blocks: [], nextBefore: nil)
+        }
+        // `before` is caller-controlled: clamp before any arithmetic.
+        var height = min(before ?? tipHeight + 1, tipHeight + 1)
+        var blocks: [ExplorerBlockSummary] = []
+        // At most `limit` heights are visited: a height whose block is not
+        // held here is skipped, not replaced by an older one.
+        for _ in 0..<boundedLimit where height > 0 {
+            height -= 1
+            guard let cid = await canonicalCID(height),
+                  let block = await block(cid: cid) else { continue }
+            let transactionCount = (try? await block.transactions.resolve(
+                fetcher: storage
+            ))?.node?.count ?? 0
+            blocks.append(ExplorerBlockSummary(
+                height: block.height,
+                hash: cid,
+                previousBlock: block.parent?.rawCID,
+                timestamp: block.timestamp,
+                transactionCount: transactionCount,
+                rewardRecipient: block.rewardRecipient
+            ))
+        }
+        return ExplorerBlocksPage(blocks: blocks, nextBefore: height > 0 ? height : nil)
+    }
+
     public func explorerBlock(cid: String) async -> ExplorerBlock? {
         guard let block = await block(cid: cid) else { return nil }
         let transactionCount = (try? await block.transactions.resolve(

@@ -185,7 +185,7 @@ final class DaemonHTTPTests: XCTestCase {
             // The bounded read surface is served.
             for uri in [
                 "/health", "/api/chain/info", "/api/chain/spec",
-                "/api/block/latest", "/api/peers", "/api/mempool"
+                "/api/block/latest", "/api/blocks", "/api/peers", "/api/mempool"
             ] {
                 try await client.execute(uri: uri, method: .get) { response in
                     XCTAssertEqual(response.status, .ok, uri)
@@ -625,6 +625,9 @@ final class DaemonHTTPTests: XCTestCase {
                 "/api/block/\(genesis)/transactions?offset=\(query)&limit=\(query)",
                 "/accounts/\(genesis)?block=\(query)",
                 "/api/block/latest?chainPath=\(query)",
+                "/api/blocks?before=\(query)",
+                "/api/blocks?limit=\(query)",
+                "/api/blocks?before=\(query)&limit=\(query)",
             ]
         }
 
@@ -667,6 +670,54 @@ final class DaemonHTTPTests: XCTestCase {
                 statuses.contains(400),
                 "nothing was rejected as bad input: handlers never parsed the matrix \(statuses)"
             )
+        }
+    }
+
+    func testBlocksRoutePagesSummariesAndValidatesQuery() async throws {
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: temporaryDirectory(prefix: "lattice-http-blocks"),
+            privateKeyHex: String(repeating: "01", count: 32)
+        )
+        let storage = try await NodeStorage.open(configuration: configuration)
+        let service = try await startRuntime(storage)
+        let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
+        try await app.test(.router) { client in
+            _ = try await mineOneBlock(client: client)
+            _ = try await mineOneBlock(client: client)
+            func page(_ uri: String) async throws -> ExplorerBlocksPage {
+                try await client.execute(uri: uri, method: .get) { response in
+                    XCTAssertEqual(response.status, .ok, uri)
+                    return try JSONDecoder().decode(
+                        ExplorerBlocksPage.self, from: Data(response.body.readableBytesView)
+                    )
+                }
+            }
+            let all = try await page("/api/blocks")
+            XCTAssertEqual(all.blocks.map(\.height), [2, 1, 0])
+            XCTAssertEqual(all.blocks.last?.hash, configuration.nexusGenesisCID)
+            let older = try await page("/api/blocks?before=2&limit=1")
+            XCTAssertEqual(older.blocks.map(\.height), [1])
+            XCTAssertEqual(older.nextBefore, 1)
+            let pastTip = try await page("/api/blocks?before=99999&limit=500")
+            XCTAssertEqual(pastTip, all)
+            let explicit = try await page("/api/blocks?chainPath=Nexus")
+            XCTAssertEqual(explicit, all)
+            // No `rewardCredited` on the wire: the list reads no body.
+            try await client.execute(uri: "/api/blocks", method: .get) { response in
+                XCTAssertFalse(String(buffer: response.body).contains("rewardCredited"))
+            }
+            for uri in [
+                "/api/blocks?before=-1", "/api/blocks?before=abc",
+                "/api/blocks?limit=0", "/api/blocks?limit=-3",
+            ] {
+                try await client.execute(uri: uri, method: .get) { response in
+                    XCTAssertEqual(response.status, .badRequest, uri)
+                }
+            }
+            try await client.execute(uri: "/api/blocks?chainPath=Nexus/Nope", method: .get) { response in
+                XCTAssertEqual(response.status, .notFound)
+            }
         }
     }
 

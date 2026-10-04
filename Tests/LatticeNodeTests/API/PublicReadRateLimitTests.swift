@@ -130,6 +130,7 @@ final class PublicReadRateLimitTests: XCTestCase {
             "/transactions/bafy",
             "/accounts/bafy",
             "/api/block/latest",
+            "/api/blocks",
             "/api/peers",
             "/api/mempool",
             "/unknown",

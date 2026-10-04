@@ -157,6 +157,17 @@ final class ReadEndpointRuntimeTests: XCTestCase {
                 XCTAssertEqual(body.children.map(\.directory), ["Beta"])
                 XCTAssertNil(body.children.first?.height, "the follower does not hold Beta's block")
             }
+            // The block list at a hosted child level: Alpha's own chain.
+            try await client.execute(uri: "/api/blocks?chainPath=Nexus/Alpha", method: .get) { response in
+                XCTAssertEqual(response.status, .ok)
+                let body = try JSONDecoder().decode(ExplorerBlocksPage.self, from: Data(buffer: response.body))
+                XCTAssertEqual(body.blocks.first?.hash, alphaTip)
+                XCTAssertEqual(body.blocks.first?.height, followerAlphaSnapshot.height)
+                XCTAssertEqual(body.blocks.map(\.height), body.blocks.map(\.height).sorted(by: >))
+                for (newer, older) in zip(body.blocks, body.blocks.dropFirst()) {
+                    XCTAssertEqual(newer.previousBlock, older.hash)
+                }
+            }
         }
     }
 }
