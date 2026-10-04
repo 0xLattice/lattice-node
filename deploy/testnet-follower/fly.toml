@@ -12,6 +12,10 @@ primary_region = "iad"
   # Hosted levels, outermost first. Every level shares one overlay and one
   # public read listener; select a child with ?chainPath=Nexus/testnet.
   HOSTED_CHAINS = "Nexus/testnet Nexus/testnet/swap"
+  # This host's public read URL, declared for every level it hosts: a node
+  # hosting Nexus (the read replica) lists Nexus/testnet through it, and this
+  # node lists Nexus/testnet/swap.
+  PUBLIC_READ_URL = "https://lattice-mainnet-testnet.fly.dev"
   # The P2P self-description must be an IP literal (Ivy netgroup hardening
   # rejects hostnames): the app's dedicated IPv4 (`fly ips list`).
   EXTERNAL_HOST = "169.155.61.57"

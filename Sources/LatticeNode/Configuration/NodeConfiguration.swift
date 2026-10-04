@@ -35,6 +35,7 @@ public enum NodeConfigurationError: Error, Equatable, CustomStringConvertible {
     case invalidChainPath
     case invalidPrivateKey
     case invalidPorts
+    case invalidPublicReadURL
 
     public var description: String {
         switch self {
@@ -42,6 +43,8 @@ public enum NodeConfigurationError: Error, Equatable, CustomStringConvertible {
             "chain path must be Nexus-rooted, consensus-valid, and fit the setup wire frame"
         case .invalidPrivateKey: "process private key must be a 32-byte Ed25519 key"
         case .invalidPorts: "overlay and RPC ports must be nonzero and distinct"
+        case .invalidPublicReadURL:
+            "public read URL must be an absolute http(s) URL with a host and no credentials, query or fragment"
         }
     }
 }
@@ -94,6 +97,11 @@ public struct NodeConfiguration: Sendable {
     /// The spec a hosted child's genesis is built from while it has no root
     /// (operator choice; a child with none only follows roots others mine).
     public let childSpecs: [[String]: ChainSpec]
+    /// The URL at which the public read routes of every level this process
+    /// hosts are reachable (operator declaration; never derived). A peer's
+    /// read-endpoint request for a hosted level is answered with it, and each
+    /// hosted child level is announced under its read-endpoint key.
+    public let publicReadURL: String?
 
     /// Overlay slots kept in reserve for outbound dials so a burst of inbound
     /// connections (from one source, especially behind a proxy where the
@@ -114,7 +122,8 @@ public struct NodeConfiguration: Sendable {
         peerSearchInterval: TimeInterval = 600,
         resourcePolicy: NodeResourcePolicy = .default,
         hostedChildren: [[String]] = [],
-        childSpecs: [[String]: ChainSpec] = [:]
+        childSpecs: [[String]: ChainSpec] = [:],
+        publicReadURL: String? = nil
     ) throws {
         guard let address = ChainAddress(chainPath), address.isNexus else {
             throw NodeConfigurationError.invalidChainPath
@@ -142,6 +151,9 @@ public struct NodeConfiguration: Sendable {
               listenPort != rpcPort else {
             throw NodeConfigurationError.invalidPorts
         }
+        if let publicReadURL, !Self.isValidPublicReadURL(publicReadURL) {
+            throw NodeConfigurationError.invalidPublicReadURL
+        }
 
         self.address = address
         self.storagePath = storagePath
@@ -160,6 +172,20 @@ public struct NodeConfiguration: Sendable {
         self.resourcePolicy = resourcePolicy
         self.childSpecs = childSpecs.filter { hostedChildren.contains($0.key) }
         self.hostedChildren = hostedChildren
+        self.publicReadURL = publicReadURL
+    }
+
+    /// An absolute http(s) URL naming a host, without credentials, query or
+    /// fragment, that fits the read-endpoint wire message.
+    public static func isValidPublicReadURL(_ value: String) -> Bool {
+        guard value.utf8.count <= ReadEndpointResponseMessage.maximumURLBytes,
+              value.utf8.allSatisfy({ (0x21...0x7E).contains($0) }),
+              let components = URLComponents(string: value),
+              let scheme = components.scheme?.lowercased(), scheme == "https" || scheme == "http",
+              let host = components.host, !host.isEmpty,
+              components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil else { return false }
+        return true
     }
 
     public var chainPath: [String] { address.components }

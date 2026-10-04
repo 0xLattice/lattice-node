@@ -55,9 +55,23 @@ actor NodeRuntimeInputGate {
 final class NodeRuntimeIvyDelegate: IvyDelegate {
     private let forward: @Sendable (NodeRuntimeNetworkInput) -> Void
     private let gate: NodeRuntimeInputGate
+    /// Read-endpoint requests are answered here and responses handed to the
+    /// directory: neither touches the chain, so neither enters the loop.
+    private let hosted: Set<[String]>
+    private let publicReadURL: String?
+    private let readEndpoints: ReadEndpointDirectory?
 
-    init(gate: NodeRuntimeInputGate, _ forward: @escaping @Sendable (NodeRuntimeNetworkInput) -> Void) {
+    init(
+        gate: NodeRuntimeInputGate,
+        hosted: Set<[String]> = [],
+        publicReadURL: String? = nil,
+        readEndpoints: ReadEndpointDirectory? = nil,
+        _ forward: @escaping @Sendable (NodeRuntimeNetworkInput) -> Void
+    ) {
         self.gate = gate
+        self.hosted = hosted
+        self.publicReadURL = publicReadURL
+        self.readEndpoints = readEndpoints
         self.forward = forward
     }
 
@@ -74,7 +88,19 @@ final class NodeRuntimeIvyDelegate: IvyDelegate {
     /// one, is dropped: only the core blames, and only for proof-of-work.
     func ivy(_ ivy: Ivy, didReceiveMessage message: PeerMessage, from peer: AuthenticatedPeer) async {
         let input: NodeRuntimeNetworkInput
-        if message.topic == OverlayTopic.overlayHello {
+        if message.topic == ReadEndpointTopic.request {
+            if let request = try? ReadEndpointRequestMessage.decoded(message.payload),
+               let response = ReadEndpointDirectory.answer(request, hosted: hosted, url: publicReadURL),
+               let payload = try? response.encoded() {
+                _ = await ivy.sendMessage(to: peer, topic: ReadEndpointTopic.response, payload: payload)
+            }
+            return
+        } else if message.topic == ReadEndpointTopic.response {
+            if let response = try? ReadEndpointResponseMessage.decoded(message.payload) {
+                await readEndpoints?.receive(response, from: peer.key.hex)
+            }
+            return
+        } else if message.topic == OverlayTopic.overlayHello {
             input = .hello(peer, payload: message.payload)
         } else if message.topic == OverlayTopic.transactionAvailable,
                   let announced = try? TransactionAvailableMessage.decoded(message.payload) {

@@ -34,6 +34,9 @@ public struct Topology: Codable, Sendable {
     /// requests per second. Address-agnostic, so it stays correct behind such
     /// a proxy. Absent = the node's default; `0` disables it.
     public var publicReadMaxRate: Double?
+    /// This host's public read URL (the node's `--public-read-url`), declared
+    /// for every level it hosts. Absent = none declared.
+    public var publicReadURL: String?
     /// Child chains this process hosts as levels, parent before child.
     public var hostedChains: [String]?
     public var mine: TopologyMine?
@@ -44,7 +47,7 @@ public struct Topology: Codable, Sendable {
         publicReadRate: Double? = nil,
         publicReadExpensiveRate: Double? = nil,
         publicReadMaxRate: Double? = nil, hostedChains: [String]? = nil,
-        mine: TopologyMine? = nil
+        mine: TopologyMine? = nil, publicReadURL: String? = nil
     ) {
         self.listen = listen
         self.rpc = rpc
@@ -54,6 +57,7 @@ public struct Topology: Codable, Sendable {
         self.publicReadRate = publicReadRate
         self.publicReadExpensiveRate = publicReadExpensiveRate
         self.publicReadMaxRate = publicReadMaxRate
+        self.publicReadURL = publicReadURL
         self.hostedChains = hostedChains
         self.mine = mine
     }
@@ -99,6 +103,9 @@ public struct Topology: Codable, Sendable {
             if let rate, !rate.isFinite || rate < 0 {
                 throw CtlError("\(name) must be finite and nonnegative")
             }
+        }
+        if let publicReadURL, !NodeConfiguration.isValidPublicReadURL(publicReadURL) {
+            throw CtlError("publicReadURL must be an absolute http(s) URL with a host and no credentials, query or fragment")
         }
         if let workers = mine?.workers, workers < 1 {
             throw CtlError("mine.workers must be at least 1")

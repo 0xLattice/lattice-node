@@ -41,7 +41,8 @@ func makeApplication(
         host: host,
         port: port,
         peers: { ExplorerPeersResponse(count: runtime.peerCount, peers: []) },
-        processStartTime: Date()
+        processStartTime: Date(),
+        endpoints: { await runtime.chainEndpoints($0) }
     )
 }
 
@@ -54,6 +55,7 @@ func makePublicReadApplication(
     healthClock: @escaping @Sendable () -> Double = PublicReadRateLimiter.monotonicSeconds
 ) -> Application<RouterResponder<PublicReadRequestContext>> {
     makePublicReadApplication(
-        reads: runtime.reads, host: host, port: port, limits: limits, healthClock: healthClock
+        reads: runtime.reads, levelReads: Array(runtime.levelReads.values), host: host, port: port,
+        limits: limits, healthClock: healthClock, endpoints: { await runtime.chainEndpoints($0) }
     )
 }

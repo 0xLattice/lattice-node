@@ -185,6 +185,24 @@ extension NodeRuntime {
     }
 
     /// `/status`: the read snapshot with the template digest.
+    /// The read URLs declared for `chainPath`, a child of a level this node
+    /// hosts that the parent recently committed (or this node hosts): this
+    /// node's own when it hosts the child, then what the child's other hosts
+    /// answer. Nil when the parent is not hosted or commits no such child.
+    public func chainEndpoints(_ chainPath: [String]) async -> ExplorerChainEndpoints? {
+        guard chainPath.count > 1, ChainAddress(chainPath) != nil else { return nil }
+        let parent = Array(chainPath.dropLast())
+        guard let parentReads = parent == reads.chainPath ? reads : levelReads[parent] else { return nil }
+        let hostsChild = levelReads[chainPath] != nil
+        let committed = await parentReads.committedChild(directory: chainPath[chainPath.count - 1])
+        guard committed != nil || hostsChild else { return nil }
+        var endpoints = hostsChild ? configuration.publicReadURL.map { [$0] } ?? [] : []
+        for url in await readEndpoints.lookup(chainPath) where !endpoints.contains(url) {
+            endpoints.append(url)
+        }
+        return ExplorerChainEndpoints(chainPath: chainPath, committedBlock: committed, endpoints: endpoints)
+    }
+
     public func status() async -> NodeStatusResponse {
         let read = await reads.readSnapshot()
         return NodeStatusResponse(

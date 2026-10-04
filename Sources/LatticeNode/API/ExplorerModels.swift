@@ -61,12 +61,29 @@ public struct ExplorerBlockTransactions: Codable, Sendable, Equatable {
 public struct ExplorerChildBlock: Codable, Sendable, Equatable {
     public let directory: String
     public let blockHash: String
-    public let height: UInt64
-    public let transactionCount: Int
+    /// Nil when this node does not hold the child block (it does not host
+    /// that child chain).
+    public let height: UInt64?
+    public let transactionCount: Int?
 }
 
 public struct ExplorerBlockChildren: Codable, Sendable, Equatable {
     public let children: [ExplorerChildBlock]
+}
+
+/// `GET /api/chain/endpoints`: the read URLs declared for a child chain,
+/// UNVERIFIED, beside the child block its parent commits under its
+/// directory. A reader accepts a URL only if it serves that block.
+public struct ExplorerChainEndpoints: Codable, Sendable, Equatable {
+    public let chainPath: [String]
+    public let committedBlock: String?
+    public let endpoints: [String]
+
+    public init(chainPath: [String], committedBlock: String?, endpoints: [String]) {
+        self.chainPath = chainPath
+        self.committedBlock = committedBlock
+        self.endpoints = endpoints
+    }
 }
 
 public struct ExplorerAccountAction: Codable, Sendable, Equatable {

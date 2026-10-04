@@ -35,11 +35,25 @@ jq -e '
   .externalAddress == "192.0.2.10" and
   .peers == ["key-a@example.test:4001", "key-b@example.test:4002"] and
   .hostedChains == ["Nexus/Alpha", "Nexus/Alpha/Beta"] and
-  (has("chains") | not)
+  (has("chains") | not) and (has("publicReadURL") | not)
 ' "$tmp_dir/root/lattice.json" >/dev/null
 
 expected="up --root $tmp_dir/root --foreground"
 [[ "$(cat "$tmp_dir/args")" == "$expected" ]]
+
+# A declared public read URL lands in the topology the CLI passes on.
+rm -rf "$tmp_dir/root" && mkdir -p "$tmp_dir/root"
+PATH="$tmp_dir/bin:$PATH" \
+LATTICE_ROOT="$tmp_dir/root" \
+LATTICE_TEST_ARGS="$tmp_dir/args" \
+NEXUS_PEERS="key-a@example.test:4001" \
+EXTERNAL_HOST="192.0.2.10" \
+HOSTED_CHAINS="Nexus/Alpha" \
+PUBLIC_READ_URL="https://alpha.example.test" \
+    sh deploy/testnet-follower/entrypoint.sh
+jq -e '.publicReadURL == "https://alpha.example.test" and .hostedChains == ["Nexus/Alpha"]' \
+    "$tmp_dir/root/lattice.json" >/dev/null
+grep -q 'PUBLIC_READ_URL = "https://lattice-mainnet-testnet.fly.dev"' deploy/testnet-follower/fly.toml
 
 ! grep -R -E 'sha-21c9f0e|lattice-miner\.service|Nexus-v3' \
     deploy --exclude='check-deploy-config.sh'
