@@ -83,11 +83,15 @@ then URLs other hosts declared over the overlay
 (`lattice.overlay.read-endpoint.request.v1` / `.response.v1`; a node answers
 only for a level it hosts). The lookup asks at most 8 hosts found through the
 child's read-endpoint provider records, in random order, takes at most 2 URLs
-from any one, waits at most 2 seconds, coalesces identical concurrent
-lookups, and caches a result for 30 seconds (an empty one for 5). The URLs are
-NOT verified: accept one only after it serves `committedBlock` at
-`/api/block/<committedBlock>?chainPath=...`. Billed to the expensive public
-read budget.
+from any one, ends within 2 seconds (provider discovery included), closes any
+session it dialed only to ask, coalesces identical concurrent lookups, and
+caches a result for 30 seconds (an empty one for 5). The URLs are NOT
+verified and may name any host, internal addresses included: accept one only
+after it serves `committedBlock` at `/api/block/<committedBlock>?chainPath=...`,
+and do not dial a non-public host on a third party's behalf. `committedBlock`
+is null only when this node hosts the child but the parent's recent blocks
+commit none; there is then nothing to verify against. Billed to the expensive
+public read budget.
 
 ## Health and status
 

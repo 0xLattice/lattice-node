@@ -25,6 +25,8 @@ final class ReadEndpointTests: XCTestCase {
         var directory: ReadEndpointDirectory?
         var lookups = 0
         var asked: [String] = []
+        var released: [String] = []
+        var discoveryDelay: UInt64 = 0
         let providers: [PeerEndpoint]
         let respond: @Sendable (PeerEndpoint, ReadEndpointRequestMessage) -> [(String, ReadEndpointResponseMessage)]
 
@@ -39,17 +41,24 @@ final class ReadEndpointTests: XCTestCase {
 
         func set(_ directory: ReadEndpointDirectory) { self.directory = directory }
 
-        func lookup() -> [PeerEndpoint] {
+        func slowDiscovery(_ nanoseconds: UInt64) { discoveryDelay = nanoseconds }
+
+        func lookup() async -> [PeerEndpoint] {
             lookups += 1
+            if discoveryDelay > 0 { try? await Task.sleep(nanoseconds: discoveryDelay) }
             return providers
         }
 
-        func ask(_ provider: PeerEndpoint, _ request: ReadEndpointRequestMessage) async {
+        /// Every ask "dials": a session the directory must release.
+        func ask(_ provider: PeerEndpoint, _ request: ReadEndpointRequestMessage) async -> Bool {
             asked.append(provider.publicKey)
             for (from, response) in respond(provider, request) {
                 await directory?.receive(response, from: from)
             }
+            return true
         }
+
+        func release(_ provider: PeerEndpoint) { released.append(provider.publicKey) }
     }
 
     private final class Clock: @unchecked Sendable {
@@ -68,7 +77,8 @@ final class ReadEndpointTests: XCTestCase {
         let directory = ReadEndpointDirectory(
             transport: ReadEndpointTransport(
                 providers: { _ in await script.lookup() },
-                ask: { await script.ask($0, $1) }
+                ask: { await script.ask($0, $1) },
+                release: { await script.release($0) }
             ),
             nexusGenesisCID: NexusGenesis.expectedBlockHash,
             ownKey: ownKey,
@@ -120,6 +130,33 @@ final class ReadEndpointTests: XCTestCase {
         let urls = await directory.lookup(Self.path)
         XCTAssertEqual(urls, ["https://talker.example"])
         XCTAssertLessThan(ContinuousClock.now - start, .seconds(2))
+    }
+
+    /// A provider lookup that never returns is inside the deadline too.
+    func testTheDeadlineCoversProviderDiscovery() async throws {
+        let script = Script(providers: [Self.endpoint(1)]) { provider, request in
+            [Self.answer(provider, request, url: "https://late.example")]
+        }
+        await script.slowDiscovery(5_000_000_000)
+        let directory = await directory(script, deadline: .milliseconds(200))
+        let start = ContinuousClock.now
+        let urls = await directory.lookup(Self.path)
+        XCTAssertEqual(urls, [])
+        XCTAssertLessThan(ContinuousClock.now - start, .seconds(2))
+    }
+
+    /// Sessions dialed only to ask are closed when the lookup ends.
+    func testSessionsDialedForALookupAreReleasedWhenItEnds() async throws {
+        let providers = (1...3).map(Self.endpoint)
+        let script = Script(providers: providers) { provider, request in
+            [Self.answer(provider, request, url: "https://\(provider.port).example")]
+        }
+        let directory = await directory(script, deadline: .milliseconds(300))
+        let urls = await directory.lookup(Self.path)
+        XCTAssertEqual(Set(urls).count, 3)
+        try await eventually("every dialed session is released") {
+            Set(await script.released) == Set(providers.map(\.publicKey))
+        }
     }
 
     /// An answer counts only from the peer the request went to, for the

@@ -52,8 +52,11 @@ enum ReadEndpointKey {
 struct ReadEndpointTransport: Sendable {
     /// Provider endpoints announced under a key.
     let providers: @Sendable (String) async -> [PeerEndpoint]
-    /// Connect when needed, then send the request. Fire and forget.
-    let ask: @Sendable (PeerEndpoint, ReadEndpointRequestMessage) async -> Void
+    /// Connect when needed, then send the request; true when it dialed a
+    /// session for this request.
+    let ask: @Sendable (PeerEndpoint, ReadEndpointRequestMessage) async -> Bool
+    /// Close a session `ask` dialed, once its lookup is over.
+    let release: @Sendable (PeerEndpoint) async -> Void
 
     /// The node's overlay: providers from the DHT, a dial when no session.
     static func overlay(_ ivy: Ivy) -> ReadEndpointTransport {
@@ -61,12 +64,19 @@ struct ReadEndpointTransport: Sendable {
             providers: { await ivy.discoverProviders(rootCID: $0) },
             ask: { provider, request in
                 guard let key = try? PeerKey(provider.publicKey),
-                      let payload = try? request.encoded() else { return }
+                      let payload = try? request.encoded() else { return false }
                 let peer = PeerID(publicKey: key.hex)
+                var dialed = false
                 if !(await ivy.connectedPeers).contains(peer) {
-                    try? await ivy.connect(to: provider)
+                    guard !Task.isCancelled, (try? await ivy.connect(to: provider)) != nil else { return false }
+                    dialed = true
                 }
                 _ = await ivy.sendMessage(to: peer, topic: ReadEndpointTopic.request, payload: payload)
+                return dialed
+            },
+            release: { provider in
+                guard let key = try? PeerKey(provider.publicKey) else { return }
+                await ivy.disconnect(PeerID(publicKey: key.hex))
             }
         )
     }
@@ -99,9 +109,13 @@ actor ReadEndpointDirectory {
 
     private struct Lookup {
         let chainPath: [String]
-        var unanswered: Set<UInt64>
+        /// Nil until the providers are found and asked.
+        var unanswered: Set<UInt64>?
         var urls: [String] = []
         var perResponder: [String: Int] = [:]
+        var asks: [Task<Void, Never>] = []
+        /// Sessions dialed only for this lookup: closed when it ends.
+        var dialed: [PeerEndpoint] = []
         var waiter: CheckedContinuation<[String], Never>?
     }
 
@@ -148,32 +162,21 @@ actor ReadEndpointDirectory {
               lookup.perResponder[peerKey, default: 0] < Self.perResponderCap else { return }
         lookup.perResponder[peerKey, default: 0] += 1
         if !lookup.urls.contains(response.url) { lookup.urls.append(response.url) }
-        lookup.unanswered.remove(response.requestID)
+        lookup.unanswered?.remove(response.requestID)
         lookups[request.lookup] = lookup
-        if lookup.unanswered.isEmpty { finish(request.lookup) }
+        if lookup.unanswered?.isEmpty == true { finish(request.lookup) }
     }
 
+    /// One lookup under one deadline, provider discovery included.
     private func run(_ chainPath: [String]) async -> [String] {
-        let key = ReadEndpointKey.key(nexusGenesisCID: nexusGenesisCID, chainPath: chainPath)
-        var seen: Set<String> = [ownKey]
-        let asked = (await transport.providers(key)).shuffled()
-            .compactMap { provider in (try? PeerKey(provider.publicKey)).map { (provider, $0.hex) } }
-            .filter { seen.insert($0.1).inserted }
-            .prefix(Self.maximumAsked)
-        guard !asked.isEmpty else { return [] }
         let lookupID = nextID
         nextID += 1
-        var sends: [(PeerEndpoint, ReadEndpointRequestMessage)] = []
-        for (provider, peerKey) in asked {
-            let requestID = nextID
-            nextID += 1
-            requests[requestID] = (lookupID, peerKey)
-            sends.append((provider, ReadEndpointRequestMessage(chainPath: chainPath, requestID: requestID)))
-        }
-        lookups[lookupID] = Lookup(chainPath: chainPath, unanswered: Set(sends.map(\.1.requestID)))
+        lookups[lookupID] = Lookup(chainPath: chainPath)
+        let key = ReadEndpointKey.key(nexusGenesisCID: nexusGenesisCID, chainPath: chainPath)
         let transport = transport
-        for (provider, message) in sends {
-            Task { await transport.ask(provider, message) }
+        let discovery = Task {
+            let providers = await transport.providers(key)
+            await self.ask(lookupID, providers)
         }
         let (seconds, attoseconds) = deadline.components
         let nanoseconds = UInt64(max(0, seconds)) * 1_000_000_000 + UInt64(max(0, attoseconds) / 1_000_000_000)
@@ -183,10 +186,45 @@ actor ReadEndpointDirectory {
         }
         let urls = await withCheckedContinuation { continuation in
             lookups[lookupID]?.waiter = continuation
-            if lookups[lookupID]?.unanswered.isEmpty ?? true { finish(lookupID) }
+            if lookups[lookupID]?.unanswered?.isEmpty == true { finish(lookupID) }
         }
         timer.cancel()
+        discovery.cancel()
         return urls
+    }
+
+    /// Ask up to `maximumAsked` of the providers found, unless the lookup
+    /// already ended.
+    private func ask(_ lookupID: UInt64, _ providers: [PeerEndpoint]) {
+        guard var lookup = lookups[lookupID] else { return }
+        var seen: Set<String> = [ownKey]
+        let asked = providers.shuffled()
+            .compactMap { provider in (try? PeerKey(provider.publicKey)).map { (provider, $0.hex) } }
+            .filter { seen.insert($0.1).inserted }
+            .prefix(Self.maximumAsked)
+        var unanswered: Set<UInt64> = []
+        let transport = transport
+        for (provider, peerKey) in asked {
+            let requestID = nextID
+            nextID += 1
+            requests[requestID] = (lookupID, peerKey)
+            unanswered.insert(requestID)
+            let message = ReadEndpointRequestMessage(chainPath: lookup.chainPath, requestID: requestID)
+            lookup.asks.append(Task {
+                if await transport.ask(provider, message) { await self.dialed(lookupID, provider) }
+            })
+        }
+        lookup.unanswered = unanswered
+        lookups[lookupID] = lookup
+        if unanswered.isEmpty { finish(lookupID) }
+    }
+
+    private func dialed(_ lookupID: UInt64, _ provider: PeerEndpoint) async {
+        if lookups[lookupID] != nil {
+            lookups[lookupID]?.dialed.append(provider)
+        } else {
+            await transport.release(provider)
+        }
     }
 
     /// Answer a peer's request: a URL only for a level this node hosts.
@@ -197,10 +235,18 @@ actor ReadEndpointDirectory {
         return ReadEndpointResponseMessage(chainPath: request.chainPath, requestID: request.requestID, url: url)
     }
 
+    /// End a lookup: answer its waiter, stop its asks, and close the
+    /// sessions it dialed.
     private func finish(_ lookupID: UInt64) {
         guard let lookup = lookups[lookupID], let waiter = lookup.waiter else { return }
         lookups[lookupID] = nil
         requests = requests.filter { $0.value.lookup != lookupID }
+        for ask in lookup.asks { ask.cancel() }
+        let transport = transport
+        let dialed = lookup.dialed
+        if !dialed.isEmpty {
+            Task { for provider in dialed { await transport.release(provider) } }
+        }
         waiter.resume(returning: lookup.urls)
     }
 }
