@@ -175,7 +175,9 @@ public struct ChainReads: Sendable {
             hash: cid,
             transactionCount: transactionCount,
             timestamp: block.timestamp,
-            previousBlock: block.parent?.rawCID
+            previousBlock: block.parent?.rawCID,
+            rewardRecipient: block.rewardRecipient,
+            rewardCredited: await rewardCredited(by: block)
         )
     }
 
@@ -202,16 +204,16 @@ public struct ChainReads: Sendable {
             postStateCID: block.postState.rawCID,
             chain: chainPath,
             rewardRecipient: block.rewardRecipient,
-            rewardAmount: await rewardAmount(of: block)
+            rewardCredited: await rewardCredited(by: block)
         )
     }
 
     /// What `block` credited its recipient: the block reward plus fees, by
-    /// the rule consensus applies. Nil when nothing was credited (no
-    /// recipient, so it burned) or the block's content is not held here.
-    private func rewardAmount(of block: Block) async -> UInt64? {
-        guard block.rewardRecipient != nil,
-              let spec = try? await block.spec.resolve(fetcher: storage).node,
+    /// the rule consensus applies (`Block.coinbaseAmount`). 0 when there is
+    /// no recipient (burned); nil when the block's content is not held here.
+    private func rewardCredited(by block: Block) async -> UInt64? {
+        guard block.rewardRecipient != nil else { return 0 }
+        guard let spec = try? await block.spec.resolve(fetcher: storage).node,
               let transactions = try? await MiningTemplateAssembly.blockTransactions(in: block, fetcher: storage)
         else { return nil }
         var bodies: [TransactionBody] = []
