@@ -35,7 +35,8 @@ extension LatticeNodeCommand {
             host: rpcBind,
             port: Int(rpcPort),
             peers: peers,
-            processStartTime: processStartTime
+            processStartTime: processStartTime,
+            endpoints: { await runtime.chainEndpoints($0) }
         ) { router in
             router.get("core/snapshot") { _, _ -> Response in
                 guard let snapshot = runtime.published.value else { return Response(status: .serviceUnavailable) }
@@ -59,7 +60,8 @@ extension LatticeNodeCommand {
                 host: "0.0.0.0",
                 port: Int(port),
                 peers: peers,
-                limits: publicReadLimits
+                limits: publicReadLimits,
+                endpoints: { await runtime.chainEndpoints($0) }
             )
         }
         print("lattice-node (node runtime)")

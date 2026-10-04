@@ -65,6 +65,8 @@ public final class NodeRuntime: Sendable {
     private let delegate: NodeRuntimeIvyDelegate
     private let gate: NodeRuntimeInputGate
     private let maintenance: Task<Void, Never>
+    /// Read URLs other hosts declare, found through their provider records.
+    let readEndpoints: ReadEndpointDirectory
 
     /// How many overlay messages may wait for the loop before a delivering
     /// connection is held back.
@@ -254,7 +256,21 @@ public final class NodeRuntime: Sendable {
         self.ivy = ivy
         let gate = NodeRuntimeInputGate(capacity: Self.networkCapacity)
         self.gate = gate
-        delegate = NodeRuntimeIvyDelegate(gate: gate) { inputs.yield(.network($0)) }
+        let readEndpoints = ReadEndpointDirectory(
+            // A configured peer is never closed by a lookup.
+            transport: .overlay(ivy, keep: Set(configuration.bootstrapPeers.compactMap {
+                (try? PeerKey($0.publicKey))?.hex
+            })),
+            nexusGenesisCID: configuration.nexusGenesisCID,
+            ownKey: configuration.processPublicKey
+        )
+        self.readEndpoints = readEndpoints
+        delegate = NodeRuntimeIvyDelegate(
+            gate: gate,
+            hosted: Set([configuration.chainPath] + configuration.hostedChildren),
+            publicReadURL: configuration.publicReadURL,
+            readEndpoints: readEndpoints
+        ) { inputs.yield(.network($0)) }
         let cadence = max(1, min(configuration.peerSearchInterval > 0
             ? configuration.peerSearchInterval : 600, 600))
         maintenance = Task {
@@ -510,12 +526,17 @@ extension NodeRuntime {
             maintenanceInFlight = true
 
             let expiry = UInt64(max(0, now / 1_000)) + 1_200
-            let announced = core.ordered.compactMap { path -> String? in
+            let genesisCIDs = core.ordered.compactMap { path -> String? in
                 guard let level = core.levels[path] else { return nil }
                 return path == core.rootPath
                     ? configuration.nexusGenesisCID
                     : level.tree.canonicalBlockHash(atHeight: 0)
             }
+            // A declared read URL is findable from the parent of each hosted
+            // child level: announced under the level's read-endpoint key.
+            let announced = genesisCIDs + (configuration.publicReadURL == nil ? [] : core.ordered
+                .filter { $0 != core.rootPath }
+                .map { ReadEndpointKey.key(nexusGenesisCID: configuration.nexusGenesisCID, chainPath: $0) })
 
             // Conversion from an operator-supplied Double must not trap even
             // for a finite but unreasonably large value.

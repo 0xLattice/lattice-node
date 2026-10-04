@@ -308,20 +308,39 @@ public struct ChainReads: Sendable {
         }
         var children: [ExplorerChildBlock] = []
         for (directory, volume) in entries {
-            guard let child = try? await volume.resolve(fetcher: storage).node else {
-                continue
+            // A child chain this node does not host has its commitment here
+            // but not its block: listed by CID, without the block's details.
+            let child = try? await volume.resolve(fetcher: storage).node
+            var transactionCount: Int?
+            if let child {
+                transactionCount = (try? await child.transactions.resolve(fetcher: storage))?.node?.count ?? 0
             }
-            let transactionCount = (try? await child.transactions.resolve(
-                fetcher: storage
-            ))?.node?.count ?? 0
             children.append(ExplorerChildBlock(
                 directory: directory,
                 blockHash: volume.rawCID,
-                height: child.height,
+                height: child?.height,
                 transactionCount: transactionCount
             ))
         }
         return ExplorerBlockChildren(children: children)
+    }
+
+    /// The newest child block this chain's canonical blocks commit under
+    /// `directory`, looking back at most `depth` blocks from the tip: the
+    /// commitment a reader checks a child's claimed read URL against.
+    public func committedChild(directory: String, depth: UInt64 = 64) async -> String? {
+        guard let top = await tip().height else { return nil }
+        var height = top
+        while top - height < depth {
+            if let cid = await canonicalCID(height), let block = await block(cid: cid),
+               let index = (try? await block.children.resolve(fetcher: storage))?.node,
+               let child = index.entries[directory] {
+                return child.rawCID
+            }
+            guard height > 0 else { return nil }
+            height -= 1
+        }
+        return nil
     }
 
     public func explorerTransaction(cid: String) async -> ExplorerTransaction? {

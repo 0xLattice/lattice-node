@@ -78,7 +78,8 @@ The example Fly read replica uses nginx as the public boundary.
 Every peer follows Nexus on the same overlay. The node periodically announces
 a provider record keyed by the genesis CID of Nexus and each active hosted
 child. Provider records name chain availability, not individual blocks or
-states.
+states. A node that declares a public read URL also announces each hosted
+child under that child's read-endpoint key (below).
 
 `peerSearchInterval` is the maximum time without a newly accepted Nexus block
 before the node:
@@ -101,6 +102,37 @@ For a child, append a URL-encoded `chainPath` query to supported reads:
 
 ```bash
 curl -s 'http://127.0.0.1:8080/health?chainPath=Nexus%2FAlpha' | jq
+```
+
+## Listing a chain on an explorer
+
+Anyone can make a chain they run readable on a public explorer such as
+lattice.build, at any depth, without asking anyone:
+
+1. Run a node that hosts the chain (`hostedChains` lists it and its
+   ancestors).
+2. Expose that node's public reads at an https URL (`publicRead` behind a TLS
+   terminator, or a proxy with the read allowlist).
+3. Declare the URL: `"publicReadURL": "https://reads.example.org"` in
+   `lattice.json` (or `--public-read-url`). One URL per host; it covers every
+   level the host serves, selected with `?chainPath=`.
+
+The rule is the same at every level. A node that hosts the parent `P` of a
+chain `P/D` answers `GET /api/chain/endpoints?chainPath=P/D`: it checks that
+`P`'s recent canonical blocks commit a block under `D`, finds the hosts that
+announced `P/D`'s read-endpoint key, and asks a bounded number of them over
+the overlay for their declared URL. A node answers that question only for a
+level it hosts. The URLs come back unverified, beside the committed child
+block; a reader accepts a URL only if it serves that block at `?chainPath=P/D`.
+The explorer starts from its configured Nexus nodes and repeats this one step
+per level, so a chain appears once a node hosting its parent can reach a
+declaring host.
+
+Check a declaration from the parent's side:
+
+```bash
+curl -s 'https://<parent-reads>/api/chain/endpoints?chainPath=Nexus/Alpha' | jq
+curl -s 'https://reads.example.org/api/block/<committedBlock>?chainPath=Nexus/Alpha' | jq .hash
 ```
 
 ## Health interpretation

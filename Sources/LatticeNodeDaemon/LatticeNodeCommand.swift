@@ -71,6 +71,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Listener-wide arrival-rate ceiling for the public read port, in requests per second. Address-agnostic, so it remains correct behind a proxy that collapses every client onto one address. 0 disables it; all three rates 0 is no rate limiting at all.")
     var publicReadMaxRate = PublicReadRateLimits.defaultListenerRate
 
+    @Option(help: "This host's public read URL (absolute https:// or http://, e.g. https://reads.example.org), declared for EVERY level it hosts: peers asking for a hosted level's read endpoint get it, and each hosted child chain is announced so a node hosting its parent can list it at /api/chain/endpoints. Unset: nothing is declared or announced.")
+    var publicReadUrl: String?
+
     @Option(help: "Self-described publicly reachable host for overlay announcements (NAT/proxy-fronted nodes announce an unreachable observed address otherwise). Host only; the overlay listen port applies.")
     var externalAddress: String?
 
@@ -127,7 +130,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             externalAddress: externalAddress,
             peerSearchInterval: peerSearchInterval,
             hostedChildren: hosted.map(\.path),
-            childSpecs: Dictionary(hosted.compactMap { entry in entry.spec.map { (entry.path, $0) } }) { first, _ in first }
+            childSpecs: Dictionary(hosted.compactMap { entry in entry.spec.map { (entry.path, $0) } }) { first, _ in first },
+            publicReadURL: publicReadUrl
         )
         try await runNodeRuntime(
             configuration: configuration,
@@ -225,6 +229,9 @@ protocol OperatorWrites: Sendable {
 
 extension NodeRuntime: OperatorWrites {}
 
+/// `GET /api/chain/endpoints`: a child chain's declared read URLs, or nil (404).
+typealias ChainEndpointsLookup = @Sendable ([String]) async -> ExplorerChainEndpoints?
+
 func makeApplication(
     reads: ChainReads,
     levelReads: [ChainReads] = [],
@@ -235,6 +242,7 @@ func makeApplication(
     port: Int,
     peers: @Sendable @escaping () async -> ExplorerPeersResponse,
     processStartTime: Date,
+    endpoints: @escaping ChainEndpointsLookup = { _ in nil },
     configure: (Router<BasicRequestContext>) -> Void = { _ in }
 ) -> Application<RouterResponder<BasicRequestContext>> {
     let router = Router()
@@ -242,6 +250,7 @@ func makeApplication(
         to: router,
         reads: ChainReadsByPath(root: reads, levels: levelReads),
         peers: peers,
+        endpoints: endpoints,
         // Loopback reads the live snapshot: `lattice status` and the E2E
         // suites poll this to watch height advance, and the public listener's
         // staleness window is a defence against public load that does not
@@ -285,7 +294,8 @@ func makePublicReadApplication(
         ExplorerPeersResponse(count: 0, peers: [])
     },
     limits: PublicReadRateLimits = .default,
-    healthClock: @escaping @Sendable () -> Double = PublicReadRateLimiter.monotonicSeconds
+    healthClock: @escaping @Sendable () -> Double = PublicReadRateLimiter.monotonicSeconds,
+    endpoints: @escaping ChainEndpointsLookup = { _ in nil }
 ) -> Application<RouterResponder<PublicReadRequestContext>> {
     // This listener faces the public internet with nothing in front of it, so
     // it carries its own arrival-rate ceilings. Its context is NOT
@@ -314,6 +324,7 @@ func makePublicReadApplication(
         to: router,
         reads: ChainReadsByPath(root: reads, levels: levelReads),
         peers: peers,
+        endpoints: endpoints,
         healthSnapshot: { await health.value() }
     )
     return Application(
@@ -329,6 +340,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
     to router: Router<Context>,
     reads byPath: ChainReadsByPath,
     peers: @Sendable @escaping () async -> ExplorerPeersResponse,
+    endpoints: @escaping ChainEndpointsLookup,
     healthSnapshot: @Sendable @escaping () async -> NodeStatusResponse
 ) {
     // CORS is scoped to READ methods only. The POST write routes stay off the
@@ -579,6 +591,24 @@ private func addPublicReadRoutes<Context: RequestContext>(
         }
         return try jsonCached(
             spec,
+            cacheControl: statusCacheControl,
+            request: request,
+            context: context
+        )
+    }
+    // A child chain's declared read URLs, UNVERIFIED (the reader checks each
+    // serves `committedBlock`). `chainPath` names the child; its parent must
+    // be hosted here. Bounded: a few providers asked, one deadline, cached.
+    router.get("api/chain/endpoints") { request, context in
+        guard let raw = request.uri.queryParameters["chainPath"].map(String.init),
+              let address = ChainAddress(string: raw), !address.isNexus else {
+            throw HTTPError(.badRequest)
+        }
+        guard let found = await endpoints(address.components) else {
+            throw HTTPError(.notFound)
+        }
+        return try jsonCached(
+            found,
             cacheControl: statusCacheControl,
             request: request,
             context: context

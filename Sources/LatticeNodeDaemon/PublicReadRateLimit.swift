@@ -139,6 +139,9 @@ enum PublicReadRouteClass: Sendable, Equatable {
         case 4 where components[0] == "api" && components[1] == "block"
             && (components[3] == "transactions" || components[3] == "children"):
             self = .expensive
+        case 3 where components[0] == "api" && components[1] == "chain" && components[2] == "endpoints":
+            // A peer fan-out, and a walk of the parent's recent commitments.
+            self = .expensive
         default:
             self = .general
         }

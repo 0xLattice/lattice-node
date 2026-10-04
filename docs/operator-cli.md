@@ -19,6 +19,7 @@ default.
   "publicReadRate": 25,
   "publicReadExpensiveRate": 1,
   "publicReadMaxRate": 200,
+  "publicReadURL": "https://reads.example.org",
   "hostedChains": [
     "Nexus/Alpha",
     "Nexus/Alpha/Beta"
@@ -45,6 +46,10 @@ This is intentionally one schema, without legacy decoding:
 - mining maps are keyed by hosted absolute path;
 - ports must be nonzero and unique;
 - rates must be finite and nonnegative;
+- `publicReadURL`, when set, is an absolute `https://` (or `http://`) URL with
+  a host and no credentials, query or fragment; it is passed as
+  `--public-read-url` and declared for every hosted level (see
+  [Listing a chain on an explorer](operations.md#listing-a-chain-on-an-explorer));
 - unknown paths in mining policy are rejected.
 
 ## Lifecycle

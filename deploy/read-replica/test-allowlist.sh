@@ -80,6 +80,7 @@ check GET  /api/chain/info         200 "explorer api"
 check GET  /api/block/latest       200 "explorer api"
 check GET  /api/block/1/transactions 200 "block transactions"
 check GET  /api/block/1/children   200 "block children"
+check GET  "/api/chain/endpoints?chainPath=Nexus/testnet" 200 "child read endpoints"
 
 echo "== denied: gated/mutating + writes + unknown get 403 =="
 check GET  /status                 403 "gated status off the public surface"
@@ -93,6 +94,7 @@ check POST "/transactions/$CID"    403 "POST to an allowlisted read route"
 check POST /api/block/latest       403 "POST to /api"
 check POST /api/chain/info         403 "POST to chain metadata"
 check POST /api/block/1/transactions 403 "POST to block transactions"
+check POST /api/chain/endpoints    403 "POST to child read endpoints"
 
 ok()  { echo "  ok   $1"; }
 bad() { echo "  FAIL $1"; fail=1; }

@@ -41,6 +41,7 @@ Mining templates are requested at Nexus and can carry every hosted descendant.
 | `GET /api/chain/info` | Chain metadata | yes |
 | `GET /api/chain/spec` | Active chain spec | yes |
 | `GET /api/chain/genesis` | Selected genesis CID | yes |
+| `GET /api/chain/endpoints?chainPath=P/D` | Declared read URLs of a child chain, unverified | yes |
 | `GET /status` | Operator status including template digest | no |
 | `GET /metrics` | Prometheus exposition | no |
 | `GET /core/snapshot` | Internal root snapshot | no |
@@ -55,6 +56,42 @@ credited that recipient (`Block.coinbaseAmount`): the block reward at that
 height plus the block's fees, the balance excess of its transactions. It is
 `0` for a burned block and omitted only when this node does not hold the
 block's spec or transaction bodies.
+
+`/api/block/:cid/children` works at any hosted level (`?chainPath=`). Each
+entry is the child's `directory` and committed `blockHash`; `height` and
+`transactionCount` are null when this node does not hold the child block (it
+does not host that child chain).
+
+## Child read endpoints
+
+`GET /api/chain/endpoints?chainPath=Nexus/Alpha/Beta` names a child; this node
+must host its parent (`Nexus/Alpha`), else 404. It also answers 404 when none
+of the parent's last 64 canonical blocks commits the child's directory and
+the node does not host the child. 400 for a missing or malformed path, or
+`Nexus` itself.
+
+```json
+{
+  "chainPath": ["Nexus", "Alpha", "Beta"],
+  "committedBlock": "<cid of the newest child block the parent commits>",
+  "endpoints": ["https://reads.example.org"]
+}
+```
+
+`endpoints` lists this node's own declared URL first when it hosts the child,
+then URLs other hosts declared over the overlay
+(`lattice.overlay.read-endpoint.request.v1` / `.response.v1`; a node answers
+only for a level it hosts). The lookup asks at most 8 hosts found through the
+child's read-endpoint provider records, in random order, takes at most 2 URLs
+from any one, ends within 2 seconds (provider discovery included), closes any
+session it dialed only to ask, coalesces identical concurrent lookups, and
+caches a result for 30 seconds (an empty one for 5). The URLs are NOT
+verified and may name any host, internal addresses included: accept one only
+after it serves `committedBlock` at `/api/block/<committedBlock>?chainPath=...`,
+and do not dial a non-public host on a third party's behalf. `committedBlock`
+is null only when this node hosts the child but the parent's recent blocks
+commit none; there is then nothing to verify against. Billed to the expensive
+public read budget.
 
 ## Health and status
 

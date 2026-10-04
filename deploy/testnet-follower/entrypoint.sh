@@ -7,6 +7,9 @@ ROOT="${LATTICE_ROOT:-/data}"
 NEXUS_PEERS="${NEXUS_PEERS:?space-separated publicKey@host:port peers}"
 EXTERNAL_HOST="${EXTERNAL_HOST:?publicly reachable IP literal}"
 HOSTED_CHAINS="${HOSTED_CHAINS:?space-separated Nexus-rooted child paths, parent first}"
+# Optional: this host's public read URL, declared for every hosted level so a
+# node hosting a parent can list the child at /api/chain/endpoints.
+PUBLIC_READ_URL="${PUBLIC_READ_URL:-}"
 
 mkdir -p "$ROOT"
 
@@ -22,6 +25,12 @@ for chain in $HOSTED_CHAINS; do
 done
 chains_json="${chains_json%,}"
 
+read_url_json=""
+if [ -n "$PUBLIC_READ_URL" ]; then
+    read_url_json="
+  \"publicReadURL\": \"$PUBLIC_READ_URL\","
+fi
+
 cat > "$ROOT/lattice.json" <<EOF
 {
   "externalAddress": "$EXTERNAL_HOST",
@@ -30,7 +39,7 @@ cat > "$ROOT/lattice.json" <<EOF
   "peers": [$peers_json],
   "publicRead": 8081,
   "publicReadExpensiveRate": 0,
-  "publicReadRate": 0,
+  "publicReadRate": 0,$read_url_json
   "rpc": 8080
 }
 EOF
