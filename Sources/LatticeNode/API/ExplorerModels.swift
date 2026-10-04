@@ -16,6 +16,10 @@ public struct ExplorerLatestBlock: Codable, Sendable, Equatable {
     public let transactionCount: Int
     public let timestamp: Int64
     public let previousBlock: String?
+    /// The address this block credited its reward and fees; nil burned them.
+    public let rewardRecipient: String?
+    /// See `ExplorerBlock.rewardCredited`.
+    public let rewardCredited: UInt64?
 }
 
 public struct ExplorerBlock: Codable, Sendable, Equatable {
@@ -34,8 +38,10 @@ public struct ExplorerBlock: Codable, Sendable, Equatable {
     public let chain: [String]
     /// The address this block credited its reward and fees; nil burned them.
     public let rewardRecipient: String?
-    /// The block reward plus fees credited to `rewardRecipient`.
-    public let rewardAmount: UInt64?
+    /// What consensus credited `rewardRecipient`: the block reward at this
+    /// height plus the block's fees; 0 when the recipient is nil (burned).
+    /// Nil only when this node does not hold the block's spec or bodies.
+    public let rewardCredited: UInt64?
 }
 
 public struct ExplorerTransactionSummary: Codable, Sendable, Equatable {
