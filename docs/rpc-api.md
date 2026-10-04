@@ -48,6 +48,14 @@ Mining templates are requested at Nexus and can carry every hosted descendant.
 Block transaction pages accept `offset` and `limit`; limits are capped at
 100. CID and response sizes are bounded before decoding.
 
+Both `/api/block/latest` and `/api/block/:height-or-cid` report the block's
+coinbase. `rewardRecipient` is the header's recipient address; it is omitted
+(null) when the block burns its reward. `rewardCredited` is what consensus
+credited that recipient (`Block.coinbaseAmount`): the block reward at that
+height plus the block's fees, the balance excess of its transactions. It is
+`0` for a burned block and omitted only when this node does not hold the
+block's spec or transaction bodies.
+
 ## Health and status
 
 ```json

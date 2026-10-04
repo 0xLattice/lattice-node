@@ -311,6 +311,93 @@ final class NodeRuntimeTests: XCTestCase {
         await producerRuntime.stop()
     }
 
+    /// The explorer block reads name the coinbase recipient and what
+    /// consensus credited it: reward + fees, or 0 when the recipient is nil.
+    func testExplorerBlockReadsReportTheRewardRecipientAndCredit() async throws {
+        let node = try host(keyByte: 0x36)
+        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let runtime = try await NodeRuntime.start(
+            storage: storage, configuration: node.configuration, overlay: node.overlay
+        )
+        let payer = CryptoUtils.generateKeyPair()
+        let payerAddress = CryptoUtils.createAddress(from: payer.publicKey)
+        let miner = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
+        let payee = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
+
+        func mine(_ recipient: String?) async throws -> String {
+            let request = MiningTemplateRequest(recipients: recipient.map {
+                [MiningRecipient(chainPath: ["Nexus"], address: $0)]
+            } ?? [])
+            let template = try await runtime.miningTemplate(request)
+            var nonce: UInt64 = 0
+            while Self.block(template.block, nonce: nonce).proofOfWorkHash() > template.searchTarget { nonce += 1 }
+            let mined = try await runtime.submitWork(SubmitWorkRequest(workID: template.workID, nonce: nonce))
+            XCTAssertEqual(mined.disposition, .canonicalized)
+            return try BlockHeader(node: Self.block(template.block, nonce: nonce)).rawCID
+        }
+        func reward(_ cid: String) async throws -> UInt64 {
+            let blockRead = await runtime.reads.block(cid: cid)
+            let block = try XCTUnwrap(blockRead)
+            let specRead = try await block.spec.resolve(fetcher: storage).node
+            let spec = try XCTUnwrap(specRead)
+            return spec.rewardAtBlock(block.height)
+        }
+
+        // Block 1 pays the payer: reward only, no transactions.
+        let first = try await mine(payerAddress)
+        let firstDetailRead = await runtime.reads.explorerBlock(cid: first)
+        let firstDetail = try XCTUnwrap(firstDetailRead)
+        XCTAssertEqual(firstDetail.rewardRecipient, payerAddress)
+        let firstReward = try await reward(first)
+        XCTAssertEqual(firstDetail.rewardCredited, firstReward)
+        let funded = try XCTUnwrap(firstDetail.rewardCredited)
+        XCTAssertGreaterThan(funded, 10)
+
+        // Block 2 carries a transfer leaving a fee of 7 (balance excess).
+        let fee: Int64 = 7
+        let bodyHeader = try HeaderImpl(node: TransactionBody(
+            accountActions: [
+                AccountAction(owner: payerAddress, delta: -10),
+                AccountAction(owner: payee, delta: 10 - fee),
+            ],
+            actions: [], depositActions: [], receiptActions: [], withdrawalActions: [],
+            signers: [payerAddress], nonce: 0, chainPath: ["Nexus"]
+        ))
+        _ = try await runtime.submitTransaction(SubmitTransactionRequest(transaction: Transaction(
+            signatures: [payer.publicKey: try XCTUnwrap(TransactionSigning.sign(
+                bodyHeader: bodyHeader, privateKeyHex: payer.privateKey
+            ))],
+            body: bodyHeader
+        )))
+        let second = try await mine(miner)
+        let secondDetailRead = await runtime.reads.explorerBlock(cid: second)
+        let secondDetail = try XCTUnwrap(secondDetailRead)
+        XCTAssertEqual(secondDetail.transactionCount, 1)
+        XCTAssertEqual(secondDetail.rewardRecipient, miner)
+        let secondReward = try await reward(second)
+        XCTAssertEqual(secondDetail.rewardCredited, secondReward + UInt64(fee))
+        let latestRead = await runtime.reads.explorerLatestBlock()
+        let latest = try XCTUnwrap(latestRead)
+        XCTAssertEqual(latest.hash, second)
+        XCTAssertEqual(latest.rewardRecipient, miner)
+        XCTAssertEqual(latest.rewardCredited, secondDetail.rewardCredited)
+
+        // Block 3 has no recipient: the reward burns, nothing is credited.
+        let third = try await mine(nil)
+        let thirdDetailRead = await runtime.reads.explorerBlock(cid: third)
+        let thirdDetail = try XCTUnwrap(thirdDetailRead)
+        XCTAssertNil(thirdDetail.rewardRecipient)
+        XCTAssertEqual(thirdDetail.rewardCredited, 0)
+        let thirdLatestRead = await runtime.reads.explorerLatestBlock()
+        let thirdLatest = try XCTUnwrap(thirdLatestRead)
+        XCTAssertNil(thirdLatest.rewardRecipient)
+        XCTAssertEqual(thirdLatest.rewardCredited, 0)
+        // The burned block still reports an explicit 0 credit on the wire.
+        let json = try XCTUnwrap(String(data: JSONEncoder().encode(thirdDetail), encoding: .utf8))
+        XCTAssertTrue(json.contains("\"rewardCredited\":0"), json)
+        await runtime.stop()
+    }
+
     private static func block(_ block: Block, nonce: UInt64) -> Block {
         Block(
             version: block.version,
