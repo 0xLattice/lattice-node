@@ -33,7 +33,7 @@ enum SyncTrace {
         }
         if value == "1" { return Sink(fd: STDERR_FILENO, cap: 0) }
         let cap = environment["LATTICE_SYNC_TRACE_MAX_BYTES"].flatMap(Int64.init) ?? 64 << 20
-        let fd = open(value, O_WRONLY | O_CREAT | O_APPEND, 0o644)
+        let fd = open(value, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0o644)
         return fd >= 0 ? Sink(fd: fd, cap: cap) : Sink(fd: STDERR_FILENO, cap: 0)
     }()
 
