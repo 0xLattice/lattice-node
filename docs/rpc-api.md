@@ -32,6 +32,7 @@ Mining templates are requested at Nexus and can carry every hosted descendant.
 | `GET /accounts/:owner?block=<cid>` | Account balance and next nonce at an accepted block | yes |
 | `GET /api/block/latest` | Latest executed block summary | yes |
 | `GET /api/block/:height-or-cid` | Block detail | yes |
+| `GET /api/blocks?before=<height>&limit=<n>` | Page of canonical block summaries, newest first | yes |
 | `GET /api/block/:cid/transactions` | Paginated block transactions | yes |
 | `GET /api/block/:cid/children` | Bounded child commitments | yes |
 | `GET /api/transaction/:cid` | Explorer transaction model | yes |
@@ -56,6 +57,19 @@ credited that recipient (`Block.coinbaseAmount`): the block reward at that
 height plus the block's fees, the balance excess of its transactions. It is
 `0` for a burned block and omitted only when this node does not hold the
 block's spec or transaction bodies.
+
+`/api/blocks` lists the canonical chain to the executed tip, newest first,
+at any hosted level (`?chainPath=`). It returns
+`{"blocks": [...], "nextBefore": <height or null>}`; each row is `height`,
+`hash`, `previousBlock`, `timestamp`, `transactionCount` and
+`rewardRecipient`. Rows are read from block headers and the transactions
+dictionary root only — no transaction body — so there is no `rewardCredited`
+(read `/api/block/:height-or-cid` for it). `before` (default: tip + 1, and
+clamped to it) is exclusive; `limit` defaults to 10 and is capped at 25; at
+most `limit` heights are visited, and a height whose block this node does not
+hold is omitted. Pass `nextBefore` as the next page's `before`; it is null
+once height 0 is listed. A non-numeric `before`, or a non-numeric or
+non-positive `limit`, is 400.
 
 `/api/block/:cid/children` works at any hosted level (`?chainPath=`). Each
 entry is the child's `directory` and committed `blockHash`; `height` and

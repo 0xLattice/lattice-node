@@ -44,6 +44,24 @@ public struct ExplorerBlock: Codable, Sendable, Equatable {
     public let rewardCredited: UInt64?
 }
 
+/// One row of `GET /api/blocks`: header fields and the transaction count
+/// only. No transaction body is read, so there is no `rewardCredited`.
+public struct ExplorerBlockSummary: Codable, Sendable, Equatable {
+    public let height: UInt64
+    public let hash: String
+    public let previousBlock: String?
+    public let timestamp: Int64
+    public let transactionCount: Int
+    public let rewardRecipient: String?
+}
+
+/// `GET /api/blocks`: canonical blocks newest first. `nextBefore` is the
+/// `before` for the next (older) page; nil once height 0 is listed.
+public struct ExplorerBlocksPage: Codable, Sendable, Equatable {
+    public let blocks: [ExplorerBlockSummary]
+    public let nextBefore: UInt64?
+}
+
 public struct ExplorerTransactionSummary: Codable, Sendable, Equatable {
     public let txCID: String
     public let signers: [String]

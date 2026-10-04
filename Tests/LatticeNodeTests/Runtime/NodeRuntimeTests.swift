@@ -398,6 +398,127 @@ final class NodeRuntimeTests: XCTestCase {
         await runtime.stop()
     }
 
+    /// `/api/blocks` pages the canonical chain newest first from headers and
+    /// the transactions-dictionary root alone: it serves every row from a
+    /// store holding no transaction body, where the detail read cannot
+    /// compute `rewardCredited`.
+    func testExplorerBlocksPagesSummariesWithoutReadingTransactionBodies() async throws {
+        let node = try host(keyByte: 0x37)
+        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let runtime = try await NodeRuntime.start(
+            storage: storage, configuration: node.configuration, overlay: node.overlay
+        )
+        let payer = CryptoUtils.generateKeyPair()
+        let payerAddress = CryptoUtils.createAddress(from: payer.publicKey)
+        let miner = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
+        func mine(_ recipient: String) async throws {
+            let template = try await runtime.miningTemplate(MiningTemplateRequest(recipients: [
+                MiningRecipient(chainPath: ["Nexus"], address: recipient),
+            ]))
+            var nonce: UInt64 = 0
+            while Self.block(template.block, nonce: nonce).proofOfWorkHash() > template.searchTarget { nonce += 1 }
+            let mined = try await runtime.submitWork(SubmitWorkRequest(workID: template.workID, nonce: nonce))
+            XCTAssertEqual(mined.disposition, .canonicalized)
+        }
+        try await mine(payerAddress)
+        let bodyHeader = try HeaderImpl(node: TransactionBody(
+            accountActions: [
+                AccountAction(owner: payerAddress, delta: -10),
+                AccountAction(owner: miner, delta: 3),
+            ],
+            actions: [], depositActions: [], receiptActions: [], withdrawalActions: [],
+            signers: [payerAddress], nonce: 0, chainPath: ["Nexus"]
+        ))
+        _ = try await runtime.submitTransaction(SubmitTransactionRequest(transaction: Transaction(
+            signatures: [payer.publicKey: try XCTUnwrap(TransactionSigning.sign(
+                bodyHeader: bodyHeader, privateKeyHex: payer.privateKey
+            ))],
+            body: bodyHeader
+        )))
+        try await mine(miner)
+        try await mine(miner)
+        let reads = runtime.reads
+
+        // The whole chain, newest first, linked by previousBlock.
+        let all = await reads.explorerBlocks(before: nil, limit: 10)
+        XCTAssertEqual(all.blocks.map(\.height), [3, 2, 1, 0])
+        XCTAssertNil(all.nextBefore)
+        for (newer, older) in zip(all.blocks, all.blocks.dropFirst()) {
+            XCTAssertEqual(newer.previousBlock, older.hash)
+        }
+        for row in all.blocks {
+            let canonical = await reads.explorerCanonicalBlockCID(atHeight: row.height)
+            XCTAssertEqual(row.hash, canonical)
+        }
+        XCTAssertEqual(all.blocks[1].transactionCount, 1)
+        XCTAssertEqual(all.blocks[1].rewardRecipient, miner)
+        XCTAssertEqual(all.blocks[2].rewardRecipient, payerAddress)
+
+        // Page boundaries: `before` is exclusive and `nextBefore` continues.
+        let first = await reads.explorerBlocks(before: nil, limit: 2)
+        XCTAssertEqual(first.blocks.map(\.height), [3, 2])
+        XCTAssertEqual(first.nextBefore, 2)
+        let second = await reads.explorerBlocks(before: first.nextBefore, limit: 2)
+        XCTAssertEqual(second.blocks.map(\.height), [1, 0])
+        XCTAssertNil(second.nextBefore)
+        let none = await reads.explorerBlocks(before: 0, limit: 10)
+        XCTAssertEqual(none, ExplorerBlocksPage(blocks: [], nextBefore: nil))
+        // Past the tip clamps to the tip.
+        let pastTip = await reads.explorerBlocks(before: UInt64.max, limit: 10)
+        XCTAssertEqual(pastTip, all)
+
+        // A store holding only each block and its transactions-dictionary
+        // root: no transaction body at all.
+        let bare = try await NodeStorage.open(configuration: NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: temporaryDirectory(prefix: "lattice-blocks-bare"),
+            privateKeyHex: String(repeating: "38", count: 32)
+        ))
+        var roots: [String] = []
+        for row in all.blocks {
+            let read = await reads.block(cid: row.hash)
+            let block = try XCTUnwrap(read)
+            roots += [row.hash, block.transactions.rawCID]
+        }
+        let held = await storage.content(Set(roots))
+        let alreadyBare = await bare.content(Set(roots))
+        // Blocks without transactions share one empty-dictionary root.
+        for cid in Set(roots) where alreadyBare[cid] == nil {
+            try await bare.store(volume: SerializedVolume(root: cid, entries: [cid: try XCTUnwrap(held[cid])]))
+        }
+        let cidsByHeight = all.blocks.map(\.hash).reversed() as [String]
+        let bareReads = ChainReads(
+            storage: bare,
+            accepted: { _ in true },
+            tip: { await reads.tip() },
+            canonicalCID: { cidsByHeight.indices.contains(Int($0)) ? cidsByHeight[Int($0)] : nil },
+            mempool: { _ in ChainReads.MempoolListing(count: 0, bytes: 0, cids: []) }
+        )
+        let barePage = await bareReads.explorerBlocks(before: nil, limit: 10)
+        XCTAssertEqual(barePage, all, "the list must not need any transaction body")
+        let bareDetail = await bareReads.explorerBlock(cid: all.blocks[1].hash)
+        XCTAssertNil(
+            try XCTUnwrap(bareDetail).rewardCredited,
+            "the bare store really lacks the bodies the detail read needs"
+        )
+
+        // The limit is capped at 25 heights visited.
+        let tall = ChainReads(
+            storage: storage,
+            tip: { ChainStatus(
+                phase: .active, chainPath: ["Nexus"],
+                nexusGenesisCID: node.configuration.nexusGenesisCID,
+                tipCID: all.blocks[0].hash, height: 500, revision: nil
+            ) },
+            canonicalCID: { _ in all.blocks[0].hash },
+            mempool: { _ in ChainReads.MempoolListing(count: 0, bytes: 0, cids: []) }
+        )
+        let capped = await tall.explorerBlocks(before: nil, limit: 1_000)
+        XCTAssertEqual(capped.blocks.count, 25)
+        XCTAssertEqual(capped.nextBefore, 476)
+        await runtime.stop()
+    }
+
     private static func block(_ block: Block, nonce: UInt64) -> Block {
         Block(
             version: block.version,

@@ -80,6 +80,7 @@ check GET  /api/chain/info         200 "explorer api"
 check GET  /api/block/latest       200 "explorer api"
 check GET  /api/block/1/transactions 200 "block transactions"
 check GET  /api/block/1/children   200 "block children"
+check GET  "/api/blocks?before=10&limit=10" 200 "block summary page"
 check GET  "/api/chain/endpoints?chainPath=Nexus/testnet" 200 "child read endpoints"
 
 echo "== denied: gated/mutating + writes + unknown get 403 =="
@@ -94,6 +95,7 @@ check POST "/transactions/$CID"    403 "POST to an allowlisted read route"
 check POST /api/block/latest       403 "POST to /api"
 check POST /api/chain/info         403 "POST to chain metadata"
 check POST /api/block/1/transactions 403 "POST to block transactions"
+check POST /api/blocks             403 "POST to block summary page"
 check POST /api/chain/endpoints    403 "POST to child read endpoints"
 
 ok()  { echo "  ok   $1"; }
@@ -152,14 +154,16 @@ drain
 got=$(fire inside \
   198.51.100.4 "/api/block/1/children" 30 \
   198.51.100.10 "/api/block/1/transactions?limit=100" 30 \
-  198.51.100.5 /api/block/latest 30)
+  198.51.100.5 /api/block/latest 30 \
+  198.51.100.11 "/api/blocks?limit=10" 30)
 children=$(count "$(lines "$got" 1,30)" 429)
 blocktxs=$(count "$(lines "$got" 31,60)" 429)
 general=$(count "$(lines "$got" 61,90)" 429)
-if [ "$children" -gt 0 ] && [ "$blocktxs" -gt 0 ] && [ "$general" -eq 0 ]; then
-  ok "30 requests trip the expensive routes (429s: children $children, block txs $blocktxs) but not a general route"
+blocks=$(count "$(lines "$got" 91,120)" 429)
+if [ "$children" -gt 0 ] && [ "$blocktxs" -gt 0 ] && [ "$general" -eq 0 ] && [ "$blocks" -eq 0 ]; then
+  ok "30 requests trip the expensive routes (429s: children $children, block txs $blocktxs) but not a general route or the block list"
 else
-  bad "30 requests should trip only the expensive routes (429s: children $children, block txs $blocktxs, general $general)"
+  bad "30 requests should trip only the expensive routes (429s: children $children, block txs $blocktxs, general $general, block list $blocks)"
 fi
 drain
 

@@ -25,6 +25,9 @@ public struct ChainReads: Sendable {
     private static let maximumReadResponseBytes = Int(IvyConfig.defaultProtocolMaxFrameSize)
     private static let maximumExplorerPageLimit = 100
     private static let maximumExplorerMempoolListing = 200
+    /// Each listed height costs three local reads (index, block, transactions
+    /// root), and the list is billed as a cheap read: a page stays small.
+    public static let maximumExplorerBlocksPage = 25
 
     private static func boundedExplorerLimit(_ limit: Int) -> Int {
         min(max(limit, 0), maximumExplorerPageLimit)
@@ -179,6 +182,38 @@ public struct ChainReads: Sendable {
             rewardRecipient: block.rewardRecipient,
             rewardCredited: await rewardCredited(by: block)
         )
+    }
+
+    /// A page of canonical block summaries below height `before` (default:
+    /// past the tip), newest first. Reads each block and its transactions
+    /// dictionary root (for the count) — never a transaction body.
+    public func explorerBlocks(before: UInt64?, limit: Int) async -> ExplorerBlocksPage {
+        let boundedLimit = min(max(limit, 0), Self.maximumExplorerBlocksPage)
+        guard let tipHeight = await tip().height else {
+            return ExplorerBlocksPage(blocks: [], nextBefore: nil)
+        }
+        // `before` is caller-controlled: clamp before any arithmetic.
+        var height = min(before ?? tipHeight + 1, tipHeight + 1)
+        var blocks: [ExplorerBlockSummary] = []
+        // At most `limit` heights are visited: a height whose block is not
+        // held here is skipped, not replaced by an older one.
+        for _ in 0..<boundedLimit where height > 0 {
+            height -= 1
+            guard let cid = await canonicalCID(height),
+                  let block = await block(cid: cid) else { continue }
+            let transactionCount = (try? await block.transactions.resolve(
+                fetcher: storage
+            ))?.node?.count ?? 0
+            blocks.append(ExplorerBlockSummary(
+                height: block.height,
+                hash: cid,
+                previousBlock: block.parent?.rawCID,
+                timestamp: block.timestamp,
+                transactionCount: transactionCount,
+                rewardRecipient: block.rewardRecipient
+            ))
+        }
+        return ExplorerBlocksPage(blocks: blocks, nextBefore: height > 0 ? height : nil)
     }
 
     public func explorerBlock(cid: String) async -> ExplorerBlock? {
