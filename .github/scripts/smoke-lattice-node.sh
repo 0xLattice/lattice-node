@@ -87,12 +87,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Isolated: with the shipped bootstrap peers the smoke would gossip its mined
+# block to the public Nexus and fork-choose against whatever the network holds.
 start_node() {
     "$node_binary" \
         --data-directory "$tmp/data" \
         --identity-key "$tmp/process.key" \
         --listen-port "$port" \
         --rpc-port "$rpc_port" \
+        --no-default-peers \
         >>"$node_log" 2>&1 &
     node_pid=$!
 }
