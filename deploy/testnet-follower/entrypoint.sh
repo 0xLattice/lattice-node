@@ -35,4 +35,8 @@ cat > "$ROOT/lattice.json" <<EOF
 }
 EOF
 
-exec lattice up --root "$ROOT" --foreground
+# The volume may hold files written by an earlier root-run image; hand it to
+# the node's user, then drop root for the node itself.
+chown -R lattice:lattice "$ROOT"
+exec setpriv --reuid=lattice --regid=lattice --init-groups \
+    lattice up --root "$ROOT" --foreground

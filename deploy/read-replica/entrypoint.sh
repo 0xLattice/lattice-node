@@ -10,7 +10,11 @@ set -e
 # loopback RPC is up; fly's health check tolerates that during the grace period.
 nginx -c /etc/nginx/nginx.conf
 
-exec /usr/local/bin/lattice-node \
+# The volume may hold files written by an earlier root-run image; hand it to
+# the node's user, then drop root for the node itself.
+chown -R lattice:lattice /data
+exec setpriv --reuid=lattice --regid=lattice --init-groups \
+    /usr/local/bin/lattice-node \
     --data-directory /data/chains/Nexus \
     --identity-key /data/identity/nexus.key \
     --listen-port 4001 \

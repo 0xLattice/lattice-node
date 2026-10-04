@@ -20,7 +20,6 @@ COPY deploy/read-replica/entrypoint.sh /usr/local/bin/read-replica-entrypoint
 RUN chmod +x /usr/local/bin/read-replica-entrypoint \
     && useradd -m -s /bin/bash lattice \
     && install -d -o lattice -g lattice /data
-USER lattice
 
 # 8081 = public nginx; 4001 = the node's tree overlay.
 EXPOSE 8081 4001
