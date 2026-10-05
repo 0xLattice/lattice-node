@@ -60,7 +60,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/adalinxx/Ivy.git",
       "state" : {
-        "revision" : "33c4690839bc93db747d95254cfb5edf8f429850",
+        "revision" : "048111eb96992328c46836f400b07e06030350dc",
         "version" : "13.1.0"
       }
     },
@@ -69,7 +69,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/adalinxx/Lattice.git",
       "state" : {
-        "revision" : "5e49e435844e4f7ebb8aa7920e2e787f9e252b09",
+        "revision" : "73f21673b56577ad30a29c39ed1573609ffc4f70",
         "version" : "44.0.0"
       }
     },
@@ -348,7 +348,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/adalinxx/Tally.git",
       "state" : {
-        "revision" : "bbc83ac8be0816682cbc6a52fe37f1b99886114a",
+        "revision" : "46a211fc0488738f6adf3cc65d5411440ed8137c",
         "version" : "3.0.1"
       }
     },
