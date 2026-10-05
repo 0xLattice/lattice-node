@@ -37,7 +37,7 @@ final class LoopbackRPCAuthTests: XCTestCase {
             ] {
                 try await client.execute(uri: uri, method: method) { response in
                     XCTAssertEqual(response.status, .unauthorized, uri)
-                    XCTAssertEqual(response.headers[.wwwAuthenticate], #"Basic realm="lattice-node""#)
+                    XCTAssertNil(response.headers[.wwwAuthenticate], "no challenge: Linux URLSession stalls on one")
                 }
             }
             for uri in ["/mining/templates", "/mining/work", "/transactions"] {

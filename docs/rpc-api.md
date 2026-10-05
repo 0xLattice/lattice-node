@@ -25,7 +25,7 @@ secret). Send either:
 - `Authorization: Basic <base64 of the file's content>` (`curl --user "$(cat .cookie)"`), or
 - `Authorization: Bearer <token>` (the part after `__cookie__:`).
 
-Anything else gets `401` with `WWW-Authenticate: Basic realm="lattice-node"`.
+Anything else gets `401` (no `WWW-Authenticate` challenge).
 The cookie changes at every restart; clients re-read the file.
 
 Browsers are refused: a request with an `Origin` header gets `403` unless the
@@ -339,7 +339,7 @@ level's facts and stream cursors commit in one `state.db` transaction.
 - `400 Bad Request` — malformed JSON, invalid content, policy refusal, or
   invalid work;
 - `413 Content Too Large` — public submit body over 1 MiB;
-- `401 Unauthorized` — operator route without the node's cookie;
+- `401 Unauthorized` — operator route without the node's cookie (no challenge header);
 - `403 Forbidden` — browser `Origin` not listed, or a non-loopback `Host`;
 - `404 Not Found` — unknown resource or unhosted `chainPath`;
 - `415 Unsupported Media Type` — operator POST without JSON content type;

@@ -125,11 +125,11 @@ struct LoopbackRPCAuthMiddleware<Context: RequestContext>: RouterMiddleware {
     private func authorize(_ request: Request) throws {
         if request.method == .get || request.method == .head, request.uri.path == "/health" { return }
         guard auth.accepts(request.headers[.authorization]) else {
-            throw HTTPError(
-                .unauthorized,
-                headers: [.wwwAuthenticate: #"Basic realm="lattice-node""#],
-                message: "operator RPC requires the node's cookie"
-            )
+            // No WWW-Authenticate challenge: Linux URLSession (corelibs
+            // FoundationNetworking) answers one by stalling the request
+            // instead of returning the 401, and every client here already
+            // knows to send the cookie.
+            throw HTTPError(.unauthorized, message: "operator RPC requires the node's cookie")
         }
     }
 }
