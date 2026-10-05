@@ -24,6 +24,15 @@ final class CompleteVolumeArchiveTests: XCTestCase {
             root: "root", entries: ["root": Data(repeating: 0, count: 64 * 1024 * 1024)]
         )))
     }
+
+    func testArchiveAppliesIvyStringBounds() {
+        XCTAssertNil(encodeCompleteVolumeArchive(SerializedVolume(
+            root: "", entries: ["": Data()]
+        )))
+        XCTAssertNil(encodeCompleteVolumeArchive(SerializedVolume(
+            root: "bafy-é", entries: ["bafy-é": Data()]
+        )))
+    }
 }
 
 private extension Data {

@@ -15,8 +15,10 @@ func encodeCompleteVolumeArchive(_ volume: SerializedVolume) -> Data? {
     var size = 2
     for (cid, bytes) in entries {
         let cidLength = cid.utf8.count
-        guard cidLength <= maximumCIDBytes,
+        guard cidLength > 0,
+              cidLength <= maximumCIDBytes,
               cidLength <= Int(UInt16.max),
+              cid.utf8.allSatisfy({ $0 < 0x80 }),
               bytes.count <= Int(UInt32.max) else { return nil }
         let (metadataSize, metadataOverflow) = 6.addingReportingOverflow(cidLength)
         let (entrySize, entryOverflow) = metadataSize.addingReportingOverflow(bytes.count)
