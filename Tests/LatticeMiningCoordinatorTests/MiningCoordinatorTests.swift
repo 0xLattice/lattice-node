@@ -861,10 +861,11 @@ final class MiningCoordinatorTests: XCTestCase {
         let cookie = FileManager.default.temporaryDirectory.appendingPathComponent("cookie-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: cookie) }
         try Data("__cookie__:first".utf8).write(to: cookie)
-        nonisolated(unsafe) var seen: [String?] = []
-        StubTemplateURLProtocol.responder = { request in
-            seen.append(request.value(forHTTPHeaderField: "Authorization"))
-            return (200, Data(#"{"tipCID":"t"}"#.utf8))
+        func expect(_ authorization: String) {
+            StubTemplateURLProtocol.responder = { request in
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), authorization)
+                return (200, Data(#"{"tipCID":"t"}"#.utf8))
+            }
         }
         defer { StubTemplateURLProtocol.responder = nil }
         let config = URLSessionConfiguration.ephemeral
@@ -874,13 +875,13 @@ final class MiningCoordinatorTests: XCTestCase {
             session: URLSession(configuration: config),
             cookieFile: cookie
         )
-        _ = try await client.fetchStaleToken()
+        expect("Basic " + Data("__cookie__:first".utf8).base64EncodedString())
+        let token = try await client.fetchStaleToken()
+        XCTAssertEqual(token, "t")
         try Data("__cookie__:second\n".utf8).write(to: cookie)
-        _ = try await client.fetchStaleToken()
-        XCTAssertEqual(seen, [
-            "Basic " + Data("__cookie__:first".utf8).base64EncodedString(),
-            "Basic " + Data("__cookie__:second".utf8).base64EncodedString(),
-        ])
+        expect("Basic " + Data("__cookie__:second".utf8).base64EncodedString())
+        let rotated = try await client.fetchStaleToken()
+        XCTAssertEqual(rotated, "t")
     }
 
     func testHTTPSubmitTreatsJSONServerFailureAsRetryableTransportFailure() throws {
