@@ -453,6 +453,23 @@ private func addPublicReadRoutes<Context: RequestContext>(
             context: context
         )
     }
+    router.get("volumes/:cid") { request, context in
+        let service = try byPath(request)
+        guard let cid = context.parameters.get("cid"), isPlausibleCID(cid) else {
+            throw HTTPError(.badRequest)
+        }
+        guard let archive = await service.completeVolumeArchive(rootCID: cid) else {
+            throw HTTPError(.notFound)
+        }
+        return Response(
+            status: .ok,
+            headers: [
+                .contentType: "application/vnd.lattice.volume",
+                .cacheControl: immutableCacheControl,
+            ],
+            body: ResponseBody(byteBuffer: ByteBuffer(bytes: archive))
+        )
+    }
     router.get("accounts/:owner") { request, context in
         let service = try byPath(request)
         guard let owner = context.parameters.get("owner"), isPlausibleCID(owner) else {

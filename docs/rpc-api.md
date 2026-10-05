@@ -73,6 +73,7 @@ Mining templates are requested at Nexus and can carry every hosted descendant.
 |---|---|---|
 | `GET /health` | Published chain and mempool status | yes |
 | `GET /transactions/:cid` | Content-verified transaction by CID | yes |
+| `GET /volumes/:cid` | Complete locally held Volume as the Ivy binary archive | yes |
 | `GET /accounts/:owner?block=<cid>` | Account balance and next nonce at an accepted block | yes |
 | `GET /api/block/latest` | Latest executed block summary | yes |
 | `GET /api/block/:height-or-cid` | Block detail | yes |
@@ -93,6 +94,14 @@ Mining templates are requested at Nexus and can carry every hosted descendant.
 
 Block transaction pages accept `offset` and `limit`; limits are capped at
 100. CID and response sizes are bounded before decoding.
+
+`GET /volumes/:cid` returns `application/vnd.lattice.volume`: Ivy's canonical
+complete-Volume archive (big-endian count and length framing, CID-sorted
+entries), capped at 64 MiB. It serves only a Volume already held locally and
+never turns an unauthenticated HTTP request into a DHT fetch. Missing or
+incomplete content is 404. The immutable response is billed to the expensive
+public-read budget. Like the other per-level reads, a hosted child is selected
+with `?chainPath=Nexus/Alpha`; omitting it selects Nexus.
 
 Both `/api/block/latest` and `/api/block/:height-or-cid` report the block's
 coinbase. `rewardRecipient` is the header's recipient address; it is omitted

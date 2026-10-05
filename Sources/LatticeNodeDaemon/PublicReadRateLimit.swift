@@ -162,6 +162,10 @@ enum PublicReadRouteClass: Sendable, Equatable {
         case 3 where components[0] == "api" && components[1] == "chain" && components[2] == "endpoints":
             // A peer fan-out, and a walk of the parent's recent commitments.
             self = .expensive
+        case 2 where components[0] == "volumes":
+            // A complete Volume can be tens of MiB. The handler is local-only
+            // but serialization and egress remain expensive.
+            self = .expensive
         default:
             self = .general
         }

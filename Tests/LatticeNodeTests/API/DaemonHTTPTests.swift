@@ -9,6 +9,38 @@ import cashew
 @testable import LatticeNodeDaemon
 
 final class DaemonHTTPTests: XCTestCase {
+    func testCompleteVolumeRouteServesTheLocalIvyArchive() async throws {
+        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-http-volume-\(UUID().uuidString)"
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
+        let storage = try await NodeStorage.open(configuration: NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: storageDirectory,
+            privateKeyHex: String(repeating: "01", count: 32)
+        ))
+        let service = try await startRuntime(storage)
+        let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
+        let genesis = storage.configuration.nexusGenesisCID
+
+        try await app.test(.router) { client in
+            try await client.execute(
+                uri: "/volumes/\(genesis)", method: .get,
+                headers: [.authorization: testOperatorAuthorization]
+            ) { response in
+                XCTAssertEqual(response.status, .ok)
+                XCTAssertEqual(response.headers[.contentType], "application/vnd.lattice.volume")
+                XCTAssertEqual(response.headers[.cacheControl], immutableCacheControl)
+                let archive = Data(response.body.readableBytesView)
+                XCTAssertGreaterThanOrEqual(archive.count, 2)
+                XCTAssertGreaterThan(
+                    archive.withUnsafeBytes { $0.loadUnaligned(as: UInt16.self).bigEndian }, 0
+                )
+                XCTAssertNotNil(archive.range(of: Data(genesis.utf8)))
+            }
+        }
+    }
+
     func testNexusTemplateDoesNotRequireParentReadiness() async throws {
         let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-http-parent-unavailable-\(UUID().uuidString)"
