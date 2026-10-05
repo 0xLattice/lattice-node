@@ -30,6 +30,7 @@ final class ReadEndpointRuntimeTests: XCTestCase {
         hosted: [[String]],
         specs: [[String]: ChainSpec] = [:],
         url: String? = nil,
+        publicSubmit: Bool = false,
         peers: [PeerEndpoint] = []
     ) async throws -> Node {
         let port = NetworkTransportTestPorts.allocate()
@@ -43,7 +44,8 @@ final class ReadEndpointRuntimeTests: XCTestCase {
             externalAddress: "127.0.0.1",
             hostedChildren: hosted,
             childSpecs: specs,
-            publicReadURL: url
+            publicReadURL: url,
+            publicSubmit: publicSubmit
         )
         let overlay = IvyConfig(
             signingKey: configuration.signingKey,
@@ -68,7 +70,7 @@ final class ReadEndpointRuntimeTests: XCTestCase {
         let hostURL = "https://tree-host.example"
         let host = try await start(
             keyByte: 0x51, hosted: [Self.alpha, Self.beta],
-            specs: [Self.alpha: Self.spec, Self.beta: Self.spec], url: hostURL
+            specs: [Self.alpha: Self.spec, Self.beta: Self.spec], url: hostURL, publicSubmit: true
         )
         // Beta's genesis needs an executed Alpha block with a changed state.
         let betaReads = try XCTUnwrap(host.runtime.levelReads[Self.beta])
@@ -105,6 +107,8 @@ final class ReadEndpointRuntimeTests: XCTestCase {
             found = await alphaFollower.runtime.chainEndpoints(Self.beta)
             return found?.endpoints == [hostURL]
         }
+        // The host's submit declaration travels with its URL, at every level.
+        XCTAssertEqual(found?.submitEndpoints, [hostURL])
         let committed = try XCTUnwrap(found?.committedBlock)
         let hostBetaBlock = await betaReads.explorerBlock(cid: committed)
         XCTAssertNotNil(hostBetaBlock, "the committed block is one the declared host serves on Beta")
@@ -117,6 +121,8 @@ final class ReadEndpointRuntimeTests: XCTestCase {
         try await eventually("Alpha's URL is found through a Nexus-only node") {
             await nexusOnly.runtime.chainEndpoints(Self.alpha)?.endpoints == [hostURL]
         }
+        let alphaThroughNexus = await nexusOnly.runtime.chainEndpoints(Self.alpha)
+        XCTAssertEqual(alphaThroughNexus?.submitEndpoints, [hostURL])
         for path in [Self.alpha, Self.beta] {
             let listed = await alphaFollower.runtime.chainEndpoints(path)?.endpoints ?? []
             XCTAssertFalse(listed.contains("https://not-a-host.example"), "\(path)")
@@ -124,6 +130,7 @@ final class ReadEndpointRuntimeTests: XCTestCase {
         // The host lists itself first for a child it hosts.
         let own = await host.runtime.chainEndpoints(Self.beta)
         XCTAssertEqual(own?.endpoints.first, hostURL)
+        XCTAssertEqual(own?.submitEndpoints, [hostURL])
         // An uncommitted, unhosted name is not looked up.
         let unknown = await alphaFollower.runtime.chainEndpoints(Self.alpha + ["Gamma"])
         XCTAssertNil(unknown)
@@ -138,6 +145,7 @@ final class ReadEndpointRuntimeTests: XCTestCase {
                 XCTAssertEqual(response.status, .ok)
                 let body = try JSONDecoder().decode(ExplorerChainEndpoints.self, from: Data(buffer: response.body))
                 XCTAssertEqual(body.endpoints, [hostURL])
+                XCTAssertEqual(body.submitEndpoints, [hostURL])
                 XCTAssertEqual(body.chainPath, Self.beta)
             }
             for (uri, status) in [

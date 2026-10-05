@@ -39,6 +39,77 @@ final class MiningStateTests: XCTestCase {
         XCTAssertEqual(mining.journaled, [cid])
     }
 
+    func testAPublicSubmitIsAnsweredAndAnnouncedButNeverJournaled() throws {
+        var mining = MiningState(tipCID: "A", spec: testSpec())
+        let tx = try transfer(nonce: 0)
+        let cid = try Mempool.cid(of: tx)
+        guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .submitted(replyID: 1)), now: 0).first
+        else { return XCTFail() }
+        XCTAssertEqual(mining.pendingSubmitted, 1)
+        let admitted = mining.step(.preflighted(job, .ready), now: 1)
+        guard case .poolChanged(let delta)? = admitted.first else { return XCTFail("\(admitted)") }
+        XCTAssertEqual(delta.added.map(\.cid), [cid])
+        XCTAssertTrue(delta.journaled.isEmpty, "a public submit is volatile")
+        XCTAssertTrue(mining.journaled.isEmpty)
+        XCTAssertTrue(admitted.contains { if case .transactionAdmitted(1, cid, 1, _) = $0 { true } else { false } })
+        XCTAssertTrue(admitted.contains { if case .announceTransaction(cid) = $0 { true } else { false } },
+                      "relayed by ordinary gossip")
+        XCTAssertEqual(mining.pendingSubmitted, 0)
+    }
+
+    func testPublicSubmitsHaveTheirOwnPendingBoundAndNeverCrowdOutLocalsOrPeers() throws {
+        var mining = MiningState(tipCID: "A", spec: testSpec(), config: MiningConfig(maxPendingSubmitted: 1))
+        func preflights(_ effects: [MiningEffect]) -> Int {
+            effects.filter { if case .preflight = $0 { true } else { false } }.count
+        }
+        XCTAssertEqual(preflights(mining.step(.transactionReceived(try transfer(nonce: 0), origin: .submitted(replyID: 1)), now: 0)), 1)
+        let over = mining.step(.transactionReceived(try transfer(nonce: 1), origin: .submitted(replyID: 2)), now: 0)
+        guard case .transactionRefused(2, .full)? = over.first, over.count == 1 else {
+            return XCTFail("over its bound a public submit is answered, never silently dropped: \(over)")
+        }
+        XCTAssertEqual(preflights(mining.step(
+            .transactionReceived(try transfer(nonce: 2), origin: .peer(PeerID(key: "p", session: 1))), now: 0
+        )), 1, "a public flood never takes a peer's room")
+        XCTAssertEqual(preflights(mining.step(.transactionReceived(try transfer(nonce: 3), origin: .local(replyID: 3)), now: 0)), 1,
+                       "nor a local submit's")
+        XCTAssertEqual(mining.pendingSubmitted, 1)
+    }
+
+    /// Pooled, a public submit is an ordinary entry: it displaces nothing a
+    /// better fee rate would not, local entries included.
+    func testAPublicSubmitGetsNoCapacityPriority() throws {
+        var mining = MiningState(tipCID: "A", spec: testSpec(), config: MiningConfig(mempool: MempoolLimits(maxCount: 1)))
+        let local = try transfer(nonce: 0, debit: 2)
+        guard case .preflight(let localJob)? = mining.step(.transactionReceived(local, origin: .local(replyID: 1)), now: 0).first
+        else { return XCTFail() }
+        _ = mining.step(.preflighted(localJob, .ready), now: 0)
+        let cheapKey = CryptoUtils.generateKeyPair()
+        let cheap = try signed(cheapKey, [AccountAction(owner: address(cheapKey), delta: -1)], nonce: 0)
+        guard case .preflight(let cheapJob)? = mining.step(.transactionReceived(cheap, origin: .submitted(replyID: 2)), now: 0).first
+        else { return XCTFail() }
+        let refused = mining.step(.preflighted(cheapJob, .ready), now: 1)
+        XCTAssertTrue(refused.contains { if case .transactionRefused(2, .full) = $0 { true } else { false } }, "\(refused)")
+        XCTAssertTrue(mining.mempool.contains(try Mempool.cid(of: local)), "the local entry stays")
+        // A better fee rate evicts by the ordinary rule, whatever its source.
+        let richKey = CryptoUtils.generateKeyPair()
+        let rich = try signed(richKey, [AccountAction(owner: address(richKey), delta: -50)], nonce: 0)
+        guard case .preflight(let richJob)? = mining.step(.transactionReceived(rich, origin: .submitted(replyID: 3)), now: 2).first
+        else { return XCTFail() }
+        let evicting = mining.step(.preflighted(richJob, .ready), now: 3)
+        XCTAssertTrue(evicting.contains { if case .transactionAdmitted(3, _, _, _) = $0 { true } else { false } }, "\(evicting)")
+        XCTAssertFalse(mining.mempool.contains(try Mempool.cid(of: local)))
+    }
+
+    func testAPublicSubmitWaitingThroughTooManyMovesIsAnsweredRetriable() throws {
+        var mining = MiningState(tipCID: "A", spec: testSpec(), config: MiningConfig(maxReissues: 1))
+        _ = mining.step(.transactionReceived(try transfer(nonce: 0), origin: .submitted(replyID: 7)), now: 0)
+        _ = mining.step(.tipMoved(TipMove(tipCID: "B")), now: 1)
+        let second = mining.step(.tipMoved(TipMove(tipCID: "C")), now: 2)
+        XCTAssertTrue(second.contains { if case .transactionRefused(7, .contextChanged) = $0 { true } else { false } }, "\(second)")
+        XCTAssertEqual(mining.pendingSubmitted, 0)
+        XCTAssertEqual(mining.pendingAdmissions, 0)
+    }
+
     func testAMoveThatLeavesBlocksAsksForTheirTransactions() {
         var mining = MiningState(tipCID: "A1", spec: testSpec())
         let moved = mining.step(.tipMoved(TipMove(tipCID: "B2", confirmed: ["t"], left: ["A1"])), now: 1)

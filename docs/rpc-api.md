@@ -4,7 +4,9 @@ Base operator URL: `http://127.0.0.1:<rpc-port>`
 
 The API has one unversioned route set. `/v1/...` does not exist. The operator
 listener is unauthenticated and loopback-only. The optional public-read
-listener registers only the GET routes in the read table below.
+listener registers only the GET routes in the read table below, plus
+`POST /transactions` when its operator turns public submit on
+([Public submit](#public-submit)); it is off by default.
 
 Requests and responses are JSON unless noted. Operator POSTs require
 `Content-Type: application/json` and a loopback `Host` authority.
@@ -88,9 +90,18 @@ the node does not host the child. 400 for a missing or malformed path, or
 {
   "chainPath": ["Nexus", "Alpha", "Beta"],
   "committedBlock": "<cid of the newest child block the parent commits>",
-  "endpoints": ["https://reads.example.org"]
+  "endpoints": ["https://reads.example.org"],
+  "submitEndpoints": ["https://reads.example.org"]
 }
 ```
+
+`submitEndpoints` is the subset of `endpoints` whose hosts also declare that
+they accept `POST /transactions` at that URL (equally unverified: confirm with
+`GET /api/chain/info` there, whose `acceptsSubmit` is true). A host that
+accepts submits answers `.response.v2` (the v1 fields plus `acceptsSubmit`)
+before its `.response.v1`; an older reader drops the unknown topic and still
+gets the URL, and a v1 answer alone counts as not accepting. An answer from a
+node predating the field has no `submitEndpoints`; read it as empty.
 
 `endpoints` lists this node's own declared URL first when it hosts the child,
 then URLs other hosts declared over the overlay
@@ -167,6 +178,29 @@ Response:
 The body is content-bound and the signature, nonce, funding, fee, and path are
 validated before admission. An unhosted path returns 404.
 
+### Public submit
+
+`POST /transactions` on the public-read listener exists only when the
+operator starts the node with `--public-submit` (`"publicSubmit": true` in
+`lattice.json`); otherwise it is 404. When on, it takes the same body and
+gives the same answer and named refusals as the operator route, without the
+operator route's loopback `Host` and `Content-Type` checks (CORS allows POST
+on that listener). Differences:
+
+- the body is capped at 1 MiB before decoding (`413` above it);
+- each client is billed to its expensive read budget, and the listener to a
+  separate submit budget (`--public-submit-rate`, default 10/s): `429` over
+  either;
+- the transaction is volatile, never written to the local journal, and is
+  held to the pool's ordinary capacity rules (fee-rate eviction and
+  replacement) with no priority over peer gossip. While it waits for its
+  preflight verdict it counts against its own bound (`full` when over).
+  Once admitted it is relayed by ordinary gossip.
+
+`GET /api/chain/info` reports `acceptsSubmit` for the listener that answers:
+`true` on the operator listener, and on the public listener only when public
+submit is on.
+
 ## Request mining work
 
 ### `POST /mining/templates`
@@ -237,6 +271,7 @@ level's facts and stream cursors commit in one `state.db` transaction.
 
 - `400 Bad Request` — malformed JSON, invalid content, policy refusal, or
   invalid work;
+- `413 Content Too Large` — public submit body over 1 MiB;
 - `404 Not Found` — unknown resource or unhosted `chainPath`;
 - `415 Unsupported Media Type` — operator POST without JSON content type;
 - `429 Too Many Requests` — mempool or public-read rate limit;

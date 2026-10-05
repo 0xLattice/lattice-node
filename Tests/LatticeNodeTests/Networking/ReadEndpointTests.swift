@@ -30,13 +30,18 @@ final class ReadEndpointTests: XCTestCase {
         var discoveryDelay: UInt64 = 0
         let providers: [PeerEndpoint]
         let respond: @Sendable (PeerEndpoint, ReadEndpointRequestMessage) -> [(String, ReadEndpointResponseMessage)]
+        /// v2 answers, delivered before the v1 ones as a host sends them.
+        let respondV2: @Sendable (PeerEndpoint, ReadEndpointRequestMessage) -> [(String, ReadEndpointResponseV2Message)]
 
         init(
             providers: [PeerEndpoint],
+            respondV2: @escaping @Sendable (PeerEndpoint, ReadEndpointRequestMessage)
+                -> [(String, ReadEndpointResponseV2Message)] = { _, _ in [] },
             respond: @escaping @Sendable (PeerEndpoint, ReadEndpointRequestMessage)
                 -> [(String, ReadEndpointResponseMessage)]
         ) {
             self.providers = providers
+            self.respondV2 = respondV2
             self.respond = respond
         }
 
@@ -53,6 +58,9 @@ final class ReadEndpointTests: XCTestCase {
         /// Every ask "dials": a session the directory must release.
         func ask(_ provider: PeerEndpoint, _ request: ReadEndpointRequestMessage) async -> Bool {
             asked.append(provider.publicKey)
+            for (from, response) in respondV2(provider, request) {
+                await directory?.receive(response, from: from)
+            }
             for (from, response) in respond(provider, request) {
                 await directory?.receive(response, from: from)
             }
@@ -104,7 +112,7 @@ final class ReadEndpointTests: XCTestCase {
             (0..<5).map { Self.answer(provider, request, url: "https://\(provider.publicKey.prefix(16))-\($0).example") }
         }
         let directory = await directory(script)
-        let urls = await directory.lookup(Self.path)
+        let urls = await directory.lookup(Self.path).map(\.url)
 
         let asked = await script.asked
         XCTAssertEqual(asked.count, ReadEndpointDirectory.maximumAsked)
@@ -127,7 +135,7 @@ final class ReadEndpointTests: XCTestCase {
         }
         let directory = await directory(script, deadline: .milliseconds(300))
         let start = ContinuousClock.now
-        let urls = await directory.lookup(Self.path)
+        let urls = await directory.lookup(Self.path).map(\.url)
         XCTAssertEqual(urls, ["https://talker.example"])
         XCTAssertLessThan(ContinuousClock.now - start, .seconds(2))
     }
@@ -140,7 +148,7 @@ final class ReadEndpointTests: XCTestCase {
         await script.slowDiscovery(5_000_000_000)
         let directory = await directory(script, deadline: .milliseconds(200))
         let start = ContinuousClock.now
-        let urls = await directory.lookup(Self.path)
+        let urls = await directory.lookup(Self.path).map(\.url)
         XCTAssertEqual(urls, [])
         XCTAssertLessThan(ContinuousClock.now - start, .seconds(2))
     }
@@ -152,7 +160,7 @@ final class ReadEndpointTests: XCTestCase {
             [Self.answer(provider, request, url: "https://\(provider.port).example")]
         }
         let directory = await directory(script, deadline: .milliseconds(300))
-        let urls = await directory.lookup(Self.path)
+        let urls = await directory.lookup(Self.path).map(\.url)
         XCTAssertEqual(Set(urls).count, 3)
         try await eventually("every dialed session is released") {
             Set(await script.released) == Set(providers.map(\.publicKey))
@@ -175,7 +183,7 @@ final class ReadEndpointTests: XCTestCase {
             ]
         }
         let directory = await directory(script, deadline: .milliseconds(200), ownKey: own)
-        let urls = await directory.lookup(Self.path)
+        let urls = await directory.lookup(Self.path).map(\.url)
         XCTAssertEqual(urls, [])
         let askedKeys = await script.asked
         XCTAssertEqual(askedKeys, [asked.publicKey])
@@ -190,7 +198,7 @@ final class ReadEndpointTests: XCTestCase {
         }
         let directory = await directory(script, clock: clock)
         let results = await withTaskGroup(of: [String].self) { group in
-            for _ in 0..<10 { group.addTask { await directory.lookup(Self.path) } }
+            for _ in 0..<10 { group.addTask { await directory.lookup(Self.path).map(\.url) } }
             return await group.reduce(into: []) { $0.append($1) }
         }
         XCTAssertEqual(results, Array(repeating: ["https://one.example"], count: 10))
@@ -235,6 +243,60 @@ final class ReadEndpointTests: XCTestCase {
             ReadEndpointRequestMessage(chainPath: Self.path, requestID: 9), hosted: hosted, url: "https://a.example"
         ))
         XCTAssertNil(ReadEndpointDirectory.answer(request, hosted: hosted, url: nil))
+    }
+
+    /// A host accepting submits answers v2 then v1 with one URL: counted
+    /// once, flagged. A v1-only host (an older node, or submit off) is not
+    /// flagged, and a v2 answer cannot lift a responder past its cap.
+    func testAV2AnswerFlagsSubmitAndAV1AnswerAloneDoesNot() async throws {
+        let submitHost = Self.endpoint(1)
+        let readOnlyHost = Self.endpoint(2)
+        let script = Script(providers: [submitHost, readOnlyHost], respondV2: { provider, request in
+            guard provider == submitHost else { return [] }
+            return (0..<4).map { index in
+                (provider.publicKey, ReadEndpointResponseV2Message(
+                    chainPath: request.chainPath, requestID: request.requestID,
+                    url: index == 0 ? "https://submit.example" : "https://extra-\(index).example",
+                    acceptsSubmit: true
+                ))
+            }
+        }) { provider, request in
+            [Self.answer(provider, request, url: provider == submitHost ? "https://submit.example" : "https://read.example")]
+        }
+        let directory = await directory(script, deadline: .milliseconds(500))
+        let found = await directory.lookup(Self.path)
+        XCTAssertTrue(found.contains(DeclaredReadEndpoint(url: "https://submit.example", acceptsSubmit: true)))
+        XCTAssertTrue(found.contains(DeclaredReadEndpoint(url: "https://read.example", acceptsSubmit: false)))
+        XCTAssertEqual(found.filter { $0.url == "https://submit.example" }.count, 1)
+        XCTAssertLessThanOrEqual(
+            found.filter { $0.url.hasPrefix("https://extra-") }.count, ReadEndpointDirectory.perResponderCap - 1
+        )
+    }
+
+    /// The v2 answer exists only for a host that accepts submits, and only
+    /// where the v1 answer would.
+    func testTheV2AnswerIsSentOnlyWhenSubmitIsOn() throws {
+        let hosted: Set<[String]> = [["Nexus"], ["Nexus", "Alpha"]]
+        let request = ReadEndpointRequestMessage(chainPath: ["Nexus", "Alpha"], requestID: 9)
+        XCTAssertEqual(
+            ReadEndpointDirectory.answerV2(request, hosted: hosted, url: "https://a.example", acceptsSubmit: true),
+            ReadEndpointResponseV2Message(
+                chainPath: ["Nexus", "Alpha"], requestID: 9, url: "https://a.example", acceptsSubmit: true
+            )
+        )
+        XCTAssertNil(ReadEndpointDirectory.answerV2(request, hosted: hosted, url: "https://a.example", acceptsSubmit: false))
+        XCTAssertNil(ReadEndpointDirectory.answerV2(request, hosted: hosted, url: nil, acceptsSubmit: true))
+        XCTAssertNil(ReadEndpointDirectory.answerV2(
+            ReadEndpointRequestMessage(chainPath: Self.path, requestID: 9), hosted: hosted,
+            url: "https://a.example", acceptsSubmit: true
+        ))
+        let v2 = ReadEndpointResponseV2Message(chainPath: Self.path, requestID: 3, url: "https://b.example", acceptsSubmit: true)
+        XCTAssertEqual(try ReadEndpointResponseV2Message.decoded(v2.encoded()), v2)
+        XCTAssertThrowsError(try ReadEndpointResponseV2Message(
+            chainPath: Self.path, requestID: 3, url: "ftp://b.example", acceptsSubmit: true
+        ).encoded())
+        // A v2 payload is not a v1 answer: an older reader never mistakes it.
+        XCTAssertThrowsError(try ReadEndpointResponseMessage.decoded(v2.encoded()))
     }
 
     func testWireMessagesAreCanonicalAndRejectABadURL() throws {

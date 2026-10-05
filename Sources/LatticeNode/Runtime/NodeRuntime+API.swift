@@ -70,6 +70,22 @@ extension NodeRuntime {
     public func submitTransaction(
         _ request: SubmitTransactionRequest
     ) async throws -> SubmitTransactionResponse {
+        try await submit(request) { .local(replyID: $0) }
+    }
+
+    /// A submit on the opt-in public listener: the same answer, but the
+    /// transaction is volatile (never journaled) and its wait for a verdict is
+    /// bounded; once pooled it is held to the pool's ordinary capacity rules.
+    public func submitPublicTransaction(
+        _ request: SubmitTransactionRequest
+    ) async throws -> SubmitTransactionResponse {
+        try await submit(request) { .submitted(replyID: $0) }
+    }
+
+    private func submit(
+        _ request: SubmitTransactionRequest,
+        origin: @escaping @Sendable (UInt64) -> TransactionOrigin
+    ) async throws -> SubmitTransactionResponse {
         guard let payload = try? JSONEncoder().encode(request),
               payload.count <= NodeAPILimits.maximumPayloadBytes else {
             throw NodeAPIError.requestTooLarge
@@ -78,7 +94,7 @@ extension NodeRuntime {
         // A transaction names its chain: it goes to that level's pool.
         let path = transaction.body.node?.chainPath ?? configuration.chainPath
         guard case .admitted(let cid, let count, let bytes) = try await ask(at: path, {
-            .transactionReceived(transaction, origin: .local(replyID: $0))
+            .transactionReceived(transaction, origin: origin($0))
         }) else { throw NodeRuntimeError.stopped }
         return SubmitTransactionResponse(transactionCID: cid, mempoolCount: count, mempoolBytes: bytes)
     }
@@ -195,11 +211,20 @@ extension NodeRuntime {
         let hostsChild = levelReads[chainPath] != nil
         let committed = await parentReads.committedChild(directory: chainPath[chainPath.count - 1])
         guard committed != nil || hostsChild else { return nil }
-        var endpoints = hostsChild ? configuration.publicReadURL.map { [$0] } ?? [] : []
-        for url in await readEndpoints.lookup(chainPath) where !endpoints.contains(url) {
-            endpoints.append(url)
+        var declared = hostsChild
+            ? configuration.publicReadURL.map {
+                [DeclaredReadEndpoint(url: $0, acceptsSubmit: configuration.publicSubmit)]
+            } ?? []
+            : []
+        for endpoint in await readEndpoints.lookup(chainPath) where !declared.contains(where: { $0.url == endpoint.url }) {
+            declared.append(endpoint)
         }
-        return ExplorerChainEndpoints(chainPath: chainPath, committedBlock: committed, endpoints: endpoints)
+        return ExplorerChainEndpoints(
+            chainPath: chainPath,
+            committedBlock: committed,
+            endpoints: declared.map(\.url),
+            submitEndpoints: declared.filter(\.acceptsSubmit).map(\.url)
+        )
     }
 
     /// `/status`: the read snapshot with the template digest.

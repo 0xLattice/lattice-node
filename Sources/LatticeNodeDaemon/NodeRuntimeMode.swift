@@ -53,6 +53,10 @@ extension LatticeNodeCommand {
                 )
             }
         }
+        var submit: PublicSubmit?
+        if publicSubmit {
+            submit = { @Sendable request in try await runtime.submitPublicTransaction(request) }
+        }
         let publicReadApp = publicReadPort.map { port in
             makePublicReadApplication(
                 reads: runtime.reads,
@@ -61,7 +65,8 @@ extension LatticeNodeCommand {
                 port: Int(port),
                 peers: peers,
                 limits: publicReadLimits,
-                endpoints: { await runtime.chainEndpoints($0) }
+                endpoints: { await runtime.chainEndpoints($0) },
+                submit: submit
             )
         }
         print("lattice-node (node runtime)")
@@ -70,6 +75,7 @@ extension LatticeNodeCommand {
         print("  rpc:     http://\(rpcBind):\(rpcPort)")
         if let publicReadPort {
             print("  public-read: http://0.0.0.0:\(publicReadPort)")
+            if publicSubmit { print("  public-submit: POST /transactions on the public read port") }
         }
         let result: Result<Void, any Error>
         do {

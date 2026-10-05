@@ -11,6 +11,18 @@ import Tally
 enum ReadEndpointTopic {
     static let request = "lattice.overlay.read-endpoint.request.v1"
     static let response = "lattice.overlay.read-endpoint.response.v1"
+    /// The same answer with the host's public-submit declaration. A host that
+    /// accepts submits sends it BEFORE the v1 answer, so a reader that knows
+    /// it records the flag and one that does not (an unknown topic is dropped)
+    /// still gets the URL from v1. A v1 answer alone means no submit.
+    static let responseV2 = "lattice.overlay.read-endpoint.response.v2"
+}
+
+/// One declared endpoint: its URL and whether its host says it accepts
+/// `POST /transactions` there. Both unverified.
+struct DeclaredReadEndpoint: Equatable, Sendable {
+    let url: String
+    let acceptsSubmit: Bool
 }
 
 /// "Your declared read URL for `chainPath`?"
@@ -82,6 +94,20 @@ struct ReadEndpointTransport: Sendable {
     }
 }
 
+/// The v2 answer: the v1 fields and the host's submit declaration.
+struct ReadEndpointResponseV2Message: CanonicalJSONMessage, Equatable, Sendable {
+    let chainPath: [String]
+    let requestID: UInt64
+    let url: String
+    let acceptsSubmit: Bool
+
+    func validate() throws {
+        guard _isAbsoluteChainPath(chainPath), NodeConfiguration.isValidPublicReadURL(url) else {
+            throw OverlayWireError.malformed
+        }
+    }
+}
+
 /// Bounded lookups of the read URLs other hosts declare for a chain: at most
 /// `maximumAsked` providers (shuffled, so a crowd of announcers cannot pick
 /// who is asked), at most `perResponderCap` URLs from any one responder, one
@@ -100,8 +126,8 @@ actor ReadEndpointDirectory {
     private let cacheSeconds: Double
     private let clock: @Sendable () -> Double
 
-    private var cache: [[String]: (at: Double, urls: [String])] = [:]
-    private var inFlight: [[String]: Task<[String], Never>] = [:]
+    private var cache: [[String]: (at: Double, urls: [DeclaredReadEndpoint])] = [:]
+    private var inFlight: [[String]: Task<[DeclaredReadEndpoint], Never>] = [:]
     private var lookups: [UInt64: Lookup] = [:]
     /// Each request in flight: its lookup and the peer it was sent to.
     private var requests: [UInt64: (lookup: UInt64, peerKey: String)] = [:]
@@ -113,12 +139,12 @@ actor ReadEndpointDirectory {
         let chainPath: [String]
         /// Nil until the providers are found and asked.
         var unanswered: Set<UInt64>?
-        var urls: [String] = []
+        var urls: [DeclaredReadEndpoint] = []
         var perResponder: [String: Int] = [:]
         var asks: [Task<Void, Never>] = []
         /// Sessions dialed only for this lookup: closed when it ends.
         var dialed: [PeerEndpoint] = []
-        var waiter: CheckedContinuation<[String], Never>?
+        var waiter: CheckedContinuation<[DeclaredReadEndpoint], Never>?
     }
 
     init(
@@ -138,7 +164,7 @@ actor ReadEndpointDirectory {
     }
 
     /// The URLs other hosts declared for `chainPath`, unverified.
-    func lookup(_ chainPath: [String]) async -> [String] {
+    func lookup(_ chainPath: [String]) async -> [DeclaredReadEndpoint] {
         if let cached = cache[chainPath], fresh(cached) { return cached.urls }
         if let running = inFlight[chainPath] { return await running.value }
         let task = Task { await self.run(chainPath) }
@@ -152,25 +178,45 @@ actor ReadEndpointDirectory {
         return urls
     }
 
-    private func fresh(_ entry: (at: Double, urls: [String])) -> Bool {
+    private func fresh(_ entry: (at: Double, urls: [DeclaredReadEndpoint])) -> Bool {
         clock() - entry.at < (entry.urls.isEmpty ? min(cacheSeconds, Self.emptyCacheSeconds) : cacheSeconds)
     }
 
     /// A response from an authenticated peer: counted only as the answer to
     /// a request this directory sent that peer, for the path it asked.
     func receive(_ response: ReadEndpointResponseMessage, from peerKey: String) {
-        guard let request = requests[response.requestID], request.peerKey == peerKey,
-              var lookup = lookups[request.lookup], lookup.chainPath == response.chainPath,
-              lookup.perResponder[peerKey, default: 0] < Self.perResponderCap else { return }
-        lookup.perResponder[peerKey, default: 0] += 1
-        if !lookup.urls.contains(response.url) { lookup.urls.append(response.url) }
-        lookup.unanswered?.remove(response.requestID)
+        receive(response.chainPath, response.requestID, response.url, acceptsSubmit: false, from: peerKey)
+    }
+
+    func receive(_ response: ReadEndpointResponseV2Message, from peerKey: String) {
+        receive(response.chainPath, response.requestID, response.url,
+                acceptsSubmit: response.acceptsSubmit, from: peerKey)
+    }
+
+    /// A URL already recorded is merged, not counted again: a host that
+    /// accepts submits answers twice (v2, then v1) with the same URL. Its
+    /// submit flag, once declared, stays.
+    private func receive(
+        _ chainPath: [String], _ requestID: UInt64, _ url: String, acceptsSubmit: Bool, from peerKey: String
+    ) {
+        guard let request = requests[requestID], request.peerKey == peerKey,
+              var lookup = lookups[request.lookup], lookup.chainPath == chainPath else { return }
+        if let index = lookup.urls.firstIndex(where: { $0.url == url }) {
+            if acceptsSubmit, !lookup.urls[index].acceptsSubmit {
+                lookup.urls[index] = DeclaredReadEndpoint(url: url, acceptsSubmit: true)
+            }
+        } else {
+            guard lookup.perResponder[peerKey, default: 0] < Self.perResponderCap else { return }
+            lookup.perResponder[peerKey, default: 0] += 1
+            lookup.urls.append(DeclaredReadEndpoint(url: url, acceptsSubmit: acceptsSubmit))
+        }
+        lookup.unanswered?.remove(requestID)
         lookups[request.lookup] = lookup
         if lookup.unanswered?.isEmpty == true { finish(request.lookup) }
     }
 
     /// One lookup under one deadline, provider discovery included.
-    private func run(_ chainPath: [String]) async -> [String] {
+    private func run(_ chainPath: [String]) async -> [DeclaredReadEndpoint] {
         let lookupID = nextID
         nextID += 1
         lookups[lookupID] = Lookup(chainPath: chainPath)
@@ -243,6 +289,17 @@ actor ReadEndpointDirectory {
     ) -> ReadEndpointResponseMessage? {
         guard let url, hosted.contains(request.chainPath) else { return nil }
         return ReadEndpointResponseMessage(chainPath: request.chainPath, requestID: request.requestID, url: url)
+    }
+
+    /// The v2 answer sent before `answer`'s, only when this host accepts
+    /// public submits: a host without it answers exactly as before.
+    static func answerV2(
+        _ request: ReadEndpointRequestMessage, hosted: Set<[String]>, url: String?, acceptsSubmit: Bool
+    ) -> ReadEndpointResponseV2Message? {
+        guard acceptsSubmit, let v1 = answer(request, hosted: hosted, url: url) else { return nil }
+        return ReadEndpointResponseV2Message(
+            chainPath: v1.chainPath, requestID: v1.requestID, url: v1.url, acceptsSubmit: true
+        )
     }
 
     /// End a lookup: answer its waiter, stop its asks, and close the

@@ -74,6 +74,12 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "This host's public read URL (absolute https:// or http://, e.g. https://reads.example.org), declared for EVERY level it hosts: peers asking for a hosted level's read endpoint get it, and each hosted child chain is announced so a node hosting its parent can list it at /api/chain/endpoints. Unset: nothing is declared or announced.")
     var publicReadUrl: String?
 
+    @Flag(help: "Also accept POST /transactions on the public read port (operator choice; default off). Same body and answer as the loopback route, body capped, its own listener rate budget (--public-submit-rate); a public submit is never journaled and is admitted under the pool's ordinary capacity rules, with no local priority. Declared beside --public-read-url to peers. Requires --public-read-port.")
+    var publicSubmit = false
+
+    @Option(help: "Listener-wide arrival-rate ceiling for public POST /transactions, in requests per second, separate from the read budgets; each client is also held to --public-read-expensive-rate. 0 disables it.")
+    var publicSubmitRate = PublicReadRateLimits.defaultSubmitRate
+
     @Option(help: "Self-described publicly reachable host for overlay announcements (NAT/proxy-fronted nodes announce an unreachable observed address otherwise). Host only; the overlay listen port applies.")
     var externalAddress: String?
 
@@ -88,10 +94,14 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                 throw ValidationError("--public-read-port must differ from --rpc-port")
             }
         }
+        if publicSubmit, publicReadPort == nil {
+            throw ValidationError("--public-submit requires --public-read-port")
+        }
         let publicReadLimits = try PublicReadRateLimits.validated(
             generalRate: publicReadRate,
             expensiveRate: publicReadExpensiveRate,
-            listenerRate: publicReadMaxRate
+            listenerRate: publicReadMaxRate,
+            submitRate: publicSubmitRate
         )
 
         let storage = try storageURL(for: address)
@@ -131,7 +141,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             peerSearchInterval: peerSearchInterval,
             hostedChildren: hosted.map(\.path),
             childSpecs: Dictionary(hosted.compactMap { entry in entry.spec.map { (entry.path, $0) } }) { first, _ in first },
-            publicReadURL: publicReadUrl
+            publicReadURL: publicReadUrl,
+            publicSubmit: publicSubmit
         )
         try await runNodeRuntime(
             configuration: configuration,
@@ -229,6 +240,9 @@ protocol OperatorWrites: Sendable {
 
 extension NodeRuntime: OperatorWrites {}
 
+/// The public listener's `POST /transactions`, when its operator turned it on.
+typealias PublicSubmit = @Sendable (SubmitTransactionRequest) async throws -> SubmitTransactionResponse
+
 /// `GET /api/chain/endpoints`: a child chain's declared read URLs, or nil (404).
 typealias ChainEndpointsLookup = @Sendable ([String]) async -> ExplorerChainEndpoints?
 
@@ -251,6 +265,7 @@ func makeApplication(
         reads: ChainReadsByPath(root: reads, levels: levelReads),
         peers: peers,
         endpoints: endpoints,
+        acceptsSubmit: true,
         // Loopback reads the live snapshot: `lattice status` and the E2E
         // suites poll this to watch height advance, and the public listener's
         // staleness window is a defence against public load that does not
@@ -295,7 +310,8 @@ func makePublicReadApplication(
     },
     limits: PublicReadRateLimits = .default,
     healthClock: @escaping @Sendable () -> Double = PublicReadRateLimiter.monotonicSeconds,
-    endpoints: @escaping ChainEndpointsLookup = { _ in nil }
+    endpoints: @escaping ChainEndpointsLookup = { _ in nil },
+    submit: PublicSubmit? = nil
 ) -> Application<RouterResponder<PublicReadRequestContext>> {
     // This listener faces the public internet with nothing in front of it, so
     // it carries its own arrival-rate ceilings. Its context is NOT
@@ -325,8 +341,24 @@ func makePublicReadApplication(
         reads: ChainReadsByPath(root: reads, levels: levelReads),
         peers: peers,
         endpoints: endpoints,
+        acceptsSubmit: submit != nil,
+        corsAllowsPost: submit != nil,
         healthSnapshot: { await health.value() }
     )
+    if let submit {
+        // Opt-in public submit: the operator route's body and answer, the
+        // body capped BEFORE decoding, and none of the loopback route's
+        // Host/Content-Type checks — those keep web pages off the operator's
+        // own surface, while this route exists to be reached from anywhere.
+        router.post("transactions") { request, context in
+            let input: SubmitTransactionRequest = try await decode(
+                request, upTo: NodeAPILimits.maximumPayloadBytes
+            )
+            return try await serviceCall(request: request, context: context) {
+                try await submit(input)
+            }
+        }
+    }
     return Application(
         responder: router.buildResponder(),
         configuration: .init(address: .hostname(host, port: port))
@@ -341,6 +373,8 @@ private func addPublicReadRoutes<Context: RequestContext>(
     reads byPath: ChainReadsByPath,
     peers: @Sendable @escaping () async -> ExplorerPeersResponse,
     endpoints: @escaping ChainEndpointsLookup,
+    acceptsSubmit: Bool,
+    corsAllowsPost: Bool = false,
     healthSnapshot: @Sendable @escaping () async -> NodeStatusResponse
 ) {
     // CORS is scoped to READ methods only. The POST write routes stay off the
@@ -348,11 +382,13 @@ private func addPublicReadRoutes<Context: RequestContext>(
     // browser POST needs a preflight — denying .post here keeps those routes
     // reachable only by same-host (non-browser) clients, preserving the
     // daemon's loopback-only write posture. Cross-origin GETs to the public
-    // read routes are "simple" requests and still succeed.
+    // read routes are "simple" requests and still succeed. The public
+    // listener of an operator who turned public submit on also allows POST:
+    // that route is meant to be reached cross-origin.
     router.add(middleware: CORSMiddleware(
         allowOrigin: .all,
         allowHeaders: [.contentType],
-        allowMethods: [.get, .options]
+        allowMethods: corsAllowsPost ? [.get, .post, .options] : [.get, .options]
     ))
 
     // /health is the public, non-mutating status: readSnapshot() never enters
@@ -594,8 +630,10 @@ private func addPublicReadRoutes<Context: RequestContext>(
         guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
             throw HTTPError(.notFound)
         }
+        var info = await service.explorerChainInfo()
+        info.acceptsSubmit = acceptsSubmit
         return try jsonCached(
-            await service.explorerChainInfo(),
+            info,
             cacheControl: statusCacheControl,
             request: request,
             context: context
@@ -664,8 +702,9 @@ struct ChainReadsByPath: Sendable {
     }
 }
 
-/// Unauthenticated writes: registered only on the loopback application, never
-/// on the public read application.
+/// Unauthenticated writes: registered only on the loopback application. The
+/// public listener's opt-in `POST /transactions` is registered separately,
+/// in `makePublicReadApplication`.
 private func addOperatorWriteRoutes(
     to router: Router<BasicRequestContext>,
     writes service: any OperatorWrites
@@ -694,8 +733,13 @@ private func decode<Value: Decodable>(
     _ request: Request,
     upTo maximumBytes: Int
 ) async throws -> Value {
+    let buffer: ByteBuffer
     do {
-        let buffer = try await request.body.collect(upTo: maximumBytes)
+        buffer = try await request.body.collect(upTo: maximumBytes)
+    } catch {
+        throw HTTPError(.contentTooLarge)
+    }
+    do {
         return try JSONDecoder().decode(
             Value.self,
             from: Data(buffer.readableBytesView)
@@ -780,11 +824,11 @@ private func serviceCall<Value: Encodable, Context: RequestContext>(
     }
 }
 
-/// The refusal's own case name. These routes are the loopback-only operator
-/// surface, and an unexplained `400` makes every refusal — an unfunded
-/// credit, a stale nonce, an unproven withdrawal — look alike to the operator
-/// holding the key. The case name is the node's existing vocabulary; it adds
-/// no state the caller could not already read back over the same loopback.
+/// The refusal's own case name. An unexplained `400` makes every refusal —
+/// an unfunded credit, a stale nonce, an unproven withdrawal — look alike to
+/// the key holder. The case name is the node's existing vocabulary; it adds
+/// no state the caller could not already read back (on the public submit
+/// route too: account state and the pool are public reads).
 private func reason(_ error: some Error) -> String {
     String(describing: error)
 }

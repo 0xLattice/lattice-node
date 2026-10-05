@@ -8,7 +8,7 @@ process owns:
 - one long-lived identity key;
 - one Ivy overlay listener;
 - one loopback operator RPC;
-- optionally one GET-only public-read listener;
+- optionally one public-read listener (GET-only unless public submit is on);
 - one `state.db`, `volumes.db`, and `header-evidence.db` recovery unit.
 
 Run mining outside the node with `lattice-mining-coordinator` and one or more
@@ -69,7 +69,8 @@ systemctl enable --now lattice-mining-coordinator
 | Public reads | disabled | Public only when explicitly configured |
 
 The public-read listener serves the bounded GET routes and never registers
-operator status, metrics, or POST handlers. Set all three read-rate controls to
+operator status, metrics, or mining handlers; it registers
+`POST /transactions` only with public submit on (below). Set all three read-rate controls to
 zero only behind a proxy that supplies its own per-client and global limits.
 The example Fly read replica uses nginx as the public boundary.
 
@@ -134,6 +135,31 @@ Check a declaration from the parent's side:
 curl -s 'https://<parent-reads>/api/chain/endpoints?chainPath=Nexus/Alpha' | jq
 curl -s 'https://reads.example.org/api/block/<committedBlock>?chainPath=Nexus/Alpha' | jq .hash
 ```
+
+## Running a public submit endpoint
+
+Whether a node accepts transactions from the public is its operator's choice;
+nothing in the protocol requires or forbids it, and it is off by default.
+Turn it on with `"publicSubmit": true` in `lattice.json` (or `--public-submit`;
+requires `publicRead`). The public-read listener then also accepts
+`POST /transactions` for every hosted level, with the same answers and named
+refusals as the operator route (see [rpc-api.md](rpc-api.md#public-submit)).
+
+What it costs and what it does not change:
+
+- one mempool policy for every source: a public submit is admitted under the
+  same fee-rate eviction, replacement and minimum rules as peer gossip, is
+  never journaled, and cannot displace the operator's own submits except by
+  paying a better fee rate, which any peer transaction could do too;
+- its own rate budget (`--public-submit-rate`, default 10/s listener-wide,
+  plus each client's expensive read budget), so submit load never spends the
+  read budget and the reverse;
+- with `publicReadURL` declared, the host also declares that it accepts
+  submits; `GET /api/chain/endpoints` lists it in `submitEndpoints`, and
+  wallets can confirm with `GET /api/chain/info` (`acceptsSubmit`).
+
+Behind a proxy that collapses client addresses (fly-proxy), set the per-client
+read rates to 0 as for reads; the submit listener budget still applies.
 
 ## Health interpretation
 
