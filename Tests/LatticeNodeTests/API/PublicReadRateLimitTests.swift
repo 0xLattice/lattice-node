@@ -257,7 +257,7 @@ final class PublicReadRateLimitTests: XCTestCase {
 
     func testAllZeroRatesDisableTheLimiterEntirely() throws {
         let off = try PublicReadRateLimits.validated(
-            generalRate: 0, expensiveRate: 0, listenerRate: 0
+            generalRate: 0, expensiveRate: 0, listenerRate: 0, submitRate: 0
         )
         XCTAssertTrue(off.isFullyDisabled)
         XCTAssertNil(PublicReadRateLimiter(limits: off))
@@ -353,6 +353,38 @@ final class PublicReadRateLimitTests: XCTestCase {
                 "a health check must never be refused by public load"
             )
         }
+    }
+
+    /// Public submit has its own listener budget: a submit flood never spends
+    /// the read listener's, nor reads the submit one's, and each submitting
+    /// client is billed to its expensive per-client budget.
+    func testSubmitIsClassifiedAndBilledToItsOwnListenerBudget() async throws {
+        XCTAssertEqual(PublicReadRouteClass(method: .post, path: "/transactions"), .submit)
+        XCTAssertEqual(PublicReadRouteClass(method: .post, path: "//transactions/"), .submit)
+        XCTAssertEqual(PublicReadRouteClass(method: .get, path: "/transactions"), .general)
+        let clock = TestClock()
+        let limits = try PublicReadRateLimits.validated(
+            generalRate: 0, expensiveRate: 0, listenerRate: 1, submitRate: 1
+        )
+        let limiter = try XCTUnwrap(PublicReadRateLimiter(limits: limits, clock: { clock.now }))
+        var admitted = await limiter.admit(client: "a", route: .submit)
+        XCTAssertTrue(admitted)
+        admitted = await limiter.admit(client: "b", route: .submit)
+        XCTAssertTrue(admitted, "a two-second bank")
+        admitted = await limiter.admit(client: "c", route: .submit)
+        XCTAssertFalse(admitted, "the submit listener bank is spent")
+        admitted = await limiter.admit(client: "c", route: .general)
+        XCTAssertTrue(admitted, "reads keep their own listener budget")
+
+        let perClient = try XCTUnwrap(PublicReadRateLimiter(limits: try PublicReadRateLimits.validated(
+            generalRate: 0, expensiveRate: 1, listenerRate: 0, submitRate: 0
+        ), clock: { clock.now }))
+        for _ in 0..<10 {
+            let within = await perClient.admit(client: "a", route: .submit)
+            XCTAssertTrue(within)
+        }
+        let over = await perClient.admit(client: "a", route: .submit)
+        XCTAssertFalse(over, "one client's submits draw on its expensive budget")
     }
 
     /// What bounds `/health` instead of a rate limit: the work collapses.

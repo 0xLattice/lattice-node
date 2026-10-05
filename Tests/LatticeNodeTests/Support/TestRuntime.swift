@@ -52,10 +52,12 @@ func makePublicReadApplication(
     host: String,
     port: Int,
     limits: PublicReadRateLimits = .default,
-    healthClock: @escaping @Sendable () -> Double = PublicReadRateLimiter.monotonicSeconds
+    healthClock: @escaping @Sendable () -> Double = PublicReadRateLimiter.monotonicSeconds,
+    submit: Bool = false
 ) -> Application<RouterResponder<PublicReadRequestContext>> {
     makePublicReadApplication(
         reads: runtime.reads, levelReads: Array(runtime.levelReads.values), host: host, port: port,
-        limits: limits, healthClock: healthClock, endpoints: { await runtime.chainEndpoints($0) }
+        limits: limits, healthClock: healthClock, endpoints: { await runtime.chainEndpoints($0) },
+        submit: submit ? { @Sendable request in try await runtime.submitPublicTransaction(request) } : nil
     )
 }

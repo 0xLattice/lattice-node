@@ -102,6 +102,9 @@ public struct NodeConfiguration: Sendable {
     /// read-endpoint request for a hosted level is answered with it, and each
     /// hosted child level is announced under its read-endpoint key.
     public let publicReadURL: String?
+    /// The public read listener also accepts `POST /transactions` (operator
+    /// choice, default off). Declared beside `publicReadURL` to peers.
+    public let publicSubmit: Bool
 
     /// Overlay slots kept in reserve for outbound dials so a burst of inbound
     /// connections (from one source, especially behind a proxy where the
@@ -123,7 +126,8 @@ public struct NodeConfiguration: Sendable {
         resourcePolicy: NodeResourcePolicy = .default,
         hostedChildren: [[String]] = [],
         childSpecs: [[String]: ChainSpec] = [:],
-        publicReadURL: String? = nil
+        publicReadURL: String? = nil,
+        publicSubmit: Bool = false
     ) throws {
         guard let address = ChainAddress(chainPath), address.isNexus else {
             throw NodeConfigurationError.invalidChainPath
@@ -173,6 +177,7 @@ public struct NodeConfiguration: Sendable {
         self.childSpecs = childSpecs.filter { hostedChildren.contains($0.key) }
         self.hostedChildren = hostedChildren
         self.publicReadURL = publicReadURL
+        self.publicSubmit = publicSubmit
     }
 
     /// An absolute http(s) URL naming a host, without credentials, query or

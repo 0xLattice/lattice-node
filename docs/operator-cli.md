@@ -20,6 +20,7 @@ default.
   "publicReadExpensiveRate": 1,
   "publicReadMaxRate": 200,
   "publicReadURL": "https://reads.example.org",
+  "publicSubmit": false,
   "hostedChains": [
     "Nexus/Alpha",
     "Nexus/Alpha/Beta"
@@ -50,6 +51,10 @@ This is intentionally one schema, without legacy decoding:
   a host and no credentials, query or fragment; it is passed as
   `--public-read-url` and declared for every hosted level (see
   [Listing a chain on an explorer](operations.md#listing-a-chain-on-an-explorer));
+- `publicSubmit`, when true, passes `--public-submit` and requires
+  `publicRead`: the public listener also accepts `POST /transactions` (see
+  [Running a public submit endpoint](operations.md#running-a-public-submit-endpoint));
+  absent or false is off;
 - unknown paths in mining policy are rejected.
 
 ## Lifecycle

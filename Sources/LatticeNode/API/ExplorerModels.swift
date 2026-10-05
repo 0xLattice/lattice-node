@@ -96,11 +96,29 @@ public struct ExplorerChainEndpoints: Codable, Sendable, Equatable {
     public let chainPath: [String]
     public let committedBlock: String?
     public let endpoints: [String]
+    /// The subset of `endpoints` whose hosts also declare that they accept
+    /// `POST /transactions` there (operator choice, equally unverified). A
+    /// host answering in the v1 form is counted as not accepting.
+    public let submitEndpoints: [String]
 
-    public init(chainPath: [String], committedBlock: String?, endpoints: [String]) {
+    public init(chainPath: [String], committedBlock: String?, endpoints: [String], submitEndpoints: [String] = []) {
         self.chainPath = chainPath
         self.committedBlock = committedBlock
         self.endpoints = endpoints
+        self.submitEndpoints = submitEndpoints
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case chainPath, committedBlock, endpoints, submitEndpoints
+    }
+
+    /// An answer from a node predating `submitEndpoints` declares none.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        chainPath = try container.decode([String].self, forKey: .chainPath)
+        committedBlock = try container.decodeIfPresent(String.self, forKey: .committedBlock)
+        endpoints = try container.decode([String].self, forKey: .endpoints)
+        submitEndpoints = try container.decodeIfPresent([String].self, forKey: .submitEndpoints) ?? []
     }
 }
 
@@ -163,6 +181,10 @@ public struct ExplorerChainInfo: Codable, Sendable, Equatable {
     public let height: UInt64?
     public let tipCID: String?
     public let chain: [String]
+    /// Whether the listener that answered accepts `POST /transactions`: true
+    /// on the loopback operator API, and on the public read listener only
+    /// when its operator turned public submit on. Absent from older nodes.
+    public var acceptsSubmit: Bool?
 }
 
 public struct ExplorerChainSpec: Codable, Sendable, Equatable {

@@ -5,6 +5,11 @@ import UInt256
 public enum TransactionOrigin: Sendable, Equatable {
     /// An RPC submit: journaled, announced, and answered under `replyID`.
     case local(replyID: UInt64)
+    /// A submit on the opt-in public listener: answered under `replyID` and
+    /// announced like a local one, but volatile (never journaled) and, while
+    /// it waits for its verdict, held to its own pending bound. Once pooled it
+    /// is an ordinary entry: the pool's capacity rules know no origin.
+    case submitted(replyID: UInt64)
     /// Peer gossip: volatile, never answered, never blamed.
     case peer(PeerID)
     /// It left the executed chain when the tip moved: re-admitted and
@@ -189,6 +194,9 @@ public struct MiningConfig: Sendable {
     /// a deep reorg is spilled. The default is the pool's own capacity, so an
     /// ordinary reorg returns every transaction, as the actor did.
     public var maxPendingReturned: Int
+    /// Public-listener submits waiting on a verdict. Over it a submit is
+    /// answered `.full` rather than dropped silently.
+    public var maxPendingSubmitted: Int
     /// Tip moves a local submit or a template request may wait through. One
     /// more and it is answered with a retriable `.contextChanged`, so replies
     /// stay bounded while the tip churns.
@@ -203,6 +211,7 @@ public struct MiningConfig: Sendable {
         maxPendingPeerAdmissions: Int = 1_024,
         maxPendingPerPeer: Int = 64,
         maxPendingReturned: Int = MempoolLimits().maxCount,
+        maxPendingSubmitted: Int = 256,
         maxReissues: Int = 3,
         maxWaitingTemplateRequests: Int = 64,
         mempool: MempoolLimits = MempoolLimits(),
@@ -212,6 +221,7 @@ public struct MiningConfig: Sendable {
         self.maxPendingPeerAdmissions = maxPendingPeerAdmissions
         self.maxPendingPerPeer = maxPendingPerPeer
         self.maxPendingReturned = maxPendingReturned
+        self.maxPendingSubmitted = maxPendingSubmitted
         self.maxReissues = maxReissues
         self.maxWaitingTemplateRequests = maxWaitingTemplateRequests
         self.mempool = mempool
@@ -244,6 +254,7 @@ public struct MiningState: Sendable {
     /// bound.
     private enum Slot: Equatable {
         case local
+        case submitted
         case peer(PeerID)
         case returned
     }
@@ -285,6 +296,7 @@ public struct MiningState: Sendable {
     public var pendingOrigins: Int { admissions.values.reduce(0) { $0 + $1.origins.count } }
     public private(set) var pendingPeerAdmissions = 0
     public private(set) var pendingReturned = 0
+    public private(set) var pendingSubmitted = 0
     private var pendingByPeer: [PeerID: Int] = [:]
 
     public func pendingAdmissions(from peer: PeerID) -> Int { pendingByPeer[peer] ?? 0 }
@@ -374,8 +386,13 @@ public struct MiningState: Sendable {
             return
         }
         // Over its bound, a peer's or a returned arrival is dropped: never
-        // answered, never blamed.
-        guard hasRoom(for: slot) else { return }
+        // answered, never blamed. A public submit is answered.
+        guard hasRoom(for: slot) else {
+            if case .submitted(let replyID) = origin {
+                turn.replies.append(.transactionRefused(replyID: replyID, .full))
+            }
+            return
+        }
         open(cid, Admission(transaction: transaction, origins: [origin], slot: slot))
         preflight(cid, transaction, &turn)
     }
@@ -383,6 +400,7 @@ public struct MiningState: Sendable {
     private static func slot(of origin: TransactionOrigin) -> Slot {
         switch origin {
         case .local, .restored: .local
+        case .submitted: .submitted
         case .peer(let peer): .peer(peer)
         case .returned: .returned
         }
@@ -392,6 +410,8 @@ public struct MiningState: Sendable {
         switch slot {
         case .local:
             true
+        case .submitted:
+            pendingSubmitted < config.maxPendingSubmitted
         case .peer(let peer):
             pendingPeerAdmissions < config.maxPendingPeerAdmissions
                 && pendingAdmissions(from: peer) < config.maxPendingPerPeer
@@ -404,6 +424,8 @@ public struct MiningState: Sendable {
         switch slot {
         case .local:
             break
+        case .submitted:
+            pendingSubmitted += delta
         case .peer(let peer):
             pendingPeerAdmissions += delta
             let remaining = pendingAdmissions(from: peer) + delta
@@ -500,6 +522,12 @@ public struct MiningState: Sendable {
                 turn.replies.append(.transactionAdmitted(
                     replyID: replyID, cid: item.cid, count: mempool.count, bytes: mempool.byteCount
                 ))
+            case .submitted(let replyID):
+                // Volatile: a public submit is never journaled.
+                announce = true
+                turn.replies.append(.transactionAdmitted(
+                    replyID: replyID, cid: item.cid, count: mempool.count, bytes: mempool.byteCount
+                ))
             case .restored:
                 // Its journal row is already durable.
                 journaled.insert(item.cid)
@@ -526,7 +554,7 @@ public struct MiningState: Sendable {
     ) {
         for origin in origins {
             switch origin {
-            case .local(let replyID):
+            case .local(let replyID), .submitted(let replyID):
                 turn.replies.append(.transactionRefused(replyID: replyID, error))
             case .restored:
                 // The journal row goes with a verdict, never with capacity.
@@ -555,7 +583,7 @@ public struct MiningState: Sendable {
             guard let admission = close(cid) else { continue }
             for origin in admission.origins {
                 switch origin {
-                case .local(let replyID):
+                case .local(let replyID), .submitted(let replyID):
                     turn.replies.append(.transactionAdmitted(
                         replyID: replyID, cid: cid, count: mempool.count, bytes: mempool.byteCount
                     ))
@@ -579,12 +607,16 @@ public struct MiningState: Sendable {
             admission.reissues += 1
             admissions[cid] = admission
             guard admission.reissues > config.maxReissues,
-                  admission.origins.contains(where: { if case .local = $0 { true } else { false } })
+                  admission.origins.contains(where: Self.isAnswered)
             else { continue }
-            for case .local(let replyID) in admission.origins {
-                turn.replies.append(.transactionRefused(replyID: replyID, .contextChanged))
+            for origin in admission.origins {
+                if case .local(let replyID) = origin {
+                    turn.replies.append(.transactionRefused(replyID: replyID, .contextChanged))
+                } else if case .submitted(let replyID) = origin {
+                    turn.replies.append(.transactionRefused(replyID: replyID, .contextChanged))
+                }
             }
-            reslot(cid, keeping: admission.origins.filter { if case .local = $0 { false } else { true } })
+            reslot(cid, keeping: admission.origins.filter { !Self.isAnswered($0) })
         }
         // Returned transactions within their bound; a deep reorg spills the
         // rest.
@@ -622,6 +654,14 @@ public struct MiningState: Sendable {
                 }
             }
             if !again.isEmpty { requestTemplate(entry.job.request, waiting: again, &turn) }
+        }
+    }
+
+    /// An origin waiting on an RPC answer.
+    private static func isAnswered(_ origin: TransactionOrigin) -> Bool {
+        switch origin {
+        case .local, .submitted: true
+        case .peer, .returned, .restored: false
         }
     }
 

@@ -269,6 +269,7 @@ public final class NodeRuntime: Sendable {
             gate: gate,
             hosted: Set([configuration.chainPath] + configuration.hostedChildren),
             publicReadURL: configuration.publicReadURL,
+            publicSubmit: configuration.publicSubmit,
             readEndpoints: readEndpoints
         ) { inputs.yield(.network($0)) }
         let cadence = max(1, min(configuration.peerSearchInterval > 0

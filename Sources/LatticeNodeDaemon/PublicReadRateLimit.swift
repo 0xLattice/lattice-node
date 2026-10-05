@@ -28,6 +28,10 @@ struct PublicReadRateLimits: Sendable {
     static let defaultExpensiveRate = 1.0
     /// nginx `limit_req_zone zone=global rate=200r/s`.
     static let defaultListenerRate = 200.0
+    /// Listener-wide ceiling for `POST /transactions` when public submit is
+    /// on: its own budget, so submits never spend the read budget or the
+    /// reverse. No nginx analogue (the read replica serves no submit).
+    static let defaultSubmitRate = 10.0
 
     // nginx states burstiness as an absolute token count (`burst=`). Carried
     // here as `burst ÷ rate` — the SECONDS of traffic one full bank holds — so
@@ -37,21 +41,25 @@ struct PublicReadRateLimits: Sendable {
     static let generalBankSeconds = 2.0
     static let expensiveBankSeconds = 10.0
     static let listenerBankSeconds = 1.0
+    static let submitBankSeconds = 2.0
 
     var generalRate: Double
     var expensiveRate: Double
     var listenerRate: Double
+    var submitRate: Double
 
     static let `default` = PublicReadRateLimits(
         generalRate: defaultGeneralRate,
         expensiveRate: defaultExpensiveRate,
-        listenerRate: defaultListenerRate
+        listenerRate: defaultListenerRate,
+        submitRate: defaultSubmitRate
     )
 
-    private init(generalRate: Double, expensiveRate: Double, listenerRate: Double) {
+    private init(generalRate: Double, expensiveRate: Double, listenerRate: Double, submitRate: Double) {
         self.generalRate = generalRate
         self.expensiveRate = expensiveRate
         self.listenerRate = listenerRate
+        self.submitRate = submitRate
     }
 
     /// Refuse bad input by the flag name that carried it. A `precondition`
@@ -59,7 +67,8 @@ struct PublicReadRateLimits: Sendable {
     static func validated(
         generalRate: Double,
         expensiveRate: Double,
-        listenerRate: Double
+        listenerRate: Double,
+        submitRate: Double = defaultSubmitRate
     ) throws -> PublicReadRateLimits {
         PublicReadRateLimits(
             generalRate: try checked(generalRate, flag: "--public-read-rate"),
@@ -68,7 +77,8 @@ struct PublicReadRateLimits: Sendable {
             ),
             listenerRate: try checked(
                 listenerRate, flag: "--public-read-max-rate"
-            )
+            ),
+            submitRate: try checked(submitRate, flag: "--public-submit-rate")
         )
     }
 
@@ -82,7 +92,7 @@ struct PublicReadRateLimits: Sendable {
     }
 
     var isFullyDisabled: Bool {
-        generalRate <= 0 && expensiveRate <= 0 && listenerRate <= 0
+        generalRate <= 0 && expensiveRate <= 0 && listenerRate <= 0 && submitRate <= 0
     }
 
     /// What the startup banner prints, so an operator reads the LIVE values
@@ -93,7 +103,8 @@ struct PublicReadRateLimits: Sendable {
         }
         return "general \(describe(generalRate)), "
             + "expensive \(describe(expensiveRate)), "
-            + "listener \(describe(listenerRate))"
+            + "listener \(describe(listenerRate)), "
+            + "submit \(describe(submitRate))"
     }
 }
 
@@ -113,6 +124,9 @@ enum PublicReadRouteClass: Sendable, Equatable {
     case general
     /// A peer fan-out, or hundreds of content fetches.
     case expensive
+    /// `POST /transactions` (public submit): the per-client expensive budget
+    /// and the listener's separate submit budget, never the read listener's.
+    case submit
 
     /// Classified by splitting the path EXACTLY as the router resolves it.
     /// Hummingbird's `splitSequence` omits empty components, so
@@ -124,6 +138,8 @@ enum PublicReadRouteClass: Sendable, Equatable {
     init(method: HTTPRequest.Method, path: String) {
         let components = path.split(separator: "/")
         switch components.count {
+        case 1 where components[0] == "transactions" && method == .post:
+            self = .submit
         case 1 where components[0] == "health":
             // The exemption exists for ONE reason: a platform health check must
             // never be refused. Those are GET (fly's `http_checks`) or HEAD, so
@@ -276,6 +292,7 @@ actor PublicReadRateLimiter {
     /// form, which scanned on every insert once the map sat at ceiling.
     private var earliestPossibleEviction = Double.infinity
     private var listener: Bucket?
+    private var submitListener: Bucket?
 
     /// `nil` when every ceiling is `0`: fully off costs nothing at all.
     init?(
@@ -300,6 +317,13 @@ actor PublicReadRateLimiter {
                 now: clock()
             )
         }
+        if limits.submitRate > 0 {
+            self.submitListener = Bucket(
+                rate: limits.submitRate,
+                bankSeconds: PublicReadRateLimits.submitBankSeconds,
+                now: clock()
+            )
+        }
     }
 
     static func monotonicSeconds() -> Double {
@@ -315,6 +339,12 @@ actor PublicReadRateLimiter {
         guard takePerClient(client: client, route: route, now: now) else {
             return false
         }
+        if route == .submit {
+            guard var bucket = submitListener else { return true }
+            let admitted = bucket.take(at: now)
+            submitListener = bucket
+            return admitted
+        }
         return takeListener(now: now)
     }
 
@@ -324,7 +354,7 @@ actor PublicReadRateLimiter {
     private func takePerClient(
         client: String, route: PublicReadRouteClass, now: Double
     ) -> Bool {
-        let expensive = route == .expensive
+        let expensive = route == .expensive || route == .submit
         let rate = expensive ? limits.expensiveRate : limits.generalRate
         guard rate > 0 else { return true }
         let bank = expensive

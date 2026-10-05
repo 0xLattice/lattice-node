@@ -59,18 +59,21 @@ final class NodeRuntimeIvyDelegate: IvyDelegate {
     /// directory: neither touches the chain, so neither enters the loop.
     private let hosted: Set<[String]>
     private let publicReadURL: String?
+    private let publicSubmit: Bool
     private let readEndpoints: ReadEndpointDirectory?
 
     init(
         gate: NodeRuntimeInputGate,
         hosted: Set<[String]> = [],
         publicReadURL: String? = nil,
+        publicSubmit: Bool = false,
         readEndpoints: ReadEndpointDirectory? = nil,
         _ forward: @escaping @Sendable (NodeRuntimeNetworkInput) -> Void
     ) {
         self.gate = gate
         self.hosted = hosted
         self.publicReadURL = publicReadURL
+        self.publicSubmit = publicSubmit
         self.readEndpoints = readEndpoints
         self.forward = forward
     }
@@ -90,6 +93,13 @@ final class NodeRuntimeIvyDelegate: IvyDelegate {
         let input: NodeRuntimeNetworkInput
         if message.topic == ReadEndpointTopic.request {
             if let request = try? ReadEndpointRequestMessage.decoded(message.payload),
+               let response = ReadEndpointDirectory.answerV2(
+                   request, hosted: hosted, url: publicReadURL, acceptsSubmit: publicSubmit
+               ),
+               let payload = try? response.encoded() {
+                _ = await ivy.sendMessage(to: peer, topic: ReadEndpointTopic.responseV2, payload: payload)
+            }
+            if let request = try? ReadEndpointRequestMessage.decoded(message.payload),
                let response = ReadEndpointDirectory.answer(request, hosted: hosted, url: publicReadURL),
                let payload = try? response.encoded() {
                 _ = await ivy.sendMessage(to: peer, topic: ReadEndpointTopic.response, payload: payload)
@@ -97,6 +107,11 @@ final class NodeRuntimeIvyDelegate: IvyDelegate {
             return
         } else if message.topic == ReadEndpointTopic.response {
             if let response = try? ReadEndpointResponseMessage.decoded(message.payload) {
+                await readEndpoints?.receive(response, from: peer.key.hex)
+            }
+            return
+        } else if message.topic == ReadEndpointTopic.responseV2 {
+            if let response = try? ReadEndpointResponseV2Message.decoded(message.payload) {
                 await readEndpoints?.receive(response, from: peer.key.hex)
             }
             return

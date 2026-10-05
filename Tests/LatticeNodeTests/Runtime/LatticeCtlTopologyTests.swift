@@ -110,6 +110,10 @@ final class LatticeCtlTopologyTests: XCTestCase {
         var infiniteRate = topology()
         infiniteRate.publicReadMaxRate = .infinity
         XCTAssertThrowsError(try infiniteRate.validated())
+        var submitWithoutPublicRead = topology()
+        submitWithoutPublicRead.publicRead = nil
+        submitWithoutPublicRead.publicSubmit = true
+        XCTAssertThrowsError(try submitWithoutPublicRead.validated(), "public submit rides the public read port")
     }
 
     /// `mine.minWork` reaches the coordinator as a search plan. There is no
