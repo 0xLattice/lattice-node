@@ -11,6 +11,24 @@ listener registers only the GET routes in the read table below, plus
 Requests and responses are JSON unless noted. Operator POSTs require
 `Content-Type: application/json` and a loopback `Host` authority.
 
+## Integer encoding
+
+Every 64- or 128-bit consensus integer, in responses and in the
+`POST /transactions` body, is a canonical base-10 JSON **string**: `0`, or
+an optional `-` then a nonzero digit then digits (`^(?:0|-?[1-9][0-9]*)$`).
+A JSON number, a leading `+` or zero, `-0`, or an out-of-range value is
+refused (400). These are heights, revisions, timestamps, block nonces,
+balances, account and transaction nonces, deltas, deposit/receipt/withdrawal
+nonces and amounts, `rewardCredited`, `minRelayFee`, and the chain spec's
+64-bit fields. Small counts and sizes (`transactionCount`, `mempoolCount`,
+`mempoolBytes`, `count`, `version`, `maxBlockSize`, offsets) stay JSON
+numbers. Targets are hex strings. An absent optional field is omitted, never
+`null`.
+
+The mining routes (`/mining/templates`, `/mining/work`) are the miner's
+protocol, not this read/submit contract, and are unchanged: their `block` is
+the consensus block's own encoding.
+
 ## Selecting a hosted chain
 
 GET routes accept an optional absolute query value:
@@ -54,7 +72,7 @@ Block transaction pages accept `offset` and `limit`; limits are capped at
 
 Both `/api/block/latest` and `/api/block/:height-or-cid` report the block's
 coinbase. `rewardRecipient` is the header's recipient address; it is omitted
-(null) when the block burns its reward. `rewardCredited` is what consensus
+when the block burns its reward. `rewardCredited` is what consensus
 credited that recipient (`Block.coinbaseAmount`): the block reward at that
 height plus the block's fees, the balance excess of its transactions. It is
 `0` for a burned block and omitted only when this node does not hold the
@@ -62,20 +80,20 @@ block's spec or transaction bodies.
 
 `/api/blocks` lists the canonical chain to the executed tip, newest first,
 at any hosted level (`?chainPath=`). It returns
-`{"blocks": [...], "nextBefore": <height or null>}`; each row is `height`,
+`{"blocks": [...], "nextBefore": "<height>"}`; each row is `height`,
 `hash`, `previousBlock`, `timestamp`, `transactionCount` and
 `rewardRecipient`. Rows are read from block headers and the transactions
 dictionary root only — no transaction body — so there is no `rewardCredited`
 (read `/api/block/:height-or-cid` for it). `before` (default: tip + 1, and
 clamped to it) is exclusive; `limit` defaults to 10 and is capped at 25; at
 most `limit` heights are visited, and a height whose block this node does not
-hold is omitted. Pass `nextBefore` as the next page's `before`; it is null
-once height 0 is listed. A non-numeric `before`, or a non-numeric or
+hold is omitted. Pass `nextBefore` as the next page's `before`; it is
+omitted once height 0 is listed. A non-numeric `before`, or a non-numeric or
 non-positive `limit`, is 400.
 
 `/api/block/:cid/children` works at any hosted level (`?chainPath=`). Each
 entry is the child's `directory` and committed `blockHash`; `height` and
-`transactionCount` are null when this node does not hold the child block (it
+`transactionCount` are omitted when this node does not hold the child block (it
 does not host that child chain).
 
 ## Child read endpoints
@@ -126,16 +144,14 @@ public read budget.
   "chainPath": ["Nexus"],
   "nexusGenesisCID": "bafyreiggtg4ezifboyekbf4gxst2jr3mpjqcxsbmopy7w6fp46g4ngpgxa",
   "tipCID": "<cid>",
-  "height": 42,
-  "revision": null,
+  "height": "42",
   "mempoolCount": 3,
   "mempoolBytes": 2048,
-  "templateDigest": null
 }
 ```
 
-`/health` reads an immutable published view and never enters the core loop. Its
-`templateDigest` is null. `/status` uses the root runtime's current template
+`/health` reads an immutable published view and never enters the core loop. It
+has no `templateDigest`. `/status` uses the root runtime's current template
 digest so a miner can detect any hosted-tree input change.
 
 A hosted child with no executed genesis reports `awaitingGenesis` and null tip
@@ -158,7 +174,7 @@ involved.
       "receiptActions": [],
       "withdrawalActions": [],
       "signers": ["<address>"],
-      "nonce": 0,
+      "nonce": "0",
       "chainPath": ["Nexus", "Alpha"]
     }
   }
@@ -177,6 +193,28 @@ Response:
 
 The body is content-bound and the signature, nonce, funding, fee, and path are
 validated before admission. An unhosted path returns 404.
+
+The node's pool admits only transactions paying at least the operator's
+`--min-relay-fee` (default 0): the fee is the transaction's balance excess,
+which the block's recipient is credited. Below it the refusal is
+`belowMinRelayFee`. This is node relay policy, never consensus: a block
+carrying a cheaper transaction stays valid, and other nodes choose their own
+floor. `GET /api/chain/info` reports this node's as `minRelayFee`.
+
+## Transaction inclusion
+
+`GET /api/transaction/:cid` reports `blockHeight`, `blockHash` and
+`timestamp` (the block's) when the transaction is in this chain's canonical
+executed chain, and omits them otherwise (pending, never mined, or left by a
+reorg). Nothing is indexed: a signer's next nonce only rises along the
+canonical chain, and executing the transaction is what moves its first
+signer's nonce past the transaction's, so the node binary-searches the
+canonical post-states (at most ~64 account reads) for the first block whose
+nonce exceeds it, then confirms that block's transaction list holds the CID
+(a rival at the same nonce also moves the nonce). Reorg-correct because it
+reads the current canonical chain; the answer is cached for 3 seconds, not
+as immutable. Billed to the expensive public read budget. When the
+post-state or block content needed is not held here, inclusion is omitted.
 
 ### Public submit
 

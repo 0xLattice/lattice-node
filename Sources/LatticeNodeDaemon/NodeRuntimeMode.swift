@@ -7,9 +7,9 @@ import LatticeNodeCore
 /// snapshot.
 struct ChainSnapshotResponse: Codable, Equatable {
     let bestHeaderTip: String
-    let bestHeaderHeight: UInt64
+    @DecimalString var bestHeaderHeight: UInt64
     let actOnTip: String
-    let actOnHeight: UInt64
+    @DecimalString var actOnHeight: UInt64
 }
 
 extension LatticeNodeCommand {

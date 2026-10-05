@@ -177,6 +177,7 @@ func spawnHost(layout: HostLayout) throws {
     if let rate = topology.publicReadMaxRate { arguments += ["--public-read-max-rate", String(rate)] }
     if let url = topology.publicReadURL { arguments += ["--public-read-url", url] }
     if topology.publicSubmit == true { arguments += ["--public-submit"] }
+    if let fee = topology.minRelayFee { arguments += ["--min-relay-fee", String(fee)] }
     for child in topology.hostedChains ?? [] {
         let spec = layout.childSpec(for: child)
         arguments += ["--host-chain", FileManager.default.fileExists(atPath: spec.path) ? "\(child)=\(spec.path)" : child]
@@ -371,7 +372,7 @@ struct Status: AsyncParsableCommand {
                 continue
             }
             let phase = health["phase"] as? String ?? "?"
-            let height = (health["height"] as? Int).map(String.init) ?? "-"
+            let height = health["height"] as? String ?? "-"
             let tip = (health["tipCID"] as? String)?.prefix(20) ?? "-"
             let mempool = health["mempoolCount"] as? Int ?? 0
             print("\(path): \(phase) height=\(height) tip=\(tip)… mempool=\(mempool)")

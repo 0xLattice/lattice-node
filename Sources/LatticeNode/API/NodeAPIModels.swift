@@ -223,8 +223,8 @@ public struct NodeStatusResponse: Codable, Sendable, Equatable {
     public let chainPath: [String]
     public let nexusGenesisCID: String
     public let tipCID: String?
-    public let height: UInt64?
-    public let revision: UInt64?
+    @OptionalDecimalString public var height: UInt64?
+    @OptionalDecimalString public var revision: UInt64?
     public let mempoolCount: Int
     public let mempoolBytes: Int
     /// Nil before the node can serve templates (no executed tip).

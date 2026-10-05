@@ -311,6 +311,78 @@ final class NodeRuntimeTests: XCTestCase {
         await producerRuntime.stop()
     }
 
+    /// `/api/transaction` reports the canonical block that executed a
+    /// transaction, derived from the chain at read time: none while pending,
+    /// the block once mined (still after the chain grows), and none again
+    /// once a reorg leaves that block.
+    func testTransactionInclusionFollowsTheCanonicalChain() async throws {
+        let node = try host(keyByte: 0x3A)
+        let storage = try await NodeStorage.open(configuration: node.configuration)
+        var runtime = try await NodeRuntime.start(
+            storage: storage, configuration: node.configuration, overlay: node.overlay
+        )
+        let key = CryptoUtils.generateKeyPair()
+        func signed(nonce: UInt64) throws -> Transaction {
+            let bodyHeader = try HeaderImpl(node: TransactionBody(
+                accountActions: [], actions: [], depositActions: [],
+                receiptActions: [], withdrawalActions: [],
+                signers: [CryptoUtils.createAddress(from: key.publicKey)],
+                nonce: nonce, chainPath: ["Nexus"]
+            ))
+            return Transaction(
+                signatures: [key.publicKey: try XCTUnwrap(TransactionSigning.sign(
+                    bodyHeader: bodyHeader, privateKeyHex: key.privateKey
+                ))],
+                body: bodyHeader
+            )
+        }
+        // A block before it, so the carrier is not at height 1.
+        _ = try await runtime.mineBlock()
+        let cid = try await runtime.submitTransaction(
+            SubmitTransactionRequest(transaction: try signed(nonce: 0))
+        ).transactionCID
+        let pendingRead = await runtime.reads.explorerTransaction(cid: cid)
+        let pending = try XCTUnwrap(pendingRead)
+        XCTAssertNil(pending.blockHeight)
+        XCTAssertNil(pending.blockHash)
+
+        // The block carrying it, then an empty one on top.
+        let carrier = try await runtime.mineBlock()
+        _ = try await runtime.mineBlock()
+        let includedRead = await runtime.reads.explorerTransaction(cid: cid)
+        let included = try XCTUnwrap(includedRead)
+        XCTAssertEqual(included.blockHash, try BlockHeader(node: carrier).rawCID)
+        XCTAssertEqual(included.blockHeight, 2)
+        XCTAssertEqual(included.timestamp, carrier.timestamp)
+        await runtime.stop()
+
+        // A heavier branch from genesis that never carried it.
+        let producer = try host(keyByte: 0x3B)
+        let producerStorage = try await NodeStorage.open(configuration: producer.configuration)
+        let producerRuntime = try await NodeRuntime.start(
+            storage: producerStorage, configuration: producer.configuration, overlay: producer.overlay
+        )
+        for _ in 0..<5 { _ = try await producerRuntime.mineBlock() }
+        let producerTip = try XCTUnwrap(producerRuntime.published.value?.actOnTip)
+        let restarted = try host(
+            keyByte: 0x3A,
+            peers: [producer.endpoint],
+            storageDirectory: node.configuration.storagePath
+        )
+        runtime = try await NodeRuntime.start(
+            storage: storage, configuration: restarted.configuration, overlay: restarted.overlay
+        )
+        try await eventually("the restarted node reorgs onto the heavier branch") {
+            runtime.published.value?.actOnTip == producerTip
+        }
+        let reorgedRead = await runtime.reads.explorerTransaction(cid: cid)
+        let reorged = try XCTUnwrap(reorgedRead)
+        XCTAssertNil(reorged.blockHeight)
+        XCTAssertNil(reorged.blockHash)
+        await runtime.stop()
+        await producerRuntime.stop()
+    }
+
     /// The explorer block reads name the coinbase recipient and what
     /// consensus credited it: reward + fees, or 0 when the recipient is nil.
     func testExplorerBlockReadsReportTheRewardRecipientAndCredit() async throws {
@@ -394,7 +466,7 @@ final class NodeRuntimeTests: XCTestCase {
         XCTAssertEqual(thirdLatest.rewardCredited, 0)
         // The burned block still reports an explicit 0 credit on the wire.
         let json = try XCTUnwrap(String(data: JSONEncoder().encode(thirdDetail), encoding: .utf8))
-        XCTAssertTrue(json.contains("\"rewardCredited\":0"), json)
+        XCTAssertTrue(json.contains("\"rewardCredited\":\"0\""), json)
         await runtime.stop()
     }
 

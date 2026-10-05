@@ -296,7 +296,7 @@ final class LatticeCtlE2ETests: XCTestCase {
     }
 
     private func height(_ rpc: UInt16, chain: String) async -> Int {
-        await health(rpc, chain: chain)?["height"] as? Int ?? -1
+        (await health(rpc, chain: chain)?["height"] as? String).flatMap { Int($0) } ?? -1
     }
 
     /// Nexus plus one hosted child, all through the CLI: the child created
@@ -360,7 +360,7 @@ final class LatticeCtlE2ETests: XCTestCase {
         ), (response as? HTTPURLResponse)?.statusCode == 200,
            let object = try? JSONSerialization.jsonObject(with: data)
                as? [String: Any] else { return 0 }
-        return (object["balance"] as? NSNumber)?.uint64Value ?? 0
+        return (object["balance"] as? String).flatMap { UInt64($0) } ?? 0
     }
 }
 

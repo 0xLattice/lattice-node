@@ -132,7 +132,7 @@ status_matches() {
     jq -e \
         --arg genesis "$expected_genesis" \
         --arg tip "$expected_tip" \
-        --argjson height "$expected_height" \
+        --arg height "$expected_height" \
         '
             .phase == "active"
             and .chainPath == ["Nexus"]

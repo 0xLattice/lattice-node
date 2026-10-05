@@ -40,6 +40,9 @@ public struct Topology: Codable, Sendable {
     /// Accept `POST /transactions` on the public read port too (the node's
     /// `--public-submit`). Absent or false = off; requires `publicRead`.
     public var publicSubmit: Bool?
+    /// The smallest fee the node admits to its pool (`--min-relay-fee`; node
+    /// policy, never consensus). Absent = the node's default, 0.
+    public var minRelayFee: UInt64?
     /// Child chains this process hosts as levels, parent before child.
     public var hostedChains: [String]?
     public var mine: TopologyMine?
@@ -51,7 +54,8 @@ public struct Topology: Codable, Sendable {
         publicReadExpensiveRate: Double? = nil,
         publicReadMaxRate: Double? = nil, hostedChains: [String]? = nil,
         mine: TopologyMine? = nil, publicReadURL: String? = nil,
-        publicSubmit: Bool? = nil
+        publicSubmit: Bool? = nil,
+        minRelayFee: UInt64? = nil
     ) {
         self.listen = listen
         self.rpc = rpc
@@ -63,6 +67,7 @@ public struct Topology: Codable, Sendable {
         self.publicReadMaxRate = publicReadMaxRate
         self.publicReadURL = publicReadURL
         self.publicSubmit = publicSubmit
+        self.minRelayFee = minRelayFee
         self.hostedChains = hostedChains
         self.mine = mine
     }

@@ -82,6 +82,9 @@ final class PublicSubmitTests: XCTestCase {
         try await makeApplication(service: runtime, host: "127.0.0.1", port: 8080).test(.router) { client in
             let info = try await client.execute(uri: "/api/chain/info", method: .get)
             XCTAssertEqual(try JSONDecoder().decode(ExplorerChainInfo.self, from: Data(buffer: info.body)).acceptsSubmit, true)
+            // The operator's relay floor, read-only, as a decimal string (default 0).
+            let object = try JSONSerialization.jsonObject(with: Data(buffer: info.body)) as? [String: Any]
+            XCTAssertEqual(object?["minRelayFee"] as? String, "0")
         }
     }
 

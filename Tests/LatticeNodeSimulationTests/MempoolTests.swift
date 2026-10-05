@@ -209,6 +209,32 @@ final class MempoolTests: XCTestCase {
         }
     }
 
+    /// `minRelayFee` is node admission policy on the real fee (the balance
+    /// excess): below it is refused by name, at it is admitted, and the
+    /// default 0 admits a zero-fee transaction.
+    func testMinRelayFeeRefusesCheaperTransactions() throws {
+        let key = CryptoUtils.generateKeyPair()
+        let recipient = address(CryptoUtils.generateKeyPair())
+        func tx(fee: Int64, nonce: UInt64) throws -> Transaction {
+            try signed(key, [
+                AccountAction(owner: address(key), delta: -(fee + 1)), AccountAction(owner: recipient, delta: 1),
+            ], nonce: nonce)
+        }
+        var pool = Mempool(limits: MempoolLimits(minRelayFee: 5))
+        XCTAssertThrowsError(try pool.submit(tx(fee: 4, nonce: 0), spec: testSpec(), addedAt: 0)) {
+            XCTAssertEqual($0 as? MempoolError, .belowMinRelayFee)
+        }
+        XCTAssertThrowsError(try pool.check(tx(fee: 4, nonce: 0), spec: testSpec())) {
+            XCTAssertEqual($0 as? MempoolError, .belowMinRelayFee)
+        }
+        try pool.submit(tx(fee: 5, nonce: 0), spec: testSpec(), addedAt: 0)
+        XCTAssertEqual(pool.count, 1)
+
+        var open = Mempool()
+        try open.submit(tx(fee: 0, nonce: 0), spec: testSpec(), addedAt: 0)
+        XCTAssertEqual(open.count, 1)
+    }
+
     func testReplaceByFeeRequiresAStrictlyHigherBid() throws {
         var pool = Mempool()
         let key = CryptoUtils.generateKeyPair()

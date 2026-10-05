@@ -80,6 +80,7 @@ check GET  /api/chain/info         200 "explorer api"
 check GET  /api/block/latest       200 "explorer api"
 check GET  /api/block/1/transactions 200 "block transactions"
 check GET  /api/block/1/children   200 "block children"
+check GET  "/api/transaction/$CID" 200 "transaction inclusion"
 check GET  "/api/blocks?before=10&limit=10" 200 "block summary page"
 check GET  "/api/chain/endpoints?chainPath=Nexus/testnet" 200 "child read endpoints"
 
