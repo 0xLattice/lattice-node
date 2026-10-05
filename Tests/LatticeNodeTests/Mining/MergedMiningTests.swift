@@ -53,6 +53,100 @@ final class MergedMiningTests: XCTestCase {
         await restarted.stop()
     }
 
+    /// The cross-chain swap end to end on one node that hosts Nexus and
+    /// Alpha: A deposits on Alpha, B pays the receipt on Nexus, and B's
+    /// withdrawal on Alpha is mined by merged mining. Preflight has no
+    /// carrier, so the pool holds the withdrawal as unavailable; the child
+    /// template must still offer it, to be checked against the carrier's
+    /// entering state.
+    func testAChildWithdrawalIsMinedOnceItsParentReceiptLands() async throws {
+        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-swap-\(UUID().uuidString)", isDirectory: true
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
+        let port = NetworkTransportTestPorts.allocate()
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"], storagePath: storageDirectory, privateKeyHex: String(repeating: "4f", count: 32),
+            listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
+            hostedChildren: [Self.alpha], childSpecs: [Self.alpha: Self.alphaSpec]
+        )
+        let overlay = IvyConfig(
+            signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: [],
+            requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        )
+        let storage = try await NodeStorage.open(configuration: configuration)
+        let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration, overlay: overlay)
+        let nexusReads = runtime.reads
+        let alphaReads = try XCTUnwrap(runtime.levelReads[Self.alpha])
+        let demander = CryptoUtils.generateKeyPair()
+        let demanderAddress = CryptoUtils.createAddress(from: demander.publicKey)
+        let withdrawer = CryptoUtils.generateKeyPair()
+        let withdrawerAddress = CryptoUtils.createAddress(from: withdrawer.publicKey)
+        // B earns on Nexus, A on Alpha: B pays the receipt, A locks the deposit.
+        let recipients = MiningTemplateRequest(recipients: [
+            MiningRecipient(chainPath: ["Nexus"], address: withdrawerAddress),
+            MiningRecipient(chainPath: Self.alpha, address: demanderAddress),
+        ])
+        func balance(_ reads: ChainReads, _ owner: String) async -> UInt64 {
+            guard let tip = await reads.readSnapshot().tipCID else { return 0 }
+            return await reads.account(owner: owner, blockCID: tip)?.balance ?? 0
+        }
+        func signed(_ key: (privateKey: String, publicKey: String), _ body: TransactionBody) throws -> Transaction {
+            let header = try HeaderImpl(node: body)
+            return Transaction(
+                signatures: [key.publicKey: try XCTUnwrap(TransactionSigning.sign(
+                    bodyHeader: header, privateKeyHex: key.privateKey
+                ))],
+                body: header
+            )
+        }
+        func confirm(_ transaction: Transaction, on reads: ChainReads, _ label: String) async throws {
+            let cid = try await runtime.submitTransaction(SubmitTransactionRequest(transaction: transaction)).transactionCID
+            try await eventually(label) {
+                _ = try await runtime.mineBlock(recipients)
+                let pooled = await reads.readSnapshot().mempoolCount
+                let stored = await reads.transaction(cid: cid)
+                return pooled == 0 && stored != nil
+            }
+        }
+        try await eventually("A and B are funded") {
+            _ = try await runtime.mineBlock(recipients)
+            let locked = await balance(alphaReads, demanderAddress)
+            let paid = await balance(nexusReads, withdrawerAddress)
+            return locked >= 5 && paid >= 3
+        }
+
+        try await confirm(signed(demander, TransactionBody(
+            accountActions: [AccountAction(owner: demanderAddress, delta: -5)], actions: [],
+            depositActions: [DepositAction(nonce: 1, demander: demanderAddress, amountDemanded: 3, amountDeposited: 5)],
+            receiptActions: [], withdrawalActions: [],
+            signers: [demanderAddress], nonce: 0, chainPath: Self.alpha
+        )), on: alphaReads, "Alpha confirms the deposit")
+        try await confirm(signed(withdrawer, TransactionBody(
+            accountActions: [], actions: [], depositActions: [],
+            receiptActions: [ReceiptAction(
+                withdrawer: withdrawerAddress, nonce: 1, demander: demanderAddress,
+                amountDemanded: 3, directory: "Alpha"
+            )],
+            withdrawalActions: [],
+            signers: [withdrawerAddress], nonce: 0, chainPath: ["Nexus"]
+        )), on: nexusReads, "Nexus confirms the receipt")
+        // Zero fee, and B holds nothing on Alpha: the withdrawal funds itself.
+        try await confirm(signed(withdrawer, TransactionBody(
+            accountActions: [AccountAction(owner: withdrawerAddress, delta: 5)], actions: [], depositActions: [],
+            receiptActions: [],
+            withdrawalActions: [WithdrawalAction(
+                withdrawer: withdrawerAddress, nonce: 1, demander: demanderAddress,
+                amountDemanded: 3, amountWithdrawn: 5
+            )],
+            signers: [withdrawerAddress], nonce: 0, chainPath: Self.alpha
+        )), on: alphaReads, "Alpha confirms the withdrawal")
+        let credited = await balance(alphaReads, withdrawerAddress)
+        XCTAssertEqual(credited, 5)
+        await runtime.stop()
+    }
+
     /// A nested child (Nexus/Alpha/Beta) created with its parent: its
     /// genesis waits until Alpha executes a block, then both advance by
     /// merged mining.

@@ -980,7 +980,10 @@ extension NodeRuntime {
                     path: child,
                     tipCID: executed ? snapshot.actOnTip : nil,
                     bestHeaderTip: snapshot.bestHeaderTip,
-                    transactions: level.mining.mempool.transactions(limit: .max),
+                    // Every child block here has a carrier, so the pool's
+                    // contextual set: a withdrawal preflight could not settle
+                    // without one is checked against that carrier's state.
+                    transactions: level.mining.mempool.contextualTransactions(limit: .max),
                     anchor: executed ? anchor(level.tree, snapshot.actOnTip) : nil,
                     // A weighed root that has not executed carries nothing
                     // until it executes, rather than a rival genesis.
