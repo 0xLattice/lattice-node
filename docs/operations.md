@@ -71,7 +71,8 @@ systemctl enable --now lattice-mining-coordinator
 The public-read listener serves the bounded GET routes and never registers
 operator status, metrics, or mining handlers; it registers
 `POST /transactions` only with public submit on (below). Set all three read-rate controls to
-zero only behind a proxy that supplies its own per-client and global limits.
+zero only behind a proxy that supplies its own per-client and global limits
+(`--public-submit-rate` is a fourth ceiling; it bounds only `POST /transactions`).
 The example Fly read replica uses nginx as the public boundary.
 
 ## Discovery and peer health
