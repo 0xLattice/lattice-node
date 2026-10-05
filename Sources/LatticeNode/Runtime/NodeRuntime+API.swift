@@ -469,15 +469,16 @@ extension NodeRuntime {
 
     /// The template digest over the root and every hosted child: each tip,
     /// best header, and transaction set a template job reads. Status serves
-    /// the current value.
+    /// the current value, so it reads the same selections a build does: the
+    /// root's ready set, and each carried child's contextual set.
     static func templateDigest(
         tip: String, mempool: Mempool, levels: [(actOn: String, best: String, pool: Mempool)] = []
     ) -> String {
         templateDigest(
             tip: tip,
-            transactions: mempool.items.filter { $0.disposition != .unavailable }.map(\.cid),
+            transactions: mempool.transactions(limit: .max).compactMap { try? Mempool.cid(of: $0) },
             levels: levels.map {
-                ($0.actOn, $0.best, $0.pool.items.filter { $0.disposition != .unavailable }.map(\.cid))
+                ($0.actOn, $0.best, $0.pool.contextualTransactions(limit: .max).compactMap { try? Mempool.cid(of: $0) })
             }
         )
     }
