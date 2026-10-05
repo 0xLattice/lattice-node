@@ -375,6 +375,9 @@ extension NodeRuntime {
         /// that has a job.
         var preflightLevels: [ChainPath: (epoch: UInt64, level: ChainLevel)] = [:]
         var views: [ChainPath: NodeReadView] = [:]
+        /// Each view's template digest and the tips and pool versions it was
+        /// computed from: selection runs only when one of them moves.
+        var digests: [ChainPath: (key: String, digest: String)] = [:]
         var rootHighWater: UInt64
         var lastProgressAt: Int64
         var lastPeerSearchAt: Int64 = 0
@@ -593,11 +596,22 @@ extension NodeRuntime {
             let tip = (hash: snapshot.actOnTip, height: snapshot.actOnHeight)
             let peers = sessions.values.filter(\.ready).count
             let pool = level.mining.mempool
-            let digest = path == core.rootPath
-                ? NodeRuntime.templateDigest(tip: tip.hash, mempool: pool, levels: core.ordered.dropFirst().compactMap {
+            let children = path == core.rootPath
+                ? core.ordered.dropFirst().compactMap {
                     core.levels[$0].map { ($0.snapshot.actOnTip, $0.snapshot.bestHeaderTip, $0.mining.mempool) }
-                })
-                : NodeRuntime.templateDigest(tip: tip.hash, mempool: pool)
+                }
+                : []
+            let key = ([(tip.hash, "", pool)] + children)
+                .map { "\($0.0)/\($0.1)/\($0.2.version)" }.joined(separator: "\n")
+            let digest: String
+            if let cached = digests[path], cached.key == key {
+                digest = cached.digest
+            } else {
+                digest = path == core.rootPath
+                    ? NodeRuntime.templateDigest(tip: tip.hash, mempool: pool, levels: children)
+                    : NodeRuntime.templateDigest(tip: tip.hash, mempool: pool)
+                digests[path] = (key, digest)
+            }
             guard view.actOnTip != tip.hash || view.poolVersion != pool.version
                     || view.templateDigest != digest || view.peers != peers else { return }
             if view.actOnTip != tip.hash {
