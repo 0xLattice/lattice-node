@@ -291,7 +291,7 @@ struct Mine: AsyncParsableCommand {
 
 struct MinerSettings {
     let mine: TopologyMine
-    let rpc: UInt16
+    let rpc: NodeRPC
     let workerExecutable: URL
 }
 
@@ -317,7 +317,7 @@ func minerSettings(_ layout: HostLayout) throws -> MinerSettings {
         throw CtlError("mine.minWork maps chain paths to work per block, as 2^N or a positive decimal integer")
     }
     return MinerSettings(
-        mine: mine, rpc: topology.rpc, workerExecutable: worker
+        mine: mine, rpc: NodeRPC(topology, layout), workerExecutable: worker
     )
 }
 
@@ -357,7 +357,8 @@ func runCoordinatorOnce(
     let executable = try nodeBinary().deletingLastPathComponent()
         .appendingPathComponent("lattice-mining-coordinator")
     var arguments = [
-        "--node", "http://127.0.0.1:\(settings.rpc)",
+        "--node", settings.rpc.baseURL,
+        "--rpc-cookie-file", settings.rpc.cookieFile.path,
         "--worker-executable", settings.workerExecutable.path,
         "--workers", String(settings.mine.workers ?? 1),
         "--batch-size", String(settings.mine.batchSize ?? 2_000_000_000),
@@ -425,12 +426,9 @@ func runCoordinatorOnce(
 /// is derived from this plus measured batch time, so no template lifetime is
 /// hardcoded on this side of the RPC.
 func observedTemplateExpiry(
-    _ rpc: UInt16, body: Data, timeoutSeconds: UInt64
+    _ rpc: NodeRPC, body: Data, timeoutSeconds: UInt64
 ) async -> Duration? {
-    guard let url = URL(
-        string: "http://127.0.0.1:\(rpc)/mining/templates"
-    ) else { return nil }
-    var request = URLRequest(url: url)
+    guard var request = try? rpc.request("mining/templates") else { return nil }
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = body

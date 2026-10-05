@@ -188,7 +188,8 @@ extension NodeRuntime {
                     nexusGenesisCID: configuration.nexusGenesisCID,
                     tipCID: snapshot?.actOnTip.isEmpty == false ? snapshot?.actOnTip : nil,
                     height: snapshot?.actOnTip.isEmpty == false ? snapshot?.actOnHeight : nil,
-                    revision: nil
+                    revision: nil,
+                    bestHeaderHeight: snapshot?.bestHeaderTip.isEmpty == false ? snapshot?.bestHeaderHeight : nil
                 )
             },
             canonicalCID: { height in
@@ -239,7 +240,8 @@ extension NodeRuntime {
             revision: read.revision,
             mempoolCount: read.mempoolCount,
             mempoolBytes: read.mempoolBytes,
-            templateDigest: read.tipCID == nil ? nil : readView.value?.templateDigest
+            templateDigest: read.tipCID == nil ? nil : readView.value?.templateDigest,
+            bestHeaderHeight: read.bestHeaderHeight
         )
     }
 

@@ -23,6 +23,8 @@ public struct ChainStatus: Sendable, Equatable {
     public let tipCID: String?
     public let height: UInt64?
     public let revision: UInt64?
+    /// The best header chain's height (nil before any header).
+    public var bestHeaderHeight: UInt64? = nil
 }
 
 

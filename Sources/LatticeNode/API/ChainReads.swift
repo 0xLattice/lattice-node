@@ -82,7 +82,8 @@ public struct ChainReads: Sendable {
             revision: status.revision,
             mempoolCount: pool.count,
             mempoolBytes: pool.bytes,
-            templateDigest: nil
+            templateDigest: nil,
+            bestHeaderHeight: status.bestHeaderHeight
         )
     }
 

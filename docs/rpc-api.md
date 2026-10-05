@@ -3,13 +3,37 @@
 Base operator URL: `http://127.0.0.1:<rpc-port>`
 
 The API has one unversioned route set. `/v1/...` does not exist. The operator
-listener is unauthenticated and loopback-only. The optional public-read
+listener is loopback-only and authenticated ([Authentication](#authentication)).
+The optional public-read listener is unauthenticated. The optional public-read
 listener registers only the GET routes in the read table below, plus
 `POST /transactions` when its operator turns public submit on
 ([Public submit](#public-submit)); it is off by default.
 
 Requests and responses are JSON unless noted. Operator POSTs require
 `Content-Type: application/json` and a loopback `Host` authority.
+
+## Authentication
+
+The operator listener works like bitcoind's RPC cookie. At every start the node
+writes a fresh random cookie to `<data-directory>/.cookie` (override with
+`--rpc-cookie-file`; under `lattice up` that is `<root>/chains/Nexus/.cookie`),
+mode `0600`, content `__cookie__:<token>`, and removes it at exit. Every route
+on the operator port requires it except `GET`/`HEAD /health` (public chain
+status, also served by the public listener; open so health probes need no
+secret). Send either:
+
+- `Authorization: Basic <base64 of the file's content>` (`curl --user "$(cat .cookie)"`), or
+- `Authorization: Bearer <token>` (the part after `__cookie__:`).
+
+Anything else gets `401` (no `WWW-Authenticate` challenge).
+The cookie changes at every restart; clients re-read the file.
+
+Browsers are refused: a request with an `Origin` header gets `403` unless the
+operator lists that exact origin with `--rpc-allowed-origin` (`rpcAllowedOrigins`
+in `lattice.json`), e.g. `chrome-extension://<extension id>`. A listed origin
+gets CORS preflight answers (`GET, HEAD, POST`; headers `Authorization,
+Content-Type`) and `Access-Control-Allow-Origin` on responses, refusals
+included, and still needs the cookie.
 
 ## Integer encoding
 
@@ -147,8 +171,13 @@ public read budget.
   "height": "42",
   "mempoolCount": 3,
   "mempoolBytes": 2048,
+  "bestHeaderHeight": "57"
 }
 ```
+
+`bestHeaderHeight` is the height of the best header chain the node knows (absent
+before any header); `height` is the deepest executed block on it, so sync
+progress is `height` of `bestHeaderHeight`. Both are per level (`?chainPath=`).
 
 `/health` reads an immutable published view and never enters the core loop. It
 has no `templateDigest`. `/status` uses the root runtime's current template
@@ -310,6 +339,8 @@ level's facts and stream cursors commit in one `state.db` transaction.
 - `400 Bad Request` — malformed JSON, invalid content, policy refusal, or
   invalid work;
 - `413 Content Too Large` — public submit body over 1 MiB;
+- `401 Unauthorized` — operator route without the node's cookie (no challenge header);
+- `403 Forbidden` — browser `Origin` not listed, or a non-loopback `Host`;
 - `404 Not Found` — unknown resource or unhosted `chainPath`;
 - `415 Unsupported Media Type` — operator POST without JSON content type;
 - `429 Too Many Requests` — mempool or public-read rate limit;

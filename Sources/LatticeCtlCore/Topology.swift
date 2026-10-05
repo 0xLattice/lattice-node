@@ -46,6 +46,10 @@ public struct Topology: Codable, Sendable {
     /// Child chains this process hosts as levels, parent before child.
     public var hostedChains: [String]?
     public var mine: TopologyMine?
+    /// Browser origins allowed on the loopback RPC port (the node's
+    /// `--rpc-allowed-origin`), e.g. `chrome-extension://<id>`. Each still
+    /// needs the node's cookie. Absent = browsers are refused.
+    public var rpcAllowedOrigins: [String]? = nil
 
     public init(
         listen: UInt16, rpc: UInt16, peers: [String]? = nil,
@@ -334,6 +338,12 @@ public struct HostLayout: Sendable {
 
     public func chainDirectory(for path: String) -> URL {
         root.appendingPathComponent("chains").appendingPathComponent(path)
+    }
+
+    /// The loopback RPC cookie the node writes at every start: the default
+    /// `.cookie` in the data directory `lattice up` gives it.
+    public var rpcCookie: URL {
+        chainDirectory(for: "Nexus").appendingPathComponent(".cookie")
     }
 
     private static func encoded(_ path: String) -> String {

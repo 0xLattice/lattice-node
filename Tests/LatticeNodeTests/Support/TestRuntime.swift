@@ -31,7 +31,8 @@ extension XCTestCase {
 
 /// The daemon's loopback application over a runtime, as `runNodeRuntime` builds it.
 func makeApplication(
-    service runtime: NodeRuntime, host: String, port: Int
+    service runtime: NodeRuntime, host: String, port: Int,
+    auth: LoopbackRPCAuth = testOperatorAuth
 ) -> Application<RouterResponder<BasicRequestContext>> {
     makeApplication(
         reads: runtime.reads,
@@ -42,6 +43,7 @@ func makeApplication(
         port: port,
         peers: { ExplorerPeersResponse(count: runtime.peerCount, peers: []) },
         processStartTime: Date(),
+        auth: auth,
         endpoints: { await runtime.chainEndpoints($0) }
     )
 }
@@ -61,3 +63,7 @@ func makePublicReadApplication(
         submit: submit ? { @Sendable request in try await runtime.submitPublicTransaction(request) } : nil
     )
 }
+
+/// The loopback application's cookie in tests, and the header carrying it.
+let testOperatorAuth = LoopbackRPCAuth(token: "test-cookie", allowedOrigins: [])
+let testOperatorAuthorization = "Bearer test-cookie"

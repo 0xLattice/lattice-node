@@ -21,6 +21,7 @@ swift run lattice-node --rpc-port 8080
 # External proof-of-work pipeline:
 swift run lattice-mining-coordinator \
   --node http://127.0.0.1:8080 \
+  --rpc-cookie-file ~/.lattice/chains/Nexus/.cookie \
   --worker-executable .build/debug/lattice-miner \
   --workers 2
 ```

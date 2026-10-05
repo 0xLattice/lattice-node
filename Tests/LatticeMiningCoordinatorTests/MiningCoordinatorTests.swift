@@ -855,6 +855,35 @@ final class MiningCoordinatorTests: XCTestCase {
         XCTAssertEqual(attempts, 1)
     }
 
+    /// Every node request carries the cookie as it is NOW: a restarted node
+    /// rotated it, and a long-running coordinator must follow.
+    func testHTTPClientSendsTheCurrentCookie() async throws {
+        let cookie = FileManager.default.temporaryDirectory.appendingPathComponent("cookie-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: cookie) }
+        try Data("__cookie__:first".utf8).write(to: cookie)
+        func expect(_ authorization: String) {
+            StubTemplateURLProtocol.responder = { request in
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), authorization)
+                return (200, Data(#"{"tipCID":"t"}"#.utf8))
+            }
+        }
+        defer { StubTemplateURLProtocol.responder = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [StubTemplateURLProtocol.self]
+        let client = HTTPMiningCoordinatorNodeClient(
+            apiBaseURL: URL(string: "http://127.0.0.1:1")!,
+            session: URLSession(configuration: config),
+            cookieFile: cookie
+        )
+        expect("Basic " + Data("__cookie__:first".utf8).base64EncodedString())
+        let token = try await client.fetchStaleToken()
+        XCTAssertEqual(token, "t")
+        try Data("__cookie__:second\n".utf8).write(to: cookie)
+        expect("Basic " + Data("__cookie__:second".utf8).base64EncodedString())
+        let rotated = try await client.fetchStaleToken()
+        XCTAssertEqual(rotated, "t")
+    }
+
     func testHTTPSubmitTreatsJSONServerFailureAsRetryableTransportFailure() throws {
         let response = try XCTUnwrap(HTTPURLResponse(
             url: URL(string: "http://127.0.0.1/mining/work")!,

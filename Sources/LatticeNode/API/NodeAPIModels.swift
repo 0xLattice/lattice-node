@@ -229,6 +229,10 @@ public struct NodeStatusResponse: Codable, Sendable, Equatable {
     public let mempoolBytes: Int
     /// Nil before the node can serve templates (no executed tip).
     public let templateDigest: String?
+    /// The height of the best header chain this node knows, ahead of
+    /// `height` (the deepest executed block on it) while it syncs: local
+    /// progress is `height` of `bestHeaderHeight`. Nil before any header.
+    @OptionalDecimalString public var bestHeaderHeight: UInt64? = nil
 }
 
 public enum NodeAPIError: Error, Equatable, Sendable {

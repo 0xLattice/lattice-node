@@ -224,7 +224,7 @@ struct TxOptions: ParsableArguments {
             signerNonce = nonce
         } else {
             signerNonce = try await nextNonce(
-                rpc: topology.rpc, address: signer.address, chain: chain
+                rpc: NodeRPC(topology, rootOption.layout), address: signer.address, chain: chain
             )
         }
         var actions = accountActions
@@ -248,7 +248,7 @@ struct TxOptions: ParsableArguments {
             throw CtlError("signing failed; check the key file")
         }
         let response: SubmitTransactionResponse = try await post(
-            rpc: topology.rpc, path: "transactions",
+            rpc: NodeRPC(topology, rootOption.layout), path: "transactions",
             body: SubmitTransactionRequest(transaction: Transaction(
                 signatures: [signer.publicKey: signature], body: header
             ))
@@ -268,7 +268,7 @@ struct TxOptions: ParsableArguments {
 /// `(signer, nonce)` with whichever bids the higher real fee — so the earlier
 /// transfer would be dropped while both commands printed `submitted` and
 /// exited 0. Paying nobody must not look like success.
-func nextNonce(rpc: UInt16, address: String, chain: String = "Nexus") async throws -> UInt64 {
+func nextNonce(rpc: NodeRPC, address: String, chain: String = "Nexus") async throws -> UInt64 {
     let committed = try await committedNextNonce(rpc: rpc, address: address, chain: chain)
     guard let pending = try await highestPendingNonce(
         rpc: rpc, signer: address, chain: chain
@@ -277,9 +277,8 @@ func nextNonce(rpc: UInt16, address: String, chain: String = "Nexus") async thro
 }
 
 /// The chain's own view of the key's next nonce, as of its tip.
-func committedNextNonce(rpc: UInt16, address: String, chain: String = "Nexus") async throws -> UInt64 {
-    guard let url = readURL(rpc: rpc, "api/state/account/\(address)", chain: chain) else { throw CtlError("bad RPC URL") }
-    var request = URLRequest(url: url)
+func committedNextNonce(rpc: NodeRPC, address: String, chain: String = "Nexus") async throws -> UInt64 {
+    var request = try rpc.request("api/state/account/\(address)", chain: chain)
     request.timeoutInterval = 10
     // These reads decide which nonce to sign. The node marks them
     // `max-age=3`, and URLSession.shared keeps a shared on-disk cache, so two
@@ -307,11 +306,8 @@ func committedNextNonce(rpc: UInt16, address: String, chain: String = "Nexus") a
     return try JSONDecoder().decode(ExplorerAccount.self, from: data).nonce
 }
 
-func chainHasTip(rpc: UInt16, chain: String = "Nexus") async throws -> Bool {
-    guard let url = readURL(rpc: rpc, "health", chain: chain) else {
-        throw CtlError("bad RPC URL")
-    }
-    var request = URLRequest(url: url)
+func chainHasTip(rpc: NodeRPC, chain: String = "Nexus") async throws -> Bool {
+    var request = try rpc.request("health", chain: chain)
     request.timeoutInterval = 10
     // These reads decide which nonce to sign. The node marks them
     // `max-age=3`, and URLSession.shared keeps a shared on-disk cache, so two
@@ -332,11 +328,8 @@ func chainHasTip(rpc: UInt16, chain: String = "Nexus") async throws -> Bool {
 /// pool listing is capped by the node, so this can only ever miss entries
 /// beyond that cap — in which case the submit is refused rather than
 /// silently replacing, which is the safe direction.
-func highestPendingNonce(rpc: UInt16, signer: String, chain: String = "Nexus") async throws -> UInt64? {
-    guard let url = readURL(rpc: rpc, "api/mempool", chain: chain) else {
-        throw CtlError("bad RPC URL")
-    }
-    var request = URLRequest(url: url)
+func highestPendingNonce(rpc: NodeRPC, signer: String, chain: String = "Nexus") async throws -> UInt64? {
+    var request = try rpc.request("api/mempool", chain: chain)
     request.timeoutInterval = 10
     // These reads decide which nonce to sign. The node marks them
     // `max-age=3`, and URLSession.shared keeps a shared on-disk cache, so two
@@ -361,10 +354,9 @@ func highestPendingNonce(rpc: UInt16, signer: String, chain: String = "Nexus") a
 /// One pooled transaction, or nil when it left the pool between the listing
 /// and this read — a race that is ordinary, not an error.
 func pooledTransaction(
-    rpc: UInt16, cid: String, chain: String = "Nexus"
+    rpc: NodeRPC, cid: String, chain: String = "Nexus"
 ) async throws -> ExplorerTransaction? {
-    guard let url = readURL(rpc: rpc, "api/transaction/\(cid)", chain: chain) else { throw CtlError("bad RPC URL") }
-    var request = URLRequest(url: url)
+    var request = try rpc.request("api/transaction/\(cid)", chain: chain)
     request.timeoutInterval = 10
     // These reads decide which nonce to sign. The node marks them
     // `max-age=3`, and URLSession.shared keeps a shared on-disk cache, so two
@@ -391,7 +383,3 @@ func amountDelta(_ amount: UInt64) throws -> Int64 {
     return Int64(amount)
 }
 
-/// A loopback read URL, naming a child chain with `?chainPath=`.
-func readURL(rpc: UInt16, _ path: String, chain: String) -> URL? {
-    URL(string: "http://127.0.0.1:\(rpc)/\(path)" + (chain == "Nexus" ? "" : "?chainPath=\(chain)"))
-}

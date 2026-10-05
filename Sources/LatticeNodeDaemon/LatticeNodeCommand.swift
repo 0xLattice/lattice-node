@@ -44,6 +44,12 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "HTTP bind address; only loopback addresses are accepted")
     var rpcBind = "127.0.0.1"
 
+    @Option(help: "Where the node writes its loopback RPC cookie at every start (mode 0600, a fresh secret each time, removed at exit). Every loopback route but GET/HEAD /health requires it, as Authorization: Basic base64(\"__cookie__:<token>\") (the file's content) or Bearer <token>. Defaults to <data-directory>/.cookie; give each node its own.")
+    var rpcCookieFile: String?
+
+    @Option(name: .customLong("rpc-allowed-origin"), help: "A browser origin allowed on the loopback RPC port, exactly as the browser sends it, e.g. chrome-extension://<id> (repeatable). Requests with any other Origin are refused; an allowed origin gets CORS preflight answers and still needs the cookie.")
+    var rpcAllowedOrigins: [String] = []
+
     @Option(parsing: .upToNextOption, help: "Overlay peer as public-key@host:port. Any peer given here REPLACES the built-in default bootstrap peers; the two are never merged.")
     var peer: [String] = []
 
@@ -90,7 +96,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         let processStartTime = Date()
         let address = ChainAddress([ChainAddress.nexus])!
         guard ["127.0.0.1", "::1", "localhost"].contains(rpcBind.lowercased()) else {
-            throw ValidationError("the unauthenticated HTTP API may bind only to loopback")
+            throw ValidationError("the operator HTTP API may bind only to loopback")
         }
         if let publicReadPort {
             guard publicReadPort != rpcPort else {
@@ -148,8 +154,11 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             publicSubmit: publicSubmit,
             minRelayFee: minRelayFee
         )
+        let cookieFile = rpcCookieFile.map { URL(fileURLWithPath: $0) }
+            ?? storage.appendingPathComponent(".cookie")
         try await runNodeRuntime(
             configuration: configuration,
+            cookieFile: cookieFile,
             publicReadLimits: publicReadLimits,
             processStartTime: processStartTime
         )
@@ -260,16 +269,21 @@ func makeApplication(
     port: Int,
     peers: @Sendable @escaping () async -> ExplorerPeersResponse,
     processStartTime: Date,
+    auth: LoopbackRPCAuth,
     endpoints: @escaping ChainEndpointsLookup = { _ in nil },
     configure: (Router<BasicRequestContext>) -> Void = { _ in }
 ) -> Application<RouterResponder<BasicRequestContext>> {
     let router = Router()
+    // First, so it covers every route below and the not-found responder: the
+    // origin policy and the cookie check (LoopbackRPCAuth).
+    router.add(middleware: LoopbackRPCAuthMiddleware(auth: auth))
     addPublicReadRoutes(
         to: router,
         reads: ChainReadsByPath(root: reads, levels: levelReads),
         peers: peers,
         endpoints: endpoints,
         acceptsSubmit: true,
+        cors: false,
         // Loopback reads the live snapshot: `lattice status` and the E2E
         // suites poll this to watch height advance, and the public listener's
         // staleness window is a defence against public load that does not
@@ -378,6 +392,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
     peers: @Sendable @escaping () async -> ExplorerPeersResponse,
     endpoints: @escaping ChainEndpointsLookup,
     acceptsSubmit: Bool,
+    cors: Bool = true,
     corsAllowsPost: Bool = false,
     healthSnapshot: @Sendable @escaping () async -> NodeStatusResponse
 ) {
@@ -388,12 +403,15 @@ private func addPublicReadRoutes<Context: RequestContext>(
     // daemon's loopback-only write posture. Cross-origin GETs to the public
     // read routes are "simple" requests and still succeed. The public
     // listener of an operator who turned public submit on also allows POST:
-    // that route is meant to be reached cross-origin.
-    router.add(middleware: CORSMiddleware(
-        allowOrigin: .all,
-        allowHeaders: [.contentType],
-        allowMethods: corsAllowsPost ? [.get, .post, .options] : [.get, .options]
-    ))
+    // that route is meant to be reached cross-origin. The loopback listener
+    // installs no open CORS: its origin policy is LoopbackRPCAuthMiddleware's.
+    if cors {
+        router.add(middleware: CORSMiddleware(
+            allowOrigin: .all,
+            allowHeaders: [.contentType],
+            allowMethods: corsAllowsPost ? [.get, .post, .options] : [.get, .options]
+        ))
+    }
 
     // /health is the public, non-mutating status: readSnapshot() never enters
     // the runtime loop, so a health-check/explorer poll cannot mutate or

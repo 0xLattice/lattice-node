@@ -163,6 +163,7 @@ await_status() {
 run_coordinator() {
     "$coordinator_binary" \
         --node "http://127.0.0.1:$rpc_port" \
+        --rpc-cookie-file "$tmp/data/.cookie" \
         --worker-executable "$miner_binary" \
         --workers 1 \
         --once \
@@ -204,6 +205,12 @@ run_coordinator() {
 
 start_node
 await_status 0 "$expected_genesis" "active Nexus genesis"
+# The operator port needs the cookie the node wrote (bitcoind-style).
+[[ "$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:$rpc_port/status")" == 401 ]] \
+    || fail "operator /status answered without the cookie"
+[[ "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    --user "$(cat "$tmp/data/.cookie")" "http://127.0.0.1:$rpc_port/status")" == 200 ]] \
+    || fail "operator /status refused the node's cookie"
 run_coordinator
 
 if ! mined_tip="$(jq -er '.tipCID' "$coordinator_output")"; then

@@ -18,10 +18,11 @@ final class MetricsTests: XCTestCase {
             host: "127.0.0.1",
             port: 8080,
             peers: { ExplorerPeersResponse(count: 3, peers: []) },
-            processStartTime: Date(timeIntervalSince1970: 1_700_000_000.5)
+            processStartTime: Date(timeIntervalSince1970: 1_700_000_000.5),
+            auth: testOperatorAuth
         )
         try await app.test(.router) { client in
-            let response = try await client.execute(uri: "/metrics", method: .get)
+            let response = try await client.execute(uri: "/metrics", method: .get, headers: [.authorization: testOperatorAuthorization])
             XCTAssertEqual(response.status, .ok)
             XCTAssertEqual(response.headers[.contentType], "text/plain; version=0.0.4")
             let samples = try parseExposition(
@@ -51,7 +52,7 @@ final class MetricsTests: XCTestCase {
             let templateResponse = try await client.execute(
                 uri: "/mining/templates",
                 method: .post,
-                headers: [.contentType: "application/json"],
+                headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
                 body: ByteBuffer(bytes: try JSONEncoder().encode(MiningTemplateRequest()))
             )
             let template = try JSONDecoder().decode(
@@ -61,7 +62,7 @@ final class MetricsTests: XCTestCase {
             let workResponse = try await client.execute(
                 uri: "/mining/work",
                 method: .post,
-                headers: [.contentType: "application/json"],
+                headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
                 body: ByteBuffer(bytes: try JSONEncoder().encode(
                     SubmitWorkRequest(workID: template.workID, nonce: 0)
                 ))
@@ -96,7 +97,7 @@ final class MetricsTests: XCTestCase {
             let submitted = try await client.execute(
                 uri: "/transactions",
                 method: .post,
-                headers: [.contentType: "application/json"],
+                headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
                 body: ByteBuffer(bytes: try JSONEncoder().encode(
                     SubmitTransactionRequest(transaction: transaction)
                 ))
@@ -131,12 +132,12 @@ final class MetricsTests: XCTestCase {
         let service = try await openService(chainPath: ["Nexus"])
         let publicApp = makePublicReadApplication(service: service, host: "127.0.0.1", port: 8081)
         try await publicApp.test(.router) { client in
-            let response = try await client.execute(uri: "/metrics", method: .get)
+            let response = try await client.execute(uri: "/metrics", method: .get, headers: [.authorization: testOperatorAuthorization])
             XCTAssertEqual(response.status, .notFound)
         }
         let loopback = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         try await loopback.test(.router) { client in
-            let response = try await client.execute(uri: "/metrics", method: .get)
+            let response = try await client.execute(uri: "/metrics", method: .get, headers: [.authorization: testOperatorAuthorization])
             XCTAssertEqual(response.status, .ok)
         }
     }
@@ -159,7 +160,7 @@ final class MetricsTests: XCTestCase {
 }
 
 private func scrape(_ client: some TestClientProtocol) async throws -> [String: String] {
-    let response = try await client.execute(uri: "/metrics", method: .get)
+    let response = try await client.execute(uri: "/metrics", method: .get, headers: [.authorization: testOperatorAuthorization])
     XCTAssertEqual(response.status, .ok)
     return try parseExposition(String(decoding: response.body.readableBytesView, as: UTF8.self))
 }
