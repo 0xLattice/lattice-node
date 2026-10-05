@@ -223,6 +223,7 @@ final class NodeRuntimeTests: XCTestCase {
         let read = await runtime.reads.readSnapshot()
         XCTAssertEqual(read.tipCID, cid)
         XCTAssertEqual(read.height, 1)
+        XCTAssertEqual(read.bestHeaderHeight, 1, "the best header chain is this executed one")
         let canonical = await runtime.reads.explorerCanonicalBlockCID(atHeight: 1)
         XCTAssertEqual(canonical, cid)
         let block = await runtime.reads.block(cid: cid)

@@ -127,11 +127,10 @@ func withSpawnLock<T>(
     return try await body()
 }
 
-func health(rpc: UInt16, chain: String = "Nexus") async -> [String: Any]? {
-    guard let url = readURL(rpc: rpc, "health", chain: chain) else {
+func health(rpc: NodeRPC, chain: String = "Nexus") async -> [String: Any]? {
+    guard var request = try? rpc.request("health", chain: chain) else {
         return nil
     }
-    var request = URLRequest(url: url)
     request.timeoutInterval = 5
     guard let (data, _) = try? await URLSession.shared.data(for: request) else {
         return nil
@@ -178,6 +177,7 @@ func spawnHost(layout: HostLayout) throws {
     if let url = topology.publicReadURL { arguments += ["--public-read-url", url] }
     if topology.publicSubmit == true { arguments += ["--public-submit"] }
     if let fee = topology.minRelayFee { arguments += ["--min-relay-fee", String(fee)] }
+    for origin in topology.rpcAllowedOrigins ?? [] { arguments += ["--rpc-allowed-origin", origin] }
     for child in topology.hostedChains ?? [] {
         let spec = layout.childSpec(for: child)
         arguments += ["--host-chain", FileManager.default.fileExists(atPath: spec.path) ? "\(child)=\(spec.path)" : child]
@@ -367,7 +367,7 @@ struct Status: AsyncParsableCommand {
                 print("\(path): down")
                 continue
             }
-            guard let health = await health(rpc: topology.rpc, chain: path) else {
+            guard let health = await health(rpc: NodeRPC(topology, layout), chain: path) else {
                 print("\(path): running, rpc unreachable")
                 continue
             }

@@ -58,7 +58,7 @@ final class PublicSubmitTests: XCTestCase {
 
     private static func post(_ client: some TestClientProtocol, _ transaction: Transaction) async throws -> TestResponse {
         try await client.execute(
-            uri: "/transactions", method: .post, headers: [.contentType: "application/json"],
+            uri: "/transactions", method: .post, headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
             body: ByteBuffer(bytes: try JSONEncoder().encode(SubmitTransactionRequest(transaction: transaction)))
         )
     }
@@ -73,14 +73,14 @@ final class PublicSubmitTests: XCTestCase {
         try await app.test(.router) { client in
             let response = try await Self.post(client, try Self.transaction(CryptoUtils.generateKeyPair()))
             XCTAssertEqual(response.status, .notFound)
-            let info = try await client.execute(uri: "/api/chain/info", method: .get)
+            let info = try await client.execute(uri: "/api/chain/info", method: .get, headers: [.authorization: testOperatorAuthorization])
             XCTAssertEqual(try JSONDecoder().decode(ExplorerChainInfo.self, from: Data(buffer: info.body)).acceptsSubmit, false)
         }
         let status = await runtime.status()
         XCTAssertEqual(status.mempoolCount, 0)
         // The loopback operator API always accepts its own submits.
         try await makeApplication(service: runtime, host: "127.0.0.1", port: 8080).test(.router) { client in
-            let info = try await client.execute(uri: "/api/chain/info", method: .get)
+            let info = try await client.execute(uri: "/api/chain/info", method: .get, headers: [.authorization: testOperatorAuthorization])
             XCTAssertEqual(try JSONDecoder().decode(ExplorerChainInfo.self, from: Data(buffer: info.body)).acceptsSubmit, true)
             // The operator's relay floor, read-only, as a decimal string (default 0).
             let object = try JSONSerialization.jsonObject(with: Data(buffer: info.body)) as? [String: Any]
@@ -101,12 +101,12 @@ final class PublicSubmitTests: XCTestCase {
             let answer = try JSONDecoder().decode(SubmitTransactionResponse.self, from: Data(buffer: response.body))
             XCTAssertEqual(answer.transactionCID, cid)
             XCTAssertEqual(answer.mempoolCount, 1)
-            let info = try await client.execute(uri: "/api/chain/info", method: .get)
+            let info = try await client.execute(uri: "/api/chain/info", method: .get, headers: [.authorization: testOperatorAuthorization])
             XCTAssertEqual(try JSONDecoder().decode(ExplorerChainInfo.self, from: Data(buffer: info.body)).acceptsSubmit, true)
             // Reachable cross-origin: the preflight allows POST.
             let preflight = try await client.execute(
                 uri: "/transactions", method: .options,
-                headers: [.origin: "chrome-extension://wallet", .accessControlRequestMethod: "POST"]
+                headers: [.authorization: testOperatorAuthorization, .origin: "chrome-extension://wallet", .accessControlRequestMethod: "POST"]
             )
             XCTAssertTrue(preflight.headers[.accessControlAllowMethods]?.contains("POST") == true, "\(preflight.headers)")
         }
@@ -144,12 +144,12 @@ final class PublicSubmitTests: XCTestCase {
             XCTAssertTrue(Self.text(unhosted).contains("unknownChain"), Self.text(unhosted))
             // Malformed and oversized bodies never reach the node.
             let malformed = try await client.execute(
-                uri: "/transactions", method: .post, headers: [.contentType: "application/json"],
+                uri: "/transactions", method: .post, headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
                 body: ByteBuffer(string: "{}")
             )
             XCTAssertEqual(malformed.status, .badRequest)
             let oversized = try await client.execute(
-                uri: "/transactions", method: .post, headers: [.contentType: "application/json"],
+                uri: "/transactions", method: .post, headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
                 body: ByteBuffer(repeating: UInt8(ascii: " "), count: NodeAPILimits.maximumPayloadBytes + 1)
             )
             XCTAssertEqual(oversized.status, .contentTooLarge)

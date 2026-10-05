@@ -18,10 +18,17 @@ extension LatticeNodeCommand {
     /// serves the same read routes without the write surface.
     func runNodeRuntime(
         configuration: NodeConfiguration,
+        cookieFile: URL,
         publicReadLimits: PublicReadRateLimits,
         processStartTime: Date
     ) async throws {
         let storage = try await NodeStorage.open(configuration: configuration)
+        // Rotated once this process owns the storage (a second node on the
+        // same directory fails above, before touching the first one's
+        // cookie) and before the runtime boots: a cookie left by an earlier
+        // run never authenticates against this one.
+        let auth = try LoopbackRPCAuth.createCookie(at: cookieFile, allowedOrigins: rpcAllowedOrigins)
+        defer { try? FileManager.default.removeItem(at: cookieFile) }
         let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration)
         let peers: @Sendable () async -> ExplorerPeersResponse = {
             ExplorerPeersResponse(count: runtime.peerCount, peers: [])
@@ -36,6 +43,7 @@ extension LatticeNodeCommand {
             port: Int(rpcPort),
             peers: peers,
             processStartTime: processStartTime,
+            auth: auth,
             endpoints: { await runtime.chainEndpoints($0) }
         ) { router in
             router.get("core/snapshot") { _, _ -> Response in
@@ -72,7 +80,7 @@ extension LatticeNodeCommand {
         print("lattice-node (node runtime)")
         print("  storage: \(configuration.processPublicKey)")
         print("  nexus:   \(configuration.nexusGenesisCID)")
-        print("  rpc:     http://\(rpcBind):\(rpcPort)")
+        print("  rpc:     http://\(rpcBind):\(rpcPort) (cookie: \(cookieFile.path))")
         if let publicReadPort {
             print("  public-read: http://0.0.0.0:\(publicReadPort)")
             if publicSubmit { print("  public-submit: POST /transactions on the public read port") }

@@ -278,16 +278,22 @@ final class LatticeCtlE2ETests: XCTestCase {
         let miner = try await makeKey(scratch, "miner")
         let recipient = try await makeKey(scratch, "recipient")
         let host = try await bringUpMiningHost(miner: miner)
+        // The operator port refuses a client without the cookie; the CLI and
+        // its coordinator below carry it.
+        var bare = URLRequest(url: URL(string: "http://127.0.0.1:\(host.nexusRPC)/status")!)
+        bare.cachePolicy = .reloadIgnoringLocalCacheData
+        let (_, refused) = try await URLSession.shared.data(for: bare)
+        XCTAssertEqual((refused as? HTTPURLResponse)?.statusCode, 401)
         _ = try await runCtl(["mine", "start"], root: host.root)
         try await waitFor("miner funded by Nexus rewards", seconds: 180) {
-            await self.balance(host.nexusRPC, miner.address) >= 10
+            await self.balance(host, miner.address) >= 10
         }
         try await submitUntilAccepted("Nexus accepts the transfer", host, [
             "send", "--chain", "Nexus", "--key", miner.file.path,
             "--to", recipient.address, "--amount", "10",
         ])
         try await waitFor("transfer mined", seconds: 240) {
-            await self.balance(host.nexusRPC, recipient.address) == 10
+            await self.balance(host, recipient.address) == 10
         }
     }
 
@@ -325,14 +331,14 @@ final class LatticeCtlE2ETests: XCTestCase {
             await self.height(host.nexusRPC, chain: alpha) >= 2
         }
         try await waitFor("the Alpha miner is funded", seconds: 180) {
-            await self.balance(host.nexusRPC, miner.address, chain: alpha) >= 10
+            await self.balance(host, miner.address, chain: alpha) >= 10
         }
         try await submitUntilAccepted("Alpha accepts the transfer", host, [
             "send", "--chain", alpha, "--key", miner.file.path,
             "--to", recipient.address, "--amount", "10",
         ])
         try await waitFor("the Alpha transfer is mined", seconds: 240) {
-            await self.balance(host.nexusRPC, recipient.address, chain: alpha) == 10
+            await self.balance(host, recipient.address, chain: alpha) == 10
         }
         let before = await height(host.nexusRPC, chain: alpha)
         _ = try await runCtl(["mine", "stop"], root: host.root)
@@ -341,7 +347,7 @@ final class LatticeCtlE2ETests: XCTestCase {
         try await waitFor("Alpha resumes where it was") {
             await self.height(host.nexusRPC, chain: alpha) >= before
         }
-        let balance = await balance(host.nexusRPC, recipient.address, chain: alpha)
+        let balance = await balance(host, recipient.address, chain: alpha)
         XCTAssertEqual(balance, 10)
         _ = try await runCtl(["mine", "start"], root: host.root)
         try await waitFor("Alpha advances after the restart", seconds: 180) {
@@ -349,12 +355,17 @@ final class LatticeCtlE2ETests: XCTestCase {
         }
     }
 
-    private func balance(_ rpc: UInt16, _ address: String, chain: String = "Nexus") async -> UInt64 {
+    /// Read with the node's loopback cookie, as every operator client must.
+    private func balance(_ host: CtlHost, _ address: String, chain: String = "Nexus") async -> UInt64 {
         guard let url = URL(
-            string: "http://127.0.0.1:\(rpc)/api/state/account/\(address)" + Self.query(chain)
+            string: "http://127.0.0.1:\(host.nexusRPC)/api/state/account/\(address)" + Self.query(chain)
         ) else { return 0 }
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
+        guard let cookie = try? String(contentsOf: HostLayout(root: host.root.path).rpcCookie, encoding: .utf8) else {
+            return 0
+        }
+        request.setValue("Basic " + Data(cookie.utf8).base64EncodedString(), forHTTPHeaderField: "Authorization")
         guard let (data, response) = try? await URLSession.shared.data(
             for: request
         ), (response as? HTTPURLResponse)?.statusCode == 200,

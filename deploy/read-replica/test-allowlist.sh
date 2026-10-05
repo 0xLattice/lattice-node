@@ -12,7 +12,7 @@
 #
 # Runs the ACTUAL nginx.conf against a stub upstream that stands in for the node
 # (returns 200 to any request). nginx and the stub share one network namespace
-# so the config's hardcoded `proxy_pass http://127.0.0.1:8080` resolves — exactly
+# so the config's hardcoded `proxy_pass http://127.0.0.1:8082` resolves — exactly
 # the production layout (nginx + node co-located on loopback). Portable: needs
 # only Docker (no host networking, no host nginx).
 set -euo pipefail
@@ -44,10 +44,10 @@ class H(BaseHTTPRequestHandler):
         self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
     do_GET = do_HEAD = do_POST = _ok
     def log_message(self, *a): pass
-ThreadingHTTPServer(("127.0.0.1", 8080), H).serve_forever()
+ThreadingHTTPServer(("127.0.0.1", 8082), H).serve_forever()
 ' >/dev/null
 
-# nginx shares the stub's netns: its 127.0.0.1:8080 reaches the stub and its
+# nginx shares the stub's netns: its 127.0.0.1:8082 reaches the stub and its
 # own listen 8081 is published via the stub container above.
 docker run --rm -d --name rr-allowlist-nginx \
   --network "container:rr-allowlist-upstream" \

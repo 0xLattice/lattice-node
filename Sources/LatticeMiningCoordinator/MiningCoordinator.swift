@@ -610,25 +610,44 @@ public enum MiningTemplateRequestBody {
     }
 }
 
+/// The `Authorization` value for a lattice-node loopback RPC cookie file
+/// (bitcoind's `__cookie__:<token>` content, sent as HTTP Basic), read fresh
+/// each call: the node writes a new one at every start. Nil when unreadable.
+public func rpcCookieAuthorization(file: URL) -> String? {
+    guard let content = try? String(contentsOf: file, encoding: .utf8) else { return nil }
+    let cookie = content.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !cookie.isEmpty else { return nil }
+    return "Basic " + Data(cookie.utf8).base64EncodedString()
+}
+
 public final class HTTPMiningCoordinatorNodeClient: MiningCoordinatorNodeClient {
     private let apiBaseURL: URL
     private let templateRequestBody: Data
     private let session: URLSession
+    private let cookieFile: URL?
 
     public init(
         apiBaseURL: URL,
         templateRequestBody: Data = Data(#"{"recipients":[]}"#.utf8),
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        cookieFile: URL? = nil
     ) {
         self.apiBaseURL = apiBaseURL
         self.templateRequestBody = templateRequestBody
         self.session = session
+        self.cookieFile = cookieFile
+    }
+
+    private func request(_ path: String) -> URLRequest {
+        var request = URLRequest(url: apiBaseURL.appendingPathComponent(path))
+        if let authorization = cookieFile.flatMap(rpcCookieAuthorization(file:)) {
+            request.setValue(authorization, forHTTPHeaderField: "Authorization")
+        }
+        return request
     }
 
     public func fetchWork() async throws -> MiningCoordinatorWork? {
-        var request = URLRequest(
-            url: apiBaseURL.appendingPathComponent("mining/templates")
-        )
+        var request = self.request("mining/templates")
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = templateRequestBody
@@ -651,7 +670,7 @@ public final class HTTPMiningCoordinatorNodeClient: MiningCoordinatorNodeClient 
     }
 
     public func fetchStaleToken() async throws -> String? {
-        var request = URLRequest(url: apiBaseURL.appendingPathComponent("status"))
+        var request = self.request("status")
         request.httpMethod = "GET"
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
@@ -680,9 +699,7 @@ public final class HTTPMiningCoordinatorNodeClient: MiningCoordinatorNodeClient 
         workId: String,
         nonce: UInt64
     ) async throws -> MiningSolutionSubmission {
-        var request = URLRequest(
-            url: apiBaseURL.appendingPathComponent("mining/work")
-        )
+        var request = self.request("mining/work")
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         struct WorkRequest: Encodable {

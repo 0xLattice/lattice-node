@@ -12,6 +12,9 @@ reaping inside the coordinator. See docs/operations.md.
 
 Configuration (environment):
   NODE_URL      default http://127.0.0.1:8080
+  COOKIE_FILE   the node's loopback RPC cookie, default
+                ~/.lattice/chains/Nexus/.cookie (lattice-node's default
+                data directory); `lattice up --root R` writes R/chains/Nexus/.cookie
   COORDINATOR   default /usr/local/bin/lattice-mining-coordinator
   WORKER        default /usr/local/bin/lattice-miner
   WORKERS       default 1
@@ -42,6 +45,9 @@ for retired in ("REWARD_BATCH", "CURSOR_FILE"):
         )
 
 NODE_URL = os.environ.get("NODE_URL", "http://127.0.0.1:8080")
+COOKIE_FILE = os.path.expanduser(
+    os.environ.get("COOKIE_FILE", "~/.lattice/chains/Nexus/.cookie")
+)
 COORDINATOR = os.environ.get(
     "COORDINATOR", "/usr/local/bin/lattice-mining-coordinator"
 )
@@ -75,6 +81,7 @@ def main():
             [
                 COORDINATOR,
                 "--node", NODE_URL,
+                "--rpc-cookie-file", COOKIE_FILE,
                 "--worker-executable", WORKER,
                 "--workers", WORKERS,
                 "--batch-size", BATCH_SIZE,

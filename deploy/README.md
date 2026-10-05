@@ -85,8 +85,10 @@ There are no per-child databases or identity keys.
 Both deployment Dockerfiles build the repository checkout directly, so the
 image cannot silently inherit an older node binary.
 
-- `read-replica/` builds a Nexus follower plus nginx. The node RPC remains on
-  loopback; nginx exposes only bounded GET routes on port 8081.
+- `read-replica/` builds a Nexus follower plus nginx. The node's operator RPC
+  remains on loopback (cookie-authenticated, unused here); nginx proxies the
+  node's public read listener (8082, unpublished) and exposes only bounded GET
+  routes on port 8081.
 - `testnet-follower/` builds all binaries and writes one flat `lattice.json`
   from `NEXUS_PEERS`, `EXTERNAL_HOST`, and parent-first `HOSTED_CHAINS`.
 

@@ -23,6 +23,9 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
     @Option(name: .long, help: "RPC base URL of the Nexus node (e.g. http://127.0.0.1:8080)")
     var node: String
 
+    @Option(name: .long, help: "The node's loopback RPC cookie file (lattice-node --rpc-cookie-file; default <data-directory>/.cookie), re-read at every request")
+    var rpcCookieFile: String?
+
     @Option(name: .long, help: "Parallel worker count (default: CPU count - 1)")
     var workers: Int = max(ProcessInfo.processInfo.activeProcessorCount - 1, 1)
 
@@ -65,7 +68,8 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
             templateRequestBody: try Self.loadTemplateRequest(
                 recipients: recipient,
                 minimumWork: minWork
-            )
+            ),
+            cookieFile: rpcCookieFile.map { URL(fileURLWithPath: $0) }
         )
 
         let coordinatorWorkers = try makeWorkers(count: workerCount)

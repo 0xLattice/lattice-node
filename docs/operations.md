@@ -96,8 +96,9 @@ Useful checks:
 
 ```bash
 curl -s http://127.0.0.1:8080/health | jq
-curl -s http://127.0.0.1:8080/status | jq
-curl -s http://127.0.0.1:8080/metrics
+# Every operator route but /health needs the node's cookie (docs/rpc-api.md):
+curl -s --user "$(cat <root>/chains/Nexus/.cookie)" http://127.0.0.1:8080/status | jq
+curl -s --user "$(cat <root>/chains/Nexus/.cookie)" http://127.0.0.1:8080/metrics
 ```
 
 For a child, append a URL-encoded `chainPath` query to supported reads:

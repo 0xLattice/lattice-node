@@ -52,7 +52,7 @@ final class PublicReadRateLimitTests: XCTestCase {
             var statuses: [Int] = []
             for _ in 0..<14 {
                 try await client.execute(
-                    uri: "/api/block/\(cid)/children", method: .get
+                    uri: "/api/block/\(cid)/children", method: .get, headers: [.authorization: testOperatorAuthorization]
                 ) { response in
                     statuses.append(response.status.code)
                 }
@@ -62,7 +62,7 @@ final class PublicReadRateLimitTests: XCTestCase {
                 "14 requests against a 10-token expensive bank must be refused at least once, got \(statuses)"
             )
 
-            try await client.execute(uri: "/health", method: .get) { response in
+            try await client.execute(uri: "/health", method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
                 XCTAssertEqual(
                     response.status, .ok,
                     "/health is exempt from every limit"
@@ -102,10 +102,10 @@ final class PublicReadRateLimitTests: XCTestCase {
         try await app.test(.router) { client in
             // Spend the expensive bank ONLY through the escaped spelling.
             for _ in 0..<12 {
-                try await client.execute(uri: escaped, method: .get) { _ in }
+                try await client.execute(uri: escaped, method: .get, headers: [.authorization: testOperatorAuthorization]) { _ in }
             }
             try await client.execute(
-                uri: "/api/block/\(cid)/children", method: .get
+                uri: "/api/block/\(cid)/children", method: .get, headers: [.authorization: testOperatorAuthorization]
             ) { response in
                 XCTAssertEqual(
                     response.status, .tooManyRequests,
@@ -173,7 +173,7 @@ final class PublicReadRateLimitTests: XCTestCase {
             var statuses: [Int] = []
             for _ in 0..<12 {
                 try await client.execute(
-                    uri: "/api/block/bafy/transactions?offset=1", method: .get
+                    uri: "/api/block/bafy/transactions?offset=1", method: .get, headers: [.authorization: testOperatorAuthorization]
                 ) { response in
                     statuses.append(response.status.code)
                 }
@@ -470,7 +470,7 @@ final class PublicReadRateLimitTests: XCTestCase {
         )
 
         try await publicApp.test(.router) { client in
-            try await client.execute(uri: "/health", method: .head) { response in
+            try await client.execute(uri: "/health", method: .head, headers: [.authorization: testOperatorAuthorization]) { response in
                 XCTAssertEqual(
                     response.status, .ok, "HEAD /health must reach the handler"
                 )
@@ -482,7 +482,7 @@ final class PublicReadRateLimitTests: XCTestCase {
             }
         }
         try await loopback.test(.router) { client in
-            try await client.execute(uri: "/health", method: .head) { response in
+            try await client.execute(uri: "/health", method: .head, headers: [.authorization: testOperatorAuthorization]) { response in
                 XCTAssertEqual(response.status, .ok)
                 XCTAssertEqual(response.body.readableBytes, 0)
             }
@@ -532,7 +532,7 @@ final class PublicReadRateLimitTests: XCTestCase {
 /// Reads `/health` and returns the reported height.
 private func healthHeight(_ client: some TestClientProtocol) async throws -> UInt64 {
     var height: UInt64?
-    try await client.execute(uri: "/health", method: .get) { response in
+    try await client.execute(uri: "/health", method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
         XCTAssertEqual(response.status, .ok)
         height = try JSONDecoder().decode(
             NodeStatusResponse.self,
@@ -549,7 +549,7 @@ private func mineOneBlock(client: some TestClientProtocol) async throws -> Strin
     try await client.execute(
         uri: "/mining/templates",
         method: .post,
-        headers: [.contentType: "application/json"],
+        headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
         body: ByteBuffer(bytes: try JSONEncoder().encode(MiningTemplateRequest()))
     ) { response in
         template = try JSONDecoder().decode(
@@ -562,7 +562,7 @@ private func mineOneBlock(client: some TestClientProtocol) async throws -> Strin
     try await client.execute(
         uri: "/mining/work",
         method: .post,
-        headers: [.contentType: "application/json"],
+        headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
         body: ByteBuffer(bytes: try JSONEncoder().encode(
             SubmitWorkRequest(workID: issued.workID, nonce: solvedNonce(for: issued))
         ))

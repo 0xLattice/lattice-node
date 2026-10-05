@@ -13,6 +13,7 @@ EnvironmentFile=/etc/lattice/mining.env
 ExecStartPre=/bin/sh -c 'test -n "$RECIPIENT_ARGS"'
 ExecStart=/usr/local/bin/lattice-mining-coordinator \
   --node http://127.0.0.1:8080 \
+  --rpc-cookie-file /var/lib/lattice/chains/Nexus/.cookie \
   --worker-executable /usr/local/bin/lattice-miner \
   --workers 2 \
   $RECIPIENT_ARGS

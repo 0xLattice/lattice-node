@@ -27,7 +27,7 @@ final class DaemonHTTPTests: XCTestCase {
             try await client.execute(
                 uri: "/mining/templates",
                 method: .post,
-                headers: [.contentType: "application/json"],
+                headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
                 body: ByteBuffer(bytes: body)
             ) { response in
                 XCTAssertEqual(response.status, .ok)
@@ -57,7 +57,7 @@ final class DaemonHTTPTests: XCTestCase {
                 try await client.execute(
                     uri: "/mining/templates",
                     method: .post,
-                    headers: [.contentType: contentType],
+                    headers: [.authorization: testOperatorAuthorization, .contentType: contentType],
                     body: ByteBuffer(bytes: body)
                 ) { response in
                     XCTAssertEqual(response.status, .unsupportedMediaType)
@@ -65,6 +65,7 @@ final class DaemonHTTPTests: XCTestCase {
             }
             var foreign = HTTPFields()
             foreign[.contentType] = "application/json"
+            foreign[.authorization] = testOperatorAuthorization
             foreign.append(.init(name: .init("Host")!, value: "rebound.example:8080"))
             try await client.execute(
                 uri: "/mining/templates",
@@ -77,7 +78,7 @@ final class DaemonHTTPTests: XCTestCase {
             try await client.execute(
                 uri: "/mining/templates",
                 method: .post,
-                headers: [.contentType: "application/json; charset=utf-8"],
+                headers: [.authorization: testOperatorAuthorization, .contentType: "application/json; charset=utf-8"],
                 body: ByteBuffer(bytes: body)
             ) { response in
                 XCTAssertEqual(response.status, .ok)
@@ -128,7 +129,7 @@ final class DaemonHTTPTests: XCTestCase {
             try await client.execute(
                 uri: "/mining/templates",
                 method: .post,
-                headers: [.contentType: "application/json"],
+                headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
                 body: ByteBuffer(bytes: templateRequest)
             ) { response in
                 XCTAssertEqual(response.status, .ok)
@@ -148,7 +149,7 @@ final class DaemonHTTPTests: XCTestCase {
             try await client.execute(
                 uri: "/mining/work",
                 method: .post,
-                headers: [.contentType: "application/json"],
+                headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
                 body: ByteBuffer(bytes: workRequest)
             ) { response in
                 XCTAssertEqual(response.status, .ok)
@@ -187,17 +188,17 @@ final class DaemonHTTPTests: XCTestCase {
                 "/health", "/api/chain/info", "/api/chain/spec",
                 "/api/block/latest", "/api/blocks", "/api/peers", "/api/mempool"
             ] {
-                try await client.execute(uri: uri, method: .get) { response in
+                try await client.execute(uri: uri, method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
                     XCTAssertEqual(response.status, .ok, uri)
                 }
             }
             // The operator surface does not exist here — not merely forbidden.
-            try await client.execute(uri: "/status", method: .get) { response in
+            try await client.execute(uri: "/status", method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
                 XCTAssertEqual(response.status, .notFound)
             }
             // Nor do the removed block routes: blocks are read through /api/block.
             for uri in ["/blocks", "/blocks/\(configuration.nexusGenesisCID)"] {
-                try await client.execute(uri: uri, method: .get) { response in
+                try await client.execute(uri: uri, method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
                     XCTAssertEqual(response.status, .notFound, uri)
                 }
             }
@@ -205,7 +206,7 @@ final class DaemonHTTPTests: XCTestCase {
                 try await client.execute(
                     uri: uri,
                     method: .post,
-                    headers: [.contentType: "application/json"],
+                    headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
                     body: ByteBuffer(bytes: Data("{}".utf8))
                 ) { response in
                     XCTAssertEqual(response.status, .notFound, uri)
@@ -216,16 +217,16 @@ final class DaemonHTTPTests: XCTestCase {
         // The loopback application still serves the full operator surface.
         let loopback = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         try await loopback.test(.router) { client in
-            try await client.execute(uri: "/status", method: .get) { response in
+            try await client.execute(uri: "/status", method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
                 XCTAssertEqual(response.status, .ok)
             }
-            try await client.execute(uri: "/v1/status", method: .get) { response in
+            try await client.execute(uri: "/v1/status", method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
                 XCTAssertEqual(response.status, .notFound)
             }
             try await client.execute(
                 uri: "/mining/templates",
                 method: .post,
-                headers: [.contentType: "application/json"],
+                headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
                 body: ByteBuffer(bytes: try JSONEncoder().encode(MiningTemplateRequest()))
             ) { response in
                 XCTAssertEqual(response.status, .ok)
@@ -290,7 +291,7 @@ final class DaemonHTTPTests: XCTestCase {
             try await client.execute(
                 uri: "/transactions",
                 method: .post,
-                headers: [.contentType: "application/json"],
+                headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
                 body: ByteBuffer(bytes: try JSONEncoder().encode(
                     SubmitTransactionRequest(transaction: transaction)
                 ))
@@ -333,7 +334,7 @@ final class DaemonHTTPTests: XCTestCase {
             try await client.execute(
                 uri: "/transactions",
                 method: .post,
-                headers: [.contentType: "application/json"],
+                headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
                 body: ByteBuffer(bytes: try JSONEncoder().encode(
                     SubmitTransactionRequest(transaction: rivalTransaction)
                 ))
@@ -349,7 +350,7 @@ final class DaemonHTTPTests: XCTestCase {
 
             try await client.execute(
                 uri: "/transactions/\(transactionCID)",
-                method: .get
+                method: .get, headers: [.authorization: testOperatorAuthorization]
             ) { response in
                 XCTAssertEqual(response.status, .ok)
                 XCTAssertEqual(response.headers[.cacheControl], immutableCacheControl)
@@ -365,7 +366,7 @@ final class DaemonHTTPTests: XCTestCase {
             // Transaction — the type gate must reject it, not serve it.
             try await client.execute(
                 uri: "/transactions/\(configuration.nexusGenesisCID)",
-                method: .get
+                method: .get, headers: [.authorization: testOperatorAuthorization]
             ) { response in
                 XCTAssertEqual(response.status, .notFound)
             }
@@ -408,7 +409,7 @@ final class DaemonHTTPTests: XCTestCase {
             try await client.execute(
                 uri: "/transactions",
                 method: .post,
-                headers: [.contentType: "application/json"],
+                headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
                 body: ByteBuffer(bytes: try JSONEncoder().encode(
                     SubmitTransactionRequest(transaction: transaction)
                 ))
@@ -442,7 +443,7 @@ final class DaemonHTTPTests: XCTestCase {
         try await app.test(.router) { client in
             try await client.execute(
                 uri: "/transactions/not-a-real-cid",
-                method: .get
+                method: .get, headers: [.authorization: testOperatorAuthorization]
             ) { response in
                 XCTAssertEqual(response.status, .badRequest)
             }
@@ -485,7 +486,7 @@ final class DaemonHTTPTests: XCTestCase {
         try await app.test(.router) { client in
             try await client.execute(
                 uri: "/accounts/\(owner)?block=\(genesisCID)",
-                method: .get
+                method: .get, headers: [.authorization: testOperatorAuthorization]
             ) { response in
                 XCTAssertEqual(response.status, .ok)
                 XCTAssertEqual(response.headers[.cacheControl], immutableCacheControl)
@@ -500,14 +501,14 @@ final class DaemonHTTPTests: XCTestCase {
             }
 
             // `block` is required.
-            try await client.execute(uri: "/accounts/\(owner)", method: .get) { response in
+            try await client.execute(uri: "/accounts/\(owner)", method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
                 XCTAssertEqual(response.status, .badRequest)
             }
 
             // Well-formed CID, never accepted as a block.
             try await client.execute(
                 uri: "/accounts/\(owner)?block=\(unknownCID)",
-                method: .get
+                method: .get, headers: [.authorization: testOperatorAuthorization]
             ) { response in
                 XCTAssertEqual(response.status, .notFound)
             }
@@ -515,13 +516,13 @@ final class DaemonHTTPTests: XCTestCase {
             // Malformed owner / block.
             try await client.execute(
                 uri: "/accounts/not-a-real-cid?block=\(genesisCID)",
-                method: .get
+                method: .get, headers: [.authorization: testOperatorAuthorization]
             ) { response in
                 XCTAssertEqual(response.status, .badRequest)
             }
             try await client.execute(
                 uri: "/accounts/\(owner)?block=not-a-real-cid",
-                method: .get
+                method: .get, headers: [.authorization: testOperatorAuthorization]
             ) { response in
                 XCTAssertEqual(response.status, .badRequest)
             }
@@ -640,7 +641,7 @@ final class DaemonHTTPTests: XCTestCase {
             // page with real transactions. Named so a regression says so.
             try await client.execute(
                 uri: "/api/block/\(genesis)/transactions?offset=\(Int.max)&limit=\(Int.max)",
-                method: .get
+                method: .get, headers: [.authorization: testOperatorAuthorization]
             ) { response in
                 XCTAssertLessThan(
                     response.status.code, 500,
@@ -650,7 +651,7 @@ final class DaemonHTTPTests: XCTestCase {
 
             var statuses = Set<Int>()
             for uri in matrix {
-                try await client.execute(uri: uri, method: .get) { response in
+                try await client.execute(uri: uri, method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
                     statuses.insert(response.status.code)
                     XCTAssertLessThan(
                         response.status.code, 500,
@@ -686,7 +687,7 @@ final class DaemonHTTPTests: XCTestCase {
             _ = try await mineOneBlock(client: client)
             _ = try await mineOneBlock(client: client)
             func page(_ uri: String) async throws -> ExplorerBlocksPage {
-                try await client.execute(uri: uri, method: .get) { response in
+                try await client.execute(uri: uri, method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
                     XCTAssertEqual(response.status, .ok, uri)
                     return try JSONDecoder().decode(
                         ExplorerBlocksPage.self, from: Data(response.body.readableBytesView)
@@ -704,18 +705,18 @@ final class DaemonHTTPTests: XCTestCase {
             let explicit = try await page("/api/blocks?chainPath=Nexus")
             XCTAssertEqual(explicit, all)
             // No `rewardCredited` on the wire: the list reads no body.
-            try await client.execute(uri: "/api/blocks", method: .get) { response in
+            try await client.execute(uri: "/api/blocks", method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
                 XCTAssertFalse(String(buffer: response.body).contains("rewardCredited"))
             }
             for uri in [
                 "/api/blocks?before=-1", "/api/blocks?before=abc",
                 "/api/blocks?limit=0", "/api/blocks?limit=-3",
             ] {
-                try await client.execute(uri: uri, method: .get) { response in
+                try await client.execute(uri: uri, method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
                     XCTAssertEqual(response.status, .badRequest, uri)
                 }
             }
-            try await client.execute(uri: "/api/blocks?chainPath=Nexus/Nope", method: .get) { response in
+            try await client.execute(uri: "/api/blocks?chainPath=Nexus/Nope", method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
                 XCTAssertEqual(response.status, .notFound)
             }
         }
@@ -766,7 +767,7 @@ final class DaemonHTTPTests: XCTestCase {
             try await client.execute(
                 uri: "/transactions",
                 method: .post,
-                headers: [.contentType: "application/json"],
+                headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
                 body: ByteBuffer(bytes: requestData)
             ) { response in
                 XCTAssertEqual(response.status, .ok)
@@ -790,7 +791,7 @@ private func mineOneBlock(client: some TestClientProtocol) async throws -> Strin
     try await client.execute(
         uri: "/mining/templates",
         method: .post,
-        headers: [.contentType: "application/json"],
+        headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
         body: ByteBuffer(bytes: try JSONEncoder().encode(MiningTemplateRequest()))
     ) { response in
         template = try JSONDecoder().decode(
@@ -803,7 +804,7 @@ private func mineOneBlock(client: some TestClientProtocol) async throws -> Strin
     try await client.execute(
         uri: "/mining/work",
         method: .post,
-        headers: [.contentType: "application/json"],
+        headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
         body: ByteBuffer(bytes: try JSONEncoder().encode(
             SubmitWorkRequest(workID: issued.workID, nonce: solvedNonce(for: issued))
         ))
