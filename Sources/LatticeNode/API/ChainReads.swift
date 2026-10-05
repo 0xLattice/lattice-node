@@ -383,11 +383,12 @@ public struct ChainReads: Sendable {
         guard let body = try? await transaction.body.resolve(fetcher: storage).node else {
             return nil
         }
+        let inclusion = await canonicalInclusion(cid: cid, body: body)
         return ExplorerTransaction(
             txCID: cid,
-            blockHeight: nil,
-            blockHash: nil,
-            timestamp: nil,
+            blockHeight: inclusion?.height,
+            blockHash: inclusion?.hash,
+            timestamp: inclusion?.timestamp,
             nonce: body.nonce,
             signers: body.signers,
             chainPath: body.chainPath,
@@ -424,6 +425,66 @@ public struct ChainReads: Sendable {
         )
     }
 
+    /// The canonical block that executed transaction `cid`, derived at read
+    /// time, with no index: every signer's next-expected nonce only ever rises
+    /// along the canonical chain, and executing this transaction is what moves
+    /// its first signer's past `body.nonce`. So the block is the lowest height
+    /// whose post-state nonce exceeds it (a binary search: at most ~64 account
+    /// reads), and the transaction is included only if that block's
+    /// transaction list holds its CID — a rival at the same nonce moves the
+    /// nonce too. Nil when it is not in this chain's canonical executed
+    /// chain, or the content needed to tell is not held here. Reorg-correct by
+    /// construction: only the current canonical chain is read.
+    func canonicalInclusion(
+        cid: String,
+        body: TransactionBody
+    ) async -> (height: UInt64, hash: String, timestamp: Int64)? {
+        guard body.chainPath == chainPath, let signer = body.signers.first,
+              let tipCID = await tip().tipCID, let tipBlock = await block(cid: tipCID),
+              let tipNonce = await nextNonce(of: signer, in: tipBlock),
+              tipNonce > body.nonce else {
+            return nil
+        }
+        // Invariant: nonce(high) > body.nonce; nonce(low - 1) <= body.nonce.
+        var low: UInt64 = 0
+        var high = tipBlock.height
+        while low < high {
+            let middle = low + (high - low) / 2
+            guard let middleCID = await canonicalCID(middle),
+                  let middleBlock = await block(cid: middleCID),
+                  let nonce = await nextNonce(of: signer, in: middleBlock) else {
+                return nil
+            }
+            if nonce > body.nonce { high = middle } else { low = middle + 1 }
+        }
+        guard let blockCID = await canonicalCID(high),
+              let block = await block(cid: blockCID),
+              await carries(block, transaction: cid),
+              await canonicalCID(high) == blockCID else {
+            return nil
+        }
+        return (height: high, hash: blockCID, timestamp: block.timestamp)
+    }
+
+    /// `signer`'s next-expected nonce in `block`'s post-state.
+    private func nextNonce(of signer: String, in block: Block) async -> UInt64? {
+        guard let state = try? await block.postState.resolve(fetcher: storage).node else {
+            return nil
+        }
+        return try? await state.accountState.nextExpectedNonce(for: signer, fetcher: storage)
+    }
+
+    /// Whether `block`'s transaction list holds `cid`. Reads the list's
+    /// entries (transaction CIDs), never a transaction body; the list is
+    /// bounded by the chain's own per-block transaction limit.
+    private func carries(_ block: Block, transaction cid: String) async -> Bool {
+        guard let dictionary = (try? await block.transactions.resolve(fetcher: storage))?.node,
+              let entries = try? await dictionary.boundedKeysAndValues(
+                limit: dictionary.count, fetcher: storage
+              ) else { return false }
+        return entries.contains { $0.1.rawCID == cid }
+    }
+
     public func explorerAccount(owner: String) async -> ExplorerAccount? {
         guard let tip = await tip().tipCID else { return nil }
         guard let account = await account(owner: owner, blockCID: tip) else { return nil }
@@ -450,7 +511,8 @@ public struct ChainReads: Sendable {
             genesisHash: await canonicalCID(0),
             height: snapshot.height,
             tipCID: snapshot.tipCID,
-            chain: chainPath
+            chain: chainPath,
+            minRelayFee: storage.configuration.minRelayFee
         )
     }
 

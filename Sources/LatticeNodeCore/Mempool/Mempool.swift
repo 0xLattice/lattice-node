@@ -1,5 +1,6 @@
 import Lattice
 import cashew
+import UInt256
 
 /// Why the pool refused a transaction. Local-resource policy only: state and
 /// consensus validity belong to Lattice's preflight, which the shell runs as a
@@ -13,6 +14,8 @@ public enum MempoolError: Error, Sendable, Equatable {
     case invalidState
     case conflictingNonce
     case feeTooLow
+    /// The fee is under this node's `MempoolLimits.minRelayFee`.
+    case belowMinRelayFee
     /// Retriable: the executed tip moved more than `maxReissues` times while
     /// the submit waited for its verdict (the actor's
     /// `templateContextChanged`).
@@ -54,18 +57,23 @@ public struct MempoolLimits: Sendable, Equatable {
     public var maxBytes: Int
     public var maxSignatures: Int
     public var maxNonReadyPerSigner: Int
+    /// The smallest fee (`minerSurplus`) admitted. Node relay policy, never
+    /// consensus; 0 admits any fee.
+    public var minRelayFee: UInt64
 
     public init(
         maxCount: Int = 10_000,
         maxBytes: Int = 64 * 1024 * 1024,
         maxSignatures: Int = 64,
-        maxNonReadyPerSigner: Int = 64
+        maxNonReadyPerSigner: Int = 64,
+        minRelayFee: UInt64 = 0
     ) {
         precondition(maxCount > 0 && maxBytes > 0 && maxSignatures > 0 && maxNonReadyPerSigner > 0)
         self.maxCount = maxCount
         self.maxBytes = maxBytes
         self.maxSignatures = maxSignatures
         self.maxNonReadyPerSigner = maxNonReadyPerSigner
+        self.minRelayFee = minRelayFee
     }
 }
 
@@ -153,6 +161,9 @@ public struct Mempool: Sendable {
         // and withdrawals) breaks the fee rule in any block, so it is never
         // pooled: a template carrying it would be invalid.
         guard let surplus = body.minerSurplus() else { throw MempoolError.invalidState }
+        guard surplus >= WorkSum(UInt256(limits.minRelayFee)) else {
+            throw MempoolError.belowMinRelayFee
+        }
         let (size, overflow) = envelopeData.count.addingReportingOverflow(bodyData.count)
         guard !overflow, size <= spec.maxBlockSize else { throw MempoolError.tooLarge }
         return (try Self.cid(of: transaction), body, size, surplus)

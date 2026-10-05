@@ -94,6 +94,10 @@ final class PublicReadRateLimitTests: XCTestCase {
             PublicReadRouteClass(method: .get, path: "/api/block/\(cid)/children"),
             .expensive
         )
+        XCTAssertEqual(
+            PublicReadRouteClass(method: .get, path: "/api/transaction/\(cid)"),
+            .expensive
+        )
 
         try await app.test(.router) { client in
             // Spend the expensive bank ONLY through the escaped spelling.

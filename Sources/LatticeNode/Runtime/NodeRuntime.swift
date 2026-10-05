@@ -112,6 +112,8 @@ public final class NodeRuntime: Sendable {
             nexusGenesisCID: configuration.nexusGenesisCID
         )
         let proofs = try headers.proofs()
+        var coreConfig = coreConfig
+        coreConfig.mining.mempool.minRelayFee = configuration.minRelayFee
         let core = try await boot(
             storage: storage, configuration: configuration,
             coreConfig: coreConfig, headers: headers, proofs: proofs

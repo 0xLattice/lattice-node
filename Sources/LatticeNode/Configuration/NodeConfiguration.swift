@@ -105,6 +105,11 @@ public struct NodeConfiguration: Sendable {
     /// The public read listener also accepts `POST /transactions` (operator
     /// choice, default off). Declared beside `publicReadURL` to peers.
     public let publicSubmit: Bool
+    /// The smallest fee (a transaction's balance excess, credited to the
+    /// block's recipient) this node admits to its pool, at every level it
+    /// hosts. Node relay policy, never consensus: a block carrying a
+    /// cheaper transaction stays valid. 0 admits any fee.
+    public let minRelayFee: UInt64
 
     /// Overlay slots kept in reserve for outbound dials so a burst of inbound
     /// connections (from one source, especially behind a proxy where the
@@ -127,7 +132,8 @@ public struct NodeConfiguration: Sendable {
         hostedChildren: [[String]] = [],
         childSpecs: [[String]: ChainSpec] = [:],
         publicReadURL: String? = nil,
-        publicSubmit: Bool = false
+        publicSubmit: Bool = false,
+        minRelayFee: UInt64 = 0
     ) throws {
         guard let address = ChainAddress(chainPath), address.isNexus else {
             throw NodeConfigurationError.invalidChainPath
@@ -178,6 +184,7 @@ public struct NodeConfiguration: Sendable {
         self.hostedChildren = hostedChildren
         self.publicReadURL = publicReadURL
         self.publicSubmit = publicSubmit
+        self.minRelayFee = minRelayFee
     }
 
     /// An absolute http(s) URL naming a host, without credentials, query or

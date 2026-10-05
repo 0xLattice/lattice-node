@@ -80,6 +80,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Listener-wide arrival-rate ceiling for public POST /transactions, in requests per second, separate from the read budgets; each client is also held to --public-read-expensive-rate. 0 disables it.")
     var publicSubmitRate = PublicReadRateLimits.defaultSubmitRate
 
+    @Option(help: "The smallest fee (a transaction's balance excess) this node admits to its pool, at every hosted level. Node relay policy, never consensus: blocks carrying cheaper transactions stay valid. Reported as minRelayFee by GET /api/chain/info. 0 admits any fee.")
+    var minRelayFee: UInt64 = 0
+
     @Option(help: "Self-described publicly reachable host for overlay announcements (NAT/proxy-fronted nodes announce an unreachable observed address otherwise). Host only; the overlay listen port applies.")
     var externalAddress: String?
 
@@ -142,7 +145,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             hostedChildren: hosted.map(\.path),
             childSpecs: Dictionary(hosted.compactMap { entry in entry.spec.map { (entry.path, $0) } }) { first, _ in first },
             publicReadURL: publicReadUrl,
-            publicSubmit: publicSubmit
+            publicSubmit: publicSubmit,
+            minRelayFee: minRelayFee
         )
         try await runNodeRuntime(
             configuration: configuration,
@@ -583,9 +587,10 @@ private func addPublicReadRoutes<Context: RequestContext>(
         guard let transaction = await service.explorerTransaction(cid: cid) else {
             throw HTTPError(.notFound)
         }
+        // Inclusion changes as the chain grows and reorgs: not immutable.
         return try jsonCached(
             transaction,
-            cacheControl: immutableCacheControl,
+            cacheControl: statusCacheControl,
             request: request,
             context: context
         )
@@ -911,8 +916,8 @@ struct TransactionResponse: Codable {
 struct AccountResponse: Codable {
     let owner: String
     let block: String
-    let balance: UInt64
-    let nonce: UInt64
+    @DecimalString var balance: UInt64
+    @DecimalString var nonce: UInt64
 }
 
 private extension Data {
