@@ -466,7 +466,7 @@ final class NodeRuntimeTests: XCTestCase {
         XCTAssertEqual(thirdLatest.rewardCredited, 0)
         // The burned block still reports an explicit 0 credit on the wire.
         let json = try XCTUnwrap(String(data: JSONEncoder().encode(thirdDetail), encoding: .utf8))
-        XCTAssertTrue(json.contains("\"rewardCredited\":0"), json)
+        XCTAssertTrue(json.contains("\"rewardCredited\":\"0\""), json)
         await runtime.stop()
     }
 
