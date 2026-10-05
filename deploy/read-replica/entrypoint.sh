@@ -5,7 +5,9 @@
 # the node's public read listener (8082: the unauthenticated read routes only;
 # the cookie-protected operator RPC on 8080 stays unexposed). fly publishes only
 # nginx's 8081. Rate limiting is nginx's job here, so the node's own public
-# read limits are off (every request arrives from nginx's one address).
+# read limits are off (every request arrives from nginx's one address). 8082
+# binds 0.0.0.0 but is unthrottled public data reachable only through nginx:
+# fly publishes nothing but 4001 and 8081 (fly.toml).
 set -e
 
 # Start nginx first (daemon mode → backgrounds itself). It 502s until the node's

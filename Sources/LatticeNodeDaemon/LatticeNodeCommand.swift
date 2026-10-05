@@ -44,7 +44,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "HTTP bind address; only loopback addresses are accepted")
     var rpcBind = "127.0.0.1"
 
-    @Option(help: "Where the node writes its loopback RPC cookie at every start (mode 0600, a fresh secret each time, removed at exit). Every loopback route but GET/HEAD /health requires it, as Authorization: Basic base64(\"__cookie__:<token>\") (the file's content) or Bearer <token>. Defaults to <data-directory>/.cookie")
+    @Option(help: "Where the node writes its loopback RPC cookie at every start (mode 0600, a fresh secret each time, removed at exit). Every loopback route but GET/HEAD /health requires it, as Authorization: Basic base64(\"__cookie__:<token>\") (the file's content) or Bearer <token>. Defaults to <data-directory>/.cookie; give each node its own.")
     var rpcCookieFile: String?
 
     @Option(name: .customLong("rpc-allowed-origin"), help: "A browser origin allowed on the loopback RPC port, exactly as the browser sends it, e.g. chrome-extension://<id> (repeatable). Requests with any other Origin are refused; an allowed origin gets CORS preflight answers and still needs the cookie.")

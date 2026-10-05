@@ -112,11 +112,13 @@ struct LoopbackRPCAuthMiddleware<Context: RequestContext>: RouterMiddleware {
             var response = try await next(request, context)
             response.headers.append(contentsOf: cors)
             return response
-        } catch let error as HTTPError {
+        } catch let error as any HTTPResponseError {
             // The listed origin must be able to read a refusal, too.
-            var headers = error.headers
-            headers.append(contentsOf: cors)
-            throw HTTPError(error.status, headers: headers, message: error.body)
+            var response = try error.response(from: request, context: context)
+            response.headers.append(contentsOf: cors)
+            return response
+        } catch {
+            return Response(status: .internalServerError, headers: cors)
         }
     }
 

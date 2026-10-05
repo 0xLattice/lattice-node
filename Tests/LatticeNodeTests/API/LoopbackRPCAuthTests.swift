@@ -55,6 +55,15 @@ final class LoopbackRPCAuthTests: XCTestCase {
             try await client.execute(uri: "/health", method: .head) { response in
                 XCTAssertEqual(response.status, .ok)
             }
+            // Only that exact path: no near-miss is open.
+            for uri in ["/health/", "/HEALTH", "/health/x"] {
+                try await client.execute(uri: uri, method: .get) { response in
+                    XCTAssertEqual(response.status, .unauthorized, uri)
+                }
+            }
+            try await client.execute(uri: "/status", method: .head) { response in
+                XCTAssertEqual(response.status, .unauthorized)
+            }
         }
     }
 
@@ -146,6 +155,17 @@ final class LoopbackRPCAuthTests: XCTestCase {
                 XCTAssertNotEqual(response.status, .unauthorized)
                 XCTAssertNotEqual(response.status, .forbidden)
                 XCTAssertEqual(response.headers[.accessControlAllowOrigin], Self.extensionOrigin)
+            }
+            try await client.execute(
+                uri: "/mining/templates", method: .post,
+                headers: [
+                    .origin: Self.extensionOrigin, .authorization: testOperatorAuthorization,
+                    .contentType: "text/plain",
+                ],
+                body: Self.templateBody
+            ) { response in
+                XCTAssertEqual(response.status, .unsupportedMediaType)
+                XCTAssertEqual(response.headers[.accessControlAllowOrigin], Self.extensionOrigin, "a route's refusal is readable")
             }
             try await client.execute(
                 uri: "/status", method: .get,

@@ -190,6 +190,7 @@ The recommended production command is equivalent to:
 ```bash
 lattice-mining-coordinator \
   --node http://127.0.0.1:8080 \
+  --rpc-cookie-file <root>/chains/Nexus/.cookie \
   --worker-executable /usr/local/bin/lattice-miner \
   --workers 2 \
   --recipient Nexus=<address> \
