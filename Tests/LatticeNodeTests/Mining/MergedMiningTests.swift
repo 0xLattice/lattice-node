@@ -133,7 +133,7 @@ final class MergedMiningTests: XCTestCase {
             signers: [withdrawerAddress], nonce: 0, chainPath: ["Nexus"]
         )), on: nexusReads, "Nexus confirms the receipt")
         // Zero fee, and B holds nothing on Alpha: the withdrawal funds itself.
-        try await confirm(signed(withdrawer, TransactionBody(
+        let withdrawal = try signed(withdrawer, TransactionBody(
             accountActions: [AccountAction(owner: withdrawerAddress, delta: 5)], actions: [], depositActions: [],
             receiptActions: [],
             withdrawalActions: [WithdrawalAction(
@@ -141,7 +141,20 @@ final class MergedMiningTests: XCTestCase {
                 amountDemanded: 3, amountWithdrawn: 5
             )],
             signers: [withdrawerAddress], nonce: 0, chainPath: Self.alpha
-        )), on: alphaReads, "Alpha confirms the withdrawal")
+        ))
+        // While it is pooled, a template and status agree on the digest, so
+        // an external miner never sees its work as stale.
+        let cid = try await runtime.submitTransaction(SubmitTransactionRequest(transaction: withdrawal)).transactionCID
+        try await eventually("Alpha pools the withdrawal") { await alphaReads.readSnapshot().mempoolCount == 1 }
+        let template = try await runtime.miningTemplate(recipients)
+        let status = await runtime.status().templateDigest
+        XCTAssertEqual(template.templateDigest, status)
+        try await eventually("Alpha confirms the withdrawal") {
+            _ = try await runtime.mineBlock(recipients)
+            let pooled = await alphaReads.readSnapshot().mempoolCount
+            let stored = await alphaReads.transaction(cid: cid)
+            return pooled == 0 && stored != nil
+        }
         let credited = await balance(alphaReads, withdrawerAddress)
         XCTAssertEqual(credited, 5)
         await runtime.stop()
