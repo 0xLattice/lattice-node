@@ -30,7 +30,8 @@ struct PublicReadRateLimits: Sendable {
     static let defaultListenerRate = 200.0
     /// Listener-wide ceiling for `POST /transactions` when public submit is
     /// on: its own budget, so submits never spend the read budget or the
-    /// reverse. No nginx analogue (the read replica serves no submit).
+    /// reverse. A proxy in front can add per-client submit limits; the
+    /// example read proxy serves no submit.
     static let defaultSubmitRate = 10.0
 
     // nginx states burstiness as an absolute token count (`burst=`). Carried
