@@ -1,4 +1,5 @@
 import Foundation
+import LatticeLightClient
 import UInt256
 
 // MARK: - Explorer read API DTOs
@@ -132,6 +133,68 @@ public struct ExplorerDepositAction: Codable, Sendable, Equatable {
     public let demander: String
     @DecimalString public var amountDemanded: UInt64
     @DecimalString public var amountDeposited: UInt64
+}
+
+public struct ExplorerDeposit: Codable, Sendable, Equatable {
+    public let key: String
+    public let demander: String
+    @DecimalString public var amountDemanded: UInt64
+    public let nonce: String
+    @DecimalString public var amountDeposited: UInt64
+
+    public init(
+        key: String,
+        demander: String,
+        amountDemanded: UInt64,
+        nonce: String,
+        amountDeposited: UInt64
+    ) {
+        self.key = key
+        self.demander = demander
+        self.amountDemanded = amountDemanded
+        self.nonce = nonce
+        self.amountDeposited = amountDeposited
+    }
+}
+
+public struct ExplorerDepositsPage: Codable, Sendable, Equatable {
+    public let deposits: [ExplorerDeposit]
+    public let count: Int
+    public let chain: String
+    public let next: String?
+    public let proof: StateDictionaryProof
+
+    public init(deposits: [ExplorerDeposit], chain: String, next: String?, proof: StateDictionaryProof) {
+        self.deposits = deposits
+        self.count = deposits.count
+        self.chain = chain
+        self.next = next
+        self.proof = proof
+    }
+}
+
+public struct ExplorerReceiptState: Codable, Sendable, Equatable {
+    public let exists: Bool
+    public let withdrawer: String?
+    public let directory: String
+    public let chainPath: [String]
+    public let key: String
+    public let proof: StateDictionaryProof
+
+    public init(
+        withdrawer: String?,
+        directory: String,
+        chainPath: [String],
+        key: String,
+        proof: StateDictionaryProof
+    ) {
+        self.exists = withdrawer != nil
+        self.withdrawer = withdrawer
+        self.directory = directory
+        self.chainPath = chainPath
+        self.key = key
+        self.proof = proof
+    }
 }
 
 public struct ExplorerReceiptAction: Codable, Sendable, Equatable {

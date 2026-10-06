@@ -1,6 +1,7 @@
 import Foundation
 import Ivy
 import Lattice
+import LatticeLightClient
 import cashew
 
 /// The node's read surface — chain status, blocks, transactions, state reads
@@ -496,6 +497,115 @@ public struct ChainReads: Sendable {
         )
     }
 
+    /// Active deposits in the canonical tip state. The page is bounded before
+    /// resolving trie values so this remains safe on the public read surface.
+    public func explorerDeposits(limit: Int, after: String?) async throws -> ExplorerDepositsPage? {
+        guard let tipCID = await tip().tipCID,
+              let block = await block(cid: tipCID),
+              let resolvedState = try? await block.postState.resolve(fetcher: storage),
+              let state = resolvedState.node,
+              let deposits = try? await state.depositState.resolve(fetcher: storage).node else {
+            return nil
+        }
+        let boundedLimit = Self.boundedExplorerLimit(limit)
+        guard let scanned = try? await deposits.boundedKeysAndValues(
+            after: after,
+            limit: boundedLimit + 1,
+            fetcher: storage
+        ) else { return nil }
+        let entries = Array(scanned.prefix(boundedLimit))
+        let next = scanned.count > boundedLimit ? entries.last?.key : nil
+        var active: [ExplorerDeposit] = []
+        for entry in entries {
+            guard entry.value > 0, let key = DepositKey(entry.key) else { continue }
+            active.append(ExplorerDeposit(
+                key: entry.key,
+                demander: key.demander,
+                amountDemanded: key.amountDemanded,
+                nonce: String(key.nonce),
+                amountDeposited: entry.value
+            ))
+        }
+        let proofPaths = Swift.Dictionary(uniqueKeysWithValues: entries.map { ([$0.key], SparseMerkleProof.existence) })
+        let proven = entries.isEmpty
+            ? try DepositStateHeader(node: deposits)
+            : try await state.depositState.proof(paths: proofPaths, fetcher: storage)
+        let proof = try await stateProof(
+            blockCID: tipCID, block: block, state: resolvedState,
+            dictionary: .deposits, dictionaryHeader: proven,
+            claims: entries.map { .init(key: $0.key, value: String($0.value)) }
+        )
+        return ExplorerDepositsPage(
+            deposits: active,
+            chain: chainPath.joined(separator: "/"),
+            next: next,
+            proof: proof
+        )
+    }
+
+    /// The withdrawer recorded by a receipt on this (parent) chain.
+    public func explorerReceiptState(
+        demander: String,
+        amountDemanded: UInt64,
+        nonce: UInt128,
+        destinationPath: [String]
+    ) async throws -> ExplorerReceiptState? {
+        guard let directory = destinationPath.last,
+              let tipCID = await tip().tipCID,
+              let block = await block(cid: tipCID),
+              let resolvedState = try? await block.postState.resolve(fetcher: storage),
+              let state = resolvedState.node else {
+            return nil
+        }
+        let logicalKey = ReceiptKey(receiptAction: ReceiptAction(
+            withdrawer: "",
+            nonce: nonce,
+            demander: demander,
+            amountDemanded: amountDemanded,
+            directory: directory
+        ))
+        let targeted = try? await state.receiptState.resolve(
+            paths: [[logicalKey.storageKey]: .targeted],
+            fetcher: storage
+        ).node
+        let withdrawer = targeted.flatMap { try? $0.get(key: logicalKey.storageKey) }
+        let proofKind: SparseMerkleProof = withdrawer == nil ? .insertion : .existence
+        let proven = try await state.receiptState.proof(
+            paths: [[logicalKey.storageKey]: proofKind], fetcher: storage
+        )
+        let proof = try await stateProof(
+            blockCID: tipCID, block: block, state: resolvedState,
+            dictionary: .receipts, dictionaryHeader: proven,
+            claims: [.init(key: logicalKey.storageKey, value: withdrawer)]
+        )
+        return ExplorerReceiptState(
+            withdrawer: withdrawer,
+            directory: directory,
+            chainPath: destinationPath,
+            key: logicalKey.description,
+            proof: proof
+        )
+    }
+
+    private func stateProof<NodeType>(
+        blockCID: String, block: Block, state: LatticeStateHeader,
+        dictionary: StateDictionaryProof.StateKind,
+        dictionaryHeader: VolumeImpl<NodeType>,
+        claims: [StateDictionaryProof.Claim]
+    ) async throws -> StateDictionaryProof where NodeType: Node {
+        let collector = ProofVolumeCollector()
+        let storagePaths = Swift.Dictionary(uniqueKeysWithValues: claims.map { ([$0.key], StorageStrategy.targeted) })
+        try await dictionaryHeader.store(paths: storagePaths, storer: collector)
+        try await state.store(storer: collector)
+        let blockData = try await storage.fetch(rawCid: blockCID)
+        return StateDictionaryProof(
+            blockHash: blockCID, blockHeight: block.height,
+            block: .init(cid: blockCID, data: blockData), stateRoot: state.rawCID,
+            dictionary: dictionary, dictionaryRoot: dictionaryHeader.rawCID,
+            claims: claims, witness: await collector.witness()
+        )
+    }
+
     /// Ungated mempool snapshot: the pool's live CIDs, hard-capped at 200.
     public func explorerMempool() async -> ExplorerMempool {
         let pool = await mempool(true)
@@ -538,5 +648,22 @@ public struct ChainReads: Sendable {
         ExplorerChainGenesis(
             genesisHash: await tip().nexusGenesisCID
         )
+    }
+}
+
+private actor ProofVolumeCollector: VolumeStorer {
+    private var volumes: [String: SerializedVolume] = [:]
+
+    func store(volume: SerializedVolume) async throws {
+        volumes[volume.root] = volume
+    }
+
+    func witness() -> [LightClientProof.WitnessNode] {
+        let unique = volumes.values.reduce(into: [String: Data]()) { result, volume in
+            result.merge(volume.entries) { existing, _ in existing }
+        }
+        return unique.sorted { $0.key < $1.key }.map {
+            LightClientProof.WitnessNode(cid: $0.key, data: $0.value)
+        }
     }
 }

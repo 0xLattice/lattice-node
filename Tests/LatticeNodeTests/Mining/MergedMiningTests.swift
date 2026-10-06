@@ -1,6 +1,7 @@
 import Foundation
 import Ivy
 import Lattice
+import LatticeLightClient
 import LatticeNodeCore
 import UInt256
 import XCTest
@@ -12,6 +13,25 @@ import cashew
 /// advances every chain whose target it meets. Nexus's target is its real,
 /// scheduled one, never the maximum.
 final class MergedMiningTests: XCTestCase {
+    func testExportedWalletProofVectorsVerify() async throws {
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/cross-chain-state-proofs.json")
+        let proofs = try JSONDecoder().decode(
+            [String: StateDictionaryProof].self,
+            from: Data(contentsOf: fixtureURL)
+        )
+        XCTAssertEqual(Set(proofs.keys), [
+            "deposit", "receiptExists", "receiptCompressedAbsence",
+            "receiptMissingRouteAbsence",
+        ])
+        for (name, proof) in proofs {
+            let verified = await LightClientProtocol.verify(proof)
+            XCTAssertTrue(verified, name)
+        }
+    }
+
     static let alpha = ["Nexus", "Alpha"]
     static let alphaSpec = ChainSpec(
         maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
@@ -114,7 +134,7 @@ final class MergedMiningTests: XCTestCase {
             _ = try await runtime.mineBlock(recipients)
             let locked = await balance(alphaReads, demanderAddress)
             let paid = await balance(nexusReads, withdrawerAddress)
-            return locked >= 5 && paid >= 3
+            return locked >= 10 && paid >= 3
         }
 
         try await confirm(signed(demander, TransactionBody(
@@ -123,6 +143,12 @@ final class MergedMiningTests: XCTestCase {
             receiptActions: [], withdrawalActions: [],
             signers: [demanderAddress], nonce: 0, chainPath: Self.alpha
         )), on: alphaReads, "Alpha confirms the deposit")
+        try await confirm(signed(demander, TransactionBody(
+            accountActions: [AccountAction(owner: demanderAddress, delta: -5)], actions: [],
+            depositActions: [DepositAction(nonce: 2, demander: demanderAddress, amountDemanded: 4, amountDeposited: 5)],
+            receiptActions: [], withdrawalActions: [],
+            signers: [demanderAddress], nonce: 1, chainPath: Self.alpha
+        )), on: alphaReads, "Alpha confirms the second active deposit")
         try await confirm(signed(withdrawer, TransactionBody(
             accountActions: [], actions: [], depositActions: [],
             receiptActions: [ReceiptAction(
@@ -157,6 +183,69 @@ final class MergedMiningTests: XCTestCase {
         }
         let credited = await balance(alphaReads, withdrawerAddress)
         XCTAssertEqual(credited, 5)
+
+        // The first raw key is now spent (value 0), but it still advances the
+        // cursor; the next page lists and proves the still-active deposit.
+        let spentResult = try await alphaReads.explorerDeposits(limit: 1, after: nil)
+        let spentPage = try XCTUnwrap(spentResult)
+        XCTAssertTrue(spentPage.deposits.isEmpty)
+        let afterSpent = try XCTUnwrap(spentPage.next)
+        let spentVerified = await LightClientProtocol.verify(spentPage.proof)
+        XCTAssertTrue(spentVerified)
+        XCTAssertEqual(spentPage.proof.claims.first?.value, "0")
+        let activeResult = try await alphaReads.explorerDeposits(limit: 1, after: afterSpent)
+        let activePage = try XCTUnwrap(activeResult)
+        XCTAssertEqual(activePage.deposits.count, 1)
+        XCTAssertEqual(activePage.deposits.first?.nonce, "2")
+        XCTAssertEqual(activePage.deposits.first?.amountDemanded, 4)
+        let activeVerified = await LightClientProtocol.verify(activePage.proof)
+        XCTAssertTrue(activeVerified)
+
+        func replacing(
+            _ proof: StateDictionaryProof,
+            blockHash: String? = nil,
+            claims: [StateDictionaryProof.Claim]? = nil,
+            witness: [LightClientProof.WitnessNode]? = nil
+        ) -> StateDictionaryProof {
+            StateDictionaryProof(
+                blockHash: blockHash ?? proof.blockHash,
+                blockHeight: proof.blockHeight, block: proof.block,
+                stateRoot: proof.stateRoot, dictionary: proof.dictionary,
+                dictionaryRoot: proof.dictionaryRoot,
+                claims: claims ?? proof.claims,
+                witness: witness ?? proof.witness
+            )
+        }
+        let changedDepositClaim = replacing(
+            activePage.proof,
+            claims: activePage.proof.claims.map { .init(key: $0.key, value: "6") }
+        )
+        let changedClaimAccepted = await LightClientProtocol.verify(changedDepositClaim)
+        XCTAssertFalse(changedClaimAccepted)
+        let incompleteWitnessAccepted = await LightClientProtocol.verify(replacing(
+            activePage.proof, witness: Array(activePage.proof.witness.dropLast())
+        ))
+        XCTAssertFalse(incompleteWitnessAccepted)
+        let mismatchedBlockAccepted = await LightClientProtocol.verify(replacing(
+            activePage.proof, blockHash: "bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ))
+        XCTAssertFalse(mismatchedBlockAccepted)
+
+        let receiptResult = try await nexusReads.explorerReceiptState(
+            demander: demanderAddress, amountDemanded: 3, nonce: 1,
+            destinationPath: Self.alpha
+        )
+        let receipt = try XCTUnwrap(receiptResult)
+        XCTAssertTrue(receipt.exists)
+        XCTAssertEqual(receipt.withdrawer, withdrawerAddress)
+        let receiptVerified = await LightClientProtocol.verify(receipt.proof)
+        XCTAssertTrue(receiptVerified)
+        let forgedReceiptAbsence = replacing(
+            receipt.proof,
+            claims: receipt.proof.claims.map { .init(key: $0.key, value: nil) }
+        )
+        let forgedAbsenceAccepted = await LightClientProtocol.verify(forgedReceiptAbsence)
+        XCTAssertFalse(forgedAbsenceAccepted)
         await runtime.stop()
     }
 

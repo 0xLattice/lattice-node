@@ -2,6 +2,7 @@ import Crypto
 import Hummingbird
 import HummingbirdTesting
 import Lattice
+import LatticeLightClient
 import UInt256
 import XCTest
 import cashew
@@ -218,11 +219,37 @@ final class DaemonHTTPTests: XCTestCase {
             // The bounded read surface is served.
             for uri in [
                 "/health", "/api/chain/info", "/api/chain/spec",
-                "/api/block/latest", "/api/blocks", "/api/peers", "/api/mempool"
+                "/api/block/latest", "/api/blocks", "/api/peers", "/api/mempool",
             ] {
                 try await client.execute(uri: uri, method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
                     XCTAssertEqual(response.status, .ok, uri)
                 }
+            }
+            try await client.execute(uri: "/api/deposits?limit=10&chainPath=Nexus", method: .get) { response in
+                XCTAssertEqual(response.status, .ok)
+                let page = try JSONDecoder().decode(ExplorerDepositsPage.self, from: Data(response.body.readableBytesView))
+                XCTAssertEqual(page.next, nil)
+                XCTAssertFalse(page.proof.blockHash.isEmpty)
+                let verified = await LightClientProtocol.verify(page.proof)
+                XCTAssertTrue(verified)
+            }
+            let demander = configuration.nexusGenesisCID
+            try await client.execute(
+                uri: "/api/receipt-state?demander=\(demander)&amount=1&nonce=42&chainPath=Nexus/testnet",
+                method: .get,
+                headers: [.authorization: testOperatorAuthorization]
+            ) { response in
+                XCTAssertEqual(response.status, .ok)
+                let state = try JSONDecoder().decode(
+                    ExplorerReceiptState.self,
+                    from: Data(response.body.readableBytesView)
+                )
+                XCTAssertFalse(state.exists)
+                XCTAssertEqual(state.chainPath, ["Nexus", "testnet"])
+                XCTAssertTrue(state.key.hasSuffix("/42"), "receipt nonce is decimal on the wire")
+                XCTAssertEqual(state.proof.claims.first?.value, nil)
+                let verified = await LightClientProtocol.verify(state.proof)
+                XCTAssertTrue(verified)
             }
             // The operator surface does not exist here — not merely forbidden.
             try await client.execute(uri: "/status", method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
