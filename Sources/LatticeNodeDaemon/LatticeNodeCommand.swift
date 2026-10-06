@@ -648,6 +648,53 @@ private func addPublicReadRoutes<Context: RequestContext>(
             context: context
         )
     }
+    router.get("api/deposits") { request, context in
+        let service = try byPath(request)
+        guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
+            throw HTTPError(.notFound)
+        }
+        let limit = try explorerParseLimit(request, defaultValue: 100, cap: 100)
+        let after = request.uri.queryParameters["after"].map(String.init)
+        guard let page = try await service.explorerDeposits(limit: limit, after: after) else {
+            throw HTTPError(.notFound)
+        }
+        return try jsonCached(
+            page,
+            cacheControl: statusCacheControl,
+            request: request,
+            context: context
+        )
+    }
+    router.get("api/receipt-state") { request, context in
+        guard let demander = request.uri.queryParameters["demander"].map(String.init),
+              isPlausibleCID(demander),
+              let amountRaw = request.uri.queryParameters["amount"].map(String.init),
+              let amount = UInt64(amountRaw),
+              let nonceRaw = request.uri.queryParameters["nonce"].map(String.init),
+              let nonce = UInt128(nonceRaw),
+              let destinationRaw = request.uri.queryParameters["chainPath"].map(String.init),
+              let destination = ChainAddress(string: destinationRaw),
+              !destination.isNexus else {
+            throw HTTPError(.badRequest)
+        }
+        let destinationPath = destination.components
+        let parentPath = Array(destinationPath.dropLast())
+        guard let service = byPath.service(for: parentPath),
+              let receipt = try await service.explorerReceiptState(
+                demander: demander,
+                amountDemanded: amount,
+                nonce: nonce,
+                destinationPath: destinationPath
+              ) else {
+            throw HTTPError(.notFound)
+        }
+        return try jsonCached(
+            receipt,
+            cacheControl: statusCacheControl,
+            request: request,
+            context: context
+        )
+    }
     router.get("api/mempool") { request, context in
         let service = try byPath(request)
         return try jsonCached(
@@ -739,6 +786,11 @@ struct ChainReadsByPath: Sendable {
               key != root.chainPath.joined(separator: "/") else { return root }
         guard let level = levels[key] else { throw HTTPError(.notFound) }
         return level
+    }
+
+    func service(for chainPath: [String]) -> ChainReads? {
+        let key = chainPath.joined(separator: "/")
+        return key == root.chainPath.joined(separator: "/") ? root : levels[key]
     }
 }
 
