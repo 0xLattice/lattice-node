@@ -40,6 +40,7 @@ cat > "$ROOT/lattice.json" <<EOF
   "publicRead": 8081,
   "publicReadExpensiveRate": 0,
   "publicReadRate": 0,$read_url_json
+  "publicSubmit": true,
   "rpc": 8080
 }
 EOF

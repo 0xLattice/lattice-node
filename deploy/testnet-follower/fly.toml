@@ -34,7 +34,8 @@ primary_region = "iad"
   [[services.ports]]
     port = 4001
 
-# Public read surface for every hosted level: 443/80 -> one listener.
+# Public read/submit surface for every hosted level: 443/80 -> one listener.
+# Only signed transaction submission is writable; operator RPC stays loopback.
 [[services]]
   protocol = "tcp"
   internal_port = 8081

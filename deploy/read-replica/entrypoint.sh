@@ -27,6 +27,9 @@ exec setpriv --reuid=lattice --regid=lattice --init-groups \
     --public-read-rate 0 \
     --public-read-expensive-rate 0 \
     --public-read-max-rate 0 \
+    --public-submit \
+    --public-submit-rate 0 \
+    --public-read-url https://lattice-mainnet-read.fly.dev \
     --overlay-max-connections-per-netgroup 256 \
     --peer 139b8f3639e7c515417c63bd3a652a5c6fd4a1a2d0baed8e33ea63047995fe64@lattice-mainnet-iad.fly.dev:4001 \
     --peer 35edf67bfe3d612aeb1f0e25da9d3f0ced44dbf79d34f00c548cf9005be6eb7d@lattice-mainnet-ams.fly.dev:4001 \

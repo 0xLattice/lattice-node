@@ -87,10 +87,13 @@ image cannot silently inherit an older node binary.
 
 - `read-replica/` builds a Nexus follower plus nginx. The node's operator RPC
   remains on loopback (cookie-authenticated, unused here); nginx proxies the
-  node's public read listener (8082, unpublished) and exposes only bounded GET
-  routes on port 8081.
+  node's public listener (8082, unpublished) and exposes bounded GET routes
+  plus the purpose-built `POST /transactions` public-submit route on port 8081.
+  It declares `https://rpc.lattice.build` as its public endpoint.
 - `testnet-follower/` builds all binaries and writes one flat `lattice.json`
-  from `NEXUS_PEERS`, `EXTERNAL_HOST`, and parent-first `HOSTED_CHAINS`.
+  from `NEXUS_PEERS`, `EXTERNAL_HOST`, and parent-first `HOSTED_CHAINS`. Its
+  public listener accepts bounded reads and signed transaction submissions;
+  operator RPC remains loopback-only.
 
 Deploy from the repository root so each Dockerfile can copy the reviewed
 sources:
@@ -106,8 +109,9 @@ Run the allowlist test whenever public routes change:
 bash deploy/read-replica/test-allowlist.sh
 ```
 
-The public-read listener or proxy must never expose `/status`, `/metrics`,
-`/core/snapshot`, or any POST route.
+The public listener or proxy must never expose `/status`, `/metrics`,
+`/core/snapshot`, or any POST route except the bounded, signed-transaction
+`POST /transactions` handler.
 
 ## Flag-day upgrades
 

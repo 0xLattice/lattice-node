@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Asserts the read-replica nginx allowlist boundary: only the bounded GET read
-# routes reach the (loopback) node; /status, every write POST, and unknown
-# paths get 403. This is the auditor-required public/internal boundary — a
+# routes and the one public transaction POST reach the node; /status, every
+# operator write, and unknown paths get 403. This is the auditor-required public/internal boundary — a
 # TESTED part of the config, not prose.
 #
 # Also asserts the limits: bursts and excess in-flight requests get 429, the
@@ -42,7 +42,7 @@ class H(BaseHTTPRequestHandler):
         if self.path.startswith("/api/slow"):
             time.sleep(3)
         self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
-    do_GET = do_HEAD = do_POST = _ok
+    do_GET = do_HEAD = do_POST = do_OPTIONS = _ok
     def log_message(self, *a): pass
 ThreadingHTTPServer(("127.0.0.1", 8082), H).serve_forever()
 ' >/dev/null
@@ -84,6 +84,8 @@ check GET  /api/block/1/children   200 "block children"
 check GET  "/api/transaction/$CID" 200 "transaction inclusion"
 check GET  "/api/blocks?before=10&limit=10" 200 "block summary page"
 check GET  "/api/chain/endpoints?chainPath=Nexus/testnet" 200 "child read endpoints"
+check POST /transactions           200 "public signed transaction submit"
+check OPTIONS /transactions        200 "public submit CORS preflight"
 
 echo "== denied: gated/mutating + writes + unknown get 403 =="
 check GET  /status                 403 "gated status off the public surface"
@@ -92,7 +94,6 @@ check GET  /random                 403 "unknown path"
 check GET  /blocks                 403 "removed recent-blocks route"
 check GET  "/blocks/$CID"          403 "removed block-by-cid route"
 check GET  /                       403 "root"
-check POST /transactions           403 "write POST"
 check POST "/transactions/$CID"    403 "POST to an allowlisted read route"
 check POST "/volumes/$CID"         403 "POST to a complete Volume route"
 check POST /api/block/latest       403 "POST to /api"
