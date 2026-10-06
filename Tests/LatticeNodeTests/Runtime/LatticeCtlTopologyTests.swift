@@ -119,6 +119,27 @@ final class LatticeCtlTopologyTests: XCTestCase {
         XCTAssertThrowsError(try submitWithoutPublicRead.validated(), "public submit rides the public read port")
     }
 
+    func testContentServingLimitsLoadFromConfigAndProduceNodeFlags() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ctl-serving-limits-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let body = #"{"listen":4001,"rpc":4003,"servingMaxConcurrent":200,"servingMaxConcurrentPerPeer":20,"servingMaxQueuedPerPeer":500,"servingMaxInFlightVolumeBytes":536870912}"#
+        try Data(body.utf8).write(to: root.appendingPathComponent(Topology.fileName))
+
+        let loaded = try Topology.load(root: root).validated()
+        XCTAssertEqual(loaded.contentServingArguments, [
+            "--serving-max-concurrent", "200",
+            "--serving-max-concurrent-per-peer", "20",
+            "--serving-max-queued-per-peer", "500",
+            "--serving-max-in-flight-volume-bytes", "536870912",
+        ])
+
+        let empty = #"{"listen":4001,"rpc":4003}"#
+        try Data(empty.utf8).write(to: root.appendingPathComponent(Topology.fileName))
+        XCTAssertEqual(try Topology.load(root: root).contentServingArguments, [])
+    }
+
     func testPublicSubmitPolicyLoadsFromConfigAndProducesNodeFlags() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ctl-submit-policy-\(UUID().uuidString)")

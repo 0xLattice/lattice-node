@@ -27,7 +27,11 @@ struct OverlayConfiguration {
                 // real per-source cost for a public direct-IP node is
                 // minPeerKeyBits, not this bucket.
                 maxConnectionsPerNetgroup: configuration.overlayMaxConnectionsPerNetgroup,
+                maxConcurrentContentRequests: configuration.contentServing.maxConcurrent,
+                maxConcurrentContentRequestsPerPeer: configuration.contentServing.maxConcurrentPerPeer,
+                maxQueuedContentRequestsPerPeer: configuration.contentServing.maxQueuedPerPeer,
                 minPeerKeyBits: configuration.minPeerKeyBits,
+                maxInFlightVolumeBytes: configuration.contentServing.maxInFlightVolumeBytes,
                 // Self-described reachable address: provider announcements and
                 // rendezvous records advertise this instead of the observed
                 // (NAT/proxy-mangled) one.

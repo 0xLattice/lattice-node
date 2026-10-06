@@ -73,6 +73,8 @@ public struct NodeConfiguration: Sendable {
     /// direct-IP node that wants a real per-source admission COST should set
     /// `minPeerKeyBits > 0` (a grinding price) rather than rely on this bucket.
     public let overlayMaxConnectionsPerNetgroup: Int
+    /// Content-serving limits handed to the overlay (operator policy).
+    public let contentServing: ContentServingLimits
     /// Operator-declared address at which this node is publicly reachable
     /// (host only; the overlay listen port applies). Behind NAT or an L4
     /// proxy the OBSERVED address differs from the reachable one, so
@@ -126,6 +128,7 @@ public struct NodeConfiguration: Sendable {
         bootstrapPeers: [PeerEndpoint] = [],
         minPeerKeyBits: Int = 0,
         overlayMaxConnectionsPerNetgroup: Int = IvyConfig.defaultMaxConnections,
+        contentServing: ContentServingLimits = .default,
         externalAddress: String? = nil,
         peerSearchInterval: TimeInterval = 600,
         resourcePolicy: NodeResourcePolicy = .default,
@@ -176,6 +179,7 @@ public struct NodeConfiguration: Sendable {
         self.bootstrapPeers = bootstrapPeers
         self.minPeerKeyBits = minPeerKeyBits
         self.overlayMaxConnectionsPerNetgroup = max(1, overlayMaxConnectionsPerNetgroup)
+        self.contentServing = contentServing
         self.externalAddress = externalAddress
         self.peerSearchInterval = peerSearchInterval.isFinite
             ? max(0, peerSearchInterval) : 0

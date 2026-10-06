@@ -176,6 +176,7 @@ func spawnHost(layout: HostLayout) throws {
     if let rate = topology.publicReadMaxRate { arguments += ["--public-read-max-rate", String(rate)] }
     if let url = topology.publicReadURL { arguments += ["--public-read-url", url] }
     arguments += topology.publicSubmissionArguments
+    arguments += topology.contentServingArguments
     for origin in topology.rpcAllowedOrigins ?? [] { arguments += ["--rpc-allowed-origin", origin] }
     for child in topology.hostedChains ?? [] {
         let spec = layout.childSpec(for: child)
