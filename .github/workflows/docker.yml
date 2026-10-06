@@ -67,7 +67,6 @@ jobs:
       matrix:
         dockerfile:
           - deploy/read-replica/Dockerfile
-          - deploy/testnet-follower/Dockerfile
     permissions:
       contents: read
     steps:

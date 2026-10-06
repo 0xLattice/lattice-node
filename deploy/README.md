@@ -82,23 +82,18 @@ There are no per-child databases or identity keys.
 
 ## Containers and Fly
 
-Both deployment Dockerfiles build the repository checkout directly, so the
-image cannot silently inherit an older node binary.
-
-- `read-replica/` builds a Nexus follower plus nginx. The node's operator RPC
-  remains on loopback (cookie-authenticated, unused here); nginx proxies the
-  node's public read listener (8082, unpublished) and exposes only bounded GET
-  routes on port 8081.
-- `testnet-follower/` builds all binaries and writes one flat `lattice.json`
-  from `NEXUS_PEERS`, `EXTERNAL_HOST`, and parent-first `HOSTED_CHAINS`.
-
-Deploy from the repository root so each Dockerfile can copy the reviewed
-sources:
+`read-replica/` is a reference public read proxy: a Nexus follower plus nginx.
+The node's operator RPC remains on loopback (cookie-authenticated, unused
+here); nginx proxies the node's public read listener (8082, unpublished) and
+exposes only bounded GET routes on port 8081. Its Dockerfile builds the
+repository checkout directly:
 
 ```bash
 fly deploy -c deploy/read-replica/fly.toml .
-fly deploy -c deploy/testnet-follower/fly.toml .
 ```
+
+Operator-specific deployments (app names, addresses, peers, and public submit
+policy) live outside this repository.
 
 Run the allowlist test whenever public routes change:
 
