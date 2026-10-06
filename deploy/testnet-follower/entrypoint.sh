@@ -10,6 +10,9 @@ HOSTED_CHAINS="${HOSTED_CHAINS:?space-separated Nexus-rooted child paths, parent
 # Optional: this host's public read URL, declared for every hosted level so a
 # node hosting a parent can list the child at /api/chain/endpoints.
 PUBLIC_READ_URL="${PUBLIC_READ_URL:-}"
+PUBLIC_SUBMIT="${PUBLIC_SUBMIT:-false}"
+PUBLIC_SUBMIT_RATE="${PUBLIC_SUBMIT_RATE:-10}"
+MIN_RELAY_FEE="${MIN_RELAY_FEE:-0}"
 
 mkdir -p "$ROOT"
 
@@ -40,6 +43,9 @@ cat > "$ROOT/lattice.json" <<EOF
   "publicRead": 8081,
   "publicReadExpensiveRate": 0,
   "publicReadRate": 0,$read_url_json
+  "publicSubmit": $PUBLIC_SUBMIT,
+  "publicSubmitRate": $PUBLIC_SUBMIT_RATE,
+  "minRelayFee": $MIN_RELAY_FEE,
   "rpc": 8080
 }
 EOF

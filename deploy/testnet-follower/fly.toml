@@ -16,6 +16,13 @@ primary_region = "iad"
   # hosting Nexus (the read replica) lists Nexus/testnet through it, and this
   # node lists Nexus/testnet/swap.
   PUBLIC_READ_URL = "https://lattice-mainnet-testnet.fly.dev"
+  # Testnet accepts wallet submissions under an explicit global budget. Fly
+  # collapses client addresses, so this is intentionally listener-wide.
+  PUBLIC_SUBMIT = "true"
+  PUBLIC_SUBMIT_RATE = "2"
+  # Every admitted transaction consumes testnet funds without making ordinary
+  # wallet testing expensive.
+  MIN_RELAY_FEE = "1"
   # The P2P self-description must be an IP literal (Ivy netgroup hardening
   # rejects hostnames): the app's dedicated IPv4 (`fly ips list`).
   EXTERNAL_HOST = "169.155.61.57"

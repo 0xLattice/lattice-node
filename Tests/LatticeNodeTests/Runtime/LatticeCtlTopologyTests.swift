@@ -110,10 +110,36 @@ final class LatticeCtlTopologyTests: XCTestCase {
         var infiniteRate = topology()
         infiniteRate.publicReadMaxRate = .infinity
         XCTAssertThrowsError(try infiniteRate.validated())
+        var negativeSubmitRate = topology()
+        negativeSubmitRate.publicSubmitRate = -1
+        XCTAssertThrowsError(try negativeSubmitRate.validated())
         var submitWithoutPublicRead = topology()
         submitWithoutPublicRead.publicRead = nil
         submitWithoutPublicRead.publicSubmit = true
         XCTAssertThrowsError(try submitWithoutPublicRead.validated(), "public submit rides the public read port")
+    }
+
+    func testPublicSubmitPolicyLoadsFromConfigAndProducesNodeFlags() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ctl-submit-policy-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let body = #"{"listen":4001,"rpc":4003,"publicRead":8081,"publicSubmit":true,"publicSubmitRate":2,"minRelayFee":1}"#
+        try Data(body.utf8).write(to: root.appendingPathComponent(Topology.fileName))
+
+        let loaded = try Topology.load(root: root).validated()
+        XCTAssertEqual(loaded.publicSubmitRate, 2)
+        XCTAssertEqual(loaded.publicSubmissionArguments, [
+            "--public-submit",
+            "--public-submit-rate", "2.0",
+            "--min-relay-fee", "1",
+        ])
+
+        let misspelled = #"{"listen":4001,"rpc":4003,"publicSubmitRtae":2}"#
+        try Data(misspelled.utf8).write(to: root.appendingPathComponent(Topology.fileName))
+        XCTAssertThrowsError(try Topology.load(root: root)) { error in
+            XCTAssertTrue(String(describing: error).contains("publicSubmitRtae"))
+        }
     }
 
     /// `mine.minWork` reaches the coordinator as a search plan. There is no
