@@ -15,9 +15,9 @@ import Ivy
 /// temporary rather than permanent, and defaults need no reconnect machinery
 /// of their own.
 public enum DefaultBootstrapPeers {
-    /// The public Nexus overlay, as deployed. `deploy/read-replica/entrypoint.sh`
-    /// carries this COMPLETE set and is the drift anchor the tests check
-    /// against.
+    /// The public Nexus overlay, as deployed. The operator's deployment
+    /// configuration (outside this repository) checks its read replica's peer
+    /// list against this constant.
     ///
     /// Hostnames rather than IP literals, so a host that moves stays
     /// reachable. The first three are the mainnet backbone and today resolve

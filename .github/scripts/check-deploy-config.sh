@@ -4,8 +4,7 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$repo_root"
 
-for script in deploy/entrypoint.sh deploy/read-replica/entrypoint.sh \
-    deploy/upgrade-binaries.sh; do
+for script in deploy/entrypoint.sh deploy/upgrade-binaries.sh; do
     sh -n "$script"
 done
 
