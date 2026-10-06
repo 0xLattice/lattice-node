@@ -10,6 +10,12 @@ import Lattice
 import LatticeNode
 
 public struct Topology: Codable, Sendable {
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case listen, rpc, peers, publicRead, externalAddress
+        case publicReadRate, publicReadExpensiveRate, publicReadMaxRate
+        case publicReadURL, publicSubmit, publicSubmitRate, minRelayFee
+        case hostedChains, mine, rpcAllowedOrigins
+    }
     public var listen: UInt16
     public var rpc: UInt16
     /// Overlay bootstrap peers as `publicKey@host:port`.
@@ -40,6 +46,9 @@ public struct Topology: Codable, Sendable {
     /// Accept `POST /transactions` on the public read port too (the node's
     /// `--public-submit`). Absent or false = off; requires `publicRead`.
     public var publicSubmit: Bool?
+    /// Listener-wide transaction submission ceiling (`--public-submit-rate`),
+    /// in requests per second. Absent = the node's default; `0` disables it.
+    public var publicSubmitRate: Double?
     /// The smallest fee the node admits to its pool (`--min-relay-fee`; node
     /// policy, never consensus). Absent = the node's default, 0.
     public var minRelayFee: UInt64?
@@ -59,6 +68,7 @@ public struct Topology: Codable, Sendable {
         publicReadMaxRate: Double? = nil, hostedChains: [String]? = nil,
         mine: TopologyMine? = nil, publicReadURL: String? = nil,
         publicSubmit: Bool? = nil,
+        publicSubmitRate: Double? = nil,
         minRelayFee: UInt64? = nil
     ) {
         self.listen = listen
@@ -71,6 +81,7 @@ public struct Topology: Codable, Sendable {
         self.publicReadMaxRate = publicReadMaxRate
         self.publicReadURL = publicReadURL
         self.publicSubmit = publicSubmit
+        self.publicSubmitRate = publicSubmitRate
         self.minRelayFee = minRelayFee
         self.hostedChains = hostedChains
         self.mine = mine
@@ -82,6 +93,14 @@ public struct Topology: Codable, Sendable {
         let url = root.appendingPathComponent(fileName)
         guard let data = try? Data(contentsOf: url) else {
             throw CtlError("no \(fileName) in \(root.path); run `lattice init` first")
+        }
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw CtlError("\(fileName) must contain one JSON object")
+        }
+        let known = Set(CodingKeys.allCases.map(\.rawValue))
+        let unknown = Set(object.keys).subtracting(known).sorted()
+        guard unknown.isEmpty else {
+            throw CtlError("unknown \(fileName) key(s): \(unknown.joined(separator: ", "))")
         }
         return try JSONDecoder().decode(Topology.self, from: data)
     }
@@ -113,6 +132,7 @@ public struct Topology: Codable, Sendable {
             ("publicReadRate", publicReadRate),
             ("publicReadExpensiveRate", publicReadExpensiveRate),
             ("publicReadMaxRate", publicReadMaxRate),
+            ("publicSubmitRate", publicSubmitRate),
         ] {
             if let rate, !rate.isFinite || rate < 0 {
                 throw CtlError("\(name) must be finite and nonnegative")
@@ -145,6 +165,19 @@ public struct Topology: Codable, Sendable {
             throw CtlError("mine.roundDeadlineMultiplier must be at least 1; a round deadline shorter than the round's own bound would kill every healthy round")
         }
         return self
+    }
+
+    /// Node flags represented by the public submission policy in
+    /// `lattice.json`. Keeping this translation in the config model makes it
+    /// directly testable instead of relying on daemon-flag tests alone.
+    public var publicSubmissionArguments: [String] {
+        var arguments: [String] = []
+        if publicSubmit == true { arguments.append("--public-submit") }
+        if let publicSubmitRate {
+            arguments += ["--public-submit-rate", String(publicSubmitRate)]
+        }
+        if let minRelayFee { arguments += ["--min-relay-fee", String(minRelayFee)] }
+        return arguments
     }
 }
 

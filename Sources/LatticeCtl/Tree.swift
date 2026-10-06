@@ -175,8 +175,7 @@ func spawnHost(layout: HostLayout) throws {
     if let rate = topology.publicReadExpensiveRate { arguments += ["--public-read-expensive-rate", String(rate)] }
     if let rate = topology.publicReadMaxRate { arguments += ["--public-read-max-rate", String(rate)] }
     if let url = topology.publicReadURL { arguments += ["--public-read-url", url] }
-    if topology.publicSubmit == true { arguments += ["--public-submit"] }
-    if let fee = topology.minRelayFee { arguments += ["--min-relay-fee", String(fee)] }
+    arguments += topology.publicSubmissionArguments
     for origin in topology.rpcAllowedOrigins ?? [] { arguments += ["--rpc-allowed-origin", origin] }
     for child in topology.hostedChains ?? [] {
         let spec = layout.childSpec(for: child)
