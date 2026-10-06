@@ -317,8 +317,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Assert the read-replica nginx allowlist boundary
-        run: bash deploy/read-replica/test-allowlist.sh
+      - name: Assert the example read proxy's nginx allowlist boundary
+        run: bash deploy/examples/read-proxy/test-allowlist.sh
 
   deployment-config:
     runs-on: ubuntu-latest

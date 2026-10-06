@@ -80,25 +80,19 @@ The persistent layout is:
 The single `chains/Nexus` directory contains facts for every hosted path.
 There are no per-child databases or identity keys.
 
-## Containers and Fly
+## Public read proxy example
 
-`read-replica/` is a reference public read proxy: a Nexus follower plus nginx.
-The node's operator RPC remains on loopback (cookie-authenticated, unused
-here); nginx proxies the node's public read listener (8082, unpublished) and
-exposes only bounded GET routes on port 8081. Its Dockerfile builds the
-repository checkout directly:
-
-```bash
-fly deploy -c deploy/read-replica/fly.toml .
-```
-
-Operator-specific deployments (app names, addresses, peers, and public submit
-policy) live outside this repository.
+`examples/read-proxy/nginx.conf` is a reference allowlist proxy for a node's
+public read listener: it forwards only bounded GET routes and refuses
+`/status` and every write. It is written for Fly's proxy (it keys per-client
+limits on `Fly-Client-IP` from Fly's egress range); adapt that part for other
+hosts. Operator-specific deployments (app names, addresses, peers, and public
+submit policy) live outside this repository.
 
 Run the allowlist test whenever public routes change:
 
 ```bash
-bash deploy/read-replica/test-allowlist.sh
+bash deploy/examples/read-proxy/test-allowlist.sh
 ```
 
 The public-read listener or proxy must never expose `/status`, `/metrics`,
