@@ -82,6 +82,7 @@ let package = Package(
             name: "LatticeNode",
             dependencies: [
                 "CSQLite",
+                "LatticeLightClient",
                 "LatticeNodeCore",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "Ivy", package: "Ivy"),
