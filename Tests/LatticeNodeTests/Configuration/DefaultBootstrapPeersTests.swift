@@ -280,7 +280,7 @@ final class DefaultBootstrapPeersTests: XCTestCase {
     }
 
     /// Defaults are discovery, not trust: they reach only the public overlay
-    /// plane, and they carry no admission bypass.
+    /// plane.
     func testDefaultsReachOnlyTheOverlayPlaneAndCarryNoTrust() throws {
         let storageDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(
