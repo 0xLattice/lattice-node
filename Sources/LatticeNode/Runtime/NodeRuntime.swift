@@ -359,6 +359,8 @@ extension NodeRuntime {
         let storage: NodeStorage
         let headers: HeaderEvidenceStore
         let ivy: Ivy
+        /// Each session's outgoing sync messages, in order, surviving backpressure.
+        let outbox: SessionOutbox
         let hello: Data?
         let configuration: NodeConfiguration
         let outputs: [ChainPath: LevelOutput]
@@ -463,6 +465,7 @@ extension NodeRuntime {
             self.storage = storage
             self.headers = headers
             self.ivy = ivy
+            self.outbox = SessionOutbox(ivy: ivy)
             self.hello = hello
             self.configuration = configuration
             self.outputs = outputs
@@ -677,7 +680,7 @@ extension NodeRuntime {
                     inputs.yield(.helloDeadline(peerKey: key, session: id))
                 }
                 if let hello {
-                    _ = await ivy.sendMessage(to: peer, topic: OverlayTopic.overlayHello, payload: hello)
+                    await outbox.send(to: peer, topic: OverlayTopic.overlayHello, payload: hello)
                 }
                 if let replaced, replaced.ready {
                     return await step(.peerGone(replaced.coreID))
@@ -836,10 +839,10 @@ extension NodeRuntime {
                 outputs[path]?.published.publish(snapshot)
             case .send(let peer, let message):
                 guard let session = session(peer), let frame = try? ChainSyncWire.encode(message, at: path) else { break }
-                _ = await ivy.sendMessage(to: session.peer, topic: frame.topic, payload: frame.payload)
+                await outbox.send(to: session.peer, topic: frame.topic, payload: frame.payload)
             case .serveHeaders(let peer, let token, let requestID, let blockCIDs, let hasMore):
                 guard let session = session(peer) else { break }
-                let (storage, headers, ivy, inputs, config) = (storage, headers, ivy, inputs, core.config)
+                let (storage, headers, outbox, inputs, config) = (storage, headers, outbox, inputs, core.config)
                 let proofs = proofs[path] ?? [:]
                 spawn {
                     var entries: [HeaderEntry] = []
@@ -856,7 +859,10 @@ extension NodeRuntime {
                     if let frame = try? ChainSyncWire.encode(.headers(HeadersResponse(
                         requestID: requestID, entries: page.entries, hasMore: page.hasMore
                     )), at: path) {
-                        _ = await ivy.sendMessage(to: session.peer, topic: frame.topic, payload: frame.payload)
+                        // Served once handed to the transport, not merely
+                        // attempted: a page refused as backpressured is sent
+                        // when the session drains.
+                        _ = await outbox.send(to: session.peer, topic: frame.topic, payload: frame.payload).value
                     }
                     inputs.yield(.event(.level(path, .headersServed(peer, token: token))))
                 }
@@ -953,7 +959,7 @@ extension NodeRuntime {
             case .announceTransaction(let cid):
                 guard let payload = try? TransactionAvailableMessage(volumeRootCID: cid).encoded() else { break }
                 for session in sessions.values.sorted(by: { $0.id < $1.id }) where session.ready {
-                    _ = await ivy.sendMessage(
+                    await outbox.send(
                         to: session.peer, topic: OverlayTopic.transactionAvailable, payload: payload
                     )
                 }
