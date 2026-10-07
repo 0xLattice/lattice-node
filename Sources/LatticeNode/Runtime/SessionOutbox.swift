@@ -8,13 +8,17 @@ import Ivy
 /// reply left the requester waiting until its deadline disconnected a peer
 /// that had answered.
 actor SessionOutbox {
-    /// Messages one session may have queued; past this, a send is dropped as
-    /// before rather than queued without bound behind a peer that never drains.
+    /// Messages, and bytes, one session may have queued. Past either, a send
+    /// is dropped as before rather than queued behind a peer that never drains:
+    /// such a peer can pin at most this much memory. The byte bound holds
+    /// several full headers pages.
     static let maximumQueuedPerSession = 1_024
+    static let maximumQueuedBytesPerSession = 8 * 1_024 * 1_024
 
     private struct Lane {
         var tail: Task<Bool, Never>
         var queued: Int
+        var bytes: Int
     }
 
     typealias Send = @Sendable (AuthenticatedPeer, String, Data) async -> SendMessageResult
@@ -43,7 +47,8 @@ actor SessionOutbox {
     func send(to peer: AuthenticatedPeer, topic: String, payload: Data) -> Task<Bool, Never> {
         let lane = Self.laneKey(peer)
         let previous = lanes[lane]
-        guard (previous?.queued ?? 0) < Self.maximumQueuedPerSession else {
+        guard (previous?.queued ?? 0) < Self.maximumQueuedPerSession,
+              (previous?.bytes ?? 0) + payload.count <= Self.maximumQueuedBytesPerSession else {
             return Task { false }
         }
         let (transmit, waitUntilWritable) = (transmit, waitUntilWritable)
@@ -60,17 +65,23 @@ actor SessionOutbox {
                 }
             }
         }
-        lanes[lane] = Lane(tail: task, queued: (previous?.queued ?? 0) + 1)
+        lanes[lane] = Lane(
+            tail: task,
+            queued: (previous?.queued ?? 0) + 1,
+            bytes: (previous?.bytes ?? 0) + payload.count
+        )
+        let size = payload.count
         Task { [weak self] in
             _ = await task.value
-            await self?.finished(lane)
+            await self?.finished(lane, bytes: size)
         }
         return task
     }
 
-    private func finished(_ lane: String) {
+    private func finished(_ lane: String, bytes: Int) {
         guard var current = lanes[lane] else { return }
         current.queued -= 1
+        current.bytes -= bytes
         lanes[lane] = current.queued > 0 ? current : nil
     }
 

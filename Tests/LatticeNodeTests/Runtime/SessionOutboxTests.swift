@@ -222,6 +222,30 @@ final class SessionOutboxDeliveryTests: XCTestCase {
         XCTAssertTrue(sent.isEmpty)
     }
 
+    func testASessionsQueuedBytesAreBounded() async throws {
+        let transport = ScriptedTransport()
+        let outbox = outbox(transport)
+        let page = Data(count: 1_024 * 1_024)
+        let fitting = SessionOutbox.maximumQueuedBytesPerSession / page.count
+        var queued: [Task<Bool, Never>] = []
+        for index in 0..<fitting {
+            queued.append(await outbox.send(to: peer, topic: "page-\(index)", payload: page))
+        }
+        let overflow = await outbox.send(to: peer, topic: "overflow", payload: page)
+        let refused = await finishes(overflow, within: .seconds(2))
+        XCTAssertEqual(refused, false, "past the byte bound a send is refused at once, not queued")
+        // Draining frees the bound once the queued pages are delivered.
+        await transport.drain()
+        for task in queued { _ = await task.value }
+        // Freed bytes are returned by each delivery's follow-up; allow it a moment.
+        var delivered = false
+        for _ in 0..<100 where !delivered {
+            delivered = await outbox.send(to: peer, topic: "after-drain", payload: page).value
+            if !delivered { try await Task.sleep(for: .milliseconds(20)) }
+        }
+        XCTAssertTrue(delivered)
+    }
+
     func testASessionsQueueIsBounded() async throws {
         let transport = ScriptedTransport()
         let outbox = outbox(transport)
@@ -229,9 +253,31 @@ final class SessionOutboxDeliveryTests: XCTestCase {
             await outbox.send(to: peer, topic: "m\(index)", payload: Data())
         }
         let overflow = await outbox.send(to: peer, topic: "overflow", payload: Data())
-        let accepted = await overflow.value
-        XCTAssertFalse(accepted, "past the bound a send is refused at once")
+        let refused = await finishes(overflow, within: .seconds(2))
+        XCTAssertEqual(refused, false, "past the bound a send is refused at once, not queued")
         await transport.end()
+    }
+}
+
+/// The task's result if it finishes within `timeout`; nil if it is still
+/// waiting (a send that was queued instead of refused). Returns at the
+/// timeout without waiting for the task.
+private func finishes(_ task: Task<Bool, Never>, within timeout: Duration) async -> Bool? {
+    final class Once: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<Bool?, Never>?
+        init(_ continuation: CheckedContinuation<Bool?, Never>) { self.continuation = continuation }
+        func resume(_ value: Bool?) {
+            lock.withLock { () -> CheckedContinuation<Bool?, Never>? in
+                defer { continuation = nil }
+                return continuation
+            }?.resume(returning: value)
+        }
+    }
+    return await withCheckedContinuation { continuation in
+        let once = Once(continuation)
+        Task { once.resume(await task.value) }
+        Task { try? await Task.sleep(for: timeout); once.resume(nil) }
     }
 }
 
