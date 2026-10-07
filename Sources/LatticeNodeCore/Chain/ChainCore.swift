@@ -132,6 +132,12 @@ public struct ChainCoreConfig: Sendable {
     /// disconnected as stalled. Each page is its own request, so a stream
     /// that keeps delivering never times out.
     public var headersTimeout: Int64
+    /// How long (ms) a server spends gathering one headers answer before it
+    /// sends what it has (always at least one header). A requester waits
+    /// only `headersTimeout`; an answer bounded by bytes alone outlasts that
+    /// on a slow server, and the request is then repeated without end. The
+    /// default leaves the rest of the deadline for encoding and the wire.
+    public var servingBudget: Int64
     /// A child index larger than this travels by CID instead of inline.
     public var maxInlineChildIndexBytes: Int
     /// The largest child index this node takes from a peer. A larger one is
@@ -161,6 +167,7 @@ public struct ChainCoreConfig: Sendable {
         maxHeadersPerPage: Int = 2_000,
         maxPageBytes: Int = 1 << 20,
         headersTimeout: Int64 = 30_000,
+        servingBudget: Int64? = nil,
         maxInlineChildIndexBytes: Int = 16 * 1_024,
         maxChildIndexBytes: Int = 1 << 20,
         pendingBudget: Int = 16 * 1_024 * 1_024,
@@ -173,6 +180,7 @@ public struct ChainCoreConfig: Sendable {
         self.maxHeadersPerPage = maxHeadersPerPage
         self.maxPageBytes = maxPageBytes
         self.headersTimeout = headersTimeout
+        self.servingBudget = servingBudget ?? headersTimeout / 6
         self.maxInlineChildIndexBytes = maxInlineChildIndexBytes
         self.maxChildIndexBytes = maxChildIndexBytes
         self.pendingBudget = pendingBudget
@@ -190,16 +198,25 @@ public struct ChainCoreConfig: Sendable {
         return HeaderEntry(block: block, children: fits ? children : nil, proofs: proofs, spec: spec)
     }
 
+    /// Whether `entry` joins a page holding `bytes` so far, `elapsed` ms into
+    /// gathering it: the first always does, a later one while the page stays
+    /// within `maxPageBytes` and the server within its `servingBudget`. Adds
+    /// the entry's size - everything it puts on the wire - to `bytes`. A
+    /// server builds its answer through this, so it stops loading headers
+    /// once the page is full or its time is spent, instead of building
+    /// everything asked and cutting after.
+    public func fits(_ entry: HeaderEntry, first: Bool, bytes: inout Int, elapsed: Int64 = 0) -> Bool {
+        bytes += ChainCore.size(of: entry)
+        return first || (bytes <= maxPageBytes && elapsed <= servingBudget)
+    }
+
     /// The answer the shell sends: `entries` cut at `maxPageBytes` (at least
     /// one), with `hasMore` set when cut. The requester continues after the
     /// last header it receives.
     public func page(_ entries: [HeaderEntry], hasMore: Bool) -> (entries: [HeaderEntry], hasMore: Bool) {
         var total = 0
-        for (index, entry) in entries.enumerated() {
-            total += ChainCore.size(of: entry)
-            if index > 0, total > maxPageBytes {
-                return (Array(entries[..<index]), true)
-            }
+        for (index, entry) in entries.enumerated() where !fits(entry, first: index == 0, bytes: &total) {
+            return (Array(entries[..<index]), true)
         }
         return (entries, hasMore)
     }
@@ -1092,7 +1109,11 @@ public struct ChainCore: Sendable {
         index.toData()?.count ?? 0
     }
 
+    /// Everything the entry puts on the wire: a child level's header carries
+    /// its proofs, a genesis its spec.
     static func size(of entry: HeaderEntry) -> Int {
         size(of: entry.block) + (entry.children.map(size) ?? 0)
+            + entry.proofs.reduce(0) { $0 + ((try? $1.serialize().count) ?? 0) }
+            + (entry.spec?.toData()?.count ?? 0)
     }
 }

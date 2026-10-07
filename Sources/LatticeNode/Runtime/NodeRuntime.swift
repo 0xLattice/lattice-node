@@ -863,24 +863,41 @@ extension NodeRuntime {
                 let (storage, headers, outbox, inputs, config) = (storage, headers, outbox, inputs, core.config)
                 let proofs = proofs[path] ?? [:]
                 spawn {
+                    // Built up to a page, or for as long as the serving
+                    // budget allows, and no further: the work is the
+                    // page's, however many headers were asked, and the
+                    // answer leaves before the requester's deadline.
+                    let started = ContinuousClock.now
                     var entries: [HeaderEntry] = []
+                    var (bytes, cut) = (0, false)
                     for cid in blockCIDs {
                         guard let stored = await storage.chainHeader(cid, headers: headers) else { continue }
                         let spec = stored.block.parent == nil
                             ? try? await storage.chainGenesisSpec(cid, headers: headers) : nil
-                        entries.append(config.entry(
+                        let entry = config.entry(
                             stored.block, children: stored.children,
                             proofs: (proofs[cid] ?? [:]).sorted { $0.key < $1.key }.map(\.value), spec: spec ?? nil
-                        ))
+                        )
+                        let elapsed = (ContinuousClock.now - started) / .milliseconds(1)
+                        guard config.fits(
+                            entry, first: entries.isEmpty, bytes: &bytes, elapsed: Int64(elapsed)
+                        ) else {
+                            cut = true
+                            break
+                        }
+                        entries.append(entry)
                     }
-                    let page = config.page(entries, hasMore: hasMore)
-                    if let frame = try? ChainSyncWire.encode(.headers(HeadersResponse(
-                        requestID: requestID, entries: page.entries, hasMore: page.hasMore
-                    )), at: path) {
+                    do {
+                        let frame = try ChainSyncWire.encode(.headers(HeadersResponse(
+                            requestID: requestID, entries: entries, hasMore: hasMore || cut
+                        )), at: path)
                         // Served once handed to the transport, not merely
                         // attempted: a page refused as backpressured is sent
                         // when the session drains.
                         _ = await outbox.send(to: session.peer, topic: frame.topic, payload: frame.payload).value
+                    } catch {
+                        // Unanswered, the requester's deadline decides; say why.
+                        SyncTrace.log(chain: path, "headers answer \(requestID) not sent: \(error)")
                     }
                     inputs.yield(.event(.level(path, .headersServed(peer, token: token))))
                 }
