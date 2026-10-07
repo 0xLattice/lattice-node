@@ -57,6 +57,21 @@ final class LevelSimulationTests: XCTestCase {
         XCTAssertGreaterThan(report.executions, 0)
     }
 
+    /// A budget bounds backlog: with the smallest pending budget every level,
+    /// the root included, still weighs each header as it arrives.
+    func testThreeLevelsConvergeWithTheSmallestPendingBudget() async throws {
+        _ = try await simulate(config(0x3_1E7E) { $0.levels = 3; $0.pendingBudget = 1 })
+    }
+
+    /// And with the smallest per-source proof budget: a source holding no
+    /// proof has one taken whatever its size.
+    func testThreeLevelsConvergeWithTheSmallestProofByteBudget() async throws {
+        _ = try await simulate(config(0x3_1E7E) {
+            $0.levels = 3
+            $0.proofs = ChildProofConfig(maxSourceBytes: 1)
+        })
+    }
+
     func testTwoLevelsConverge() async throws {
         let (simulator, report) = try await simulate(config(0x2_1E7E) { $0.levels = 2 })
         XCTAssertEqual(simulator.world.paths.count, 2)

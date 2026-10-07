@@ -201,7 +201,8 @@ public enum LevelInvariants {
             load[proof.source] = (current.count + 1, current.bytes + proof.bytes)
         }
         for (source, used) in load {
-            guard used.count <= bounds.maxPerSource, used.bytes <= bounds.maxSourceBytes else {
+            guard used.count <= bounds.maxPerSource,
+                  used.count == 1 || used.bytes <= bounds.maxSourceBytes else {
                 throw fail("source \(String(describing: source)) holds \(used.count) proofs, \(used.bytes) bytes, over its caps")
             }
             if let peer = source, core.sync.peers[peer] == nil {

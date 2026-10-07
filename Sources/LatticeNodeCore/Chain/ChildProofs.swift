@@ -11,6 +11,7 @@ public struct ChildProofConfig: Sendable {
     public var indexChecks: Int
     /// Proofs per source (a peer, or the index) queued or in flight, by
     /// count and by bytes; over either, a proof is dropped without blame.
+    /// A source holding none has one proof taken whatever its size.
     public var maxPerSource: Int
     public var maxSourceBytes: Int
     /// Proofs taken from one header, and the largest proof taken at all.
@@ -253,7 +254,7 @@ extension ChainCore {
                   !credits(proof.rootCID, at: cid) else { continue }
             let load = sync.proofs.load[source] ?? (0, 0)
             guard load.count < proofConfig.maxPerSource,
-                  load.bytes + queued.bytes <= proofConfig.maxSourceBytes else {
+                  load.count == 0 || load.bytes + queued.bytes <= proofConfig.maxSourceBytes else {
                 skipped(cid)
                 continue
             }
@@ -343,7 +344,8 @@ extension ChainCore {
 
     /// A waiting header has verified work: it enters the pending queue, at
     /// its root's achieved hash, as `accept` enters a root header, and is
-    /// weighed at once when its parent is.
+    /// weighed at once when its parent is. The step evicts after its drain,
+    /// as for a root header: never this header before it could be weighed.
     mutating func promote(_ waiting: AwaitingChildProof, evidence: VerifiedChildEvidence, proof: ChildBlockProof, _ turn: inout Turn) {
         let cid = waiting.blockCID
         var header = PendingHeader(
@@ -361,7 +363,6 @@ extension ChainCore {
         sync.pending.insert(header)
         for peer in waiting.announcers { sync.announced[peer, default: []].insert(cid) }
         dirty(cid, &turn)
-        sync.evict(to: config.pendingBudget)
     }
 
     // MARK: - Each step

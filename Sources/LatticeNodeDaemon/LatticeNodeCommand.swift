@@ -62,10 +62,10 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Per-netgroup overlay connection cap (both directions). Defaults to the total connection cap (no effective throttle): a low value breaks proxy-fronted nodes where every connection shares one address, and buys little since bad data is rejected on verification and outbound sync slots are separately reserved. For a real per-source admission cost on a public direct-IP node, set --minimum-peer-key-bits (a grinding price) instead of lowering this.")
     var overlayMaxConnectionsPerNetgroup: Int?
 
-    @Option(help: "Overlay connections this node holds at once, both directions. Each costs a socket and its buffers; a few slots stay reserved for this node's own outbound dials.")
+    @Option(help: "Overlay connections this node holds at once, both directions. Each costs a socket and its buffers. Up to 16 are reserved for this node's own outbound dials, always leaving at least one for inbound.")
     var overlayMaxConnections = IvyConfig.defaultMaxConnections
 
-    @Option(help: "Bytes of child proofs one peer may have queued or in flight before they are verified. Past it that peer's further proofs are dropped without blame.")
+    @Option(help: "Bytes of child proofs one peer may have queued or in flight before they are verified. Past it that peer's further proofs are dropped without blame; a peer with none held always has one taken.")
     var syncMaxUnverifiedBytesPerPeer = MemoryBudgets.default.syncMaxUnverifiedBytesPerPeer
 
     @Option(help: "Bytes of headers each hosted level holds that do not yet connect to its chain. Past it pending headers are evicted.")
@@ -74,7 +74,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Bytes of transactions each hosted level's pool holds. A full pool admits a transaction only by evicting cheaper ones.")
     var mempoolMaxBytes = MemoryBudgets.default.mempoolMaxBytes
 
-    @Option(help: "Bytes of sync messages this node queues for one peer session that is not draining. Past it a send to that session is dropped rather than queued.")
+    @Option(help: "Bytes of sync messages this node queues for one peer session that is not draining. Past it a send to that session is dropped rather than queued; a session with nothing queued always takes one message.")
     var syncMaxQueuedBytesPerSession = MemoryBudgets.default.syncMaxQueuedBytesPerSession
 
     @Option(help: "Content requests this node serves to peers at once, all combined. Past the limits requests wait rather than being refused, and freed slots are shared by weight, favouring peers that have served this node verified content; a peer with none still advances.")

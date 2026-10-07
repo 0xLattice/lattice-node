@@ -11,7 +11,9 @@ actor SessionOutbox {
     /// Messages, and bytes, one session may have queued. Past either, a send
     /// is dropped as before rather than queued behind a peer that never drains:
     /// such a peer can pin at most this much memory. The byte bound holds
-    /// several full headers pages.
+    /// several full headers pages. The byte bound is on what queues behind a
+    /// session's first message: with nothing queued a message is taken
+    /// whatever its size, so any budget still delivers.
     static let maximumQueuedPerSession = 1_024
     nonisolated let maximumQueuedBytesPerSession: Int
 
@@ -57,7 +59,7 @@ actor SessionOutbox {
         let lane = Self.laneKey(peer)
         let previous = lanes[lane]
         guard (previous?.queued ?? 0) < Self.maximumQueuedPerSession,
-              (previous?.bytes ?? 0) + payload.count <= maximumQueuedBytesPerSession else {
+              previous == nil || previous!.bytes + payload.count <= maximumQueuedBytesPerSession else {
             return Task { false }
         }
         let (transmit, waitUntilWritable) = (transmit, waitUntilWritable)

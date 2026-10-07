@@ -79,11 +79,13 @@ The example Fly read replica uses nginx as the public boundary.
 
 These bound the memory and connections this node spends on peers. They are
 the operator's choice, never protocol rules; each must be a positive integer,
-and the default applies when the key is absent.
+and the default applies when the key is absent. A byte budget bounds backlog:
+with nothing held, one item is always taken whatever its size, so any positive
+value still makes progress.
 
 | `lattice.json` key | Node flag | Default | Bounds |
 |---|---|---:|---|
-| `overlayMaxConnections` | `--overlay-max-connections` | 256 | Overlay connections held at once, both directions; the per-netgroup cap defaults to it |
+| `overlayMaxConnections` | `--overlay-max-connections` | 256 | Overlay connections held at once, both directions; the per-netgroup cap defaults to it. Up to 16 are reserved for outbound dials, always leaving at least one for inbound (a total of 17 or less leaves exactly one) |
 | `syncMaxUnverifiedBytesPerPeer` | `--sync-max-unverified-bytes-per-peer` | 1048576 | Bytes of child proofs one peer may have waiting to be verified |
 | `syncMaxPendingBytes` | `--sync-max-pending-bytes` | 16777216 | Bytes of not-yet-connected headers held per hosted level |
 | `mempoolMaxBytes` | `--mempool-max-bytes` | 67108864 | Bytes of transactions in each hosted level's pool |

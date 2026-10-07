@@ -230,6 +230,34 @@ final class SessionOutboxDeliveryTests: XCTestCase {
         await transport.end()
     }
 
+    /// The byte budget bounds backlog: a session with nothing queued takes
+    /// one message of any size, so the smallest budget still delivers.
+    func testAMessageIntoAnEmptySessionIsTakenWhateverTheByteBudget() async throws {
+        let transport = ScriptedTransport()
+        let outbox = SessionOutbox(
+            send: { _, topic, _ in await transport.send(topic) },
+            waitUntilWritable: { _ in await transport.waitUntilWritable() },
+            maximumQueuedBytesPerSession: 1
+        )
+        let page = Data(count: 1_024 * 1_024)
+        let first = await outbox.send(to: peer, topic: "first", payload: page)
+        let behind = await outbox.send(to: peer, topic: "behind", payload: page)
+        let refused = await finishes(behind, within: .seconds(2))
+        XCTAssertEqual(refused, false, "the budget bounds what queues behind the first message")
+        await transport.drain()
+        let firstDelivered = await first.value
+        XCTAssertTrue(firstDelivered)
+        // The lane empties in the delivery's follow-up; allow it a moment.
+        var delivered = false
+        for _ in 0..<100 where !delivered {
+            delivered = await outbox.send(to: peer, topic: "after-drain", payload: page).value
+            if !delivered { try await Task.sleep(for: .milliseconds(20)) }
+        }
+        XCTAssertTrue(delivered)
+        let sent = await transport.sent
+        XCTAssertEqual(sent, ["first", "after-drain"])
+    }
+
     func testASessionsQueuedBytesAreBounded() async throws {
         let transport = ScriptedTransport()
         let outbox = outbox(transport)
