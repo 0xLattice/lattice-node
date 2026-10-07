@@ -699,21 +699,28 @@ public struct ChainCore: Sendable {
     /// asked for (an object asked of another peer counts as held, until that
     /// request stalls). A header it holds but has not weighed gains the peer
     /// as an announcer (the peer holds its ancestors). Otherwise the next
-    /// page is pulled. Holes still lacking are asked again on a tick.
+    /// page is pulled. Holes still lacking are asked again on a tick. A
+    /// child level asks for no more headers than it has room for their
+    /// proofs (`proofRoom`): the rest are asked as checks finish.
     mutating func pump(_ peer: PeerID, _ turn: inout Turn, again: Bool = false) {
         guard let state = sync.peers[peer], state.data == nil, sync.cursors[peer.key] != nil else { return }
         let inFlight = Set(sync.peers.values.flatMap { $0.data?.cids ?? [] })
-        var ask: [StreamEntry] = []
+        let room = proofRoom(for: peer)
+        var requested = state.holes.last.map { Swift.max(state.requested, $0.position) } ?? state.requested
+        var seen = Set<String>()
+        var cids: [String] = []
         for hole in state.holes where (again || hole.position > state.requested) && lacks(hole.entry, inFlight: inFlight) {
-            ask.append(hole)
+            guard seen.contains(hole.entry.block) || cids.count < room else {
+                requested = hole.position - 1
+                break
+            }
+            if seen.insert(hole.entry.block).inserted { cids.append(hole.entry.block) }
         }
-        for hole in state.holes where hole.position > state.requested && hole.entry.kind == .header
-            && sync.pending.entries[hole.entry.block] != nil {
+        for hole in state.holes where hole.position > state.requested && hole.position <= requested
+            && hole.entry.kind == .header && sync.pending.entries[hole.entry.block] != nil {
             announce(hole.entry.block, by: peer, &turn)
         }
-        if let last = state.holes.last { sync.peers[peer]?.requested = Swift.max(state.requested, last.position) }
-        var seen = Set<String>()
-        let cids = ask.map(\.entry.block).filter { seen.insert($0).inserted }
+        sync.peers[peer]?.requested = requested
         if !cids.isEmpty {
             requestData(cids, from: peer, &turn)
         } else if state.more, state.stream == nil, state.holes.count < config.maxHeadersPerPage {

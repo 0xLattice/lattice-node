@@ -215,6 +215,15 @@ extension ChainCore {
         offer(entry.proofs, cid: cid, from: peer)
     }
 
+    /// The proof-bearing headers `peer` can be asked for now: its free proof
+    /// slots, by the cap `offer` holds it to. A peer with no check queued or
+    /// in flight always has room, so asking never stops for good. A root
+    /// header carries no proofs: no bound.
+    func proofRoom(for peer: PeerID) -> Int {
+        guard !isRoot else { return .max }
+        return Swift.max(0, proofConfig.maxPerSource - (sync.proofs.load[peer]?.count ?? 0))
+    }
+
     /// Room for one more waiting header: evict the oldest with no proof
     /// queued or in flight, or refuse.
     mutating func makeRoomToAwait() -> Bool {
