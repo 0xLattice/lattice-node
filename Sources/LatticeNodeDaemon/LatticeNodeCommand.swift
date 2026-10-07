@@ -60,7 +60,22 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     var minimumPeerKeyBits = 0
 
     @Option(help: "Per-netgroup overlay connection cap (both directions). Defaults to the total connection cap (no effective throttle): a low value breaks proxy-fronted nodes where every connection shares one address, and buys little since bad data is rejected on verification and outbound sync slots are separately reserved. For a real per-source admission cost on a public direct-IP node, set --minimum-peer-key-bits (a grinding price) instead of lowering this.")
-    var overlayMaxConnectionsPerNetgroup = IvyConfig.defaultMaxConnections
+    var overlayMaxConnectionsPerNetgroup: Int?
+
+    @Option(help: "Overlay connections this node holds at once, both directions. Each costs a socket and its buffers; a few slots stay reserved for this node's own outbound dials.")
+    var overlayMaxConnections = IvyConfig.defaultMaxConnections
+
+    @Option(help: "Bytes of child proofs one peer may have queued or in flight before they are verified. Past it that peer's further proofs are dropped without blame.")
+    var syncMaxUnverifiedBytesPerPeer = MemoryBudgets.default.syncMaxUnverifiedBytesPerPeer
+
+    @Option(help: "Bytes of headers each hosted level holds that do not yet connect to its chain. Past it pending headers are evicted.")
+    var syncMaxPendingBytes = MemoryBudgets.default.syncMaxPendingBytes
+
+    @Option(help: "Bytes of transactions each hosted level's pool holds. A full pool admits a transaction only by evicting cheaper ones.")
+    var mempoolMaxBytes = MemoryBudgets.default.mempoolMaxBytes
+
+    @Option(help: "Bytes of sync messages this node queues for one peer session that is not draining. Past it a send to that session is dropped rather than queued.")
+    var syncMaxQueuedBytesPerSession = MemoryBudgets.default.syncMaxQueuedBytesPerSession
 
     @Option(help: "Content requests this node serves to peers at once, all combined. Past the limits requests wait rather than being refused, and freed slots are shared by weight, favouring peers that have served this node verified content; a peer with none still advances.")
     var servingMaxConcurrent = 64
@@ -118,6 +133,15 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         if publicSubmit, publicReadPort == nil {
             throw ValidationError("--public-submit requires --public-read-port")
         }
+        for (flag, value) in [
+            ("--overlay-max-connections", overlayMaxConnections),
+            ("--sync-max-unverified-bytes-per-peer", syncMaxUnverifiedBytesPerPeer),
+            ("--sync-max-pending-bytes", syncMaxPendingBytes),
+            ("--mempool-max-bytes", mempoolMaxBytes),
+            ("--sync-max-queued-bytes-per-session", syncMaxQueuedBytesPerSession),
+        ] where value < 1 {
+            throw ValidationError("\(flag) must be a positive integer")
+        }
         let publicReadLimits = try PublicReadRateLimits.validated(
             generalRate: publicReadRate,
             expensiveRate: publicReadExpensiveRate,
@@ -158,11 +182,18 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             bootstrapPeers: overlayPeers,
             minPeerKeyBits: minimumPeerKeyBits,
             overlayMaxConnectionsPerNetgroup: overlayMaxConnectionsPerNetgroup,
+            overlayMaxConnections: overlayMaxConnections,
             contentServing: ContentServingLimits(
                 maxConcurrent: servingMaxConcurrent,
                 maxConcurrentPerPeer: servingMaxConcurrentPerPeer,
                 maxQueuedPerPeer: servingMaxQueuedPerPeer,
                 maxInFlightVolumeBytes: servingMaxInFlightVolumeBytes
+            ),
+            memoryBudgets: MemoryBudgets(
+                syncMaxUnverifiedBytesPerPeer: syncMaxUnverifiedBytesPerPeer,
+                syncMaxPendingBytes: syncMaxPendingBytes,
+                mempoolMaxBytes: mempoolMaxBytes,
+                syncMaxQueuedBytesPerSession: syncMaxQueuedBytesPerSession
             ),
             externalAddress: externalAddress,
             peerSearchInterval: peerSearchInterval,

@@ -112,6 +112,18 @@ public final class NodeRuntime: Sendable {
         case stop
     }
 
+    /// `base` with the operator's pool and memory policy applied.
+    static func coreConfig(
+        _ base: ChainCoreConfig, applying configuration: NodeConfiguration
+    ) -> ChainCoreConfig {
+        var config = base
+        config.mining.mempool.minRelayFee = configuration.minRelayFee
+        config.mining.mempool.maxBytes = configuration.memoryBudgets.mempoolMaxBytes
+        config.pendingBudget = configuration.memoryBudgets.syncMaxPendingBytes
+        config.proofs.maxSourceBytes = configuration.memoryBudgets.syncMaxUnverifiedBytesPerPeer
+        return config
+    }
+
     /// Boot replay, then start the loop and the overlay.
     public static func start(
         storage: NodeStorage,
@@ -128,8 +140,7 @@ public final class NodeRuntime: Sendable {
             nexusGenesisCID: configuration.nexusGenesisCID
         )
         let proofs = try headers.proofs()
-        var coreConfig = coreConfig
-        coreConfig.mining.mempool.minRelayFee = configuration.minRelayFee
+        let coreConfig = Self.coreConfig(coreConfig, applying: configuration)
         let core = try await boot(
             storage: storage, configuration: configuration,
             coreConfig: coreConfig, headers: headers, proofs: proofs
@@ -465,7 +476,10 @@ extension NodeRuntime {
             self.storage = storage
             self.headers = headers
             self.ivy = ivy
-            self.outbox = SessionOutbox(ivy: ivy)
+            self.outbox = SessionOutbox(
+                ivy: ivy,
+                maximumQueuedBytesPerSession: configuration.memoryBudgets.syncMaxQueuedBytesPerSession
+            )
             self.hello = hello
             self.configuration = configuration
             self.outputs = outputs

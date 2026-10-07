@@ -16,6 +16,8 @@ public struct Topology: Codable, Sendable {
         case publicReadURL, publicSubmit, publicSubmitRate, minRelayFee
         case servingMaxConcurrent, servingMaxConcurrentPerPeer
         case servingMaxQueuedPerPeer, servingMaxInFlightVolumeBytes
+        case overlayMaxConnections, syncMaxUnverifiedBytesPerPeer, syncMaxPendingBytes
+        case mempoolMaxBytes, syncMaxQueuedBytesPerSession
         case hostedChains, mine, rpcAllowedOrigins
     }
     public var listen: UInt16
@@ -59,6 +61,14 @@ public struct Topology: Codable, Sendable {
     public var servingMaxConcurrentPerPeer: Int?
     public var servingMaxQueuedPerPeer: Int?
     public var servingMaxInFlightVolumeBytes: Int?
+    /// Overlay connection cap (`--overlay-max-connections`) and the node's
+    /// memory budgets in bytes (`--sync-max-*`, `--mempool-max-bytes`).
+    /// Absent = the node's defaults.
+    public var overlayMaxConnections: Int?
+    public var syncMaxUnverifiedBytesPerPeer: Int?
+    public var syncMaxPendingBytes: Int?
+    public var mempoolMaxBytes: Int?
+    public var syncMaxQueuedBytesPerSession: Int?
     /// Child chains this process hosts as levels, parent before child.
     public var hostedChains: [String]?
     public var mine: TopologyMine?
@@ -145,6 +155,17 @@ public struct Topology: Codable, Sendable {
                 throw CtlError("\(name) must be finite and nonnegative")
             }
         }
+        for (name, value) in [
+            ("overlayMaxConnections", overlayMaxConnections),
+            ("syncMaxUnverifiedBytesPerPeer", syncMaxUnverifiedBytesPerPeer),
+            ("syncMaxPendingBytes", syncMaxPendingBytes),
+            ("mempoolMaxBytes", mempoolMaxBytes),
+            ("syncMaxQueuedBytesPerSession", syncMaxQueuedBytesPerSession),
+        ] {
+            if let value, value < 1 {
+                throw CtlError("\(name) must be a positive integer")
+            }
+        }
         if let publicReadURL, !NodeConfiguration.isValidPublicReadURL(publicReadURL) {
             throw CtlError("publicReadURL must be an absolute http(s) URL with a host and no credentials, query or fragment")
         }
@@ -182,6 +203,21 @@ public struct Topology: Codable, Sendable {
         if let value = servingMaxQueuedPerPeer { arguments += ["--serving-max-queued-per-peer", String(value)] }
         if let value = servingMaxInFlightVolumeBytes {
             arguments += ["--serving-max-in-flight-volume-bytes", String(value)]
+        }
+        return arguments
+    }
+
+    /// Node flags for the connection cap and memory budgets in `lattice.json`.
+    public var resourceBudgetArguments: [String] {
+        var arguments: [String] = []
+        if let value = overlayMaxConnections { arguments += ["--overlay-max-connections", String(value)] }
+        if let value = syncMaxUnverifiedBytesPerPeer {
+            arguments += ["--sync-max-unverified-bytes-per-peer", String(value)]
+        }
+        if let value = syncMaxPendingBytes { arguments += ["--sync-max-pending-bytes", String(value)] }
+        if let value = mempoolMaxBytes { arguments += ["--mempool-max-bytes", String(value)] }
+        if let value = syncMaxQueuedBytesPerSession {
+            arguments += ["--sync-max-queued-bytes-per-session", String(value)]
         }
         return arguments
     }

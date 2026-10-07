@@ -73,8 +73,12 @@ public struct NodeConfiguration: Sendable {
     /// direct-IP node that wants a real per-source admission COST should set
     /// `minPeerKeyBits > 0` (a grinding price) rather than rely on this bucket.
     public let overlayMaxConnectionsPerNetgroup: Int
+    /// Overlay connections held at once, both directions (operator policy).
+    public let overlayMaxConnections: Int
     /// Content-serving limits handed to the overlay (operator policy).
     public let contentServing: ContentServingLimits
+    /// Memory budgets for sync, the pool and queued replies (operator policy).
+    public let memoryBudgets: MemoryBudgets
     /// Operator-declared address at which this node is publicly reachable
     /// (host only; the overlay listen port applies). Behind NAT or an L4
     /// proxy the OBSERVED address differs from the reachable one, so
@@ -127,8 +131,10 @@ public struct NodeConfiguration: Sendable {
         rpcPort: UInt16 = 8080,
         bootstrapPeers: [PeerEndpoint] = [],
         minPeerKeyBits: Int = 0,
-        overlayMaxConnectionsPerNetgroup: Int = IvyConfig.defaultMaxConnections,
+        overlayMaxConnectionsPerNetgroup: Int? = nil,
+        overlayMaxConnections: Int = IvyConfig.defaultMaxConnections,
         contentServing: ContentServingLimits = .default,
+        memoryBudgets: MemoryBudgets = .default,
         externalAddress: String? = nil,
         peerSearchInterval: TimeInterval = 600,
         resourcePolicy: NodeResourcePolicy = .default,
@@ -178,8 +184,10 @@ public struct NodeConfiguration: Sendable {
         self.rpcPort = rpcPort
         self.bootstrapPeers = bootstrapPeers
         self.minPeerKeyBits = minPeerKeyBits
-        self.overlayMaxConnectionsPerNetgroup = max(1, overlayMaxConnectionsPerNetgroup)
+        self.overlayMaxConnectionsPerNetgroup = max(1, overlayMaxConnectionsPerNetgroup ?? overlayMaxConnections)
+        self.overlayMaxConnections = overlayMaxConnections
         self.contentServing = contentServing
+        self.memoryBudgets = memoryBudgets
         self.externalAddress = externalAddress
         self.peerSearchInterval = peerSearchInterval.isFinite
             ? max(0, peerSearchInterval) : 0

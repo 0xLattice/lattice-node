@@ -10,13 +10,14 @@ struct OverlayConfiguration {
                 signingKey: configuration.signingKey,
                 listenPort: configuration.listenPort,
                 bootstrapPeers: configuration.bootstrapPeers,
+                maxConnections: configuration.overlayMaxConnections,
                 // Always keep headroom for outbound dials so an inbound burst from
                 // a single source cannot exhaust total capacity and starve the
                 // dials a node needs to bootstrap/cold-sync. Matters most when the
                 // per-netgroup cap is relaxed (proxy-fronted nodes, below).
                 reservedOutboundConnectionSlots: min(
                     NodeConfiguration.overlayReservedOutboundSlots,
-                    IvyConfig.defaultMaxConnections - 1
+                    configuration.overlayMaxConnections - 1
                 ),
                 // Default: permissive (= the total connection cap). This is a
                 // PUBLIC plane, and a per-netgroup connection cap is weak defense here: bad

@@ -13,7 +13,7 @@ actor SessionOutbox {
     /// such a peer can pin at most this much memory. The byte bound holds
     /// several full headers pages.
     static let maximumQueuedPerSession = 1_024
-    static let maximumQueuedBytesPerSession = 8 * 1_024 * 1_024
+    nonisolated let maximumQueuedBytesPerSession: Int
 
     private struct Lane {
         var tail: Task<Bool, Never>
@@ -28,16 +28,25 @@ actor SessionOutbox {
     private let waitUntilWritable: WaitUntilWritable
     private var lanes: [String: Lane] = [:]
 
-    init(ivy: Ivy) {
+    init(
+        ivy: Ivy,
+        maximumQueuedBytesPerSession: Int = MemoryBudgets.default.syncMaxQueuedBytesPerSession
+    ) {
         self.init(
             send: { peer, topic, payload in await ivy.sendMessage(to: peer, topic: topic, payload: payload) },
-            waitUntilWritable: { peer in await ivy.waitUntilWritable(to: peer) }
+            waitUntilWritable: { peer in await ivy.waitUntilWritable(to: peer) },
+            maximumQueuedBytesPerSession: maximumQueuedBytesPerSession
         )
     }
 
-    init(send: @escaping Send, waitUntilWritable: @escaping WaitUntilWritable) {
+    init(
+        send: @escaping Send,
+        waitUntilWritable: @escaping WaitUntilWritable,
+        maximumQueuedBytesPerSession: Int = MemoryBudgets.default.syncMaxQueuedBytesPerSession
+    ) {
         self.transmit = send
         self.waitUntilWritable = waitUntilWritable
+        self.maximumQueuedBytesPerSession = maximumQueuedBytesPerSession
     }
 
     /// Queues `payload` for `peer` behind its earlier messages. The returned
@@ -48,7 +57,7 @@ actor SessionOutbox {
         let lane = Self.laneKey(peer)
         let previous = lanes[lane]
         guard (previous?.queued ?? 0) < Self.maximumQueuedPerSession,
-              (previous?.bytes ?? 0) + payload.count <= Self.maximumQueuedBytesPerSession else {
+              (previous?.bytes ?? 0) + payload.count <= maximumQueuedBytesPerSession else {
             return Task { false }
         }
         let (transmit, waitUntilWritable) = (transmit, waitUntilWritable)

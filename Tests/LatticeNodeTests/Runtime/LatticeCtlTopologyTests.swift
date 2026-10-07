@@ -140,6 +140,42 @@ final class LatticeCtlTopologyTests: XCTestCase {
         XCTAssertEqual(try Topology.load(root: root).contentServingArguments, [])
     }
 
+    func testResourceBudgetsLoadFromConfigAndProduceNodeFlags() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ctl-resource-budgets-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let body = #"{"listen":4001,"rpc":4003,"overlayMaxConnections":512,"syncMaxUnverifiedBytesPerPeer":2097152,"syncMaxPendingBytes":33554432,"mempoolMaxBytes":134217728,"syncMaxQueuedBytesPerSession":4194304}"#
+        try Data(body.utf8).write(to: root.appendingPathComponent(Topology.fileName))
+
+        let loaded = try Topology.load(root: root).validated()
+        XCTAssertEqual(loaded.resourceBudgetArguments, [
+            "--overlay-max-connections", "512",
+            "--sync-max-unverified-bytes-per-peer", "2097152",
+            "--sync-max-pending-bytes", "33554432",
+            "--mempool-max-bytes", "134217728",
+            "--sync-max-queued-bytes-per-session", "4194304",
+        ])
+
+        let empty = #"{"listen":4001,"rpc":4003}"#
+        try Data(empty.utf8).write(to: root.appendingPathComponent(Topology.fileName))
+        XCTAssertEqual(try Topology.load(root: root).validated().resourceBudgetArguments, [])
+
+        for key in [
+            "overlayMaxConnections", "syncMaxUnverifiedBytesPerPeer", "syncMaxPendingBytes",
+            "mempoolMaxBytes", "syncMaxQueuedBytesPerSession",
+        ] {
+            for value in ["0", "-1"] {
+                let invalid = #"{"listen":4001,"rpc":4003,"\#(key)":\#(value)}"#
+                try Data(invalid.utf8).write(to: root.appendingPathComponent(Topology.fileName))
+                XCTAssertThrowsError(try Topology.load(root: root).validated(), "\(key) = \(value)")
+            }
+            let fractional = #"{"listen":4001,"rpc":4003,"\#(key)":1.5}"#
+            try Data(fractional.utf8).write(to: root.appendingPathComponent(Topology.fileName))
+            XCTAssertThrowsError(try Topology.load(root: root), "\(key) is an integer")
+        }
+    }
+
     func testPublicSubmitPolicyLoadsFromConfigAndProducesNodeFlags() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ctl-submit-policy-\(UUID().uuidString)")

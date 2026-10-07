@@ -214,11 +214,27 @@ final class SessionOutboxDeliveryTests: XCTestCase {
         XCTAssertTrue(sent.isEmpty)
     }
 
+    func testTheOperatorsQueuedByteBudgetBoundsASession() async throws {
+        let transport = ScriptedTransport()
+        let outbox = SessionOutbox(
+            send: { _, topic, _ in await transport.send(topic) },
+            waitUntilWritable: { _ in await transport.waitUntilWritable() },
+            maximumQueuedBytesPerSession: 2_048
+        )
+        let page = Data(count: 1_024)
+        _ = await outbox.send(to: peer, topic: "page-0", payload: page)
+        _ = await outbox.send(to: peer, topic: "page-1", payload: page)
+        let overflow = await outbox.send(to: peer, topic: "overflow", payload: page)
+        let refused = await finishes(overflow, within: .seconds(2))
+        XCTAssertEqual(refused, false, "past the operator's byte budget a send is refused at once")
+        await transport.end()
+    }
+
     func testASessionsQueuedBytesAreBounded() async throws {
         let transport = ScriptedTransport()
         let outbox = outbox(transport)
         let page = Data(count: 1_024 * 1_024)
-        let fitting = SessionOutbox.maximumQueuedBytesPerSession / page.count
+        let fitting = outbox.maximumQueuedBytesPerSession / page.count
         var queued: [Task<Bool, Never>] = []
         for index in 0..<fitting {
             queued.append(await outbox.send(to: peer, topic: "page-\(index)", payload: page))

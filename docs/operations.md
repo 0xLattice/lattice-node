@@ -75,6 +75,20 @@ zero only behind a proxy that supplies its own per-client and global limits
 (`--public-submit-rate` is a fourth ceiling; it bounds only `POST /transactions`).
 The example Fly read replica uses nginx as the public boundary.
 
+## Resource budgets
+
+These bound the memory and connections this node spends on peers. They are
+the operator's choice, never protocol rules; each must be a positive integer,
+and the default applies when the key is absent.
+
+| `lattice.json` key | Node flag | Default | Bounds |
+|---|---|---:|---|
+| `overlayMaxConnections` | `--overlay-max-connections` | 256 | Overlay connections held at once, both directions; the per-netgroup cap defaults to it |
+| `syncMaxUnverifiedBytesPerPeer` | `--sync-max-unverified-bytes-per-peer` | 1048576 | Bytes of child proofs one peer may have waiting to be verified |
+| `syncMaxPendingBytes` | `--sync-max-pending-bytes` | 16777216 | Bytes of not-yet-connected headers held per hosted level |
+| `mempoolMaxBytes` | `--mempool-max-bytes` | 67108864 | Bytes of transactions in each hosted level's pool |
+| `syncMaxQueuedBytesPerSession` | `--sync-max-queued-bytes-per-session` | 8388608 | Bytes of sync messages queued for one peer session that is not draining |
+
 ## Discovery and peer health
 
 Every peer follows Nexus on the same overlay. The node periodically announces

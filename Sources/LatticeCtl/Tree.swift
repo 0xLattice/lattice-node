@@ -177,6 +177,7 @@ func spawnHost(layout: HostLayout) throws {
     if let url = topology.publicReadURL { arguments += ["--public-read-url", url] }
     arguments += topology.publicSubmissionArguments
     arguments += topology.contentServingArguments
+    arguments += topology.resourceBudgetArguments
     for origin in topology.rpcAllowedOrigins ?? [] { arguments += ["--rpc-allowed-origin", origin] }
     for child in topology.hostedChains ?? [] {
         let spec = layout.childSpec(for: child)
