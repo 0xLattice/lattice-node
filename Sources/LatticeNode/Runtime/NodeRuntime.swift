@@ -876,11 +876,7 @@ extension NodeRuntime {
                             ? try? await storage.chainGenesisSpec(cid, headers: headers) : nil
                         let entry = config.entry(
                             stored.block, children: stored.children,
-                            // No more proofs than a wire entry may carry: one
-                            // past it and the whole answer fails to encode.
-                            proofs: (proofs[cid] ?? [:]).sorted { $0.key < $1.key }
-                                .prefix(WireHeaderEntry.maximumProofs).map(\.value),
-                            spec: spec ?? nil
+                            proofs: (proofs[cid] ?? [:]).sorted { $0.key < $1.key }.map(\.value), spec: spec ?? nil
                         )
                         let elapsed = (ContinuousClock.now - started) / .milliseconds(1)
                         guard config.fits(
