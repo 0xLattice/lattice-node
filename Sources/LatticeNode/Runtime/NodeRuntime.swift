@@ -364,9 +364,10 @@ public final class NodeRuntime: Sendable {
         coreConfig.mining.mempool.minRelayFee = configuration.minRelayFee
         coreConfig.maxTipAge = milliseconds(configuration.miningMaxTipAge)
         if let budget = configuration.servingBudget {
-            // An answer gathered for longer than the requester waits is
-            // never received, and the request is repeated without end.
-            coreConfig.servingBudget = min(milliseconds(budget), coreConfig.headersTimeout)
+            // An answer gathered for as long as the requester waits is
+            // never received, and the request is repeated without end:
+            // at most half the deadline, the rest for encoding and the wire.
+            coreConfig.servingBudget = min(milliseconds(budget), coreConfig.headersTimeout / 2)
         }
         return coreConfig
     }

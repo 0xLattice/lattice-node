@@ -73,7 +73,7 @@ final class NodeRuntimeTests: XCTestCase {
         }
         let huge = core(try configuration(maxTipAge: 1e16, servingBudget: 1e16))
         XCTAssertEqual(huge.maxTipAge, .max)
-        XCTAssertEqual(huge.servingBudget, huge.headersTimeout, "an answer never outlasts the request deadline")
+        XCTAssertEqual(huge.servingBudget, huge.headersTimeout / 2, "an answer leaves well inside the request deadline")
         let small = core(try configuration(maxTipAge: 0.0001, servingBudget: 2.5))
         XCTAssertEqual(small.maxTipAge, 1, "a positive limit is never rounded to off")
         XCTAssertEqual(small.servingBudget, 2_500)

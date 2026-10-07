@@ -99,8 +99,8 @@ to `0` only for an intentionally isolated node.
 A peer's request for headers is answered with what the node gathers within
 `servingBudget` (`--serving-budget`, seconds, default 5), always at least one
 header; the peer asks again for the rest. Keep it well under the 30-second
-request deadline, after which the peer gives up on the answer; a larger value
-is held to that deadline. Lower it on a slow disk if peers time out before an
+request deadline, after which the peer gives up on the answer; a value over
+half the deadline is held to half. Lower it on a slow disk if peers time out before an
 answer is sent.
 
 Useful checks:
@@ -213,14 +213,20 @@ candidate, or accepted child block invalidates stale work even when the Nexus
 tip did not change. Submitted work is persisted only for child levels whose
 target the hash actually meets.
 
-The node issues no work for a chain it is still syncing. A chain is syncing
-while its executed tip is older than `miningMaxTipAge`
-(`--mining-max-tip-age`, seconds, default 86400) and the node has not yet
-caught up on that chain since it started; a chain with only its genesis is
-never too old. The test reads the locally verified tip, never a remote height
-claim. A syncing hosted child is left out of the template while Nexus and the
-other children are mined. A syncing Nexus answers `POST /mining/templates`
-with 503 `syncing`, which the coordinator retries.
+The node issues no work for a chain whose executed tip is stale: older than
+`miningMaxTipAge` (`--mining-max-tip-age`, seconds, default 86400) while the
+node has not yet seen a fresher tip on that chain since it started. This is
+Bitcoin Core's initial-sync test and no stronger: it stops a node mining on a
+tip days behind, not on one hours behind. It opens as soon as the executed
+tip is within the limit of now - on a chain with one-minute blocks, some
+1,500 blocks before the real tip at the default - and then stays open for as
+long as the node runs, even if a heavier chain later moves the tip back. A
+chain with only its genesis executed is never held back, whatever headers the
+node holds. Lower the limit for a fast chain. The test reads the locally
+verified tip, never a remote height claim. A stale hosted child is left out
+of the template, with every hosted chain below it, while Nexus and the other
+children are mined. A stale Nexus answers `POST /mining/templates` with 503
+`syncing`, which the coordinator retries.
 
 Children are mined only inside a Nexus template, so while Nexus is refused as
 `syncing` every hosted child stops too. This is the case after a restart on a
