@@ -5,8 +5,8 @@ import Lattice
 /// verification, retries and provider suppression. The core only names the
 /// next `ChainCoreConfig.bodyWindow` weighed-but-unexecuted blocks on the best
 /// chain and connects them in parent order as their bodies arrive. It also
-/// names the blocks the act-on tip would step into once executed
-/// (`forkChildren`).
+/// names, outside that count, the blocks the act-on tip would step into once
+/// executed (`forkChildren`).
 ///
 /// There is no per-peer state here and no fetch deadline: a missing body is
 /// an availability wait, never blame and never a verdict.
@@ -32,9 +32,6 @@ public struct BodyPipeline: Sendable, Equatable {
     /// backoff over. A header weighed off the best chain changes neither:
     /// `window` is the best chain's.
     var seen: TreeMark?
-    /// Which fork children hold the window's slots while there are more of
-    /// them than slots: it advances every `bodyRetryCap`.
-    var rotation = 0
 
     public struct Parked: Sendable, Equatable {
         public let notBefore: Int64
@@ -55,21 +52,14 @@ public struct BodyPipeline: Sendable, Equatable {
 }
 
 extension ChainCore {
-    /// The next blocks to execute, within the operator's count: the fork
-    /// children, then the best chain's blocks after its executed prefix in
-    /// parent order. More fork children than slots take turns, so a body
-    /// that never arrives cannot keep a slot from one that would.
+    /// The next blocks to execute: every fork child, then the best chain's
+    /// blocks after its executed prefix in parent order. The operator's
+    /// count bounds only that look-ahead. Each fork child is a
+    /// proof-of-work header, so their number is paid for by work: a node
+    /// asks for every alternative at a fork on the path it acts on.
     public var bodyWindow: [String] {
-        var first = forkChildren
-        if first.count > config.bodyWindow {
-            let start = bodies.rotation % first.count
-            first = Array(first[start...] + first[..<start])
-        }
-        var window: [String] = []
-        for cid in first + bestWindow where window.count < config.bodyWindow && !window.contains(cid) {
-            window.append(cid)
-        }
-        return window
+        let forks = forkChildren
+        return forks + bestWindow.filter { !forks.contains($0) }
     }
 
     /// The best chain's blocks after its executed prefix, up to the count.
@@ -86,8 +76,10 @@ extension ChainCore {
     /// The unexecuted blocks the act-on descent would step into once
     /// executed, heaviest first: every child of the act-on tip, and at each
     /// fork above it the children heavier than the executed one it took.
-    /// The cost: at a fork a node may fetch and execute one stale sibling,
-    /// never a stale sibling's descendants unless it becomes the tip.
+    /// The cost: at a fork, each child that arrives heavier than those
+    /// executed before it is executed too, so of three or more arriving
+    /// lightest first more than one is stale. A stale sibling's descendants
+    /// are never fetched unless it becomes the tip.
     var forkChildren: [String] {
         var wanted: [String] = []
         var fork = tree.executedPrefix().hash
@@ -173,7 +165,6 @@ extension ChainCore {
     /// left, and start the next connect: the first window block whose body
     /// is here and whose parent is executed.
     mutating func scheduleBodies(_ turn: inout Turn) {
-        bodies.rotation = Int(turn.now / max(config.bodyRetryCap, 1))
         let window = bodyWindow
         let wanted = Set(window)
         let mark = BodyPipeline.TreeMark(actOn: actOnTip.hash, window: bestWindow)

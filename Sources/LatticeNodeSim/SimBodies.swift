@@ -85,15 +85,22 @@ public struct InvalidBodyMiner: SimScript {
 
 extension Invariants {
     /// The body window and connect after every step: what is asked for or
-    /// held is exactly on the best chain after the act-on tip and within the
-    /// operator's count; the one connect in flight is a weighed block whose
-    /// parent is executed.
+    /// held is on the best chain after its executed prefix and within the
+    /// operator's count, or is a child of a block on the act-on path; the
+    /// one connect in flight is a weighed block whose parent is executed.
     static func checkBodies(node: String, core: ChainCore, digest: TreeDigest, now: Int64, wakes: [Int64]) throws {
         let window = core.bodyWindow
         let inWindow = Set(window)
         let bodies = core.bodies
-        if bodies.requested.count + bodies.arrived.count > core.config.bodyWindow {
-            throw fail(node, "the body window holds more than \(core.config.bodyWindow) bodies")
+        let prefix = digest.canonicalPath.prefix { digest.executed.contains($0) }.count
+        let lookAhead = Set(digest.canonicalPath.dropFirst(prefix).prefix(max(core.config.bodyWindow, 0)))
+        var actOn = Set<String>()
+        var cursor: String? = digest.actOnTip
+        while let cid = cursor, actOn.insert(cid).inserted { cursor = digest.blocks[cid]?.parent }
+        if let stray = bodies.requested.union(bodies.arrived).first(where: {
+            !lookAhead.contains($0) && !(digest.blocks[$0]?.parent.map(actOn.contains) ?? false)
+        }) {
+            throw fail(node, "body \(stray) is neither in the look-ahead nor a child of the act-on path")
         }
         if !bodies.requested.isDisjoint(with: bodies.arrived) {
             throw fail(node, "a body is both requested and arrived")

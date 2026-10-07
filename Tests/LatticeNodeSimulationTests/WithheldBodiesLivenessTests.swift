@@ -308,20 +308,49 @@ final class WithheldBodiesLivenessTests: XCTestCase {
         }
     }
 
-    /// More children of the tip than window slots take turns: with a window
-    /// of one the withheld heavier child does not keep the slot from the
-    /// honest block, and is asked for again once that block is the tip.
-    func testAWithheldHeavierChildDoesNotKeepTheOnlySlot() async throws {
-        let (net, _, branch, _) = try await held(withheld: 2, nodes: 2, window: 1)
-        let (block, _) = try await net.mine(by: 0)
-        for _ in 0..<2 {
-            net.now += net.level(1).config.bodyRetryCap
-            for node in 0..<2 { try await net.settle(node, net.step(node, .tick)) }
+    /// Fork children are not counted against the window: with a window of
+    /// one and a withheld heavier child at the tip, the lighter child's body
+    /// is asked for and executed, and the tip advances.
+    func testAWithheldHeavierChildDoesNotKeepTheLighterOneFromExecuting() async throws {
+        let (net, _, branch, weight) = try await held(withheld: 2, nodes: 2, window: 1)
+        let (block, outcome) = try await net.mine(by: 0)
+        XCTAssertEqual(outcome, .executed(tipCID: block.cid))
+        XCTAssertTrue(net.fetched[1].contains(block.cid), "the lighter child is asked for")
+        XCTAssertEqual(net.connected[1].last, block.cid)
+        for node in 0..<2 {
+            XCTAssertEqual(net.snapshot(node).actOnTip, block.cid)
+            XCTAssertEqual(net.snapshot(node).bestHeaderTip, branch.last?.cid)
+            XCTAssertEqual(net.level(node).bodies.requested, [branch[0].cid], "the heavier child stays asked for")
         }
-        for node in 0..<2 { XCTAssertEqual(net.snapshot(node).actOnTip, block.cid) }
-        XCTAssertEqual(net.level(1).bodies.requested, [branch[0].cid])
+        net.assertUnjudged(branch, weight: weight)
         try await net.release()
         XCTAssertEqual(net.snapshot(1).actOnTip, branch.last?.cid, "released while heaviest, it is executed and wins")
+    }
+
+    /// A fork on the act-on path past the best chain's executed prefix: a
+    /// heavier unexecuted alternative to an executed block there is asked
+    /// for, and once its body arrives and executes the tip switches to it.
+    func testAHeavierAlternativeBelowTheActOnTipIsFetchedAndFollowed() async throws {
+        let (net, base, branch, weight) = try await held(withheld: 4, nodes: 1)
+        let (first, _) = try await net.mine(by: 0)
+        let (second, _) = try await net.mine(by: 0)
+        XCTAssertEqual(first.parent, base.cid)
+        XCTAssertEqual(net.snapshot(0).actOnTip, second.cid)
+        // Two blocks on `first` outweigh `second`; their bodies are late.
+        let other = try await net.world.branch(from: first, count: 2)
+        net.withheld.formUnion(other.map(\.cid))
+        try await net.show(other, to: 0)
+        XCTAssertEqual(net.snapshot(0).bestHeaderTip, branch.last?.cid, "the fork is past the best chain's executed prefix")
+        XCTAssertEqual(net.snapshot(0).actOnTip, second.cid, "an unexecuted block is not stepped into")
+        XCTAssertEqual(net.level(0).bodies.requested, Set(branch.map(\.cid) + [other[0].cid]))
+        net.withheld.subtract(other.map(\.cid))
+        net.contents[0].put(other[0].body)
+        try await net.settle(0, net.step(0, .level(net.path, .bodyFetched(cid: other[0].cid))))
+        XCTAssertEqual(net.connected[0].suffix(2), other.map(\.cid))
+        XCTAssertEqual(net.snapshot(0).actOnTip, other[1].cid)
+        XCTAssertEqual(net.level(0).mining.tipCID, other[1].cid)
+        XCTAssertEqual(net.snapshot(0).bestHeaderTip, branch.last?.cid)
+        net.assertUnjudged(branch, weight: weight)
     }
 
     /// Every body obtainable but late: each is still in flight when its

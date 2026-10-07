@@ -151,8 +151,9 @@ public struct ChainCoreConfig: Sendable {
     public var maxFutureDrift: Int64
     /// A child level's proof bounds.
     public var proofs = ChildProofConfig()
-    /// How many weighed-but-unexecuted blocks of the best chain, after the
-    /// act-on tip, have their bodies asked for at once.
+    /// How many weighed-but-unexecuted blocks of the best chain, after its
+    /// executed prefix, have their bodies asked for at once. Fork children
+    /// are asked for besides and are not counted.
     public var bodyWindow: Int
     /// A connect with no verdict (its content was not resolvable) waits this
     /// long before its body is asked for again, doubling per attempt up to
@@ -477,10 +478,8 @@ public struct ChainCore: Sendable {
         sync.compact()
         // Holes left unasked are asked again on a tick.
         let holes = sync.peers.values.contains { !$0.holes.isEmpty && $0.data == nil }
-        let turns = forkChildren.count > config.bodyWindow
         let deadlines = [sync.nextDeadline(after: turn.now), bodies.nextRetry(after: turn.now),
-                         holes ? turn.now + config.headersTimeout : nil,
-                         turns ? Int64(bodies.rotation + 1) * max(config.bodyRetryCap, 1) : nil]
+                         holes ? turn.now + config.headersTimeout : nil]
         if let deadline = deadlines.compactMap({ $0 }).min() {
             effects.append(.wakeAt(deadline))
         }

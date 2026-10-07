@@ -38,7 +38,9 @@ chain whose bodies are not served must not hold the node, and nothing tells
 it that a body will never come. So besides the look-ahead along the heaviest
 header chain it asks for the body of every block the act-on tip would step
 into once executed: each child of the tip and, at a fork above it, each child
-heavier than the executed one taken. Whichever arrives is executed; a heavier
+heavier than the executed one taken. The body window's count bounds only the
+look-ahead: these fork children are each a proof-of-work header and are all
+asked for. Whichever arrives is executed; a heavier
 one that arrives later is executed and followed then. A block whose body is
 not held keeps its weight and gets no verdict. Losing headers retain their
 verified work
