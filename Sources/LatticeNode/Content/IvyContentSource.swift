@@ -9,6 +9,8 @@ import cashew
 /// selected by the caller. The root is never guessed from a frontier of CIDs.
 public struct IvyRootContentSource: Sendable {
     private static let defaultPolicy = NodeResourcePolicy.default
+    /// The most entries one Volume's wire archive can declare.
+    private static let volumeEntryWidth = Int(UInt16.max)
 
     public struct Attribution: Sendable, Equatable {
         public let servedByPublicKeys: Set<String>
@@ -88,24 +90,15 @@ public struct IvyRootContentSource: Sendable {
     private final class Context: @unchecked Sendable {
         let rootCID: String
         let trace = Trace()
-        private let maximumMembers: Int
         private let maximumStorageBytes: Int
-        private let maximumVolumes: Int
         private let broker = MemoryBroker()
         private let lock = NSLock()
         private var attemptedRoots = Set<String>()
         private var accountedMembers = Set<String>()
         private var storageByteCount = 0
 
-        init(
-            rootCID: String,
-            maximumVolumes: Int,
-            maximumMembers: Int,
-            maximumStorageBytes: Int
-        ) {
+        init(rootCID: String, maximumStorageBytes: Int) {
             self.rootCID = rootCID
-            self.maximumVolumes = maximumVolumes
-            self.maximumMembers = maximumMembers
             self.maximumStorageBytes = maximumStorageBytes
         }
 
@@ -114,21 +107,14 @@ public struct IvyRootContentSource: Sendable {
         }
 
         func reserve(rootCID: String) -> Bool {
-            lock.withLock {
-                guard attemptedRoots.count < maximumVolumes else {
-                    return false
-                }
-                return attemptedRoots.insert(rootCID).inserted
-            }
+            lock.withLock { attemptedRoots.insert(rootCID).inserted }
         }
 
         func store(_ volume: SerializedVolume) async -> Bool {
             let fits = lock.withLock {
-                var addedMembers = 0
                 var addedStorageBytes = 0
                 for (cid, data) in volume.entries
                     where !accountedMembers.contains(cid) {
-                    addedMembers += 1
                     let framed = cid.utf8.count
                         .addingReportingOverflow(data.count)
                     guard !framed.overflow else { return false }
@@ -141,15 +127,10 @@ public struct IvyRootContentSource: Sendable {
                     guard !next.overflow else { return false }
                     addedStorageBytes = next.partialValue
                 }
-                let nextMembers = accountedMembers.count.addingReportingOverflow(
-                    addedMembers
-                )
                 let nextStorageBytes = storageByteCount.addingReportingOverflow(
                     addedStorageBytes
                 )
-                guard !nextMembers.overflow,
-                      nextMembers.partialValue <= maximumMembers,
-                      !nextStorageBytes.overflow,
+                guard !nextStorageBytes.overflow,
                       nextStorageBytes.partialValue <= maximumStorageBytes else {
                     return false
                 }
@@ -176,8 +157,6 @@ public struct IvyRootContentSource: Sendable {
     /// Credits the peer that served a requested Volume once it verifies, so
     /// the overlay favours peers that serve this node when it is contended.
     private let credit: @Sendable (PeerID, Int) async -> Void
-    private let maximumVolumes: Int
-    private let maximumMembers: Int
     private let maximumStorageBytes: Int
 
     public final class Session: ContentSource {
@@ -187,20 +166,13 @@ public struct IvyRootContentSource: Sendable {
 
         fileprivate init(
             rootCID: String,
-            maximumVolumes: Int,
-            maximumMembers: Int,
             maximumStorageBytes: Int,
             fetch: @escaping @Sendable (String) async -> AttributedVolumeResponse,
             credit: @escaping @Sendable (PeerID, Int) async -> Void
         ) {
             self.fetchVolume = fetch
             self.credit = credit
-            context = Context(
-                rootCID: rootCID,
-                maximumVolumes: maximumVolumes,
-                maximumMembers: maximumMembers,
-                maximumStorageBytes: maximumStorageBytes
-            )
+            context = Context(rootCID: rootCID, maximumStorageBytes: maximumStorageBytes)
         }
 
         fileprivate func acceptInitialResponse(
@@ -276,14 +248,12 @@ public struct IvyRootContentSource: Sendable {
 
     public init(ivy: Ivy, policy: NodeResourcePolicy = .default) {
         credit = Self.tallyCredit(ivy)
-        maximumVolumes = policy.maximumAcquisitionVolumes
-        maximumMembers = policy.maximumAcquisitionMembers
         maximumStorageBytes = policy.maximumAcquisitionStorageBytes
         fetch = { rootCID in
             await ivy.fetchVolume(
                 rootCID: rootCID,
                 maximumArchiveBytes: policy.maximumAcquisitionStorageBytes,
-                maximumEntries: policy.maximumAcquisitionMembers
+                maximumEntries: Self.volumeEntryWidth
             )
         }
     }
@@ -294,15 +264,13 @@ public struct IvyRootContentSource: Sendable {
         policy: NodeResourcePolicy = .default
     ) {
         credit = Self.tallyCredit(ivy)
-        maximumVolumes = policy.maximumAcquisitionVolumes
-        maximumMembers = policy.maximumAcquisitionMembers
         maximumStorageBytes = policy.maximumAcquisitionStorageBytes
         fetch = { rootCID in
             let response = await ivy.fetchVolume(
                 rootCID: rootCID,
                 from: peer,
                 maximumArchiveBytes: policy.maximumAcquisitionStorageBytes,
-                maximumEntries: policy.maximumAcquisitionMembers
+                maximumEntries: Self.volumeEntryWidth
             )
             return Self.response(response, from: peer.id)
         }
@@ -316,8 +284,6 @@ public struct IvyRootContentSource: Sendable {
         maximumArchiveBytes: Int
     ) {
         credit = Self.tallyCredit(ivy)
-        maximumVolumes = maximumMembers
-        self.maximumMembers = maximumMembers
         self.maximumStorageBytes = maximumStorageBytes
         fetch = { rootCID in
             let response = await ivy.fetchVolume(
@@ -345,15 +311,11 @@ public struct IvyRootContentSource: Sendable {
     }
 
     init(
-        maximumVolumes: Int = Self.defaultPolicy.maximumAcquisitionVolumes,
-        maximumMembers: Int = Self.defaultPolicy.maximumAcquisitionMembers,
         maximumStorageBytes: Int = Self.defaultPolicy.maximumAcquisitionStorageBytes,
         fetch: @escaping @Sendable (String) async -> AttributedVolumeResponse,
         credit: @escaping @Sendable (PeerID, Int) async -> Void = { _, _ in }
     ) {
         self.credit = credit
-        self.maximumVolumes = maximumVolumes
-        self.maximumMembers = maximumMembers
         self.maximumStorageBytes = maximumStorageBytes
         self.fetch = fetch
     }
@@ -374,8 +336,6 @@ public struct IvyRootContentSource: Sendable {
     ) async rethrows -> (value: T, attribution: Attribution) {
         let session = Session(
             rootCID: rootCID,
-            maximumVolumes: maximumVolumes,
-            maximumMembers: maximumMembers,
             maximumStorageBytes: maximumStorageBytes,
             fetch: fetch,
             credit: credit

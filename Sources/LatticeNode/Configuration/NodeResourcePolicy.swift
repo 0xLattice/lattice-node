@@ -3,22 +3,12 @@
 public struct NodeResourcePolicy: Sendable, Equatable {
     public static let `default` = NodeResourcePolicy()
 
-    public let maximumAcquisitionVolumes: Int
-    public let maximumAcquisitionMembers: Int
+    /// The bytes one content session may hold: a block's body and everything
+    /// fetched with it to validate it.
     public let maximumAcquisitionStorageBytes: Int
 
-    public init(
-        maximumAcquisitionVolumes: Int = 20_548,
-        maximumAcquisitionMembers: Int = Int(UInt16.max),
-        maximumAcquisitionStorageBytes: Int = 64 * 1_024 * 1_024
-    ) {
-        precondition(
-            maximumAcquisitionVolumes > 0
-                && maximumAcquisitionMembers > 0
-                && maximumAcquisitionStorageBytes > 0
-        )
-        self.maximumAcquisitionVolumes = maximumAcquisitionVolumes
-        self.maximumAcquisitionMembers = maximumAcquisitionMembers
+    public init(maximumAcquisitionStorageBytes: Int = 64 * 1_024 * 1_024) {
+        precondition(maximumAcquisitionStorageBytes > 0)
         self.maximumAcquisitionStorageBytes = maximumAcquisitionStorageBytes
     }
 }

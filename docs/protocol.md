@@ -188,7 +188,7 @@ mining. Candidate content is retained with the issued work and becomes durable
 only if the submitted grind actually secures that level.
 
 Each candidate-root content session uses the node's `NodeResourcePolicy` for
-archive bytes, Volume count, and member count. `ChainSpec.maxBlockSize` remains
+the bytes it may hold, and nothing else. `ChainSpec.maxBlockSize` remains
 chain-selected validity for that chain's complete block Volume boundary
 (excluding the spec and materialized state Volumes). Exceeding a local ceiling
 declines or defers acquisition without proving the candidate invalid or

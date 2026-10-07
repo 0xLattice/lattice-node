@@ -122,7 +122,7 @@ target, such evidence costs almost nothing.
   and the work fact. No input compares the candidate's work with anything the
   node already holds.
 - **Resource budgets limit size, not work.** `NodeResourcePolicy` limits what a
-  single candidate may cost: archive bytes, Volume counts and member counts.
+  single candidate may cost: the bytes one content session holds.
   The fetcher's ready and park capacities limit memory. None of them
   asks how much work must stand behind what the node keeps.
 
