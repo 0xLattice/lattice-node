@@ -5,16 +5,16 @@ import Lattice
 /// verification, retries and provider suppression. The core only names the
 /// next `ChainCoreConfig.bodyWindow` weighed-but-unexecuted blocks on the best
 /// chain and connects them in parent order as their bodies arrive. It also
-/// names this node's own mined blocks and, where a fetch attempt found a
-/// body missing, the next-heaviest sibling at that fork.
+/// names this node's own mined blocks and, where the heavier child at a fork
+/// was tried and cannot be executed now, the next-heaviest sibling.
 ///
 /// There is no per-peer state here and no fetch deadline: a missing body is
 /// an availability wait, never blame and never a verdict.
 public struct BodyPipeline: Sendable, Equatable {
     /// Bodies asked of the content layer that have not arrived.
     public internal(set) var requested: Set<String> = []
-    /// Requested bodies a fetch attempt finished without. Each stays
-    /// requested; it only lets the next-heaviest sibling be tried meanwhile.
+    /// Requested bodies every peer asked answered it does not hold
+    /// (`ChainEvent.bodyMissed`). Each stays requested.
     public internal(set) var missed: Set<String> = []
     /// Bodies that arrived and are not executed yet.
     public internal(set) var arrived: Set<String> = []
@@ -32,7 +32,8 @@ public struct BodyPipeline: Sendable, Equatable {
     public internal(set) var awaitingParent: [String: CrossChainEvidenceRequirement] = [:]
     /// The act-on tip and window when `parked` was last kept: a change to
     /// either (an execution, or a best chain that moved) starts every
-    /// backoff over. A header weighed off the best chain changes neither.
+    /// backoff over. A header weighed off the best chain changes neither,
+    /// nor does a fallback candidate: `window` is the best chain's.
     var seen: TreeMark?
 
     public struct Parked: Sendable, Equatable {
@@ -54,23 +55,33 @@ public struct BodyPipeline: Sendable, Equatable {
 }
 
 extension ChainCore {
-    /// The next blocks to execute: the best chain's blocks after its
-    /// executed prefix in parent order, then this node's own mined blocks
-    /// and the fallback candidates, within the operator's count.
+    /// The next blocks to execute: this node's own mined blocks, the best
+    /// chain's blocks after its executed prefix in parent order, and the
+    /// fallback candidates. The operator's count bounds the bodies in
+    /// flight or held to execute; a stuck block is only being retried and
+    /// takes none of it.
     public var bodyWindow: [String] {
-        guard config.bodyWindow > 0 else { return [] }
-        var side: [String] = []
-        for cid in ownMined.sorted() + fallback() where side.count < config.bodyWindow && !side.contains(cid) && executable(cid) {
-            side.append(cid)
+        var window: [String] = []
+        var live = 0
+        for cid in ownMined.sorted().filter(executable) + bestWindow + fallback() where !window.contains(cid) {
+            if !stuck(cid) {
+                guard live < config.bodyWindow else { continue }
+                live += 1
+            }
+            window.append(cid)
         }
+        return window
+    }
+
+    /// The best chain's blocks after its executed prefix, up to the count.
+    var bestWindow: [String] {
         let prefix = tree.executedPrefix()
-        guard let tipHeight = tree.headerSnapshot(of: tree.canonicalTip)?.tipHeight else { return side }
+        guard let tipHeight = tree.headerSnapshot(of: tree.canonicalTip)?.tipHeight, config.bodyWindow > 0 else { return [] }
         // A best chain whose genesis root is not executed yet starts there.
         let first = prefix.hash.isEmpty ? 0 : prefix.height + 1
-        let room = UInt64(config.bodyWindow - side.count)
-        guard tipHeight >= first, room > 0 else { return side }
-        let last = min(tipHeight, first + room - 1)
-        return (first...last).compactMap { tree.canonicalBlockHash(atHeight: $0) }.filter { !side.contains($0) } + side
+        guard tipHeight >= first else { return [] }
+        let last = min(tipHeight, first + UInt64(config.bodyWindow) - 1)
+        return (first...last).compactMap { tree.canonicalBlockHash(atHeight: $0) }
     }
 
     /// A weighed block with no verdict whose parent is executed from genesis.
@@ -79,13 +90,21 @@ extension ChainCore {
         return index.parent[cid].map(tree.hasExecutedAncestry(blockHash:)) ?? true
     }
 
-    /// With a body missed: at each fork of the act-on descent, heaviest
-    /// first, the unexecuted children that would be the step taken if
-    /// executed, up to the first whose body no attempt has missed. A lighter
-    /// sibling is tried only once a fetch for every heavier one finished
-    /// empty; no clock decides it. Empty while nothing is missed.
+    /// Tried and not executable now, for a reason that is no verdict: every
+    /// peer asked lacks its body, its connect awaits a parent fact, or its
+    /// connect found content unresolvable. It stays wanted and is retried
+    /// as before, and is executed and followed once it can be.
+    public func stuck(_ cid: String) -> Bool {
+        bodies.missed.contains(cid) || bodies.awaitingParent[cid] != nil || bodies.parked[cid] != nil
+    }
+
+    /// At each fork of the act-on descent, heaviest first, the unexecuted
+    /// children that would be the step taken if executed, up to the first
+    /// that is not stuck: a lighter sibling is tried only once every heavier
+    /// one was tried and cannot be executed now. Events decide it, never a
+    /// clock. Empty while nothing is stuck.
     func fallback() -> [String] {
-        guard !bodies.missed.isEmpty else { return [] }
+        guard !(bodies.missed.isEmpty && bodies.awaitingParent.isEmpty && bodies.parked.isEmpty) else { return [] }
         var tried: [String] = []
         var fork = tree.executedPrefix().hash
         while !fork.isEmpty {
@@ -97,7 +116,7 @@ extension ChainCore {
             }
             while let next = Self.heaviest(of: open, in: tree) {
                 tried.append(next)
-                guard bodies.missed.contains(next) else { return tried }
+                guard stuck(next) else { return tried }
                 open.removeAll { $0 == next }
             }
             fork = taken ?? ""
@@ -175,7 +194,7 @@ extension ChainCore {
     mutating func scheduleBodies(_ turn: inout Turn) {
         let window = bodyWindow
         let wanted = Set(window)
-        let mark = BodyPipeline.TreeMark(actOn: actOnTip.hash, window: window)
+        let mark = BodyPipeline.TreeMark(actOn: actOnTip.hash, window: bestWindow)
         if bodies.seen != mark {
             bodies.seen = mark
             bodies.parked.removeAll()

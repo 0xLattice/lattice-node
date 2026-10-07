@@ -268,9 +268,10 @@ public struct NodeCore: Sendable {
     public var ordered: [ChainPath] { levels.keys.sorted(by: Self.order) }
 
     /// What a child level's execution reads of its parent: the parent's
-    /// executed set on any branch. A parent level executes only along its
-    /// own best chain (decision 21): a child block naming a state it never
-    /// executed waits, unvalidated, until it does.
+    /// executed set on any branch. A parent level executes its best chain,
+    /// its own mined blocks and its fallback candidates (decision 21): a
+    /// child block naming a state it never executed waits, unvalidated,
+    /// until it does.
     public func parentFacts(for path: ChainPath) -> ParentLevelFacts? {
         let parent = Array(path.dropLast())
         guard path.count > 1, let core = levels[parent] else { return nil }

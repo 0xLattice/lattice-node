@@ -987,7 +987,10 @@ extension NodeRuntime {
                                 ))
                             }
                         }
-                        inputs.yield(.event(.level(path, .bodyMissed(cid: cid))))
+                        // Nothing here yields `ChainEvent.bodyMissed`: an empty
+                        // Ivy answer does not say a peer was asked and lacks the
+                        // body (no peer to ask, a timeout, a busy or refusing
+                        // peer and a cancelled request all read the same).
                         _ = await Timers.sleep(nanoseconds: backoff * 1_000_000)
                         backoff = min(backoff * 2, 30_000)
                     }

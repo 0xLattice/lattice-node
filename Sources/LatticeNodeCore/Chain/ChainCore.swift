@@ -16,8 +16,11 @@ public enum ChainEvent: Sendable {
     case headersServed(PeerID, token: UInt64)
     /// The content layer holds the body Volume of this block locally.
     case bodyFetched(cid: String)
-    /// A fetch attempt for this block's body finished without it. The
-    /// content layer keeps trying.
+    /// A fetch attempt for this block's body completed in which at least one
+    /// connected peer was asked and every peer asked answered that it does
+    /// not hold it. Never: no peer to ask, a timeout, a transport or local
+    /// error, an invalid answer, a cancelled attempt. The content layer
+    /// keeps trying; the mark stands until the body arrives.
     case bodyMissed(cid: String)
     /// A connect job's verdict, with the CIDs of the transactions the block
     /// carries (the job read them from the body it executed): what the act-on

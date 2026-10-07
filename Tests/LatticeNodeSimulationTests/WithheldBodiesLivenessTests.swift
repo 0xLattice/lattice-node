@@ -15,8 +15,8 @@ final class WithheldBodiesLivenessTests: XCTestCase {
 
     /// Honest nodes over one world, each a root-level `NodeCore` with its own
     /// content store. One relay peer shows every node the headers the others
-    /// mine. A body is served when asked for unless it is withheld: a
-    /// withheld body's fetch attempt finishes empty, as the shell reports it.
+    /// mine. A body is served when asked for unless it is withheld: every
+    /// peer asked answers that it lacks a withheld body (`bodyMissed`).
     private final class Net {
         let world: World
         let path: ChainPath
@@ -28,6 +28,9 @@ final class WithheldBodiesLivenessTests: XCTestCase {
         var withheld = Set<String>()
         /// While set, a body asked for is in flight: neither served nor missed.
         var inFlight = false
+        /// While set, a withheld body's Volume arrives without the content
+        /// its connect needs.
+        var unresolvable = false
         var now = World.genesisTime + 1_000_000
         /// Per node: the bodies asked for and the blocks connected, in order,
         /// and every act-on tip it published, in order.
@@ -35,12 +38,12 @@ final class WithheldBodiesLivenessTests: XCTestCase {
         var connected: [[String]] = []
         var tips: [[String]] = []
 
-        init(world: World, nodes: Int) {
+        init(world: World, nodes: Int, window: Int = 8) {
             self.world = world
             path = world.bootstrap.tree.context!.path
             known = world.blocks
             for _ in 0..<nodes {
-                var host = NodeCore(root: world.bootstrap.tree, hosted: [], config: ChainCoreConfig(bodyWindow: 8))
+                var host = NodeCore(root: world.bootstrap.tree, hosted: [], config: ChainCoreConfig(bodyWindow: window))
                 _ = host.step(.peerReady(peer), now: now)
                 hosts.append(host)
                 contents.append(SimCAS(world.genesisContent))
@@ -78,7 +81,7 @@ final class WithheldBodiesLivenessTests: XCTestCase {
                     if inFlight {
                         break
                     } else if withheld.contains(cid) {
-                        next = step(node, .level(path, .bodyMissed(cid: cid)))
+                        next = step(node, .level(path, unresolvable ? .bodyFetched(cid: cid) : .bodyMissed(cid: cid)))
                     } else {
                         contents[node].put(known[cid]!.body)
                         next = step(node, .level(path, .bodyFetched(cid: cid)))
@@ -172,11 +175,14 @@ final class WithheldBodiesLivenessTests: XCTestCase {
 
     /// `nodes` honest nodes at an executed tip of height 3, shown `count`
     /// headers on it whose bodies are withheld.
-    private func held(withheld count: Int, nodes: Int) async throws -> (net: Net, base: SimBlock, branch: [SimBlock], weight: UInt256?) {
+    private func held(
+        withheld count: Int, nodes: Int, window: Int = 8, unresolvable: Bool = false
+    ) async throws -> (net: Net, base: SimBlock, branch: [SimBlock], weight: UInt256?) {
         var rng = SplitMix64(state: 0x317)
         let world = try await World.generate(rng: &rng, honestBlocks: 4, forkProbability: 0, spamBlocks: 0)
         let chain = world.honest.compactMap { world.blocks[$0] }
-        let net = Net(world: world, nodes: nodes)
+        let net = Net(world: world, nodes: nodes, window: window)
+        net.unresolvable = unresolvable
         for block in chain.prefix(Self.executedHeight) { _ = try await net.mine(by: 0, block) }
         let base = chain[Self.executedHeight - 1]
         let branch = try await world.branch(from: base, count: count)
@@ -265,8 +271,34 @@ final class WithheldBodiesLivenessTests: XCTestCase {
         }
     }
 
-    /// Every body obtainable, each still in flight when its header is
-    /// weighed: a sync through stale sibling forks asks for and executes the
+    /// The heavier child's body arrived but its connect found content
+    /// unresolvable (it is parked for a retry): the next-heaviest sibling,
+    /// another node's block, is executed meanwhile.
+    func testAParkedHeavierSiblingDoesNotHoldTheNextHeaviest() async throws {
+        let (net, _, branch, weight) = try await held(withheld: 2, nodes: 2, unresolvable: true)
+        XCTAssertNotNil(net.level(1).bodies.parked[branch[0].cid])
+        let (block, _) = try await net.mine(by: 0)
+        XCTAssertEqual(net.snapshot(1).actOnTip, block.cid)
+        XCTAssertEqual(net.snapshot(1).bestHeaderTip, branch.last?.cid)
+        XCTAssertTrue(net.level(1).bodyWindow.contains(branch[0].cid), "the parked block stays wanted")
+        net.assertUnjudged(branch, weight: weight)
+    }
+
+    /// A stuck block is only being retried and takes none of the operator's
+    /// count: with a window of one the next-heaviest sibling is still
+    /// fetched, and the missed body stays asked for.
+    func testAMissedBodyTakesNoWindowSlotFromTheNextHeaviest() async throws {
+        let (net, _, branch, _) = try await held(withheld: 2, nodes: 2, window: 1)
+        let (block, _) = try await net.mine(by: 0)
+        XCTAssertEqual(net.snapshot(1).actOnTip, block.cid)
+        XCTAssertTrue(net.level(1).bodies.requested.contains(branch[0].cid))
+        try await net.release()
+        XCTAssertEqual(net.snapshot(1).actOnTip, branch.last?.cid, "released while heaviest, it is executed and wins")
+    }
+
+    /// Every body obtainable but late: each is still in flight (no peer has
+    /// answered) when its header and a stale sibling's are weighed. A body
+    /// that is merely late is not a miss: the sync asks for and executes the
     /// main chain and nothing else, and the tip never leaves it.
     func testASyncPastStaleSiblingsExecutesOnlyTheMainChain() async throws {
         var rng = SplitMix64(state: 0x51B)

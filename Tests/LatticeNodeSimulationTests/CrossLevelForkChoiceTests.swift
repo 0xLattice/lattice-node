@@ -274,4 +274,104 @@ final class CrossLevelForkChoiceTests: XCTestCase {
         let restored = try assertRestartHolds(hosts, "restart")
         XCTAssertEqual(TreeDigest(try XCTUnwrap(restored.levels[Self.alpha]).tree).canonicalTip, c1.cid)
     }
+
+    // MARK: - Test 3: withheld parent bodies, published child bodies
+
+    /// Nexus W1, W2, W3 on N1 carry Alpha blocks CW1, CW2, CW3; their Nexus
+    /// bodies are withheld and their Alpha bodies published. CW1 executes
+    /// (it names N1's state). CW2 names W1's state, which this node has not
+    /// executed: its body arrives and its connect awaits that parent fact.
+    /// An honest grind H1 on N1 carries CH2 on CW1. A node that mined none
+    /// of them turns to the next-heaviest child: Alpha acts on CH2 while CW2
+    /// keeps its weight and gets no verdict. A block that becomes executable
+    /// is followed: H1 pays the reward W1 pays, so executing it produces the
+    /// state CW2 names, and CW2, the heavier, is taken; once the Nexus
+    /// bodies are released both levels follow the heavier branch to its tip.
+    func testAChildBlockAwaitingAWithheldParentStateDoesNotHoldTheChildLevel() async throws {
+        var builder = try await LevelWorld.Builder(levels: 2)
+        let t = World.genesisTime
+        let interval = LevelWorld.interval
+        let n0 = try await builder.grind(on: try XCTUnwrap(builder.geneses[Self.nexus]), carrying: [], at: t + interval / 2, outcome: .block).root
+        let g = try await builder.childGenesis(Self.alpha, parentState: n0.block.postState.rawCID, at: t + interval)
+        let n1 = try await builder.grind(on: n0, carrying: [(Self.alpha, g)], at: t + interval, outcome: .block).root
+        let cw1 = try await builder.build(on: g, carrierPrevState: n1.block.postState.rawCID, timestamp: t + 2 * interval, nonce: 1)
+        let w1 = try await builder.grind(on: n1, carrying: [(Self.alpha, cw1)], at: t + 2 * interval, outcome: .block).root
+        let cw2 = try await builder.build(on: cw1, carrierPrevState: w1.block.postState.rawCID, timestamp: t + 3 * interval, nonce: 2)
+        let w2 = try await builder.grind(on: w1, carrying: [(Self.alpha, cw2)], at: t + 3 * interval, outcome: .block).root
+        let cw3 = try await builder.build(on: cw2, carrierPrevState: w2.block.postState.rawCID, timestamp: t + 4 * interval, nonce: 3)
+        let w3 = try await builder.grind(on: w2, carrying: [(Self.alpha, cw3)], at: t + 4 * interval, outcome: .block).root
+        let ch2 = try await builder.build(on: cw1, carrierPrevState: n1.block.postState.rawCID, timestamp: t + 3 * interval + 1, nonce: 4)
+        let h1 = try await builder.grind(on: n1, carrying: [(Self.alpha, ch2)], at: t + 3 * interval + 1, outcome: .block).root
+        let world = builder.world()
+
+        // Every header and proof weighed and persisted, nothing executed; a
+        // node restored from those facts mined none of the blocks.
+        var miner = NodeCore(root: world.rootBootstrap.tree, hosted: world.hosted)
+        var store = HostStore(world: world)
+        for grind in world.grinds {
+            for case .persist(let batch) in miner.step(.mined(grind.mined), now: Self.now) { store.append(batch) }
+        }
+        var node = try NodeCore.restore(
+            root: try XCTUnwrap(store.records[LevelWorld.nexus]),
+            facts: store.levels.mapValues(\.facts),
+            specs: store.levels.mapValues { $0.headers.values.compactMap(\.spec) },
+            hosted: world.hosted,
+            cursors: store.levels.mapValues(\.cursors)
+        )
+        var withheld: Set<String> = [w1.cid, w2.cid, w3.cid]
+        // H1's body is late at first: asked for, not yet answered.
+        var late: Set<String> = [h1.cid]
+        func drive(_ event: NodeEvent) async {
+            var queue = [event]
+            while !queue.isEmpty {
+                for effect in node.step(queue.removeFirst(), now: Self.now) {
+                    switch effect {
+                    case .level(_, .fetchBody(let cid)) where late.contains(cid):
+                        break
+                    case .level(let path, .fetchBody(let cid)):
+                        // Every peer asked lacks a withheld body.
+                        queue.append(.level(path, withheld.contains(cid) ? .bodyMissed(cid: cid) : .bodyFetched(cid: cid)))
+                    case .connect(let path, let job, let facts):
+                        let verdict = await ChainTree.connect(
+                            job, fetcher: world.cas, parentFacts: facts,
+                            validationContext: ValidationContext(nowMilliseconds: Self.now)
+                        )
+                        queue.append(.level(path, .connected(verdict)))
+                    default:
+                        break
+                    }
+                }
+            }
+        }
+        await drive(.tick)
+
+        var nexus = try XCTUnwrap(node.levels[Self.nexus])
+        var alpha = try XCTUnwrap(node.levels[Self.alpha])
+        XCTAssertEqual(nexus.snapshot.bestHeaderTip, w3.cid)
+        XCTAssertEqual(alpha.snapshot.bestHeaderTip, cw3.cid)
+        XCTAssertEqual(nexus.snapshot.actOnTip, n1.cid, "H1's body is late: Nexus waits on N1")
+        XCTAssertNotNil(alpha.bodies.awaitingParent[cw2.cid], "CW2's body arrived and its connect awaits W1's state")
+        XCTAssertEqual(alpha.snapshot.actOnTip, ch2.cid, "Alpha acts on the honest child block")
+        XCTAssertFalse(alpha.tree.isExcludedRoot(cw2.cid), "no verdict without an execution")
+        XCTAssertFalse(alpha.tree.isExecuted(blockHash: cw2.cid))
+        XCTAssertTrue(alpha.bodyWindow.contains(cw2.cid), "CW2 stays wanted")
+
+        // H1's body arrives: Nexus acts on it, and CW2 is executed and taken.
+        late = []
+        await drive(.level(Self.nexus, .bodyFetched(cid: h1.cid)))
+        nexus = try XCTUnwrap(node.levels[Self.nexus])
+        alpha = try XCTUnwrap(node.levels[Self.alpha])
+        XCTAssertEqual(nexus.snapshot.actOnTip, h1.cid)
+        XCTAssertFalse(nexus.tree.isExecuted(blockHash: w1.cid))
+        XCTAssertEqual(alpha.snapshot.actOnTip, cw2.cid, "the heavier child is followed once it executes")
+        XCTAssertNotNil(alpha.bodies.awaitingParent[cw3.cid])
+
+        // Released: the heavier branch executes at both levels and is followed.
+        withheld = []
+        for cid in nexus.bodies.requested.sorted() { await drive(.level(Self.nexus, .bodyFetched(cid: cid))) }
+        nexus = try XCTUnwrap(node.levels[Self.nexus])
+        alpha = try XCTUnwrap(node.levels[Self.alpha])
+        XCTAssertEqual(nexus.snapshot.actOnTip, w3.cid)
+        XCTAssertEqual(alpha.snapshot.actOnTip, cw3.cid)
+    }
 }

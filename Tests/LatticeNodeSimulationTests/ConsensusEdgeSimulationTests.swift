@@ -73,9 +73,13 @@ final class ConsensusEdgeSimulationTests: XCTestCase {
         for path in world.paths {
             for (core, digests) in once.digests {
                 // A core executes the blocks it mined itself, so what it
-                // executed (and so excluded) is its own; the graph and its
-                // weights are everyone's.
+                // executed (and so excluded, and so acts on) is its own. The
+                // graph and its weights are everyone's, and with no
+                // exclusion so is the best header tip.
                 XCTAssertEqual(digests[path]?.blocks, reference[path]?.blocks, "\(core) differs at \(path) on one link")
+                if digests[path]?.excluded == reference[path]?.excluded {
+                    XCTAssertEqual(digests[path]?.canonicalTip, reference[path]?.canonicalTip, "\(core) selects differently at \(path)")
+                }
             }
         }
         for (core, digests) in twice.digests {

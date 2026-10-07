@@ -32,7 +32,14 @@ verified header -> fork choice -> bounded body window
                                  -> publish the new read snapshot
 ```
 
-Only the selected chain is executed. Losing headers retain their verified work
+The node acts on the heaviest executed tip: from genesis, at each fork the
+heaviest child (its whole header subtree) that is executed. It executes the
+heaviest header chain, each block it mined itself, and, where the heavier
+child at a fork was tried and cannot be executed now (every peer asked lacks
+its body, its connect awaits a parent fact, or its content is unresolvable),
+the next-heaviest sibling. That heavier child keeps its weight, gets no
+verdict, stays wanted, and is executed and followed once it can be. Losing
+headers retain their verified work
 and can become selected later without having consumed state-execution work in
 advance. A missing body is an availability wait, never peer blame. If a
 connect attempt lacks content, the block is retried with bounded exponential
