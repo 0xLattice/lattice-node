@@ -40,12 +40,13 @@ block is spine and must be executed before anyone builds on it.)
 **A node weighs a block when it possesses and structurally verifies it,
 and executes it only when the block matters.** Two tiers of belief:
 
-- **Weighed**: the node holds the block's bytes — header, transactions,
-  referenced proof material — and has verified everything verifiable
-  without execution: the proof of work over the header, parent linkage,
-  size and structural validity, and for a child block its securing-work
-  proof and reference-level continuity. The block's work counts. Its
-  declared post-state is recorded as an unverified claim.
+- **Weighed**: the node holds the block's header and has verified
+  everything a header proves: the proof of work over it, parent linkage,
+  and for a child block its securing-work proof and reference-level
+  continuity. The header alone gives weight - the work commits to the
+  body by its root and does not need it - so a block whose body the node
+  does not hold is weighed all the same. Its declared post-state is
+  recorded as an unverified claim.
 - **Validated**: the state transition has been executed and the declared
   post-state checked. Only now may the node *use* the block — build
   templates at its tip, serve its state, or issue the parent-side
@@ -57,13 +58,18 @@ Execution runs when a block becomes *load-bearing*, under two triggers:
 
 - **Selection**: fork choice selects a branch; the node validates it
   forward from its last validated ancestor before producing on or serving
-  its tip. What the node acts on meanwhile is the **act-on tip**: the
-  executed prefix of the heaviest header chain — the deepest block on that
-  chain whose ancestry is executed from genesis. It moves forward as the
-  selected branch is validated, and back to the fork point when a heavier
-  branch is selected. A block whose body the node does not hold is weighed
-  and unvalidated, not invalid: the act-on tip waits below it while the
-  body is retried; it does not step to a lighter validated sibling.
+  its tip. What the node acts on meanwhile is the **act-on tip**, the
+  heaviest executed tip: descend from genesis and, at each fork, follow
+  the heaviest child that is executed (heaviest by its whole subtree's
+  header work); stop where no child is executed. A heavier branch takes
+  over at its fork once its first block there is executed - until then the
+  node keeps acting on the branch it has validated, and does not retreat
+  to the fork point on headers alone. At a fork the node tries the
+  children heaviest first, and turns to the next only after a fetch for
+  the heavier one's body has come back empty; the body is still retried,
+  and the heavier child is executed and followed when it arrives. A block
+  the node mined itself is executed at once. A block whose body the node
+  does not hold is weighed and unvalidated, never invalid.
 - **Pivotality**: unvalidated weight may not decide anything the node
   acts on — where "acts on" means, exhaustively: building templates,
   serving state, issuing continuity facts, and asserting a head
@@ -178,10 +184,11 @@ move bytes in order, execute exactly what matters.**
   description of deferred execution as "consensus-neutral" is corrected
   by the same change — this is consensus-adjacent and is treated with
   that gravity.
-- Data availability is enforced exactly as today: no possession, no
-  weight. A withheld branch weighs nothing anywhere, so the design adds
-  no new withholding leverage and no permanent-skeleton inflation beyond
-  what a publishing attacker could already buy.
+- Data availability never judges and never un-weighs: a withheld branch
+  keeps its header weight and is simply never acted on, because the
+  act-on tip follows executed blocks only. Honest work chains on the
+  act-on tip meanwhile, so withholding buys what a secret chain already
+  buys and no more.
 - Recovery and boot invariants hold per tier; no index, page, or
   advertisement promises a tier the node has not reached for that block.
   Served surfaces already advertise possession truthfully — possession

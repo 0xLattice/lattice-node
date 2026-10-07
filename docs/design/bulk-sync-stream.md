@@ -143,12 +143,17 @@ upon, served, exported, asserted as head (the acted-on set is enumerated in
 [weight-first-acquisition](weight-first-acquisition.md)). A miner can publish a
 heavy header chain (real work) and withhold its bodies; it ranks first but is
 **never acted on** — the node keeps building on its **act-on tip**, the
-executed prefix of the heaviest header chain (the deepest block on that chain
-whose ancestry is executed from genesis), and retries the missing bodies as an
-availability gap. The act-on tip is always on the heaviest header chain: a
-validated block off it is not acted on, however much of the heaviest chain is
-still unexecuted. This is the *same*
-withholding surface as a secret-then-released heavy chain today; header-weight
+heaviest *executed* tip, and retries the missing bodies as an availability
+gap. The act-on tip is found by descending from genesis and, at each fork,
+following the heaviest child that is executed (heaviest by its whole subtree's
+header work, unexecuted descendants included); it stops where no child is
+executed. The withheld chain keeps all its weight and is never marked: it
+cannot be stepped into because stepping requires execution. Honest blocks
+built on the act-on tip therefore form a chain, which outweighs K withheld
+blocks after K+1 of its own; released before then, the withheld chain is
+executed and wins. This is the *same*
+withholding surface as a secret-then-released heavy chain today (publishing
+the headers early buys nothing over keeping the chain secret); header-weight
 adds **no new attack**, *provided* "rank on headers, act only on validated" is
 implemented exactly. Get it wrong and a heaviest-but-invalid or
 heaviest-but-unavailable path could be acted on, or nodes with different body
