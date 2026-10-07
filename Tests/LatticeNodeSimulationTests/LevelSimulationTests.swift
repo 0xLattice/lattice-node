@@ -286,6 +286,7 @@ final class LevelSimulationTests: XCTestCase {
         // after it comes from the peer.
         var queue: [NodeEvent] = world.grinds.prefix(3).map { .mined($0.mined) } + [.peerReady(peer)]
         var asked: [ChainPath: [Int]] = [:]
+        var askedCIDs: [String: Int] = [:]
         while !queue.isEmpty {
             for effect in host.step(queue.removeFirst(), now: now) {
                 switch effect {
@@ -293,6 +294,7 @@ final class LevelSimulationTests: XCTestCase {
                     if case .getData(_, let cids) = message {
                         asked[path, default: []].append(cids.count)
                         if path == alpha {
+                            for cid in cids { askedCIDs[cid, default: 0] += 1 }
                             let proofs = try XCTUnwrap(host.levels[alpha]).sync.proofs
                             let room = config.proofs.maxPerSource - (proofs.load[peer]?.count ?? 0)
                             XCTAssertLessThanOrEqual(cids.count, room, "asked for more headers than there is room to check")
@@ -323,6 +325,12 @@ final class LevelSimulationTests: XCTestCase {
         XCTAssertGreaterThan(served.count, 3 * config.proofs.maxPerSource)
         XCTAssertEqual(served.filter { weighed[$0] == nil }.count, 0, "child blocks never weighed")
         XCTAssertTrue(level.sync.proofs.awaiting.isEmpty)
+        XCTAssertEqual(askedCIDs.values.filter { $0 > 1 }.count, 0, "a header asked of the peer twice")
+        // A request occupies the peer for a round trip: none but the last
+        // is spent on fewer than half its slots.
+        let requests = asked[alpha] ?? []
+        XCTAssertGreaterThanOrEqual(requests.dropLast().min() ?? .max, config.proofs.maxPerSource / 2)
+        XCTAssertLessThanOrEqual(requests.count, 2 * (served.count / config.proofs.maxPerSource + 1))
         XCTAssertEqual(asked[LevelWorld.nexus]?.count, 1, "the root level asks for a whole page at once")
     }
 
