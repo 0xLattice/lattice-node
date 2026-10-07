@@ -16,12 +16,6 @@ public enum ChainEvent: Sendable {
     case headersServed(PeerID, token: UInt64)
     /// The content layer holds the body Volume of this block locally.
     case bodyFetched(cid: String)
-    /// A fetch attempt for this block's body completed in which at least one
-    /// connected peer was asked and every peer asked answered that it does
-    /// not hold it. Never: no peer to ask, a timeout, a transport or local
-    /// error, an invalid answer, a cancelled attempt. The content layer
-    /// keeps trying; the mark stands until the body arrives.
-    case bodyMissed(cid: String)
     /// A connect job's verdict, with the CIDs of the transactions the block
     /// carries (the job read them from the body it executed): what the act-on
     /// chain confirms when it enters the block.
@@ -261,11 +255,8 @@ public struct ChainCore: Sendable {
     var readingTransactions: Set<String> = []
     /// This host's mined blocks awaiting their answer, by block: answered
     /// once executed (or proven invalid), or at once when the block is
-    /// weighed off the best chain, which the body window never executes.
+    /// weighed where the body window will not execute it.
     var minedReplies: [String: UInt64] = [:]
-    /// This node's own mined blocks not yet executed: each is executed when
-    /// it is produced, on the best header chain or not.
-    var ownMined: Set<String> = []
     /// The blocks this step's admissions weighed (`ChainTreeUpdate.weighed`),
     /// for the host to forward to run attribution. Reset by every step.
     public internal(set) var weighed: [String] = []
@@ -378,8 +369,6 @@ public struct ChainCore: Sendable {
                 sync.peers[peer]?.queued.removeFirst()
                 serve(next, to: peer, &turn)
             }
-        case .bodyMissed(let cid):
-            if bodies.requested.contains(cid) { bodies.missed.insert(cid) }
         case .bodyFetched(let cid):
             bodyFetched(cid)
         case .connected(let verdict, let transactions):
@@ -488,8 +477,10 @@ public struct ChainCore: Sendable {
         sync.compact()
         // Holes left unasked are asked again on a tick.
         let holes = sync.peers.values.contains { !$0.holes.isEmpty && $0.data == nil }
+        let turns = forkChildren.count > config.bodyWindow
         let deadlines = [sync.nextDeadline(after: turn.now), bodies.nextRetry(after: turn.now),
-                         holes ? turn.now + config.headersTimeout : nil]
+                         holes ? turn.now + config.headersTimeout : nil,
+                         turns ? Int64(bodies.rotation + 1) * max(config.bodyRetryCap, 1) : nil]
         if let deadline = deadlines.compactMap({ $0 }).min() {
             effects.append(.wakeAt(deadline))
         }

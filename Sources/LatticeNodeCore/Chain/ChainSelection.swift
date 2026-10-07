@@ -146,11 +146,12 @@ extension ChainCore {
     }
 
     /// Answer each mined block awaiting execution that the body window will
-    /// not execute: one off the best chain that is not this node's to
-    /// execute (its parent is not executed).
+    /// not execute: one off the best chain that is not a fork child.
     mutating func answerSideMined(_ turn: inout Turn) {
+        guard !minedReplies.isEmpty else { return }
+        let stepped = forkChildren
         for (cid, replyID) in minedReplies.sorted(by: { $0.key < $1.key })
-        where index.contains(cid) && !tree.isCanonical(hash: cid) && !ownMined.contains(cid) {
+        where index.contains(cid) && !tree.isCanonical(hash: cid) && !stepped.contains(cid) {
             minedReplies[cid] = nil
             turn.effects.append(.workSubmitted(replyID: replyID, .side))
         }

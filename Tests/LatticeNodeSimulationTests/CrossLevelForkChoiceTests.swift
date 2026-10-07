@@ -282,7 +282,7 @@ final class CrossLevelForkChoiceTests: XCTestCase {
     /// (it names N1's state). CW2 names W1's state, which this node has not
     /// executed: its body arrives and its connect awaits that parent fact.
     /// An honest grind H1 on N1 carries CH2 on CW1. A node that mined none
-    /// of them turns to the next-heaviest child: Alpha acts on CH2 while CW2
+    /// of them asks for both children of CW1: Alpha acts on CH2 while CW2
     /// keeps its weight and gets no verdict. A block that becomes executable
     /// is followed: H1 pays the reward W1 pays, so executing it produces the
     /// state CW2 names, and CW2, the heavier, is taken; once the Nexus
@@ -328,9 +328,10 @@ final class CrossLevelForkChoiceTests: XCTestCase {
                     switch effect {
                     case .level(_, .fetchBody(let cid)) where late.contains(cid):
                         break
+                    case .level(_, .fetchBody(let cid)) where withheld.contains(cid):
+                        break
                     case .level(let path, .fetchBody(let cid)):
-                        // Every peer asked lacks a withheld body.
-                        queue.append(.level(path, withheld.contains(cid) ? .bodyMissed(cid: cid) : .bodyFetched(cid: cid)))
+                        queue.append(.level(path, .bodyFetched(cid: cid)))
                     case .connect(let path, let job, let facts):
                         let verdict = await ChainTree.connect(
                             job, fetcher: world.cas, parentFacts: facts,

@@ -72,8 +72,8 @@ final class ConsensusEdgeSimulationTests: XCTestCase {
         let reference = try XCTUnwrap(once.digests.values.first)
         for path in world.paths {
             for (core, digests) in once.digests {
-                // A core executes the blocks it mined itself, so what it
-                // executed (and so excluded, and so acts on) is its own. The
+                // A core executes whichever child of its tip it holds, so what
+                // it executed (and so excluded, and so acts on) is its own. The
                 // graph and its weights are everyone's, and with no
                 // exclusion so is the best header tip.
                 XCTAssertEqual(digests[path]?.blocks, reference[path]?.blocks, "\(core) differs at \(path) on one link")

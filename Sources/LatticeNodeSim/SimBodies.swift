@@ -92,7 +92,7 @@ extension Invariants {
         let window = core.bodyWindow
         let inWindow = Set(window)
         let bodies = core.bodies
-        if bodies.requested.union(bodies.arrived).filter({ !core.stuck($0) }).count > core.config.bodyWindow {
+        if bodies.requested.count + bodies.arrived.count > core.config.bodyWindow {
             throw fail(node, "the body window holds more than \(core.config.bodyWindow) bodies")
         }
         if !bodies.requested.isDisjoint(with: bodies.arrived) {

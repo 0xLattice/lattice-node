@@ -15,8 +15,8 @@ final class WithheldBodiesLivenessTests: XCTestCase {
 
     /// Honest nodes over one world, each a root-level `NodeCore` with its own
     /// content store. One relay peer shows every node the headers the others
-    /// mine. A body is served when asked for unless it is withheld: every
-    /// peer asked answers that it lacks a withheld body (`bodyMissed`).
+    /// mine. A body is served when asked for unless it is withheld: a
+    /// withheld body never arrives.
     private final class Net {
         let world: World
         let path: ChainPath
@@ -26,7 +26,7 @@ final class WithheldBodiesLivenessTests: XCTestCase {
         var positions: [UInt64] = []
         var known: [String: SimBlock]
         var withheld = Set<String>()
-        /// While set, a body asked for is in flight: neither served nor missed.
+        /// While set, no body asked for is served yet.
         var inFlight = false
         /// While set, a withheld body's Volume arrives without the content
         /// its connect needs.
@@ -78,10 +78,10 @@ final class WithheldBodiesLivenessTests: XCTestCase {
                     }
                 case .level(_, .fetchBody(let cid)):
                     fetched[node].append(cid)
-                    if inFlight {
+                    if inFlight || (withheld.contains(cid) && !unresolvable) {
                         break
                     } else if withheld.contains(cid) {
-                        next = step(node, .level(path, unresolvable ? .bodyFetched(cid: cid) : .bodyMissed(cid: cid)))
+                        next = step(node, .level(path, .bodyFetched(cid: cid)))
                     } else {
                         contents[node].put(known[cid]!.body)
                         next = step(node, .level(path, .bodyFetched(cid: cid)))
@@ -247,9 +247,9 @@ final class WithheldBodiesLivenessTests: XCTestCase {
         XCTAssertEqual(next.block.parent, branch.last?.cid)
     }
 
-    /// Three honest miners: a fetch for the withheld body finished empty, so
-    /// each node tries the next-heaviest sibling — another miner's block —
-    /// and their work pools on one chain. No honest block is wasted and the
+    /// Three honest miners: each node asks for every child of its tip, so
+    /// another miner's block arrives while the withheld one does not, and
+    /// their work pools on one chain. No honest block is wasted and the
     /// hold ends within `count + 1` rounds.
     func testHonestWorkPoolsOnOneChainAgainstTwoWithheldHeaders() async throws {
         let (net, base, branch, weight) = try await held(withheld: 2, nodes: 3)
@@ -284,22 +284,51 @@ final class WithheldBodiesLivenessTests: XCTestCase {
         net.assertUnjudged(branch, weight: weight)
     }
 
-    /// A stuck block is only being retried and takes none of the operator's
-    /// count: with a window of one the next-heaviest sibling is still
-    /// fetched, and the missed body stays asked for.
-    func testAMissedBodyTakesNoWindowSlotFromTheNextHeaviest() async throws {
+    /// Two honest miners against a heavier withheld branch build one chain
+    /// between them; released while still the heaviest, the withheld branch
+    /// is executed and every node follows it.
+    func testTwoMinersPoolAndConvergeOnTheReleasedHeavierBranch() async throws {
+        let (net, base, branch, weight) = try await held(withheld: 4, nodes: 2)
+        var parent = base.cid
+        for round in 1...2 {
+            let (block, outcome) = try await net.mine(by: round % 2)
+            XCTAssertEqual(block.parent, parent, "round \(round) builds on the other miner's block")
+            XCTAssertEqual(outcome, .executed(tipCID: block.cid))
+            for node in 0..<2 {
+                XCTAssertEqual(net.snapshot(node).actOnTip, block.cid)
+                XCTAssertEqual(net.snapshot(node).bestHeaderTip, branch.last?.cid)
+            }
+            parent = block.cid
+        }
+        net.assertUnjudged(branch, weight: weight)
+        try await net.release()
+        for node in 0..<2 {
+            XCTAssertEqual(net.snapshot(node).actOnTip, branch.last?.cid)
+            XCTAssertEqual(net.level(node).mining.tipCID, branch.last?.cid)
+        }
+    }
+
+    /// More children of the tip than window slots take turns: with a window
+    /// of one the withheld heavier child does not keep the slot from the
+    /// honest block, and is asked for again once that block is the tip.
+    func testAWithheldHeavierChildDoesNotKeepTheOnlySlot() async throws {
         let (net, _, branch, _) = try await held(withheld: 2, nodes: 2, window: 1)
         let (block, _) = try await net.mine(by: 0)
-        XCTAssertEqual(net.snapshot(1).actOnTip, block.cid)
-        XCTAssertTrue(net.level(1).bodies.requested.contains(branch[0].cid))
+        for _ in 0..<2 {
+            net.now += net.level(1).config.bodyRetryCap
+            for node in 0..<2 { try await net.settle(node, net.step(node, .tick)) }
+        }
+        for node in 0..<2 { XCTAssertEqual(net.snapshot(node).actOnTip, block.cid) }
+        XCTAssertEqual(net.level(1).bodies.requested, [branch[0].cid])
         try await net.release()
         XCTAssertEqual(net.snapshot(1).actOnTip, branch.last?.cid, "released while heaviest, it is executed and wins")
     }
 
-    /// Every body obtainable but late: each is still in flight (no peer has
-    /// answered) when its header and a stale sibling's are weighed. A body
-    /// that is merely late is not a miss: the sync asks for and executes the
-    /// main chain and nothing else, and the tip never leaves it.
+    /// Every body obtainable but late: each is still in flight when its
+    /// header and a stale sibling's are weighed. The sync asks for the main
+    /// chain and, as each block becomes the tip, its children: at most one
+    /// stale sibling a fork. The main chain is executed and the tip never
+    /// leaves it.
     func testASyncPastStaleSiblingsExecutesOnlyTheMainChain() async throws {
         var rng = SplitMix64(state: 0x51B)
         let world = try await World.generate(rng: &rng, honestBlocks: 12, forkProbability: 0, spamBlocks: 0)
@@ -326,7 +355,11 @@ final class WithheldBodiesLivenessTests: XCTestCase {
         }
         XCTAssertEqual(net.snapshot(0).actOnTip, chain.last?.cid)
         XCTAssertEqual(net.snapshot(0).bestHeaderTip, chain.last?.cid)
-        XCTAssertEqual(net.fetched[0], chain.map(\.cid), "no sibling's body is asked for")
+        let main = Set(chain.map(\.cid))
+        let stale = net.fetched[0].filter { !main.contains($0) }.compactMap { net.known[$0]?.parent }
+        XCTAssertEqual(net.fetched[0].filter(main.contains), chain.map(\.cid))
+        XCTAssertEqual(stale.count, Set(stale).count, "at most one stale sibling a fork is asked for")
+        XCTAssertTrue(stale.allSatisfy { main.contains($0) || $0 == world.genesis.cid }, "never a stale sibling's descendant")
         XCTAssertEqual(net.connected[0], chain.map(\.cid), "exactly the main chain is executed")
         XCTAssertEqual(net.tips[0], [world.genesis.cid] + chain.map(\.cid), "the tip only ever extends")
     }

@@ -27,8 +27,8 @@ public enum MinedOutcome: Sendable, Equatable {
     /// The root met its own target, was weighed and executed; `tipCID` is
     /// the act-on tip after its execution.
     case executed(tipCID: String)
-    /// The root was weighed off the best chain on a parent that is not
-    /// executed: it is not executed.
+    /// The root was weighed off the best chain where the act-on tip would
+    /// not step into it: it is not executed.
     case side
     /// The root was weighed and its execution proved it invalid.
     case invalid
@@ -268,10 +268,10 @@ public struct NodeCore: Sendable {
     public var ordered: [ChainPath] { levels.keys.sorted(by: Self.order) }
 
     /// What a child level's execution reads of its parent: the parent's
-    /// executed set on any branch. A parent level executes its best chain,
-    /// its own mined blocks and its fallback candidates (decision 21): a
-    /// child block naming a state it never executed waits, unvalidated,
-    /// until it does.
+    /// executed set on any branch. A parent level executes its best chain
+    /// and the blocks its act-on tip would step into (decision 21): a child
+    /// block naming a state it never executed waits, unvalidated, until it
+    /// does.
     public func parentFacts(for path: ChainPath) -> ParentLevelFacts? {
         let parent = Array(path.dropLast())
         guard path.count > 1, let core = levels[parent] else { return nil }

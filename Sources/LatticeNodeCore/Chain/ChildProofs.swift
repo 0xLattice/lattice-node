@@ -492,7 +492,6 @@ extension ChainCore {
                 blockCID: cid, block: block, children: children, spec: block.parent == nil ? block.spec.node : nil
             ))
             index.add(cid, parent: block.parent?.rawCID, height: block.height)
-            ownMined.insert(cid)
             for child in waiting { dirty(child, &turn) }
         }
         turn.facts += update.batches

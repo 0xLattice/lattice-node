@@ -5,17 +5,14 @@ import Lattice
 /// verification, retries and provider suppression. The core only names the
 /// next `ChainCoreConfig.bodyWindow` weighed-but-unexecuted blocks on the best
 /// chain and connects them in parent order as their bodies arrive. It also
-/// names this node's own mined blocks and, where the heavier child at a fork
-/// was tried and cannot be executed now, the next-heaviest sibling.
+/// names the blocks the act-on tip would step into once executed
+/// (`forkChildren`).
 ///
 /// There is no per-peer state here and no fetch deadline: a missing body is
 /// an availability wait, never blame and never a verdict.
 public struct BodyPipeline: Sendable, Equatable {
     /// Bodies asked of the content layer that have not arrived.
     public internal(set) var requested: Set<String> = []
-    /// Requested bodies every peer asked answered it does not hold
-    /// (`ChainEvent.bodyMissed`). Each stays requested.
-    public internal(set) var missed: Set<String> = []
     /// Bodies that arrived and are not executed yet.
     public internal(set) var arrived: Set<String> = []
     /// The block whose connect job is running: one at a time, in parent
@@ -32,9 +29,12 @@ public struct BodyPipeline: Sendable, Equatable {
     public internal(set) var awaitingParent: [String: CrossChainEvidenceRequirement] = [:]
     /// The act-on tip and window when `parked` was last kept: a change to
     /// either (an execution, or a best chain that moved) starts every
-    /// backoff over. A header weighed off the best chain changes neither,
-    /// nor does a fallback candidate: `window` is the best chain's.
+    /// backoff over. A header weighed off the best chain changes neither:
+    /// `window` is the best chain's.
     var seen: TreeMark?
+    /// Which fork children hold the window's slots while there are more of
+    /// them than slots: it advances every `bodyRetryCap`.
+    var rotation = 0
 
     public struct Parked: Sendable, Equatable {
         public let notBefore: Int64
@@ -55,19 +55,18 @@ public struct BodyPipeline: Sendable, Equatable {
 }
 
 extension ChainCore {
-    /// The next blocks to execute: this node's own mined blocks, the best
-    /// chain's blocks after its executed prefix in parent order, and the
-    /// fallback candidates. The operator's count bounds the bodies in
-    /// flight or held to execute; a stuck block is only being retried and
-    /// takes none of it.
+    /// The next blocks to execute, within the operator's count: the fork
+    /// children, then the best chain's blocks after its executed prefix in
+    /// parent order. More fork children than slots take turns, so a body
+    /// that never arrives cannot keep a slot from one that would.
     public var bodyWindow: [String] {
+        var first = forkChildren
+        if first.count > config.bodyWindow {
+            let start = bodies.rotation % first.count
+            first = Array(first[start...] + first[..<start])
+        }
         var window: [String] = []
-        var live = 0
-        for cid in ownMined.sorted().filter(executable) + bestWindow + fallback() where !window.contains(cid) {
-            if !stuck(cid) {
-                guard live < config.bodyWindow else { continue }
-                live += 1
-            }
+        for cid in first + bestWindow where window.count < config.bodyWindow && !window.contains(cid) {
             window.append(cid)
         }
         return window
@@ -84,28 +83,13 @@ extension ChainCore {
         return (first...last).compactMap { tree.canonicalBlockHash(atHeight: $0) }
     }
 
-    /// A weighed block with no verdict whose parent is executed from genesis.
-    func executable(_ cid: String) -> Bool {
-        guard index.contains(cid), !tree.isExecuted(blockHash: cid), !tree.isExcludedRoot(cid) else { return false }
-        return index.parent[cid].map(tree.hasExecutedAncestry(blockHash:)) ?? true
-    }
-
-    /// Tried and not executable now, for a reason that is no verdict: every
-    /// peer asked lacks its body, its connect awaits a parent fact, or its
-    /// connect found content unresolvable. It stays wanted and is retried
-    /// as before, and is executed and followed once it can be.
-    public func stuck(_ cid: String) -> Bool {
-        bodies.missed.contains(cid) || bodies.awaitingParent[cid] != nil || bodies.parked[cid] != nil
-    }
-
-    /// At each fork of the act-on descent, heaviest first, the unexecuted
-    /// children that would be the step taken if executed, up to the first
-    /// that is not stuck: a lighter sibling is tried only once every heavier
-    /// one was tried and cannot be executed now. Events decide it, never a
-    /// clock. Empty while nothing is stuck.
-    func fallback() -> [String] {
-        guard !(bodies.missed.isEmpty && bodies.awaitingParent.isEmpty && bodies.parked.isEmpty) else { return [] }
-        var tried: [String] = []
+    /// The unexecuted blocks the act-on descent would step into once
+    /// executed, heaviest first: every child of the act-on tip, and at each
+    /// fork above it the children heavier than the executed one it took.
+    /// The cost: at a fork a node may fetch and execute one stale sibling,
+    /// never a stale sibling's descendants unless it becomes the tip.
+    var forkChildren: [String] {
+        var wanted: [String] = []
         var fork = tree.executedPrefix().hash
         while !fork.isEmpty {
             let children = index.children[fork] ?? []
@@ -115,20 +99,18 @@ extension ChainCore {
                     && (taken == nil || Self.heaviest(of: [taken!, $0], in: tree) == $0)
             }
             while let next = Self.heaviest(of: open, in: tree) {
-                tried.append(next)
-                guard stuck(next) else { return tried }
+                wanted.append(next)
                 open.removeAll { $0 == next }
             }
             fork = taken ?? ""
         }
-        return tried
+        return wanted
     }
 
     /// The content layer has the body of `cid` locally. Only a body the
     /// window still wants is kept; any other arrival is simply unused.
     mutating func bodyFetched(_ cid: String) {
         guard bodies.requested.remove(cid) != nil else { return }
-        bodies.missed.remove(cid)
         bodies.arrived.insert(cid)
     }
 
@@ -158,7 +140,6 @@ extension ChainCore {
         bodies.arrived.remove(cid)
         switch tree.applyConnect(verdict) {
         case .applied(let update):
-            ownMined.remove(cid)
             if let state = update.materializedPostState { turn.states.append(state) }
             turn.facts += update.batches
             weighed += update.weighed
@@ -192,6 +173,7 @@ extension ChainCore {
     /// left, and start the next connect: the first window block whose body
     /// is here and whose parent is executed.
     mutating func scheduleBodies(_ turn: inout Turn) {
+        bodies.rotation = Int(turn.now / max(config.bodyRetryCap, 1))
         let window = bodyWindow
         let wanted = Set(window)
         let mark = BodyPipeline.TreeMark(actOn: actOnTip.hash, window: bestWindow)
@@ -203,8 +185,6 @@ extension ChainCore {
             turn.effects.append(.cancelBody(cid: cid))
         }
         bodies.requested.formIntersection(wanted)
-        bodies.missed.formIntersection(wanted)
-        ownMined = ownMined.filter(executable)
         bodies.arrived.formIntersection(wanted)
         bodies.parked = bodies.parked.filter { wanted.contains($0.key) }
         bodies.awaitingParent = bodies.awaitingParent.filter { wanted.contains($0.key) }
@@ -214,7 +194,8 @@ extension ChainCore {
             turn.effects.append(.fetchBody(cid: cid))
         }
         guard bodies.connecting == nil, let next = window.first(where: {
-            bodies.arrived.contains($0) && bodies.awaitingParent[$0] == nil && executable($0)
+            bodies.arrived.contains($0) && bodies.awaitingParent[$0] == nil
+                && index.parent[$0].map(tree.hasExecutedAncestry(blockHash:)) ?? true
         }), let job = tree.connectJob(for: next) else { return }
         bodies.connecting = next
         turn.effects.append(.connect(job))
