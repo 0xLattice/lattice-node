@@ -92,6 +92,14 @@ public struct NodeConfiguration: Sendable {
     /// peer, and it has no bearing on validation or fork choice. `0` disables
     /// stalled-peer search; provider announcements continue.
     public let peerSearchInterval: TimeInterval
+    /// Seconds past which a hosted level's executed tip is too old to mine
+    /// on until that level has caught up once in this process
+    /// (`ChainCoreConfig.maxTipAge`). Measured from this node's own verified
+    /// tip, never from a peer's claimed height. `0` turns the age test off.
+    public let miningMaxTipAge: TimeInterval
+    /// Seconds this node spends gathering one headers answer for a peer
+    /// (`ChainCoreConfig.servingBudget`). Nil keeps the core's default.
+    public let servingBudget: TimeInterval?
     public let resourcePolicy: NodeResourcePolicy
     /// The child chains this process hosts as levels under Nexus (operator
     /// choice), parent before child; every parent is Nexus or listed.
@@ -131,6 +139,8 @@ public struct NodeConfiguration: Sendable {
         contentServing: ContentServingLimits = .default,
         externalAddress: String? = nil,
         peerSearchInterval: TimeInterval = 600,
+        miningMaxTipAge: TimeInterval = 86_400,
+        servingBudget: TimeInterval? = nil,
         resourcePolicy: NodeResourcePolicy = .default,
         hostedChildren: [[String]] = [],
         childSpecs: [[String]: ChainSpec] = [:],
@@ -183,6 +193,8 @@ public struct NodeConfiguration: Sendable {
         self.externalAddress = externalAddress
         self.peerSearchInterval = peerSearchInterval.isFinite
             ? max(0, peerSearchInterval) : 0
+        self.miningMaxTipAge = miningMaxTipAge.isFinite ? max(0, miningMaxTipAge) : 0
+        self.servingBudget = servingBudget.flatMap { $0.isFinite ? max(0, $0) : nil }
         self.resourcePolicy = resourcePolicy
         self.childSpecs = childSpecs.filter { hostedChildren.contains($0.key) }
         self.hostedChildren = hostedChildren

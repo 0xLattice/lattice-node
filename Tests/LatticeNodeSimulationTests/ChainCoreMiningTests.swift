@@ -27,38 +27,66 @@ final class ChainCoreMiningTests: XCTestCase {
 
     /// A core that weighed `blocks` from `peer`'s log: a page of their IDs,
     /// then the objects it asks for.
-    private func weighed(_ blocks: [SimBlock]) -> ChainCore {
-        var core = ChainCore(tree: world.bootstrap.tree, config: ChainCoreConfig(bodyWindow: 4))
-        let asked = core.step(.peerReady(peer), now: Self.now).compactMap { effect -> UInt64? in
+    private func weighed(
+        _ blocks: [SimBlock], config: ChainCoreConfig = ChainCoreConfig(bodyWindow: 4), now: Int64 = ChainCoreMiningTests.now
+    ) -> ChainCore {
+        var core = ChainCore(tree: world.bootstrap.tree, config: config)
+        let asked = core.step(.peerReady(peer), now: now).compactMap { effect -> UInt64? in
             if case .send(_, .getStream(let id, _, _, _)) = effect { return id }
             return nil
         }
         let ids = blocks.enumerated().map { StreamEntry(position: UInt64($0.offset + 1), entry: .header($0.element.cid)) }
         let page = core.step(.received(peer, .stream(StreamPage(
             requestID: asked.first ?? 0, logID: "peer", entries: ids, hasMore: false
-        ))), now: Self.now)
+        ))), now: now)
         for case .send(_, .getData(let id, _)) in page {
             _ = core.step(.received(peer, .headers(HeadersResponse(
                 requestID: id,
                 entries: blocks.map { HeaderEntry(block: $0.block, children: $0.children) },
                 hasMore: false
-            ))), now: Self.now)
+            ))), now: now)
         }
         return core
     }
 
     /// Deliver the first block's body and run its connect.
     private func executeFirst(_ core: inout ChainCore, transactions: [String] = []) async throws -> [ChainEffect] {
-        content.put(world.blocks[chain[0].cid]!.body)
-        let arrived = core.step(.bodyFetched(cid: chain[0].cid), now: Self.now)
+        try await execute(&core, 0, transactions: transactions)
+    }
+
+    /// Deliver `chain[index]`'s body and run its connect, storing the
+    /// post-state the way the shell does.
+    private func execute(
+        _ core: inout ChainCore, _ index: Int, transactions: [String] = [], now: Int64 = ChainCoreMiningTests.now
+    ) async throws -> [ChainEffect] {
+        content.put(world.blocks[chain[index].cid]!.body)
+        let arrived = core.step(.bodyFetched(cid: chain[index].cid), now: now)
         let job = try XCTUnwrap(arrived.compactMap { effect -> ConnectJob? in
             if case .connect(let job) = effect { return job }
             return nil
         }.first)
         let verdict = await ChainTree.connect(
-            job, fetcher: content, validationContext: ValidationContext(nowMilliseconds: Self.now)
+            job, fetcher: content, validationContext: ValidationContext(nowMilliseconds: now)
         )
-        return core.step(.connected(verdict, transactions: transactions), now: Self.now)
+        let effects = core.step(.connected(verdict, transactions: transactions), now: now)
+        for case .persist(let batch) in effects {
+            for state in batch.states { try await storeMaterialized(state, in: content) }
+        }
+        return effects
+    }
+
+    /// The answer to a template request at `now`: the build it starts, or
+    /// the refusal.
+    private func requestTemplate(_ core: inout ChainCore, now: Int64 = ChainCoreMiningTests.now) -> MiningEffect? {
+        mining(core.step(.mining(.templateRequested(replyID: 9, TemplateRequest(rewardRecipient: nil))), now: now)).first
+    }
+
+    private func isBuild(_ effect: MiningEffect?) -> Bool {
+        if case .buildTemplate = effect { true } else { false }
+    }
+
+    private func isSyncing(_ effect: MiningEffect?) -> Bool {
+        if case .templateRefused(9, .syncing) = effect { true } else { false }
     }
 
     private func mining(_ effects: [ChainEffect]) -> [MiningEffect] {
@@ -157,5 +185,77 @@ final class ChainCoreMiningTests: XCTestCase {
         XCTAssertTrue(host.step(.mined(grind, replyID: 4), now: Self.now).contains {
             if case .level(_, .workSubmitted(4, .duplicate)) = $0 { true } else { false }
         })
+    }
+
+    // MARK: - Caught up
+
+    func testATemplateIsRefusedWhileHeadersAreMoreThanTheBodyWindowAhead() async throws {
+        var core = weighed(chain, config: ChainCoreConfig(bodyWindow: 2))
+        XCTAssertEqual(core.snapshot.bestHeaderHeight, 4)
+        XCTAssertFalse(core.isCaughtUp(now: Self.now))
+        XCTAssertTrue(isSyncing(requestTemplate(&core)), "four weighed headers, none executed, a window of two")
+        XCTAssertEqual(core.mining.waitingTemplateRequests, 0, "a refused request does not wait")
+
+        _ = try await execute(&core, 0)
+        XCTAssertTrue(isSyncing(requestTemplate(&core)), "three ahead")
+        _ = try await execute(&core, 1)
+        XCTAssertEqual(core.snapshot.actOnHeight, 2)
+        XCTAssertTrue(isBuild(requestTemplate(&core)), "two ahead is within the window")
+    }
+
+    func testATemplateIsRefusedOnATipOlderThanMaxTipAgeUntilTheLevelHasCaughtUp() async throws {
+        let age: Int64 = 60_000
+        // Weighed and executed long after the tip was mined: never seen fresh.
+        let late = chain[0].block.timestamp + age + 1
+        var core = weighed([chain[0]], config: ChainCoreConfig(bodyWindow: 4, maxTipAge: age), now: late)
+        XCTAssertTrue(isBuild(requestTemplate(&core, now: late)), "the age test does not apply to a genesis tip")
+        // The tip move does not issue the waiting build again on a stale tip.
+        let executed = mining(try await execute(&core, 0, now: late))
+        XCTAssertTrue(isSyncing(executed.first { if case .templateRefused = $0 { true } else { false } }), "\(executed)")
+        XCTAssertEqual(core.mining.waitingTemplateRequests, 0)
+        XCTAssertEqual(core.snapshot.actOnTip, chain[0].cid)
+        XCTAssertEqual(core.snapshot.bestHeaderHeight, core.snapshot.actOnHeight)
+        XCTAssertTrue(isSyncing(requestTemplate(&core, now: late)), "one millisecond too old")
+        XCTAssertFalse(core.wasCaughtUp, "neither a genesis tip nor a stale one latches")
+        XCTAssertTrue(isBuild(requestTemplate(&core, now: late - 1)), "exactly maxTipAge old is caught up")
+        XCTAssertTrue(core.wasCaughtUp)
+        // Once caught up, the tip's age no longer holds mining back (the
+        // request joins the build already running).
+        XCTAssertTrue(core.isCaughtUp(now: late + 10 * age))
+        XCTAssertNil(requestTemplate(&core, now: late + 10 * age))
+        XCTAssertEqual(core.mining.waitingTemplateRequests, 2)
+
+        // The operator turned the age test off.
+        var off = weighed([chain[0]], config: ChainCoreConfig(bodyWindow: 4, maxTipAge: 0), now: late)
+        _ = try await execute(&off, 0, now: late)
+        XCTAssertTrue(isBuild(requestTemplate(&off, now: late)))
+    }
+
+    func testHavingCaughtUpDoesNotLiftTheBodyGapTest() async throws {
+        var core = weighed([chain[0]], config: ChainCoreConfig(bodyWindow: 2))
+        _ = try await execute(&core, 0)
+        XCTAssertTrue(core.wasCaughtUp, "a fresh tip with no header ahead: a sole miner's own block")
+        XCTAssertTrue(isBuild(requestTemplate(&core)))
+        // Three more headers arrive: the level is behind again.
+        let rest = Array(chain.dropFirst())
+        let page = core.step(.received(peer, .stream(StreamPage(
+            requestID: 0, logID: "peer",
+            entries: rest.enumerated().map { StreamEntry(position: UInt64($0.offset + 2), entry: .header($0.element.cid)) },
+            hasMore: false
+        ))), now: Self.now)
+        for case .send(_, .getData(let id, _)) in page {
+            _ = core.step(.received(peer, .headers(HeadersResponse(
+                requestID: id, entries: rest.map { HeaderEntry(block: $0.block, children: $0.children) }, hasMore: false
+            ))), now: Self.now)
+        }
+        XCTAssertEqual(core.snapshot.bestHeaderHeight, 4)
+        XCTAssertTrue(isSyncing(requestTemplate(&core)))
+    }
+
+    func testALevelWithNoRootIsCaughtUp() throws {
+        var empty = try ChainCore.restore(replaying: [], context: world.context, specs: [world.spec])
+        XCTAssertTrue(empty.snapshot.bestHeaderTip.isEmpty)
+        XCTAssertTrue(empty.isCaughtUp(now: .max), "a genesis is never held back")
+        XCTAssertTrue(isBuild(requestTemplate(&empty, now: .max)))
     }
 }

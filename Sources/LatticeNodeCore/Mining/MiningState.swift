@@ -247,6 +247,10 @@ public struct MiningState: Sendable {
     /// The spec of the tip's genesis root; nil while the level executed no
     /// root, when the pool admits nothing.
     public internal(set) var spec: ChainSpec?
+    /// Whether the level is caught up (`ChainCore.isCaughtUp`), set before
+    /// each step that may start a build: while it is not, a template
+    /// request, new or issued again by a tip move, is refused as `.syncing`.
+    public internal(set) var caughtUp = true
     public let config: MiningConfig
 
     /// Which bound a pending admission counts against. A local or restored
@@ -680,6 +684,10 @@ public struct MiningState: Sendable {
     // MARK: - Templates
 
     private mutating func requestTemplate(_ request: TemplateRequest, waiting: [Waiting], _ turn: inout Turn) {
+        guard caughtUp else {
+            for entry in waiting { turn.replies.append(.templateRefused(replyID: entry.replyID, .syncing)) }
+            return
+        }
         // A build of this plan on this tip from this pool is already running.
         if let (id, _) = builds.first(where: {
             $0.value.job.tipEpoch == tipEpoch && $0.value.job.poolVersion == mempool.version

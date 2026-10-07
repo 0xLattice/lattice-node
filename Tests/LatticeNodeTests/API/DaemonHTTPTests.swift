@@ -3,6 +3,7 @@ import Hummingbird
 import HummingbirdTesting
 import Lattice
 import LatticeLightClient
+import LatticeNodeCore
 import UInt256
 import XCTest
 import cashew
@@ -64,6 +65,49 @@ final class DaemonHTTPTests: XCTestCase {
                 body: ByteBuffer(bytes: body)
             ) { response in
                 XCTAssertEqual(response.status, .ok)
+            }
+        }
+    }
+
+    /// A node still syncing answers a template request 503 `syncing`: the
+    /// coordinator backs off and asks again.
+    func testATemplateRequestWhileSyncingIsAnswered503() async throws {
+        struct Syncing: OperatorWrites {
+            func submitTransaction(_ request: SubmitTransactionRequest) async throws -> SubmitTransactionResponse {
+                throw NodeRuntimeError.stopped
+            }
+            func miningTemplate(_ request: MiningTemplateRequest) async throws -> MiningTemplateResponse {
+                throw TemplateError.syncing
+            }
+            func submitWork(_ request: SubmitWorkRequest) async throws -> SubmitWorkResponse {
+                throw NodeRuntimeError.stopped
+            }
+        }
+        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-http-syncing-\(UUID().uuidString)"
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
+        let storage = try await NodeStorage.open(configuration: NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: storageDirectory,
+            privateKeyHex: String(repeating: "01", count: 32)
+        ))
+        let service = try await startRuntime(storage)
+        let app = makeApplication(
+            reads: service.reads, writes: Syncing(), status: { await service.status() },
+            metrics: { _, _ in "" }, host: "127.0.0.1", port: 8080,
+            peers: { ExplorerPeersResponse(count: 0, peers: []) }, processStartTime: Date(), auth: testOperatorAuth
+        )
+
+        try await app.test(.router) { client in
+            try await client.execute(
+                uri: "/mining/templates",
+                method: .post,
+                headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
+                body: ByteBuffer(bytes: try JSONEncoder().encode(MiningTemplateRequest()))
+            ) { response in
+                XCTAssertEqual(response.status, .serviceUnavailable)
+                XCTAssertTrue(String(buffer: response.body).contains("syncing"))
             }
         }
     }

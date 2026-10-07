@@ -16,6 +16,7 @@ public struct Topology: Codable, Sendable {
         case publicReadURL, publicSubmit, publicSubmitRate, minRelayFee
         case servingMaxConcurrent, servingMaxConcurrentPerPeer
         case servingMaxQueuedPerPeer, servingMaxInFlightVolumeBytes
+        case servingBudget, miningMaxTipAge
         case hostedChains, mine, rpcAllowedOrigins
     }
     public var listen: UInt16
@@ -59,6 +60,13 @@ public struct Topology: Codable, Sendable {
     public var servingMaxConcurrentPerPeer: Int?
     public var servingMaxQueuedPerPeer: Int?
     public var servingMaxInFlightVolumeBytes: Int?
+    /// Seconds spent gathering one headers answer for a peer
+    /// (`--serving-budget`). Absent = the node's default.
+    public var servingBudget: Double?
+    /// Seconds past which a chain's executed tip is too old to mine on
+    /// before the node has caught up on it (`--mining-max-tip-age`). Absent =
+    /// the node's default, a day; `0` turns the age test off.
+    public var miningMaxTipAge: Double?
     /// Child chains this process hosts as levels, parent before child.
     public var hostedChains: [String]?
     public var mine: TopologyMine?
@@ -140,6 +148,8 @@ public struct Topology: Codable, Sendable {
             ("publicReadExpensiveRate", publicReadExpensiveRate),
             ("publicReadMaxRate", publicReadMaxRate),
             ("publicSubmitRate", publicSubmitRate),
+            ("servingBudget", servingBudget),
+            ("miningMaxTipAge", miningMaxTipAge),
         ] {
             if let rate, !rate.isFinite || rate < 0 {
                 throw CtlError("\(name) must be finite and nonnegative")
@@ -183,7 +193,13 @@ public struct Topology: Codable, Sendable {
         if let value = servingMaxInFlightVolumeBytes {
             arguments += ["--serving-max-in-flight-volume-bytes", String(value)]
         }
+        if let value = servingBudget { arguments += ["--serving-budget", String(value)] }
         return arguments
+    }
+
+    /// Node flags for the node's mining policy in `lattice.json`.
+    public var miningArguments: [String] {
+        miningMaxTipAge.map { ["--mining-max-tip-age", String($0)] } ?? []
     }
 
     /// Node flags represented by the public submission policy in

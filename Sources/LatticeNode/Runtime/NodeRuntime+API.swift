@@ -46,7 +46,9 @@ struct HeightIndex: Sendable {
 
 /// One hosted child level as a template job reads it: its executed tip (nil
 /// when it executed no root), its pool, its difficulty anchor, and the spec a
-/// genesis is built from when it has no root yet.
+/// genesis is built from when it has no root yet. One that is not caught up
+/// (`ChainCore.isCaughtUp`) is read for the digest, which status serves for
+/// every hosted level, and gets no candidate.
 struct ChildTemplateInput: Sendable {
     let path: ChainPath
     let tipCID: String?
@@ -55,6 +57,7 @@ struct ChildTemplateInput: Sendable {
     let anchor: DifficultyAnchor?
     let genesisSpec: ChainSpec?
     let genesisTarget: UInt256
+    let caughtUp: Bool
 }
 
 /// An RPC's answer, from the effect that names its reply ID.
@@ -434,7 +437,7 @@ extension NodeRuntime {
     /// `parent`, each carrying its own children's, every one committing its
     /// carrier's entering state. A child with an executed tip builds on it;
     /// one with no root yet and a configured spec gets a genesis; one whose
-    /// root is weighed but not executed waits.
+    /// root is weighed but not executed, or that is not caught up, waits.
     static func childCandidates(
         of parent: ChainPath,
         among inputs: [ChildTemplateInput],
@@ -444,7 +447,7 @@ extension NodeRuntime {
         fetcher: any Fetcher
     ) async -> [DirectChildCandidate] {
         var candidates: [DirectChildCandidate] = []
-        for input in inputs where input.path.dropLast().elementsEqual(parent) {
+        for input in inputs where input.caughtUp && input.path.dropLast().elementsEqual(parent) {
             let carrier = Block(
                 version: Block.currentVersion, parent: nil,
                 transactions: HeaderImpl(rawCID: entering.rawCID), target: .max, nextTarget: .max,

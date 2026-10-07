@@ -96,6 +96,11 @@ bootstrap endpoints without a live session.
 The trigger uses the locally verified tip, never a remote height claim. Set it
 to `0` only for an intentionally isolated node.
 
+A peer's request for headers is answered with what the node gathers within
+`servingBudget` (`--serving-budget`, seconds, default 5), always at least one
+header; the peer asks again for the rest. Lower it on a slow disk if peers
+time out before an answer is sent.
+
 Useful checks:
 
 ```bash
@@ -205,6 +210,18 @@ The node fingerprints the complete hosted tree. A new transaction, child
 candidate, or accepted child block invalidates stale work even when the Nexus
 tip did not change. Submitted work is persisted only for child levels whose
 target the hash actually meets.
+
+The node issues no work for a chain it is still syncing. A chain is syncing
+while its verified headers are more than the body window (64 blocks) ahead of
+what it has executed, or while its executed tip is older than
+`miningMaxTipAge` (`--mining-max-tip-age`, seconds, default 86400) and the
+node has not yet caught up on that chain since it started; a chain with only
+its genesis is never too old. A syncing Nexus answers `POST /mining/templates`
+with 503 `syncing`, which the coordinator retries; a syncing hosted child is
+left out of the template while Nexus and the other children are mined. Both
+tests read the locally verified chain, never a remote height claim. Set
+`miningMaxTipAge` to `0` to restart a chain nobody has mined for longer than
+that.
 
 Alert when:
 

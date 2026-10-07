@@ -53,6 +53,28 @@ extension ChainCore {
 }
 
 extension ChainCore {
+    // MARK: - Caught up
+
+    /// Whether a block may be built on this level's act-on tip (Bitcoin
+    /// Core's initial-block-download gate on `getblocktemplate`), from local
+    /// state alone: the best weighed header is within `bodyWindow` of the
+    /// act-on tip, and that tip is no older than `maxTipAge`. The age test
+    /// does not apply at genesis (a chain with only its root is behind
+    /// nothing the header gap does not show, and a new chain's root may be
+    /// any age), nor once the level has been caught up in this process: a
+    /// chain whose miners stop for a day does not lock itself out.
+    public func isCaughtUp(now: Int64) -> Bool {
+        isCaughtUp(snapshot, now: now)
+    }
+
+    func isCaughtUp(_ snapshot: ChainSnapshot, now: Int64) -> Bool {
+        guard snapshot.bestHeaderHeight - snapshot.actOnHeight <= UInt64(max(config.bodyWindow, 0)) else { return false }
+        if config.maxTipAge == 0 || snapshot.actOnHeight == 0 || wasCaughtUp { return true }
+        guard let timestamp = tree.headerSnapshot(of: snapshot.actOnTip)?.timestamp else { return false }
+        let (age, overflow) = now.subtractingReportingOverflow(timestamp)
+        return !overflow && age <= config.maxTipAge
+    }
+
     // MARK: - Mining tip
 
     /// When the act-on tip moved, tell the mempool in the same step: the
@@ -91,6 +113,7 @@ extension ChainCore {
         }
         let confirmed = Set(entered.flatMap { executedTransactions[$0] ?? [] })
         mining.spec = Self.actOnSpec(of: tree)
+        mining.caughtUp = isCaughtUp(now: turn.now)
         turn.mining += mining.step(
             .tipMoved(TipMove(tipCID: tip.hash, confirmed: confirmed, left: left.reversed())),
             now: turn.now

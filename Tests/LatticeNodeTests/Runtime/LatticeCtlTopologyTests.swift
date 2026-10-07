@@ -140,6 +140,27 @@ final class LatticeCtlTopologyTests: XCTestCase {
         XCTAssertEqual(try Topology.load(root: root).contentServingArguments, [])
     }
 
+    func testServingBudgetAndMiningMaxTipAgeLoadFromConfigAndProduceNodeFlags() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ctl-mining-policy-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let body = #"{"listen":4001,"rpc":4003,"servingBudget":2.5,"miningMaxTipAge":0}"#
+        try Data(body.utf8).write(to: root.appendingPathComponent(Topology.fileName))
+
+        let loaded = try Topology.load(root: root).validated()
+        XCTAssertEqual(loaded.contentServingArguments, ["--serving-budget", "2.5"])
+        XCTAssertEqual(loaded.miningArguments, ["--mining-max-tip-age", "0.0"])
+
+        let empty = #"{"listen":4001,"rpc":4003}"#
+        try Data(empty.utf8).write(to: root.appendingPathComponent(Topology.fileName))
+        XCTAssertEqual(try Topology.load(root: root).miningArguments, [])
+
+        var negative = try Topology.load(root: root)
+        negative.miningMaxTipAge = -1
+        XCTAssertThrowsError(try negative.validated())
+    }
+
     func testPublicSubmitPolicyLoadsFromConfigAndProducesNodeFlags() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ctl-submit-policy-\(UUID().uuidString)")

@@ -160,6 +160,10 @@ public struct ChainCoreConfig: Sendable {
     /// window changes.
     public var bodyRetryBase: Int64
     public var bodyRetryCap: Int64
+    /// An act-on tip older than this (ms) is not mined on until the level
+    /// has caught up once (`ChainCore.isCaughtUp`): Bitcoin's `-maxtipage`.
+    /// 0 turns the age test off.
+    public var maxTipAge: Int64
     /// The level's mempool and template bounds.
     public var mining = MiningConfig()
 
@@ -174,7 +178,8 @@ public struct ChainCoreConfig: Sendable {
         maxFutureDrift: Int64 = 2 * 60 * 60 * 1_000,
         bodyWindow: Int = 64,
         bodyRetryBase: Int64 = 1_000,
-        bodyRetryCap: Int64 = 60_000
+        bodyRetryCap: Int64 = 60_000,
+        maxTipAge: Int64 = 24 * 60 * 60 * 1_000
     ) {
         self.maxFutureDrift = maxFutureDrift
         self.maxHeadersPerPage = maxHeadersPerPage
@@ -187,6 +192,7 @@ public struct ChainCoreConfig: Sendable {
         self.bodyWindow = bodyWindow
         self.bodyRetryBase = bodyRetryBase
         self.bodyRetryCap = bodyRetryCap
+        self.maxTipAge = maxTipAge
     }
 
     /// A header as it travels: its children map inline when it fits, and a
@@ -257,6 +263,9 @@ public struct ChainCore: Sendable {
     /// once executed (or proven invalid), or at once when the block is
     /// weighed off the best chain, which the body window never executes.
     var minedReplies: [String: UInt64] = [:]
+    /// Whether this level, past its genesis, has been caught up in this
+    /// process: from then on its tip's age no longer holds mining back.
+    public internal(set) var wasCaughtUp = false
     /// The blocks this step's admissions weighed (`ChainTreeUpdate.weighed`),
     /// for the host to forward to run attribution. Reset by every step.
     public internal(set) var weighed: [String] = []
@@ -392,6 +401,7 @@ public struct ChainCore: Sendable {
         case .evidenceChanged(let cids):
             evidenceChanged(cids)
         case .mining(let event):
+            if case .templateRequested = event { mining.caughtUp = isCaughtUp(now: turn.now) }
             turn.mining += mining.step(event, now: turn.now)
         }
         drain(&turn)
@@ -452,6 +462,7 @@ public struct ChainCore: Sendable {
         }
         effects += turn.indexed.map { .indexProof(childCID: $0.childCID, $0.proof) }
         let current = snapshot
+        if current.actOnHeight > 0, isCaughtUp(current, now: turn.now) { wasCaughtUp = true }
         if current != published {
             published = current
             effects.append(.publish(current))

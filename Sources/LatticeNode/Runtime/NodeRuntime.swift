@@ -130,6 +130,12 @@ public final class NodeRuntime: Sendable {
         let proofs = try headers.proofs()
         var coreConfig = coreConfig
         coreConfig.mining.mempool.minRelayFee = configuration.minRelayFee
+        // Conversion from an operator-supplied Double must not trap.
+        let maximumSeconds = Double(Int64.max / 1_000)
+        coreConfig.maxTipAge = Int64(min(configuration.miningMaxTipAge, maximumSeconds) * 1_000)
+        if let budget = configuration.servingBudget {
+            coreConfig.servingBudget = Int64(min(budget, maximumSeconds) * 1_000)
+        }
         let core = try await boot(
             storage: storage, configuration: configuration,
             coreConfig: coreConfig, headers: headers, proofs: proofs
@@ -1067,7 +1073,10 @@ extension NodeRuntime {
                     // A weighed root that has not executed carries nothing
                     // until it executes, rather than a rival genesis.
                     genesisSpec: snapshot.bestHeaderTip.isEmpty ? configuration.childSpecs[child] : nil,
-                    genesisTarget: .max
+                    genesisTarget: .max,
+                    // A level still syncing carries nothing: a block on its
+                    // act-on tip would be on a stale one.
+                    caughtUp: level.isCaughtUp(now: NodeRuntime.now())
                 )
             }
         }

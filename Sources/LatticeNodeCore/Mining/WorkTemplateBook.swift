@@ -52,6 +52,9 @@ public enum TemplateError: Error, Sendable, Equatable {
     /// Retriable: the executed tip moved more than `maxReissues` times while
     /// the request waited (the actor's `templateContextChanged`).
     case contextChanged
+    /// Retriable: the level is not caught up (`MiningState.caughtUp`), so a
+    /// block built now would be on a stale tip.
+    case syncing
 }
 
 /// The bounded work cache for external miners. It never searches a nonce.

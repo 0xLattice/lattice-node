@@ -290,6 +290,108 @@ final class MergedMiningTests: XCTestCase {
         await restarted.stop()
     }
 
+    /// A hosted child whose executed tip is older than `miningMaxTipAge`, in
+    /// a process that never saw it caught up, is left out of the template
+    /// while Nexus is still mined; a process in which its tip is not too old
+    /// carries it again.
+    func testAChildNotCaughtUpIsLeftOutOfTheTemplateWhileNexusIsStillMined() async throws {
+        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-merged-syncing-\(UUID().uuidString)", isDirectory: true
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
+        let port = NetworkTransportTestPorts.allocate()
+        let rpcPort = NetworkTransportTestPorts.allocate()
+        func start(hosting children: [[String]], maxTipAge: TimeInterval) async throws -> NodeRuntime {
+            let configuration = try NodeConfiguration(
+                chainPath: ["Nexus"], storagePath: storageDirectory,
+                privateKeyHex: String(repeating: "50", count: 32), listenPort: port, rpcPort: rpcPort,
+                miningMaxTipAge: maxTipAge,
+                hostedChildren: children, childSpecs: [Self.alpha: Self.alphaSpec]
+            )
+            return try await NodeRuntime.start(
+                storage: try await NodeStorage.open(configuration: configuration), configuration: configuration,
+                overlay: IvyConfig(
+                    signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: [],
+                    requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
+                    mode: .overlay
+                )
+            )
+        }
+        func carriesAlpha(_ template: MiningTemplateResponse) -> Bool {
+            template.block.children.node?.entries["Alpha"] != nil
+        }
+
+        // Alpha is mined past its genesis, then left alone for longer than
+        // the limit the next processes run with. Each process is one call:
+        // its storage is free once its runtime is gone.
+        let maxTipAge: TimeInterval = 3
+        func mineAlphaPastGenesis() async throws -> UInt64 {
+            let runtime = try await start(hosting: [Self.alpha], maxTipAge: 86_400)
+            try await eventually("Alpha is mined past its genesis") {
+                _ = try await runtime.mineBlock()
+                return (await runtime.levelReads[Self.alpha]?.readSnapshot().height ?? 0) >= 1
+            }
+            let height = await runtime.levelReads[Self.alpha]?.readSnapshot().height ?? 0
+            await runtime.stop()
+            return height
+        }
+        // A process that does not host Alpha mines Nexus a fresh tip.
+        func mineNexusAlone() async throws {
+            let runtime = try await start(hosting: [], maxTipAge: 0)
+            let height = runtime.published.value?.actOnHeight ?? 0
+            _ = try await runtime.mineBlock()
+            try await eventually("Nexus executes its fresh block") {
+                (runtime.published.value?.actOnHeight ?? 0) > height
+            }
+            await runtime.stop()
+        }
+        // Whether a process hosting both, with Alpha's tip too old, was
+        // caught up on Nexus: false when the restart outlasted the limit.
+        func mineWithAStaleAlpha(at alphaHeight: UInt64) async throws -> Bool {
+            let runtime = try await start(hosting: [Self.alpha], maxTipAge: maxTipAge)
+            let template: MiningTemplateResponse
+            do {
+                template = try await runtime.miningTemplate(MiningTemplateRequest())
+            } catch TemplateError.syncing {
+                await runtime.stop()
+                return false
+            }
+            let alphaReads = try XCTUnwrap(runtime.levelReads[Self.alpha])
+            let restored = await alphaReads.readSnapshot().height
+            XCTAssertEqual(restored, alphaHeight)
+            XCTAssertFalse(carriesAlpha(template), "Alpha's tip is too old to mine on")
+            let statusDigest = await runtime.status().templateDigest
+            XCTAssertEqual(template.templateDigest, statusDigest, "status and the template fingerprint the same tree")
+            // Nexus is mined without it, and Alpha stays where it was.
+            let nexusHeight = runtime.published.value?.actOnHeight ?? 0
+            _ = try await runtime.mineBlock()
+            try await eventually("Nexus advances without Alpha") {
+                (runtime.published.value?.actOnHeight ?? 0) > nexusHeight
+            }
+            let later = try await runtime.miningTemplate(MiningTemplateRequest())
+            XCTAssertFalse(carriesAlpha(later))
+            let unchanged = await alphaReads.readSnapshot().height
+            XCTAssertEqual(unchanged, alphaHeight)
+            await runtime.stop()
+            return true
+        }
+
+        let alphaHeight = try await mineAlphaPastGenesis()
+        try await Task.sleep(for: .seconds(maxTipAge) + .milliseconds(200))
+        var caughtUpOnNexus = false
+        for _ in 0..<5 where !caughtUpOnNexus {
+            try await mineNexusAlone()
+            caughtUpOnNexus = try await mineWithAStaleAlpha(at: alphaHeight)
+        }
+        XCTAssertTrue(caughtUpOnNexus, "Nexus was never caught up")
+
+        // The same tip within the limit is caught up: Alpha is carried.
+        let runtime = try await start(hosting: [Self.alpha], maxTipAge: 86_400)
+        let carrying = try await runtime.miningTemplate(MiningTemplateRequest())
+        XCTAssertTrue(carriesAlpha(carrying))
+        await runtime.stop()
+    }
+
     private func mineNestedFirstRun(
         _ configuration: NodeConfiguration,
         _ overlay: IvyConfig,

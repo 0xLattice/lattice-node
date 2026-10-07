@@ -353,7 +353,8 @@ level's facts and stream cursors commit in one `state.db` transaction.
 - `404 Not Found` — unknown resource or unhosted `chainPath`;
 - `415 Unsupported Media Type` — operator POST without JSON content type;
 - `429 Too Many Requests` — mempool or public-read rate limit;
-- `503 Service Unavailable` — stopping process or transient core context.
+- `503 Service Unavailable` — stopping process, transient core context, or a
+  template asked of a node still syncing (`syncing`).
 
 Error bodies use Hummingbird's JSON error envelope and preserve the named
 refusal where available.
