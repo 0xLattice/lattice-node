@@ -180,8 +180,9 @@ struct Mine: AsyncParsableCommand {
                         // State the OBSERVATION, not a cause: no usable answer
                         // covers a timeout, a transport failure, a non-200
                         // (the node answers 409 while bootstrapping and 503
-                        // when the mempool or parent is unavailable -- both
-                        // fast), and a reply carrying no expiry. Naming any one
+                        // when the mempool or parent is unavailable or the
+                        // node is `syncing` -- all fast), and a reply carrying
+                        // no expiry. Naming any one
                         // of them would send an operator after the wrong thing.
                         // Elapsed, not an attempt count: an attempt here spans
                         // anywhere from milliseconds (a fast non-200) to the

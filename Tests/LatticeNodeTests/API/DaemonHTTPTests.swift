@@ -112,6 +112,20 @@ final class DaemonHTTPTests: XCTestCase {
         }
     }
 
+    /// A mining limit that is not a nonnegative number is refused, never
+    /// read as 0 (off).
+    func testAnInvalidMiningMaxTipAgeIsRefused() async throws {
+        for value in ["-1", "nan", "inf"] {
+            var command = try LatticeNodeCommand.parse(["--mining-max-tip-age=\(value)"])
+            do {
+                try await command.run()
+                XCTFail("--mining-max-tip-age=\(value) was accepted")
+            } catch {
+                XCTAssertTrue("\(error)".contains("--mining-max-tip-age"), "\(error)")
+            }
+        }
+    }
+
     /// A web page can send a cross-origin "simple" POST (no preflight) or
     /// reach the loopback listener under a rebound hostname: the operator
     /// write routes refuse both before touching the service.

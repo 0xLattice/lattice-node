@@ -189,18 +189,15 @@ final class ChainCoreMiningTests: XCTestCase {
 
     // MARK: - Caught up
 
-    func testATemplateIsRefusedWhileHeadersAreMoreThanTheBodyWindowAhead() async throws {
+    /// Only the act-on tip's age holds mining back: headers weighed ahead
+    /// of it do not.
+    func testHeadersAheadOfTheActOnTipDoNotHoldMiningBack() async throws {
         var core = weighed(chain, config: ChainCoreConfig(bodyWindow: 2))
         XCTAssertEqual(core.snapshot.bestHeaderHeight, 4)
-        XCTAssertFalse(core.isCaughtUp(now: Self.now))
-        XCTAssertTrue(isSyncing(requestTemplate(&core)), "four weighed headers, none executed, a window of two")
-        XCTAssertEqual(core.mining.waitingTemplateRequests, 0, "a refused request does not wait")
-
+        XCTAssertTrue(isBuild(requestTemplate(&core)), "four weighed headers, none executed")
         _ = try await execute(&core, 0)
-        XCTAssertTrue(isSyncing(requestTemplate(&core)), "three ahead")
-        _ = try await execute(&core, 1)
-        XCTAssertEqual(core.snapshot.actOnHeight, 2)
-        XCTAssertTrue(isBuild(requestTemplate(&core)), "two ahead is within the window")
+        XCTAssertTrue(core.wasCaughtUp, "a fresh tip past genesis")
+        XCTAssertTrue(core.isCaughtUp(now: Self.now))
     }
 
     func testATemplateIsRefusedOnATipOlderThanMaxTipAgeUntilTheLevelHasCaughtUp() async throws {
@@ -217,6 +214,7 @@ final class ChainCoreMiningTests: XCTestCase {
         XCTAssertEqual(core.snapshot.bestHeaderHeight, core.snapshot.actOnHeight)
         XCTAssertTrue(isSyncing(requestTemplate(&core, now: late)), "one millisecond too old")
         XCTAssertFalse(core.wasCaughtUp, "neither a genesis tip nor a stale one latches")
+        XCTAssertTrue(core.isCaughtUp(now: chain[0].block.timestamp - 1), "a tip dated ahead of now is not old")
         XCTAssertTrue(isBuild(requestTemplate(&core, now: late - 1)), "exactly maxTipAge old is caught up")
         XCTAssertTrue(core.wasCaughtUp)
         // Once caught up, the tip's age no longer holds mining back (the
@@ -229,27 +227,6 @@ final class ChainCoreMiningTests: XCTestCase {
         var off = weighed([chain[0]], config: ChainCoreConfig(bodyWindow: 4, maxTipAge: 0), now: late)
         _ = try await execute(&off, 0, now: late)
         XCTAssertTrue(isBuild(requestTemplate(&off, now: late)))
-    }
-
-    func testHavingCaughtUpDoesNotLiftTheBodyGapTest() async throws {
-        var core = weighed([chain[0]], config: ChainCoreConfig(bodyWindow: 2))
-        _ = try await execute(&core, 0)
-        XCTAssertTrue(core.wasCaughtUp, "a fresh tip with no header ahead: a sole miner's own block")
-        XCTAssertTrue(isBuild(requestTemplate(&core)))
-        // Three more headers arrive: the level is behind again.
-        let rest = Array(chain.dropFirst())
-        let page = core.step(.received(peer, .stream(StreamPage(
-            requestID: 0, logID: "peer",
-            entries: rest.enumerated().map { StreamEntry(position: UInt64($0.offset + 2), entry: .header($0.element.cid)) },
-            hasMore: false
-        ))), now: Self.now)
-        for case .send(_, .getData(let id, _)) in page {
-            _ = core.step(.received(peer, .headers(HeadersResponse(
-                requestID: id, entries: rest.map { HeaderEntry(block: $0.block, children: $0.children) }, hasMore: false
-            ))), now: Self.now)
-        }
-        XCTAssertEqual(core.snapshot.bestHeaderHeight, 4)
-        XCTAssertTrue(isSyncing(requestTemplate(&core)))
     }
 
     func testALevelWithNoRootIsCaughtUp() throws {

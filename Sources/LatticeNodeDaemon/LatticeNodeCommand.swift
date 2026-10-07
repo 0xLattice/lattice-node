@@ -77,10 +77,10 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Seconds with no newly accepted Nexus block after which the node widens its peer search: re-dial configured peers without a session and look up providers of Nexus genesis. The node also announces each hosted chain by genesis. Staleness is measured from the verified local tip. Discovery never affects validation or fork choice. 0 disables search.")
     var peerSearchInterval: Double = 600
 
-    @Option(help: "Seconds past which a hosted chain's executed tip is too old to mine on while the node has not yet caught up on that chain since it started. Until a chain is caught up the node issues no work for it: a template request for Nexus is answered 503 `syncing`, and a hosted child is left out of the template. A chain also counts as syncing whenever its verified headers are more than the body window ahead of what it has executed. Measured from the verified local tip, never a peer's claim. 0 turns the age test off (needed to restart a chain nobody has mined for longer than this).")
+    @Option(help: "Seconds past which a hosted chain's executed tip is too old to mine on while the node has not yet caught up on that chain since it started. Until a chain is caught up the node issues no work for it: a template request for Nexus is answered 503 `syncing` (which stops every hosted child too, since children are mined inside a Nexus template), and a hosted child is left out of the template. A chain with only its genesis is never too old. Measured from the verified local tip, never a peer's claim. 0 turns the test off (needed to resume a chain nobody has mined for longer than this).")
     var miningMaxTipAge: Double = 86_400
 
-    @Option(help: "Seconds this node spends gathering one headers answer for a peer before it sends what it has (always at least one header). Default: a sixth of the 30-second request timeout.")
+    @Option(help: "Seconds this node spends gathering one headers answer for a peer before it sends what it has (always at least one header). Keep it well under the 30-second request deadline; a larger value is held to that deadline. Default: a sixth of it.")
     var servingBudget: Double?
 
     @Option(help: "Public read-only HTTP port; binds all interfaces and serves ONLY the bounded GET read routes (the read-replica allowlist, enforced in code). Chain data is public; this exposes no operator or write surface.")
@@ -123,6 +123,12 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         }
         if publicSubmit, publicReadPort == nil {
             throw ValidationError("--public-submit requires --public-read-port")
+        }
+        guard miningMaxTipAge.isFinite, miningMaxTipAge >= 0 else {
+            throw ValidationError("--mining-max-tip-age must be finite and nonnegative (0 turns the test off)")
+        }
+        if let servingBudget, !servingBudget.isFinite || servingBudget < 0 {
+            throw ValidationError("--serving-budget must be finite and nonnegative")
         }
         let publicReadLimits = try PublicReadRateLimits.validated(
             generalRate: publicReadRate,

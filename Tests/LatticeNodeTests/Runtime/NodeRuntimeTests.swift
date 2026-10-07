@@ -50,6 +50,60 @@ final class NodeRuntimeTests: XCTestCase {
         )
     }
 
+    /// Operator seconds reach the core as milliseconds: a huge value does
+    /// not trap, a positive one never becomes 0 (off), an invalid mining
+    /// limit is the default, and the serving budget stays within the
+    /// request deadline.
+    func testOperatorSecondsBecomeCoreMilliseconds() async throws {
+        XCTAssertEqual(NodeRuntime.milliseconds(0), 0)
+        XCTAssertEqual(NodeRuntime.milliseconds(86_400), 86_400_000)
+        XCTAssertEqual(NodeRuntime.milliseconds(0.0001), 1)
+        XCTAssertEqual(NodeRuntime.milliseconds(Double(Int64.max / 1_000)), .max)
+        XCTAssertEqual(NodeRuntime.milliseconds(1e16), .max)
+
+        func configuration(maxTipAge: TimeInterval, servingBudget: TimeInterval?) throws -> NodeConfiguration {
+            try NodeConfiguration(
+                chainPath: ["Nexus"], storagePath: FileManager.default.temporaryDirectory,
+                privateKeyHex: String(repeating: "61", count: 32),
+                miningMaxTipAge: maxTipAge, servingBudget: servingBudget
+            )
+        }
+        func core(_ configuration: NodeConfiguration) -> ChainCoreConfig {
+            NodeRuntime.coreConfig(ChainCoreConfig(), applying: configuration)
+        }
+        let huge = core(try configuration(maxTipAge: 1e16, servingBudget: 1e16))
+        XCTAssertEqual(huge.maxTipAge, .max)
+        XCTAssertEqual(huge.servingBudget, huge.headersTimeout, "an answer never outlasts the request deadline")
+        let small = core(try configuration(maxTipAge: 0.0001, servingBudget: 2.5))
+        XCTAssertEqual(small.maxTipAge, 1, "a positive limit is never rounded to off")
+        XCTAssertEqual(small.servingBudget, 2_500)
+        XCTAssertEqual(core(try configuration(maxTipAge: 0, servingBudget: nil)).maxTipAge, 0)
+        XCTAssertEqual(
+            core(try configuration(maxTipAge: 0, servingBudget: nil)).servingBudget, ChainCoreConfig().servingBudget
+        )
+        for invalid in [-1, .nan, .infinity, -.infinity] as [TimeInterval] {
+            let sanitized = try configuration(maxTipAge: invalid, servingBudget: invalid)
+            XCTAssertEqual(sanitized.miningMaxTipAge, 86_400, "only an explicit 0 turns the test off")
+            XCTAssertNil(sanitized.servingBudget)
+        }
+
+        // A node started with all three at a value that overflows runs its
+        // boot, its first maintenance pass and a template request.
+        let base = try host(keyByte: 0x62)
+        let configured = try NodeConfiguration(
+            chainPath: ["Nexus"], storagePath: base.configuration.storagePath,
+            privateKeyHex: String(repeating: "62", count: 32),
+            listenPort: base.configuration.listenPort, rpcPort: base.configuration.rpcPort,
+            peerSearchInterval: 1e16, miningMaxTipAge: 1e16, servingBudget: 1e16
+        )
+        let runtime = try await NodeRuntime.start(
+            storage: try await NodeStorage.open(configuration: configured),
+            configuration: configured, overlay: base.overlay
+        )
+        _ = try await runtime.miningTemplate(MiningTemplateRequest())
+        await runtime.stop()
+    }
+
     func testJoinerSyncsHeadersAndExecutesBodiesOverLoopbackIvy() async throws {
         let producer = try host(keyByte: 0x31)
         let producerStorage = try await NodeStorage.open(configuration: producer.configuration)

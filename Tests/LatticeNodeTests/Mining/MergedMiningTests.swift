@@ -323,8 +323,9 @@ final class MergedMiningTests: XCTestCase {
 
         // Alpha is mined past its genesis, then left alone for longer than
         // the limit the next processes run with. Each process is one call:
-        // its storage is free once its runtime is gone.
-        let maxTipAge: TimeInterval = 3
+        // its storage is free once its runtime is gone. The limit is long
+        // against one restart, which must fit inside it below.
+        let maxTipAge: TimeInterval = 10
         func mineAlphaPastGenesis() async throws -> UInt64 {
             let runtime = try await start(hosting: [Self.alpha], maxTipAge: 86_400)
             try await eventually("Alpha is mined past its genesis") {

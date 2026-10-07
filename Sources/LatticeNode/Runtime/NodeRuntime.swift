@@ -128,14 +128,7 @@ public final class NodeRuntime: Sendable {
             nexusGenesisCID: configuration.nexusGenesisCID
         )
         let proofs = try headers.proofs()
-        var coreConfig = coreConfig
-        coreConfig.mining.mempool.minRelayFee = configuration.minRelayFee
-        // Conversion from an operator-supplied Double must not trap.
-        let maximumSeconds = Double(Int64.max / 1_000)
-        coreConfig.maxTipAge = Int64(min(configuration.miningMaxTipAge, maximumSeconds) * 1_000)
-        if let budget = configuration.servingBudget {
-            coreConfig.servingBudget = Int64(min(budget, maximumSeconds) * 1_000)
-        }
+        let coreConfig = Self.coreConfig(coreConfig, applying: configuration)
         let core = try await boot(
             storage: storage, configuration: configuration,
             coreConfig: coreConfig, headers: headers, proofs: proofs
@@ -356,6 +349,27 @@ public final class NodeRuntime: Sendable {
     static func now() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1_000)
     }
+
+    /// An operator's seconds as the core's milliseconds, rounded up (a
+    /// positive setting never becomes 0, which turns a limit off) and
+    /// without trapping: too large for `Int64` is `.max`.
+    static func milliseconds(_ seconds: TimeInterval) -> Int64 {
+        let value = (seconds * 1_000).rounded(.up)
+        return value < 0x1p63 ? Int64(max(value, 0)) : .max
+    }
+
+    /// `coreConfig` with the operator's settings from `configuration`.
+    static func coreConfig(_ coreConfig: ChainCoreConfig, applying configuration: NodeConfiguration) -> ChainCoreConfig {
+        var coreConfig = coreConfig
+        coreConfig.mining.mempool.minRelayFee = configuration.minRelayFee
+        coreConfig.maxTipAge = milliseconds(configuration.miningMaxTipAge)
+        if let budget = configuration.servingBudget {
+            // An answer gathered for longer than the requester waits is
+            // never received, and the request is repeated without end.
+            coreConfig.servingBudget = min(milliseconds(budget), coreConfig.headersTimeout)
+        }
+        return coreConfig
+    }
 }
 
 extension NodeRuntime {
@@ -570,10 +584,7 @@ extension NodeRuntime {
                 .filter { $0 != core.rootPath }
                 .map { ReadEndpointKey.key(nexusGenesisCID: configuration.nexusGenesisCID, chainPath: $0) })
 
-            // Conversion from an operator-supplied Double must not trap even
-            // for a finite but unreasonably large value.
-            let maximumSeconds = Double(Int64.max / 1_000)
-            let interval = Int64(min(configuration.peerSearchInterval, maximumSeconds) * 1_000)
+            let interval = NodeRuntime.milliseconds(configuration.peerSearchInterval)
             let due = peerSearch.due(
                 heights: core.ordered.compactMap { path in
                     core.levels[path].map { (path, $0.snapshot.actOnHeight) }

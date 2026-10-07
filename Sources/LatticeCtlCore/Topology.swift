@@ -65,7 +65,7 @@ public struct Topology: Codable, Sendable {
     public var servingBudget: Double?
     /// Seconds past which a chain's executed tip is too old to mine on
     /// before the node has caught up on it (`--mining-max-tip-age`). Absent =
-    /// the node's default, a day; `0` turns the age test off.
+    /// the node's default, a day; `0` turns the test off.
     public var miningMaxTipAge: Double?
     /// Child chains this process hosts as levels, parent before child.
     public var hostedChains: [String]?

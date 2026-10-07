@@ -162,7 +162,7 @@ public struct ChainCoreConfig: Sendable {
     public var bodyRetryCap: Int64
     /// An act-on tip older than this (ms) is not mined on until the level
     /// has caught up once (`ChainCore.isCaughtUp`): Bitcoin's `-maxtipage`.
-    /// 0 turns the age test off.
+    /// 0 turns the test off.
     public var maxTipAge: Int64
     /// The level's mempool and template bounds.
     public var mining = MiningConfig()

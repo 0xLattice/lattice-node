@@ -98,8 +98,10 @@ to `0` only for an intentionally isolated node.
 
 A peer's request for headers is answered with what the node gathers within
 `servingBudget` (`--serving-budget`, seconds, default 5), always at least one
-header; the peer asks again for the rest. Lower it on a slow disk if peers
-time out before an answer is sent.
+header; the peer asks again for the rest. Keep it well under the 30-second
+request deadline, after which the peer gives up on the answer; a larger value
+is held to that deadline. Lower it on a slow disk if peers time out before an
+answer is sent.
 
 Useful checks:
 
@@ -212,16 +214,21 @@ tip did not change. Submitted work is persisted only for child levels whose
 target the hash actually meets.
 
 The node issues no work for a chain it is still syncing. A chain is syncing
-while its verified headers are more than the body window (64 blocks) ahead of
-what it has executed, or while its executed tip is older than
-`miningMaxTipAge` (`--mining-max-tip-age`, seconds, default 86400) and the
-node has not yet caught up on that chain since it started; a chain with only
-its genesis is never too old. A syncing Nexus answers `POST /mining/templates`
-with 503 `syncing`, which the coordinator retries; a syncing hosted child is
-left out of the template while Nexus and the other children are mined. Both
-tests read the locally verified chain, never a remote height claim. Set
-`miningMaxTipAge` to `0` to restart a chain nobody has mined for longer than
-that.
+while its executed tip is older than `miningMaxTipAge`
+(`--mining-max-tip-age`, seconds, default 86400) and the node has not yet
+caught up on that chain since it started; a chain with only its genesis is
+never too old. The test reads the locally verified tip, never a remote height
+claim. A syncing hosted child is left out of the template while Nexus and the
+other children are mined. A syncing Nexus answers `POST /mining/templates`
+with 503 `syncing`, which the coordinator retries.
+
+Children are mined only inside a Nexus template, so while Nexus is refused as
+`syncing` every hosted child stops too. This is the case after a restart on a
+Nexus nobody has mined for longer than the limit, and Nexus's target block
+time is long, so a quiet Nexus reaches the limit in far fewer blocks than a
+child does. Resume by starting the node with `--mining-max-tip-age 0` (or a
+value larger than the tip's age); once a block lands, the node is caught up
+for as long as it runs. Only `0` turns the test off.
 
 Alert when:
 
