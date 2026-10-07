@@ -701,7 +701,10 @@ public struct ChainCore: Sendable {
     /// as an announcer (the peer holds its ancestors). Otherwise the next
     /// page is pulled. Holes still lacking are asked again on a tick. A
     /// child level asks for no more headers than it has room for their
-    /// proofs (`proofRoom`): the rest are asked as checks finish.
+    /// proofs (`proofRoom`): the rest are asked as checks finish - once
+    /// half the peer's slots are free, so that a request, which occupies
+    /// the peer for a round trip, is not spent on the one slot the first
+    /// finished check frees.
     mutating func pump(_ peer: PeerID, _ turn: inout Turn, again: Bool = false) {
         guard let state = sync.peers[peer], state.data == nil, sync.cursors[peer.key] != nil else { return }
         let inFlight = Set(sync.peers.values.flatMap { $0.data?.cids ?? [] })
@@ -715,6 +718,12 @@ public struct ChainCore: Sendable {
                 break
             }
             if seen.insert(hole.entry.block).inserted { cids.append(hole.entry.block) }
+        }
+        if requested < (state.holes.last?.position ?? 0), cids.count * 2 < proofConfig.maxPerSource {
+            // The window is full and under half of it is free: wait for
+            // more checks to finish (some are in flight, or it would fit).
+            requested = state.requested
+            cids = []
         }
         for hole in state.holes where hole.position > state.requested && hole.position <= requested
             && hole.entry.kind == .header && sync.pending.entries[hole.entry.block] != nil {
