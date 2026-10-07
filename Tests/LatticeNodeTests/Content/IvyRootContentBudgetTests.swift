@@ -47,7 +47,7 @@ final class IvyRootContentBudgetTests: XCTestCase {
     /// budget declined it rather than that nobody served it.
     func testContentPastTheByteBudgetIsDeclinedAndSaidSo() async throws {
         let item = try content(1)
-        let framed = item.cid.utf8.count + item.data.count + 6
+        let framed = item.cid.utf8.count + item.data.count + IvyRootContentSource.retainedEntryOverhead
 
         let tight = source(serving: [item.cid: item.data], maximumStorageBytes: framed - 1)
         let declined = await tight.withRootTracing(item.cid) { session in await session.fetch([item.cid]) }
@@ -58,5 +58,55 @@ final class IvyRootContentBudgetTests: XCTestCase {
         let held = await exact.withRootTracing(item.cid) { session in await session.fetch([item.cid]) }
         XCTAssertEqual(held.value[item.cid], item.data)
         XCTAssertFalse(held.attribution.byteBudgetExceeded)
+    }
+
+    /// A Volume a peer padded with entries nobody asked for is charged what
+    /// the session retains for each of them, so padding cannot make a session
+    /// hold more than its budget says.
+    func testAPaddedVolumeIsChargedWhatTheSessionRetainsForEachEntry() async throws {
+        let root = try content(0)
+        var entries = [root.cid: root.data]
+        for nonce in 1...500 {
+            let junk = try content(UInt64(nonce))
+            entries[junk.cid] = junk.data
+        }
+        let padded = entries
+        func source(maximumStorageBytes: Int) -> IvyRootContentSource {
+            IvyRootContentSource(maximumStorageBytes: maximumStorageBytes) { _ in
+                AttributedVolumeResponse(rootCID: root.cid, entries: padded, servedBy: nil, failure: nil)
+            }
+        }
+        // What holding the entries takes at the very least: their CIDs and
+        // bytes, a slot in each of the four tables keyed by CID, the data's
+        // header and the owner set's.
+        let slots = 4 * MemoryLayout<String>.stride + MemoryLayout<Data>.stride
+            + MemoryLayout<Set<String>>.stride
+        let retainedAtLeast = padded.reduce(0) { $0 + $1.key.utf8.count + $1.value.count + slots }
+
+        let charged = await source(maximumStorageBytes: .max).withRoot(root.cid) { session in
+            _ = await session.fetch([root.cid])
+            return session.accountedBytes
+        }
+        XCTAssertGreaterThanOrEqual(charged, retainedAtLeast)
+
+        let declined = await source(maximumStorageBytes: charged - 1).withRootTracing(root.cid) { session in
+            let fetched = await session.fetch([root.cid])
+            return (fetched: fetched.count, accounted: session.accountedBytes)
+        }
+        XCTAssertEqual(declined.value.fetched, 0)
+        XCTAssertEqual(declined.value.accounted, 0)
+        XCTAssertTrue(declined.attribution.byteBudgetExceeded)
+    }
+
+    /// A size a peer declares is its claim, verified by nothing: an answer
+    /// refused for it says nothing about this node's budget.
+    func testASizeAPeerOnlyDeclaredIsNotThisNodesBudget() async throws {
+        let item = try content(1)
+        let source = IvyRootContentSource { _ in
+            AttributedVolumeResponse(rootCID: "", entries: [:], servedBy: nil, failure: .callerBoundaryExceeded)
+        }
+        let refused = await source.withRootTracing(item.cid) { session in await session.fetch([item.cid]) }
+        XCTAssertTrue(refused.value.isEmpty)
+        XCTAssertFalse(refused.attribution.byteBudgetExceeded)
     }
 }
