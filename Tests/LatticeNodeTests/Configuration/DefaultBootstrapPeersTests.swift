@@ -280,7 +280,7 @@ final class DefaultBootstrapPeersTests: XCTestCase {
     }
 
     /// Defaults are discovery, not trust: they reach only the public overlay
-    /// plane, and they carry no admission bypass.
+    /// plane.
     func testDefaultsReachOnlyTheOverlayPlaneAndCarryNoTrust() throws {
         let storageDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(
@@ -301,10 +301,6 @@ final class DefaultBootstrapPeersTests: XCTestCase {
         let planes = try OverlayConfiguration(configuration)
 
         XCTAssertEqual(planes.overlay.bootstrapPeers, DefaultBootstrapPeers.nexus)
-        XCTAssertTrue(
-            planes.overlay.inboundAdmissionBypassPeerKeys.isEmpty,
-            "a default peer gets no admission bypass"
-        )
         XCTAssertTrue(
             planes.overlay.carriers.isEmpty,
             "a default peer is not a carrier"

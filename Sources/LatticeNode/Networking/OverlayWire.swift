@@ -39,7 +39,7 @@ extension CanonicalJSONMessage {
             throw OverlayWireError.malformed
         }
         try value.validate()
-        guard try value.encoded() == data else {
+        guard try _canonicalJSONEncode(value) == data else {
             throw OverlayWireError.nonCanonical
         }
         return value

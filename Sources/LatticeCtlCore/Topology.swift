@@ -14,8 +14,7 @@ public struct Topology: Codable, Sendable {
         case listen, rpc, peers, publicRead, externalAddress
         case publicReadRate, publicReadExpensiveRate, publicReadMaxRate
         case publicReadURL, publicSubmit, publicSubmitRate, minRelayFee
-        case servingMaxConcurrent, servingMaxConcurrentPerPeer
-        case servingMaxQueuedPerPeer, servingMaxInFlightVolumeBytes
+        case servingMaxConcurrent, servingMaxInFlightVolumeBytes
         case hostedChains, mine, rpcAllowedOrigins
     }
     public var listen: UInt16
@@ -56,8 +55,6 @@ public struct Topology: Codable, Sendable {
     public var minRelayFee: UInt64?
     /// Content-serving limits (`--serving-max-*`). Absent = the node's defaults.
     public var servingMaxConcurrent: Int?
-    public var servingMaxConcurrentPerPeer: Int?
-    public var servingMaxQueuedPerPeer: Int?
     public var servingMaxInFlightVolumeBytes: Int?
     /// Child chains this process hosts as levels, parent before child.
     public var hostedChains: [String]?
@@ -178,8 +175,6 @@ public struct Topology: Codable, Sendable {
     public var contentServingArguments: [String] {
         var arguments: [String] = []
         if let value = servingMaxConcurrent { arguments += ["--serving-max-concurrent", String(value)] }
-        if let value = servingMaxConcurrentPerPeer { arguments += ["--serving-max-concurrent-per-peer", String(value)] }
-        if let value = servingMaxQueuedPerPeer { arguments += ["--serving-max-queued-per-peer", String(value)] }
         if let value = servingMaxInFlightVolumeBytes {
             arguments += ["--serving-max-in-flight-volume-bytes", String(value)]
         }

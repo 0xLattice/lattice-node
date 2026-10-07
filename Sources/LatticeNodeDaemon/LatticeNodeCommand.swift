@@ -65,12 +65,6 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Content requests this node serves to peers at once, all combined. Past the limits requests wait rather than being refused, and freed slots are shared by weight, favouring peers that have served this node verified content; a peer with none still advances.")
     var servingMaxConcurrent = 64
 
-    @Option(help: "Content requests one peer may have served at once. Default: a quarter of --serving-max-concurrent, at most 8.")
-    var servingMaxConcurrentPerPeer: Int?
-
-    @Option(help: "Content requests one peer may have waiting when its slots are busy. Each peer has its own allotment, so no peer can crowd another out.")
-    var servingMaxQueuedPerPeer = 64
-
     @Option(help: "Bytes of Volumes this node reads or sends to peers at once.")
     var servingMaxInFlightVolumeBytes = IvyConfig.defaultMaxInFlightVolumeBytes
 
@@ -160,8 +154,6 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             overlayMaxConnectionsPerNetgroup: overlayMaxConnectionsPerNetgroup,
             contentServing: ContentServingLimits(
                 maxConcurrent: servingMaxConcurrent,
-                maxConcurrentPerPeer: servingMaxConcurrentPerPeer,
-                maxQueuedPerPeer: servingMaxQueuedPerPeer,
                 maxInFlightVolumeBytes: servingMaxInFlightVolumeBytes
             ),
             externalAddress: externalAddress,
