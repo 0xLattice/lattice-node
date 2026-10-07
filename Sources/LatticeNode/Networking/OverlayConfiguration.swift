@@ -28,8 +28,6 @@ struct OverlayConfiguration {
                 // minPeerKeyBits, not this bucket.
                 maxConnectionsPerNetgroup: configuration.overlayMaxConnectionsPerNetgroup,
                 maxConcurrentContentRequests: configuration.contentServing.maxConcurrent,
-                maxConcurrentContentRequestsPerPeer: configuration.contentServing.maxConcurrentPerPeer,
-                maxQueuedContentRequestsPerPeer: configuration.contentServing.maxQueuedPerPeer,
                 minPeerKeyBits: configuration.minPeerKeyBits,
                 maxInFlightVolumeBytes: configuration.contentServing.maxInFlightVolumeBytes,
                 // Self-described reachable address: provider announcements and
@@ -44,9 +42,7 @@ struct OverlayConfiguration {
     }
 
     init(overlay: IvyConfig) throws {
-        guard overlay.mode == .overlay,
-              overlay.inboundAdmissionBypassPeerKeys.isEmpty
-        else {
+        guard overlay.mode == .overlay else {
             throw IvyModeError.invalidConfiguration(
                 "network runtime requires an overlay plane"
             )

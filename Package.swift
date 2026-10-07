@@ -34,7 +34,7 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/adalinxx/Ivy.git",
-            exact: "13.2.1"
+            branch: "fix/serving-waits-never-refuses"
         ),
         .package(
             url: "https://github.com/adalinxx/Tally.git",

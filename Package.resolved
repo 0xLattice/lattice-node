@@ -1,5 +1,5 @@
 {
-  "originHash" : "3c060cf42db002bb00b2ffd7e63a3ee0fa900e7a54777b2841c3fd14ed077e01",
+  "originHash" : "d93639579c9e1da922d6df31c98d66baf830c9bc8416faedfa52802b38bf13b3",
   "pins" : [
     {
       "identity" : "arraytrie",
@@ -60,8 +60,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/adalinxx/Ivy.git",
       "state" : {
-        "revision" : "27f8f65725eb92eccc5e6abca99c90c52c455708",
-        "version" : "13.2.1"
+        "branch" : "fix/serving-waits-never-refuses",
+        "revision" : "309d9f1a8ffc544f2683508f274bc8623793a64d"
       }
     },
     {

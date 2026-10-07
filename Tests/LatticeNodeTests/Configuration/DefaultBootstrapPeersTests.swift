@@ -302,10 +302,6 @@ final class DefaultBootstrapPeersTests: XCTestCase {
 
         XCTAssertEqual(planes.overlay.bootstrapPeers, DefaultBootstrapPeers.nexus)
         XCTAssertTrue(
-            planes.overlay.inboundAdmissionBypassPeerKeys.isEmpty,
-            "a default peer gets no admission bypass"
-        )
-        XCTAssertTrue(
             planes.overlay.carriers.isEmpty,
             "a default peer is not a carrier"
         )
