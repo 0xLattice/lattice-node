@@ -54,8 +54,8 @@ both hosts, and sync messages carry their absolute path. Parent facts,
 attributed runs, merged-mining inputs, and a locally mined grind's carried
 blocks pass directly between levels and never become a second network protocol.
 
-Provider records keyed by each active hosted genesis advertise availability on
-that shared overlay. They grant neither consensus authority nor a special
+Provider records keyed by each hosted chain - Nexus by its genesis, a child by
+its path - advertise availability on that shared overlay. They grant neither consensus authority nor a special
 parent/child network role.
 
 ## Work and one-way authority
