@@ -16,6 +16,9 @@ public enum ChainEvent: Sendable {
     case headersServed(PeerID, token: UInt64)
     /// The content layer holds the body Volume of this block locally.
     case bodyFetched(cid: String)
+    /// A fetch attempt for this block's body finished without it. The
+    /// content layer keeps trying.
+    case bodyMissed(cid: String)
     /// A connect job's verdict, with the CIDs of the transactions the block
     /// carries (the job read them from the body it executed): what the act-on
     /// chain confirms when it enters the block.
@@ -257,6 +260,9 @@ public struct ChainCore: Sendable {
     /// once executed (or proven invalid), or at once when the block is
     /// weighed off the best chain, which the body window never executes.
     var minedReplies: [String: UInt64] = [:]
+    /// This node's own mined blocks not yet executed: each is executed when
+    /// it is produced, on the best header chain or not.
+    var ownMined: Set<String> = []
     /// The blocks this step's admissions weighed (`ChainTreeUpdate.weighed`),
     /// for the host to forward to run attribution. Reset by every step.
     public internal(set) var weighed: [String] = []
@@ -274,7 +280,6 @@ public struct ChainCore: Sendable {
     ) {
         var tree = tree
         precondition(tree.context != nil, "the core runs one chain's level")
-        mining = MiningState(tipCID: Self.miningTip(of: tree), spec: Self.actOnSpec(of: tree), config: config.mining)
         var index = WeighedIndex()
         var stack = roots ?? Self.bestRoot(of: tree)
         while let hash = stack.popLast() {
@@ -282,6 +287,9 @@ public struct ChainCore: Sendable {
             index.add(hash, parent: meta.parentBlockHash, height: meta.blockHeight)
             stack += meta.childHashes
         }
+        mining = MiningState(
+            tipCID: Self.miningTip(of: tree, index: index), spec: Self.actOnSpec(of: tree), config: config.mining
+        )
         self.tree = tree
         self.config = config
         self.index = index
@@ -367,6 +375,8 @@ public struct ChainCore: Sendable {
                 sync.peers[peer]?.queued.removeFirst()
                 serve(next, to: peer, &turn)
             }
+        case .bodyMissed(let cid):
+            if bodies.requested.contains(cid) { bodies.missed.insert(cid) }
         case .bodyFetched(let cid):
             bodyFetched(cid)
         case .connected(let verdict, let transactions):

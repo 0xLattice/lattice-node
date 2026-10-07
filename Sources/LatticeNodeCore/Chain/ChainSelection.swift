@@ -7,7 +7,7 @@ import Lattice
 // mempool's tip.
 
 /// What readers see: the best header tip and the tip a node acts on — the
-/// deepest executed block on the best chain — with the mining tip epoch (a
+/// heaviest executed tip — with the mining tip epoch (a
 /// worker skips a job whose epoch is not this one) and the pool's size.
 public struct ChainSnapshot: Sendable, Equatable {
     public let bestHeaderTip: String
@@ -26,8 +26,52 @@ extension ChainCore {
     }
 
     /// The mempool's starting tip: the act-on tip.
-    static func miningTip(of tree: ChainTree) -> String {
-        tree.actOnTip().hash
+    static func miningTip(of tree: ChainTree, index: WeighedIndex) -> String {
+        actOnTip(of: tree, index: index).hash
+    }
+
+    /// The tip a node acts on: the heaviest executed tip. From genesis, at
+    /// each fork the heaviest child (its whole header subtree, fork choice's
+    /// own measure and tie-break) that is executed is the step taken; the
+    /// descent stops where no child is executed. A block with no verdict —
+    /// its body not held, or not yet run — is never stepped into and never
+    /// marked: it weighs, and is taken once it executes.
+    ///
+    /// Up to the executed prefix of the best header chain this is fork
+    /// choice's own descent (its heaviest child there is executed), so the
+    /// walk starts from that prefix.
+    static func actOnTip(of tree: ChainTree, index: WeighedIndex) -> (hash: String, height: UInt64) {
+        var tip = tree.executedPrefix()
+        guard !tip.hash.isEmpty else { return tip }
+        while let next = heaviest(of: (index.children[tip.hash] ?? []).filter(tree.isExecuted(blockHash:)), in: tree) {
+            tip = (next, tip.height + 1)
+        }
+        return tip
+    }
+
+    var actOnTip: (hash: String, height: UInt64) {
+        Self.actOnTip(of: tree, index: index)
+    }
+
+    /// The parent of a weighed block: how a reader walks the act-on chain,
+    /// which need not be the best header chain.
+    public func parent(of cid: String) -> String? {
+        index.parent[cid]
+    }
+
+    /// The heaviest of sibling blocks by fork choice's subtree work, ties by
+    /// its rule. Only a fork is weighed.
+    static func heaviest(of siblings: [String], in tree: ChainTree) -> String? {
+        guard siblings.count > 1 else { return siblings.first }
+        let work = { (hash: String) in tree.forkChoiceSnapshot(startingAt: hash)?.subtreeWork.uint256Value ?? .zero }
+        var best = (hash: siblings[0], work: work(siblings[0]))
+        for hash in siblings.dropFirst() {
+            let weight = work(hash)
+            if weight > best.work || (weight == best.work && forkChoicePrefersBlock(hash, over: best.hash)) {
+                best = (hash, weight)
+            }
+        }
+        return best.hash
     }
 
     /// The spec of the act-on tip's genesis root: what the mempool measures
@@ -39,7 +83,7 @@ extension ChainCore {
     }
 
     public var snapshot: ChainSnapshot {
-        let actOn = tree.actOnTip()
+        let actOn = actOnTip
         return ChainSnapshot(
             bestHeaderTip: tree.canonicalTip,
             bestHeaderHeight: tree.headerSnapshot(of: tree.canonicalTip)?.tipHeight ?? 0,
@@ -64,7 +108,7 @@ extension ChainCore {
     /// old tip until the read answers, since a verdict on the new tip could
     /// not tell a used nonce from a confirmation.
     mutating func moveMiningTip(_ turn: inout Turn) {
-        let tip = tree.actOnTip()
+        let tip = actOnTip
         guard tip.hash != mining.tipCID else { return }
         var entered: [String] = []
         var left: [String] = []
@@ -101,11 +145,12 @@ extension ChainCore {
         }
     }
 
-    /// Answer each mined block awaiting execution that is not on the best
-    /// chain: the body window will not execute it.
+    /// Answer each mined block awaiting execution that the body window will
+    /// not execute: one off the best chain that is not this node's to
+    /// execute (its parent is not executed).
     mutating func answerSideMined(_ turn: inout Turn) {
         for (cid, replyID) in minedReplies.sorted(by: { $0.key < $1.key })
-        where index.contains(cid) && !tree.isCanonical(hash: cid) {
+        where index.contains(cid) && !tree.isCanonical(hash: cid) && !ownMined.contains(cid) {
             minedReplies[cid] = nil
             turn.effects.append(.workSubmitted(replyID: replyID, .side))
         }
@@ -115,10 +160,10 @@ extension ChainCore {
 
 extension ChainTree {
     /// The deepest block on the best header chain whose ancestry is executed
-    /// from genesis: the tip a node acts on. The executed blocks on one path
+    /// from genesis. The executed blocks on one path
     /// are a prefix of it, so this is a binary search over heights. None
     /// (an empty hash) while the best chain's genesis root is not executed.
-    func actOnTip() -> (hash: String, height: UInt64) {
+    func executedPrefix() -> (hash: String, height: UInt64) {
         guard let genesis = canonicalBlockHash(atHeight: 0), isExecuted(blockHash: genesis) else { return ("", 0) }
         let tipHeight = headerSnapshot(of: canonicalTip)?.tipHeight ?? 0
         var low: UInt64 = 0

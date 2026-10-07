@@ -656,6 +656,8 @@ public struct Simulator {
                 report.bodyFetches += 1
                 node.fetching.insert(cid)
                 let available = max(now, config.withheldBodies[cid] ?? now)
+                // A withheld body's first fetch attempt finishes empty.
+                if available > now { schedule(at: now, to: name, .core(.bodyMissed(cid: cid))) }
                 guard available != .max, world.blocks[cid] != nil else { continue }
                 schedule(
                     at: available + rng.draw(config.minDelay...config.maxDelay),

@@ -700,17 +700,18 @@ extension NodeRuntime {
                     || view.waiting != waiting else { return }
             if view.actOnTip != tip.hash {
                 view.actOnTip = tip.hash
-                let tree = level.tree
-                var keep = min(view.heights.count, tip.hash.isEmpty ? 0 : Int(tip.height) + 1)
-                while keep > 0, view.heights[keep - 1] != tree.canonicalBlockHash(atHeight: UInt64(keep - 1)) {
+                // The act-on chain is the tip's ancestry, on the best header
+                // chain or not: walk down to where the view already agrees.
+                var entered: [String] = []
+                var keep = tip.hash.isEmpty ? 0 : Int(tip.height) + 1
+                var cursor: String? = tip.hash
+                while keep > 0, let cid = cursor, !(keep <= view.heights.count && view.heights[keep - 1] == cid) {
+                    entered.append(cid)
+                    cursor = level.parent(of: cid)
                     keep -= 1
                 }
                 view.heights.truncate(to: keep)
-                var height = UInt64(keep)
-                while !tip.hash.isEmpty, height <= tip.height, let cid = tree.canonicalBlockHash(atHeight: height) {
-                    view.heights.append(cid)
-                    height += 1
-                }
+                for cid in entered.reversed() { view.heights.append(cid) }
             }
             view.poolVersion = pool.version
             view.mempool = ChainReads.MempoolListing(
@@ -986,6 +987,7 @@ extension NodeRuntime {
                                 ))
                             }
                         }
+                        inputs.yield(.event(.level(path, .bodyMissed(cid: cid))))
                         _ = await Timers.sleep(nanoseconds: backoff * 1_000_000)
                         backoff = min(backoff * 2, 30_000)
                     }

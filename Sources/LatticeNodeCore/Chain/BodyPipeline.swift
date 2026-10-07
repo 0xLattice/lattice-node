@@ -4,13 +4,18 @@ import Lattice
 /// CID through the content layer, which owns provider discovery, CID
 /// verification, retries and provider suppression. The core only names the
 /// next `ChainCoreConfig.bodyWindow` weighed-but-unexecuted blocks on the best
-/// chain and connects them in parent order as their bodies arrive.
+/// chain and connects them in parent order as their bodies arrive. It also
+/// names this node's own mined blocks and, where a fetch attempt found a
+/// body missing, the next-heaviest sibling at that fork.
 ///
 /// There is no per-peer state here and no fetch deadline: a missing body is
-/// an availability wait, never blame.
+/// an availability wait, never blame and never a verdict.
 public struct BodyPipeline: Sendable, Equatable {
     /// Bodies asked of the content layer that have not arrived.
     public internal(set) var requested: Set<String> = []
+    /// Requested bodies a fetch attempt finished without. Each stays
+    /// requested; it only lets the next-heaviest sibling be tried meanwhile.
+    public internal(set) var missed: Set<String> = []
     /// Bodies that arrived and are not executed yet.
     public internal(set) var arrived: Set<String> = []
     /// The block whose connect job is running: one at a time, in parent
@@ -49,22 +54,62 @@ public struct BodyPipeline: Sendable, Equatable {
 }
 
 extension ChainCore {
-    /// The best chain's blocks after the act-on tip, up to the window: the
-    /// next blocks to execute, in parent order.
+    /// The next blocks to execute: the best chain's blocks after its
+    /// executed prefix in parent order, then this node's own mined blocks
+    /// and the fallback candidates, within the operator's count.
     public var bodyWindow: [String] {
-        let actOn = tree.actOnTip()
-        guard let tipHeight = tree.headerSnapshot(of: tree.canonicalTip)?.tipHeight, config.bodyWindow > 0 else { return [] }
+        guard config.bodyWindow > 0 else { return [] }
+        var side: [String] = []
+        for cid in ownMined.sorted() + fallback() where side.count < config.bodyWindow && !side.contains(cid) && executable(cid) {
+            side.append(cid)
+        }
+        let prefix = tree.executedPrefix()
+        guard let tipHeight = tree.headerSnapshot(of: tree.canonicalTip)?.tipHeight else { return side }
         // A best chain whose genesis root is not executed yet starts there.
-        let first = actOn.hash.isEmpty ? 0 : actOn.height + 1
-        guard tipHeight >= first else { return [] }
-        let last = min(tipHeight, first + UInt64(config.bodyWindow) - 1)
-        return (first...last).compactMap { tree.canonicalBlockHash(atHeight: $0) }
+        let first = prefix.hash.isEmpty ? 0 : prefix.height + 1
+        let room = UInt64(config.bodyWindow - side.count)
+        guard tipHeight >= first, room > 0 else { return side }
+        let last = min(tipHeight, first + room - 1)
+        return (first...last).compactMap { tree.canonicalBlockHash(atHeight: $0) }.filter { !side.contains($0) } + side
+    }
+
+    /// A weighed block with no verdict whose parent is executed from genesis.
+    func executable(_ cid: String) -> Bool {
+        guard index.contains(cid), !tree.isExecuted(blockHash: cid), !tree.isExcludedRoot(cid) else { return false }
+        return index.parent[cid].map(tree.hasExecutedAncestry(blockHash:)) ?? true
+    }
+
+    /// With a body missed: at each fork of the act-on descent, heaviest
+    /// first, the unexecuted children that would be the step taken if
+    /// executed, up to the first whose body no attempt has missed. A lighter
+    /// sibling is tried only once a fetch for every heavier one finished
+    /// empty; no clock decides it. Empty while nothing is missed.
+    func fallback() -> [String] {
+        guard !bodies.missed.isEmpty else { return [] }
+        var tried: [String] = []
+        var fork = tree.executedPrefix().hash
+        while !fork.isEmpty {
+            let children = index.children[fork] ?? []
+            let taken = Self.heaviest(of: children.filter(tree.isExecuted(blockHash:)), in: tree)
+            var open = children.filter {
+                !tree.isExecuted(blockHash: $0) && !tree.isExcludedRoot($0)
+                    && (taken == nil || Self.heaviest(of: [taken!, $0], in: tree) == $0)
+            }
+            while let next = Self.heaviest(of: open, in: tree) {
+                tried.append(next)
+                guard bodies.missed.contains(next) else { return tried }
+                open.removeAll { $0 == next }
+            }
+            fork = taken ?? ""
+        }
+        return tried
     }
 
     /// The content layer has the body of `cid` locally. Only a body the
     /// window still wants is kept; any other arrival is simply unused.
     mutating func bodyFetched(_ cid: String) {
         guard bodies.requested.remove(cid) != nil else { return }
+        bodies.missed.remove(cid)
         bodies.arrived.insert(cid)
     }
 
@@ -94,6 +139,7 @@ extension ChainCore {
         bodies.arrived.remove(cid)
         switch tree.applyConnect(verdict) {
         case .applied(let update):
+            ownMined.remove(cid)
             if let state = update.materializedPostState { turn.states.append(state) }
             turn.facts += update.batches
             weighed += update.weighed
@@ -101,7 +147,7 @@ extension ChainCore {
             if let replyID = minedReplies.removeValue(forKey: cid) {
                 turn.effects.append(.workSubmitted(
                     replyID: replyID,
-                    update.excluded ? .invalid : .executed(tipCID: tree.actOnTip().hash)
+                    update.excluded ? .invalid : .executed(tipCID: actOnTip.hash)
                 ))
             }
         case .duplicate:
@@ -123,13 +169,13 @@ extension ChainCore {
     }
 
     /// Ask the content layer for every body in the window not yet asked for
-    /// (a parked one once its wait is over), cancel bodies the best chain
-    /// left, and start the next connect when the block after the act-on tip
-    /// has its body.
+    /// (a parked one once its wait is over), cancel bodies the window
+    /// left, and start the next connect: the first window block whose body
+    /// is here and whose parent is executed.
     mutating func scheduleBodies(_ turn: inout Turn) {
         let window = bodyWindow
         let wanted = Set(window)
-        let mark = BodyPipeline.TreeMark(actOn: tree.actOnTip().hash, window: window)
+        let mark = BodyPipeline.TreeMark(actOn: actOnTip.hash, window: window)
         if bodies.seen != mark {
             bodies.seen = mark
             bodies.parked.removeAll()
@@ -138,6 +184,8 @@ extension ChainCore {
             turn.effects.append(.cancelBody(cid: cid))
         }
         bodies.requested.formIntersection(wanted)
+        bodies.missed.formIntersection(wanted)
+        ownMined = ownMined.filter(executable)
         bodies.arrived.formIntersection(wanted)
         bodies.parked = bodies.parked.filter { wanted.contains($0.key) }
         bodies.awaitingParent = bodies.awaitingParent.filter { wanted.contains($0.key) }
@@ -146,9 +194,9 @@ extension ChainCore {
             bodies.requested.insert(cid)
             turn.effects.append(.fetchBody(cid: cid))
         }
-        guard bodies.connecting == nil, let next = window.first,
-              bodies.arrived.contains(next), bodies.awaitingParent[next] == nil,
-              let job = tree.connectJob(for: next) else { return }
+        guard bodies.connecting == nil, let next = window.first(where: {
+            bodies.arrived.contains($0) && bodies.awaitingParent[$0] == nil && executable($0)
+        }), let job = tree.connectJob(for: next) else { return }
         bodies.connecting = next
         turn.effects.append(.connect(job))
     }

@@ -24,10 +24,11 @@ public enum NodeEvent: Sendable {
 
 /// What a submitted grind did at the root level.
 public enum MinedOutcome: Sendable, Equatable {
-    /// The root met its own target, was weighed on the best chain and
-    /// executed; `tipCID` is the act-on tip after its execution.
+    /// The root met its own target, was weighed and executed; `tipCID` is
+    /// the act-on tip after its execution.
     case executed(tipCID: String)
-    /// The root was weighed off the best chain: it is not executed.
+    /// The root was weighed off the best chain on a parent that is not
+    /// executed: it is not executed.
     case side
     /// The root was weighed and its execution proved it invalid.
     case invalid
