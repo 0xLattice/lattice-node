@@ -43,7 +43,7 @@ extension ChainCore {
     static func actOnTip(of tree: ChainTree, index: WeighedIndex) -> (hash: String, height: UInt64) {
         var tip = tree.executedPrefix()
         guard !tip.hash.isEmpty else { return tip }
-        while let next = heaviest(of: (index.children[tip.hash] ?? []).filter(tree.isExecuted(blockHash:)), in: tree) {
+        while let next = byWeight((index.children[tip.hash] ?? []).filter(tree.isExecuted(blockHash:)), in: tree).first {
             tip = (next, tip.height + 1)
         }
         return tip
@@ -59,19 +59,14 @@ extension ChainCore {
         index.parent[cid]
     }
 
-    /// The heaviest of sibling blocks by fork choice's subtree work, ties by
-    /// its rule. Only a fork is weighed.
-    static func heaviest(of siblings: [String], in tree: ChainTree) -> String? {
-        guard siblings.count > 1 else { return siblings.first }
-        let work = { (hash: String) in tree.forkChoiceSnapshot(startingAt: hash)?.subtreeWork.uint256Value ?? .zero }
-        var best = (hash: siblings[0], work: work(siblings[0]))
-        for hash in siblings.dropFirst() {
-            let weight = work(hash)
-            if weight > best.work || (weight == best.work && forkChoicePrefersBlock(hash, over: best.hash)) {
-                best = (hash, weight)
-            }
-        }
-        return best.hash
+    /// Sibling blocks heaviest first by fork choice's subtree work, ties by
+    /// its rule. Each is weighed once, and only at a fork.
+    static func byWeight(_ siblings: [String], in tree: ChainTree) -> [String] {
+        guard siblings.count > 1 else { return siblings }
+        return siblings
+            .map { (hash: $0, work: tree.forkChoiceSnapshot(startingAt: $0)?.subtreeWork.uint256Value ?? .zero) }
+            .sorted { $0.work != $1.work ? $0.work > $1.work : forkChoicePrefersBlock($0.hash, over: $1.hash) }
+            .map(\.hash)
     }
 
     /// The spec of the act-on tip's genesis root: what the mempool measures

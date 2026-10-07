@@ -106,7 +106,7 @@ extension Invariants {
             throw fail(node, "a body is both requested and arrived")
         }
         if let stray = bodies.requested.union(bodies.arrived).first(where: { !inWindow.contains($0) }) {
-            throw fail(node, "body \(stray) is outside the window after the act-on tip")
+            throw fail(node, "body \(stray) is not in the body window")
         }
         if let stray = bodies.parked.keys.first(where: { !inWindow.contains($0) }) {
             throw fail(node, "parked body \(stray) is outside the window")

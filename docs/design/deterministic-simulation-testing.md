@@ -320,9 +320,10 @@ node's observable behaviour against it; it does not restate it.
    deterministic check records invalidity. Sources: spec §9.9;
    [deferred execution](weight-first-acquisition.md) "Availability never judges";
    NODE-SEMANTICS-003 to 005; the absence rule in operator finality.
-7. **Nothing is acted on from unvalidated weight.** Templates, served state,
-   issued continuity facts and asserted heads come only from the validated tier.
-   Unvalidated weight is never pivotal to a decision the node acts on. Sources:
+7. **Nothing unvalidated is acted on.** Templates, served state, issued
+   continuity facts and asserted heads come only from the validated tier: the
+   node acts on the heaviest executed tip. Unvalidated weight chooses between
+   executed blocks and is never itself stepped into. Sources:
    spec §9.9; the pivotality rule in deferred execution; the data-availability
    linchpin in bulk sync, which that document names "the one part to model
    adversarially first".

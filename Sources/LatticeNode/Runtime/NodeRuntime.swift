@@ -684,13 +684,14 @@ extension NodeRuntime {
                     : NodeRuntime.templateDigest(tip: tip.hash, mempool: pool)
                 digests[path] = (key, digest)
             }
-            // Status names the next block's wait. A block the window left
-            // (executed, excluded, or off the best chain) waits no more.
+            // Status names the wait of the block after the act-on tip, its
+            // heaviest child the window asks for. A block the window left
+            // (executed, excluded, or no longer asked for) waits no more.
             var waiting: NodeReadView.Waiting?
             if !fetchWaits.isEmpty || !connectWaits.isEmpty {
                 let window = level.bodyWindow
                 connectWaits = connectWaits.filter { $0.key.path != path || window.contains($0.key.cid) }
-                waiting = window.first.flatMap { cid in
+                waiting = window.first { (level.parent(of: $0) ?? "") == tip.hash }.flatMap { cid in
                     let key = BodyKey(path: path, cid: cid)
                     return (fetchWaits[key] ?? connectWaits[key]).map { NodeReadView.Waiting(cid: cid, reason: $0) }
                 }

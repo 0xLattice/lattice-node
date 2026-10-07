@@ -8,8 +8,10 @@ and the shared content layer.
 ## Ownership
 
 `HeaderSync` acquires and verifies headers. Once fork choice has selected a
-best chain, `BodyPipeline` names the next bounded window of
-weighed-but-unexecuted block CIDs. It owns only deterministic scheduling state:
+best chain, `BodyPipeline` names the weighed-but-unexecuted block CIDs to
+fetch next: a bounded look-ahead along the best chain, and every alternative
+at a fork on the chain the node acts on. It owns only deterministic scheduling
+state:
 
 - bodies requested from the content layer;
 - bodies that arrived and are ready to connect;
@@ -54,9 +56,11 @@ ready and is retried when the co-hosted parent advances.
 
 1. Headers are weighed before body execution and fork choice does not depend
    on body arrival order.
-2. Bodies connect one at a time, in parent order, along the current best chain.
-3. Every requested, arrived, parked, or parent-waiting set is bounded by the
-   configured body window.
+2. Bodies connect one at a time, each after its parent is executed.
+3. Every requested, arrived, parked, or parent-waiting block is in the
+   look-ahead along the best chain, which the configured body window bounds,
+   or is an alternative at a fork on the chain the node acts on, whose number
+   only the proof of work in their headers bounds.
 4. Complete Volumes are CID-verified and materialized through the one shared
    content store.
 5. Worker tasks never mutate consensus state. Their results return as events

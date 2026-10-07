@@ -37,6 +37,8 @@ final class WithheldBodiesLivenessTests: XCTestCase {
         var fetched: [[String]] = []
         var connected: [[String]] = []
         var tips: [[String]] = []
+        /// Per node: the facts it persisted, in order.
+        var facts: [[BlockImportBatch]] = []
 
         init(world: World, nodes: Int, window: Int = 8) {
             self.world = world
@@ -51,6 +53,7 @@ final class WithheldBodiesLivenessTests: XCTestCase {
                 fetched.append([])
                 connected.append([])
                 tips.append([world.genesis.cid])
+                facts.append([world.bootstrap.facts])
             }
         }
 
@@ -74,6 +77,7 @@ final class WithheldBodiesLivenessTests: XCTestCase {
                 switch queue.removeFirst() {
                 case .persist(let batch):
                     for (_, level) in batch.levels {
+                        facts[node] += level.facts
                         for state in level.states { try await storeMaterialized(state, in: contents[node]) }
                     }
                 case .level(_, .fetchBody(let cid)):
@@ -127,7 +131,9 @@ final class WithheldBodiesLivenessTests: XCTestCase {
         /// `node` mines one block on the tip its templates are built on and
         /// every other node is shown its header. Returns the block and the
         /// answer to the miner.
-        func mine(by node: Int, _ block: SimBlock? = nil) async throws -> (block: SimBlock, outcome: MinedOutcome?) {
+        func mine(
+            by node: Int, _ block: SimBlock? = nil, announce: Bool = true
+        ) async throws -> (block: SimBlock, outcome: MinedOutcome?) {
             now += World.blockInterval
             let tip = level(node).mining.tipCID
             XCTAssertEqual(tip, snapshot(node).actOnTip, "templates are built on the act-on tip")
@@ -140,12 +146,18 @@ final class WithheldBodiesLivenessTests: XCTestCase {
             known[mined.cid] = mined
             let grind = MinedGrind(root: mined.block, rootChildren: mined.children, carried: [])
             let effects = try await settle(node, step(node, .mined(grind, replyID: 1)))
-            for other in hosts.indices where other != node { try await show([mined], to: other) }
+            for other in hosts.indices where other != node && announce { try await show([mined], to: other) }
             let outcome = effects.compactMap { effect -> MinedOutcome? in
                 if case .level(_, .workSubmitted(1, let outcome)) = effect { return outcome }
                 return nil
             }.first
             return (mined, outcome)
+        }
+
+        /// The body of `cid` arrives at `node`.
+        func serve(_ cid: String, to node: Int) async throws {
+            contents[node].put(known[cid]!.body)
+            try await settle(node, step(node, .level(path, .bodyFetched(cid: cid))))
         }
 
         /// The withholder serves its bodies: every node still asking gets them.
@@ -351,6 +363,85 @@ final class WithheldBodiesLivenessTests: XCTestCase {
         XCTAssertEqual(net.level(0).mining.tipCID, other[1].cid)
         XCTAssertEqual(net.snapshot(0).bestHeaderTip, branch.last?.cid)
         net.assertUnjudged(branch, weight: weight)
+    }
+
+    /// Two miners find sibling blocks on one tip at once and each sees the
+    /// other's late: both end on the same block, fork choice's pick.
+    func testConcurrentSiblingsConvergeByTheTieBreak() async throws {
+        var rng = SplitMix64(state: 0x317)
+        let world = try await World.generate(rng: &rng, honestBlocks: 4, forkProbability: 0, spamBlocks: 0)
+        let chain = world.honest.compactMap { world.blocks[$0] }
+        let net = Net(world: world, nodes: 2)
+        for block in chain.prefix(Self.executedHeight) { _ = try await net.mine(by: 0, block) }
+        let base = chain[Self.executedHeight - 1]
+        let mine = try await world.branch(from: base, count: 1, interval: World.blockInterval + 1)[0]
+        let theirs = try await world.branch(from: base, count: 1, interval: World.blockInterval + 2)[0]
+        _ = try await net.mine(by: 0, mine, announce: false)
+        _ = try await net.mine(by: 1, theirs, announce: false)
+        XCTAssertEqual(net.snapshot(0).actOnTip, mine.cid)
+        XCTAssertEqual(net.snapshot(1).actOnTip, theirs.cid)
+        try await net.show([theirs], to: 0)
+        try await net.show([mine], to: 1)
+        var tree = net.level(0).tree
+        XCTAssertEqual(tree.subtreeWeight(forHash: mine.cid), tree.subtreeWeight(forHash: theirs.cid), "a tie")
+        let chosen = forkChoicePrefersBlock(mine.cid, over: theirs.cid) ? mine : theirs
+        for node in 0..<2 {
+            XCTAssertEqual(net.snapshot(node).actOnTip, chosen.cid)
+            XCTAssertEqual(net.snapshot(node).bestHeaderTip, chosen.cid)
+            XCTAssertEqual(net.level(node).mining.tipCID, chosen.cid)
+        }
+        let next = try await net.mine(by: chosen.cid == mine.cid ? 1 : 0)
+        XCTAssertEqual(next.block.parent, chosen.cid)
+    }
+
+    /// A restart while the act-on tip is off the best header chain: the
+    /// restored node acts on the same tip and mines on it.
+    func testARestartKeepsAnActOnTipOffTheBestHeaderChain() async throws {
+        let (net, _, branch, _) = try await held(withheld: 3, nodes: 1)
+        let (honest, _) = try await net.mine(by: 0)
+        XCTAssertEqual(net.snapshot(0).actOnTip, honest.cid)
+        let restored = try ChainCore.restore(
+            replaying: net.facts[0], context: net.world.context, specs: [net.world.spec],
+            config: ChainCoreConfig(bodyWindow: 8)
+        )
+        XCTAssertEqual(restored.snapshot.actOnTip, honest.cid)
+        XCTAssertEqual(restored.snapshot.bestHeaderTip, branch.last?.cid)
+        XCTAssertEqual(restored.mining.tipCID, honest.cid)
+        net.hosts[0] = NodeCore(root: restored.tree, hosted: [], config: ChainCoreConfig(bodyWindow: 8))
+        _ = net.step(0, .peerReady(net.peer))
+        let (next, outcome) = try await net.mine(by: 0)
+        XCTAssertEqual(next.parent, honest.cid)
+        XCTAssertEqual(outcome, .executed(tipCID: next.cid))
+    }
+
+    /// A stale sibling's body arrives before the main block's: the tip hops
+    /// to it and only its children are asked for, then to the main block
+    /// when that executes, and the stale branch is asked for no more.
+    func testAStaleSiblingArrivingFirstIsTheTipUntilTheMainBlockExecutes() async throws {
+        var rng = SplitMix64(state: 0x51B)
+        let world = try await World.generate(rng: &rng, honestBlocks: 6, forkProbability: 0, spamBlocks: 0)
+        let chain = world.honest.compactMap { world.blocks[$0] }
+        let net = Net(world: world, nodes: 1)
+        net.inFlight = true
+        let stale = try await world.branch(from: chain[0], count: 3, interval: World.blockInterval / 2)
+        try await net.show(chain + stale, to: 0)
+        XCTAssertEqual(net.snapshot(0).bestHeaderTip, chain.last?.cid)
+        try await net.serve(chain[0].cid, to: 0)
+        XCTAssertEqual(net.snapshot(0).actOnTip, chain[0].cid)
+        XCTAssertTrue(net.level(0).bodies.requested.contains(stale[0].cid))
+        try await net.serve(stale[0].cid, to: 0)
+        XCTAssertEqual(net.snapshot(0).actOnTip, stale[0].cid, "the only executed child is the tip")
+        XCTAssertEqual(net.level(0).mining.tipCID, stale[0].cid)
+        XCTAssertTrue(net.level(0).bodies.requested.contains(stale[1].cid), "the tip's child is asked for")
+        XCTAssertTrue(net.level(0).bodies.requested.contains(chain[1].cid), "the heavier sibling stays asked for")
+        try await net.serve(chain[1].cid, to: 0)
+        XCTAssertEqual(net.snapshot(0).actOnTip, chain[1].cid)
+        XCTAssertTrue(net.level(0).bodies.requested.isDisjoint(with: stale.map(\.cid)))
+        for block in chain.dropFirst(2) { try await net.serve(block.cid, to: 0) }
+        XCTAssertEqual(net.snapshot(0).actOnTip, chain.last?.cid)
+        XCTAssertEqual(net.tips[0], [world.genesis.cid, chain[0].cid, stale[0].cid] + chain.dropFirst().map(\.cid))
+        XCTAssertFalse(net.fetched[0].contains(stale[2].cid), "never a stale sibling's grandchild")
+        XCTAssertEqual(net.connected[0], [chain[0].cid, stale[0].cid] + chain.dropFirst().map(\.cid))
     }
 
     /// Every body obtainable but late: each is still in flight when its

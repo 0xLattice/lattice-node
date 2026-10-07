@@ -91,8 +91,8 @@ Invariants:
   a node acts on is identical to that of a node which validated every
   block whose bytes it obtained. Computed weight includes work beneath
   blocks a validating node has excluded — as does that node's own, since
-  exclusion removes no weight (spec §9.9); the pivotality rule guarantees
-  such weight never reaches an action. A validate-at-import
+  exclusion removes no weight (spec §9.9); it weighs, and no excluded or
+  unexecuted block is ever acted on. A validate-at-import
   node and a deferred-execution node therefore differ only in *when*
   work is examined, never in any decision either acts on, and the two
   interoperate on one network.

@@ -84,17 +84,11 @@ extension ChainCore {
         var wanted: [String] = []
         var fork = tree.executedPrefix().hash
         while !fork.isEmpty {
-            let children = index.children[fork] ?? []
-            let taken = Self.heaviest(of: children.filter(tree.isExecuted(blockHash:)), in: tree)
-            var open = children.filter {
-                !tree.isExecuted(blockHash: $0) && !tree.isExcludedRoot($0)
-                    && (taken == nil || Self.heaviest(of: [taken!, $0], in: tree) == $0)
-            }
-            while let next = Self.heaviest(of: open, in: tree) {
-                wanted.append(next)
-                open.removeAll { $0 == next }
-            }
-            fork = taken ?? ""
+            let children = Self.byWeight((index.children[fork] ?? []).filter {
+                tree.isExecuted(blockHash: $0) || !tree.isExcludedRoot($0)
+            }, in: tree)
+            wanted += children.prefix { !tree.isExecuted(blockHash: $0) }
+            fork = children.first(where: tree.isExecuted(blockHash:)) ?? ""
         }
         return wanted
     }
