@@ -188,6 +188,13 @@ public read budget.
 before any header); `height` is the deepest executed block on it, so sync
 progress is `height` of `bestHeaderHeight`. Both are per level (`?chainPath=`).
 
+`waiting` is present while the level's next block cannot be executed, and says
+which block and why: `body of <cid> exceeds local budget <bytes>` (its content
+is past this node's byte budget for one fetch), `body of <cid> not fetched
+(<error>)`, or `body of <cid> not connected (<failure>)` (its connect ended
+without a verdict). The node keeps retrying; the field goes when the block
+executes, is excluded, or leaves the best chain.
+
 `/health` reads an immutable published view and never enters the core loop. It
 has no `templateDigest`. `/status` uses the root runtime's current template
 digest so a miner can detect any hosted-tree input change.

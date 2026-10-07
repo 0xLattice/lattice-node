@@ -21,7 +21,8 @@ final class NodeRuntimeTests: XCTestCase {
     private func host(
         keyByte: UInt8,
         peers: [PeerEndpoint] = [],
-        storageDirectory reused: URL? = nil
+        storageDirectory reused: URL? = nil,
+        resourcePolicy: NodeResourcePolicy = .default
     ) throws -> Host {
         let storageDirectory = reused ?? FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-node-runtime-\(UUID().uuidString)", isDirectory: true
@@ -33,7 +34,8 @@ final class NodeRuntimeTests: XCTestCase {
             storagePath: storageDirectory,
             privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
             listenPort: port,
-            rpcPort: NetworkTransportTestPorts.allocate()
+            rpcPort: NetworkTransportTestPorts.allocate(),
+            resourcePolicy: resourcePolicy
         )
         return Host(
             configuration: configuration,
@@ -94,6 +96,43 @@ final class NodeRuntimeTests: XCTestCase {
             let volume = await reopened.volume(cid)
             XCTAssertNotNil(volume, "body \(cid) was evicted after restart")
         }
+    }
+
+    /// A body this node's byte budget declines is named in its status, with
+    /// the reason, for as long as the node waits on it.
+    func testStatusNamesTheBodyThisNodesBudgetDeclinesUntilItIsHeld() async throws {
+        let producer = try host(keyByte: 0x3C)
+        let producerStorage = try await NodeStorage.open(configuration: producer.configuration)
+        let producerRuntime = try await NodeRuntime.start(
+            storage: producerStorage, configuration: producer.configuration, overlay: producer.overlay
+        )
+        let blockCID = try BlockHeader(node: try await producerRuntime.mineBlock()).rawCID
+
+        let joiner = try host(
+            keyByte: 0x3D, peers: [producer.endpoint],
+            resourcePolicy: NodeResourcePolicy(maximumAcquisitionStorageBytes: 1)
+        )
+        let joinerStorage = try await NodeStorage.open(configuration: joiner.configuration)
+        let joinerRuntime = try await NodeRuntime.start(
+            storage: joinerStorage, configuration: joiner.configuration, overlay: joiner.overlay
+        )
+        try await eventually("the joiner's status names the declined body") {
+            await joinerRuntime.status().waiting == "body of \(blockCID) exceeds local budget 1"
+        }
+        XCTAssertEqual(joinerRuntime.published.value?.actOnHeight, 0)
+
+        // The body comes to be held another way: the next retry finds it,
+        // the block executes, and the wait is gone from the status.
+        try await BlockHeader(rawCID: blockCID).storeBlock(
+            fetcher: producerStorage.localFetcher, storer: joinerStorage
+        )
+        try await eventually("the joiner executes the block") {
+            joinerRuntime.published.value?.actOnTip == blockCID
+        }
+        let waiting = await joinerRuntime.status().waiting
+        XCTAssertNil(waiting)
+        await joinerRuntime.stop()
+        await producerRuntime.stop()
     }
 
     func testMaintenanceAnnouncesNexusAndEveryHostedChildsRendezvous() async throws {

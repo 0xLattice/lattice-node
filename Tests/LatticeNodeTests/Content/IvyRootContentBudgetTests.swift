@@ -42,4 +42,21 @@ final class IvyRootContentBudgetTests: XCTestCase {
         }
         XCTAssertEqual(fetched.count, wanted.count)
     }
+
+    /// Content past the byte budget is declined, and the session says the
+    /// budget declined it rather than that nobody served it.
+    func testContentPastTheByteBudgetIsDeclinedAndSaidSo() async throws {
+        let item = try content(1)
+        let framed = item.cid.utf8.count + item.data.count + 6
+
+        let tight = source(serving: [item.cid: item.data], maximumStorageBytes: framed - 1)
+        let declined = await tight.withRootTracing(item.cid) { session in await session.fetch([item.cid]) }
+        XCTAssertTrue(declined.value.isEmpty)
+        XCTAssertTrue(declined.attribution.byteBudgetExceeded)
+
+        let exact = source(serving: [item.cid: item.data], maximumStorageBytes: framed)
+        let held = await exact.withRootTracing(item.cid) { session in await session.fetch([item.cid]) }
+        XCTAssertEqual(held.value[item.cid], item.data)
+        XCTAssertFalse(held.attribution.byteBudgetExceeded)
+    }
 }

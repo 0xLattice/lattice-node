@@ -14,6 +14,8 @@ struct NodeReadView: Sendable {
     var mempool = ChainReads.MempoolListing(count: 0, bytes: 0, cids: [])
     var templateDigest: String?
     var peers = 0
+    /// The first block of the body window, when it waits, and why.
+    var waiting: String?
 }
 
 /// The act-on chain's block CIDs by height, in fixed-size chunks: a copy
@@ -189,7 +191,8 @@ extension NodeRuntime {
                     tipCID: snapshot?.actOnTip.isEmpty == false ? snapshot?.actOnTip : nil,
                     height: snapshot?.actOnTip.isEmpty == false ? snapshot?.actOnHeight : nil,
                     revision: nil,
-                    bestHeaderHeight: snapshot?.bestHeaderTip.isEmpty == false ? snapshot?.bestHeaderHeight : nil
+                    bestHeaderHeight: snapshot?.bestHeaderTip.isEmpty == false ? snapshot?.bestHeaderHeight : nil,
+                    waiting: view.value?.waiting
                 )
             },
             canonicalCID: { height in
@@ -241,7 +244,8 @@ extension NodeRuntime {
             mempoolCount: read.mempoolCount,
             mempoolBytes: read.mempoolBytes,
             templateDigest: read.tipCID == nil ? nil : readView.value?.templateDigest,
-            bestHeaderHeight: read.bestHeaderHeight
+            bestHeaderHeight: read.bestHeaderHeight,
+            waiting: read.waiting
         )
     }
 

@@ -16,6 +16,9 @@ public struct IvyRootContentSource: Sendable {
         public let servedByPublicKeys: Set<String>
         public let allResponsesComplete: Bool
         public let localCapacityUnavailable: Bool
+        /// Content was declined because it is past this session's byte
+        /// budget: this node's choice, not content nobody served.
+        public let byteBudgetExceeded: Bool
         public let contentUnavailable: Bool
         public let deficientVolumeSuppliers: [String: Set<String>]
 
@@ -44,6 +47,7 @@ public struct IvyRootContentSource: Sendable {
         private var peerPublicKeys: Set<String> = []
         private var complete = true
         private var locallyLimited = false
+        private var overBudget = false
         private var unavailable = false
         private var deficientVolumeSuppliers: [String: Set<String>] = [:]
 
@@ -66,6 +70,8 @@ public struct IvyRootContentSource: Sendable {
             self.complete = self.complete && complete
             locallyLimited = locallyLimited
                 || response.failure == .localCapacityUnavailable
+            overBudget = overBudget
+                || response.failure == .callerBoundaryExceeded
             unavailable = unavailable || response == .empty
             lock.unlock()
         }
@@ -77,6 +83,7 @@ public struct IvyRootContentSource: Sendable {
                 servedByPublicKeys: peerPublicKeys,
                 allResponsesComplete: complete,
                 localCapacityUnavailable: locallyLimited,
+                byteBudgetExceeded: overBudget,
                 contentUnavailable: unavailable,
                 deficientVolumeSuppliers: deficientVolumeSuppliers
             )
@@ -84,6 +91,10 @@ public struct IvyRootContentSource: Sendable {
 
         func markIncomplete() {
             lock.withLock { complete = false }
+        }
+
+        func markOverBudget() {
+            lock.withLock { overBudget = true }
         }
     }
 
@@ -138,7 +149,10 @@ public struct IvyRootContentSource: Sendable {
                 storageByteCount = nextStorageBytes.partialValue
                 return true
             }
-            guard fits else { return false }
+            guard fits else {
+                trace.markOverBudget()
+                return false
+            }
             do {
                 try await broker.store(volume: volume)
                 return true
@@ -157,7 +171,7 @@ public struct IvyRootContentSource: Sendable {
     /// Credits the peer that served a requested Volume once it verifies, so
     /// the overlay favours peers that serve this node when it is contended.
     private let credit: @Sendable (PeerID, Int) async -> Void
-    private let maximumStorageBytes: Int
+    let maximumStorageBytes: Int
 
     public final class Session: ContentSource {
         private let fetchVolume: @Sendable (String) async -> AttributedVolumeResponse
