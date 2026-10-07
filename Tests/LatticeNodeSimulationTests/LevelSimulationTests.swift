@@ -263,6 +263,69 @@ final class LevelSimulationTests: XCTestCase {
         XCTAssertTrue(report.disconnects.isEmpty, "\(report.disconnects)")
     }
 
+    // MARK: - The proof download window
+
+    /// One honest peer serves a child chain several times the per-peer proof
+    /// slots, at the default bounds, to a node that never ticks (so nothing
+    /// is asked twice): each `getData` asks for no more headers than the
+    /// node has room to check, so no solicited proof is dropped and every
+    /// block weighs. The root level's headers carry no proofs: one page.
+    func testAChildChainLongerThanTheProofSlotsWeighsWithoutAskingTwice() async throws {
+        var rng = SplitMix64(state: 0x51075)
+        let world = try await LevelWorld.generate(
+            rng: &rng, levels: 2, grinds: 200, forkProbability: 0, shareProbability: 0,
+            doubleProbability: 0, withholdDelay: 1_000
+        )
+        let now = World.genesisTime + 1_000_000
+        let config = ChainCoreConfig()
+        let alpha = LevelWorld.alpha
+        var host = NodeCore(root: world.rootBootstrap.tree, hosted: world.hosted, config: config)
+        var source = LevelSource(name: "source", config: config)
+        let peer = PeerID(key: "source", session: 1)
+        // Alpha's genesis comes with the grind that carries it; everything
+        // after it comes from the peer.
+        var queue: [NodeEvent] = world.grinds.prefix(3).map { .mined($0.mined) } + [.peerReady(peer)]
+        var asked: [ChainPath: [Int]] = [:]
+        while !queue.isEmpty {
+            for effect in host.step(queue.removeFirst(), now: now) {
+                switch effect {
+                case .level(let path, .send(_, let message)):
+                    if case .getData(_, let cids) = message {
+                        asked[path, default: []].append(cids.count)
+                        if path == alpha {
+                            let proofs = try XCTUnwrap(host.levels[alpha]).sync.proofs
+                            let room = config.proofs.maxPerSource - (proofs.load[peer]?.count ?? 0)
+                            XCTAssertLessThanOrEqual(cids.count, room, "asked for more headers than there is room to check")
+                        }
+                    }
+                    for case .send(_, let path, let reply) in source.received(
+                        message, at: path, from: PeerID(key: "node", session: 1), now: now, world: world
+                    ) {
+                        queue.append(.received(peer, path, reply))
+                    }
+                case .level(let path, .verifyProof(let job)):
+                    let block = try XCTUnwrap(job.block ?? world.blocks[path]?[job.childCID]?.block)
+                    queue.append(.level(path, .proofVerified(job, await job.run(block))))
+                case .level(let path, .fetchByCID(_, let cid)):
+                    queue.append(.level(path, .childIndexFetched(
+                        peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
+                    )))
+                case .disconnect(let gone, let reason):
+                    XCTFail("disconnected \(gone) as \(reason)")
+                default:
+                    break
+                }
+            }
+        }
+        let served = world.released(alpha, at: now, withheld: false).filter { $0.height > 0 }.map(\.cid)
+        let level = try XCTUnwrap(host.levels[alpha])
+        let weighed = TreeDigest(level.tree).blocks
+        XCTAssertGreaterThan(served.count, 3 * config.proofs.maxPerSource)
+        XCTAssertEqual(served.filter { weighed[$0] == nil }.count, 0, "child blocks never weighed")
+        XCTAssertTrue(level.sync.proofs.awaiting.isEmpty)
+        XCTAssertEqual(asked[LevelWorld.nexus]?.count, 1, "the root level asks for a whole page at once")
+    }
+
     // MARK: - Waiting on the parent level
 
     /// Drives one host by hand over a two-level world: weighs root blocks
