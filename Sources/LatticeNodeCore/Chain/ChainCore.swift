@@ -190,16 +190,23 @@ public struct ChainCoreConfig: Sendable {
         return HeaderEntry(block: block, children: fits ? children : nil, proofs: proofs, spec: spec)
     }
 
+    /// Whether `entry` joins a page holding `bytes` so far: the first always
+    /// does, a later one while the page stays within `maxPageBytes`. Adds the
+    /// entry's size - everything it puts on the wire - to `bytes`. A server
+    /// builds its answer through this, so it stops loading headers once the
+    /// page is full instead of building everything asked and cutting after.
+    public func fits(_ entry: HeaderEntry, first: Bool, bytes: inout Int) -> Bool {
+        bytes += ChainCore.size(of: entry)
+        return first || bytes <= maxPageBytes
+    }
+
     /// The answer the shell sends: `entries` cut at `maxPageBytes` (at least
     /// one), with `hasMore` set when cut. The requester continues after the
     /// last header it receives.
     public func page(_ entries: [HeaderEntry], hasMore: Bool) -> (entries: [HeaderEntry], hasMore: Bool) {
         var total = 0
-        for (index, entry) in entries.enumerated() {
-            total += ChainCore.size(of: entry)
-            if index > 0, total > maxPageBytes {
-                return (Array(entries[..<index]), true)
-            }
+        for (index, entry) in entries.enumerated() where !fits(entry, first: index == 0, bytes: &total) {
+            return (Array(entries[..<index]), true)
         }
         return (entries, hasMore)
     }
@@ -1092,7 +1099,11 @@ public struct ChainCore: Sendable {
         index.toData()?.count ?? 0
     }
 
+    /// Everything the entry puts on the wire: a child level's header carries
+    /// its proofs, a genesis its spec.
     static func size(of entry: HeaderEntry) -> Int {
         size(of: entry.block) + (entry.children.map(size) ?? 0)
+            + entry.proofs.reduce(0) { $0 + ((try? $1.serialize().count) ?? 0) }
+            + (entry.spec?.toData()?.count ?? 0)
     }
 }

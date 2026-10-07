@@ -863,19 +863,26 @@ extension NodeRuntime {
                 let (storage, headers, outbox, inputs, config) = (storage, headers, outbox, inputs, core.config)
                 let proofs = proofs[path] ?? [:]
                 spawn {
+                    // Built up to a page and no further: the work is the
+                    // page's, however many headers were asked.
                     var entries: [HeaderEntry] = []
+                    var (bytes, cut) = (0, false)
                     for cid in blockCIDs {
                         guard let stored = await storage.chainHeader(cid, headers: headers) else { continue }
                         let spec = stored.block.parent == nil
                             ? try? await storage.chainGenesisSpec(cid, headers: headers) : nil
-                        entries.append(config.entry(
+                        let entry = config.entry(
                             stored.block, children: stored.children,
                             proofs: (proofs[cid] ?? [:]).sorted { $0.key < $1.key }.map(\.value), spec: spec ?? nil
-                        ))
+                        )
+                        guard config.fits(entry, first: entries.isEmpty, bytes: &bytes) else {
+                            cut = true
+                            break
+                        }
+                        entries.append(entry)
                     }
-                    let page = config.page(entries, hasMore: hasMore)
                     if let frame = try? ChainSyncWire.encode(.headers(HeadersResponse(
-                        requestID: requestID, entries: page.entries, hasMore: page.hasMore
+                        requestID: requestID, entries: entries, hasMore: hasMore || cut
                     )), at: path) {
                         // Served once handed to the transport, not merely
                         // attempted: a page refused as backpressured is sent

@@ -2,6 +2,7 @@ import Lattice
 import LatticeNodeCore
 import LatticeNodeSim
 import UInt256
+import LatticeProofs
 import XCTest
 import cashew
 
@@ -799,6 +800,32 @@ final class ChainCoreSyncTests: XCTestCase {
         XCTAssertEqual(page.entries.count, 1, "always at least one header")
         XCTAssertTrue(page.hasMore)
         XCTAssertEqual(ChainCoreConfig().page(entries, hasMore: false).entries.count, 3)
+    }
+
+    /// A child level's header carries its proofs: they count toward the page,
+    /// or a page of them is several times the byte cap.
+    func testThePageCapCountsProofs() throws {
+        let plain = chain.prefix(4).map { entry($0) }
+        let proof = ChildBlockProof(
+            rootCID: "root", directoryPath: ["Nexus", "testnet"],
+            entries: [(cid: "node", data: Data(count: 4_000))]
+        )
+        let proofBytes = try proof.serialize().count
+        let proven = plain.map { HeaderEntry(block: $0.block, children: $0.children, proofs: [proof]) }
+        let blockBytes = plain.map { entry -> Int in
+            var bytes = 0
+            _ = ChainCoreConfig().fits(entry, first: true, bytes: &bytes)
+            return bytes
+        }.max() ?? 0
+        // Room for every header without its proof, and for two with.
+        let config = ChainCoreConfig(maxPageBytes: 2 * (blockBytes + proofBytes))
+        XCTAssertEqual(config.page(plain, hasMore: false).entries.count, 4)
+        let page = config.page(proven, hasMore: false)
+        XCTAssertEqual(page.entries.count, 2, "the proofs fill the page")
+        XCTAssertTrue(page.hasMore)
+        var bytes = 0
+        XCTAssertTrue(config.fits(proven[0], first: true, bytes: &bytes))
+        XCTAssertGreaterThanOrEqual(bytes, proofBytes)
     }
 
     // MARK: - Schedule before fetch, re-sourcing, repair
