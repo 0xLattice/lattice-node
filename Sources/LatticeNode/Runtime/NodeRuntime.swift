@@ -308,7 +308,8 @@ public final class NodeRuntime: Sendable {
             ivy: ivy,
             hello: try? ChainHandshake(
                 nexusGenesisCID: configuration.nexusGenesisCID,
-                chainPath: configuration.chainPath
+                chainPath: configuration.chainPath,
+                capabilities: [ChainHandshake.volumeBundle]
             ).encode(),
             configuration: configuration,
             outputs: outputs,
@@ -378,7 +379,14 @@ extension NodeRuntime {
         var proofs: SavedChildProofs = [:]
 
         /// One overlay session per peer key; the core sees `(key, id)`.
-        var sessions: [String: Session] = [:]
+        /// Every change publishes what the open sessions' hellos advertised.
+        var sessions: [String: Session] = [:] {
+            didSet {
+                remote.peerCapabilities.set(
+                    sessions.values.filter(\.ready).sorted { $0.id < $1.id }.map { ($0.peer, $0.capabilities) }
+                )
+            }
+        }
         var nextSession: UInt64 = 1
         var runningJobs = 0
         /// Two FIFOs: execution (connect, proof verification) runs before
@@ -447,6 +455,8 @@ extension NodeRuntime {
             let peer: AuthenticatedPeer
             let id: UInt64
             var ready = false
+            /// What this session's hello said the peer speaks beyond version 6.
+            var capabilities: Set<String> = []
             var coreID: LatticeNodeCore.PeerID { .init(key: peer.key.hex, session: id) }
         }
 
@@ -770,6 +780,7 @@ extension NodeRuntime {
                         return true
                     }
                 session.ready = true
+                session.capabilities = Set(remote.capabilities ?? [])
                 sessions[peer.key.hex] = session
                 // The first peer is the first chance for a lookup to reach
                 // the DHT: search the levels due one now, not an interval on.

@@ -151,6 +151,35 @@ plane: they pass in-process between co-hosted levels.
 The overlay currently requires node protocol version 6; mixed-version peers
 refuse the session.
 
+### Adding to the wire without a flag day
+
+The version changes, and old and new nodes part, only for a change that makes
+them disagree about what is valid. Everything else is an addition, and old and
+new nodes keep one network:
+
+- An addition is a new message type (a new overlay topic, a new Ivy message
+  tag) or a new optional field of the hello. An existing message never changes
+  its meaning or its encoding. Overlay messages are canonical-exact
+  (`CanonicalJSONMessage`: a decoded message must re-encode to the bytes
+  received), so adding a field to an existing message is not compatible: it
+  is a new message on a new topic, as `read-endpoint.response.v2` stands
+  beside `read-endpoint.response`.
+- The hello's optional `capabilities` names what a node speaks beyond version
+  6 (a sorted list of strings, absent when empty). The hello is decoded
+  leniently, so a node that predates the field, or any later field, accepts a
+  hello that carries it.
+- A node sends a new message type only to a peer whose hello advertised it.
+  A peer that advertised nothing is spoken to exactly as before.
+- What a node does not know it ignores: an unknown capability, an overlay
+  message of an unknown topic, an Ivy message of an unknown tag. None of them
+  ends the session or counts against the peer.
+
+Ivy releases through 14.0.0 end the session of a peer that sends an unknown
+Ivy tag; later ones ignore it. That is why the third rule is not optional.
+
+Capabilities in use: `volume-bundle`, the peer answers a Volume bundle
+request.
+
 A level's weigh log streams header and proof entries by position. Stream pages
 carry IDs only. `getData` and `getAncestors` return bounded header entries that
 contain the canonical block bytes, an optional child index, the credited
@@ -176,6 +205,22 @@ that made the claim. Each connection must complete a compatible hello before it
 may request a Volume, including a same-key replacement connection. Entry CIDs,
 bounded framing, and atomic publication are transport/storage details; node
 protocol messages never request arbitrary CID selections.
+
+A block's bundle is the content the protocol's `storeBlock` defines for it:
+the block's own Volume, its transactions', its spec and policy modules, and
+the materialized pre-state its validation reads (the `prevState` root and
+every trie node on the paths its actions touch), never its post-state, its
+parent or its child blocks. Storing a block records those Volume roots in
+`volume-bundles.db`, a cache beside the stores that nothing else reads; for a
+block with no record the server walks the same paths over its local content
+and records what it finds. A content session asks, on its first miss, for the
+bundle of its root from the connected peers that advertised `volume-bundle`,
+and is sent those Volumes with one request; a root with nothing recorded
+bundles only itself. A bundled Volume is verified, charged to the session and
+credited to its server only when the session's traversal asks for its root,
+exactly as a requested Volume is; one that does not verify is its server's
+deficiency and is then requested like any other. Whatever a bundle lacks, and everything when
+no connected peer advertised bundles, is requested one Volume at a time.
 Merged-mining candidates pass in-process. One template job reads an immutable
 epoch copy of every hosted level and recursively builds at most one candidate
 per directory. A child with an executed tip builds on that tip; a child with

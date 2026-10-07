@@ -45,6 +45,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     public nonisolated let configuration: NodeConfiguration
 
     let store: NodeStore
+    nonisolated let bundles: VolumeBundleCache
     let broker: DiskBroker
     let localFetcher: CoalescingFetcher
     let retentionScope: String
@@ -66,6 +67,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     private init(
         configuration: NodeConfiguration,
         store: NodeStore,
+        bundles: VolumeBundleCache,
         broker: DiskBroker,
         localFetcher: CoalescingFetcher,
         retentionScope: String,
@@ -75,6 +77,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     ) {
         self.configuration = configuration
         self.store = store
+        self.bundles = bundles
         self.broker = broker
         self.localFetcher = localFetcher
         self.retentionScope = retentionScope
@@ -92,6 +95,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         return NodeStorage(
             configuration: configuration,
             store: recovered.store,
+            bundles: try VolumeBundleCache(directory: configuration.storagePath),
             broker: recovered.broker,
             localFetcher: recovered.localFetcher,
             retentionScope: recovered.retentionScope,
