@@ -173,7 +173,6 @@ The running tree stores data under `node-data/chains/Nexus/`:
 ```text
 state.db
 volumes.db
-header-evidence.db
 storage.lock
 ```
 

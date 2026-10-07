@@ -176,7 +176,6 @@ rewards.
   chains/Nexus/
     state.db
     volumes.db
-    header-evidence.db
     storage.lock
   run/
   log/

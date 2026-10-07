@@ -24,11 +24,11 @@ extension NodeStorage {
     }
 
     /// `NodeEffect.persist`: content first for every affected level, then the
-    /// complete node step's facts and cursors in one state.db transaction.
+    /// complete node step's headers, proofs, facts and cursors in one
+    /// state.db transaction.
     nonisolated func persistNodeBatch(
         _ batch: NodeBatch,
         logID: String,
-        headers: HeaderEvidenceStore,
         bodyRoots: [ChainPath: [String]] = [:]
     ) async throws {
         var durable: [NodeFactBatch] = []
@@ -45,12 +45,13 @@ extension NodeStorage {
             for spec in level.headers.compactMap(\.spec) {
                 try await VolumeImpl<ChainSpec>(node: spec).store(storer: storage)
             }
-            try headers.store(level.headers)
             let roots = await storage.takeStoredVolumeRoots() + (bodyRoots[path] ?? [])
             try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots)
             durable.append(NodeFactBatch(
                 path: path,
                 facts: level.facts,
+                headers: level.headers,
+                proofs: level.proofs,
                 volumeRoots: roots,
                 cursors: level.cursors
             ))
@@ -145,13 +146,13 @@ extension NodeStorage {
     /// The spec a stored genesis header names, from local content.
     /// A child genesis header lives in the header store (its body may not be
     /// fetched yet); its spec Volume was stored with it.
-    nonisolated func chainGenesisSpec(_ cid: String, headers: HeaderEvidenceStore) async throws -> ChainSpec? {
-        guard let block = await chainHeader(cid, headers: headers)?.block else { return nil }
+    nonisolated func chainGenesisSpec(_ cid: String) async throws -> ChainSpec? {
+        guard let block = await chainHeader(cid)?.block else { return nil }
         return try await block.spec.resolve(fetcher: localFetcher).node
     }
 
-    nonisolated func chainHeader(_ cid: String, headers: HeaderEvidenceStore) async -> (block: Block, children: FlatDictionary<BlockHeader>)? {
-        if let stored = headers.header(cid) { return stored }
+    nonisolated func chainHeader(_ cid: String) async -> (block: Block, children: FlatDictionary<BlockHeader>)? {
+        if let stored = store.header(cid) { return stored }
         guard let blockBytes = try? await localFetcher.fetch(rawCid: cid),
               let block = Block(data: blockBytes),
               let childBytes = try? await localFetcher.fetch(rawCid: block.children.rawCID),

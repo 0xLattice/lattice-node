@@ -40,8 +40,8 @@ public enum NodeRuntimeError: Error, Equatable, Sendable {
 ///
 /// Network and fetch effects spawn tasks that only post events back, so no
 /// suspension ever interleaves two steps.
-/// Child levels are journaled with Nexus in the one hosted-tree fact store;
-/// their verified proofs are kept in the evidence sidecar for lookup and
+/// Child levels are journaled with Nexus in the one hosted-tree fact store,
+/// their verified proofs with the work facts they produced, for lookup and
 /// serving across restarts.
 public final class NodeRuntime: Sendable {
     public let published: PublishedValue<ChainSnapshot>
@@ -107,22 +107,17 @@ public final class NodeRuntime: Sendable {
         // persists is validated by the core, so peer input cannot reach it.
         failStop: @escaping @Sendable (any Error) -> Void = { fatalError("node runtime: persist failed: \($0)") }
     ) async throws -> NodeRuntime {
-        let headers = try HeaderEvidenceStore(
-            directory: configuration.storagePath,
-            nexusGenesisCID: configuration.nexusGenesisCID
-        )
-        let proofs = try headers.proofs()
+        let proofs = try storage.store.savedProofs()
         var coreConfig = coreConfig
         coreConfig.mining.mempool.minRelayFee = configuration.minRelayFee
         let core = try await boot(
             storage: storage, configuration: configuration,
-            coreConfig: coreConfig, headers: headers, proofs: proofs
+            coreConfig: coreConfig
         )
         let overlay = try overlay ?? OverlayConfiguration(configuration).overlay
         let runtime = NodeRuntime(
             core: core,
             storage: storage,
-            headers: headers,
             configuration: configuration,
             ivy: Ivy(config: overlay),
             helloTimeout: overlay.requestTimeout,
@@ -136,7 +131,7 @@ public final class NodeRuntime: Sendable {
             delegate: runtime.delegate,
             contentSource: NodeStorageIvyContentSource(storage: storage) { root in
                 // A child index travels by CID as its own one-node Volume.
-                headers.childIndexBytes(root).map { SerializedVolume(root: root, entries: [root: $0]) }
+                storage.store.childIndexBytes(root).map { SerializedVolume(root: root, entries: [root: $0]) }
             }
         )
         // Boot replay of the local journal, each row with its arrival time,
@@ -166,15 +161,11 @@ public final class NodeRuntime: Sendable {
     static func boot(
         storage: NodeStorage,
         configuration: NodeConfiguration,
-        coreConfig: ChainCoreConfig,
-        headers: HeaderEvidenceStore,
-        proofs suppliedProofs: SavedChildProofs? = nil
+        coreConfig: ChainCoreConfig
     ) async throws -> NodeCore {
         guard configuration.address.isNexus else { throw NodeRuntimeError.notNexus }
         let logID = try await storage.chainLogID() ?? UUID().uuidString.lowercased()
         let facts = try await storage.nodeFacts()
-        let proofs = try suppliedProofs ?? headers.proofs()
-        try validateSavedProofCoverage(facts: facts, proofs: proofs)
         var cursors: [ChainPath: [String: StreamCursor]] = [:]
         for path in [configuration.chainPath] + configuration.hostedChildren {
             cursors[path] = try await storage.chainCursors(at: path)
@@ -192,7 +183,7 @@ public final class NodeRuntime: Sendable {
         for path in configuration.hostedChildren {
             let batches = facts[path] ?? []
             for case .block(let block) in batches.flatMap(\.facts) where block.parentBlockHash == nil {
-                guard let spec = try await storage.chainGenesisSpec(block.blockHash, headers: headers) else {
+                guard let spec = try await storage.chainGenesisSpec(block.blockHash) else {
                     throw NodeStorageError.missingMaterializedVolume(block.blockHash)
                 }
                 specs[path, default: []].append(spec)
@@ -205,28 +196,9 @@ public final class NodeRuntime: Sendable {
         )
     }
 
-    /// Every durable child work fact must retain the exact proof that produced
-    /// it. Without this check, deleting or losing the evidence sidecar could
-    /// restart successfully and relay child headers that no peer can weigh.
-    static func validateSavedProofCoverage(
-        facts: [ChainPath: [BlockImportBatch]],
-        proofs: SavedChildProofs
-    ) throws {
-        for (path, batches) in facts where path.count > 1 {
-            for case .work(let work) in batches.flatMap(\.facts) {
-                guard proofs[path]?[work.blockHash]?[work.contribution.id] != nil else {
-                    throw NodeStoreError.corrupt(
-                        "a durable child work fact is missing its saved proof"
-                    )
-                }
-            }
-        }
-    }
-
     private init(
         core: NodeCore,
         storage: NodeStorage,
-        headers: HeaderEvidenceStore,
         configuration: NodeConfiguration,
         ivy: Ivy,
         helloTimeout: Duration,
@@ -285,7 +257,6 @@ public final class NodeRuntime: Sendable {
         let initial = Loop(
             core: core,
             storage: storage,
-            headers: headers,
             ivy: ivy,
             hello: try? ChainHandshake(
                 nexusGenesisCID: configuration.nexusGenesisCID,
@@ -341,7 +312,6 @@ extension NodeRuntime {
     struct Loop: Sendable {
         var core: NodeCore
         let storage: NodeStorage
-        let headers: HeaderEvidenceStore
         let ivy: Ivy
         let hello: Data?
         let configuration: NodeConfiguration
@@ -427,7 +397,6 @@ extension NodeRuntime {
         init(
             core: NodeCore,
             storage: NodeStorage,
-            headers: HeaderEvidenceStore,
             ivy: Ivy,
             hello: Data?,
             configuration: NodeConfiguration,
@@ -445,7 +414,6 @@ extension NodeRuntime {
             self.helloTimeout = helloTimeout
             self.core = core
             self.storage = storage
-            self.headers = headers
             self.ivy = ivy
             self.hello = hello
             self.configuration = configuration
@@ -736,11 +704,10 @@ extension NodeRuntime {
         private mutating func step(_ event: NodeEvent) async -> Bool {
             let effects = core.step(event, now: NodeRuntime.now())
             SyncTrace.log(chain: core.rootPath, "node-runtime step \(String(describing: event).prefix(160)) -> \(effects.map { $0.traceLabel.prefix(80) })")
-            // Referenced evidence, then the facts transaction, then publish,
-            // then everything else, each in order.
+            // The facts transaction, then publish, then everything else, each
+            // in order.
             func rank(_ effect: NodeEffect) -> Int {
                 switch effect {
-                case .level(_, .indexProof): -1
                 case .persist, .level(_, .mining(.poolChanged)): 0
                 case .level(_, .publish): 1
                 default: 2
@@ -775,9 +742,14 @@ extension NodeRuntime {
                 }
                 do {
                     try await storage.persistNodeBatch(
-                        batch, logID: core.logID, headers: headers, bodyRoots: roots
+                        batch, logID: core.logID, bodyRoots: roots
                     )
                     for key in persistedBodyKeys { bodyRoots[key] = nil }
+                    for (path, levelBatch) in batch.levels {
+                        for stored in levelBatch.proofs {
+                            proofs[path, default: [:]][stored.childCID, default: [:]][stored.proof.rootCID] = stored.proof
+                        }
+                    }
                 } catch {
                     // Fail-stop: no later effect of this step may run.
                     failStop(error)
@@ -818,14 +790,14 @@ extension NodeRuntime {
                 _ = await ivy.sendMessage(to: session.peer, topic: frame.topic, payload: frame.payload)
             case .serveHeaders(let peer, let token, let requestID, let blockCIDs, let hasMore):
                 guard let session = session(peer) else { break }
-                let (storage, headers, ivy, inputs, config) = (storage, headers, ivy, inputs, core.config)
+                let (storage, ivy, inputs, config) = (storage, ivy, inputs, core.config)
                 let proofs = proofs[path] ?? [:]
                 spawn {
                     var entries: [HeaderEntry] = []
                     for cid in blockCIDs {
-                        guard let stored = await storage.chainHeader(cid, headers: headers) else { continue }
+                        guard let stored = await storage.chainHeader(cid) else { continue }
                         let spec = stored.block.parent == nil
-                            ? try? await storage.chainGenesisSpec(cid, headers: headers) : nil
+                            ? try? await storage.chainGenesisSpec(cid) : nil
                         entries.append(config.entry(
                             stored.block, children: stored.children,
                             proofs: (proofs[cid] ?? [:]).sorted { $0.key < $1.key }.map(\.value), spec: spec ?? nil
@@ -841,10 +813,10 @@ extension NodeRuntime {
                 }
             case .fetchByCID(let peer, let cid):
                 guard let session = session(peer) else { break }
-                let (headers, ivy, inputs) = (headers, ivy, inputs)
+                let (storage, ivy, inputs) = (storage, ivy, inputs)
                 spawn {
                     let bytes: Data?
-                    if let local = headers.childIndexBytes(cid) {
+                    if let local = storage.store.childIndexBytes(cid) {
                         bytes = local
                     } else {
                         bytes = await ivy.fetchVolume(rootCID: cid, from: session.peer).entries[cid]
@@ -875,7 +847,7 @@ extension NodeRuntime {
                 bodyRoots[BodyKey(path: path, cid: cid)] = nil
             case .verifyProof(let job):
                 // A job without its block reads it from the header store.
-                guard let block = job.block ?? headers.header(job.childCID)?.block else {
+                guard let block = job.block ?? storage.store.header(job.childCID)?.block else {
                     // Its block is gone: the check frees its slot, blaming no one.
                     inputs.yield(.event(.level(path, .proofDropped(job))))
                     break
@@ -895,14 +867,6 @@ extension NodeRuntime {
                     inputs.yield(.event(.level(path, .proofsFound(
                         childCID: cid, roots.sorted { $0.key < $1.key }.map(\.value)
                     ))))
-                }
-            case .indexProof(let cid, let proof):
-                proofs[path, default: [:]][cid, default: [:]][proof.rootCID] = proof
-                do {
-                    try headers.storeProof(proof, for: cid, at: path)
-                } catch {
-                    failStop(error)
-                    return false
                 }
             case .mining(let effect):
                 return await execute(effect, at: path)

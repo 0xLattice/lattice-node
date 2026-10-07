@@ -322,7 +322,7 @@ extension ChainCore {
             guard case .applied(let update) = tree.addWork(work, to: cid) else { return }
             turn.facts += update.batches
             weighed += update.weighed
-            turn.indexed.append((cid, job.proof))
+            turn.indexed.append(StoredProof(childCID: cid, proof: job.proof))
         } else if let held = sync.pending.entries[cid] {
             guard held.evidence[evidence.grindID] == nil else { return }
             sync.pending.entries[cid]?.evidence[evidence.grindID] = evidence
@@ -434,7 +434,7 @@ extension ChainCore {
                 weighed += update.weighed
             }
             credited.append(proof)
-            turn.indexed.append((header.blockCID, proof))
+            turn.indexed.append(StoredProof(childCID: header.blockCID, proof: proof))
         }
         return credited
     }
@@ -486,7 +486,7 @@ extension ChainCore {
             for child in waiting { dirty(child, &turn) }
         }
         turn.facts += update.batches
-        if let proof { turn.indexed.append((cid, proof.proof)) }
+        if let proof { turn.indexed.append(StoredProof(childCID: cid, proof: proof.proof)) }
         drain(&turn)
         if !isRoot { proofWork(&turn) }
         return finish(turn)

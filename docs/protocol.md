@@ -128,8 +128,8 @@ acquire
 The transaction is the durability boundary. Success means the complete tree
 batch is durable; failure publishes none of it and stops the runtime. Live
 execution and recovery consume the same immutable facts. Path-keyed facts,
-indexes, and cursors share `state.db`; content lives in `volumes.db`; incomplete
-header boundaries and child proofs live in `header-evidence.db`.
+indexes, cursors, incomplete header boundaries, and child proofs share
+`state.db`; content lives in `volumes.db`.
 
 ## Network plane
 
@@ -162,7 +162,7 @@ Durable sync cursors are written in the same tree-wide transaction as the
 facts they pass.
 
 Verified child proofs are indexed locally by chain path, child CID, and grind
-root in `header-evidence.db`. The index is recovery and serving evidence, not a
+root in `state.db`. The index is recovery and serving evidence, not a
 second network or consensus authority. A restart refuses unreadable or
 misindexed proof rows. When serving a child header, the node attaches the
 proofs it has already verified; a receiver missing a streamed proof requests
