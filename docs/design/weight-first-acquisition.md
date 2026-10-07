@@ -57,7 +57,13 @@ Execution runs when a block becomes *load-bearing*, under two triggers:
 
 - **Selection**: fork choice selects a branch; the node validates it
   forward from its last validated ancestor before producing on or serving
-  its tip.
+  its tip. What the node acts on meanwhile is the **act-on tip**: the
+  executed prefix of the heaviest header chain — the deepest block on that
+  chain whose ancestry is executed from genesis. It moves forward as the
+  selected branch is validated, and back to the fork point when a heavier
+  branch is selected. A block whose body the node does not hold is weighed
+  and unvalidated, not invalid: the act-on tip waits below it while the
+  body is retried; it does not step to a lighter validated sibling.
 - **Pivotality**: unvalidated weight may not decide anything the node
   acts on — where "acts on" means, exhaustively: building templates,
   serving state, issuing continuity facts, and asserting a head

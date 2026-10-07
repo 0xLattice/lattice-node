@@ -142,8 +142,12 @@ Header-weight **ranks**; only **validated** blocks are **acted on** — built
 upon, served, exported, asserted as head (the acted-on set is enumerated in
 [weight-first-acquisition](weight-first-acquisition.md)). A miner can publish a
 heavy header chain (real work) and withhold its bodies; it ranks first but is
-**never acted on** — the node keeps building on its heaviest *validated* tip
-and retries the missing bodies as an availability gap. This is the *same*
+**never acted on** — the node keeps building on its **act-on tip**, the
+executed prefix of the heaviest header chain (the deepest block on that chain
+whose ancestry is executed from genesis), and retries the missing bodies as an
+availability gap. The act-on tip is always on the heaviest header chain: a
+validated block off it is not acted on, however much of the heaviest chain is
+still unexecuted. This is the *same*
 withholding surface as a secret-then-released heavy chain today; header-weight
 adds **no new attack**, *provided* "rank on headers, act only on validated" is
 implemented exactly. Get it wrong and a heaviest-but-invalid or
@@ -168,7 +172,12 @@ availability could split.
   from what the chain acts on.
 - **Availability never judges.** Failure to obtain a body is an availability
   gap, retried forever, excluding nothing. Only a *completed* deterministic
-  check records invalidity.
+  check records invalidity. A block is therefore in one of three states, and
+  they are never conflated: **weighed** and unvalidated (its body may or may
+  not be held; its work counts; it has no verdict), **validated** (executed,
+  post-state checked), or **excluded** (executed and found invalid: still
+  weighed, never the step the descent takes). An unavailable block is the
+  first, not the third.
 - **Wire compatibility is additive.** The strict-canonical wire evolves by new
   message types, never mutated ones. Peers that do not speak the new topics
   keep serving the existing pages; receivers fall back — slow, never wrong.
