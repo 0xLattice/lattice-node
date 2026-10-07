@@ -43,6 +43,22 @@ public enum NodeRuntimeError: Error, Equatable, Sendable {
 /// Child levels are journaled with Nexus in the one hosted-tree fact store;
 /// their verified proofs are kept in the evidence sidecar for lookup and
 /// serving across restarts.
+/// How the overlay closes a session the core disconnects. A stalled peer is
+/// not to blame and may come back at once (`DisconnectReason.stalled`), so
+/// its session is recycled: a configured peer is re-dialled on the overlay's
+/// backoff. A peer that sent invalid proof of work is closed for good.
+enum SessionClose: Equatable {
+    case recycle
+    case close
+
+    init(_ reason: DisconnectReason) {
+        switch reason {
+        case .stalled: self = .recycle
+        case .proofOfWorkInvalid: self = .close
+        }
+    }
+}
+
 public final class NodeRuntime: Sendable {
     public let published: PublishedValue<ChainSnapshot>
     let readView: PublishedValue<NodeReadView>
@@ -785,10 +801,15 @@ extension NodeRuntime {
                 }
             case .level(let path, let effect):
                 return await execute(effect, at: path)
-            case .disconnect(let peer, _):
+            case .disconnect(let peer, let reason):
                 guard let session = session(peer) else { break }
                 sessions[peer.key] = nil
-                _ = await ivy.disconnectSession(ifCurrent: session.peer)
+                switch SessionClose(reason) {
+                case .recycle:
+                    _ = await ivy.recycleSession(ifCurrent: session.peer)
+                case .close:
+                    _ = await ivy.disconnectSession(ifCurrent: session.peer)
+                }
             case .connect(let path, let job, let parentFacts):
                 executionJobs.append(NodeRuntime.connectJob(job, at: path, parentFacts: parentFacts, storage: storage))
                 startJobs()
