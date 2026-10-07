@@ -3,6 +3,7 @@ import Foundation
 import Ivy
 import Lattice
 import LatticeNodeCore
+import VolumeBroker
 import XCTest
 import cashew
 @testable import LatticeNode
@@ -117,7 +118,7 @@ final class NodeRuntimeTests: XCTestCase {
             storage: joinerStorage, configuration: joiner.configuration, overlay: joiner.overlay
         )
         try await eventually("the joiner's status names the declined body") {
-            await joinerRuntime.status().waiting == "body of \(blockCID) exceeds local budget 1"
+            await joinerRuntime.status().waiting == "body of \(blockCID): exceeds this node's byte budget"
         }
         XCTAssertEqual(joinerRuntime.published.value?.actOnHeight, 0)
 
@@ -133,6 +134,43 @@ final class NodeRuntimeTests: XCTestCase {
         XCTAssertNil(waiting)
         await joinerRuntime.stop()
         await producerRuntime.stop()
+    }
+
+    /// Status is public. Whatever error is behind a wait, it shows one of a
+    /// fixed set of reasons: none of the error's text, and no setting's value.
+    func testStatusShowsAFixedReasonAndNeverAnErrorsText() async throws {
+        struct Unknown: Error { let text: String }
+        let marker = "MARKER-disk-full"
+        let node = try host(keyByte: 0x3E)
+        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let view = PublishedValue<NodeReadView>()
+        let reads = NodeRuntime.reads(
+            storage: storage, configuration: node.configuration,
+            published: PublishedValue<ChainSnapshot>(), view: view
+        )
+        let cases: [(BodyWait, String)] = [
+            (BodyWait(fetchFailure: BrokerError.sqlFailed(marker)), "local storage failed"),
+            (BodyWait(fetchFailure: BrokerError.inconsistentState(marker)), "local storage failed"),
+            (BodyWait(fetchFailure: Unknown(text: marker)), "not obtained from any peer"),
+            (
+                BodyWait(fetchFailure: NodeStorageError.bodyExceedsLocalBudget(bytes: 424_242)),
+                "exceeds this node's byte budget"
+            ),
+            (
+                .notConnected(.crossChainEvidenceRequired(.childProof(chainPath: [marker], childCID: marker))),
+                "not connected: crossChainEvidenceRequired"
+            ),
+        ]
+        for (reason, shown) in cases {
+            var next = NodeReadView()
+            next.waiting = NodeReadView.Waiting(cid: "cid", reason: reason)
+            view.publish(next)
+            let status = await reads.readSnapshot()
+            XCTAssertEqual(status.waiting, "body of cid: \(shown)")
+            let json = String(decoding: try JSONEncoder().encode(status), as: UTF8.self)
+            XCTAssertFalse(json.contains(marker), json)
+            XCTAssertFalse(json.contains("424242"), json)
+        }
     }
 
     func testMaintenanceAnnouncesNexusAndEveryHostedChildsRendezvous() async throws {

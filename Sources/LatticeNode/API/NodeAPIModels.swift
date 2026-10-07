@@ -235,7 +235,8 @@ public struct NodeStatusResponse: Codable, Sendable, Equatable {
     @OptionalDecimalString public var bestHeaderHeight: UInt64? = nil
     /// The next block this chain cannot execute yet and why — its body not
     /// fetched, or its connect ended without a verdict — while that holds.
-    /// The node keeps retrying; nil when it waits on nothing.
+    /// The reason is one of a fixed set; no error text is shown here. The
+    /// node keeps retrying; nil when it waits on nothing.
     public var waiting: String? = nil
 }
 

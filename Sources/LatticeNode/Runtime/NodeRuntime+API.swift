@@ -4,6 +4,7 @@ import Lattice
 import LatticeNodeCore
 import cashew
 import UInt256
+import VolumeBroker
 
 /// What RPC reads besides the core's snapshot, published by the loop with
 /// it: the act-on chain by height, the pool listing and the template digest.
@@ -15,7 +16,56 @@ struct NodeReadView: Sendable {
     var templateDigest: String?
     var peers = 0
     /// The first block of the body window, when it waits, and why.
-    var waiting: String?
+    var waiting: Waiting?
+
+    struct Waiting: Sendable, Equatable {
+        let cid: String
+        let reason: BodyWait
+    }
+}
+
+/// Why a block has no verdict yet. A closed set with a fixed rendering:
+/// status is public, so it shows nothing an error says. The error itself
+/// goes to the log.
+enum BodyWait: Sendable, Equatable, CustomStringConvertible {
+    /// Verified content of the body is past this node's byte budget.
+    case exceedsLocalBudget
+    /// No peer served the body's content.
+    case unavailable
+    /// This node's own store failed.
+    case storageFailed
+    /// The body is held and its connect ended without a verdict.
+    case notConnected(BlockImportError)
+
+    init(fetchFailure error: any Error) {
+        switch error {
+        case NodeStorageError.bodyExceedsLocalBudget: self = .exceedsLocalBudget
+        case is NodeStorageError, is NodeStoreError, is BrokerError: self = .storageFailed
+        default: self = .unavailable
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .exceedsLocalBudget: return "exceeds this node's byte budget"
+        case .unavailable: return "not obtained from any peer"
+        case .storageFailed: return "local storage failed"
+        case .notConnected(let failure):
+            let name = switch failure {
+            case .unavailableEvidence: "unavailableEvidence"
+            case .providerMalformedEvidence: "providerMalformedEvidence"
+            case .crossChainEvidenceRequired: "crossChainEvidenceRequired"
+            case .protocolInvalid: "protocolInvalid"
+            case .localVerificationFailure: "localVerificationFailure"
+            case .notYetValid: "notYetValid"
+            case .notAcceptedAtCurrentChain: "notAcceptedAtCurrentChain"
+            case .revisionExhausted: "revisionExhausted"
+            case .executedVerdictContradiction: "executedVerdictContradiction"
+            case .proofOfWorkInvalid: "proofOfWorkInvalid"
+            }
+            return "not connected: \(name)"
+        }
+    }
 }
 
 /// The act-on chain's block CIDs by height, in fixed-size chunks: a copy
@@ -192,7 +242,7 @@ extension NodeRuntime {
                     height: snapshot?.actOnTip.isEmpty == false ? snapshot?.actOnHeight : nil,
                     revision: nil,
                     bestHeaderHeight: snapshot?.bestHeaderTip.isEmpty == false ? snapshot?.bestHeaderHeight : nil,
-                    waiting: view.value?.waiting
+                    waiting: view.value?.waiting.map { "body of \($0.cid): \($0.reason)" }
                 )
             },
             canonicalCID: { height in

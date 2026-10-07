@@ -189,10 +189,13 @@ before any header); `height` is the deepest executed block on it, so sync
 progress is `height` of `bestHeaderHeight`. Both are per level (`?chainPath=`).
 
 `waiting` is present while the level's next block cannot be executed, and says
-which block and why: `body of <cid> exceeds local budget <bytes>` (its content
-is past this node's byte budget for one fetch), `body of <cid> not fetched
-(<error>)`, or `body of <cid> not connected (<failure>)` (its connect ended
-without a verdict). The node keeps retrying; the field goes when the block
+which block and why, as `body of <cid>: <reason>`. The reason is one of a fixed
+set: `exceeds this node's byte budget` (verified content of the body is past
+what this node holds for one fetch), `not obtained from any peer`, `local
+storage failed`, or `not connected: <failure>` (its connect ended without a
+verdict; `<failure>` is the import failure's name). No error text and no
+setting's value is shown: the error behind a reason, and the budget, are in
+the node's log. The node keeps retrying; the field goes when the block
 executes, is excluded, or leaves the best chain.
 
 `/health` reads an immutable published view and never enters the core loop. It
