@@ -376,6 +376,70 @@ final class ChainCoreSyncTests: XCTestCase {
         XCTAssertTrue(core.sync.pending.entries.isEmpty)
     }
 
+    /// A `getData` answer is taken only for the objects asked: valid
+    /// headers beside them are as if not sent.
+    func testADataAnswerIsTakenOnlyForWhatWasAsked() throws {
+        var core = core()
+        let request = try XCTUnwrap(requests(ready(&core, peer)).first)
+        var effects = core.step(.received(peer, .stream(StreamPage(
+            requestID: request.requestID, logID: "log", entries: [StreamEntry(position: 1, entry: .header(chain[0].cid))], hasMore: false
+        ))), now: Self.now)
+        let ask = try XCTUnwrap(dataRequests(effects).first)
+        XCTAssertEqual(ask.cids, [chain[0].cid])
+        let orphan = world.blocks[world.orphan]!
+        effects = relay(&core, [chain[1], chain[0], orphan, chain[0]].map { entry($0) }, from: peer, requestID: ask.requestID)
+        XCTAssertTrue(disconnects(effects).isEmpty)
+        XCTAssertTrue(core.tree.contains(blockHash: chain[0].cid))
+        XCTAssertFalse(core.tree.contains(blockHash: chain[1].cid))
+        XCTAssertTrue(core.sync.pending.entries.isEmpty)
+        XCTAssertTrue(parentRequests(effects).isEmpty)
+        XCTAssertEqual(relays(effects).flatMap(\.1), [chain[0].cid])
+    }
+
+    /// An ancestors answer is taken up to the first entry that is not the
+    /// parent of the one before it.
+    func testAnAncestorsAnswerIsTakenOnlyWhileLinked() async throws {
+        let branch = try await world.branch(from: chain[5], count: 8)
+        var core = weighed(Array(chain[0..<12]), pageSize: 16)
+        ready(&core, other)
+        let ask = try XCTUnwrap(parentRequests(relay(&core, [entry(branch.last!)], from: other)).first)
+        let answer = [branch[6], branch[5], branch[0], branch[4]].map { entry($0) }
+        let effects = relay(&core, answer, from: other, requestID: ask.1)
+        XCTAssertTrue(disconnects(effects).isEmpty)
+        XCTAssertFalse(core.tree.contains(blockHash: branch[0].cid))
+        XCTAssertEqual(Set(core.sync.pending.entries.keys), Set(branch[5...7].map(\.cid)))
+        XCTAssertEqual(parentRequests(effects).map(\.2), [branch[4].cid], "the rest is asked for")
+
+        // An answer that does not start at the asked header: none of it.
+        var none = weighed(Array(chain[0..<12]), pageSize: 16)
+        ready(&none, other)
+        let second = try XCTUnwrap(parentRequests(relay(&none, [entry(branch.last!)], from: other)).first)
+        relay(&none, branch[0...5].reversed().map { entry($0) }, from: other, requestID: second.1)
+        XCTAssertFalse(none.tree.contains(blockHash: branch[0].cid))
+        XCTAssertEqual(Array(none.sync.pending.entries.keys), [branch[7].cid])
+    }
+
+    /// An ancestors answer is taken for the asked header and as many
+    /// parents as were asked, no more.
+    func testAnAncestorsAnswerIsTakenOnlyAsLongAsAsked() async throws {
+        let branch = try await world.branch(from: chain[5], count: 8)
+        var core = weighed(Array(chain[0..<12]), pageSize: 4)
+        ready(&core, other)
+        let effects = relay(&core, [entry(branch.last!)], from: other)
+        let max = effects.compactMap {
+            if case .send(_, .getAncestors(_, _, let max)) = $0 { return max }
+            return nil
+        }.first
+        XCTAssertEqual(max, 4)
+        let ask = try XCTUnwrap(parentRequests(effects).first)
+        // Linked all the way to the fork: 7 entries, 5 asked.
+        let done = relay(&core, branch.dropLast().reversed().map { entry($0) }, from: other, requestID: ask.1)
+        XCTAssertTrue(disconnects(done).isEmpty)
+        XCTAssertFalse(core.tree.contains(blockHash: branch[0].cid))
+        XCTAssertEqual(Set(core.sync.pending.entries.keys), Set(branch[2...7].map(\.cid)))
+        XCTAssertEqual(parentRequests(done).map(\.2), [branch[1].cid])
+    }
+
     func testTheServerAnswersAncestorsChildToParentCappedAboveGenesis() throws {
         var core = weighed(Array(chain[0..<10]), pageSize: 4)
         ready(&core, other)

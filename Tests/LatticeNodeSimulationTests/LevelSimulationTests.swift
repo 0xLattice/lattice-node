@@ -334,6 +334,70 @@ final class LevelSimulationTests: XCTestCase {
         XCTAssertEqual(asked[LevelWorld.nexus]?.count, 1, "the root level asks for a whole page at once")
     }
 
+    /// A peer answers each child-level `getData` with every header it has,
+    /// proofs and all: only the asked ones wait for a proof, and no check is
+    /// spent on another.
+    func testAChildDataAnswerIsTakenOnlyForWhatWasAsked() async throws {
+        var rng = SplitMix64(state: 0x51075)
+        let world = try await LevelWorld.generate(
+            rng: &rng, levels: 2, grinds: 200, forkProbability: 0, shareProbability: 0,
+            doubleProbability: 0, withholdDelay: 1_000
+        )
+        let now = World.genesisTime + 1_000_000
+        let config = ChainCoreConfig()
+        let alpha = LevelWorld.alpha
+        var host = NodeCore(root: world.rootBootstrap.tree, hosted: world.hosted, config: config)
+        var source = LevelSource(name: "source", config: config)
+        let peer = PeerID(key: "source", session: 1)
+        let node = PeerID(key: "node", session: 1)
+        let served = world.released(alpha, at: now, withheld: false).filter { $0.height > 0 }.map(\.cid)
+        var everything: [HeaderEntry] = []
+        for case .send(_, _, .headers(let all)) in source.received(
+            .getData(requestID: 0, cids: served), at: alpha, from: node, now: now, world: world
+        ) {
+            everything = all.entries
+        }
+        XCTAssertEqual(everything.count, served.count)
+        var queue: [NodeEvent] = world.grinds.prefix(3).map { .mined($0.mined) } + [.peerReady(peer)]
+        var asked = Set<String>()
+        var answers = 0
+        while !queue.isEmpty {
+            for effect in host.step(queue.removeFirst(), now: now) {
+                switch effect {
+                case .level(let path, .send(_, let message)):
+                    if path == alpha, case .getData(_, let cids) = message { asked.formUnion(cids) }
+                    for case .send(_, let path, var reply) in source.received(message, at: path, from: node, now: now, world: world) {
+                        if path == alpha, case .headers(let page) = reply {
+                            reply = .headers(HeadersResponse(
+                                requestID: page.requestID, entries: page.entries + everything, hasMore: page.hasMore
+                            ))
+                            answers += 1
+                        }
+                        queue.append(.received(peer, path, reply))
+                    }
+                case .level(let path, .verifyProof(let job)):
+                    XCTAssertTrue(asked.contains(job.childCID), "a check spent on a header not asked for")
+                    let block = try XCTUnwrap(job.block ?? world.blocks[path]?[job.childCID]?.block)
+                    queue.append(.level(path, .proofVerified(job, await job.run(block))))
+                case .level(let path, .fetchByCID(_, let cid)):
+                    queue.append(.level(path, .childIndexFetched(
+                        peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
+                    )))
+                case .disconnect(let gone, let reason):
+                    XCTFail("disconnected \(gone) as \(reason)")
+                default:
+                    break
+                }
+            }
+            let level = try XCTUnwrap(host.levels[alpha])
+            XCTAssertTrue(asked.isSuperset(of: level.sync.proofs.awaiting.keys), "a header not asked for awaits a proof")
+            XCTAssertTrue(asked.isSuperset(of: level.sync.proofs.queued.map(\.cid)))
+        }
+        XCTAssertGreaterThan(answers, 1)
+        let weighed = TreeDigest(try XCTUnwrap(host.levels[alpha]).tree).blocks
+        XCTAssertEqual(served.filter { weighed[$0] == nil }.count, 0, "child blocks never weighed")
+    }
+
     // MARK: - Waiting on the parent level
 
     /// Drives one host by hand over a two-level world: weighs root blocks
