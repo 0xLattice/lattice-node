@@ -43,6 +43,22 @@ public enum NodeRuntimeError: Error, Equatable, Sendable {
 /// Child levels are journaled with Nexus in the one hosted-tree fact store;
 /// their verified proofs are kept in the evidence sidecar for lookup and
 /// serving across restarts.
+/// How the overlay closes a session the core disconnects. A stalled peer is
+/// not to blame and may come back at once (`DisconnectReason.stalled`), so
+/// its session is recycled: a configured peer is re-dialled on the overlay's
+/// backoff. A peer that sent invalid proof of work is closed for good.
+enum SessionClose: Equatable {
+    case recycle
+    case close
+
+    init(_ reason: DisconnectReason) {
+        switch reason {
+        case .stalled: self = .recycle
+        case .proofOfWorkInvalid: self = .close
+        }
+    }
+}
+
 public final class NodeRuntime: Sendable {
     public let published: PublishedValue<ChainSnapshot>
     let readView: PublishedValue<NodeReadView>
@@ -343,6 +359,8 @@ extension NodeRuntime {
         let storage: NodeStorage
         let headers: HeaderEvidenceStore
         let ivy: Ivy
+        /// Each session's outgoing sync messages, in order, surviving backpressure.
+        let outbox: SessionOutbox
         let hello: Data?
         let configuration: NodeConfiguration
         let outputs: [ChainPath: LevelOutput]
@@ -447,6 +465,7 @@ extension NodeRuntime {
             self.storage = storage
             self.headers = headers
             self.ivy = ivy
+            self.outbox = SessionOutbox(ivy: ivy)
             self.hello = hello
             self.configuration = configuration
             self.outputs = outputs
@@ -661,7 +680,7 @@ extension NodeRuntime {
                     inputs.yield(.helloDeadline(peerKey: key, session: id))
                 }
                 if let hello {
-                    _ = await ivy.sendMessage(to: peer, topic: OverlayTopic.overlayHello, payload: hello)
+                    await outbox.send(to: peer, topic: OverlayTopic.overlayHello, payload: hello)
                 }
                 if let replaced, replaced.ready {
                     return await step(.peerGone(replaced.coreID))
@@ -785,10 +804,15 @@ extension NodeRuntime {
                 }
             case .level(let path, let effect):
                 return await execute(effect, at: path)
-            case .disconnect(let peer, _):
+            case .disconnect(let peer, let reason):
                 guard let session = session(peer) else { break }
                 sessions[peer.key] = nil
-                _ = await ivy.disconnectSession(ifCurrent: session.peer)
+                switch SessionClose(reason) {
+                case .recycle:
+                    _ = await ivy.recycleSession(ifCurrent: session.peer)
+                case .close:
+                    _ = await ivy.disconnectSession(ifCurrent: session.peer)
+                }
             case .connect(let path, let job, let parentFacts):
                 executionJobs.append(NodeRuntime.connectJob(job, at: path, parentFacts: parentFacts, storage: storage))
                 startJobs()
@@ -815,10 +839,10 @@ extension NodeRuntime {
                 outputs[path]?.published.publish(snapshot)
             case .send(let peer, let message):
                 guard let session = session(peer), let frame = try? ChainSyncWire.encode(message, at: path) else { break }
-                _ = await ivy.sendMessage(to: session.peer, topic: frame.topic, payload: frame.payload)
+                await outbox.send(to: session.peer, topic: frame.topic, payload: frame.payload)
             case .serveHeaders(let peer, let token, let requestID, let blockCIDs, let hasMore):
                 guard let session = session(peer) else { break }
-                let (storage, headers, ivy, inputs, config) = (storage, headers, ivy, inputs, core.config)
+                let (storage, headers, outbox, inputs, config) = (storage, headers, outbox, inputs, core.config)
                 let proofs = proofs[path] ?? [:]
                 spawn {
                     var entries: [HeaderEntry] = []
@@ -835,7 +859,10 @@ extension NodeRuntime {
                     if let frame = try? ChainSyncWire.encode(.headers(HeadersResponse(
                         requestID: requestID, entries: page.entries, hasMore: page.hasMore
                     )), at: path) {
-                        _ = await ivy.sendMessage(to: session.peer, topic: frame.topic, payload: frame.payload)
+                        // Served once handed to the transport, not merely
+                        // attempted: a page refused as backpressured is sent
+                        // when the session drains.
+                        _ = await outbox.send(to: session.peer, topic: frame.topic, payload: frame.payload).value
                     }
                     inputs.yield(.event(.level(path, .headersServed(peer, token: token))))
                 }
@@ -932,7 +959,7 @@ extension NodeRuntime {
             case .announceTransaction(let cid):
                 guard let payload = try? TransactionAvailableMessage(volumeRootCID: cid).encoded() else { break }
                 for session in sessions.values.sorted(by: { $0.id < $1.id }) where session.ready {
-                    _ = await ivy.sendMessage(
+                    await outbox.send(
                         to: session.peer, topic: OverlayTopic.transactionAvailable, payload: payload
                     )
                 }
