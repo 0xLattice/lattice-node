@@ -106,8 +106,6 @@ struct AncestorsRequestMessage: CanonicalJSONMessage, Equatable, Sendable {
 /// a child header's `ChildBlockProof`s (a root header carries none), and a
 /// child genesis's spec.
 struct WireHeaderEntry: Codable, Equatable, Sendable {
-    static let maximumProofs = 16
-
     let block: Data
     let children: Data?
     let proofs: [Data]
@@ -116,7 +114,6 @@ struct WireHeaderEntry: Codable, Equatable, Sendable {
     var isCanonical: Bool {
         Block(data: block)?.toData() == block
             && (children.map { FlatDictionary<BlockHeader>(data: $0)?.toData() == $0 } ?? true)
-            && proofs.count <= Self.maximumProofs
             && proofs.allSatisfy { (try? ChildBlockProof.deserialize($0)?.serialize()) == $0 }
             && (spec.map { ChainSpec(data: $0)?.toData() == $0 } ?? true)
     }

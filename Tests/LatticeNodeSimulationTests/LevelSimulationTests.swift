@@ -398,6 +398,72 @@ final class LevelSimulationTests: XCTestCase {
         XCTAssertEqual(served.filter { weighed[$0] == nil }.count, 0, "child blocks never weighed")
     }
 
+    /// Child blocks carried by seventeen roots each, served with every
+    /// proof: all seventeen are credited, a few per answer, the rest as the
+    /// header is asked again on a tick.
+    func testAChildBlockCarriedBySeventeenRootsIsCreditedWithAll() async throws {
+        var rng = SplitMix64(state: 0x17)
+        let world = try await LevelWorld.generate(
+            rng: &rng, levels: 2, grinds: 12, forkProbability: 0, shareProbability: 0,
+            doubleProbability: 1, doubles: 16, withholdDelay: 1_000
+        )
+        var now = World.genesisTime + 1_000_000
+        let config = ChainCoreConfig()
+        let alpha = LevelWorld.alpha
+        var host = NodeCore(root: world.rootBootstrap.tree, hosted: world.hosted, config: config)
+        var source = LevelSource(name: "source", config: config)
+        let peer = PeerID(key: "source", session: 1)
+        let served = world.released(alpha, at: now, withheld: false).filter { $0.height > 0 }.map(\.cid)
+        let roots = Dictionary(uniqueKeysWithValues: served.map { cid in
+            (cid, Set(world.publicProofs(alpha, cid, at: now).map(\.rootCID)))
+        })
+        XCTAssertGreaterThan(roots.values.filter { $0.count == 17 }.count, 3)
+        func missing() throws -> Int {
+            let weighed = TreeDigest(try XCTUnwrap(host.levels[alpha]).tree).blocks
+            return roots.map { cid, roots in roots.subtracting(weighed[cid]?.grinds.keys.map { $0 } ?? []).count }.reduce(0, +)
+        }
+        // Alpha's genesis comes with the grind that carries it.
+        let first = try XCTUnwrap(world.grinds.firstIndex { !$0.mined.carried.isEmpty })
+        var queue: [NodeEvent] = world.grinds.prefix(through: first).map { .mined($0.mined) } + [.peerReady(peer)]
+        var asks: [String: Int] = [:]
+        var ticks = 0
+        while true {
+            while !queue.isEmpty {
+                for effect in host.step(queue.removeFirst(), now: now) {
+                    switch effect {
+                    case .level(let path, .send(_, let message)):
+                        if path == alpha, case .getData(_, let cids) = message {
+                            for cid in cids { asks[cid, default: 0] += 1 }
+                        }
+                        for case .send(_, let path, let reply) in source.received(
+                            message, at: path, from: PeerID(key: "node", session: 1), now: now, world: world
+                        ) {
+                            queue.append(.received(peer, path, reply))
+                        }
+                    case .level(let path, .verifyProof(let job)):
+                        let block = try XCTUnwrap(job.block ?? world.blocks[path]?[job.childCID]?.block)
+                        queue.append(.level(path, .proofVerified(job, await job.run(block))))
+                    case .level(let path, .fetchByCID(_, let cid)):
+                        queue.append(.level(path, .childIndexFetched(
+                            peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
+                        )))
+                    case .disconnect(let gone, let reason):
+                        XCTFail("disconnected \(gone) as \(reason)")
+                    default:
+                        break
+                    }
+                }
+            }
+            let left = try missing()
+            print("seventeen roots: \(left) proofs uncredited after \(ticks) ticks, most asks of one header \(asks.values.max() ?? 0)")
+            guard left > 0, ticks < 20 else { break }
+            ticks += 1
+            now += config.headersTimeout
+            queue.append(.tick)
+        }
+        XCTAssertEqual(try missing(), 0, "proofs never credited")
+    }
+
     // MARK: - Waiting on the parent level
 
     /// Drives one host by hand over a two-level world: weighs root blocks
