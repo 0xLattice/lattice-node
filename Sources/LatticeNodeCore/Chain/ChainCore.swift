@@ -763,8 +763,26 @@ public struct ChainCore: Sendable {
         } else {
             return
         }
+        // Only what was asked is taken: each asked object once, or the asked
+        // header and the parents linked to it, as many as were asked.
+        var entries: [HeaderEntry] = []
+        if let data {
+            var wanted = Set(data.cids)
+            entries = response.entries.filter {
+                guard let cid = try? BlockHeader(node: $0.block).rawCID else { return false }
+                return wanted.remove(cid) != nil
+            }
+        } else {
+            var next = asked
+            for entry in response.entries.prefix(config.maxHeadersPerPage + 1) {
+                guard let cid = try? BlockHeader(node: entry.block).rawCID, cid == next else { break }
+                entries.append(entry)
+                next = entry.block.parent?.rawCID
+            }
+            entries.reverse()
+        }
         var received = Set<String>()
-        for entry in asked != nil ? response.entries.reversed() : response.entries {
+        for entry in entries {
             guard let cid = accept(entry, from: peer, &turn) else { return }
             received.insert(cid)
         }

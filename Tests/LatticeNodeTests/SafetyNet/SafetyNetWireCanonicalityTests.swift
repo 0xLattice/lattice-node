@@ -227,6 +227,46 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
         }
     }
 
+    /// A child block carried by any number of roots is served: the page
+    /// encodes and decodes with all its proofs, each still checked canonical.
+    func testAHeaderEntryCarriesAnyNumberOfProofs() throws {
+        var generator = SplitMix64(state: 0x43)
+        let path = randomChainPath(&generator, minimumCount: 2)
+        let proofs = (0..<17).map { _ in
+            ChildBlockProof(
+                rootCID: randomCID(&generator), directoryPath: path,
+                entries: [(cid: randomCID(&generator), data: Data(randomAtom(&generator).utf8))]
+            )
+        }
+        let block = Block(
+            parent: nil,
+            transactions: HeaderImpl(rawCID: randomCID(&generator)),
+            target: UInt256(1), nextTarget: UInt256(1),
+            spec: VolumeImpl(rawCID: randomCID(&generator)),
+            parentState: LatticeStateHeader(rawCID: randomCID(&generator)),
+            prevState: LatticeStateHeader(rawCID: randomCID(&generator)),
+            postState: LatticeStateHeader(rawCID: randomCID(&generator)),
+            children: HeaderImpl(rawCID: randomCID(&generator)),
+            height: 1, timestamp: 1, rewardRecipient: nil, nonce: 1
+        )
+        let page = HeadersResponse(
+            requestID: 7, entries: [HeaderEntry(block: block, children: nil, proofs: proofs)], hasMore: false
+        )
+        let frame = try ChainSyncWire.encode(.headers(page), at: path)
+        let decoded = try XCTUnwrap(ChainSyncWire.decode(topic: frame.topic, payload: frame.payload))
+        guard case .headers(let response) = decoded.message else { return XCTFail("not a headers page") }
+        XCTAssertEqual(try response.entries.first?.proofs.map { try $0.serialize() }, try proofs.map { try $0.serialize() })
+
+        let wire = try HeadersResponseMessage.decoded(frame.payload)
+        let entry = try XCTUnwrap(wire.entries.first)
+        let junk = HeadersResponseMessage(
+            chainPath: path, requestID: 7,
+            entries: [WireHeaderEntry(block: entry.block, children: nil, proofs: entry.proofs + [Data("junk".utf8)])],
+            hasMore: false
+        )
+        XCTAssertThrowsError(try junk.encoded())
+    }
+
     // MARK: - Content fixtures for the binary frames
 
     /// An unsigned-but-content-bound transaction under `chainPath`: the frame
