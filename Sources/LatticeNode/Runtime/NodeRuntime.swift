@@ -95,6 +95,9 @@ public final class NodeRuntime: Sendable {
         case event(NodeEvent)
         /// A body is held locally, in these Volume roots.
         case bodyStored(ChainPath, cid: String, roots: [String])
+        /// A body's fetch failed and is being retried: why, and the error
+        /// for the log.
+        case bodyWaiting(ChainPath, cid: String, BodyWait, detail: String)
         /// A session's hello deadline passed.
         case helloDeadline(peerKey: String, session: UInt64)
         /// A worker finished: its slot frees, then its results step.
@@ -429,6 +432,11 @@ extension NodeRuntime {
         /// The Volume roots each fetched body was stored in, until the
         /// validation fact that references them is persisted with them.
         var bodyRoots: [BodyKey: [String]] = [:]
+        /// Why each body being fetched has not arrived, while its fetch runs.
+        var fetchWaits: [BodyKey: BodyWait] = [:]
+        /// Why each held block's connect ended without a verdict, until the
+        /// block leaves the body window.
+        var connectWaits: [BodyKey: BodyWait] = [:]
 
         struct BodyKey: Hashable {
             let path: ChainPath
@@ -486,8 +494,15 @@ extension NodeRuntime {
             case .bodyStored(let path, let cid, let roots):
                 let key = BodyKey(path: path, cid: cid)
                 bodies[key] = nil
+                fetchWaits[key] = nil
                 bodyRoots[key] = roots
                 return await step(.level(path, .bodyFetched(cid: cid)))
+            case .bodyWaiting(let path, let cid, let reason, let detail):
+                let key = BodyKey(path: path, cid: cid)
+                guard bodies[key] != nil else { return true }
+                wait(key, reason, detail: detail, in: \.fetchWaits)
+                refreshView(path)
+                return true
             case .helloDeadline(let key, let id):
                 guard let session = sessions[key], session.id == id, !session.ready else { return true }
                 sessions[key] = nil
@@ -497,6 +512,14 @@ extension NodeRuntime {
                 runningJobs -= 1
                 startJobs()
                 for event in events {
+                    // A connect without a verdict is a wait with its reason.
+                    if case .level(let path, .connected(let verdict, _)) = event,
+                       let failure = verdict.retryFailure {
+                        wait(
+                            BodyKey(path: path, cid: verdict.blockHash), .notConnected(failure),
+                            detail: "\(failure)", in: \.connectWaits
+                        )
+                    }
                     guard await step(event) else { return false }
                 }
                 return true
@@ -615,6 +638,20 @@ extension NodeRuntime {
             replies.removeValue(forKey: id)?.resume(with: result)
         }
 
+        /// Record why a block waits. A reason is logged when it changes,
+        /// never per retry, with the error behind it: `detail` goes to the
+        /// log and nowhere else.
+        private mutating func wait(
+            _ key: BodyKey, _ reason: BodyWait, detail: String,
+            in waits: WritableKeyPath<Loop, [BodyKey: BodyWait]>
+        ) {
+            guard self[keyPath: waits][key] != reason else { return }
+            self[keyPath: waits][key] = reason
+            let line = "waiting: body of \(key.cid): \(reason) (\(detail))"
+            SyncTrace.log(chain: key.path, line)
+            FileHandle.standardError.write(Data("lattice-node [\(key.path.joined(separator: "/"))] \(line)\n".utf8))
+        }
+
         /// Republish the read view when the act-on chain, the pool or the
         /// peers changed: the act-on chain by height (walked down from its
         /// top only as far as it changed), the pool listing and the digest.
@@ -647,8 +684,20 @@ extension NodeRuntime {
                     : NodeRuntime.templateDigest(tip: tip.hash, mempool: pool)
                 digests[path] = (key, digest)
             }
+            // Status names the next block's wait. A block the window left
+            // (executed, excluded, or off the best chain) waits no more.
+            var waiting: NodeReadView.Waiting?
+            if !fetchWaits.isEmpty || !connectWaits.isEmpty {
+                let window = level.bodyWindow
+                connectWaits = connectWaits.filter { $0.key.path != path || window.contains($0.key.cid) }
+                waiting = window.first.flatMap { cid in
+                    let key = BodyKey(path: path, cid: cid)
+                    return (fetchWaits[key] ?? connectWaits[key]).map { NodeReadView.Waiting(cid: cid, reason: $0) }
+                }
+            }
             guard view.actOnTip != tip.hash || view.poolVersion != pool.version
-                    || view.templateDigest != digest || view.peers != peers else { return }
+                    || view.templateDigest != digest || view.peers != peers
+                    || view.waiting != waiting else { return }
             if view.actOnTip != tip.hash {
                 view.actOnTip = tip.hash
                 let tree = level.tree
@@ -671,6 +720,7 @@ extension NodeRuntime {
             // pool moving changes the template a miner should fetch.
             view.templateDigest = digest
             view.peers = peers
+            view.waiting = waiting
             views[path] = view
             output.view.publish(view)
         }
@@ -921,12 +971,20 @@ extension NodeRuntime {
                 let (storage, remote, inputs) = (storage, remote, inputs)
                 bodies[key] = Task {
                     // The content layer retries until the body is held or the
-                    // core no longer wants it.
+                    // core no longer wants it, and says why each attempt
+                    // failed.
                     var backoff: UInt64 = 250
                     while !Task.isCancelled {
-                        if let roots = try? await storage.fetchChainBody(cid, remote: remote) {
+                        do {
+                            let roots = try await storage.fetchChainBody(cid, remote: remote)
                             inputs.yield(.bodyStored(path, cid: cid, roots: roots))
                             return
+                        } catch {
+                            if !Task.isCancelled {
+                                inputs.yield(.bodyWaiting(
+                                    path, cid: cid, BodyWait(fetchFailure: error), detail: "\(error)"
+                                ))
+                            }
                         }
                         _ = await Timers.sleep(nanoseconds: backoff * 1_000_000)
                         backoff = min(backoff * 2, 30_000)
@@ -935,6 +993,7 @@ extension NodeRuntime {
             case .cancelBody(let cid):
                 bodies.removeValue(forKey: BodyKey(path: path, cid: cid))?.cancel()
                 bodyRoots[BodyKey(path: path, cid: cid)] = nil
+                fetchWaits[BodyKey(path: path, cid: cid)] = nil
             case .verifyProof(let job):
                 // A job without its block reads it from the header store.
                 guard let block = job.block ?? headers.header(job.childCID)?.block else {

@@ -9,11 +9,23 @@ import cashew
 /// selected by the caller. The root is never guessed from a frontier of CIDs.
 public struct IvyRootContentSource: Sendable {
     private static let defaultPolicy = NodeResourcePolicy.default
+    /// What a session is charged for each entry it holds, beyond the entry's
+    /// CID and bytes: the heap a held entry costs in the session's set and
+    /// its store's three tables (hash slots at their load, the owner set, the
+    /// string and data headers). Measured at 273 to 430 bytes an entry
+    /// (1,000 to 300,000 entries of 1 to 113 bytes, arm64 macOS) and rounded
+    /// up, so the byte budget bounds memory however small a peer makes the
+    /// entries it sends.
+    static let retainedEntryOverhead = 512
 
     public struct Attribution: Sendable, Equatable {
         public let servedByPublicKeys: Set<String>
         public let allResponsesComplete: Bool
         public let localCapacityUnavailable: Bool
+        /// Verified content this session received was past its byte budget
+        /// by this node's own count: this node's choice, not content nobody
+        /// served. Never a size a peer only declared.
+        public let byteBudgetExceeded: Bool
         public let contentUnavailable: Bool
         public let deficientVolumeSuppliers: [String: Set<String>]
 
@@ -42,6 +54,7 @@ public struct IvyRootContentSource: Sendable {
         private var peerPublicKeys: Set<String> = []
         private var complete = true
         private var locallyLimited = false
+        private var overBudget = false
         private var unavailable = false
         private var deficientVolumeSuppliers: [String: Set<String>] = [:]
 
@@ -75,6 +88,7 @@ public struct IvyRootContentSource: Sendable {
                 servedByPublicKeys: peerPublicKeys,
                 allResponsesComplete: complete,
                 localCapacityUnavailable: locallyLimited,
+                byteBudgetExceeded: overBudget,
                 contentUnavailable: unavailable,
                 deficientVolumeSuppliers: deficientVolumeSuppliers
             )
@@ -83,29 +97,24 @@ public struct IvyRootContentSource: Sendable {
         func markIncomplete() {
             lock.withLock { complete = false }
         }
+
+        func markOverBudget() {
+            lock.withLock { overBudget = true }
+        }
     }
 
     private final class Context: @unchecked Sendable {
         let rootCID: String
         let trace = Trace()
-        private let maximumMembers: Int
         private let maximumStorageBytes: Int
-        private let maximumVolumes: Int
         private let broker = MemoryBroker()
         private let lock = NSLock()
         private var attemptedRoots = Set<String>()
         private var accountedMembers = Set<String>()
         private var storageByteCount = 0
 
-        init(
-            rootCID: String,
-            maximumVolumes: Int,
-            maximumMembers: Int,
-            maximumStorageBytes: Int
-        ) {
+        init(rootCID: String, maximumStorageBytes: Int) {
             self.rootCID = rootCID
-            self.maximumVolumes = maximumVolumes
-            self.maximumMembers = maximumMembers
             self.maximumStorageBytes = maximumStorageBytes
         }
 
@@ -113,27 +122,22 @@ public struct IvyRootContentSource: Sendable {
             await broker.fetch(cids)
         }
 
+        var accountedBytes: Int { lock.withLock { storageByteCount } }
+
         func reserve(rootCID: String) -> Bool {
-            lock.withLock {
-                guard attemptedRoots.count < maximumVolumes else {
-                    return false
-                }
-                return attemptedRoots.insert(rootCID).inserted
-            }
+            lock.withLock { attemptedRoots.insert(rootCID).inserted }
         }
 
         func store(_ volume: SerializedVolume) async -> Bool {
             let fits = lock.withLock {
-                var addedMembers = 0
                 var addedStorageBytes = 0
                 for (cid, data) in volume.entries
                     where !accountedMembers.contains(cid) {
-                    addedMembers += 1
                     let framed = cid.utf8.count
                         .addingReportingOverflow(data.count)
                     guard !framed.overflow else { return false }
                     let framedWithOverhead = framed.partialValue
-                        .addingReportingOverflow(6)
+                        .addingReportingOverflow(IvyRootContentSource.retainedEntryOverhead)
                     guard !framedWithOverhead.overflow else { return false }
                     let next = addedStorageBytes.addingReportingOverflow(
                         framedWithOverhead.partialValue
@@ -141,15 +145,10 @@ public struct IvyRootContentSource: Sendable {
                     guard !next.overflow else { return false }
                     addedStorageBytes = next.partialValue
                 }
-                let nextMembers = accountedMembers.count.addingReportingOverflow(
-                    addedMembers
-                )
                 let nextStorageBytes = storageByteCount.addingReportingOverflow(
                     addedStorageBytes
                 )
-                guard !nextMembers.overflow,
-                      nextMembers.partialValue <= maximumMembers,
-                      !nextStorageBytes.overflow,
+                guard !nextStorageBytes.overflow,
                       nextStorageBytes.partialValue <= maximumStorageBytes else {
                     return false
                 }
@@ -157,7 +156,10 @@ public struct IvyRootContentSource: Sendable {
                 storageByteCount = nextStorageBytes.partialValue
                 return true
             }
-            guard fits else { return false }
+            guard fits else {
+                trace.markOverBudget()
+                return false
+            }
             do {
                 try await broker.store(volume: volume)
                 return true
@@ -176,9 +178,7 @@ public struct IvyRootContentSource: Sendable {
     /// Credits the peer that served a requested Volume once it verifies, so
     /// the overlay favours peers that serve this node when it is contended.
     private let credit: @Sendable (PeerID, Int) async -> Void
-    private let maximumVolumes: Int
-    private let maximumMembers: Int
-    private let maximumStorageBytes: Int
+    let maximumStorageBytes: Int
 
     public final class Session: ContentSource {
         private let fetchVolume: @Sendable (String) async -> AttributedVolumeResponse
@@ -187,20 +187,13 @@ public struct IvyRootContentSource: Sendable {
 
         fileprivate init(
             rootCID: String,
-            maximumVolumes: Int,
-            maximumMembers: Int,
             maximumStorageBytes: Int,
             fetch: @escaping @Sendable (String) async -> AttributedVolumeResponse,
             credit: @escaping @Sendable (PeerID, Int) async -> Void
         ) {
             self.fetchVolume = fetch
             self.credit = credit
-            context = Context(
-                rootCID: rootCID,
-                maximumVolumes: maximumVolumes,
-                maximumMembers: maximumMembers,
-                maximumStorageBytes: maximumStorageBytes
-            )
+            context = Context(rootCID: rootCID, maximumStorageBytes: maximumStorageBytes)
         }
 
         fileprivate func acceptInitialResponse(
@@ -257,6 +250,9 @@ public struct IvyRootContentSource: Sendable {
 
         public var attribution: Attribution { context.trace.snapshot() }
 
+        /// What the entries this session holds are charged against its budget.
+        var accountedBytes: Int { context.accountedBytes }
+
         /// A Volume this session requested passed CID validation: credit the
         /// peer that served it with its bytes.
         private func creditServer(of response: AttributedVolumeResponse, volume: SerializedVolume) async {
@@ -276,58 +272,11 @@ public struct IvyRootContentSource: Sendable {
 
     public init(ivy: Ivy, policy: NodeResourcePolicy = .default) {
         credit = Self.tallyCredit(ivy)
-        maximumVolumes = policy.maximumAcquisitionVolumes
-        maximumMembers = policy.maximumAcquisitionMembers
         maximumStorageBytes = policy.maximumAcquisitionStorageBytes
-        fetch = { rootCID in
-            await ivy.fetchVolume(
-                rootCID: rootCID,
-                maximumArchiveBytes: policy.maximumAcquisitionStorageBytes,
-                maximumEntries: policy.maximumAcquisitionMembers
-            )
-        }
-    }
-
-    public init(
-        ivy: Ivy,
-        peer: AuthenticatedPeer,
-        policy: NodeResourcePolicy = .default
-    ) {
-        credit = Self.tallyCredit(ivy)
-        maximumVolumes = policy.maximumAcquisitionVolumes
-        maximumMembers = policy.maximumAcquisitionMembers
-        maximumStorageBytes = policy.maximumAcquisitionStorageBytes
-        fetch = { rootCID in
-            let response = await ivy.fetchVolume(
-                rootCID: rootCID,
-                from: peer,
-                maximumArchiveBytes: policy.maximumAcquisitionStorageBytes,
-                maximumEntries: policy.maximumAcquisitionMembers
-            )
-            return Self.response(response, from: peer.id)
-        }
-    }
-
-    init(
-        ivy: Ivy,
-        peer: AuthenticatedPeer,
-        maximumMembers: Int,
-        maximumStorageBytes: Int,
-        maximumArchiveBytes: Int
-    ) {
-        credit = Self.tallyCredit(ivy)
-        maximumVolumes = maximumMembers
-        self.maximumMembers = maximumMembers
-        self.maximumStorageBytes = maximumStorageBytes
-        fetch = { rootCID in
-            let response = await ivy.fetchVolume(
-                rootCID: rootCID,
-                from: peer,
-                maximumArchiveBytes: maximumArchiveBytes,
-                maximumEntries: maximumMembers
-            )
-            return Self.response(response, from: peer.id)
-        }
+        // A Volume is taken at whatever size the wire carries and measured
+        // here once verified: the size a peer declares is its claim, and a
+        // declared size past the budget would say nothing about the block.
+        fetch = { rootCID in await ivy.fetchVolume(rootCID: rootCID) }
     }
 
     /// Credit verified content to the serving peer in the overlay's Tally.
@@ -335,25 +284,12 @@ public struct IvyRootContentSource: Sendable {
         { peer, bytes in await ivy.tally.recordUsefulReceived(peer: peer, bytes: bytes) }
     }
 
-    static func response(
-        _ response: AttributedVolumeResponse,
-        from peer: PeerID
-    ) -> AttributedVolumeResponse {
-        response.failure != nil || response.servedBy == peer
-            ? response
-            : .empty
-    }
-
     init(
-        maximumVolumes: Int = Self.defaultPolicy.maximumAcquisitionVolumes,
-        maximumMembers: Int = Self.defaultPolicy.maximumAcquisitionMembers,
         maximumStorageBytes: Int = Self.defaultPolicy.maximumAcquisitionStorageBytes,
         fetch: @escaping @Sendable (String) async -> AttributedVolumeResponse,
         credit: @escaping @Sendable (PeerID, Int) async -> Void = { _, _ in }
     ) {
         self.credit = credit
-        self.maximumVolumes = maximumVolumes
-        self.maximumMembers = maximumMembers
         self.maximumStorageBytes = maximumStorageBytes
         self.fetch = fetch
     }
@@ -374,8 +310,6 @@ public struct IvyRootContentSource: Sendable {
     ) async rethrows -> (value: T, attribution: Attribution) {
         let session = Session(
             rootCID: rootCID,
-            maximumVolumes: maximumVolumes,
-            maximumMembers: maximumMembers,
             maximumStorageBytes: maximumStorageBytes,
             fetch: fetch,
             credit: credit

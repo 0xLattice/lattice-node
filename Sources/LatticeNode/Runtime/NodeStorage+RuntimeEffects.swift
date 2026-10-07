@@ -64,13 +64,21 @@ extension NodeStorage {
     /// Returns the roots it stored in, for the validation that references
     /// them.
     nonisolated func fetchChainBody(_ cid: String, remote: IvyRootContentSource) async throws -> [String] {
-        try await remote.withRoot(cid) { session in
-            let fetcher = CoalescingFetcher(CompositeContentSource([broker, session]))
-            let storage = NodeImportStorage(storage: broker)
-            try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: storage)
-            let roots = await storage.takeStoredVolumeRoots()
-            try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots)
-            return roots
+        let capture = IvyRootContentSource.AttributionCapture()
+        do {
+            return try await remote.withRootTracing(cid, capture: capture) { session in
+                let fetcher = CoalescingFetcher(CompositeContentSource([broker, session]))
+                let storage = NodeImportStorage(storage: broker)
+                try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: storage)
+                let roots = await storage.takeStoredVolumeRoots()
+                try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots)
+                return roots
+            }.value
+        } catch {
+            // Content this node's own budget declined is named as that, not
+            // as content nobody served.
+            guard capture.snapshot()?.byteBudgetExceeded == true else { throw error }
+            throw NodeStorageError.bodyExceedsLocalBudget(bytes: remote.maximumStorageBytes)
         }
     }
 

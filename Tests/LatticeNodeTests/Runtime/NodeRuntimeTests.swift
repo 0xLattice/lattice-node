@@ -3,6 +3,7 @@ import Foundation
 import Ivy
 import Lattice
 import LatticeNodeCore
+import VolumeBroker
 import XCTest
 import cashew
 @testable import LatticeNode
@@ -21,7 +22,8 @@ final class NodeRuntimeTests: XCTestCase {
     private func host(
         keyByte: UInt8,
         peers: [PeerEndpoint] = [],
-        storageDirectory reused: URL? = nil
+        storageDirectory reused: URL? = nil,
+        resourcePolicy: NodeResourcePolicy = .default
     ) throws -> Host {
         let storageDirectory = reused ?? FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-node-runtime-\(UUID().uuidString)", isDirectory: true
@@ -33,7 +35,8 @@ final class NodeRuntimeTests: XCTestCase {
             storagePath: storageDirectory,
             privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
             listenPort: port,
-            rpcPort: NetworkTransportTestPorts.allocate()
+            rpcPort: NetworkTransportTestPorts.allocate(),
+            resourcePolicy: resourcePolicy
         )
         return Host(
             configuration: configuration,
@@ -93,6 +96,80 @@ final class NodeRuntimeTests: XCTestCase {
         for cid in blockCIDs {
             let volume = await reopened.volume(cid)
             XCTAssertNotNil(volume, "body \(cid) was evicted after restart")
+        }
+    }
+
+    /// A body this node's byte budget declines is named in its status, with
+    /// the reason, for as long as the node waits on it.
+    func testStatusNamesTheBodyThisNodesBudgetDeclinesUntilItIsHeld() async throws {
+        let producer = try host(keyByte: 0x3C)
+        let producerStorage = try await NodeStorage.open(configuration: producer.configuration)
+        let producerRuntime = try await NodeRuntime.start(
+            storage: producerStorage, configuration: producer.configuration, overlay: producer.overlay
+        )
+        let blockCID = try BlockHeader(node: try await producerRuntime.mineBlock()).rawCID
+
+        let joiner = try host(
+            keyByte: 0x3D, peers: [producer.endpoint],
+            resourcePolicy: NodeResourcePolicy(maximumAcquisitionStorageBytes: 1)
+        )
+        let joinerStorage = try await NodeStorage.open(configuration: joiner.configuration)
+        let joinerRuntime = try await NodeRuntime.start(
+            storage: joinerStorage, configuration: joiner.configuration, overlay: joiner.overlay
+        )
+        try await eventually("the joiner's status names the declined body") {
+            await joinerRuntime.status().waiting == "body of \(blockCID): exceeds this node's byte budget"
+        }
+        XCTAssertEqual(joinerRuntime.published.value?.actOnHeight, 0)
+
+        // The body comes to be held another way: the next retry finds it,
+        // the block executes, and the wait is gone from the status.
+        try await BlockHeader(rawCID: blockCID).storeBlock(
+            fetcher: producerStorage.localFetcher, storer: joinerStorage
+        )
+        try await eventually("the joiner executes the block") {
+            joinerRuntime.published.value?.actOnTip == blockCID
+        }
+        let waiting = await joinerRuntime.status().waiting
+        XCTAssertNil(waiting)
+        await joinerRuntime.stop()
+        await producerRuntime.stop()
+    }
+
+    /// Status is public. Whatever error is behind a wait, it shows one of a
+    /// fixed set of reasons: none of the error's text, and no setting's value.
+    func testStatusShowsAFixedReasonAndNeverAnErrorsText() async throws {
+        struct Unknown: Error { let text: String }
+        let marker = "MARKER-disk-full"
+        let node = try host(keyByte: 0x3E)
+        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let view = PublishedValue<NodeReadView>()
+        let reads = NodeRuntime.reads(
+            storage: storage, configuration: node.configuration,
+            published: PublishedValue<ChainSnapshot>(), view: view
+        )
+        let cases: [(BodyWait, String)] = [
+            (BodyWait(fetchFailure: BrokerError.sqlFailed(marker)), "local storage failed"),
+            (BodyWait(fetchFailure: BrokerError.inconsistentState(marker)), "local storage failed"),
+            (BodyWait(fetchFailure: Unknown(text: marker)), "not obtained from any peer"),
+            (
+                BodyWait(fetchFailure: NodeStorageError.bodyExceedsLocalBudget(bytes: 424_242)),
+                "exceeds this node's byte budget"
+            ),
+            (
+                .notConnected(.crossChainEvidenceRequired(.childProof(chainPath: [marker], childCID: marker))),
+                "not connected: crossChainEvidenceRequired"
+            ),
+        ]
+        for (reason, shown) in cases {
+            var next = NodeReadView()
+            next.waiting = NodeReadView.Waiting(cid: "cid", reason: reason)
+            view.publish(next)
+            let status = await reads.readSnapshot()
+            XCTAssertEqual(status.waiting, "body of cid: \(shown)")
+            let json = String(decoding: try JSONEncoder().encode(status), as: UTF8.self)
+            XCTAssertFalse(json.contains(marker), json)
+            XCTAssertFalse(json.contains("424242"), json)
         }
     }
 

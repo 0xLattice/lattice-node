@@ -233,6 +233,11 @@ public struct NodeStatusResponse: Codable, Sendable, Equatable {
     /// `height` (the deepest executed block on it) while it syncs: local
     /// progress is `height` of `bestHeaderHeight`. Nil before any header.
     @OptionalDecimalString public var bestHeaderHeight: UInt64? = nil
+    /// The next block this chain cannot execute yet and why — its body not
+    /// fetched, or its connect ended without a verdict — while that holds.
+    /// The reason is one of a fixed set; no error text is shown here. The
+    /// node keeps retrying; nil when it waits on nothing.
+    public var waiting: String? = nil
 }
 
 public enum NodeAPIError: Error, Equatable, Sendable {

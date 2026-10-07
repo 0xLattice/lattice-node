@@ -9,6 +9,8 @@ public enum NodeStorageError: Error, Equatable, Sendable {
     case storageUnavailable
     case invalidNexusGenesis
     case missingMaterializedVolume(String)
+    /// A body's content is past this node's byte budget for one fetch.
+    case bodyExceedsLocalBudget(bytes: Int)
 }
 
 public enum ChainPhase: String, Sendable {
@@ -25,6 +27,8 @@ public struct ChainStatus: Sendable, Equatable {
     public let revision: UInt64?
     /// The best header chain's height (nil before any header).
     public var bestHeaderHeight: UInt64? = nil
+    /// The next block this chain cannot execute yet, and why (nil when none).
+    public var waiting: String? = nil
 }
 
 
