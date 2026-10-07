@@ -802,6 +802,19 @@ final class ChainCoreSyncTests: XCTestCase {
         XCTAssertEqual(ChainCoreConfig().page(entries, hasMore: false).entries.count, 3)
     }
 
+    /// A slow server sends what it gathered within its serving budget: the
+    /// first header always, a later one only while time remains.
+    func testAPageStopsAtTheServingBudget() throws {
+        let config = ChainCoreConfig(headersTimeout: 30_000)
+        XCTAssertEqual(config.servingBudget, 5_000, "a sixth of the request deadline by default")
+        let header = entry(chain[0])
+        var bytes = 0
+        XCTAssertTrue(config.fits(header, first: false, bytes: &bytes, elapsed: 5_000))
+        XCTAssertFalse(config.fits(header, first: false, bytes: &bytes, elapsed: 5_001), "its time is spent")
+        XCTAssertTrue(config.fits(header, first: true, bytes: &bytes, elapsed: 60_000), "always at least one")
+        XCTAssertEqual(ChainCoreConfig(servingBudget: 250).servingBudget, 250)
+    }
+
     /// A child level's header carries its proofs: they count toward the page,
     /// or a page of them is several times the byte cap.
     func testThePageCapCountsProofs() throws {

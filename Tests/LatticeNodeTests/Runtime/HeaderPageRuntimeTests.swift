@@ -49,7 +49,16 @@ final class HeaderPageRuntimeTests: XCTestCase {
     }
 
     func testAFollowerSyncsAChildLevelThroughOneHeaderPages() async throws {
-        let host = try await start(keyByte: 0x71, coreConfig: ChainCoreConfig(maxPageBytes: 1))
+        try await followerSyncs(from: ChainCoreConfig(maxPageBytes: 1), keys: (0x71, 0x72))
+    }
+
+    /// The same through a server with no time to gather more than one header.
+    func testAFollowerSyncsAChildLevelFromAServerOutOfTime() async throws {
+        try await followerSyncs(from: ChainCoreConfig(servingBudget: -1), keys: (0x73, 0x74))
+    }
+
+    private func followerSyncs(from serverConfig: ChainCoreConfig, keys: (UInt8, UInt8)) async throws {
+        let host = try await start(keyByte: keys.0, coreConfig: serverConfig)
         let hostAlpha = try XCTUnwrap(host.runtime.levelReads[Self.alpha])
         let recipient = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
         try await eventually("the host mines Alpha to height 6") {
@@ -61,7 +70,7 @@ final class HeaderPageRuntimeTests: XCTestCase {
         let hostHeight = await hostAlpha.readSnapshot().height
         let tip = try XCTUnwrap(hostHeight)
 
-        let follower = try await start(keyByte: 0x72, peers: [host.endpoint])
+        let follower = try await start(keyByte: keys.1, peers: [host.endpoint])
         let followerAlpha = try XCTUnwrap(follower.runtime.levelReads[Self.alpha])
         try await eventually("the follower reaches the host's Alpha tip") {
             (await followerAlpha.readSnapshot().height ?? 0) >= tip

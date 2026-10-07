@@ -863,8 +863,11 @@ extension NodeRuntime {
                 let (storage, headers, outbox, inputs, config) = (storage, headers, outbox, inputs, core.config)
                 let proofs = proofs[path] ?? [:]
                 spawn {
-                    // Built up to a page and no further: the work is the
-                    // page's, however many headers were asked.
+                    // Built up to a page, or for as long as the serving
+                    // budget allows, and no further: the work is the
+                    // page's, however many headers were asked, and the
+                    // answer leaves before the requester's deadline.
+                    let started = ContinuousClock.now
                     var entries: [HeaderEntry] = []
                     var (bytes, cut) = (0, false)
                     for cid in blockCIDs {
@@ -879,7 +882,10 @@ extension NodeRuntime {
                                 .prefix(WireHeaderEntry.maximumProofs).map(\.value),
                             spec: spec ?? nil
                         )
-                        guard config.fits(entry, first: entries.isEmpty, bytes: &bytes) else {
+                        let elapsed = (ContinuousClock.now - started) / .milliseconds(1)
+                        guard config.fits(
+                            entry, first: entries.isEmpty, bytes: &bytes, elapsed: Int64(elapsed)
+                        ) else {
                             cut = true
                             break
                         }
