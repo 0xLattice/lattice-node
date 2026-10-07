@@ -60,8 +60,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/adalinxx/Ivy.git",
       "state" : {
-        "revision" : "9d68604fac133a47d19ec0409ad3b8b54d6a9c7e",
-        "version" : "13.2.0"
+        "revision" : "27f8f65725eb92eccc5e6abca99c90c52c455708",
+        "version" : "13.2.1"
       }
     },
     {

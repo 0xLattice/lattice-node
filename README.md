@@ -18,8 +18,8 @@ mempool, and mining candidates inside that process.
   in one SQLite transaction. `volumes.db` stores content, and
   `header-evidence.db` stores incomplete header boundaries and child proofs.
 - **One overlay with discovery.** Every peer follows Nexus. Nodes announce one
-  provider record for each hosted chain genesis and widen peer search when the
-  verified Nexus tip stops progressing.
+  provider record per hosted chain - Nexus by its genesis, a child by its path -
+  and search a chain's record for more peers when that chain stops progressing.
 - **External mining.** The node owns templates and validation,
   `lattice-mining-coordinator` owns ranges, and stateless `lattice-miner`
   workers search nonces.

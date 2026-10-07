@@ -77,7 +77,7 @@ public final class NodeRuntime: Sendable {
     let configuration: NodeConfiguration
     let inputs: AsyncStream<Input>.Continuation
     private let loop: Task<Void, Never>
-    private let ivy: Ivy
+    let ivy: Ivy
     private let delegate: NodeRuntimeIvyDelegate
     private let gate: NodeRuntimeInputGate
     private let maintenance: Task<Void, Never>
@@ -399,10 +399,10 @@ extension NodeRuntime {
         /// Each view's template digest and the tips and pool versions it was
         /// computed from: selection runs only when one of them moves.
         var digests: [ChainPath: (key: String, digest: String)] = [:]
-        var rootHighWater: UInt64
-        var lastProgressAt: Int64
-        var lastPeerSearchAt: Int64 = 0
+        var peerSearch = PeerSearch()
         var maintenanceInFlight = false
+        /// A maintenance pass asked for while one was running: run it next.
+        var maintenancePending = false
 
 
         /// A bounded set, oldest out.
@@ -473,8 +473,6 @@ extension NodeRuntime {
             self.remote = remote
             self.workers = workers
             self.failStop = failStop
-            rootHighWater = core.levels[core.rootPath]?.snapshot.actOnHeight ?? 0
-            lastProgressAt = NodeRuntime.now()
         }
 
         /// Returns false once the loop must end.
@@ -532,6 +530,10 @@ extension NodeRuntime {
                 return true
             case .maintenanceFinished:
                 maintenanceInFlight = false
+                if maintenancePending {
+                    maintenancePending = false
+                    startNetworkMaintenance()
+                }
                 return true
             }
         }
@@ -542,24 +544,23 @@ extension NodeRuntime {
         /// timeouts expire.
         private mutating func startNetworkMaintenance() {
             let now = NodeRuntime.now()
-            let rootHeight = core.levels[core.rootPath]?.snapshot.actOnHeight ?? 0
-            if rootHeight > rootHighWater {
-                rootHighWater = rootHeight
-                lastProgressAt = now
+            guard !maintenanceInFlight else {
+                maintenancePending = true
+                return
             }
-            guard !maintenanceInFlight else { return }
             maintenanceInFlight = true
 
             let expiry = UInt64(max(0, now / 1_000)) + 1_200
-            let genesisCIDs = core.ordered.compactMap { path -> String? in
-                guard let level = core.levels[path] else { return nil }
-                return path == core.rootPath
-                    ? configuration.nexusGenesisCID
-                    : level.tree.canonicalBlockHash(atHeight: 0)
+            // Each hosted level's rendezvous: Nexus's genesis, a child's path.
+            let nexus = configuration.nexusGenesisCID
+            let rendezvous = core.ordered.map { path in
+                (path: path, key: path == core.rootPath
+                    ? nexus
+                    : ChainPeersKey.key(nexusGenesisCID: nexus, chainPath: path))
             }
             // A declared read URL is findable from the parent of each hosted
             // child level: announced under the level's read-endpoint key.
-            let announced = genesisCIDs + (configuration.publicReadURL == nil ? [] : core.ordered
+            let announced = rendezvous.map(\.key) + (configuration.publicReadURL == nil ? [] : core.ordered
                 .filter { $0 != core.rootPath }
                 .map { ReadEndpointKey.key(nexusGenesisCID: configuration.nexusGenesisCID, chainPath: $0) })
 
@@ -567,31 +568,43 @@ extension NodeRuntime {
             // for a finite but unreasonably large value.
             let maximumSeconds = Double(Int64.max / 1_000)
             let interval = Int64(min(configuration.peerSearchInterval, maximumSeconds) * 1_000)
-            let shouldSearch = interval > 0 && now - lastProgressAt >= interval
-                && now - lastPeerSearchAt >= interval
-            if shouldSearch { lastPeerSearchAt = now }
-            let (ivy, inputs, bootstrap, nexus) = (
-                ivy, inputs, configuration.bootstrapPeers,
-                configuration.nexusGenesisCID
+            let due = peerSearch.due(
+                heights: core.ordered.compactMap { path in
+                    core.levels[path].map { (path, $0.snapshot.actOnHeight) }
+                },
+                now: now, interval: interval,
+                connected: sessions.values.contains(where: \.ready)
+            )
+            let searched = rendezvous.filter { due.contains($0.path) }.map(\.key)
+            let redialBootstrap = due.contains(core.rootPath)
+            let (ivy, inputs, bootstrap, ownKey) = (
+                ivy, inputs, configuration.bootstrapPeers, configuration.processPublicKey
             )
             spawn {
-                for genesis in announced {
-                    await ivy.announceProvider(rootCID: genesis, expiresAt: expiry)
+                for key in announced {
+                    await ivy.announceProvider(rootCID: key, expiresAt: expiry)
                 }
-                if shouldSearch {
+                if !searched.isEmpty {
                     var connected = Set((await ivy.connectedPeers).map(\.publicKey))
-                    for endpoint in bootstrap where !connected.contains(endpoint.publicKey) {
+                    for endpoint in bootstrap where redialBootstrap && !connected.contains(endpoint.publicKey) {
                         do {
                             try await ivy.connect(to: endpoint)
                             connected.insert(endpoint.publicKey)
                         } catch {}
                     }
-                    for endpoint in (await ivy.discoverProviders(rootCID: nexus)).prefix(4)
-                    where !connected.contains(endpoint.publicKey) {
-                        do {
-                            try await ivy.connect(to: endpoint)
-                            connected.insert(endpoint.publicKey)
-                        } catch {}
+                    // The stalled level's rendezvous: the peers that can sync
+                    // it. Ourselves and peers already connected are skipped;
+                    // the dials are a random draw, so whoever orders the
+                    // lookup's answer does not pick them.
+                    for key in searched {
+                        let fresh = (await ivy.discoverProviders(rootCID: key))
+                            .filter { $0.publicKey != ownKey && !connected.contains($0.publicKey) }
+                        for endpoint in fresh.shuffled().prefix(4) {
+                            do {
+                                try await ivy.connect(to: endpoint)
+                                connected.insert(endpoint.publicKey)
+                            } catch {}
+                        }
                     }
                 }
                 inputs.yield(.maintenanceFinished)
@@ -706,6 +719,11 @@ extension NodeRuntime {
                     }
                 session.ready = true
                 sessions[peer.key.hex] = session
+                // The first peer is the first chance for a lookup to reach
+                // the DHT: search the levels due one now, not an interval on.
+                if !sessions.values.contains(where: { $0.ready && $0.id != session.id }) {
+                    startNetworkMaintenance()
+                }
                 return await step(.peerReady(session.coreID))
             case .sync(let peer, let chainPath, let message):
                 guard let session = sessions[peer.key.hex], session.peer.sessionID == peer.sessionID,

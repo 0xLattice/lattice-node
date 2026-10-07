@@ -137,11 +137,13 @@ The process has one Ivy network plane. Sync messages carry an absolute path,
 and a peer session serves every level both hosts. The overlay exchanges
 transaction announcements, path-scoped sync messages, and content.
 
-Provider discovery is keyed only by chain genesis: the node periodically
-announces Nexus and each active hosted child genesis. It does not publish a
-provider record per block or state. When verified Nexus progress stalls, it
-retries disconnected bootstrap peers and a bounded set of providers found for
-the Nexus genesis.
+Provider discovery is keyed per chain: the node periodically announces Nexus
+under its genesis and each hosted child under its path
+(`lattice.chain-peers.v1:<nexus genesis>:<path>`). It does not publish a
+provider record per block or state. When a hosted chain has not progressed
+since boot, or its verified progress stalls, the node dials a bounded random
+set of that chain's providers; a Nexus stall also retries disconnected
+bootstrap peers.
 
 Parent facts, run reports and merged-mining candidates never cross a network
 plane: they pass in-process between co-hosted levels.

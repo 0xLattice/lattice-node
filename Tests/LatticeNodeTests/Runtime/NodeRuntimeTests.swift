@@ -96,7 +96,7 @@ final class NodeRuntimeTests: XCTestCase {
         }
     }
 
-    func testMaintenanceAnnouncesNexusAndEveryMaterializedChildGenesis() async throws {
+    func testMaintenanceAnnouncesNexusAndEveryHostedChildsRendezvous() async throws {
         let routerKey = try Curve25519.Signing.PrivateKey(
             rawRepresentation: Data(repeating: 0x46, count: 32)
         )
@@ -176,16 +176,14 @@ final class NodeRuntimeTests: XCTestCase {
                 .contains { $0.publicKey == configuration.processPublicKey }
         }
 
-        let alphaReads = try XCTUnwrap(runtime.levelReads[alpha])
-        _ = try await runtime.mineBlock()
-        try await eventually("Alpha's genesis executes") {
-            await alphaReads.explorerCanonicalBlockCID(atHeight: 0) != nil
-        }
-        let materializedAlphaGenesis = await alphaReads.explorerCanonicalBlockCID(atHeight: 0)
-        let alphaGenesis = try XCTUnwrap(materializedAlphaGenesis)
-        try await eventually("Alpha's genesis is announced to the overlay") {
+        // A hosted child's rendezvous is its path: announced before the node
+        // holds any of the child's blocks, so a joiner is findable at once.
+        let alphaRendezvous = ChainPeersKey.key(
+            nexusGenesisCID: configuration.nexusGenesisCID, chainPath: alpha
+        )
+        try await eventually("Alpha's rendezvous is announced to the overlay") {
             runtime.inputs.yield(.maintenance)
-            return await router.providers(for: alphaGenesis)
+            return await router.providers(for: alphaRendezvous)
                 .contains { $0.publicKey == configuration.processPublicKey }
         }
 
