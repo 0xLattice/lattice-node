@@ -94,6 +94,7 @@ public struct LevelWorld: Sendable {
         forkProbability: Double,
         shareProbability: Double,
         doubleProbability: Double,
+        doubles: Int = 1,
         withholdDelay: Int64
     ) async throws -> LevelWorld {
         var builder = try await Builder(levels: min(max(levels, 2), 3))
@@ -103,6 +104,7 @@ public struct LevelWorld: Sendable {
             forkProbability: forkProbability,
             shareProbability: shareProbability,
             doubleProbability: doubleProbability,
+            doubles: doubles,
             withholdDelay: withholdDelay
         )
         return builder.world()
@@ -362,6 +364,7 @@ public struct LevelWorld: Sendable {
             forkProbability: Double,
             shareProbability: Double,
             doubleProbability: Double,
+            doubles: Int,
             withholdDelay: Int64
         ) async throws {
             let alphaStart = 3
@@ -382,7 +385,9 @@ public struct LevelWorld: Sendable {
                 let outcome: Outcome = !carried.isEmpty && rng.chance(shareProbability) ? .share : .block
                 _ = try await grind(on: nexusParent, carrying: carried, at: time, outcome: outcome)
                 if !carried.isEmpty, rng.chance(doubleProbability) {
-                    _ = try await grind(on: nexusParent, carrying: carried, at: time + 1, outcome: .share)
+                    for extra in 1...doubles {
+                        _ = try await grind(on: nexusParent, carrying: carried, at: time + Int64(extra), outcome: .share)
+                    }
                 }
                 if index == invalidAt { try await invalidBranch(at: time, rng: &rng) }
                 if index == withheldAt { try await withheldBranch(at: time, delay: withholdDelay) }
