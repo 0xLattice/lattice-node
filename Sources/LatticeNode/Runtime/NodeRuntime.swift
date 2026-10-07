@@ -873,7 +873,11 @@ extension NodeRuntime {
                             ? try? await storage.chainGenesisSpec(cid, headers: headers) : nil
                         let entry = config.entry(
                             stored.block, children: stored.children,
-                            proofs: (proofs[cid] ?? [:]).sorted { $0.key < $1.key }.map(\.value), spec: spec ?? nil
+                            // No more proofs than a wire entry may carry: one
+                            // past it and the whole answer fails to encode.
+                            proofs: (proofs[cid] ?? [:]).sorted { $0.key < $1.key }
+                                .prefix(WireHeaderEntry.maximumProofs).map(\.value),
+                            spec: spec ?? nil
                         )
                         guard config.fits(entry, first: entries.isEmpty, bytes: &bytes) else {
                             cut = true
@@ -881,13 +885,17 @@ extension NodeRuntime {
                         }
                         entries.append(entry)
                     }
-                    if let frame = try? ChainSyncWire.encode(.headers(HeadersResponse(
-                        requestID: requestID, entries: entries, hasMore: hasMore || cut
-                    )), at: path) {
+                    do {
+                        let frame = try ChainSyncWire.encode(.headers(HeadersResponse(
+                            requestID: requestID, entries: entries, hasMore: hasMore || cut
+                        )), at: path)
                         // Served once handed to the transport, not merely
                         // attempted: a page refused as backpressured is sent
                         // when the session drains.
                         _ = await outbox.send(to: session.peer, topic: frame.topic, payload: frame.payload).value
+                    } catch {
+                        // Unanswered, the requester's deadline decides; say why.
+                        SyncTrace.log(chain: path, "headers answer \(requestID) not sent: \(error)")
                     }
                     inputs.yield(.event(.level(path, .headersServed(peer, token: token))))
                 }
