@@ -293,19 +293,27 @@ final class BundledBlockFetchTests: XCTestCase {
 
     /// A client overlay connected to a server overlay that serves `producer`.
     private func overlay(
-        serving producer: NodeStorage, requestTimeout: Duration = .seconds(5)
+        serving producer: NodeStorage, requestTimeout: Duration = .seconds(5),
+        clientInFlightVolumeBytes: Int = IvyConfig.defaultMaxInFlightVolumeBytes
     ) async throws -> (client: Ivy, source: CountingSource, serverPeer: AuthenticatedPeer) {
-        func config(_ key: Curve25519.Signing.PrivateKey, _ port: UInt16) -> IvyConfig {
+        func config(
+            _ key: Curve25519.Signing.PrivateKey, _ port: UInt16,
+            inFlightVolumeBytes: Int = IvyConfig.defaultMaxInFlightVolumeBytes
+        ) -> IvyConfig {
             IvyConfig(
                 signingKey: key, listenPort: port, requestTimeout: requestTimeout, stunServers: [],
-                healthConfig: PeerHealthConfig(enabled: false), externalAddress: ("127.0.0.1", port),
+                healthConfig: PeerHealthConfig(enabled: false),
+                maxInFlightVolumeBytes: inFlightVolumeBytes, externalAddress: ("127.0.0.1", port),
                 mode: .overlay
             )
         }
         let serverKey = Curve25519.Signing.PrivateKey()
         let serverPort = NetworkTransportTestPorts.allocate()
         let server = Ivy(config: config(serverKey, serverPort))
-        let client = Ivy(config: config(Curve25519.Signing.PrivateKey(), NetworkTransportTestPorts.allocate()))
+        let client = Ivy(config: config(
+            Curve25519.Signing.PrivateKey(), NetworkTransportTestPorts.allocate(),
+            inFlightVolumeBytes: clientInFlightVolumeBytes
+        ))
         let source = CountingSource(producer)
         let connections = Connections()
         await server.installNodeRuntime(delegate: Connections(), contentSource: source)
@@ -381,9 +389,81 @@ final class BundledBlockFetchTests: XCTestCase {
         XCTAssertEqual(remote.peerCapabilities.sessions(speaking: ChainHandshake.volumeBundle), [reconnected])
     }
 
+    /// A bundle this node's own in-flight budget cuts short, after a Volume
+    /// arrived, is not the peer's failure: the session keeps the capability
+    /// and is asked again, and the block arrives per Volume.
+    func testABundleCutShortByThisNodesOwnCapacityCostsThePeerNothing() async throws {
+        let producer = try await storage(keyByte: 0x61)
+        let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
+        let recorded = await producer.volumeBundle(cid)
+        // Room for less than the whole bundle at once.
+        var bytes = 0
+        for root in recorded {
+            let volume = await producer.volume(root)
+            bytes += try XCTUnwrap(volume).entries.values.reduce(0) { $0 + $1.count }
+        }
+        let (client, source, serverPeer) = try await overlay(
+            serving: producer, clientInFlightVolumeBytes: bytes - 1
+        )
+        let cut = await client.fetchVolumeBundle(rootCID: cid, from: [serverPeer])
+        XCTAssertFalse(cut.volumes.isEmpty)
+        XCTAssertFalse(cut.ended)
+        XCTAssertEqual(cut.failure, .localCapacityUnavailable)
+
+        let remote = IvyRootContentSource(ivy: client)
+        remote.peerCapabilities.set([(serverPeer, [ChainHandshake.volumeBundle])])
+        for (count, keyByte) in [(2, UInt8(0x62)), (3, 0x63)] {
+            let stored = try await storage(keyByte: keyByte).fetchChainBody(cid, remote: remote)
+            XCTAssertEqual(Set(stored), Set(recorded))
+            XCTAssertEqual(source.bundleRequestCount, count)
+        }
+        XCTAssertEqual(remote.peerCapabilities.sessions(speaking: ChainHandshake.volumeBundle), [serverPeer])
+    }
+
+    /// Held-aside bundle Volumes and stored content share one byte budget:
+    /// content the traversal stores takes it from a Volume only held aside,
+    /// which is dropped and then requested like any other.
+    func testHeldAsideVolumesShareTheSessionsOneByteBudget() async throws {
+        let root = try content(1)
+        let held = try content(2)
+        let other = try content(3)
+        let all = [root, held, other]
+        let budget = all.reduce(0) {
+            $0 + $1.cid.utf8.count + $1.data.count + IvyRootContentSource.retainedEntryOverhead
+        } - 1
+        let server = self.server
+        let requests = Requests()
+        let volume: @Sendable (String) -> AttributedVolumeResponse = { requested in
+            let data = all.first { $0.cid == requested }!.data
+            return AttributedVolumeResponse(rootCID: requested, entries: [requested: data], servedBy: server)
+        }
+        let source = IvyRootContentSource(
+            maximumStorageBytes: budget,
+            fetch: { requested in
+                await requests.volume(requested)
+                return volume(requested)
+            },
+            fetchBundle: { _ in [volume(root.cid), volume(held.cid)] }
+        )
+        let result = await source.withRootTracing(root.cid) { session in
+            let first = await session.fetch([root.cid])
+            let second = await session.fetch([other.cid])
+            let third = await session.fetch([held.cid])
+            return (first, second, third)
+        }
+        XCTAssertEqual(result.value.0, [root.cid: root.data])
+        XCTAssertEqual(result.value.1, [other.cid: other.data])
+        // Stored content left no room for the held Volume: it was dropped,
+        // so the traversal requested it, and the budget declined it once.
+        XCTAssertEqual(result.value.2, [:])
+        XCTAssertTrue(result.attribution.byteBudgetExceeded)
+        let volumes = await requests.volumes
+        XCTAssertEqual(volumes, [other.cid, held.cid])
+    }
+
     /// A capable peer answers every bundle with a Volume that verifies and
     /// lacks part of the block; an honest peer holds the block and speaks no
-    /// bundles. The retry asks for no bundle, and the block completes.
+    /// bundles. The runtime's retry asks for no bundle, and the block completes.
     func testARetryAsksForNoBundleSoABadBundleCannotWithholdABlock() async throws {
         let producer = try await storage(keyByte: 0x5D)
         let joiner = try await storage(keyByte: 0x5E)
@@ -410,12 +490,20 @@ final class BundledBlockFetchTests: XCTestCase {
                 return [partial]
             }
         )
-        do {
-            _ = try await joiner.fetchChainBody(cid, remote: poisoned)
-            XCTFail("a partial root Volume cannot complete the block")
-        } catch {}
-        let stored = try await joiner.fetchChainBody(cid, remote: poisoned, bundle: false)
-        XCTAssertEqual(Set(stored), Set(recorded))
+        // The loop the runtime fetches a body with: the first attempt fails
+        // on the partial bundle, the second is made without one.
+        var attempts: [Bool] = []
+        var failures = 0
+        let stored = await NodeRuntime.retryingBody { bundle in
+            // A third attempt is a failure, not a wait.
+            if attempts.count == 2 { withUnsafeCurrentTask { $0?.cancel() } }
+            try Task.checkCancellation()
+            attempts.append(bundle)
+            return try await joiner.fetchChainBody(cid, remote: poisoned, bundle: bundle)
+        } waiting: { _ in failures += 1 }
+        XCTAssertEqual(Set(try XCTUnwrap(stored)), Set(recorded))
+        XCTAssertEqual(attempts, [true, false])
+        XCTAssertEqual(failures, 1)
         let bundles = await requests.bundles
         XCTAssertEqual(bundles, [cid])
     }
@@ -434,5 +522,26 @@ final class BundledBlockFetchTests: XCTestCase {
         XCTAssertEqual(Set(stored), Set(walked))
         let volumes = await requests.volumes
         XCTAssertEqual(volumes, [])
+    }
+
+    /// A cache that opens and then cannot be written costs the record and
+    /// nothing else: the fetched block is stored whole.
+    func testABundleCacheThatCannotBeWrittenLeavesAFetchedBlockStored() async throws {
+        let producer = try await storage(keyByte: 0x64)
+        let joiner = try await storage(keyByte: 0x65)
+        let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
+        let recorded = await producer.volumeBundle(cid)
+        try NodeSQLite(
+            path: joiner.configuration.storagePath.appendingPathComponent(VolumeBundleCache.fileName).path
+        ).execute("DROP TABLE volume_bundles")
+
+        let stored = try await joiner.fetchChainBody(cid, remote: remote(producer, requests: Requests()))
+
+        XCTAssertEqual(Set(stored), Set(recorded))
+        XCTAssertNil(joiner.bundles.bundle(root: cid))
+        for root in recorded {
+            let held = await joiner.volume(root)
+            XCTAssertNotNil(held, root)
+        }
     }
 }

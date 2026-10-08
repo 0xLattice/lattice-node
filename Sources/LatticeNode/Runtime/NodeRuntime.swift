@@ -355,6 +355,28 @@ public final class NodeRuntime: Sendable {
         await loop.value
     }
 
+    /// The content layer retries until the body is held or the core no longer
+    /// wants it (nil), and says why each attempt failed. A bundle is asked
+    /// for on the first attempt only.
+    static func retryingBody<T>(
+        _ attempt: (_ bundle: Bool) async throws -> T,
+        waiting: (Error) -> Void
+    ) async -> T? {
+        var backoff: UInt64 = 250
+        var bundle = true
+        while !Task.isCancelled {
+            do {
+                return try await attempt(bundle)
+            } catch {
+                if !Task.isCancelled { waiting(error) }
+            }
+            bundle = false
+            _ = await Timers.sleep(nanoseconds: backoff * 1_000_000)
+            backoff = min(backoff * 2, 30_000)
+        }
+        return nil
+    }
+
     static func now() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1_000)
     }
@@ -987,28 +1009,14 @@ extension NodeRuntime {
                 guard bodies[key] == nil else { break }
                 let (storage, remote, inputs) = (storage, remote, inputs)
                 bodies[key] = Task {
-                    // The content layer retries until the body is held or the
-                    // core no longer wants it, and says why each attempt
-                    // failed.
-                    var backoff: UInt64 = 250
-                    // A bundle is asked for on the first attempt only.
-                    var bundle = true
-                    while !Task.isCancelled {
-                        do {
-                            let roots = try await storage.fetchChainBody(cid, remote: remote, bundle: bundle)
-                            inputs.yield(.bodyStored(path, cid: cid, roots: roots))
-                            return
-                        } catch {
-                            if !Task.isCancelled {
-                                inputs.yield(.bodyWaiting(
-                                    path, cid: cid, BodyWait(fetchFailure: error), detail: "\(error)"
-                                ))
-                            }
-                        }
-                        bundle = false
-                        _ = await Timers.sleep(nanoseconds: backoff * 1_000_000)
-                        backoff = min(backoff * 2, 30_000)
+                    let roots = await NodeRuntime.retryingBody { bundle in
+                        try await storage.fetchChainBody(cid, remote: remote, bundle: bundle)
+                    } waiting: { error in
+                        inputs.yield(.bodyWaiting(
+                            path, cid: cid, BodyWait(fetchFailure: error), detail: "\(error)"
+                        ))
                     }
+                    if let roots { inputs.yield(.bodyStored(path, cid: cid, roots: roots)) }
                 }
             case .cancelBody(let cid):
                 bodies.removeValue(forKey: BodyKey(path: path, cid: cid))?.cancel()

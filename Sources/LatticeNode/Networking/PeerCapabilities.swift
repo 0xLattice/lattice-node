@@ -26,11 +26,10 @@ final class PeerCapabilities: @unchecked Sendable {
         }
     }
 
-    func revoke(_ capability: String, from peer: PeerID) {
+    func revoke(_ capability: String, from session: AuthenticatedPeer) {
         lock.withLock {
-            for session in sessions where session.peer.id == peer {
-                revoked[session.peer.sessionID, default: []].insert(capability)
-            }
+            guard sessions.contains(where: { $0.peer.sessionID == session.sessionID }) else { return }
+            revoked[session.sessionID, default: []].insert(capability)
         }
     }
 
