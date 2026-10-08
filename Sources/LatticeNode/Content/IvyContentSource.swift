@@ -243,10 +243,9 @@ public struct IvyRootContentSource: Sendable {
     private let fetch: @Sendable (String) async -> AttributedVolumeResponse
     /// The Volumes a peer that speaks bundles holds under a root (what it
     /// stored with that block), or none, and the session that sent them.
-    /// Whatever a bundle lacks is fetched with `fetch`. `hosts` is the
-    /// rendezvous of the block's chain, or nil: the capable sessions the DHT
-    /// names under it are asked before the others. The record is a hint for
-    /// whom to ask, never for what to accept.
+    /// Whatever a bundle lacks is fetched with `fetch`. The capable sessions
+    /// the DHT names under the block's chain rendezvous are asked before the
+    /// others; the record is a hint for whom to ask, never for what to accept.
     fileprivate typealias BundleFetch =
         @Sendable (String) async -> (volumes: [AttributedVolumeResponse], session: AuthenticatedPeer?)
     private let fetchBundle: @Sendable (_ rootCID: String, _ hosts: String?) async

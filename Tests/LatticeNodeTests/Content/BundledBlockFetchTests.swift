@@ -262,7 +262,6 @@ final class BundledBlockFetchTests: XCTestCase {
         private let source: NodeStorageIvyContentSource
         private let lock = NSLock()
         private var bundleRequests = 0
-        private var volumeRequests = 0
         var answersBundles = true
         /// The bundle names a Volume whose read never returns.
         var neverEnds = false
@@ -270,12 +269,10 @@ final class BundledBlockFetchTests: XCTestCase {
         init(_ storage: NodeStorage) { source = NodeStorageIvyContentSource(storage: storage) }
 
         var bundleRequestCount: Int { lock.withLock { bundleRequests } }
-        var volumeRequestCount: Int { lock.withLock { volumeRequests } }
 
         func content(rootCID: String, cids: [String], maxDataBytes: Int) async -> [ContentEntry] { [] }
 
         func volume(rootCID: String, maxDataBytes: Int) async -> [ContentEntry] {
-            lock.withLock { volumeRequests += 1 }
             if rootCID == "never" { try? await Task.sleep(for: .seconds(60)) }
             return await source.volume(rootCID: rootCID, maxDataBytes: maxDataBytes)
         }

@@ -100,8 +100,10 @@ capable sessions. Nothing else is routed by the rendezvous: Volumes fetched one
 at a time, and every retry, go to peers in the overlay's ordinary order. The
 record is only a hint for whom to ask: content is verified the same whoever
 sent it, a named session that has no bundle costs one round trip before the
-others are asked, one that does not end its bundle is not asked for another
-that session, and no peer is refused service for what it announced.
+others are asked, one that does not end its bundle is chosen for no further
+bundle that session (requests already waiting for it when that is learned are
+still sent, at most one window of blocks, once per session), and no peer is
+refused service for what it announced.
 
 The trigger uses the locally verified tip, never a remote height claim. Set it
 to `0` only for an intentionally isolated node.
