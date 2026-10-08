@@ -288,6 +288,7 @@ final class BundledBlockFetchTests: XCTestCase {
         private let lock = NSLock()
         private var peers: [AuthenticatedPeer] = []
         var first: AuthenticatedPeer? { lock.withLock { peers.first } }
+        var all: [AuthenticatedPeer] { lock.withLock { peers } }
         func ivy(_ ivy: Ivy, didConnect peer: AuthenticatedPeer) async { lock.withLock { peers.append(peer) } }
     }
 
@@ -361,6 +362,123 @@ final class BundledBlockFetchTests: XCTestCase {
             let fallback = try await storage(keyByte: keyByte).fetchChainBody(cid, remote: remote)
             XCTAssertEqual(Set(fallback), Set(recorded))
             XCTAssertEqual(source.bundleRequestCount, count)
+        }
+    }
+
+    /// A client connected to two servers, the first of which announced
+    /// itself under `rendezvous`.
+    private func hostAndBystander(
+        _ host: NodeStorage, _ bystander: NodeStorage, rendezvous: String,
+        recordsPerPeer: Int = IvyConfig.defaultMaxProviderRecordsPerPeer,
+        requestTimeout: Duration = .seconds(5)
+    ) async throws -> (remote: IvyRootContentSource, host: CountingSource, bystander: CountingSource) {
+        func ivy() -> (Ivy, PeerEndpoint) {
+            let (key, port) = (Curve25519.Signing.PrivateKey(), NetworkTransportTestPorts.allocate())
+            let hex = key.publicKey.rawRepresentation.map { String(format: "%02x", $0) }.joined()
+            return (Ivy(config: IvyConfig(
+                signingKey: key, listenPort: port, requestTimeout: requestTimeout, stunServers: [],
+                healthConfig: PeerHealthConfig(enabled: false),
+                maxProviderRecordsPerPeer: recordsPerPeer, externalAddress: ("127.0.0.1", port),
+                mode: .overlay
+            )), PeerEndpoint(publicKey: hex, host: "127.0.0.1", port: port))
+        }
+        let (client, _) = ivy()
+        let connections = Connections()
+        await client.installNodeRuntime(delegate: connections, contentSource: CountingSource(host))
+        try await client.start()
+        addTeardownBlock { await client.stop() }
+        var sources: [CountingSource] = []
+        var servers: [Ivy] = []
+        for storage in [host, bystander] {
+            let (server, endpoint) = ivy()
+            sources.append(CountingSource(storage))
+            await server.installNodeRuntime(delegate: Connections(), contentSource: sources[sources.count - 1])
+            try await server.start()
+            addTeardownBlock { await server.stop() }
+            try await client.connect(to: endpoint)
+            servers.append(server)
+        }
+        await client.setContentSource(nil)
+        let hostID = await servers[0].localID
+        let remote = IvyRootContentSource(ivy: client)
+        let deadline = ContinuousClock.now + .seconds(10)
+        while ContinuousClock.now < deadline {
+            await servers[0].announceProvider(
+                rootCID: rendezvous, expiresAt: UInt64(Date().timeIntervalSince1970) + 600
+            )
+            let named = await client.providers(for: rendezvous)
+            if connections.all.count == 2, named == [hostID] { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        remote.peerCapabilities.set(connections.all.map { ($0, [ChainHandshake.volumeBundle]) })
+        return (remote, sources[0], sources[1])
+    }
+
+    /// A chain's bundle is asked of the capable session its rendezvous names:
+    /// a capable peer that holds the same bundle and is not named there is
+    /// not asked.
+    func testAChainsBundleIsAskedOfThePeerItsRendezvousNames() async throws {
+        let producer = try await storage(keyByte: 0x71)
+        let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
+        let (remote, host, bystander) = try await hostAndBystander(producer, producer, rendezvous: "alpha")
+        for keyByte in [UInt8(0x72), 0x73, 0x74, 0x75, 0x76] {
+            _ = try await storage(keyByte: keyByte).fetchChainBody(cid, remote: remote, hosts: "alpha")
+        }
+        XCTAssertEqual(host.bundleRequestCount, 5)
+        XCTAssertEqual(bystander.bundleRequestCount, 0)
+    }
+
+    /// Serving content does not cost a host its record: one that served more
+    /// bundles than a peer may hold records for is still the one asked.
+    func testAHostThatServedMoreThanItsRecordQuotaIsStillNamed() async throws {
+        let producer = try await storage(keyByte: 0x7B)
+        let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
+        let (remote, host, bystander) = try await hostAndBystander(
+            producer, producer, rendezvous: "alpha", recordsPerPeer: 1
+        )
+        for keyByte in [UInt8(0x7C), 0x7D, 0x7E] {
+            _ = try await storage(keyByte: keyByte).fetchChainBody(cid, remote: remote, hosts: "alpha")
+        }
+        XCTAssertEqual(host.bundleRequestCount, 3)
+        XCTAssertEqual(bystander.bundleRequestCount, 0)
+    }
+
+    /// The record is a hint: a named session with no bundle for the block is
+    /// asked first, each block, and the bundle then comes from a capable
+    /// session that is not named.
+    func testABlockStillArrivesWhenThePeerItsRendezvousNamesHasNoBundle() async throws {
+        let producer = try await storage(keyByte: 0x77)
+        let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
+        let recorded = await producer.volumeBundle(cid)
+        let (remote, host, bystander) = try await hostAndBystander(
+            try await storage(keyByte: 0x78), producer, rendezvous: "alpha"
+        )
+        for (count, keyByte) in [(1, UInt8(0x79)), (2, 0x7A)] {
+            let stored = try await storage(keyByte: keyByte).fetchChainBody(cid, remote: remote, hosts: "alpha")
+            XCTAssertEqual(Set(stored), Set(recorded))
+            XCTAssertEqual(host.bundleRequestCount, count)
+            XCTAssertEqual(bystander.bundleRequestCount, count)
+        }
+    }
+
+    /// A named session is held to its bundles like any other: one that never
+    /// ends a bundle is asked once, and the next block's bundle is asked of
+    /// the others.
+    func testANamedPeerThatNeverEndsABundleIsNotAskedForTheNextBlock() async throws {
+        let producer = try await storage(keyByte: 0x7F)
+        let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
+        let recorded = await producer.volumeBundle(cid)
+        let (remote, host, bystander) = try await hostAndBystander(
+            producer, producer, rendezvous: "alpha", requestTimeout: .seconds(1)
+        )
+        host.neverEnds = true
+        // The first block keeps what the bundle sent before it stalled and
+        // fetches the rest per Volume; the second asks the other session.
+        for (others, keyByte) in [(0, UInt8(0x80)), (1, 0x81)] {
+            let stored = try await storage(keyByte: keyByte).fetchChainBody(cid, remote: remote, hosts: "alpha")
+            XCTAssertEqual(Set(stored), Set(recorded))
+            XCTAssertEqual(host.bundleRequestCount, 1)
+            XCTAssertEqual(bystander.bundleRequestCount, others)
         }
     }
 

@@ -70,13 +70,14 @@ extension NodeStorage {
     ///
     /// `bundle` is false on a retry: a bundle is an optimisation, so a block
     /// whose first attempt failed is fetched one Volume at a time, as it
-    /// would be from peers that speak no bundles.
+    /// would be from peers that speak no bundles. `hosts` is the rendezvous
+    /// of the block's chain: the bundle is asked first of the peers it names.
     nonisolated func fetchChainBody(
-        _ cid: String, remote: IvyRootContentSource, bundle: Bool = true
+        _ cid: String, remote: IvyRootContentSource, bundle: Bool = true, hosts: String? = nil
     ) async throws -> [String] {
         let capture = IvyRootContentSource.AttributionCapture()
         do {
-            return try await remote.withRootTracing(cid, bundle: bundle, capture: capture) { session in
+            return try await remote.withRootTracing(cid, bundle: bundle, hosts: hosts, capture: capture) { session in
                 let fetcher = CoalescingFetcher(CompositeContentSource([broker, session]))
                 let storage = NodeImportStorage(storage: broker)
                 try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: storage)

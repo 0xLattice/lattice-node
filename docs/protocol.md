@@ -137,13 +137,23 @@ The process has one Ivy network plane. Sync messages carry an absolute path,
 and a peer session serves every level both hosts. The overlay exchanges
 transaction announcements, path-scoped sync messages, and content.
 
-Provider discovery is keyed per chain: the node periodically announces Nexus
-under its genesis and each hosted child under its path
-(`lattice.chain-peers.v1:<nexus genesis>:<path>`). It does not publish a
-provider record per block or state. When a hosted chain has not progressed
-since boot, or its verified progress stalls, the node dials a bounded random
-set of that chain's providers; a Nexus stall also retries disconnected
-bootstrap peers.
+A node joins any chain by first being a node of its parent, then asking the
+DHT which of the parent's nodes host the child, as a provider announce and
+lookup work in IPFS. One process hosts a chain's whole ancestry on one overlay,
+so every host of a child is already in its parent's network and they share one
+DHT: the hosts of a child announce its rendezvous key there, a joiner looks the
+key up and dials the hosts it finds. The same rule applies at every depth, the
+key carrying the full path.
+
+Provider discovery is keyed per child chain: the node periodically announces
+each hosted child under its path
+(`lattice.chain-peers.v1:<nexus genesis>:<path>`); Nexus, which every node
+hosts, has no record. It does not publish a provider record per block or
+state. While no connected peer is among a hosted child's providers, or when
+its verified progress stalls, the node dials a bounded random set of that
+chain's providers. On a child block's first attempt its bundle is asked of the
+capable sessions among those providers before other capable sessions; nothing
+else is routed by the rendezvous. A Nexus stall retries disconnected bootstrap peers.
 
 Parent facts, run reports and merged-mining candidates never cross a network
 plane: they pass in-process between co-hosted levels.

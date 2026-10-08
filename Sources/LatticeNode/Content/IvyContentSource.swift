@@ -243,10 +243,13 @@ public struct IvyRootContentSource: Sendable {
     private let fetch: @Sendable (String) async -> AttributedVolumeResponse
     /// The Volumes a peer that speaks bundles holds under a root (what it
     /// stored with that block), or none, and the session that sent them.
-    /// Whatever a bundle lacks is fetched with `fetch`.
+    /// Whatever a bundle lacks is fetched with `fetch`. The capable sessions
+    /// the DHT names under the block's chain rendezvous are asked before the
+    /// others; the record is a hint for whom to ask, never for what to accept.
     fileprivate typealias BundleFetch =
         @Sendable (String) async -> (volumes: [AttributedVolumeResponse], session: AuthenticatedPeer?)
-    private let fetchBundle: BundleFetch
+    private let fetchBundle: @Sendable (_ rootCID: String, _ hosts: String?) async
+        -> (volumes: [AttributedVolumeResponse], session: AuthenticatedPeer?)
     /// Credits the peer that served a requested Volume once it verifies, so
     /// the overlay favours peers that serve this node when it is contended.
     private let credit: @Sendable (PeerID, Int) async -> Void
@@ -378,11 +381,19 @@ public struct IvyRootContentSource: Sendable {
         // then fetched from one Volume at a time, like a peer that speaks no
         // bundles. An answer this node cut short or never asked for (its
         // own capacity or boundary, a request not sent, its cancellation)
-        // reports a failure and is not the peer's.
-        fetchBundle = { rootCID in
+        // reports a failure and is not the peer's. The sessions the DHT names
+        // as hosts of the block's chain are asked before the others.
+        fetchBundle = { rootCID, hosts in
+            var named = Set<Data>()
+            if let hosts {
+                named = Set(capabilities.sessions(of: await ivy.providers(for: hosts)).map(\.sessionID))
+            }
             var asked = Set<Data>()
-            while let peer = capabilities.sessions(speaking: ChainHandshake.volumeBundle)
-                .filter({ !asked.contains($0.sessionID) }).randomElement() {
+            while let peer = ({
+                let left = capabilities.sessions(speaking: ChainHandshake.volumeBundle)
+                    .filter { !asked.contains($0.sessionID) }
+                return left.filter { named.contains($0.sessionID) }.randomElement() ?? left.randomElement()
+            })() {
                 asked.insert(peer.sessionID)
                 let answer = await ivy.fetchVolumeBundle(rootCID: rootCID, from: [peer])
                 if !answer.ended, answer.failure == nil, !Task.isCancelled {
@@ -408,7 +419,7 @@ public struct IvyRootContentSource: Sendable {
         self.credit = credit
         self.maximumStorageBytes = maximumStorageBytes
         self.fetch = fetch
-        self.fetchBundle = { (await fetchBundle($0), nil) }
+        self.fetchBundle = { rootCID, _ in (await fetchBundle(rootCID), nil) }
     }
 
     public func withRoot<T: Sendable>(
@@ -422,16 +433,20 @@ public struct IvyRootContentSource: Sendable {
     public func withRootTracing<T: Sendable>(
         _ rootCID: String,
         bundle: Bool = true,
+        hosts: String? = nil,
         initialResponse: AttributedVolumeResponse? = nil,
         capture: AttributionCapture? = nil,
         operation: @Sendable (Session) async throws -> T
     ) async rethrows -> (value: T, attribution: Attribution) {
-        let none: BundleFetch = { _ in ([], nil) }
+        let fetchBundle = fetchBundle
+        let bundled: BundleFetch = { rootCID in
+            bundle ? await fetchBundle(rootCID, hosts) : ([], nil)
+        }
         let session = Session(
             rootCID: rootCID,
             maximumStorageBytes: maximumStorageBytes,
             fetch: fetch,
-            fetchBundle: bundle ? fetchBundle : none,
+            fetchBundle: bundled,
             credit: credit,
             peerCapabilities: peerCapabilities
         )

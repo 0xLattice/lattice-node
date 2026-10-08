@@ -5,7 +5,8 @@ import LatticeNodeCore
 /// looks it up. Keyed by path, not genesis: a joiner knows the path before it
 /// holds any block, and competing geneses share one rendezvous for fork
 /// choice to settle. Scoped to the Nexus it runs under, so two networks
-/// sharing a DHT never mix. Nexus's own rendezvous is its genesis CID.
+/// sharing a DHT never mix. Nexus has none: every node hosts it, so every
+/// peer is one of its peers.
 enum ChainPeersKey {
     static func key(nexusGenesisCID: String, chainPath: [String]) -> String {
         "lattice.chain-peers.v1:\(nexusGenesisCID):\(chainPath.joined(separator: "/"))"

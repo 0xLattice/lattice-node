@@ -77,21 +77,33 @@ The example Fly read replica uses nginx as the public boundary.
 
 ## Discovery and peer health
 
-Every peer follows Nexus on the same overlay. The node periodically announces
-one provider record per hosted chain, its rendezvous: Nexus under its genesis
-CID, each hosted child under `lattice.chain-peers.v1:<nexus genesis>:<path>`.
-A child is keyed by path, not genesis, so a joiner is findable and can search
+Every peer follows Nexus on the same overlay, so Nexus has no record: every
+peer is a Nexus peer. The node periodically announces one provider record per
+hosted child chain, its rendezvous:
+`lattice.chain-peers.v1:<nexus genesis>:<path>`. A child is keyed by path, not genesis, so a joiner is findable and can search
 before it holds any of the child's blocks, and competing geneses share one
 rendezvous. Provider records name chain availability, not individual blocks or
 states. A node that declares a public read URL also announces each hosted
 child under that child's read-endpoint key (below).
 
-Each hosted chain searches its own rendezvous when it has not progressed since
-boot - as soon as the node has a peer - or for `peerSearchInterval`: the node
-asks the DHT for that chain's providers and dials up to four, drawn at random,
-that it is not already connected to. Peers that host only other chains cannot
-sync it. When Nexus is the stalled chain, the node also re-dials configured
-bootstrap endpoints without a live session.
+A node announces what it hosts on every announcement turn and whenever a
+session opens. Each hosted child chain searches its own rendezvous while no
+connected peer is named there - looked at at those same moments - and when it has not progressed since boot or for `peerSearchInterval`:
+the node asks the DHT for that chain's providers and dials up to four, drawn
+at random, that it is not already connected to. Peers that host only other
+chains cannot sync it. When Nexus is the stalled chain, the node re-dials
+configured bootstrap endpoints without a live session.
+
+On the first attempt at a child chain's block, its bundle is asked of the
+bundle-capable sessions named under the chain's rendezvous before the other
+capable sessions. Nothing else is routed by the rendezvous: Volumes fetched one
+at a time, and every retry, go to peers in the overlay's ordinary order. The
+record is only a hint for whom to ask: content is verified the same whoever
+sent it, a named session that has no bundle costs one round trip before the
+others are asked, one that does not end its bundle is chosen for no further
+bundle that session (requests already waiting for it when that is learned are
+still sent, at most one window of blocks, once per session), and no peer is
+refused service for what it announced.
 
 The trigger uses the locally verified tip, never a remote height claim. Set it
 to `0` only for an intentionally isolated node.

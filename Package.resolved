@@ -1,5 +1,5 @@
 {
-  "originHash" : "edeb3a8f2284415313a4cc242516959ca60a8b12429f299c66638896f0b99649",
+  "originHash" : "8f3a8120890dac9a0883fa756dcc802289840955c8780d06b606e2956a8f8ca7",
   "pins" : [
     {
       "identity" : "arraytrie",
@@ -60,8 +60,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/adalinxx/Ivy.git",
       "state" : {
-        "revision" : "164aa6e334e8a7e15006c399c7e98f4c8e7eb0e7",
-        "version" : "14.1.2"
+        "revision" : "5afa2f5c52227d4a01a0c9b7462a96d01d488c37",
+        "version" : "15.0.1"
       }
     },
     {

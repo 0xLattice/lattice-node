@@ -39,6 +39,14 @@ final class PeerCapabilities: @unchecked Sendable {
         ))
     }
 
+    /// The open sessions of `peers`: for a chain's providers, the sessions
+    /// that host it. Like the record that names them, a hint for whom to
+    /// ask, never for what to accept.
+    func sessions(of peers: [PeerID]) -> [AuthenticatedPeer] {
+        let peers = Set(peers)
+        return lock.withLock { sessions.map(\.peer).filter { peers.contains($0.id) } }
+    }
+
     func sessions(speaking capability: String) -> [AuthenticatedPeer] {
         lock.withLock {
             sessions.filter {
