@@ -95,7 +95,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         return NodeStorage(
             configuration: configuration,
             store: recovered.store,
-            bundles: try VolumeBundleCache(directory: configuration.storagePath),
+            bundles: VolumeBundleCache(directory: configuration.storagePath),
             broker: recovered.broker,
             localFetcher: recovered.localFetcher,
             retentionScope: recovered.retentionScope,

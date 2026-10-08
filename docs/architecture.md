@@ -118,7 +118,12 @@ were a complete boundary.
   state.db             facts, indexes, cursors, and local mempool for the tree
   volumes.db           shared materialized content and retained roots
   header-evidence.db   incomplete header boundaries and child proofs
+  volume-bundles.db    cache: per block, the Volume roots served together
 ```
+
+`volume-bundles.db` is a cache and no part of the recovery unit: nothing but
+bundle serving reads it, a node runs without it, and it may be deleted while
+the node is stopped.
 
 Persistence is content-first: referenced Volumes and header evidence become
 durable before the fact transaction that names them. The complete `NodeBatch`

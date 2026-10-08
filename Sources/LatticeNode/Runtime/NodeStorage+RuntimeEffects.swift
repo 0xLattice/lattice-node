@@ -67,16 +67,22 @@ extension NodeStorage {
     /// block from this node is sent it all with one request.
     /// Returns the roots it stored in, for the validation that references
     /// them.
-    nonisolated func fetchChainBody(_ cid: String, remote: IvyRootContentSource) async throws -> [String] {
+    ///
+    /// `bundle` is false on a retry: a bundle is an optimisation, so a block
+    /// whose first attempt failed is fetched one Volume at a time, as it
+    /// would be from peers that speak no bundles.
+    nonisolated func fetchChainBody(
+        _ cid: String, remote: IvyRootContentSource, bundle: Bool = true
+    ) async throws -> [String] {
         let capture = IvyRootContentSource.AttributionCapture()
         do {
-            return try await remote.withRootTracing(cid, capture: capture) { session in
+            return try await remote.withRootTracing(cid, bundle: bundle, capture: capture) { session in
                 let fetcher = CoalescingFetcher(CompositeContentSource([broker, session]))
                 let storage = NodeImportStorage(storage: broker)
                 try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: storage)
                 let roots = await storage.takeStoredVolumeRoots()
                 try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots)
-                try bundles.record(root: cid, roots: roots)
+                bundles.record(root: cid, roots: roots)
                 return roots
             }.value
         } catch {
@@ -93,22 +99,20 @@ extension NodeStorage {
     /// walk over local content only, recorded once it completes. A root that
     /// is no block this node holds whole bundles only itself.
     nonisolated func volumeBundle(_ rootCID: String) async -> [String] {
-        do {
-            if let recorded = try bundles.bundle(root: rootCID) { return recorded }
-        } catch {
-            syncTrace("volume bundle of \(rootCID) unreadable: \(error)")
+        if let recorded = bundles.bundle(root: rootCID) { return recorded }
+        // Not a block this node holds: nothing to walk, and nothing to say.
+        guard let bytes = await broker.fetchDataLocal(cid: rootCID), Block(data: bytes) != nil else {
             return [rootCID]
         }
         let walked = NodeImportStorage(storage: DiscardingVolumeStorer())
-        guard (try? await BlockHeader(rawCID: rootCID).storeBlock(fetcher: localFetcher, storer: walked)) != nil else {
+        do {
+            try await BlockHeader(rawCID: rootCID).storeBlock(fetcher: localFetcher, storer: walked)
+        } catch {
+            syncTrace("volume bundle of \(rootCID) not walked: \(error)")
             return [rootCID]
         }
         let roots = await walked.takeStoredVolumeRoots()
-        do {
-            try bundles.record(root: rootCID, roots: roots)
-        } catch {
-            syncTrace("volume bundle of \(rootCID) not recorded: \(error)")
-        }
+        bundles.record(root: rootCID, roots: roots)
         return [rootCID] + roots.filter { $0 != rootCID }
     }
 
@@ -121,7 +125,7 @@ extension NodeStorage {
         try await header.storeBlock(fetcher: localFetcher, storer: storage)
         let roots = await storage.takeStoredVolumeRoots()
         try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots)
-        try bundles.record(root: header.rawCID, roots: roots)
+        bundles.record(root: header.rawCID, roots: roots)
         guard let children = try await block.children.resolve(fetcher: localFetcher).node else {
             throw NodeStorageError.missingMaterializedVolume(block.children.rawCID)
         }
@@ -151,7 +155,7 @@ extension NodeStorage {
                 try await child.storeBlock(fetcher: localFetcher, storer: storage)
                 let roots = await storage.takeStoredVolumeRoots()
                 try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots)
-                try bundles.record(root: child.rawCID, roots: roots)
+                bundles.record(root: child.rawCID, roots: roots)
                 frontier.append((block, childPath, proof))
                 guard let grandchildren = try await block.children.resolve(fetcher: localFetcher).node else { continue }
                 carried.append(MinedGrind.Carried(

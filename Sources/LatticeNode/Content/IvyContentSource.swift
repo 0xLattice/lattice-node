@@ -139,16 +139,35 @@ public struct IvyRootContentSource: Sendable {
         ) async -> AttributedVolumeResponse? {
             let task = lock.withLock {
                 if let bundle { return bundle }
-                let task = Task { [root = self.rootCID] in
-                    Dictionary(
-                        await fetch(root).map { ($0.rootCID, $0) },
-                        uniquingKeysWith: { first, _ in first }
-                    )
+                let task = Task { [root = self.rootCID, budget = maximumStorageBytes] in
+                    // What is held aside is held within the session's byte
+                    // budget; Volumes past it are dropped, and requested if
+                    // the traversal needs them.
+                    var held: [String: AttributedVolumeResponse] = [:]
+                    var remaining = budget
+                    for volume in await fetch(root) where held[volume.rootCID] == nil {
+                        let bytes = volume.entries.reduce(0) {
+                            $0 + $1.key.utf8.count + $1.value.count + IvyRootContentSource.retainedEntryOverhead
+                        }
+                        guard bytes <= remaining else { break }
+                        remaining -= bytes
+                        held[volume.rootCID] = volume
+                    }
+                    return held
                 }
                 bundle = task
                 return task
             }
-            return await task.value[rootCID]
+            return await withTaskCancellationHandler {
+                await task.value[rootCID]
+            } onCancel: {
+                task.cancel()
+            }
+        }
+
+        /// The session is over: a bundle still on its way is not waited for.
+        func cancelBundle() {
+            lock.withLock { bundle }?.cancel()
         }
 
         func store(_ volume: SerializedVolume) async -> Bool {
@@ -213,6 +232,7 @@ public struct IvyRootContentSource: Sendable {
         private let fetchVolume: @Sendable (String) async -> AttributedVolumeResponse
         private let fetchBundle: @Sendable (String) async -> [AttributedVolumeResponse]
         private let credit: @Sendable (PeerID, Int) async -> Void
+        private let peerCapabilities: PeerCapabilities
         private let context: Context
 
         fileprivate init(
@@ -220,11 +240,13 @@ public struct IvyRootContentSource: Sendable {
             maximumStorageBytes: Int,
             fetch: @escaping @Sendable (String) async -> AttributedVolumeResponse,
             fetchBundle: @escaping @Sendable (String) async -> [AttributedVolumeResponse],
-            credit: @escaping @Sendable (PeerID, Int) async -> Void
+            credit: @escaping @Sendable (PeerID, Int) async -> Void,
+            peerCapabilities: PeerCapabilities
         ) {
             self.fetchVolume = fetch
             self.fetchBundle = fetchBundle
             self.credit = credit
+            self.peerCapabilities = peerCapabilities
             context = Context(rootCID: rootCID, maximumStorageBytes: maximumStorageBytes)
         }
 
@@ -277,6 +299,9 @@ public struct IvyRootContentSource: Sendable {
                         providerDeficient: !valid
                     )
                     guard bundled != nil, !valid else { break }
+                    if let peer = response.servedBy {
+                        peerCapabilities.revoke(ChainHandshake.volumeBundle, from: peer)
+                    }
                     bundled = nil
                 }
             }
@@ -289,6 +314,8 @@ public struct IvyRootContentSource: Sendable {
         }
 
         public var attribution: Attribution { context.trace.snapshot() }
+
+        fileprivate func cancelBundle() { context.cancelBundle() }
 
         /// What the entries this session holds are charged against its budget.
         var accountedBytes: Int { context.accountedBytes }
@@ -318,12 +345,21 @@ public struct IvyRootContentSource: Sendable {
         // here once verified: the size a peer declares is its claim, and a
         // declared size past the budget would say nothing about the block.
         fetch = { rootCID in await ivy.fetchVolume(rootCID: rootCID) }
-        // Asked only of the sessions whose hello said they answer it.
+        // Asked only of the sessions whose hello said they answer it, one at
+        // a time. A session keeps the capability only while every bundle it
+        // is asked for ends (whole, or "no bundle"): one whose answer ends
+        // any other way is then fetched from one Volume at a time, like a
+        // peer that speaks no bundles. This node's own cancellation or
+        // capacity is not the peer's failure.
         fetchBundle = { rootCID in
-            await ivy.fetchVolumeBundle(
-                rootCID: rootCID,
-                from: capabilities.sessions(speaking: ChainHandshake.volumeBundle)
-            ).volumes
+            for peer in capabilities.sessions(speaking: ChainHandshake.volumeBundle).shuffled() {
+                let answer = await ivy.fetchVolumeBundle(rootCID: rootCID, from: [peer])
+                if !answer.ended, answer.failure == nil, !Task.isCancelled {
+                    capabilities.revoke(ChainHandshake.volumeBundle, from: peer.id)
+                }
+                if !answer.volumes.isEmpty { return answer.volumes }
+            }
+            return []
         }
     }
 
@@ -354,17 +390,21 @@ public struct IvyRootContentSource: Sendable {
 
     public func withRootTracing<T: Sendable>(
         _ rootCID: String,
+        bundle: Bool = true,
         initialResponse: AttributedVolumeResponse? = nil,
         capture: AttributionCapture? = nil,
         operation: @Sendable (Session) async throws -> T
     ) async rethrows -> (value: T, attribution: Attribution) {
+        let none: @Sendable (String) async -> [AttributedVolumeResponse] = { _ in [] }
         let session = Session(
             rootCID: rootCID,
             maximumStorageBytes: maximumStorageBytes,
             fetch: fetch,
-            fetchBundle: fetchBundle,
-            credit: credit
+            fetchBundle: bundle ? fetchBundle : none,
+            credit: credit,
+            peerCapabilities: peerCapabilities
         )
+        defer { session.cancelBundle() }
         if let initialResponse {
             await session.acceptInitialResponse(initialResponse)
         }

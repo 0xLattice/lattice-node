@@ -7,7 +7,8 @@ process validates a selected Nexus-rooted chain tree. The single outer root is
 and [foundational architecture](https://github.com/adalinxx/Lattice/blob/43.1.0/docs/foundational-architecture.md).
 
 > **One process, one hosted tree.** Every process owns one identity, overlay,
-> `state.db`, `volumes.db`, and `header-evidence.db`. Paths select levels inside
+> `state.db`, `volumes.db`, and `header-evidence.db` (plus `volume-bundles.db`,
+> a cache). Paths select levels inside
 > the process; a complete node step commits atomically across them. External
 > `lattice-miner` workers search work issued by Nexus through the coordinator.
 > Child chains provide opt-in throughput and testing networks while deciding

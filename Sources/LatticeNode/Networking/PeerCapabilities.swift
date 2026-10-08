@@ -1,5 +1,6 @@
 import Foundation
 import Ivy
+import Tally
 
 /// What the hello of each session now open said the peer speaks beyond the
 /// base protocol, for readers off the runtime loop. A message added to the
@@ -7,16 +8,38 @@ import Ivy
 /// that never advertised it may end the session of whoever sends it. A
 /// capability belongs to the session whose hello named it, never to the peer
 /// key: a peer that reconnects is judged by its new hello.
+///
+/// A session keeps a capability only while it honours it: `revoke` takes one
+/// from the session that broke it, for as long as that session lasts.
 final class PeerCapabilities: @unchecked Sendable {
     private let lock = NSLock()
     private var sessions: [(peer: AuthenticatedPeer, capabilities: Set<String>)] = []
+    /// By session ID: what an open session advertised and no longer has.
+    private var revoked: [Data: Set<String>] = [:]
 
     /// Replaces the whole view with the sessions now open.
     func set(_ sessions: [(peer: AuthenticatedPeer, capabilities: Set<String>)]) {
-        lock.withLock { self.sessions = sessions }
+        lock.withLock {
+            self.sessions = sessions
+            let open = Set(sessions.map(\.peer.sessionID))
+            revoked = revoked.filter { open.contains($0.key) }
+        }
+    }
+
+    func revoke(_ capability: String, from peer: PeerID) {
+        lock.withLock {
+            for session in sessions where session.peer.id == peer {
+                revoked[session.peer.sessionID, default: []].insert(capability)
+            }
+        }
     }
 
     func sessions(speaking capability: String) -> [AuthenticatedPeer] {
-        lock.withLock { sessions.filter { $0.capabilities.contains(capability) }.map(\.peer) }
+        lock.withLock {
+            sessions.filter {
+                $0.capabilities.contains(capability)
+                    && revoked[$0.peer.sessionID]?.contains(capability) != true
+            }.map(\.peer)
+        }
     }
 }

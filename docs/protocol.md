@@ -211,15 +211,22 @@ the block's own Volume, its transactions', its spec and policy modules, and
 the materialized pre-state its validation reads (the `prevState` root and
 every trie node on the paths its actions touch), never its post-state, its
 parent or its child blocks. Storing a block records those Volume roots in
-`volume-bundles.db`, a cache beside the stores that nothing else reads; for a
-block with no record the server walks the same paths over its local content
-and records what it finds. A content session asks, on its first miss, for the
+`volume-bundles.db`, a cache beside the stores that nothing else reads and
+whose failure costs only speed; for a block with no record the server walks
+the same paths over its local content and records what it finds. A content
+session asks, on its first miss, for the
 bundle of its root from the connected peers that advertised `volume-bundle`,
 and is sent those Volumes with one request; a root with nothing recorded
 bundles only itself. A bundled Volume is verified, charged to the session and
 credited to its server only when the session's traversal asks for its root,
 exactly as a requested Volume is; one that does not verify is its server's
-deficiency and is then requested like any other. Whatever a bundle lacks, and everything when
+deficiency and is then requested like any other. A bundle is an optimisation
+and never the only way to a block: it is asked for on a block's first attempt
+only, so a retry is the per-Volume traversal; and a session keeps
+`volume-bundle` only while every bundle it is asked for ends (whole, or "no
+bundle") — one whose answer times out, breaks the stream, carries a Volume
+that does not verify, or is cut off is from then on fetched from one Volume at
+a time, until it reconnects and says hello again. Whatever a bundle lacks, and everything when
 no connected peer advertised bundles, is requested one Volume at a time.
 Merged-mining candidates pass in-process. One template job reads an immutable
 epoch copy of every hosted level and recursively builds at most one candidate

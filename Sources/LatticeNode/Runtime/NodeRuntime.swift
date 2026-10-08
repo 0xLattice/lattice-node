@@ -75,6 +75,8 @@ public final class NodeRuntime: Sendable {
         let view: PublishedValue<NodeReadView>
     }
     let configuration: NodeConfiguration
+    /// What the open sessions' hellos advertised, as the content layer reads it.
+    let peerCapabilities: PeerCapabilities
     let inputs: AsyncStream<Input>.Continuation
     private let loop: Task<Void, Never>
     let ivy: Ivy
@@ -301,6 +303,8 @@ public final class NodeRuntime: Sendable {
                 inputs.yield(.maintenance)
             }
         }
+        let remote = IvyRootContentSource(ivy: ivy, policy: configuration.resourcePolicy)
+        peerCapabilities = remote.peerCapabilities
         let initial = Loop(
             core: core,
             storage: storage,
@@ -316,7 +320,7 @@ public final class NodeRuntime: Sendable {
             inputs: inputs,
             gate: gate,
             helloTimeout: helloTimeout,
-            remote: IvyRootContentSource(ivy: ivy, policy: configuration.resourcePolicy),
+            remote: remote,
             proofs: proofs,
             workers: max(1, workers),
             failStop: failStop
@@ -987,9 +991,11 @@ extension NodeRuntime {
                     // core no longer wants it, and says why each attempt
                     // failed.
                     var backoff: UInt64 = 250
+                    // A bundle is asked for on the first attempt only.
+                    var bundle = true
                     while !Task.isCancelled {
                         do {
-                            let roots = try await storage.fetchChainBody(cid, remote: remote)
+                            let roots = try await storage.fetchChainBody(cid, remote: remote, bundle: bundle)
                             inputs.yield(.bodyStored(path, cid: cid, roots: roots))
                             return
                         } catch {
@@ -999,6 +1005,7 @@ extension NodeRuntime {
                                 ))
                             }
                         }
+                        bundle = false
                         _ = await Timers.sleep(nanoseconds: backoff * 1_000_000)
                         backoff = min(backoff * 2, 30_000)
                     }
