@@ -273,7 +273,7 @@ extension ChainCore {
 
     mutating func credits(_ grind: String, at cid: String) -> Bool {
         sync.pending.entries[cid]?.evidence[grind] != nil
-            || (index.contains(cid) && tree.getConsensusBlock(hash: cid)?.workContributions[grind] != nil)
+            || (index.contains(cid) && tree.workContribution(id: grind, at: cid) != nil)
     }
 
     /// The evidence index's proofs for a block.
@@ -437,7 +437,7 @@ extension ChainCore {
         var credited: [ChildBlockProof] = []
         for (root, evidence) in header.evidence.sorted(by: { $0.key < $1.key }) {
             guard let work = evidence.contribution, let proof = header.proofs[root] else { continue }
-            if tree.getConsensusBlock(hash: header.blockCID)?.workContributions[root] == nil {
+            if tree.workContribution(id: root, at: header.blockCID) == nil {
                 guard case .applied(let update) = tree.addWork(work, to: header.blockCID) else { continue }
                 turn.facts += update.batches
                 weighed += update.weighed
