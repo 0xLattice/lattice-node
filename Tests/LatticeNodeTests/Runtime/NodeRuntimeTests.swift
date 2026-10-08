@@ -309,12 +309,6 @@ final class NodeRuntimeTests: XCTestCase {
             runtime.peerCount == 1
         }
 
-        try await eventually("Nexus is announced to the overlay") {
-            runtime.inputs.yield(.maintenance)
-            return await router.providers(for: configuration.nexusGenesisCID)
-                .contains { $0.publicKey == configuration.processPublicKey }
-        }
-
         // A hosted child's rendezvous is its path: announced before the node
         // holds any of the child's blocks, so a joiner is findable at once.
         let alphaRendezvous = ChainPeersKey.key(
@@ -325,6 +319,9 @@ final class NodeRuntimeTests: XCTestCase {
             return await router.providers(for: alphaRendezvous)
                 .contains { $0.publicKey == configuration.processPublicKey }
         }
+        // Every node hosts Nexus: it has no record.
+        let nexusProviders = await router.providers(for: configuration.nexusGenesisCID)
+        XCTAssertTrue(nexusProviders.isEmpty)
 
         await runtime.stop()
         await router.stop()

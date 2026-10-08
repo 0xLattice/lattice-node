@@ -262,6 +262,7 @@ final class BundledBlockFetchTests: XCTestCase {
         private let source: NodeStorageIvyContentSource
         private let lock = NSLock()
         private var bundleRequests = 0
+        private var volumeRequests = 0
         var answersBundles = true
         /// The bundle names a Volume whose read never returns.
         var neverEnds = false
@@ -269,10 +270,12 @@ final class BundledBlockFetchTests: XCTestCase {
         init(_ storage: NodeStorage) { source = NodeStorageIvyContentSource(storage: storage) }
 
         var bundleRequestCount: Int { lock.withLock { bundleRequests } }
+        var volumeRequestCount: Int { lock.withLock { volumeRequests } }
 
         func content(rootCID: String, cids: [String], maxDataBytes: Int) async -> [ContentEntry] { [] }
 
         func volume(rootCID: String, maxDataBytes: Int) async -> [ContentEntry] {
+            lock.withLock { volumeRequests += 1 }
             if rootCID == "never" { try? await Task.sleep(for: .seconds(60)) }
             return await source.volume(rootCID: rootCID, maxDataBytes: maxDataBytes)
         }
@@ -288,6 +291,7 @@ final class BundledBlockFetchTests: XCTestCase {
         private let lock = NSLock()
         private var peers: [AuthenticatedPeer] = []
         var first: AuthenticatedPeer? { lock.withLock { peers.first } }
+        var all: [AuthenticatedPeer] { lock.withLock { peers } }
         func ivy(_ ivy: Ivy, didConnect peer: AuthenticatedPeer) async { lock.withLock { peers.append(peer) } }
     }
 
@@ -362,6 +366,107 @@ final class BundledBlockFetchTests: XCTestCase {
             XCTAssertEqual(Set(fallback), Set(recorded))
             XCTAssertEqual(source.bundleRequestCount, count)
         }
+    }
+
+    /// A client connected to two servers, the first of which announced
+    /// itself under `rendezvous`.
+    private func hostAndBystander(
+        _ host: NodeStorage, _ bystander: NodeStorage, rendezvous: String
+    ) async throws -> (remote: IvyRootContentSource, host: CountingSource, bystander: CountingSource) {
+        func ivy() -> (Ivy, PeerEndpoint) {
+            let (key, port) = (Curve25519.Signing.PrivateKey(), NetworkTransportTestPorts.allocate())
+            let hex = key.publicKey.rawRepresentation.map { String(format: "%02x", $0) }.joined()
+            return (Ivy(config: IvyConfig(
+                signingKey: key, listenPort: port, requestTimeout: .seconds(5), stunServers: [],
+                healthConfig: PeerHealthConfig(enabled: false), externalAddress: ("127.0.0.1", port),
+                mode: .overlay
+            )), PeerEndpoint(publicKey: hex, host: "127.0.0.1", port: port))
+        }
+        let (client, _) = ivy()
+        let connections = Connections()
+        await client.installNodeRuntime(delegate: connections, contentSource: CountingSource(host))
+        try await client.start()
+        addTeardownBlock { await client.stop() }
+        var sources: [CountingSource] = []
+        var servers: [Ivy] = []
+        for storage in [host, bystander] {
+            let (server, endpoint) = ivy()
+            sources.append(CountingSource(storage))
+            await server.installNodeRuntime(delegate: Connections(), contentSource: sources[sources.count - 1])
+            try await server.start()
+            addTeardownBlock { await server.stop() }
+            try await client.connect(to: endpoint)
+            servers.append(server)
+        }
+        await client.setContentSource(nil)
+        let hostID = await servers[0].localID
+        let remote = IvyRootContentSource(ivy: client)
+        let deadline = ContinuousClock.now + .seconds(10)
+        while ContinuousClock.now < deadline {
+            await servers[0].announceProvider(
+                rootCID: rendezvous, expiresAt: UInt64(Date().timeIntervalSince1970) + 600
+            )
+            let named = await client.providers(for: rendezvous)
+            if connections.all.count == 2, named == [hostID] { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        remote.peerCapabilities.set(connections.all.map { ($0, [ChainHandshake.volumeBundle]) })
+        return (remote, sources[0], sources[1])
+    }
+
+    /// A peer named under a chain's rendezvous hosts it for that session,
+    /// whatever becomes of the record; its next session is judged anew.
+    func testAPeerOnceNamedHostsTheChainForThatSessionOnly() {
+        func session(_ byte: UInt8) -> AuthenticatedPeer {
+            AuthenticatedPeer(
+                key: try! PeerKey(server.publicKey), role: .endpoint, route: .direct,
+                metadata: PeerMetadata(listenAddresses: []), sessionID: Data(repeating: byte, count: 32)
+            )
+        }
+        let view = PeerCapabilities()
+        view.set([(session(1), [])])
+        XCTAssertEqual(view.hosts(of: "alpha", providers: []), [])
+        XCTAssertEqual(view.hosts(of: "alpha", providers: [server]), [session(1)])
+        XCTAssertEqual(view.hosts(of: "alpha", providers: []), [session(1)], "the record was displaced")
+        XCTAssertEqual(view.hosts(of: "beta", providers: []), [])
+        view.set([(session(2), [])])
+        XCTAssertEqual(view.hosts(of: "alpha", providers: []), [])
+    }
+
+    /// A chain's content is asked of the connected peer its rendezvous names:
+    /// a peer that holds the same content and is not named there is asked
+    /// for none of it, by bundle or by Volume.
+    func testAChainsContentIsAskedOfThePeerItsRendezvousNames() async throws {
+        let producer = try await storage(keyByte: 0x71)
+        let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
+        let (remote, host, bystander) = try await hostAndBystander(producer, producer, rendezvous: "alpha")
+        for (keyByte, bundle) in [(UInt8(0x72), true), (0x73, true), (0x74, true), (0x75, false), (0x76, false)] {
+            _ = try await storage(keyByte: keyByte).fetchChainBody(cid, remote: remote, bundle: bundle, hosts: "alpha")
+        }
+        XCTAssertEqual(host.bundleRequestCount, 3)
+        XCTAssertGreaterThan(host.volumeRequestCount, 0)
+        XCTAssertEqual(bystander.bundleRequestCount, 0)
+        XCTAssertEqual(bystander.volumeRequestCount, 0)
+    }
+
+    /// The record is a hint: a named peer that lacks the content is asked
+    /// first, and the block still arrives from a peer that is not named.
+    func testAChainsContentStillArrivesWhenThePeerItsRendezvousNamesLacksIt() async throws {
+        let producer = try await storage(keyByte: 0x77)
+        let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
+        let recorded = await producer.volumeBundle(cid)
+        let (remote, host, bystander) = try await hostAndBystander(
+            try await storage(keyByte: 0x78), producer, rendezvous: "alpha"
+        )
+        for (keyByte, bundle) in [(UInt8(0x79), true), (0x7A, false)] {
+            let stored = try await storage(keyByte: keyByte).fetchChainBody(
+                cid, remote: remote, bundle: bundle, hosts: "alpha"
+            )
+            XCTAssertEqual(Set(stored), Set(recorded))
+        }
+        XCTAssertEqual(host.bundleRequestCount, 1)
+        XCTAssertGreaterThan(host.volumeRequestCount, 0)
+        XCTAssertGreaterThan(bystander.volumeRequestCount, 0)
     }
 
     /// A session whose bundle does not end loses the capability: it is asked

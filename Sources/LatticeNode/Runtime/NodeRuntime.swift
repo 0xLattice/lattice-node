@@ -406,11 +406,13 @@ extension NodeRuntime {
 
         /// One overlay session per peer key; the core sees `(key, id)`.
         /// Every change publishes what the open sessions' hellos advertised.
+        /// A session that opened is told what this node hosts and asked what
+        /// it hosts: each level's rendezvous is announced and looked at again.
         var sessions: [String: Session] = [:] {
             didSet {
-                remote.peerCapabilities.set(
-                    sessions.values.filter(\.ready).sorted { $0.id < $1.id }.map { ($0.peer, $0.capabilities) }
-                )
+                let ready = sessions.values.filter(\.ready)
+                remote.peerCapabilities.set(ready.sorted { $0.id < $1.id }.map { ($0.peer, $0.capabilities) })
+                if ready.count > oldValue.values.filter(\.ready).count { startNetworkMaintenance() }
             }
         }
         var nextSession: UInt64 = 1
@@ -610,12 +612,11 @@ extension NodeRuntime {
             maintenanceInFlight = true
 
             let expiry = UInt64(max(0, now / 1_000)) + 1_200
-            // Each hosted level's rendezvous: Nexus's genesis, a child's path.
+            // Each hosted child level's rendezvous, its path. Nexus has none:
+            // every node hosts it.
             let nexus = configuration.nexusGenesisCID
-            let rendezvous = core.ordered.map { path in
-                (path: path, key: path == core.rootPath
-                    ? nexus
-                    : ChainPeersKey.key(nexusGenesisCID: nexus, chainPath: path))
+            let rendezvous = core.ordered.filter { $0 != core.rootPath }.map { path in
+                (path: path, key: ChainPeersKey.key(nexusGenesisCID: nexus, chainPath: path))
             }
             // A declared read URL is findable from the parent of each hosted
             // child level: announced under the level's read-endpoint key.
@@ -634,36 +635,37 @@ extension NodeRuntime {
                 now: now, interval: interval,
                 connected: sessions.values.contains(where: \.ready)
             )
-            let searched = rendezvous.filter { due.contains($0.path) }.map(\.key)
+            let stalled = Set(rendezvous.filter { due.contains($0.path) }.map(\.key))
             let redialBootstrap = due.contains(core.rootPath)
-            let (ivy, inputs, bootstrap, ownKey) = (
-                ivy, inputs, configuration.bootstrapPeers, configuration.processPublicKey
+            let (ivy, inputs, bootstrap, ownKey, capabilities) = (
+                ivy, inputs, configuration.bootstrapPeers, configuration.processPublicKey, remote.peerCapabilities
             )
             spawn {
                 for key in announced {
                     await ivy.announceProvider(rootCID: key, expiresAt: expiry)
                 }
-                if !searched.isEmpty {
-                    var connected = Set((await ivy.connectedPeers).map(\.publicKey))
-                    for endpoint in bootstrap where redialBootstrap && !connected.contains(endpoint.publicKey) {
+                var connected = Set((await ivy.connectedPeers).map(\.publicKey))
+                for endpoint in bootstrap where redialBootstrap && !connected.contains(endpoint.publicKey) {
+                    do {
+                        try await ivy.connect(to: endpoint)
+                        connected.insert(endpoint.publicKey)
+                    } catch {}
+                }
+                // A level's rendezvous names the peers that can sync it. It
+                // is searched while no open session is one of them, and
+                // when the level stalled. Ourselves and peers already
+                // connected are skipped; the dials are a random draw, so
+                // whoever orders the lookup's answer does not pick them.
+                for key in rendezvous.map(\.key) {
+                    let hosted = !capabilities.hosts(of: key, providers: await ivy.providers(for: key)).isEmpty
+                    guard !hosted || stalled.contains(key) else { continue }
+                    let fresh = (await ivy.discoverProviders(rootCID: key))
+                        .filter { $0.publicKey != ownKey && !connected.contains($0.publicKey) }
+                    for endpoint in fresh.shuffled().prefix(4) {
                         do {
                             try await ivy.connect(to: endpoint)
                             connected.insert(endpoint.publicKey)
                         } catch {}
-                    }
-                    // The stalled level's rendezvous: the peers that can sync
-                    // it. Ourselves and peers already connected are skipped;
-                    // the dials are a random draw, so whoever orders the
-                    // lookup's answer does not pick them.
-                    for key in searched {
-                        let fresh = (await ivy.discoverProviders(rootCID: key))
-                            .filter { $0.publicKey != ownKey && !connected.contains($0.publicKey) }
-                        for endpoint in fresh.shuffled().prefix(4) {
-                            do {
-                                try await ivy.connect(to: endpoint)
-                                connected.insert(endpoint.publicKey)
-                            } catch {}
-                        }
                     }
                 }
                 inputs.yield(.maintenanceFinished)
@@ -808,11 +810,6 @@ extension NodeRuntime {
                 session.ready = true
                 session.capabilities = Set(remote.capabilities ?? [])
                 sessions[peer.key.hex] = session
-                // The first peer is the first chance for a lookup to reach
-                // the DHT: search the levels due one now, not an interval on.
-                if !sessions.values.contains(where: { $0.ready && $0.id != session.id }) {
-                    startNetworkMaintenance()
-                }
                 return await step(.peerReady(session.coreID))
             case .sync(let peer, let chainPath, let message):
                 guard let session = sessions[peer.key.hex], session.peer.sessionID == peer.sessionID,
@@ -1008,9 +1005,17 @@ extension NodeRuntime {
                 let key = BodyKey(path: path, cid: cid)
                 guard bodies[key] == nil else { break }
                 let (storage, remote, inputs) = (storage, remote, inputs)
+                // Every peer hosts Nexus; a child's hosts are those its
+                // rendezvous names. Like the bundle, a hint for the first
+                // attempt only: a retry asks as if there were none.
+                let rendezvous = path == core.rootPath ? nil : ChainPeersKey.key(
+                    nexusGenesisCID: configuration.nexusGenesisCID, chainPath: path
+                )
                 bodies[key] = Task {
                     let roots = await NodeRuntime.retryingBody { bundle in
-                        try await storage.fetchChainBody(cid, remote: remote, bundle: bundle)
+                        try await storage.fetchChainBody(
+                            cid, remote: remote, bundle: bundle, hosts: bundle ? rendezvous : nil
+                        )
                     } waiting: { error in
                         inputs.yield(.bodyWaiting(
                             path, cid: cid, BodyWait(fetchFailure: error), detail: "\(error)"

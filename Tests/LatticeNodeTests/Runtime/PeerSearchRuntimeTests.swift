@@ -1,6 +1,7 @@
 import Foundation
 @testable import Ivy
 import Lattice
+import Tally
 import XCTest
 @testable import LatticeNode
 
@@ -24,7 +25,9 @@ final class PeerSearchRuntimeTests: XCTestCase {
     /// Routable stand-in address → loopback port, shared by every node's dialer.
     private static func advertised(_ port: UInt16) -> String { "8.8.\(port >> 8).\(port & 0xFF)" }
 
-    private func start(keyByte: UInt8, hosted: [[String]], peers: [PeerEndpoint] = []) async throws -> Node {
+    private func start(
+        keyByte: UInt8, hosted: [[String]], peers: [PeerEndpoint] = [], interval: TimeInterval = 5
+    ) async throws -> Node {
         let port = NetworkTransportTestPorts.allocate()
         let host = Self.advertised(port)
         let configuration = try NodeConfiguration(
@@ -35,7 +38,7 @@ final class PeerSearchRuntimeTests: XCTestCase {
             rpcPort: NetworkTransportTestPorts.allocate(),
             bootstrapPeers: peers,
             externalAddress: host,
-            peerSearchInterval: 5,
+            peerSearchInterval: interval,
             hostedChildren: hosted,
             childSpecs: hosted.isEmpty ? [:] : [Self.alpha: Self.spec]
         )
@@ -100,6 +103,24 @@ final class PeerSearchRuntimeTests: XCTestCase {
         // Nexus, which the Nexus-only search waits for) does not pass.
         try await eventually("the follower finds Alpha's host and syncs Alpha", within: .seconds(20)) {
             (await followerAlpha.readSnapshot().height ?? 0) >= 2
+        }
+    }
+
+    /// Hosting is learned when a session opens, not an announcement interval
+    /// later: a host that joins after the follower is named under Alpha's
+    /// rendezvous on the follower as soon as they are connected.
+    func testAPeerIsKnownToHostALevelAsSoonAsItsSessionOpens() async throws {
+        let hub = try await start(keyByte: 0x67, hosted: [], interval: 3_600)
+        let follower = try await start(keyByte: 0x68, hosted: [Self.alpha], peers: [hub.endpoint], interval: 3_600)
+        try await eventually("the follower joins through the hub") { follower.runtime.peerCount == 1 }
+        let host = try await start(keyByte: 0x69, hosted: [Self.alpha], peers: [hub.endpoint], interval: 3_600)
+        let hostID = PeerID(publicKey: host.endpoint.publicKey)
+        let (ivy, key) = (follower.runtime.ivy, ChainPeersKey.key(
+            nexusGenesisCID: follower.runtime.configuration.nexusGenesisCID, chainPath: Self.alpha
+        ))
+        try await eventually("the follower knows its new peer hosts Alpha", within: .seconds(20)) {
+            guard await ivy.connectedPeers.contains(hostID) else { return false }
+            return await ivy.providers(for: key).contains(hostID)
         }
     }
 }
