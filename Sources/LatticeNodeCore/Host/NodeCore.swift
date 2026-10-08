@@ -444,7 +444,7 @@ public struct NodeCore: Sendable {
                 core.minedReplies[cid] = nil
                 outcome = .refused
             }
-            levels[rootPath] = consume core
+            levels[rootPath] = core
             absorb(effects, at: rootPath, &turn)
         }
         for carried in grind.carried.sorted(by: { Self.order($0.path, $1.path) }) {
@@ -471,7 +471,7 @@ public struct NodeCore: Sendable {
         let parent = Array(path.dropLast())
         guard path.count > 1, var core = levels.removeValue(forKey: parent) else { return false }
         core.tree.serveRuns(for: path[path.count - 1])
-        levels[parent] = consume core
+        levels[parent] = core
         return true
     }
 
