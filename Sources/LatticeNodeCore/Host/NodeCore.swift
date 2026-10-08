@@ -331,11 +331,17 @@ public struct NodeCore: Sendable {
     /// Step one level. A level that executed a block wakes each child
     /// block awaiting a fact it now holds; a level's own verdict is checked
     /// the same way, since its parent may have executed while it ran.
+    ///
+    /// A level is stepped by its one owner: taken out of `levels`, mutated,
+    /// and moved back. Stepping a copy read from `levels` would leave two
+    /// references to every collection the level holds, so each one the step
+    /// writes would first be copied whole (copy-on-write): a step would cost
+    /// in proportion to the chain, not to its event.
     mutating func run(_ path: ChainPath, _ event: ChainEvent, _ turn: inout Turn) {
-        guard var core = levels[path] else { return }
+        guard var core = levels.removeValue(forKey: path) else { return }
         let effects = core.step(event, now: turn.now)
-        levels[path] = core
         turn.weighed[path, default: []].formUnion(core.weighed)
+        levels[path] = consume core
         absorb(effects, at: path, &turn)
         let executed = effects.contains {
             guard case .persist(let batch) = $0 else { return false }
@@ -355,9 +361,9 @@ public struct NodeCore: Sendable {
     /// Connect again the blocks of a child level whose awaited parent fact
     /// is now present; a level with none is not stepped.
     mutating func wakeAnswered(_ path: ChainPath, _ turn: inout Turn) {
-        guard let core = levels[path], !core.bodies.awaitingParent.isEmpty,
+        guard let awaiting = levels[path]?.bodies.awaitingParent, !awaiting.isEmpty,
               let facts = parentFacts(for: path) else { return }
-        let present = core.bodies.awaitingParent.filter { facts.holds($0.value) }.keys.sorted()
+        let present = awaiting.filter { facts.holds($0.value) }.keys.sorted()
         guard !present.isEmpty else { return }
         run(path, .parentFactsPresent(present), &turn)
     }
@@ -424,8 +430,8 @@ public struct NodeCore: Sendable {
     /// off the best chain), as the root level's `workSubmitted`.
     mutating func mined(_ grind: MinedGrind, replyID: UInt64?, _ turn: inout Turn) {
         var outcome: MinedOutcome? = .childOnly
-        if ChainTree.rootWork(of: grind.root) != nil, var core = levels[rootPath],
-           let cid = try? BlockHeader(node: grind.root).rawCID {
+        if ChainTree.rootWork(of: grind.root) != nil, let cid = try? BlockHeader(node: grind.root).rawCID,
+           var core = levels.removeValue(forKey: rootPath) {
             let held = core.index.contains(cid)
             if !held, let replyID { core.minedReplies[cid] = replyID }
             let effects = core.weighOwn(grind.root, children: grind.rootChildren, proof: nil, now: turn.now)
@@ -442,13 +448,13 @@ public struct NodeCore: Sendable {
             absorb(effects, at: rootPath, &turn)
         }
         for carried in grind.carried.sorted(by: { Self.order($0.path, $1.path) }) {
-            guard var core = levels[carried.path] else { continue }
+            guard var core = levels.removeValue(forKey: carried.path) else { continue }
             let effects = core.weighOwn(
                 carried.block, children: carried.children,
                 proof: (carried.proof, carried.evidence), now: turn.now
             )
             turn.weighed[carried.path, default: []].formUnion(core.weighed)
-            levels[carried.path] = core
+            levels[carried.path] = consume core
             absorb(effects, at: carried.path, &turn)
         }
         if let replyID, let outcome {
@@ -463,7 +469,7 @@ public struct NodeCore: Sendable {
     @discardableResult
     mutating func serve(_ path: ChainPath) -> Bool {
         let parent = Array(path.dropLast())
-        guard path.count > 1, var core = levels[parent] else { return false }
+        guard path.count > 1, var core = levels.removeValue(forKey: parent) else { return false }
         core.tree.serveRuns(for: path[path.count - 1])
         levels[parent] = core
         return true
@@ -480,11 +486,11 @@ public struct NodeCore: Sendable {
             let parentBlocks = (turn.weighed[parent] ?? []).union(raised[parent] ?? [])
             let held = turn.weighed[path] ?? []
             guard !parentBlocks.isEmpty || !held.isEmpty,
-                  let parentCore = levels[parent], var core = levels[path] else { continue }
+                  let parentCore = levels[parent], var core = levels.removeValue(forKey: path) else { continue }
             let result = core.applyParentRun(
                 from: parentCore.tree, parentBlocks: parentBlocks, held: held, now: turn.now
             )
-            levels[path] = core
+            levels[path] = consume core
             raised[path] = Set(result.raised)
             absorb(result.effects, at: path, &turn)
         }
