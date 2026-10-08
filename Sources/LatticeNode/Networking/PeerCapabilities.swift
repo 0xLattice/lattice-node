@@ -16,8 +16,6 @@ final class PeerCapabilities: @unchecked Sendable {
     private var sessions: [(peer: AuthenticatedPeer, capabilities: Set<String>)] = []
     /// By session ID: what an open session advertised and no longer has.
     private var revoked: [Data: Set<String>] = [:]
-    /// By session ID: the chain rendezvous the session's peer was named under.
-    private var hosting: [Data: Set<String>] = [:]
 
     /// Replaces the whole view with the sessions now open.
     func set(_ sessions: [(peer: AuthenticatedPeer, capabilities: Set<String>)]) {
@@ -25,7 +23,6 @@ final class PeerCapabilities: @unchecked Sendable {
             self.sessions = sessions
             let open = Set(sessions.map(\.peer.sessionID))
             revoked = revoked.filter { open.contains($0.key) }
-            hosting = hosting.filter { open.contains($0.key) }
         }
     }
 
@@ -42,19 +39,12 @@ final class PeerCapabilities: @unchecked Sendable {
         ))
     }
 
-    /// The open sessions that host the chain whose rendezvous is `key`: the
-    /// peers the overlay names there now (`providers`), and those it named
-    /// earlier in their session. A process hosts the same chains for as long
-    /// as it runs, while the overlay's record of it may be displaced. As the
-    /// record is, this is a hint for whom to ask, never for what to accept.
-    func hosts(of key: String, providers: [PeerID]) -> [AuthenticatedPeer] {
-        let providers = Set(providers)
-        return lock.withLock {
-            for session in sessions where providers.contains(session.peer.id) {
-                hosting[session.peer.sessionID, default: []].insert(key)
-            }
-            return sessions.map(\.peer).filter { hosting[$0.sessionID]?.contains(key) == true }
-        }
+    /// The open sessions of `peers`: for a chain's providers, the sessions
+    /// that host it. Like the record that names them, a hint for whom to
+    /// ask, never for what to accept.
+    func sessions(of peers: [PeerID]) -> [AuthenticatedPeer] {
+        let peers = Set(peers)
+        return lock.withLock { sessions.map(\.peer).filter { peers.contains($0.id) } }
     }
 
     func sessions(speaking capability: String) -> [AuthenticatedPeer] {

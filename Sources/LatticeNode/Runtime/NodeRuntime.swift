@@ -657,7 +657,7 @@ extension NodeRuntime {
                 // connected are skipped; the dials are a random draw, so
                 // whoever orders the lookup's answer does not pick them.
                 for key in rendezvous.map(\.key) {
-                    let hosted = !capabilities.hosts(of: key, providers: await ivy.providers(for: key)).isEmpty
+                    let hosted = !capabilities.sessions(of: await ivy.providers(for: key)).isEmpty
                     guard !hosted || stalled.contains(key) else { continue }
                     let fresh = (await ivy.discoverProviders(rootCID: key))
                         .filter { $0.publicKey != ownKey && !connected.contains($0.publicKey) }

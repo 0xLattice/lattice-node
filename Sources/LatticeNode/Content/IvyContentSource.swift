@@ -378,7 +378,7 @@ public struct IvyRootContentSource: Sendable {
         // declared size past the budget would say nothing about the block.
         let hosting: @Sendable (String?) async -> [AuthenticatedPeer] = { key in
             guard let key else { return [] }
-            return capabilities.hosts(of: key, providers: await ivy.providers(for: key))
+            return capabilities.sessions(of: await ivy.providers(for: key))
         }
         fetch = { rootCID, hosts in
             if let host = await hosting(hosts).randomElement() {

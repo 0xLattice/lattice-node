@@ -371,14 +371,16 @@ final class BundledBlockFetchTests: XCTestCase {
     /// A client connected to two servers, the first of which announced
     /// itself under `rendezvous`.
     private func hostAndBystander(
-        _ host: NodeStorage, _ bystander: NodeStorage, rendezvous: String
+        _ host: NodeStorage, _ bystander: NodeStorage, rendezvous: String,
+        recordsPerPeer: Int = IvyConfig.defaultMaxProviderRecordsPerPeer
     ) async throws -> (remote: IvyRootContentSource, host: CountingSource, bystander: CountingSource) {
         func ivy() -> (Ivy, PeerEndpoint) {
             let (key, port) = (Curve25519.Signing.PrivateKey(), NetworkTransportTestPorts.allocate())
             let hex = key.publicKey.rawRepresentation.map { String(format: "%02x", $0) }.joined()
             return (Ivy(config: IvyConfig(
                 signingKey: key, listenPort: port, requestTimeout: .seconds(5), stunServers: [],
-                healthConfig: PeerHealthConfig(enabled: false), externalAddress: ("127.0.0.1", port),
+                healthConfig: PeerHealthConfig(enabled: false),
+                maxProviderRecordsPerPeer: recordsPerPeer, externalAddress: ("127.0.0.1", port),
                 mode: .overlay
             )), PeerEndpoint(publicKey: hex, host: "127.0.0.1", port: port))
         }
@@ -414,25 +416,6 @@ final class BundledBlockFetchTests: XCTestCase {
         return (remote, sources[0], sources[1])
     }
 
-    /// A peer named under a chain's rendezvous hosts it for that session,
-    /// whatever becomes of the record; its next session is judged anew.
-    func testAPeerOnceNamedHostsTheChainForThatSessionOnly() {
-        func session(_ byte: UInt8) -> AuthenticatedPeer {
-            AuthenticatedPeer(
-                key: try! PeerKey(server.publicKey), role: .endpoint, route: .direct,
-                metadata: PeerMetadata(listenAddresses: []), sessionID: Data(repeating: byte, count: 32)
-            )
-        }
-        let view = PeerCapabilities()
-        view.set([(session(1), [])])
-        XCTAssertEqual(view.hosts(of: "alpha", providers: []), [])
-        XCTAssertEqual(view.hosts(of: "alpha", providers: [server]), [session(1)])
-        XCTAssertEqual(view.hosts(of: "alpha", providers: []), [session(1)], "the record was displaced")
-        XCTAssertEqual(view.hosts(of: "beta", providers: []), [])
-        view.set([(session(2), [])])
-        XCTAssertEqual(view.hosts(of: "alpha", providers: []), [])
-    }
-
     /// A chain's content is asked of the connected peer its rendezvous names:
     /// a peer that holds the same content and is not named there is asked
     /// for none of it, by bundle or by Volume.
@@ -446,6 +429,21 @@ final class BundledBlockFetchTests: XCTestCase {
         XCTAssertEqual(host.bundleRequestCount, 3)
         XCTAssertGreaterThan(host.volumeRequestCount, 0)
         XCTAssertEqual(bystander.bundleRequestCount, 0)
+        XCTAssertEqual(bystander.volumeRequestCount, 0)
+    }
+
+    /// Serving content does not cost a host its record: one that served more
+    /// Volumes than a peer may hold records for is still the one asked.
+    func testAHostThatServedMoreVolumesThanItsRecordQuotaIsStillNamed() async throws {
+        let producer = try await storage(keyByte: 0x7B)
+        let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
+        let (remote, host, bystander) = try await hostAndBystander(
+            producer, producer, rendezvous: "alpha", recordsPerPeer: 1
+        )
+        for keyByte in [UInt8(0x7C), 0x7D, 0x7E] {
+            _ = try await storage(keyByte: keyByte).fetchChainBody(cid, remote: remote, bundle: false, hosts: "alpha")
+        }
+        XCTAssertGreaterThan(host.volumeRequestCount, 1)
         XCTAssertEqual(bystander.volumeRequestCount, 0)
     }
 

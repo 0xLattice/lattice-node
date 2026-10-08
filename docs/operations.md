@@ -94,8 +94,7 @@ at random, that it is not already connected to. Peers that host only other
 chains cannot sync it. When Nexus is the stalled chain, the node re-dials
 configured bootstrap endpoints without a live session.
 
-The connected peers a child's rendezvous names, or named earlier in their
-session, are asked first for that
+The connected peers a child's rendezvous names are asked first for that
 chain's block content. The record is only a hint for whom to ask: content is
 verified the same whoever sent it, a peer not named there is still asked when
 the named one misses, and no peer is refused service for what it announced.
