@@ -82,7 +82,7 @@ inherent. The remaining lever is skipping execution of **abandoned** forks (plac
 side-fork blocks in the DAG on the cheap work path; execute state only on
 load-bearing membership). It is NOT consensus-neutral: it changes what
 acceptance asserts and requires an execution-invalidity exclusion seam —
-the design, its invariants (availability never judges; pivotal weight is
-validated before it decides), and the required spec amendments live in
+the design, its invariants (availability never judges; only executed
+blocks are acted on), and the required spec amendments live in
 weight-first-acquisition.md. Its delicate requirement stands: a
 heaviest-but-*invalid* path is always demoted to the heaviest *valid* one.

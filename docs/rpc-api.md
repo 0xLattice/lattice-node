@@ -111,7 +111,7 @@ height plus the block's fees, the balance excess of its transactions. It is
 `0` for a burned block and omitted only when this node does not hold the
 block's spec or transaction bodies.
 
-`/api/blocks` lists the canonical chain to the executed tip, newest first,
+`/api/blocks` lists the chain to the tip this node acts on, newest first,
 at any hosted level (`?chainPath=`). It returns
 `{"blocks": [...], "nextBefore": "<height>"}`; each row is `height`,
 `hash`, `previousBlock`, `timestamp`, `transactionCount` and
@@ -185,8 +185,10 @@ public read budget.
 ```
 
 `bestHeaderHeight` is the height of the best header chain the node knows (absent
-before any header); `height` is the deepest executed block on it, so sync
-progress is `height` of `bestHeaderHeight`. Both are per level (`?chainPath=`).
+before any header); `height` is the height of the heaviest executed tip, the
+block the node acts on. It is on the best header chain unless a heavier
+chain's bodies are not held, so sync progress is `height` of
+`bestHeaderHeight`. Both are per level (`?chainPath=`).
 
 `waiting` is present while the level's next block cannot be executed, and says
 which block and why, as `body of <cid>: <reason>`. The reason is one of a fixed

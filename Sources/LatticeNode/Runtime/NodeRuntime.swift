@@ -684,13 +684,14 @@ extension NodeRuntime {
                     : NodeRuntime.templateDigest(tip: tip.hash, mempool: pool)
                 digests[path] = (key, digest)
             }
-            // Status names the next block's wait. A block the window left
-            // (executed, excluded, or off the best chain) waits no more.
+            // Status names the wait of the block after the act-on tip, its
+            // heaviest child the window asks for. A block the window left
+            // (executed, excluded, or no longer asked for) waits no more.
             var waiting: NodeReadView.Waiting?
             if !fetchWaits.isEmpty || !connectWaits.isEmpty {
                 let window = level.bodyWindow
                 connectWaits = connectWaits.filter { $0.key.path != path || window.contains($0.key.cid) }
-                waiting = window.first.flatMap { cid in
+                waiting = window.first { (level.parent(of: $0) ?? "") == tip.hash }.flatMap { cid in
                     let key = BodyKey(path: path, cid: cid)
                     return (fetchWaits[key] ?? connectWaits[key]).map { NodeReadView.Waiting(cid: cid, reason: $0) }
                 }
@@ -700,17 +701,18 @@ extension NodeRuntime {
                     || view.waiting != waiting else { return }
             if view.actOnTip != tip.hash {
                 view.actOnTip = tip.hash
-                let tree = level.tree
-                var keep = min(view.heights.count, tip.hash.isEmpty ? 0 : Int(tip.height) + 1)
-                while keep > 0, view.heights[keep - 1] != tree.canonicalBlockHash(atHeight: UInt64(keep - 1)) {
+                // The act-on chain is the tip's ancestry, on the best header
+                // chain or not: walk down to where the view already agrees.
+                var entered: [String] = []
+                var keep = tip.hash.isEmpty ? 0 : Int(tip.height) + 1
+                var cursor: String? = tip.hash
+                while keep > 0, let cid = cursor, !(keep <= view.heights.count && view.heights[keep - 1] == cid) {
+                    entered.append(cid)
+                    cursor = level.parent(of: cid)
                     keep -= 1
                 }
                 view.heights.truncate(to: keep)
-                var height = UInt64(keep)
-                while !tip.hash.isEmpty, height <= tip.height, let cid = tree.canonicalBlockHash(atHeight: height) {
-                    view.heights.append(cid)
-                    height += 1
-                }
+                for cid in entered.reversed() { view.heights.append(cid) }
             }
             view.poolVersion = pool.version
             view.mempool = ChainReads.MempoolListing(

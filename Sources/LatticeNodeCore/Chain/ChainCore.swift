@@ -151,8 +151,9 @@ public struct ChainCoreConfig: Sendable {
     public var maxFutureDrift: Int64
     /// A child level's proof bounds.
     public var proofs = ChildProofConfig()
-    /// How many weighed-but-unexecuted blocks of the best chain, after the
-    /// act-on tip, have their bodies asked for at once.
+    /// How many weighed-but-unexecuted blocks of the best chain, after its
+    /// executed prefix, have their bodies asked for at once. Fork children
+    /// are asked for besides and are not counted.
     public var bodyWindow: Int
     /// A connect with no verdict (its content was not resolvable) waits this
     /// long before its body is asked for again, doubling per attempt up to
@@ -255,7 +256,7 @@ public struct ChainCore: Sendable {
     var readingTransactions: Set<String> = []
     /// This host's mined blocks awaiting their answer, by block: answered
     /// once executed (or proven invalid), or at once when the block is
-    /// weighed off the best chain, which the body window never executes.
+    /// weighed where the body window will not execute it.
     var minedReplies: [String: UInt64] = [:]
     /// The blocks this step's admissions weighed (`ChainTreeUpdate.weighed`),
     /// for the host to forward to run attribution. Reset by every step.
@@ -274,7 +275,6 @@ public struct ChainCore: Sendable {
     ) {
         var tree = tree
         precondition(tree.context != nil, "the core runs one chain's level")
-        mining = MiningState(tipCID: Self.miningTip(of: tree), spec: Self.actOnSpec(of: tree), config: config.mining)
         var index = WeighedIndex()
         var stack = roots ?? Self.bestRoot(of: tree)
         while let hash = stack.popLast() {
@@ -282,6 +282,9 @@ public struct ChainCore: Sendable {
             index.add(hash, parent: meta.parentBlockHash, height: meta.blockHeight)
             stack += meta.childHashes
         }
+        mining = MiningState(
+            tipCID: Self.miningTip(of: tree, index: index), spec: Self.actOnSpec(of: tree), config: config.mining
+        )
         self.tree = tree
         self.config = config
         self.index = index

@@ -72,7 +72,14 @@ final class ConsensusEdgeSimulationTests: XCTestCase {
         let reference = try XCTUnwrap(once.digests.values.first)
         for path in world.paths {
             for (core, digests) in once.digests {
-                XCTAssertEqual(digests[path], reference[path], "\(core) differs at \(path) on one link")
+                // A core executes whichever child of its tip it holds, so what
+                // it executed (and so excluded, and so acts on) is its own. The
+                // graph and its weights are everyone's, and with no
+                // exclusion so is the best header tip.
+                XCTAssertEqual(digests[path]?.blocks, reference[path]?.blocks, "\(core) differs at \(path) on one link")
+                if digests[path]?.excluded == reference[path]?.excluded {
+                    XCTAssertEqual(digests[path]?.canonicalTip, reference[path]?.canonicalTip, "\(core) selects differently at \(path)")
+                }
             }
         }
         for (core, digests) in twice.digests {
@@ -81,7 +88,7 @@ final class ConsensusEdgeSimulationTests: XCTestCase {
                 XCTAssertEqual(digests[path]?.blocks.mapValues(\.subtreeWork), reference[path]?.blocks.mapValues(\.subtreeWork),
                                "\(core) weighs \(path) differently when relayed twice")
                 XCTAssertEqual(digests[path]?.canonicalTip, reference[path]?.canonicalTip, "\(core) selects differently at \(path)")
-                XCTAssertEqual(digests[path], reference[path], "\(core) holds a different graph at \(path)")
+                XCTAssertEqual(digests[path]?.blocks, reference[path]?.blocks, "\(core) holds a different graph at \(path)")
             }
             for grind in threeLevel {
                 XCTAssertEqual(digests[LevelWorld.nexus]?.blocks[grind.root.cid]?.grinds.count, 1, core)

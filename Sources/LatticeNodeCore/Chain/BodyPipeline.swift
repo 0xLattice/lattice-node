@@ -4,10 +4,12 @@ import Lattice
 /// CID through the content layer, which owns provider discovery, CID
 /// verification, retries and provider suppression. The core only names the
 /// next `ChainCoreConfig.bodyWindow` weighed-but-unexecuted blocks on the best
-/// chain and connects them in parent order as their bodies arrive.
+/// chain and connects them in parent order as their bodies arrive. It also
+/// names, outside that count, the blocks the act-on tip would step into once
+/// executed (`forkChildren`).
 ///
 /// There is no per-peer state here and no fetch deadline: a missing body is
-/// an availability wait, never blame.
+/// an availability wait, never blame and never a verdict.
 public struct BodyPipeline: Sendable, Equatable {
     /// Bodies asked of the content layer that have not arrived.
     public internal(set) var requested: Set<String> = []
@@ -27,7 +29,8 @@ public struct BodyPipeline: Sendable, Equatable {
     public internal(set) var awaitingParent: [String: CrossChainEvidenceRequirement] = [:]
     /// The act-on tip and window when `parked` was last kept: a change to
     /// either (an execution, or a best chain that moved) starts every
-    /// backoff over. A header weighed off the best chain changes neither.
+    /// backoff over. A header weighed off the best chain changes neither:
+    /// `window` is the best chain's.
     var seen: TreeMark?
 
     public struct Parked: Sendable, Equatable {
@@ -49,16 +52,45 @@ public struct BodyPipeline: Sendable, Equatable {
 }
 
 extension ChainCore {
-    /// The best chain's blocks after the act-on tip, up to the window: the
-    /// next blocks to execute, in parent order.
+    /// The next blocks to execute: every fork child, then the best chain's
+    /// blocks after its executed prefix in parent order. The operator's
+    /// count bounds only that look-ahead. Each fork child is a
+    /// proof-of-work header, so their number is paid for by work: a node
+    /// asks for every alternative at a fork on the path it acts on.
     public var bodyWindow: [String] {
-        let actOn = tree.actOnTip()
+        let forks = forkChildren
+        return forks + bestWindow.filter { !forks.contains($0) }
+    }
+
+    /// The best chain's blocks after its executed prefix, up to the count.
+    var bestWindow: [String] {
+        let prefix = tree.executedPrefix()
         guard let tipHeight = tree.headerSnapshot(of: tree.canonicalTip)?.tipHeight, config.bodyWindow > 0 else { return [] }
         // A best chain whose genesis root is not executed yet starts there.
-        let first = actOn.hash.isEmpty ? 0 : actOn.height + 1
+        let first = prefix.hash.isEmpty ? 0 : prefix.height + 1
         guard tipHeight >= first else { return [] }
         let last = min(tipHeight, first + UInt64(config.bodyWindow) - 1)
         return (first...last).compactMap { tree.canonicalBlockHash(atHeight: $0) }
+    }
+
+    /// The unexecuted blocks the act-on descent would step into once
+    /// executed, heaviest first: every child of the act-on tip, and at each
+    /// fork above it the children heavier than the executed one it took.
+    /// The cost: at a fork, each child that arrives heavier than those
+    /// executed before it is executed too, so of three or more arriving
+    /// lightest first more than one is stale. A stale sibling's descendants
+    /// are never fetched unless it becomes the tip.
+    var forkChildren: [String] {
+        var wanted: [String] = []
+        var fork = tree.executedPrefix().hash
+        while !fork.isEmpty {
+            let children = Self.byWeight((index.children[fork] ?? []).filter {
+                tree.isExecuted(blockHash: $0) || !tree.isExcludedRoot($0)
+            }, in: tree)
+            wanted += children.prefix { !tree.isExecuted(blockHash: $0) }
+            fork = children.first(where: tree.isExecuted(blockHash:)) ?? ""
+        }
+        return wanted
     }
 
     /// The content layer has the body of `cid` locally. Only a body the
@@ -101,7 +133,7 @@ extension ChainCore {
             if let replyID = minedReplies.removeValue(forKey: cid) {
                 turn.effects.append(.workSubmitted(
                     replyID: replyID,
-                    update.excluded ? .invalid : .executed(tipCID: tree.actOnTip().hash)
+                    update.excluded ? .invalid : .executed(tipCID: actOnTip.hash)
                 ))
             }
         case .duplicate:
@@ -123,13 +155,13 @@ extension ChainCore {
     }
 
     /// Ask the content layer for every body in the window not yet asked for
-    /// (a parked one once its wait is over), cancel bodies the best chain
-    /// left, and start the next connect when the block after the act-on tip
-    /// has its body.
+    /// (a parked one once its wait is over), cancel bodies the window
+    /// left, and start the next connect: the first window block whose body
+    /// is here and whose parent is executed.
     mutating func scheduleBodies(_ turn: inout Turn) {
         let window = bodyWindow
         let wanted = Set(window)
-        let mark = BodyPipeline.TreeMark(actOn: tree.actOnTip().hash, window: window)
+        let mark = BodyPipeline.TreeMark(actOn: actOnTip.hash, window: bestWindow)
         if bodies.seen != mark {
             bodies.seen = mark
             bodies.parked.removeAll()
@@ -146,9 +178,10 @@ extension ChainCore {
             bodies.requested.insert(cid)
             turn.effects.append(.fetchBody(cid: cid))
         }
-        guard bodies.connecting == nil, let next = window.first,
-              bodies.arrived.contains(next), bodies.awaitingParent[next] == nil,
-              let job = tree.connectJob(for: next) else { return }
+        guard bodies.connecting == nil, let next = window.first(where: {
+            bodies.arrived.contains($0) && bodies.awaitingParent[$0] == nil
+                && index.parent[$0].map(tree.hasExecutedAncestry(blockHash:)) ?? true
+        }), let job = tree.connectJob(for: next) else { return }
         bodies.connecting = next
         turn.effects.append(.connect(job))
     }

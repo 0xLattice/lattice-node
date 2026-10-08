@@ -230,7 +230,7 @@ public struct NodeStatusResponse: Codable, Sendable, Equatable {
     /// Nil before the node can serve templates (no executed tip).
     public let templateDigest: String?
     /// The height of the best header chain this node knows, ahead of
-    /// `height` (the deepest executed block on it) while it syncs: local
+    /// `height` (the tip this node acts on) while it syncs: local
     /// progress is `height` of `bestHeaderHeight`. Nil before any header.
     @OptionalDecimalString public var bestHeaderHeight: UInt64? = nil
     /// The next block this chain cannot execute yet and why — its body not

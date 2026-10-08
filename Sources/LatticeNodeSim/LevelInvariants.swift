@@ -15,9 +15,10 @@ import UInt256
 ///   grinds; validity selects (no excluded block on the best chain);
 /// - the executed set is a subset of the weighed graph, closed under
 ///   ancestry, never shrinking, outside every excluded subtree, and holds no
-///   invalid block. A level executes only along its best chain (decision
-///   21), so a side branch it never followed stays unexecuted, and an
-///   invalid block there stays unexcluded;
+///   invalid block. A level executes along its best chain and the
+///   alternatives at forks on the chain it acts on, so a side branch it
+///   never followed stays unexecuted, and an invalid block there stays
+///   unexcluded;
 /// - continuity: every executed child block's parent state was produced by
 ///   an executed parent block (any branch);
 /// - weighed-only blocks issue no facts: validations only for executed

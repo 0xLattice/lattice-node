@@ -8,8 +8,10 @@ and the shared content layer.
 ## Ownership
 
 `HeaderSync` acquires and verifies headers. Once fork choice has selected a
-best chain, `BodyPipeline` names the next bounded window of
-weighed-but-unexecuted block CIDs. It owns only deterministic scheduling state:
+best chain, `BodyPipeline` names the weighed-but-unexecuted block CIDs to
+fetch next: a bounded look-ahead along the best chain, and every alternative
+at a fork on the chain the node acts on. It owns only deterministic scheduling
+state:
 
 - bodies requested from the content layer;
 - bodies that arrived and are ready to connect;
@@ -32,7 +34,18 @@ verified header -> fork choice -> bounded body window
                                  -> publish the new read snapshot
 ```
 
-Only the selected chain is executed. Losing headers retain their verified work
+The node acts on the heaviest executed tip: from genesis, at each fork the
+heaviest child (its whole header subtree) that is executed. A heavier header
+chain whose bodies are not served must not hold the node, and nothing tells
+it that a body will never come. So besides the look-ahead along the heaviest
+header chain it asks for the body of every block the act-on tip would step
+into once executed: each child of the tip and, at a fork above it, each child
+heavier than the executed one taken. The body window's count bounds only the
+look-ahead: these fork children are each a proof-of-work header and are all
+asked for. Whichever arrives is executed; a heavier
+one that arrives later is executed and followed then. A block whose body is
+not held keeps its weight and gets no verdict. Losing headers retain their
+verified work
 and can become selected later without having consumed state-execution work in
 advance. A missing body is an availability wait, never peer blame. If a
 connect attempt lacks content, the block is retried with bounded exponential
@@ -43,9 +56,11 @@ ready and is retried when the co-hosted parent advances.
 
 1. Headers are weighed before body execution and fork choice does not depend
    on body arrival order.
-2. Bodies connect one at a time, in parent order, along the current best chain.
-3. Every requested, arrived, parked, or parent-waiting set is bounded by the
-   configured body window.
+2. Bodies connect one at a time, each after its parent is executed.
+3. Every requested, arrived, parked, or parent-waiting block is in the
+   look-ahead along the best chain, which the configured body window bounds,
+   or is an alternative at a fork on the chain the node acts on, whose number
+   only the proof of work in their headers bounds.
 4. Complete Volumes are CID-verified and materialized through the one shared
    content store.
 5. Worker tasks never mutate consensus state. Their results return as events

@@ -107,10 +107,23 @@ public struct TreeDigest: Equatable, Sendable {
         self.excluded = excluded
     }
 
-    /// The deepest executed block on the best chain, walked from genesis;
-    /// empty while the genesis root is not executed.
+    /// The heaviest executed tip, walked from genesis: at each block the
+    /// heaviest executed child (ties by fork choice's rule), until no child
+    /// is executed; empty while the genesis root is not executed.
     public var actOnTip: String {
-        canonicalPath.prefix { executed.contains($0) }.last ?? ""
+        guard executed.contains(genesis) else { return "" }
+        var children: [String: [String]] = [:]
+        for (cid, entry) in blocks where executed.contains(cid) {
+            if let parent = entry.parent { children[parent, default: []].append(cid) }
+        }
+        var tip = genesis
+        while let next = children[tip]?.max(by: { a, b in
+            let (workA, workB) = (blocks[a]?.subtreeWork ?? .zero, blocks[b]?.subtreeWork ?? .zero)
+            return workA != workB ? workA < workB : forkChoicePrefersBlock(b, over: a)
+        }) {
+            tip = next
+        }
+        return tip
     }
 }
 
@@ -140,7 +153,7 @@ public enum Invariants {
             )
         }
 
-        // The act-on tip is the deepest executed block on the best chain.
+        // The act-on tip is the heaviest executed tip.
         if core.snapshot.actOnTip != digest.actOnTip {
             throw fail(node, "act-on tip \(core.snapshot.actOnTip) is not \(digest.actOnTip)")
         }

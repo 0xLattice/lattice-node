@@ -264,6 +264,7 @@ public struct PendingQueue: Sendable {
 public struct WeighedIndex: Sendable {
     var parent: [String: String] = [:]
     var height: [String: UInt64] = [:]
+    var children: [String: [String]] = [:]
     /// Leaves: headers with no weighed child.
     public internal(set) var leaves: Set<String> = []
 
@@ -271,6 +272,7 @@ public struct WeighedIndex: Sendable {
         guard self.height.updateValue(height, forKey: cid) == nil else { return }
         if let parent {
             self.parent[cid] = parent
+            children[parent, default: []].append(cid)
             leaves.remove(parent)
         }
         leaves.insert(cid)

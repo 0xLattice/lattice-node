@@ -40,12 +40,13 @@ block is spine and must be executed before anyone builds on it.)
 **A node weighs a block when it possesses and structurally verifies it,
 and executes it only when the block matters.** Two tiers of belief:
 
-- **Weighed**: the node holds the block's bytes — header, transactions,
-  referenced proof material — and has verified everything verifiable
-  without execution: the proof of work over the header, parent linkage,
-  size and structural validity, and for a child block its securing-work
-  proof and reference-level continuity. The block's work counts. Its
-  declared post-state is recorded as an unverified claim.
+- **Weighed**: the node holds the block's header and has verified
+  everything a header proves: the proof of work over it, parent linkage,
+  and for a child block its securing-work proof and reference-level
+  continuity. The header alone gives weight - the work commits to the
+  body by its root and does not need it - so a block whose body the node
+  does not hold is weighed all the same. Its declared post-state is
+  recorded as an unverified claim.
 - **Validated**: the state transition has been executed and the declared
   post-state checked. Only now may the node *use* the block — build
   templates at its tip, serve its state, or issue the parent-side
@@ -57,33 +58,37 @@ Execution runs when a block becomes *load-bearing*, under two triggers:
 
 - **Selection**: fork choice selects a branch; the node validates it
   forward from its last validated ancestor before producing on or serving
-  its tip.
-- **Pivotality**: unvalidated weight may not decide anything the node
-  acts on — where "acts on" means, exhaustively: building templates,
-  serving state, issuing continuity facts, and asserting a head
-  externally (head announcements, read and status views of the canonical
-  tip — never possession inventory, which advertises what the node holds
-  and is governed by the possession boundary, not by pivotality).
-  A comparison is safe to act on only when the total unvalidated weight
-  on the winning side is strictly less than its margin over the
-  alternative; where it is not, blocks are validated until it is.
-  Pivotality is a property of the residual unvalidated *set*, never of a
-  single block — subtree aggregation lets many individually-immaterial
-  blocks be collectively decisive. The asymmetry that makes deferral
-  work is structural: unvalidated weight on the *losing* side of a
-  comparison is never pivotal (excluding it only widens the margin), and
-  every losing sibling sits on the losing side at its own fork base — so
-  the measured majority is deferrable by construction. The validation
-  loop terminates: each round validates or permanently excludes a block,
-  both monotone over a finite set. Its cost is margin-driven, not
-  constant — as fork-choice margins narrow, more winning-side weight
-  becomes pivotal, and a sustained near-tie (roughly half the network's
-  work) degrades deferral back toward validate-everything. The
-  amplification an adversary buys is bounded by fork depth, not by one
-  block: one grind atop an existing near-tie fork forces execution of
-  the branch prefix since the last validated ancestor, on both sides if
-  alternated — only recent forks sit within a block of canonical, so
-  depth stays small.
+  its tip. What the node acts on meanwhile is the **act-on tip**, the
+  heaviest executed tip: descend from genesis and, at each fork, follow
+  the heaviest child that is executed (heaviest by its whole subtree's
+  header work); stop where no child is executed. A heavier branch takes
+  over at its fork once its first block there is executed - until then the
+  node keeps acting on the branch it has validated, and does not retreat
+  to the fork point on headers alone. A block whose body the node does
+  not hold is weighed and unvalidated, never invalid.
+- **Pivotality**: everything the node acts on — exhaustively: building
+  templates, serving state, issuing continuity facts, and asserting a
+  head externally (head announcements, read and status views of the
+  canonical tip — never possession inventory, which advertises what the
+  node holds and is governed by the possession boundary, not by
+  pivotality) — is the act-on tip and its ancestry, all executed.
+  Unvalidated weight ranks and is never itself acted on: it chooses
+  which executed child is followed at a fork, and a block that is not
+  executed is never stepped into, however heavy. A block that could
+  change the act-on tip is therefore one that matters: at each fork on
+  the chain the node acts on, every child heavier than the executed one
+  it follows — at the tip, every child — is asked for and executed when
+  its body is held. Whichever executes is followed; a heavier one is
+  followed once it executes. Nothing tells the node that a body will
+  never come, so no wait ends in a verdict and a body not held holds
+  nothing up: the node keeps acting on what it has executed. The
+  asymmetry that makes deferral work is structural: a losing sibling
+  sits on the losing side at its own fork base and never needs
+  executing — so the measured majority is deferrable by construction.
+  The cost is at forks: each alternative that arrives heavier than
+  those executed before it is executed too, so a fork whose children
+  arrive lightest first executes more than one of them. A stale
+  sibling's descendants are not executed unless it becomes the tip.
 
 Invariants:
 
@@ -91,8 +96,8 @@ Invariants:
   a node acts on is identical to that of a node which validated every
   block whose bytes it obtained. Computed weight includes work beneath
   blocks a validating node has excluded — as does that node's own, since
-  exclusion removes no weight (spec §9.9); the pivotality rule guarantees
-  such weight never reaches an action. A validate-at-import
+  exclusion removes no weight (spec §9.9); it weighs, and no excluded or
+  unexecuted block is ever acted on. A validate-at-import
   node and a deferred-execution node therefore differ only in *when*
   work is examined, never in any decision either acts on, and the two
   interoperate on one network.
@@ -172,10 +177,11 @@ move bytes in order, execute exactly what matters.**
   description of deferred execution as "consensus-neutral" is corrected
   by the same change — this is consensus-adjacent and is treated with
   that gravity.
-- Data availability is enforced exactly as today: no possession, no
-  weight. A withheld branch weighs nothing anywhere, so the design adds
-  no new withholding leverage and no permanent-skeleton inflation beyond
-  what a publishing attacker could already buy.
+- Data availability never judges and never un-weighs: a withheld branch
+  keeps its header weight and is simply never acted on, because the
+  act-on tip follows executed blocks only. Honest work chains on the
+  act-on tip meanwhile, so withholding buys what a secret chain already
+  buys and no more.
 - Recovery and boot invariants hold per tier; no index, page, or
   advertisement promises a tier the node has not reached for that block.
   Served surfaces already advertise possession truthfully — possession
