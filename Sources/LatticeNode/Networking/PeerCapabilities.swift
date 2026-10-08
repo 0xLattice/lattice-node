@@ -27,10 +27,16 @@ final class PeerCapabilities: @unchecked Sendable {
     }
 
     func revoke(_ capability: String, from session: AuthenticatedPeer) {
-        lock.withLock {
-            guard sessions.contains(where: { $0.peer.sessionID == session.sessionID }) else { return }
-            revoked[session.sessionID, default: []].insert(capability)
+        let taken = lock.withLock {
+            guard sessions.contains(where: { $0.peer.sessionID == session.sessionID }) else { return false }
+            return revoked[session.sessionID, default: []].insert(capability).inserted
         }
+        // Said once per session: a fleet falling back to the base protocol
+        // must be visible.
+        guard taken else { return }
+        FileHandle.standardError.write(Data(
+            "lattice-node: \(capability) no longer asked of \(session.key.hex.prefix(12)) this session\n".utf8
+        ))
     }
 
     func sessions(speaking capability: String) -> [AuthenticatedPeer] {
