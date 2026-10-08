@@ -35,7 +35,7 @@ public struct ChainReads: Sendable {
     }
 
     let storage: NodeStorage
-    /// The tip readers see: the deepest executed block on the best chain.
+    /// The tip readers see: the tip this node acts on, its heaviest executed tip.
     let tip: @Sendable () async -> ChainStatus
     /// The block at a height of the chain to that tip.
     let canonicalCID: @Sendable (UInt64) async -> String?

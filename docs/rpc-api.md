@@ -111,7 +111,7 @@ height plus the block's fees, the balance excess of its transactions. It is
 `0` for a burned block and omitted only when this node does not hold the
 block's spec or transaction bodies.
 
-`/api/blocks` lists the canonical chain to the executed tip, newest first,
+`/api/blocks` lists the chain to the tip this node acts on, newest first,
 at any hosted level (`?chainPath=`). It returns
 `{"blocks": [...], "nextBefore": "<height>"}`; each row is `height`,
 `hash`, `previousBlock`, `timestamp`, `transactionCount` and

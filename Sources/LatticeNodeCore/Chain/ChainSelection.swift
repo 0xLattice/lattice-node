@@ -64,7 +64,7 @@ extension ChainCore {
     static func byWeight(_ siblings: [String], in tree: ChainTree) -> [String] {
         guard siblings.count > 1 else { return siblings }
         return siblings
-            .map { (hash: $0, work: tree.forkChoiceWeight(of: $0)?.uint256Value ?? .zero) }
+            .map { (hash: $0, work: tree.forkChoiceWeight(of: $0) ?? .zero) }
             .sorted { $0.work != $1.work ? $0.work > $1.work : forkChoicePrefersBlock($0.hash, over: $1.hash) }
             .map(\.hash)
     }
