@@ -33,8 +33,7 @@ final class ChildLevelRestartTests: XCTestCase {
         let reopened = try await NodeStorage.open(configuration: configuration)
         _ = try await reopened.broker.sweep()
         let restored = try await NodeRuntime.boot(
-            storage: reopened, configuration: configuration, coreConfig: .init(),
-            headers: try HeaderEvidenceStore(directory: configuration.storagePath)
+            storage: reopened, configuration: configuration, coreConfig: .init()
         )
         XCTAssertTrue(restored.levels[alpha]?.tree.contains(blockHash: genesisCID) ?? false)
         XCTAssertFalse(restored.levels[alpha]?.tree.isExecuted(blockHash: genesisCID) ?? true)
@@ -53,44 +52,64 @@ final class ChildLevelRestartTests: XCTestCase {
         let genesisCID = try await weighChildGenesis(configuration)
         let reopened = try await NodeStorage.open(configuration: configuration)
         let restored = try await NodeRuntime.boot(
-            storage: reopened, configuration: configuration, coreConfig: .init(),
-            headers: try HeaderEvidenceStore(directory: configuration.storagePath)
+            storage: reopened, configuration: configuration, coreConfig: .init()
         )
         XCTAssertEqual(restored.levels[["Nexus"]]?.snapshot.actOnHeight, 0)
         XCTAssertEqual(restored.levels[["Nexus"]]?.snapshot.bestHeaderHeight, 1)
         XCTAssertTrue(restored.levels[alpha]?.tree.contains(blockHash: genesisCID) ?? false)
     }
 
-    func testMissingEvidenceSidecarRefusesChildRestart() async throws {
+    /// A credited proof commits with the work fact it produced.
+    func testACreditedChildProofIsSavedWithItsWorkFact() async throws {
         let configuration = try configuration()
-        _ = try await weighChildGenesis(configuration)
-        let evidencePath = configuration.storagePath
-            .appendingPathComponent(HeaderEvidenceStore.fileName).path
-        for path in [evidencePath, evidencePath + "-wal", evidencePath + "-shm"]
-        where FileManager.default.fileExists(atPath: path) {
-            try FileManager.default.removeItem(atPath: path)
-        }
+        let genesisCID = try await weighChildGenesis(configuration)
+        let reopened = try await NodeStorage.open(configuration: configuration)
+        let work = try await reopened.store.stagedImports(at: alpha).flatMap(\.batch.facts)
+            .compactMap { fact -> String? in
+                guard case .work(let work) = fact, work.blockHash == genesisCID else { return nil }
+                return work.contribution.id
+            }
+        XCTAssertFalse(work.isEmpty)
+        let proofs = try await reopened.store.savedProofs()[alpha]?[genesisCID] ?? [:]
+        XCTAssertEqual(Set(proofs.keys), Set(work))
+    }
+
+    /// A kill after content is stored and retained, before the facts that
+    /// name it commit: the restart retains only what facts name, and boots.
+    func testContentWithoutItsFactIsReleasedOnRestart() async throws {
+        let configuration = try configuration()
+        let orphan = try VolumeImpl<ChainSpec>(node: ChainSpec(
+            maxNumberOfTransactionsPerBlock: 10, maxStateGrowth: 100_000, premine: 7,
+            targetBlockTime: 1_000, initialReward: 1, halvingInterval: 10_000, halfLife: 10
+        ))
+        try await storeAndRetain(orphan, configuration)
 
         let reopened = try await NodeStorage.open(configuration: configuration)
-        do {
-            _ = try await NodeRuntime.boot(
-                storage: reopened, configuration: configuration,
-                coreConfig: .init(),
-                headers: try HeaderEvidenceStore(directory: configuration.storagePath)
-            )
-            XCTFail("a child work fact without its proof must not boot")
-        } catch NodeStoreError.corrupt(let reason) {
-            XCTAssertTrue(reason.contains("missing its saved proof"), reason)
-        } catch {
-            XCTFail("unexpected error: \(error)")
-        }
+        let retained = try await reopened.broker.retainedRoots(scope: reopened.retentionScope)
+        XCTAssertFalse(retained.contains(orphan.rawCID))
+        _ = try await reopened.broker.sweep()
+        let swept = await reopened.volume(orphan.rawCID)
+        XCTAssertNil(swept)
+        let restored = try await NodeRuntime.boot(
+            storage: reopened, configuration: configuration, coreConfig: .init()
+        )
+        XCTAssertEqual(restored.levels[["Nexus"]]?.snapshot.actOnHeight, 0)
+    }
+
+    private func storeAndRetain(_ volume: VolumeImpl<ChainSpec>, _ configuration: NodeConfiguration) async throws {
+        let storage = try await NodeStorage.open(configuration: configuration)
+        let storer = NodeImportStorage(storage: await storage.broker)
+        try await volume.store(storer: storer)
+        try await storer.commit()
+        try await storage.broker.mergeRetainedRoots(
+            scope: await storage.retentionScope, roots: await storer.takeStoredVolumeRoots()
+        )
     }
 
     private func weighChildGenesis(_ configuration: NodeConfiguration) async throws -> String {
         let storage = try await NodeStorage.open(configuration: configuration)
-        let headers = try HeaderEvidenceStore(directory: configuration.storagePath)
         var host = try await NodeRuntime.boot(
-            storage: storage, configuration: configuration, coreConfig: .init(), headers: headers
+            storage: storage, configuration: configuration, coreConfig: .init()
         )
 
         // A Nexus block carrying Alpha's genesis, which commits the carrier's
@@ -123,6 +142,7 @@ final class ChildLevelRestartTests: XCTestCase {
             )
         }
         try await BlockHeader(node: carrier).storeBlock(fetcher: content, storer: storer)
+        try await storer.commit()
         let proof = try await ChildBlockProof.generate(
             rootHeader: BlockHeader(node: carrier), childDirectory: "Alpha", fetcher: content
         )
@@ -136,13 +156,8 @@ final class ChildLevelRestartTests: XCTestCase {
         let effects = host.step(.mined(MinedGrind(root: carrier, rootChildren: rootChildren, carried: [
             .init(path: alpha, block: childGenesis, children: childChildren, proof: proof, evidence: evidence),
         ])), now: carrier.timestamp + 1)
-        for case .level(let path, .indexProof(let child, let proof)) in effects {
-            try headers.storeProof(proof, for: child, at: path)
-        }
         for case .persist(let batch) in effects {
-            try await storage.persistNodeBatch(
-                batch, logID: host.logID, headers: headers
-            )
+            try await storage.persistNodeBatch(batch, logID: host.logID)
         }
         let genesisCID = try BlockHeader(node: childGenesis).rawCID
         XCTAssertTrue(host.levels[alpha]?.tree.contains(blockHash: genesisCID) ?? false)

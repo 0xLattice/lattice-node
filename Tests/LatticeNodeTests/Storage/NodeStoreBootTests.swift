@@ -24,6 +24,13 @@ final class NodeStoreBootTests: XCTestCase {
         ])
     }
 
+    private var alphaProof: StoredProof {
+        StoredProof(
+            childCID: NexusGenesis.expectedBlockHash,
+            proof: ChildBlockProof(rootCID: NexusGenesis.expectedBlockHash, directoryPath: ["Alpha"], entries: [])
+        )
+    }
+
     private func expectCorrupt(_ store: NodeStore) async {
         do {
             try await store.auditNormalizedIndexes()
@@ -169,6 +176,7 @@ final class NodeStoreBootTests: XCTestCase {
                 ),
                 NodeFactBatch(
                     path: ["Nexus", "Alpha"], facts: [blockBatch("child")],
+                    proofs: [alphaProof],
                     volumeRoots: [],
                     cursors: ["": StreamCursor(logID: "remote-log", position: 1)]
                 ),
@@ -183,6 +191,20 @@ final class NodeStoreBootTests: XCTestCase {
         XCTAssertTrue(staged.isEmpty)
         let logID = try await store.chainLogID()
         XCTAssertNil(logID)
+        XCTAssertTrue(try store.savedProofs().isEmpty)
+    }
+
+    func testAChildProofCommitsWithItsStepAndSurvivesReopen() async throws {
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
+        let alpha: ChainPath = ["Nexus", "Alpha"]
+        try await store(path).stageNodeFacts([
+            NodeFactBatch(
+                path: alpha, facts: [blockBatch("child")], proofs: [alphaProof],
+                volumeRoots: [], cursors: [:]
+            ),
+        ], logID: "local-log")
+        let saved = try store(path).savedProofs()
+        XCTAssertNotNil(saved[alpha]?[alphaProof.childCID]?[alphaProof.proof.rootCID])
     }
 
     func testAuditIncludesHostedChildNormalizedIndexes() async throws {
@@ -202,9 +224,9 @@ final class NodeStoreBootTests: XCTestCase {
     }
 
     func testCorruptSavedChildProofFailsToLoad() throws {
-        let directory = temporaryDirectory(create: true)
-        let headers = try HeaderEvidenceStore(directory: directory)
-        let database = try NodeSQLite(path: directory.appendingPathComponent(HeaderEvidenceStore.fileName).path)
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
+        let store = try store(path)
+        let database = try NodeSQLite(path: path.path)
         _ = try database.execute(
             "INSERT INTO child_proofs (chain, child, root, bytes) VALUES (?1, ?2, ?3, ?4)",
             params: [
@@ -213,17 +235,15 @@ final class NodeStoreBootTests: XCTestCase {
             ]
         )
 
-        XCTAssertThrowsError(try headers.proofs()) { error in
+        XCTAssertThrowsError(try store.savedProofs()) { error in
             guard case NodeStoreError.corrupt = error else { return XCTFail("got \(error)") }
         }
     }
 
     func testSavedChildProofMustMatchItsIndex() throws {
-        let directory = temporaryDirectory(create: true)
-        let headers = try HeaderEvidenceStore(directory: directory)
-        let database = try NodeSQLite(
-            path: directory.appendingPathComponent(HeaderEvidenceStore.fileName).path
-        )
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
+        let store = try store(path)
+        let database = try NodeSQLite(path: path.path)
         let proof = ChildBlockProof(
             rootCID: NexusGenesis.expectedBlockHash,
             directoryPath: ["Alpha"],
@@ -237,28 +257,8 @@ final class NodeStoreBootTests: XCTestCase {
             ]
         )
 
-        XCTAssertThrowsError(try headers.proofs()) { error in
+        XCTAssertThrowsError(try store.savedProofs()) { error in
             guard case NodeStoreError.corrupt = error else { return XCTFail("got \(error)") }
-        }
-    }
-
-    func testHeaderEvidenceRejectsUnknownSchemaAndWrongNetwork() throws {
-        let unknownDirectory = temporaryDirectory(create: true)
-        let unknown = try NodeSQLite(
-            path: unknownDirectory.appendingPathComponent(HeaderEvidenceStore.fileName).path
-        )
-        _ = try unknown.execute("CREATE TABLE old_headers (cid TEXT PRIMARY KEY)")
-        XCTAssertThrowsError(try HeaderEvidenceStore(directory: unknownDirectory)) { error in
-            guard case NodeStoreError.wipeRequired = error else { return XCTFail("got \(error)") }
-        }
-
-        let networkDirectory = temporaryDirectory(create: true)
-        _ = try HeaderEvidenceStore(directory: networkDirectory)
-        XCTAssertThrowsError(try HeaderEvidenceStore(
-            directory: networkDirectory,
-            nexusGenesisCID: "wrong-network"
-        )) { error in
-            guard case NodeStoreError.wipeRequired = error else { return XCTFail("got \(error)") }
         }
     }
 }

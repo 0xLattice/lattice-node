@@ -55,6 +55,18 @@ public struct StoredHeader: Sendable {
     }
 }
 
+/// A proof the core credited at a child block, durable beside the work fact
+/// it produced.
+public struct StoredProof: Sendable {
+    public let childCID: String
+    public let proof: ChildBlockProof
+
+    public init(childCID: String, proof: ChildBlockProof) {
+        self.childCID = childCID
+        self.proof = proof
+    }
+}
+
 /// One weighed object in a node's weigh log: a header, or a proof (a
 /// `ChildBlockProof` grind) it credited at a child block. Only verifiable
 /// objects are logged; validation and exclusion facts and attributed run

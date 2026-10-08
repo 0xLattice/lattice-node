@@ -152,8 +152,8 @@ this design forbids.
   validation CAS.
 - Cross-chain continuity reads only the co-hosted immediate parent's recovered
   validated graph; child genesis needs no deployment acknowledgement.
-- The host records weighed headers, child indexes, and credited proofs in its
-  durable `header-evidence.db` sidecar. That sidecar is local scheduling and
+- The host records weighed headers, child indexes, and credited proofs in
+  `state.db`, in the transaction of their facts. They are local scheduling and
   serving state, not portable authority.
 - Proofs learned from peers or produced by local merged mining are verified
   before credit. A node can later serve the exact saved proof with the child

@@ -83,8 +83,7 @@ final class NodeRuntimeTests: XCTestCase {
         // Restart: the joiner's own journal replays to the same tip.
         let reopened = try await NodeStorage.open(configuration: joiner.configuration)
         let host = try await NodeRuntime.boot(
-            storage: reopened, configuration: joiner.configuration, coreConfig: .init(),
-            headers: try HeaderEvidenceStore(directory: joiner.configuration.storagePath)
+            storage: reopened, configuration: joiner.configuration, coreConfig: .init()
         )
         let snapshot = try XCTUnwrap(host.levels[host.rootPath]?.snapshot)
         XCTAssertEqual(snapshot.actOnTip, tipCID)

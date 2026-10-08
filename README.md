@@ -15,8 +15,9 @@ mempool, and mining candidates inside that process.
 - **One process, one tree.** A child and every hosted ancestor run as levels of
   the same `NodeCore`; the wire carries a chain path where routing is needed.
 - **One durable step.** `state.db` commits all levels touched by one core step
-  in one SQLite transaction. `volumes.db` stores content, and
-  `header-evidence.db` stores incomplete header boundaries and child proofs.
+  in one SQLite transaction, with their weighed headers and child proofs.
+  `volumes.db` stores content; a block's or a step's content is one
+  transaction there, durable before the facts that name it.
 - **One overlay with discovery.** Every peer follows Nexus. Nodes announce one
   provider record per hosted chain - Nexus by its genesis, a child by its path -
   and search a chain's record for more peers when that chain stops progressing.
@@ -145,7 +146,7 @@ The genesis is final: its CID is committed in a Bitcoin transaction. See
 There are no storage migrations or compatibility modes. A schema, consensus,
 or wire cutover is a flag day: stop the node, back up the identity separately
 if needed, and wipe the complete hosted-tree storage directory. Never combine
-`state.db`, `volumes.db`, or `header-evidence.db` from different snapshots.
+`state.db` and `volumes.db` from different snapshots.
 
 ```bash
 lattice down --root /var/lib/lattice

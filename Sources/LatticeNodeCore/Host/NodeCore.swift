@@ -132,6 +132,7 @@ public struct NodeBatch: Sendable {
             headers: held.headers + batch.headers,
             states: held.states + batch.states,
             facts: held.facts + batch.facts,
+            proofs: held.proofs + batch.proofs,
             cursors: held.cursors.merging(batch.cursors) { $1 }
         )
     }

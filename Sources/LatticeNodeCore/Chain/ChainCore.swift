@@ -52,9 +52,9 @@ public enum DisconnectReason: Sendable, Equatable {
     case stalled
 }
 
-/// The durable form of one step: content first — header content and the
-/// post-states its executions produced, stored, pinned and fsynced — then
-/// the facts that reference it, committed. The shell writes it before executing any
+/// The durable form of one step: content first — the post-states its
+/// executions produced, stored, pinned and fsynced — then the facts that
+/// reference it, committed with their headers and credited proofs. The shell writes it before executing any
 /// later effect of the same step. Facts durable without their content is an
 /// ordering violation the shell must prevent: a crash may lose the facts of
 /// durable content, never the reverse.
@@ -65,6 +65,9 @@ public struct ChainBatch: Sendable {
     /// references it.
     public let states: [LatticeState]
     public let facts: [BlockImportBatch]
+    /// A child level: the proofs this step credited, written with the work
+    /// facts they produced, so this node serves them.
+    public let proofs: [StoredProof]
     /// The stream cursors this step moved, per peer key: written with the
     /// facts that applied the entries they pass, never separately.
     public let cursors: [String: StreamCursor]
@@ -73,11 +76,13 @@ public struct ChainBatch: Sendable {
         headers: [StoredHeader],
         states: [LatticeState] = [],
         facts: [BlockImportBatch],
+        proofs: [StoredProof] = [],
         cursors: [String: StreamCursor] = [:]
     ) {
         self.headers = headers
         self.states = states
         self.facts = facts
+        self.proofs = proofs
         self.cursors = cursors
     }
 }
@@ -106,10 +111,6 @@ public enum ChainEffect: Sendable {
     /// A child level: run `ChildBlockProof.verifySecuringWork`, a pure job,
     /// and answer `proofVerified`.
     case verifyProof(ChildProofJob)
-    /// A child level: write a credited proof to the local evidence index, so
-    /// this node serves it. The core emits it beside the fact batch; the shell
-    /// stages the evidence before committing that batch.
-    case indexProof(childCID: String, ChildBlockProof)
     /// The answer to a mined grind (`NodeEvent.mined` with a reply ID): at
     /// once unless its root waits to execute, then from its verdict.
     case workSubmitted(replyID: UInt64, MinedOutcome)
@@ -419,7 +420,7 @@ public struct ChainCore: Sendable {
         var facts: [BlockImportBatch] = []
         var effects: [ChainEffect] = []
         /// Child proofs this step credited, to index.
-        var indexed: [(childCID: String, proof: ChildBlockProof)] = []
+        var indexed: [StoredProof] = []
         /// Stream cursors this step moved.
         var cursors: [String: StreamCursor] = [:]
         var mining: [MiningEffect] = []
@@ -448,12 +449,12 @@ public struct ChainCore: Sendable {
         for entry in Self.logEntries(of: turn.facts, isRoot: isRoot) { sync.log.append(entry) }
         // At most a page is pushed; `hasMore` has the peer pull the rest.
         let appended = sync.log.page(after: start, limit: config.maxHeadersPerPage, bytes: config.maxPageBytes)
-        if !turn.facts.isEmpty || !turn.cursors.isEmpty {
+        if !turn.facts.isEmpty || !turn.indexed.isEmpty || !turn.cursors.isEmpty {
             effects.append(.persist(ChainBatch(
-                headers: turn.headers, states: turn.states, facts: turn.facts, cursors: turn.cursors
+                headers: turn.headers, states: turn.states, facts: turn.facts,
+                proofs: turn.indexed, cursors: turn.cursors
             )))
         }
-        effects += turn.indexed.map { .indexProof(childCID: $0.childCID, $0.proof) }
         let current = snapshot
         if current != published {
             published = current

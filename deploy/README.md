@@ -12,8 +12,8 @@ workers.
 2. Keep the operator RPC on loopback. Publish only the GET-only read listener
    or the checked-in nginx allowlist.
 3. Expose one overlay port for the tree, not one port per hosted chain.
-4. Treat `state.db`, `volumes.db`, and `header-evidence.db` as one recovery
-   unit.
+4. Treat `state.db` and `volumes.db` as one recovery unit.
+   `volume-bundles.db` is a cache and may be lost.
 5. Use one reviewed revision for the node, coordinator, workers, CLI, and
    deployment image.
 6. Pin Nexus to
@@ -74,7 +74,7 @@ The persistent layout is:
   chains/Nexus/
     state.db
     volumes.db
-    header-evidence.db
+    volume-bundles.db
 ```
 
 The single `chains/Nexus` directory contains facts for every hosted path.
