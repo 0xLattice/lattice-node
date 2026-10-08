@@ -665,7 +665,7 @@ public struct ChainCore: Sendable {
     /// credited.
     mutating func applied(_ entry: LogEntry) -> Bool {
         guard index.contains(entry.block) else { return false }
-        return entry.kind == .header || tree.getConsensusBlock(hash: entry.block)?.workContributions[entry.cid] != nil
+        return entry.kind == .header || tree.workContribution(id: entry.cid, at: entry.block) != nil
     }
 
     /// The cursor in `peer`'s log: before its first hole not yet applied

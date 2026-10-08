@@ -47,7 +47,9 @@ extension NodeStorage {
             }
             try headers.store(level.headers)
             let roots = await storage.takeStoredVolumeRoots() + (bodyRoots[path] ?? [])
-            try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots)
+            if !roots.isEmpty {
+                try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots)
+            }
             durable.append(NodeFactBatch(
                 path: path,
                 facts: level.facts,
