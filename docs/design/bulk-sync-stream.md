@@ -142,9 +142,18 @@ Header-weight **ranks**; only **validated** blocks are **acted on** — built
 upon, served, exported, asserted as head (the acted-on set is enumerated in
 [weight-first-acquisition](weight-first-acquisition.md)). A miner can publish a
 heavy header chain (real work) and withhold its bodies; it ranks first but is
-**never acted on** — the node keeps building on its heaviest *validated* tip
-and retries the missing bodies as an availability gap. This is the *same*
-withholding surface as a secret-then-released heavy chain today; header-weight
+**never acted on** — the node keeps building on its **act-on tip**, the
+heaviest *executed* tip, and retries the missing bodies as an availability
+gap. The act-on tip is found by descending from genesis and, at each fork,
+following the heaviest child that is executed (heaviest by its whole subtree's
+header work, unexecuted descendants included); it stops where no child is
+executed. The withheld chain keeps all its weight and is never marked: it
+cannot be stepped into because stepping requires execution. Honest blocks
+built on the act-on tip therefore form a chain, which outweighs K withheld
+blocks after K+1 of its own; released before then, the withheld chain is
+executed and wins. This is the *same*
+withholding surface as a secret-then-released heavy chain today (publishing
+the headers early buys nothing over keeping the chain secret); header-weight
 adds **no new attack**, *provided* "rank on headers, act only on validated" is
 implemented exactly. Get it wrong and a heaviest-but-invalid or
 heaviest-but-unavailable path could be acted on, or nodes with different body
@@ -168,7 +177,12 @@ availability could split.
   from what the chain acts on.
 - **Availability never judges.** Failure to obtain a body is an availability
   gap, retried forever, excluding nothing. Only a *completed* deterministic
-  check records invalidity.
+  check records invalidity. A block is therefore in one of three states, and
+  they are never conflated: **weighed** and unvalidated (its body may or may
+  not be held; its work counts; it has no verdict), **validated** (executed,
+  post-state checked), or **excluded** (executed and found invalid: still
+  weighed, never the step the descent takes). An unavailable block is the
+  first, not the third.
 - **Wire compatibility is additive.** The strict-canonical wire evolves by new
   message types, never mutated ones. Peers that do not speak the new topics
   keep serving the existing pages; receivers fall back — slow, never wrong.
