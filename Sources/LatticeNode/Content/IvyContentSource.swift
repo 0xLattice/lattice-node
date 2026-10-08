@@ -240,15 +240,13 @@ public struct IvyRootContentSource: Sendable {
         }
     }
 
-    /// A Volume by its root. `hosts` is the rendezvous of the chain the fetch
-    /// is for, or nil: a connected peer the DHT names under it is asked
-    /// first. The record is a hint for whom to ask, never for what to accept:
-    /// what arrives is verified the same, and a miss is followed by the same
-    /// requests as without it.
-    private let fetch: @Sendable (_ rootCID: String, _ hosts: String?) async -> AttributedVolumeResponse
+    private let fetch: @Sendable (String) async -> AttributedVolumeResponse
     /// The Volumes a peer that speaks bundles holds under a root (what it
     /// stored with that block), or none, and the session that sent them.
-    /// Whatever a bundle lacks is fetched with `fetch`.
+    /// Whatever a bundle lacks is fetched with `fetch`. `hosts` is the
+    /// rendezvous of the block's chain, or nil: the capable sessions the DHT
+    /// names under it are asked before the others. The record is a hint for
+    /// whom to ask, never for what to accept.
     fileprivate typealias BundleFetch =
         @Sendable (String) async -> (volumes: [AttributedVolumeResponse], session: AuthenticatedPeer?)
     private let fetchBundle: @Sendable (_ rootCID: String, _ hosts: String?) async
@@ -376,17 +374,7 @@ public struct IvyRootContentSource: Sendable {
         // A Volume is taken at whatever size the wire carries and measured
         // here once verified: the size a peer declares is its claim, and a
         // declared size past the budget would say nothing about the block.
-        let hosting: @Sendable (String?) async -> [AuthenticatedPeer] = { key in
-            guard let key else { return [] }
-            return capabilities.sessions(of: await ivy.providers(for: key))
-        }
-        fetch = { rootCID, hosts in
-            if let host = await hosting(hosts).randomElement() {
-                let response = await ivy.fetchVolume(rootCID: rootCID, from: host)
-                if !response.entries.isEmpty { return response }
-            }
-            return await ivy.fetchVolume(rootCID: rootCID)
-        }
+        fetch = { rootCID in await ivy.fetchVolume(rootCID: rootCID) }
         // Asked only of the sessions whose hello said they answer it, one at
         // a time, each read as still capable when its turn comes. A session
         // keeps the capability only while every bundle it is asked for ends
@@ -397,12 +385,15 @@ public struct IvyRootContentSource: Sendable {
         // reports a failure and is not the peer's. The sessions the DHT names
         // as hosts of the block's chain are asked before the others.
         fetchBundle = { rootCID, hosts in
-            let hosts = Set(await hosting(hosts).map(\.sessionID))
+            var named = Set<Data>()
+            if let hosts {
+                named = Set(capabilities.sessions(of: await ivy.providers(for: hosts)).map(\.sessionID))
+            }
             var asked = Set<Data>()
             while let peer = ({
                 let left = capabilities.sessions(speaking: ChainHandshake.volumeBundle)
                     .filter { !asked.contains($0.sessionID) }
-                return left.filter { hosts.contains($0.sessionID) }.randomElement() ?? left.randomElement()
+                return left.filter { named.contains($0.sessionID) }.randomElement() ?? left.randomElement()
             })() {
                 asked.insert(peer.sessionID)
                 let answer = await ivy.fetchVolumeBundle(rootCID: rootCID, from: [peer])
@@ -428,7 +419,7 @@ public struct IvyRootContentSource: Sendable {
     ) {
         self.credit = credit
         self.maximumStorageBytes = maximumStorageBytes
-        self.fetch = { rootCID, _ in await fetch(rootCID) }
+        self.fetch = fetch
         self.fetchBundle = { rootCID, _ in (await fetchBundle(rootCID), nil) }
     }
 
@@ -448,15 +439,14 @@ public struct IvyRootContentSource: Sendable {
         capture: AttributionCapture? = nil,
         operation: @Sendable (Session) async throws -> T
     ) async rethrows -> (value: T, attribution: Attribution) {
-        let (fetch, fetchBundle) = (fetch, fetchBundle)
-        let volume: @Sendable (String) async -> AttributedVolumeResponse = { await fetch($0, hosts) }
+        let fetchBundle = fetchBundle
         let bundled: BundleFetch = { rootCID in
             bundle ? await fetchBundle(rootCID, hosts) : ([], nil)
         }
         let session = Session(
             rootCID: rootCID,
             maximumStorageBytes: maximumStorageBytes,
-            fetch: volume,
+            fetch: fetch,
             fetchBundle: bundled,
             credit: credit,
             peerCapabilities: peerCapabilities

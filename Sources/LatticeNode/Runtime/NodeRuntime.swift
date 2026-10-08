@@ -1006,15 +1006,14 @@ extension NodeRuntime {
                 guard bodies[key] == nil else { break }
                 let (storage, remote, inputs) = (storage, remote, inputs)
                 // Every peer hosts Nexus; a child's hosts are those its
-                // rendezvous names. Like the bundle, a hint for the first
-                // attempt only: a retry asks as if there were none.
+                // rendezvous names: a hint for whom to ask for the bundle.
                 let rendezvous = path == core.rootPath ? nil : ChainPeersKey.key(
                     nexusGenesisCID: configuration.nexusGenesisCID, chainPath: path
                 )
                 bodies[key] = Task {
                     let roots = await NodeRuntime.retryingBody { bundle in
                         try await storage.fetchChainBody(
-                            cid, remote: remote, bundle: bundle, hosts: bundle ? rendezvous : nil
+                            cid, remote: remote, bundle: bundle, hosts: rendezvous
                         )
                     } waiting: { error in
                         inputs.yield(.bodyWaiting(

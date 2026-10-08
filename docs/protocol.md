@@ -151,8 +151,9 @@ each hosted child under its path
 hosts, has no record. It does not publish a provider record per block or
 state. While no connected peer is among a hosted child's providers, or when
 its verified progress stalls, the node dials a bounded random set of that
-chain's providers, and the connected ones are asked first for its content; a
-Nexus stall retries disconnected bootstrap peers.
+chain's providers. On a child block's first attempt its bundle is asked of the
+capable sessions among those providers before other capable sessions; nothing
+else is routed by the rendezvous. A Nexus stall retries disconnected bootstrap peers.
 
 Parent facts, run reports and merged-mining candidates never cross a network
 plane: they pass in-process between co-hosted levels.
