@@ -22,16 +22,28 @@ public struct ChainHandshake: Codable, Equatable, Sendable {
     /// staying well under the frame size. `validateShape()` is the real check.
     public static let maximumEncodedSize = 64 * 1024
 
+    /// The peer answers a Volume bundle request.
+    public static let volumeBundle = "volume-bundle"
+
     public let version: UInt16
     public let nexusGenesisCID: String
     public let chainPath: [String]
+    /// What this node speaks beyond version 6, sorted. An addition to the
+    /// protocol is named here instead of changing the version: a peer whose
+    /// hello lacks the field speaks none, a name a peer does not know is
+    /// ignored, and an added message is sent only to a peer that named it.
+    /// Absent when empty, as in the hello of a node that predates the field.
+    public let capabilities: [String]?
+
     public init(
         nexusGenesisCID: String,
-        chainPath: [String]
+        chainPath: [String],
+        capabilities: Set<String> = []
     ) {
         version = Self.protocolVersion
         self.nexusGenesisCID = nexusGenesisCID
         self.chainPath = chainPath
+        self.capabilities = capabilities.isEmpty ? nil : capabilities.sorted()
     }
 
     public func encode() throws -> Data {

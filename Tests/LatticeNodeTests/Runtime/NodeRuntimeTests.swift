@@ -173,6 +173,68 @@ final class NodeRuntimeTests: XCTestCase {
         }
     }
 
+    /// The runtime's wiring of hello capabilities: a session is listed for
+    /// bundles while its own hello advertised them, and a peer that
+    /// reconnects with a hello that does not is no longer listed.
+    func testASessionIsAskedForBundlesOnlyWhileItsOwnHelloAdvertisedThem() async throws {
+        let peerKey = Curve25519.Signing.PrivateKey()
+        let peerPort = NetworkTransportTestPorts.allocate()
+        let peer = Ivy(config: IvyConfig(
+            signingKey: peerKey, listenPort: peerPort, requestTimeout: .seconds(5), stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false), externalAddress: ("127.0.0.1", peerPort),
+            mode: .overlay
+        ))
+        let delegate = BootstrapHelloDelegate(hello: try ChainHandshake(
+            nexusGenesisCID: NexusGenesis.expectedBlockHash, chainPath: ["Nexus"],
+            capabilities: [ChainHandshake.volumeBundle]
+        ).encode())
+        await peer.installTestDelegate(delegate)
+        try await peer.start()
+        addTeardownBlock { await peer.stop() }
+        let peerEndpoint = PeerEndpoint(
+            publicKey: try PeerKey(rawRepresentation: peerKey.publicKey.rawRepresentation).hex,
+            host: "127.0.0.1", port: peerPort
+        )
+        let nodePort = NetworkTransportTestPorts.allocate()
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: temporaryDirectory(),
+            privateKeyHex: String(repeating: "48", count: 32),
+            listenPort: nodePort,
+            rpcPort: NetworkTransportTestPorts.allocate(),
+            bootstrapPeers: [peerEndpoint],
+            externalAddress: "127.0.0.1"
+        )
+        let runtime = try await NodeRuntime.start(
+            storage: try await NodeStorage.open(configuration: configuration),
+            configuration: configuration,
+            overlay: IvyConfig(
+                signingKey: configuration.signingKey, listenPort: nodePort, bootstrapPeers: [peerEndpoint],
+                requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
+                externalAddress: ("127.0.0.1", nodePort), mode: .overlay
+            )
+        )
+        addTeardownBlock { await runtime.stop() }
+        try await eventually("the session that advertised bundles is listed") {
+            runtime.peerCapabilities.sessions(speaking: ChainHandshake.volumeBundle).count == 1
+        }
+
+        // The peer drops the session and dials back with a hello that
+        // advertises nothing.
+        delegate.hello = try ChainHandshake(
+            nexusGenesisCID: NexusGenesis.expectedBlockHash, chainPath: ["Nexus"]
+        ).encode()
+        _ = await peer.disconnectSession(ifCurrent: try XCTUnwrap(delegate.connected))
+        try await eventually("the ended session is no longer listed") {
+            runtime.peerCapabilities.sessions(speaking: ChainHandshake.volumeBundle).isEmpty
+        }
+        try await peer.connect(to: PeerEndpoint(
+            publicKey: configuration.processPublicKey, host: "127.0.0.1", port: nodePort
+        ))
+        try await eventually("the new session is ready") { runtime.peerCount == 1 }
+        XCTAssertTrue(runtime.peerCapabilities.sessions(speaking: ChainHandshake.volumeBundle).isEmpty)
+    }
+
     func testMaintenanceAnnouncesNexusAndEveryHostedChildsRendezvous() async throws {
         let routerKey = try Curve25519.Signing.PrivateKey(
             rawRepresentation: Data(repeating: 0x46, count: 32)
@@ -687,14 +749,23 @@ final class NodeRuntimeTests: XCTestCase {
     }
 }
 
-private final class BootstrapHelloDelegate: IvyDelegate {
-    private let hello: Data
+private final class BootstrapHelloDelegate: IvyDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: Data
+    var hello: Data {
+        get { lock.withLock { current } }
+        set { lock.withLock { current = newValue } }
+    }
+
+    private var session: AuthenticatedPeer?
+    var connected: AuthenticatedPeer? { lock.withLock { session } }
 
     init(hello: Data) {
-        self.hello = hello
+        current = hello
     }
 
     func ivy(_ ivy: Ivy, didConnect peer: AuthenticatedPeer) async {
+        lock.withLock { session = peer }
         _ = await ivy.sendMessage(
             to: peer,
             topic: OverlayTopic.overlayHello,

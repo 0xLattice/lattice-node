@@ -75,6 +75,8 @@ public final class NodeRuntime: Sendable {
         let view: PublishedValue<NodeReadView>
     }
     let configuration: NodeConfiguration
+    /// What the open sessions' hellos advertised, as the content layer reads it.
+    let peerCapabilities: PeerCapabilities
     let inputs: AsyncStream<Input>.Continuation
     private let loop: Task<Void, Never>
     let ivy: Ivy
@@ -301,6 +303,8 @@ public final class NodeRuntime: Sendable {
                 inputs.yield(.maintenance)
             }
         }
+        let remote = IvyRootContentSource(ivy: ivy, policy: configuration.resourcePolicy)
+        peerCapabilities = remote.peerCapabilities
         let initial = Loop(
             core: core,
             storage: storage,
@@ -308,14 +312,15 @@ public final class NodeRuntime: Sendable {
             ivy: ivy,
             hello: try? ChainHandshake(
                 nexusGenesisCID: configuration.nexusGenesisCID,
-                chainPath: configuration.chainPath
+                chainPath: configuration.chainPath,
+                capabilities: [ChainHandshake.volumeBundle]
             ).encode(),
             configuration: configuration,
             outputs: outputs,
             inputs: inputs,
             gate: gate,
             helloTimeout: helloTimeout,
-            remote: IvyRootContentSource(ivy: ivy, policy: configuration.resourcePolicy),
+            remote: remote,
             proofs: proofs,
             workers: max(1, workers),
             failStop: failStop
@@ -350,6 +355,28 @@ public final class NodeRuntime: Sendable {
         await loop.value
     }
 
+    /// The content layer retries until the body is held or the core no longer
+    /// wants it (nil), and says why each attempt failed. A bundle is asked
+    /// for on the first attempt only.
+    static func retryingBody<T>(
+        _ attempt: (_ bundle: Bool) async throws -> T,
+        waiting: (Error) -> Void
+    ) async -> T? {
+        var backoff: UInt64 = 250
+        var bundle = true
+        while !Task.isCancelled {
+            do {
+                return try await attempt(bundle)
+            } catch {
+                if !Task.isCancelled { waiting(error) }
+            }
+            bundle = false
+            _ = await Timers.sleep(nanoseconds: backoff * 1_000_000)
+            backoff = min(backoff * 2, 30_000)
+        }
+        return nil
+    }
+
     static func now() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1_000)
     }
@@ -378,7 +405,14 @@ extension NodeRuntime {
         var proofs: SavedChildProofs = [:]
 
         /// One overlay session per peer key; the core sees `(key, id)`.
-        var sessions: [String: Session] = [:]
+        /// Every change publishes what the open sessions' hellos advertised.
+        var sessions: [String: Session] = [:] {
+            didSet {
+                remote.peerCapabilities.set(
+                    sessions.values.filter(\.ready).sorted { $0.id < $1.id }.map { ($0.peer, $0.capabilities) }
+                )
+            }
+        }
         var nextSession: UInt64 = 1
         var runningJobs = 0
         /// Two FIFOs: execution (connect, proof verification) runs before
@@ -447,6 +481,8 @@ extension NodeRuntime {
             let peer: AuthenticatedPeer
             let id: UInt64
             var ready = false
+            /// What this session's hello said the peer speaks beyond version 6.
+            var capabilities: Set<String> = []
             var coreID: LatticeNodeCore.PeerID { .init(key: peer.key.hex, session: id) }
         }
 
@@ -770,6 +806,7 @@ extension NodeRuntime {
                         return true
                     }
                 session.ready = true
+                session.capabilities = Set(remote.capabilities ?? [])
                 sessions[peer.key.hex] = session
                 // The first peer is the first chance for a lookup to reach
                 // the DHT: search the levels due one now, not an interval on.
@@ -972,25 +1009,14 @@ extension NodeRuntime {
                 guard bodies[key] == nil else { break }
                 let (storage, remote, inputs) = (storage, remote, inputs)
                 bodies[key] = Task {
-                    // The content layer retries until the body is held or the
-                    // core no longer wants it, and says why each attempt
-                    // failed.
-                    var backoff: UInt64 = 250
-                    while !Task.isCancelled {
-                        do {
-                            let roots = try await storage.fetchChainBody(cid, remote: remote)
-                            inputs.yield(.bodyStored(path, cid: cid, roots: roots))
-                            return
-                        } catch {
-                            if !Task.isCancelled {
-                                inputs.yield(.bodyWaiting(
-                                    path, cid: cid, BodyWait(fetchFailure: error), detail: "\(error)"
-                                ))
-                            }
-                        }
-                        _ = await Timers.sleep(nanoseconds: backoff * 1_000_000)
-                        backoff = min(backoff * 2, 30_000)
+                    let roots = await NodeRuntime.retryingBody { bundle in
+                        try await storage.fetchChainBody(cid, remote: remote, bundle: bundle)
+                    } waiting: { error in
+                        inputs.yield(.bodyWaiting(
+                            path, cid: cid, BodyWait(fetchFailure: error), detail: "\(error)"
+                        ))
                     }
+                    if let roots { inputs.yield(.bodyStored(path, cid: cid, roots: roots)) }
                 }
             case .cancelBody(let cid):
                 bodies.removeValue(forKey: BodyKey(path: path, cid: cid))?.cancel()
