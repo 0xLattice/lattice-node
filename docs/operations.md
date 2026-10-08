@@ -9,7 +9,7 @@ process owns:
 - one Ivy overlay listener;
 - one loopback operator RPC;
 - optionally one public-read listener (GET-only unless public submit is on);
-- one `state.db`, `volumes.db`, and `header-evidence.db` recovery unit.
+- one `state.db` and `volumes.db` recovery unit.
 
 Run mining outside the node with `lattice-mining-coordinator` and one or more
 workers. Use a supervisor for both processes.
@@ -234,23 +234,29 @@ The tree storage directory contains:
 ```text
 state.db
 volumes.db
-header-evidence.db
+volume-bundles.db
 storage.lock
 ```
 
-`state.db` holds path-keyed facts, indexes, durable sync cursors, and the local
-mempool journal. `volumes.db` holds content and retained roots.
-`header-evidence.db` holds incomplete header boundaries and saved child proofs.
+`state.db` holds path-keyed facts, weighed headers, saved child proofs,
+indexes, durable sync cursors, and the local mempool journal. `volumes.db`
+holds content and retained roots. Those two are the recovery unit.
+`volume-bundles.db` is a cache of which Volume roots are served together for a
+block: it may be lost or deleted while the node is stopped, and is rebuilt
+from local content.
 
 Persistence order is:
 
-1. store and retain content;
-2. store header evidence;
-3. commit the complete multi-level `NodeBatch` and its cursors in one
-   `state.db` transaction;
-4. publish the new snapshots.
+1. store the content in one `volumes.db` transaction (a fetched or mined
+   block's Volumes together; a step's post-states together), then retain it;
+2. commit the complete multi-level `NodeBatch` (headers, child proofs, facts,
+   and cursors) in one `state.db` transaction;
+3. publish the new snapshots.
 
-Back up only while the process is stopped, and snapshot all three databases
+Every commit is synchronous (`synchronous=FULL`): nothing is announced,
+served, or built on before the write that makes it durable returns.
+
+Back up only while the process is stopped, and snapshot both databases
 together. The identity and child specs need separate backups.
 
 ```bash
@@ -265,7 +271,7 @@ Startup fails closed when:
 - the schema epoch or Nexus genesis does not match;
 - a journal/index audit disagrees;
 - referenced retained content is missing;
-- saved child proofs do not decode or fail to cover a durable child work fact;
+- saved child proofs do not decode or do not match their index;
 - another process owns the storage lock.
 
 Do not repair or combine database files by hand. Restore one matched snapshot

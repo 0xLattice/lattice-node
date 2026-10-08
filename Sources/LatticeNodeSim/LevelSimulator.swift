@@ -97,11 +97,10 @@ public struct HostStore: Sendable {
     mutating func append(_ batch: NodeBatch) {
         for (path, level) in batch.levels {
             levels[path, default: SimStore()].append(level)
+            for stored in level.proofs {
+                proofs[path, default: [:]][stored.childCID, default: [:]][stored.proof.rootCID] = stored.proof
+            }
         }
-    }
-
-    mutating func index(_ proof: ChildBlockProof, for cid: String, at path: ChainPath) {
-        proofs[path, default: [:]][cid, default: [:]][proof.rootCID] = proof
     }
 
     func proofs(_ path: ChainPath, _ cid: String) -> [ChildBlockProof] {
@@ -481,8 +480,6 @@ public struct LevelSimulator {
             }
             let result = await job.run(block)
             schedule(at: delay(), to: name, .host(.level(path, .proofVerified(job, result))))
-        case .indexProof(let cid, let proof):
-            node.store.index(proof, for: cid, at: path)
         case .readTransactions(let blocks):
             // The simulated chains carry no transactions.
             schedule(at: delay(), to: name, .host(.level(path, .transactionsRead(

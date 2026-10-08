@@ -17,10 +17,10 @@ struct NodeMetadataRow: NodeStoreRecord {
 }
 
 extension NodeStore {
-    /// Epoch 45: one node-tree journal, including durable per-level sync
-    /// cursors. Older stores must be wiped; Nexus deterministically recreates the
-    /// configured exact genesis.
-    static let currentSchemaEpoch: Int64 = 45
+    /// Epoch 46: weighed header material and credited child proofs live in
+    /// this store, written with their facts. Older stores must be wiped; Nexus
+    /// deterministically recreates the configured exact genesis.
+    static let currentSchemaEpoch: Int64 = 46
 
     static func validateMetadata(
         in database: NodeSQLite,
@@ -64,6 +64,9 @@ extension NodeStore {
         "local_mempool_transactions",
         "core_meta",
         "stream_cursors",
+        "headers",
+        "child_indexes",
+        "child_proofs",
     ]
 
     /// Owner: NodeStore.init — runs before the store exists, on an empty database.
@@ -157,6 +160,15 @@ extension NodeStore {
                 PRIMARY KEY (chain_path, peer_key)
             ) WITHOUT ROWID
             """)
+        try database.execute(
+            "CREATE TABLE IF NOT EXISTS headers (cid TEXT PRIMARY KEY, block BLOB NOT NULL, children_cid TEXT NOT NULL)"
+        )
+        try database.execute(
+            "CREATE TABLE IF NOT EXISTS child_indexes (cid TEXT PRIMARY KEY, bytes BLOB NOT NULL)"
+        )
+        try database.execute(
+            "CREATE TABLE IF NOT EXISTS child_proofs (chain TEXT NOT NULL, child TEXT NOT NULL, root TEXT NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (chain, child, root))"
+        )
     }
 
     /// Boot-time audit of every normalized index against the immutable

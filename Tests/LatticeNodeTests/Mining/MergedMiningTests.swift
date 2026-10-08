@@ -59,9 +59,9 @@ final class MergedMiningTests: XCTestCase {
 
         // A restart serves Alpha's headers with their proofs at once, and
         // resumes both chains where they were.
-        let storedProofs = try HeaderEvidenceStore(directory: storageDirectory).proofs()
-        XCTAssertFalse((storedProofs[Self.alpha] ?? [:]).isEmpty, "Alpha's credited proofs survive the restart")
         let reopened = try await NodeStorage.open(configuration: configuration)
+        let storedProofs = try await reopened.store.savedProofs()
+        XCTAssertFalse((storedProofs[Self.alpha] ?? [:]).isEmpty, "Alpha's credited proofs survive the restart")
         let restarted = try await NodeRuntime.start(storage: reopened, configuration: configuration, overlay: overlay)
         // A block weighed before the stop may execute only now: never lower.
         let resumed = await restarted.levelReads[Self.alpha]?.readSnapshot().height ?? 0
@@ -274,9 +274,9 @@ final class MergedMiningTests: XCTestCase {
         // A nested proof crosses two child indexes. Restoring only Alpha is
         // not enough: Beta must have its exact evidence immediately after a
         // process restart, and the next merged grind must keep advancing it.
-        let storedProofs = try HeaderEvidenceStore(directory: storageDirectory).proofs()
-        XCTAssertFalse((storedProofs[beta] ?? [:]).isEmpty, "Beta's credited proofs survive the restart")
         let reopened = try await NodeStorage.open(configuration: configuration)
+        let storedProofs = try await reopened.store.savedProofs()
+        XCTAssertFalse((storedProofs[beta] ?? [:]).isEmpty, "Beta's credited proofs survive the restart")
         let restarted = try await NodeRuntime.start(
             storage: reopened, configuration: configuration, overlay: overlay
         )

@@ -108,6 +108,7 @@ enum BootRecovery {
         try await LatticeState.emptyHeader.storeRecursively(
             storer: constantStorage as any VolumeStorer
         )
+        try await constantStorage.commit()
         let constantRoots = await constantStorage.takeStoredVolumeRoots()
         return constantRoots
     }
@@ -170,6 +171,7 @@ enum BootRecovery {
         // body from the store.
         let storage = NodeImportStorage(storage: stores.broker)
         try await header.storeBlock(fetcher: stores.localFetcher, storer: storage)
+        try await storage.commit()
         let booted = await ChainTree.bootstrap(
             genesis: header,
             fetcher: stores.localFetcher,
@@ -181,6 +183,7 @@ enum BootRecovery {
         if let state = boot.materializedPostState {
             try await NodeStorage.storeExecutedState(state, in: storage)
         }
+        try await storage.commit()
         let roots = await storage.takeStoredVolumeRoots()
         try await stores.broker.mergeRetainedRoots(scope: stores.retentionScope, roots: roots)
         try await stores.store.stageChainFacts(

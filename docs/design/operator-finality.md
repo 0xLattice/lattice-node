@@ -3,7 +3,7 @@
 > **Status: historical design study.** The current node does not expose the
 > accepted-leaf or remote child-evidence-index surfaces described below. See
 > [architecture](../architecture.md) and [protocol](../protocol.md) for the
-> implemented bounded header stream and local evidence sidecar. This record is
+> implemented bounded header stream and local evidence index. This record is
 > retained only as rationale for future operator-controlled pruning work.
 
 ## Problem

@@ -7,14 +7,16 @@ import LatticeNodeCore
 struct NodeFactBatch: Sendable {
     let path: ChainPath
     let facts: [BlockImportBatch]
+    var headers: [StoredHeader] = []
+    var proofs: [StoredProof] = []
     let volumeRoots: [String]
     let cursors: [String: StreamCursor]
 }
 
 extension NodeStore {
-    /// Commit one whole node step across all affected levels. Content and
-    /// header evidence are durable before this runs; every fact, normalized
-    /// index row, and cursor for the step becomes visible atomically.
+    /// Commit one whole node step across all affected levels. Content is
+    /// durable before this runs; every header, proof, fact, normalized index
+    /// row, and cursor for the step becomes visible atomically.
     func stageNodeFacts(_ levels: [NodeFactBatch], logID: String) throws {
         struct PreparedRow {
             let payload: Data
@@ -24,6 +26,7 @@ extension NodeStore {
         }
         struct PreparedLevel {
             let path: String
+            let evidence: PreparedEvidence
             let rootsPayload: Data
             let rows: [PreparedRow]
             let cursors: [String: StreamCursor]
@@ -58,6 +61,9 @@ extension NodeStore {
             }
             return PreparedLevel(
                 path: level.path.joined(separator: "/"),
+                evidence: try Self.prepareEvidence(
+                    headers: level.headers, proofs: level.proofs, at: level.path
+                ),
                 rootsPayload: try Self.encode(Array(Set(level.volumeRoots)).sorted()),
                 rows: rows,
                 cursors: level.cursors
@@ -72,6 +78,7 @@ extension NodeStore {
                 )
             }
             for level in prepared {
+                try Self.writeEvidence(level.evidence, at: level.path, in: database)
                 for row in level.rows {
                     if try database.row(
                         ImportBatchRow.self,

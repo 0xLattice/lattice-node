@@ -79,8 +79,8 @@ different answer to different child nodes.
 ## Durability and operation
 
 One `state.db` transaction records every level touched by a `NodeBatch`, along
-with their stream cursors. `volumes.db` retains content and
-`header-evidence.db` retains incomplete header boundaries and child proofs.
+with their stream cursors, incomplete header boundaries, and child proofs.
+`volumes.db` retains content.
 Recovery replays path-keyed immutable facts and recomputes fork choice; it does
 not restore remote certificates.
 

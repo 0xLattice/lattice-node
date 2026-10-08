@@ -108,16 +108,15 @@ LatticeNode/
 local mempool journal. Facts, accepted-block indexes, and stream cursors carry
 their absolute chain path.
 
-`HeaderEvidenceStore` is a deliberate sidecar for weighed header material and
-credited child proofs. A sync header can arrive before the full block Volume,
-so this data cannot be inserted into the immutable Volume store as though it
-were a complete boundary.
+Weighed header material and credited child proofs live in `state.db` beside
+the facts that reference them. A sync header can arrive before the full block
+Volume, so this data cannot be inserted into the immutable Volume store as
+though it were a complete boundary.
 
 ```text
 <storage>/
-  state.db             facts, indexes, cursors, and local mempool for the tree
+  state.db             facts, headers, child proofs, indexes, cursors, local mempool
   volumes.db           shared materialized content and retained roots
-  header-evidence.db   incomplete header boundaries and child proofs
   volume-bundles.db    cache: per block, the Volume roots served together
 ```
 
@@ -125,23 +124,23 @@ were a complete boundary.
 bundle serving reads it, a node runs without it, and it may be deleted while
 the node is stopped.
 
-Persistence is content-first: referenced Volumes and header evidence become
-durable before the fact transaction that names them. The complete `NodeBatch`
-then commits in one SQLite transaction across every affected chain path,
-including each path's sync cursors. A crash may leave retained content that no
-fact references, but it cannot leave a durable fact without its content or a
-parent-level half of a multi-level grind.
+Persistence is content-first: referenced Volumes become durable before the
+fact transaction that names them. One admission's Volumes (a fetched or mined
+block's, or the post-states of one step) are one `volumes.db` transaction,
+then retained. The complete `NodeBatch` then commits in one SQLite transaction
+across every affected chain path, including each path's headers, child
+proofs, and sync cursors. A crash may leave content that no fact references,
+which the next boot stops retaining, but it cannot leave a durable fact without its
+content, part of a block's content, or a parent-level half of a multi-level
+grind.
 
 `BootRecovery` validates the databases and retained roots before networking
 starts. `NodeRuntime.boot` then rebuilds every `ChainCore` from one ordered
-scan grouped by path. The evidence sidecar has its own schema epoch and Nexus
-identity, and saved child proofs must decode, match their indexes, and cover
-every durable child work fact. Startup fails rather than serving child headers
-without their proofs.
+scan grouped by path. Saved child proofs must decode and match their indexes;
+each commits in the transaction of the work fact it produced.
 
-There are no storage migrations. `state.db`, `volumes.db`, and
-`header-evidence.db` are one recovery unit and must be wiped together on a
-schema cutover.
+There are no storage migrations. `state.db` and `volumes.db` are one recovery
+unit and must be wiped together on a schema cutover.
 
 ## Networking and synchronization
 
