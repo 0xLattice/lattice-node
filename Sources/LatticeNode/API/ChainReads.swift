@@ -516,15 +516,21 @@ public struct ChainReads: Sendable {
         ) else { return nil }
         let entries = Array(scanned.prefix(boundedLimit))
         let next = scanned.count > boundedLimit ? entries.last?.key : nil
+        let listed = entries.filter { $0.value > 0 && DepositKey($0.key) != nil }
+        let created = await canonicalDepositInclusions(
+            keys: listed.map(\.key), tipCID: tipCID, tipBlock: block, tipRoot: state.depositState.rawCID
+        )
         var active: [ExplorerDeposit] = []
-        for entry in entries {
-            guard entry.value > 0, let key = DepositKey(entry.key) else { continue }
+        for entry in listed {
+            guard let key = DepositKey(entry.key) else { continue }
             active.append(ExplorerDeposit(
                 key: entry.key,
                 demander: key.demander,
                 amountDemanded: key.amountDemanded,
                 nonce: String(key.nonce),
-                amountDeposited: entry.value
+                amountDeposited: entry.value,
+                blockHeight: created[entry.key]?.height,
+                blockHash: created[entry.key]?.hash
             ))
         }
         let proofPaths = Swift.Dictionary(uniqueKeysWithValues: entries.map { ([$0.key], SparseMerkleProof.existence) })
@@ -542,6 +548,70 @@ public struct ChainReads: Sendable {
             next: next,
             proof: proof
         )
+    }
+
+    /// The canonical block that created each of `keys`, derived at read time
+    /// with no index, as `canonicalInclusion` does for a transaction: a
+    /// deposit key is absent until the block that inserts it and never
+    /// removed afterwards (a withdrawal leaves a zero marker), so presence
+    /// only ever turns on along the canonical chain. A key's creating block is
+    /// the lowest height whose post-state holds it.
+    ///
+    /// One search serves the whole page. A probed height is loaded once and
+    /// asked about every key still undecided in its range, which then splits
+    /// into the keys already present (search below) and not yet (search
+    /// above). The deposit dictionary is content-addressed, so a height whose
+    /// dictionary root was already read answers with no trie read at all;
+    /// most blocks carry no deposit or withdrawal and repeat their parent's.
+    ///
+    /// `tipBlock` must hold every key, under dictionary root `tipRoot`. A key
+    /// is left out when a state needed to place it is not held here; nothing
+    /// is returned if the canonical chain moved during the search.
+    func canonicalDepositInclusions(
+        keys: [String], tipCID: String, tipBlock: Block, tipRoot: String
+    ) async -> [String: (height: UInt64, hash: String)] {
+        guard !keys.isEmpty else { return [:] }
+        // Keys present under a dictionary root, for every key ever asked of it.
+        var known: [String: [String: Bool]] = [tipRoot: Dictionary(uniqueKeysWithValues: keys.map { ($0, true) })]
+        var heights: [String: UInt64] = [:]
+        // Invariant per range: every key present(high); absent(low - 1).
+        var ranges: [(low: UInt64, high: UInt64, keys: [String])] = [(0, tipBlock.height, keys)]
+        while let range = ranges.popLast() {
+            if range.low == range.high {
+                for key in range.keys { heights[key] = range.high }
+                continue
+            }
+            let middle = range.low + (range.high - range.low) / 2
+            guard let middleCID = await canonicalCID(middle),
+                  let middleBlock = await block(cid: middleCID),
+                  let state = try? await middleBlock.postState.resolve(fetcher: storage).node else {
+                continue // not held here: these keys go unplaced
+            }
+            let root = state.depositState.rawCID
+            let unread = range.keys.filter { known[root]?[$0] == nil }
+            if !unread.isEmpty {
+                let paths = Swift.Dictionary(uniqueKeysWithValues: unread.map { ([$0], ResolutionStrategy.targeted) })
+                guard let deposits = try? await state.depositState.resolve(paths: paths, fetcher: storage).node else {
+                    continue
+                }
+                for key in unread { known[root, default: [:]][key] = (try? deposits.get(key: key)) != nil }
+            }
+            let present = range.keys.filter { known[root]?[$0] == true }
+            let absent = range.keys.filter { known[root]?[$0] != true }
+            if !present.isEmpty { ranges.append((range.low, middle, present)) }
+            if !absent.isEmpty { ranges.append((middle + 1, range.high, absent)) }
+        }
+        var hashes: [UInt64: String] = [:]
+        for height in Set(heights.values) {
+            if let cid = await canonicalCID(height) { hashes[height] = cid }
+        }
+        // The heights read name one chain only if the tip still names it.
+        guard await canonicalCID(tipBlock.height) == tipCID else { return [:] }
+        var created: [String: (height: UInt64, hash: String)] = [:]
+        for (key, height) in heights {
+            if let hash = hashes[height] { created[key] = (height: height, hash: hash) }
+        }
+        return created
     }
 
     /// The withdrawer recorded by a receipt on this (parent) chain.

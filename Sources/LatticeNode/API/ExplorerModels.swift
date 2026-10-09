@@ -141,19 +141,28 @@ public struct ExplorerDeposit: Codable, Sendable, Equatable {
     @DecimalString public var amountDemanded: UInt64
     public let nonce: String
     @DecimalString public var amountDeposited: UInt64
+    /// The canonical block that created this deposit, as this node reports it.
+    /// Absent when the node no longer holds the states needed to locate it.
+    /// The page's proof covers the deposit's value at the tip, not these.
+    @OptionalDecimalString public var blockHeight: UInt64?
+    public let blockHash: String?
 
     public init(
         key: String,
         demander: String,
         amountDemanded: UInt64,
         nonce: String,
-        amountDeposited: UInt64
+        amountDeposited: UInt64,
+        blockHeight: UInt64? = nil,
+        blockHash: String? = nil
     ) {
         self.key = key
         self.demander = demander
         self.amountDemanded = amountDemanded
         self.nonce = nonce
         self.amountDeposited = amountDeposited
+        self.blockHeight = blockHeight
+        self.blockHash = blockHash
     }
 }
 
