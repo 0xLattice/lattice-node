@@ -164,7 +164,9 @@ enum PublicReadRouteClass: Sendable, Equatable {
             self = .expensive
         case 2 where components[0] == "api" && components[1] == "deposits":
             // One response constructs a sparse witness for every raw key in
-            // the page, including spent keys omitted from the visible list.
+            // the page, including spent keys omitted from the visible list,
+            // and locates each visible deposit's creating block by a binary
+            // search over the chain's post-states.
             self = .expensive
         case 2 where components[0] == "volumes":
             // A complete Volume can be tens of MiB. The handler is local-only

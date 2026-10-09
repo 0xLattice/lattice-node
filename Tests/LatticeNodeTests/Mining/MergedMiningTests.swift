@@ -121,7 +121,8 @@ final class MergedMiningTests: XCTestCase {
                 body: header
             )
         }
-        func confirm(_ transaction: Transaction, on reads: ChainReads, _ label: String) async throws {
+        @discardableResult
+        func confirm(_ transaction: Transaction, on reads: ChainReads, _ label: String) async throws -> String {
             let cid = try await runtime.submitTransaction(SubmitTransactionRequest(transaction: transaction)).transactionCID
             try await eventually(label) {
                 _ = try await runtime.mineBlock(recipients)
@@ -129,6 +130,7 @@ final class MergedMiningTests: XCTestCase {
                 let stored = await reads.transaction(cid: cid)
                 return pooled == 0 && stored != nil
             }
+            return cid
         }
         try await eventually("A and B are funded") {
             _ = try await runtime.mineBlock(recipients)
@@ -143,7 +145,7 @@ final class MergedMiningTests: XCTestCase {
             receiptActions: [], withdrawalActions: [],
             signers: [demanderAddress], nonce: 0, chainPath: Self.alpha
         )), on: alphaReads, "Alpha confirms the deposit")
-        try await confirm(signed(demander, TransactionBody(
+        let secondDepositCID = try await confirm(signed(demander, TransactionBody(
             accountActions: [AccountAction(owner: demanderAddress, delta: -5)], actions: [],
             depositActions: [DepositAction(nonce: 2, demander: demanderAddress, amountDemanded: 4, amountDeposited: 5)],
             receiptActions: [], withdrawalActions: [],
@@ -198,6 +200,37 @@ final class MergedMiningTests: XCTestCase {
         XCTAssertEqual(activePage.deposits.count, 1)
         XCTAssertEqual(activePage.deposits.first?.nonce, "2")
         XCTAssertEqual(activePage.deposits.first?.amountDemanded, 4)
+        // Each listed deposit names the canonical block that created it: the
+        // block that executed its transaction, several blocks below the tip
+        // by now, and unchanged by the later withdrawal of its neighbour.
+        let depositTransaction = await alphaReads.explorerTransaction(cid: secondDepositCID)
+        let createdAt = try XCTUnwrap(depositTransaction?.blockHeight)
+        XCTAssertEqual(activePage.deposits.first?.blockHeight, createdAt)
+        XCTAssertEqual(activePage.deposits.first?.blockHash, depositTransaction?.blockHash)
+        XCTAssertLessThan(createdAt, activePage.proof.blockHeight)
+        let wire = try JSONSerialization.jsonObject(with: JSONEncoder().encode(activePage)) as? [String: Any]
+        let wireDeposit = (wire?["deposits"] as? [[String: Any]])?.first
+        XCTAssertEqual(wireDeposit?["blockHeight"] as? String, String(createdAt))
+        XCTAssertEqual(wireDeposit?["blockHash"] as? String, depositTransaction?.blockHash)
+
+        // One page places every deposit it lists with a single shared search:
+        // a later deposit lands in a later block, and the older one keeps its.
+        let thirdDepositCID = try await confirm(signed(demander, TransactionBody(
+            accountActions: [AccountAction(owner: demanderAddress, delta: -1)], actions: [],
+            depositActions: [DepositAction(nonce: 3, demander: demanderAddress, amountDemanded: 6, amountDeposited: 1)],
+            receiptActions: [], withdrawalActions: [],
+            signers: [demanderAddress], nonce: 2, chainPath: Self.alpha
+        )), on: alphaReads, "Alpha confirms a third deposit")
+        let bothResult = try await alphaReads.explorerDeposits(limit: 10, after: nil)
+        let bothPage = try XCTUnwrap(bothResult)
+        XCTAssertEqual(bothPage.deposits.map(\.nonce), ["2", "3"])
+        let thirdTransaction = await alphaReads.explorerTransaction(cid: thirdDepositCID)
+        let thirdCreatedAt = try XCTUnwrap(thirdTransaction?.blockHeight)
+        XCTAssertEqual(bothPage.deposits.map(\.blockHeight), [createdAt, thirdCreatedAt])
+        XCTAssertEqual(bothPage.deposits.map(\.blockHash), [depositTransaction?.blockHash, thirdTransaction?.blockHash])
+        XCTAssertGreaterThan(thirdCreatedAt, createdAt)
+        let bothVerified = await LightClientProtocol.verify(bothPage.proof)
+        XCTAssertTrue(bothVerified)
         let activeVerified = await LightClientProtocol.verify(activePage.proof)
         XCTAssertTrue(activeVerified)
 
