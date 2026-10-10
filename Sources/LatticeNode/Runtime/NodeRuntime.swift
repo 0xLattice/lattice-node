@@ -396,11 +396,11 @@ extension NodeRuntime {
         var nextReply: UInt64 = 1
         /// Announced transactions being fetched, by CID.
         var transactionFetches: Set<String> = []
-        /// Transactions recently fetched, not refetched until the act-on tip
-        /// moves (Bitcoin's recent rejects): a refused one is not fetched
+        /// Transactions recently fetched, not refetched until a hosted chain's
+        /// act-on tip moves (Bitcoin's recent rejects): a refused one is not fetched
         /// again in a loop. Bounded, oldest out.
         var recentlyFetched = RecentSet(capacity: 4_096)
-        var recentlyFetchedTip: String?
+        var recentlyFetchedTips: [String] = []
         /// Per level, the chain a tip epoch's jobs read, made once per epoch
         /// that has a job.
         var preflightLevels: [ChainPath: (epoch: UInt64, level: ChainLevel)] = [:]
@@ -796,28 +796,37 @@ extension NodeRuntime {
         }
 
         /// A peer announced a transaction: fetch it from that peer, and hand
-        /// it to the pool as the peer's. Only one not pooled, not awaiting
-        /// its verdict, not being fetched and not recently fetched, within
-        /// the cap on concurrent fetches; anything else is dropped, never
-        /// blamed.
+        /// it, as the peer's, to the pool of the chain it names. An
+        /// announcement carries only the transaction's CID, so its chain is
+        /// known once it is fetched: every hosted level is asked whether it
+        /// already holds it, and one naming a chain this host does not run is
+        /// dropped. Only one not pooled, not awaiting its verdict, not being
+        /// fetched and not recently fetched, within the cap on concurrent
+        /// fetches; anything else is dropped, never blamed.
         private mutating func fetchAnnounced(_ cid: String, from session: Session) {
-            guard let mining = core.levels[core.rootPath]?.mining else { return }
-            if recentlyFetchedTip != mining.tipCID {
-                recentlyFetchedTip = mining.tipCID
+            let pools = core.levels.sorted { $0.key.lexicographicallyPrecedes($1.key) }.map(\.value.mining)
+            // A fetched transaction may be worth fetching again once any
+            // hosted chain moves: a child's tip moves without the root's.
+            let tips = pools.map(\.tipCID)
+            if recentlyFetchedTips != tips {
+                recentlyFetchedTips = tips
                 recentlyFetched.removeAll()
             }
-            guard !mining.mempool.contains(cid), !mining.isPending(cid),
+            guard !pools.contains(where: { $0.mempool.contains(cid) || $0.isPending(cid) }),
                   !transactionFetches.contains(cid), !recentlyFetched.members.contains(cid),
                   transactionFetches.count < 64
             else { return }
             transactionFetches.insert(cid)
-            let (ivy, inputs, path, peer) = (ivy, inputs, core.rootPath, session.coreID)
+            let (ivy, inputs, peer) = (ivy, inputs, session.coreID)
+            let hosted = Set(core.levels.keys)
             spawn {
                 let response = await ivy.fetchVolume(rootCID: cid, from: session.peer)
                 let transaction = try? await VolumeImpl<Transaction>(rawCID: cid, node: nil, encryptionInfo: nil)
                     .resolveRecursive(source: InMemoryContentSource(response.entries)).node
-                inputs.yield(.transactionFetched(cid: cid, transaction.map {
-                    .level(path, .mining(.transactionReceived($0, origin: .peer(peer))))
+                // A transaction names its chain: it goes to that level's pool.
+                let path = transaction?.body.node?.chainPath
+                inputs.yield(.transactionFetched(cid: cid, transaction.flatMap { transaction in
+                    path.flatMap { hosted.contains($0) ? .level($0, .mining(.transactionReceived(transaction, origin: .peer(peer)))) : nil }
                 }))
             }
         }

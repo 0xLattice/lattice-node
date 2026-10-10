@@ -73,6 +73,101 @@ final class MergedMiningTests: XCTestCase {
         await restarted.stop()
     }
 
+    /// A transaction for a hosted child chain reaches a peer that hosts the
+    /// same child, just as a Nexus transaction reaches it: the peer learns of
+    /// it by announcement and pools it on the level the transaction names.
+    func testAPeerPoolsAnAnnouncedTransactionOnTheChainItNames() async throws {
+        func host(_ keyByte: String, peers: [PeerEndpoint] = []) throws -> (NodeConfiguration, IvyConfig, PeerEndpoint) {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "lattice-relay-\(UUID().uuidString)", isDirectory: true
+            )
+            addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+            let port = NetworkTransportTestPorts.allocate()
+            let configuration = try NodeConfiguration(
+                chainPath: ["Nexus"], storagePath: directory, privateKeyHex: String(repeating: keyByte, count: 32),
+                listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
+                hostedChildren: [Self.alpha], childSpecs: [Self.alpha: Self.alphaSpec]
+            )
+            let overlay = IvyConfig(
+                signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: peers,
+                requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
+                mode: .overlay
+            )
+            return (configuration, overlay, PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port))
+        }
+        let (minerConfiguration, minerOverlay, minerEndpoint) = try host("5a")
+        let miner = try await NodeRuntime.start(
+            storage: try await NodeStorage.open(configuration: minerConfiguration),
+            configuration: minerConfiguration, overlay: minerOverlay
+        )
+        addTeardownBlock { await miner.stop() }
+        let minerAlpha = try XCTUnwrap(miner.levelReads[Self.alpha])
+        let payer = CryptoUtils.generateKeyPair()
+        let payerAddress = CryptoUtils.createAddress(from: payer.publicKey)
+        let payee = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
+        let recipients = MiningTemplateRequest(recipients: [
+            MiningRecipient(chainPath: ["Nexus"], address: payerAddress),
+            MiningRecipient(chainPath: Self.alpha, address: payerAddress),
+        ])
+        func balance(_ reads: ChainReads) async -> UInt64 {
+            guard let tip = await reads.readSnapshot().tipCID else { return 0 }
+            return await reads.account(owner: payerAddress, blockCID: tip)?.balance ?? 0
+        }
+        try await eventually("the payer is funded on both chains") {
+            _ = try await miner.mineBlock(recipients)
+            let onAlpha = await balance(minerAlpha), onNexus = await balance(miner.reads)
+            return onAlpha >= 5 && onNexus >= 5
+        }
+
+        // A second node that hosts both chains joins and catches up. It is the
+        // one a transaction is submitted to, as a public submit node would be.
+        let (entryConfiguration, entryOverlay, _) = try host("5b", peers: [minerEndpoint])
+        let entry = try await NodeRuntime.start(
+            storage: try await NodeStorage.open(configuration: entryConfiguration),
+            configuration: entryConfiguration, overlay: entryOverlay
+        )
+        addTeardownBlock { await entry.stop() }
+        let entryAlpha = try XCTUnwrap(entry.levelReads[Self.alpha])
+        try await eventually("the entry node catches up on both chains") {
+            let alphaTip = await minerAlpha.readSnapshot().tipCID, nexusTip = await miner.reads.readSnapshot().tipCID
+            let entryAlphaTip = await entryAlpha.readSnapshot().tipCID, entryNexusTip = await entry.reads.readSnapshot().tipCID
+            return alphaTip != nil && alphaTip == entryAlphaTip && nexusTip == entryNexusTip
+        }
+
+        func pay(on chainPath: [String]) throws -> Transaction {
+            let body = TransactionBody(
+                accountActions: [AccountAction(owner: payerAddress, delta: -2), AccountAction(owner: payee, delta: 1)],
+                actions: [], depositActions: [], receiptActions: [], withdrawalActions: [],
+                signers: [payerAddress], nonce: 0, chainPath: chainPath
+            )
+            let header = try HeaderImpl(node: body)
+            return Transaction(
+                signatures: [payer.publicKey: try XCTUnwrap(TransactionSigning.sign(
+                    bodyHeader: header, privateKeyHex: payer.privateKey
+                ))],
+                body: header
+            )
+        }
+        // The control: a Nexus transaction submitted to the entry node reaches the miner's pool.
+        _ = try await entry.submitTransaction(SubmitTransactionRequest(transaction: try pay(on: ["Nexus"])))
+        try await eventually("the miner pools the announced Nexus transaction") {
+            await miner.reads.readSnapshot().mempoolCount == 1
+        }
+        // The same for the hosted child: it must land in the child's pool, and nowhere else.
+        let alphaCID = try await entry.submitTransaction(SubmitTransactionRequest(transaction: try pay(on: Self.alpha))).transactionCID
+        try await eventually("the miner pools the announced Alpha transaction", within: .seconds(10)) {
+            await minerAlpha.readSnapshot().mempoolCount == 1
+        }
+        let nexusPooled = await miner.reads.readSnapshot().mempoolCount
+        XCTAssertEqual(nexusPooled, 1, "a child transaction never enters the root pool")
+        // And the miner then mines it on Alpha.
+        try await eventually("the miner includes the Alpha transaction") {
+            _ = try await miner.mineBlock(recipients)
+            let included = await minerAlpha.explorerTransaction(cid: alphaCID)?.blockHeight
+            return included != nil
+        }
+    }
+
     /// The cross-chain swap end to end on one node that hosts Nexus and
     /// Alpha: A deposits on Alpha, B pays the receipt on Nexus, and B's
     /// withdrawal on Alpha is mined by merged mining. Preflight has no
