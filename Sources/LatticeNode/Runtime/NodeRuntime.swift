@@ -804,8 +804,7 @@ extension NodeRuntime {
         /// fetched and not recently fetched, within the cap on concurrent
         /// fetches; anything else is dropped, never blamed.
         private mutating func fetchAnnounced(_ cid: String, from session: Session) {
-            let pools = core.levels.sorted { $0.key.lexicographicallyPrecedes($1.key) }.compactMap(\.value.mining)
-            guard !pools.isEmpty else { return }
+            let pools = core.levels.sorted { $0.key.lexicographicallyPrecedes($1.key) }.map(\.value.mining)
             // A fetched transaction may be worth fetching again once any
             // hosted chain moves: a child's tip moves without the root's.
             let tips = pools.map(\.tipCID)
@@ -819,7 +818,7 @@ extension NodeRuntime {
             else { return }
             transactionFetches.insert(cid)
             let (ivy, inputs, peer) = (ivy, inputs, session.coreID)
-            let hosted = Set(core.levels.filter { $0.value.mining != nil }.keys)
+            let hosted = Set(core.levels.keys)
             spawn {
                 let response = await ivy.fetchVolume(rootCID: cid, from: session.peer)
                 let transaction = try? await VolumeImpl<Transaction>(rawCID: cid, node: nil, encryptionInfo: nil)
