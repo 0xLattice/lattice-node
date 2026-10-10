@@ -82,6 +82,9 @@ Mining templates are requested at Nexus and can carry every hosted descendant.
 | `GET /api/block/:cid/children` | Bounded child commitments | yes |
 | `GET /api/transaction/:cid` | Explorer transaction model | yes |
 | `GET /api/state/account/:addr` | Account at the current executed tip | yes |
+| `GET /api/deposits?limit=<n>&after=<key>` | Page of active deposits, with a state proof | yes |
+| `GET /api/deposit-state?key=<demander/amount/nonce>` | One deposit key: its locked amount, `0` once withdrawn, or absent; with a state proof | yes |
+| `GET /api/receipt-state?demander=&amount=&nonce=&chainPath=P/D` | The withdrawer a receipt on `P` records for a deposit on `P/D`, with a state proof | yes |
 | `GET /api/mempool` | Bounded mempool listing | yes |
 | `GET /api/peers` | Ready peer count | yes |
 | `GET /api/chain/info` | Chain metadata | yes |

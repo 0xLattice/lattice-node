@@ -182,6 +182,24 @@ public struct ExplorerDepositsPage: Codable, Sendable, Equatable {
     }
 }
 
+/// One deposit key's value at the tip: the amount still locked, `0` once
+/// withdrawn, or absent (`value` left out) if it was never deposited.
+public struct ExplorerDepositState: Codable, Sendable, Equatable {
+    public let exists: Bool
+    public let key: String
+    public let value: String?
+    public let chain: String
+    public let proof: StateDictionaryProof
+
+    public init(key: String, value: String?, chain: String, proof: StateDictionaryProof) {
+        self.exists = value != nil
+        self.key = key
+        self.value = value
+        self.chain = chain
+        self.proof = proof
+    }
+}
+
 public struct ExplorerReceiptState: Codable, Sendable, Equatable {
     public let exists: Bool
     public let withdrawer: String?

@@ -251,6 +251,28 @@ final class DaemonHTTPTests: XCTestCase {
                 let verified = await LightClientProtocol.verify(state.proof)
                 XCTAssertTrue(verified)
             }
+            let depositKey = "\(demander)/1/42"
+            try await client.execute(
+                uri: "/api/deposit-state?key=\(depositKey)&chainPath=Nexus",
+                method: .get
+            ) { response in
+                XCTAssertEqual(response.status, .ok)
+                let body = Data(response.body.readableBytesView)
+                let state = try JSONDecoder().decode(ExplorerDepositState.self, from: body)
+                XCTAssertFalse(state.exists)
+                XCTAssertEqual(state.key, depositKey)
+                XCTAssertEqual(state.proof.claims, [.init(key: depositKey, value: nil)])
+                let wire = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+                XCTAssertNil(wire?["value"], "an absent deposit leaves its value out")
+                let verified = await LightClientProtocol.verify(state.proof)
+                XCTAssertTrue(verified)
+            }
+            // A key that is not demander/amount/nonce is refused before any state is read.
+            for uri in ["/api/deposit-state?chainPath=Nexus", "/api/deposit-state?key=not-a-key&chainPath=Nexus"] {
+                try await client.execute(uri: uri, method: .get) { response in
+                    XCTAssertEqual(response.status, .badRequest, uri)
+                }
+            }
             // The operator surface does not exist here — not merely forbidden.
             try await client.execute(uri: "/status", method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
                 XCTAssertEqual(response.status, .notFound)

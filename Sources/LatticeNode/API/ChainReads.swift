@@ -614,6 +614,38 @@ public struct ChainReads: Sendable {
         return created
     }
 
+    /// One deposit key in the canonical tip state: its locked amount, `0`
+    /// once withdrawn (a withdrawal leaves a zero marker), or nothing if the
+    /// key was never deposited. Proven either way, without scanning the
+    /// listing: a wallet settles a purchase on the exact keys it bought.
+    public func explorerDepositState(key: String) async throws -> ExplorerDepositState? {
+        guard let tipCID = await tip().tipCID,
+              let block = await block(cid: tipCID),
+              let resolvedState = try? await block.postState.resolve(fetcher: storage),
+              let state = resolvedState.node else {
+            return nil
+        }
+        let targeted = try? await state.depositState.resolve(
+            paths: [[key]: .targeted],
+            fetcher: storage
+        ).node
+        let amount = targeted.flatMap { try? $0.get(key: key) }
+        let value = amount.map { String($0) }
+        let proofKind: SparseMerkleProof = amount == nil ? .insertion : .existence
+        let proven = try await state.depositState.proof(paths: [[key]: proofKind], fetcher: storage)
+        let proof = try await stateProof(
+            blockCID: tipCID, block: block, state: resolvedState,
+            dictionary: .deposits, dictionaryHeader: proven,
+            claims: [.init(key: key, value: value)]
+        )
+        return ExplorerDepositState(
+            key: key,
+            value: value,
+            chain: chainPath.joined(separator: "/"),
+            proof: proof
+        )
+    }
+
     /// The withdrawer recorded by a receipt on this (parent) chain.
     public func explorerReceiptState(
         demander: String,

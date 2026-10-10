@@ -359,6 +359,38 @@ final class MergedMiningTests: XCTestCase {
         ))
         XCTAssertFalse(mismatchedBlockAccepted)
 
+        // One key is read and proven without the listing: the withdrawn
+        // deposit as its zero marker, the active one as its amount, and a key
+        // never deposited as absent. A wallet settles a purchase on the first.
+        let spentKey = try XCTUnwrap(spentPage.proof.claims.first?.key)
+        let spentStateResult = try await alphaReads.explorerDepositState(key: spentKey)
+        let spentState = try XCTUnwrap(spentStateResult)
+        XCTAssertTrue(spentState.exists)
+        XCTAssertEqual(spentState.value, "0")
+        XCTAssertEqual(spentState.proof.claims, [.init(key: spentKey, value: "0")])
+        let spentStateVerified = await LightClientProtocol.verify(spentState.proof)
+        XCTAssertTrue(spentStateVerified)
+        let activeKey = try XCTUnwrap(activePage.deposits.first?.key)
+        let activeStateResult = try await alphaReads.explorerDepositState(key: activeKey)
+        let activeState = try XCTUnwrap(activeStateResult)
+        XCTAssertEqual(activeState.value, "5")
+        let activeStateVerified = await LightClientProtocol.verify(activeState.proof)
+        XCTAssertTrue(activeStateVerified)
+        let neverKey = "\(demanderAddress)/9/99"
+        let neverStateResult = try await alphaReads.explorerDepositState(key: neverKey)
+        let neverState = try XCTUnwrap(neverStateResult)
+        XCTAssertFalse(neverState.exists)
+        XCTAssertNil(neverState.value)
+        let neverStateVerified = await LightClientProtocol.verify(neverState.proof)
+        XCTAssertTrue(neverStateVerified)
+        // A still-locked deposit cannot be passed off as withdrawn, nor as never made.
+        for forged in ["0", nil] as [String?] {
+            let accepted = await LightClientProtocol.verify(replacing(
+                activeState.proof, claims: [.init(key: activeKey, value: forged)]
+            ))
+            XCTAssertFalse(accepted)
+        }
+
         let receiptResult = try await nexusReads.explorerReceiptState(
             demander: demanderAddress, amountDemanded: 3, nonce: 1,
             destinationPath: Self.alpha
