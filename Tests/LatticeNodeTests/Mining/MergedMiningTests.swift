@@ -531,21 +531,31 @@ final class MergedMiningTests: XCTestCase {
         }
 
         // A grind that meets Alpha's target but misses Nexus's weighs only
-        // Alpha; one that meets Nexus's advances both.
-        let alphaBefore = await alphaReads.readSnapshot().height ?? 0
+        // Alpha; one that meets Nexus's advances both. Nexus executes a block
+        // before Alpha executes the block it carried, so a template read in
+        // between carries an Alpha block on the tip Alpha is about to leave:
+        // its share is weighed as a sibling and Alpha's height stays. The
+        // share is therefore taken from a fresh template until one advances
+        // Alpha. Nothing else is mining, so Alpha settles and one does.
         let nexusBefore = runtime.published.value?.actOnHeight ?? 0
-        let carried = try XCTUnwrap(template.block.children.node?.entries["Alpha"]?.node)
-        var nonce: UInt64 = 0
-        while true {
-            let hash = template.block.replacingNonce(nonce).proofOfWorkHash()
-            if hash > template.block.target, hash <= carried.target { break }
-            nonce += 1
+        var advanced = false
+        for _ in 0..<8 where !advanced {
+            let alphaBefore = await alphaReads.readSnapshot().height ?? 0
+            template = try await runtime.miningTemplate(MiningTemplateRequest())
+            let carried = try XCTUnwrap(template.block.children.node?.entries["Alpha"]?.node)
+            var nonce: UInt64 = 0
+            while true {
+                let hash = template.block.replacingNonce(nonce).proofOfWorkHash()
+                if hash > template.block.target, hash <= carried.target { break }
+                nonce += 1
+            }
+            let share = try await runtime.submitWork(SubmitWorkRequest(workID: template.workID, nonce: nonce))
+            XCTAssertEqual(share.disposition, .childOnly)
+            advanced = (try? await eventually("the share advances Alpha alone", within: .seconds(3)) {
+                (await alphaReads.readSnapshot().height ?? 0) > alphaBefore
+            }) != nil
         }
-        let share = try await runtime.submitWork(SubmitWorkRequest(workID: template.workID, nonce: nonce))
-        XCTAssertEqual(share.disposition, .childOnly)
-        try await eventually("the share advances Alpha alone") {
-            (await alphaReads.readSnapshot().height ?? 0) > alphaBefore
-        }
+        XCTAssertTrue(advanced, "a share advances Alpha alone")
         XCTAssertEqual(runtime.published.value?.actOnHeight, nexusBefore, "a share never enters Nexus")
         _ = try await runtime.mineBlock()
         try await eventually("a Nexus hit advances both") {
@@ -570,8 +580,14 @@ final class MergedMiningTests: XCTestCase {
         XCTAssertEqual(runtime.published.value?.mempoolCount, 0, "Nexus's pool never holds it")
         let digestWithChildTransaction = await runtime.status().templateDigest
         XCTAssertNotEqual(digestWithChildTransaction, digestBeforeChildTransaction)
-        let refreshedTemplate = try await runtime.miningTemplate(MiningTemplateRequest())
-        XCTAssertEqual(refreshedTemplate.templateDigest, digestWithChildTransaction)
+        // Status and a template agree on the digest for the same state. The
+        // digest covers Alpha's tip, which may still be moving to the block
+        // the last Nexus block carried, so the two are read until they agree.
+        try await eventually("status serves the digest of the template a miner fetches") {
+            let served = await runtime.status().templateDigest
+            let fetched = try await runtime.miningTemplate(MiningTemplateRequest()).templateDigest
+            return served == fetched && served != digestBeforeChildTransaction
+        }
         try await eventually("Alpha confirms the transaction") {
             _ = try await runtime.mineBlock()
             return await alphaReads.readSnapshot().mempoolCount == 0
