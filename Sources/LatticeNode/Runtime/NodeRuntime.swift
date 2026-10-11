@@ -85,6 +85,9 @@ public final class NodeRuntime: Sendable {
     private let maintenance: Task<Void, Never>
     /// Read URLs other hosts declare, found through their provider records.
     let readEndpoints: ReadEndpointDirectory
+    /// The peers remembered across restarts; nil for a node told to connect
+    /// to no one, which neither remembers nor redials anyone.
+    let peerMemory: PeerMemory?
 
     /// How many overlay messages may wait for the loop before a delivering
     /// connection is held back.
@@ -141,6 +144,7 @@ public final class NodeRuntime: Sendable {
             storage: storage,
             configuration: configuration,
             ivy: Ivy(config: overlay),
+            overlayPeers: overlay.bootstrapPeers,
             helloTimeout: overlay.requestTimeout,
             workers: workers,
             // A store that cannot read its proofs fails the boot: it would
@@ -170,6 +174,9 @@ public final class NodeRuntime: Sendable {
             await runtime.stop()
             throw error
         }
+        // The first maintenance pass, once the overlay is up: where a node
+        // dials the peers it remembers, and its seeds if those are not enough
+        // (the overlay itself dials only configured peers).
         runtime.inputs.yield(.maintenance)
         return runtime
     }
@@ -222,6 +229,7 @@ public final class NodeRuntime: Sendable {
         storage: NodeStorage,
         configuration: NodeConfiguration,
         ivy: Ivy,
+        overlayPeers: [PeerEndpoint],
         helloTimeout: Duration,
         workers: Int,
         proofs: SavedChildProofs,
@@ -260,6 +268,17 @@ public final class NodeRuntime: Sendable {
             ownKey: configuration.processPublicKey
         )
         self.readEndpoints = readEndpoints
+        // The overlay's own list is what is dialled from the start; the seeds
+        // only on need. With neither, the operator chose an isolated node: it
+        // keeps no memory of peers either. A seed is remembered like any
+        // other peer, so a node that has met the network dials what it
+        // remembers, the seeds among them, before it asks a seed afresh.
+        let peerMemory: PeerMemory? = overlayPeers.isEmpty && configuration.seedPeers.isEmpty ? nil : PeerMemory(
+            directory: configuration.storagePath,
+            excluding: Set([configuration.processPublicKey] + overlayPeers.map(\.publicKey)),
+            now: Self.now()
+        )
+        self.peerMemory = peerMemory
         delegate = NodeRuntimeIvyDelegate(
             gate: gate,
             hosted: Set([configuration.chainPath] + configuration.hostedChildren),
@@ -294,7 +313,8 @@ public final class NodeRuntime: Sendable {
             remote: remote,
             proofs: proofs,
             workers: max(1, workers),
-            failStop: failStop
+            failStop: failStop,
+            peerMemory: peerMemory
         )
         loop = Task {
             var state = initial
@@ -351,6 +371,11 @@ public final class NodeRuntime: Sendable {
     static func now() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1_000)
     }
+
+    /// Below this many peers, a maintenance pass dials remembered ones.
+    static let rememberedPeerTarget = 8
+    /// The most remembered peers one maintenance pass dials.
+    static let rememberedPeerDials = 4
 }
 
 extension NodeRuntime {
@@ -370,6 +395,7 @@ extension NodeRuntime {
         let remote: IvyRootContentSource
         let workers: Int
         let failStop: @Sendable (any Error) -> Void
+        let peerMemory: PeerMemory?
         /// Each child level's verified proofs, by block and root: what
         /// `lookupProofs` answers and a served child header carries.
         var proofs: SavedChildProofs = [:]
@@ -410,6 +436,8 @@ extension NodeRuntime {
         var digests: [ChainPath: (key: String, digest: String)] = [:]
         var peerSearch = PeerSearch()
         var maintenanceInFlight = false
+        /// When a lost session last brought maintenance forward.
+        var lastUrgentMaintenanceAt: Int64 = .min / 2
         /// A maintenance pass asked for while one was running: run it next.
         var maintenancePending = false
 
@@ -471,8 +499,10 @@ extension NodeRuntime {
             remote: IvyRootContentSource,
             proofs: SavedChildProofs,
             workers: Int,
-            failStop: @escaping @Sendable (any Error) -> Void
+            failStop: @escaping @Sendable (any Error) -> Void,
+            peerMemory: PeerMemory?
         ) {
+            self.peerMemory = peerMemory
             self.proofs = proofs
             self.gate = gate
             self.helloTimeout = helloTimeout
@@ -608,6 +638,7 @@ extension NodeRuntime {
             let (ivy, inputs, bootstrap, ownKey, capabilities) = (
                 ivy, inputs, configuration.bootstrapPeers, configuration.processPublicKey, remote.peerCapabilities
             )
+            let (peerMemory, seeds, fixedSeeds) = (peerMemory, configuration.seedPeers, configuration.fixedSeedPeers)
             spawn {
                 for key in announced {
                     await ivy.announceProvider(rootCID: key, expiresAt: expiry)
@@ -633,7 +664,57 @@ extension NodeRuntime {
                         do {
                             try await ivy.connect(to: endpoint)
                             connected.insert(endpoint.publicKey)
+                            await peerMemory?.reached(endpoint, now: now)
                         } catch {}
+                    }
+                }
+                // The network as this node last knew it. With few peers
+                // (always, just after a start) it dials some it remembers, so
+                // it rejoins without leaning on its bootstrap peers, or when
+                // none of them answers. What it remembers is every address
+                // one of its own dials reached a peer at, kept fresh while
+                // that session stays open.
+                if let peerMemory {
+                    if connected.count < NodeRuntime.rememberedPeerTarget {
+                        let remembered = await peerMemory.candidates(
+                            excluding: connected, count: NodeRuntime.rememberedPeerDials
+                        )
+                        for endpoint in remembered {
+                            do {
+                                try await ivy.connect(to: endpoint)
+                                connected.insert(endpoint.publicKey)
+                                await peerMemory.reached(endpoint, now: now)
+                            } catch {
+                                await peerMemory.failed(endpoint.publicKey)
+                            }
+                        }
+                    }
+                    // Seeds last, and only on need: with too few peers still,
+                    // after the remembered ones had their turn. A fresh node
+                    // has nothing to remember and comes straight here.
+                    // Each layer is asked only if the one before left the node
+                    // short: the seeds by name, then the same seeds at fixed
+                    // addresses, for when names cannot be resolved.
+                    for layer in [seeds, fixedSeeds] where SeedPolicy.needsSeeds(peers: connected.count) {
+                        for endpoint in layer.shuffled() where !connected.contains(endpoint.publicKey) {
+                            do {
+                                try await ivy.connect(to: endpoint)
+                                connected.insert(endpoint.publicKey)
+                                await peerMemory.reached(endpoint, now: now)
+                            } catch {}
+                        }
+                    }
+                    let open = Set((await ivy.connectedPeers).map(\.publicKey))
+                    await peerMemory.stillOpen(open, now: now)
+                    // Still short of peers (a seed that was down, no network
+                    // yet): nothing else will look again before the next
+                    // interval, so this pass asks for another soon. The
+                    // overlay no longer redials the seeds itself.
+                    if !seeds.isEmpty, SeedPolicy.needsSeeds(peers: open.count) {
+                        inputs.yield(.maintenanceFinished)
+                        guard await Timers.sleep(nanoseconds: UInt64(SeedPolicy.retryInterval) * 1_000_000) else { return }
+                        inputs.yield(.maintenance)
+                        return
                     }
                 }
                 inputs.yield(.maintenanceFinished)
@@ -760,6 +841,17 @@ extension NodeRuntime {
                 guard let session = sessions[key],
                       !(await ivy.connectedPeers).contains(session.peer.id) else { return true }
                 sessions[key] = nil
+                // Nothing redials a seed or a remembered peer but a
+                // maintenance pass. Left with too few peers, the node looks
+                // again now, not at the next interval: at most once per
+                // `SeedPolicy.retryInterval`, so a peer that keeps dropping
+                // cannot make it spin.
+                let now = NodeRuntime.now()
+                if !configuration.seedPeers.isEmpty, SeedPolicy.needsSeeds(peers: sessions.count),
+                   now - lastUrgentMaintenanceAt >= SeedPolicy.retryInterval {
+                    lastUrgentMaintenanceAt = now
+                    inputs.yield(.maintenance)
+                }
                 if session.ready { return await step(.peerGone(session.coreID)) }
             case .hello(let peer, let payload):
                 guard var session = sessions[peer.key.hex], session.peer.sessionID == peer.sessionID,

@@ -163,6 +163,31 @@ final class DefaultBootstrapPeersTests: XCTestCase {
             XCTAssertFalse(endpoint.host.isEmpty)
             XCTAssertNotEqual(endpoint.port, 0)
         }
+        // The seeds are the project's own names, seed1 onward: a host can
+        // move provider with a DNS change, and no release names a provider.
+        XCTAssertEqual(
+            DefaultBootstrapPeers.nexus.map(\.host),
+            (1...DefaultBootstrapPeers.nexus.count).map { "seed\($0).lattice.build" }
+        )
+    }
+
+    /// The fixed addresses are the named seeds again, for when names cannot be
+    /// resolved: the same identities and ports, each at a literal IPv4
+    /// address, so that dialling one needs no lookup at all.
+    func testFixedSeedsAreTheNamedSeedsAtLiteralAddresses() {
+        XCTAssertEqual(
+            DefaultBootstrapPeers.nexusFixed.map(\.publicKey),
+            DefaultBootstrapPeers.nexus.map(\.publicKey)
+        )
+        XCTAssertEqual(DefaultBootstrapPeers.nexusFixed.map(\.port), DefaultBootstrapPeers.nexus.map(\.port))
+        for endpoint in DefaultBootstrapPeers.nexusFixed {
+            let octets = endpoint.host.split(separator: ".", omittingEmptySubsequences: false)
+            XCTAssertTrue(
+                octets.count == 4 && octets.allSatisfy { UInt8($0) != nil },
+                "\(endpoint.host) is not a literal IPv4 address"
+            )
+        }
+        XCTAssertEqual(Set(DefaultBootstrapPeers.nexusFixed.map(\.host)).count, DefaultBootstrapPeers.nexusFixed.count)
     }
 
     /// The shipped defaults and the deployed peer list are ONE constant living

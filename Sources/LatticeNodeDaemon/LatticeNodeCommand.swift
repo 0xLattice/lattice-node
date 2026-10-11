@@ -136,10 +136,15 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                 "\(DefaultBootstrapPeers.forbidEnvironmentKey)=1: pass --peer or --no-default-peers"
             )
         }
-        let overlayPeers = DefaultBootstrapPeers.resolved(
-            chainPath: address.components,
-            configured: configuredPeers
-        )
+        // The operator's own peers are configured: dialled from the start and
+        // kept. With none configured, the built-in peers are seeds: tried
+        // only while the node has too few peers after the ones it remembers.
+        let seedPeers = configuredPeers == nil
+            ? DefaultBootstrapPeers.resolved(chainPath: address.components, configured: nil)
+            : []
+        // Behind the seeds by name, the same seeds at fixed addresses.
+        let fixedSeedPeers = seedPeers.isEmpty ? [] : DefaultBootstrapPeers.nexusFixed
+        let overlayPeers = configuredPeers ?? []
 
         // Each spec file read once: the paths and specs agree.
         let hosted = try hostedChains()
@@ -150,6 +155,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             listenPort: listenPort,
             rpcPort: rpcPort,
             bootstrapPeers: overlayPeers,
+            seedPeers: seedPeers,
+            fixedSeedPeers: fixedSeedPeers,
             minPeerKeyBits: minimumPeerKeyBits,
             overlayMaxConnectionsPerNetgroup: overlayMaxConnectionsPerNetgroup,
             contentServing: ContentServingLimits(
