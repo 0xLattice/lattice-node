@@ -85,6 +85,9 @@ public final class NodeRuntime: Sendable {
     private let maintenance: Task<Void, Never>
     /// Read URLs other hosts declare, found through their provider records.
     let readEndpoints: ReadEndpointDirectory
+    /// The peers remembered across restarts; nil for a node told to connect
+    /// to no one, which neither remembers nor redials anyone.
+    let peerMemory: PeerMemory?
 
     /// How many overlay messages may wait for the loop before a delivering
     /// connection is held back.
@@ -141,6 +144,7 @@ public final class NodeRuntime: Sendable {
             storage: storage,
             configuration: configuration,
             ivy: Ivy(config: overlay),
+            overlayPeers: overlay.bootstrapPeers,
             helloTimeout: overlay.requestTimeout,
             workers: workers,
             // A store that cannot read its proofs fails the boot: it would
@@ -222,6 +226,7 @@ public final class NodeRuntime: Sendable {
         storage: NodeStorage,
         configuration: NodeConfiguration,
         ivy: Ivy,
+        overlayPeers: [PeerEndpoint],
         helloTimeout: Duration,
         workers: Int,
         proofs: SavedChildProofs,
@@ -260,6 +265,14 @@ public final class NodeRuntime: Sendable {
             ownKey: configuration.processPublicKey
         )
         self.readEndpoints = readEndpoints
+        // The overlay's own list is what is actually dialled. Empty, the
+        // operator chose an isolated node: it keeps no memory of peers either.
+        let peerMemory: PeerMemory? = overlayPeers.isEmpty ? nil : PeerMemory(
+            directory: configuration.storagePath,
+            excluding: Set([configuration.processPublicKey] + overlayPeers.map(\.publicKey)),
+            now: Self.now()
+        )
+        self.peerMemory = peerMemory
         delegate = NodeRuntimeIvyDelegate(
             gate: gate,
             hosted: Set([configuration.chainPath] + configuration.hostedChildren),
@@ -294,11 +307,15 @@ public final class NodeRuntime: Sendable {
             remote: remote,
             proofs: proofs,
             workers: max(1, workers),
-            failStop: failStop
+            failStop: failStop,
+            peerMemory: peerMemory
         )
         loop = Task {
             var state = initial
             state.refreshView()
+            // A node that remembers peers dials them as it starts, not at the
+            // first maintenance interval.
+            if await peerMemory?.isEmpty == false { inputs.yield(.maintenance) }
             // After the loop ends, inputs are only drained until the stream
             // finishes, so no RPC waits forever.
             var running = true
@@ -351,6 +368,11 @@ public final class NodeRuntime: Sendable {
     static func now() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1_000)
     }
+
+    /// Below this many peers, a maintenance pass dials remembered ones.
+    static let rememberedPeerTarget = 8
+    /// The most remembered peers one maintenance pass dials.
+    static let rememberedPeerDials = 4
 }
 
 extension NodeRuntime {
@@ -370,6 +392,7 @@ extension NodeRuntime {
         let remote: IvyRootContentSource
         let workers: Int
         let failStop: @Sendable (any Error) -> Void
+        let peerMemory: PeerMemory?
         /// Each child level's verified proofs, by block and root: what
         /// `lookupProofs` answers and a served child header carries.
         var proofs: SavedChildProofs = [:]
@@ -471,8 +494,10 @@ extension NodeRuntime {
             remote: IvyRootContentSource,
             proofs: SavedChildProofs,
             workers: Int,
-            failStop: @escaping @Sendable (any Error) -> Void
+            failStop: @escaping @Sendable (any Error) -> Void,
+            peerMemory: PeerMemory?
         ) {
+            self.peerMemory = peerMemory
             self.proofs = proofs
             self.gate = gate
             self.helloTimeout = helloTimeout
@@ -608,6 +633,7 @@ extension NodeRuntime {
             let (ivy, inputs, bootstrap, ownKey, capabilities) = (
                 ivy, inputs, configuration.bootstrapPeers, configuration.processPublicKey, remote.peerCapabilities
             )
+            let peerMemory = peerMemory
             spawn {
                 for key in announced {
                     await ivy.announceProvider(rootCID: key, expiresAt: expiry)
@@ -635,6 +661,31 @@ extension NodeRuntime {
                             connected.insert(endpoint.publicKey)
                         } catch {}
                     }
+                }
+                // The network as this node last knew it. With few peers
+                // (always, just after a start) it dials some it remembers, so
+                // it rejoins without leaning on its bootstrap peers, or when
+                // none of them answers. Then it records who it holds a
+                // session with now, at the address the overlay accepted.
+                if let peerMemory {
+                    if connected.count < NodeRuntime.rememberedPeerTarget {
+                        let remembered = await peerMemory.candidates(
+                            excluding: connected, count: NodeRuntime.rememberedPeerDials
+                        )
+                        for endpoint in remembered {
+                            do {
+                                try await ivy.connect(to: endpoint)
+                                connected.insert(endpoint.publicKey)
+                            } catch {
+                                await peerMemory.failed(endpoint.publicKey)
+                            }
+                        }
+                    }
+                    let open = Set((await ivy.connectedPeers).map(\.publicKey))
+                    await peerMemory.saw(
+                        (await ivy.knownPeerEndpoints).filter { open.contains($0.publicKey) },
+                        now: now
+                    )
                 }
                 inputs.yield(.maintenanceFinished)
             }

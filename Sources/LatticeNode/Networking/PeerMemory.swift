@@ -1,0 +1,207 @@
+import Foundation
+import Ivy
+
+/// The peers this node has held an authenticated session with, kept across
+/// restarts so that a node which has been on the network finds it again
+/// without its bootstrap peers.
+///
+/// The bootstrap list (built in, or the operator's) is how a node meets the
+/// network the first time. Without this it is also how the node meets it
+/// every time, because the overlay's routing table lives in memory: every
+/// restart of every node leans on the same few hosts, and a node whose
+/// bootstrap peers are all unreachable is cut off however long it had run.
+///
+/// What is remembered is deliberately narrow:
+///
+/// - Only peers a session was actually held with, at the address the overlay
+///   accepted for them (the one dialled, or the listen address the peer
+///   advertised and the overlay admitted). Never an address merely heard
+///   about: a peer cannot plant third parties in the book by gossip.
+/// - One address per identity, so an identity cannot fill the book.
+/// - A bounded number, a bounded number per network group, and none older
+///   than the horizon, so the book cannot grow without limit or be filled
+///   from one network.
+///
+/// A remembered peer gets nothing a stranger does not. It is dialled like any
+/// discovered peer, accepted only by its key, subject to the overlay's own
+/// admission limits, and never treated as configured: it is not redialled
+/// forever and holds no connection slot by right. Nothing here is consensus.
+struct PeerBook: Equatable, Sendable {
+    struct Entry: Codable, Equatable, Sendable {
+        var publicKey: String
+        var host: String
+        var port: UInt16
+        /// When a session with this peer was last seen open, Unix milliseconds.
+        var lastSeen: Int64
+        /// Dials that failed since then.
+        var failures: Int
+
+        var endpoint: PeerEndpoint { PeerEndpoint(publicKey: publicKey, host: host, port: port) }
+    }
+
+    /// The most peers remembered.
+    static let capacity = 256
+    /// The most remembered from one network group, so one network cannot
+    /// become the node's whole memory.
+    static let capacityPerGroup = 8
+    /// A peer not seen for this long is forgotten: its address is stale.
+    static let horizon: Int64 = 30 * 24 * 60 * 60 * 1_000
+    /// A peer that refused this many dials in a row since it was last seen is
+    /// forgotten.
+    static let maxFailures = 10
+
+    private(set) var entries: [String: Entry] = [:]
+
+    init(entries: [Entry] = []) {
+        for entry in entries where Self.acceptable(entry) { self.entries[entry.publicKey] = entry }
+    }
+
+    /// Record that sessions are open with `endpoints` at `now`. `excluded`
+    /// are identities never remembered: this node's own and its configured
+    /// peers, which it dials anyway.
+    mutating func saw(_ endpoints: [PeerEndpoint], excluding excluded: Set<String>, now: Int64) {
+        for endpoint in endpoints where !excluded.contains(endpoint.publicKey) {
+            let entry = Entry(
+                publicKey: endpoint.publicKey, host: endpoint.host, port: endpoint.port,
+                lastSeen: now, failures: 0
+            )
+            guard Self.acceptable(entry) else { continue }
+            entries[endpoint.publicKey] = entry
+        }
+        prune(now: now)
+    }
+
+    /// Record that a dial to `publicKey` failed.
+    mutating func failed(_ publicKey: String) {
+        guard var entry = entries[publicKey] else { return }
+        entry.failures += 1
+        entries[publicKey] = entry.failures >= Self.maxFailures ? nil : entry
+    }
+
+    /// Drop what is stale, then what exceeds a group's share, then the
+    /// oldest beyond capacity. Within a limit the most recently seen stay.
+    mutating func prune(now: Int64) {
+        entries = entries.filter { now - $0.value.lastSeen <= Self.horizon }
+        let newestFirst = entries.values.sorted {
+            ($0.lastSeen, $0.publicKey) > ($1.lastSeen, $1.publicKey)
+        }
+        var kept: [String: Entry] = [:]
+        var perGroup: [String: Int] = [:]
+        for entry in newestFirst where kept.count < Self.capacity {
+            let group = Self.group(entry.host)
+            guard perGroup[group, default: 0] < Self.capacityPerGroup else { continue }
+            perGroup[group, default: 0] += 1
+            kept[entry.publicKey] = entry
+        }
+        entries = kept
+    }
+
+    /// Up to `count` remembered peers to dial, none of them `connected`. A
+    /// random draw, so that no peer chooses the order it is tried in.
+    func candidates(
+        excluding connected: Set<String>, count: Int,
+        using generator: inout some RandomNumberGenerator
+    ) -> [PeerEndpoint] {
+        entries.values
+            .filter { !connected.contains($0.publicKey) }
+            .sorted { $0.publicKey < $1.publicKey }
+            .shuffled(using: &generator)
+            .prefix(max(0, count))
+            .map(\.endpoint)
+    }
+
+    /// The network group of a host: an IPv4 address's /16, as the overlay's
+    /// own connection limit groups them; any other host is its own group.
+    static func group(_ host: String) -> String {
+        let octets = host.split(separator: ".", omittingEmptySubsequences: false)
+        if octets.count == 4, octets.allSatisfy({ UInt8($0) != nil }) {
+            return "\(octets[0]).\(octets[1])"
+        }
+        return host.lowercased()
+    }
+
+    /// Whether an entry could be dialled at all: a well-formed identity, a
+    /// plausible host, a port.
+    static func acceptable(_ entry: Entry) -> Bool {
+        (try? PeerKey(entry.publicKey)) != nil
+            && entry.port != 0
+            && !entry.host.isEmpty && entry.host.utf8.count <= 253
+            && entry.host != "unknown"
+            && entry.host.unicodeScalars.allSatisfy { $0.isASCII && $0.value > 0x20 && $0.value != 0x7F }
+            && entry.failures >= 0 && entry.failures < maxFailures
+    }
+}
+
+/// The peer book and the file it is kept in, beside the node's store. The
+/// file is advisory: absent, unreadable or malformed, it is an empty book,
+/// never a reason not to start.
+actor PeerMemory {
+    static let fileName = "peers.json"
+    /// A file larger than this is not this node's doing, and is not read.
+    static let maxFileBytes = 256 * 1024
+
+    private struct File: Codable {
+        var version: Int
+        var peers: [PeerBook.Entry]
+    }
+
+    private let file: URL
+    private let excluded: Set<String>
+    private var book: PeerBook
+    private var written: PeerBook
+
+    /// `excluded`: identities never remembered (this node's own key and its
+    /// configured peers).
+    init(directory: URL, excluding excluded: Set<String>, now: Int64) {
+        file = directory.appendingPathComponent(Self.fileName)
+        self.excluded = excluded
+        var loaded = Self.load(file)
+        loaded.prune(now: now)
+        book = loaded
+        written = loaded
+    }
+
+    var isEmpty: Bool { book.entries.isEmpty }
+    var remembered: [PeerEndpoint] { book.entries.values.map(\.endpoint) }
+
+    /// Remembered peers to dial, none of them `connected` or excluded.
+    func candidates(excluding connected: Set<String>, count: Int) -> [PeerEndpoint] {
+        var generator = SystemRandomNumberGenerator()
+        return book.candidates(excluding: connected.union(excluded), count: count, using: &generator)
+    }
+
+    func failed(_ publicKey: String) {
+        book.failed(publicKey)
+    }
+
+    /// Record the open sessions and write the book if it changed.
+    func saw(_ endpoints: [PeerEndpoint], now: Int64) {
+        book.saw(endpoints, excluding: excluded, now: now)
+        save()
+    }
+
+    private func save() {
+        guard book != written else { return }
+        let peers = book.entries.values.sorted { $0.publicKey < $1.publicKey }
+        guard let data = try? JSONEncoder().encode(File(version: 1, peers: peers)) else { return }
+        do {
+            try data.write(to: file, options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+            written = book
+        } catch {
+            // Advisory: a book that cannot be written is rebuilt from the
+            // network next time. The node does not stop for it.
+        }
+    }
+
+    static func load(_ file: URL) -> PeerBook {
+        guard let size = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.size] as? Int,
+              size <= maxFileBytes,
+              let data = try? Data(contentsOf: file),
+              let decoded = try? JSONDecoder().decode(File.self, from: data),
+              decoded.version == 1 else {
+            return PeerBook()
+        }
+        return PeerBook(entries: Array(decoded.peers.prefix(PeerBook.capacity * 4)))
+    }
+}

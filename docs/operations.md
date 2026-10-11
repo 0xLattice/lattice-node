@@ -30,6 +30,23 @@ Before exposing a node:
 9. Reserve enough disk for unbounded fact history and retained content.
 10. Test a clean shutdown, restart, and recovery before accepting traffic.
 
+## Remembered peers
+
+A node keeps the peers it has held a session with in `peers.json`, in its
+data directory beside the store, and dials some of them when it starts or
+runs short of peers. A node that has been on the network therefore finds it
+again without its bootstrap peers, and when none of them answers.
+
+- Only peers a session was actually held with are kept, one address per
+  identity, at most 256, at most 8 per network group, none unseen for 30 days,
+  and none that refused ten dials in a row.
+- A remembered peer is dialled like any discovered peer and accepted only by
+  its key. It is never treated as configured.
+- Configured peers and the node's own identity are not written to it.
+- A node started with no peers (`"peers": []`) neither reads nor writes it.
+- The file is advisory. Deleting it costs nothing but the next start's head
+  start; a damaged one is ignored.
+
 ## Process lifecycle
 
 ```bash
