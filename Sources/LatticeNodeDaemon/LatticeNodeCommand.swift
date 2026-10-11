@@ -675,6 +675,25 @@ private func addPublicReadRoutes<Context: RequestContext>(
             context: context
         )
     }
+    router.get("api/deposit-state") { request, context in
+        let service = try byPath(request)
+        guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
+            throw HTTPError(.notFound)
+        }
+        guard let key = request.uri.queryParameters["key"].map(String.init),
+              DepositKey(key) != nil else {
+            throw HTTPError(.badRequest)
+        }
+        guard let state = try await service.explorerDepositState(key: key) else {
+            throw HTTPError(.notFound)
+        }
+        return try jsonCached(
+            state,
+            cacheControl: statusCacheControl,
+            request: request,
+            context: context
+        )
+    }
     router.get("api/receipt-state") { request, context in
         guard let demander = request.uri.queryParameters["demander"].map(String.init),
               isPlausibleCID(demander),
