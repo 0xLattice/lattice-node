@@ -122,12 +122,15 @@ enum BootRecovery {
         let staged = try await stores.store.stagedImports()
         try await stores.store.auditNormalizedIndexes()
         let roots = Set(staged.flatMap(\.volumeRoots)).union(constantRoots).sorted()
-        for root in roots {
-            guard await stores.broker.fetchVolumeLocal(root: root) != nil else {
-                throw NodeStorageError.missingMaterializedVolume(root)
-            }
+        // Presence only, and the broker checks it as it retains each root:
+        // every read of a stored Volume validates its content against its
+        // CID, so hashing the whole store here would repeat that on each
+        // boot, before the node can listen.
+        do {
+            try await stores.broker.advanceRetainedRoots(scope: stores.retentionScope, roots: roots)
+        } catch BrokerError.missingRetainedRoot(let root) {
+            throw NodeStorageError.missingMaterializedVolume(root)
         }
-        try await stores.broker.advanceRetainedRoots(scope: stores.retentionScope, roots: roots)
     }
 
     /// Stage 6: the durable mempool's pins rebuilt, the live pool's cleared.
