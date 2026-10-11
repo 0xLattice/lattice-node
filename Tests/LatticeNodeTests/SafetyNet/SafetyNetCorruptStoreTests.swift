@@ -22,6 +22,8 @@ import XCTest
 /// - Semantic damage the row layer cannot see (undecodable batches, facts
 ///   that disagree with their batch): refused with `NodeStoreError.corrupt`.
 /// - accepted_blocks.leaf disagreeing with the parent links: repaired at boot.
+/// - A Volume a fact names gone from volumes.db: refused with
+///   `NodeStorageError.missingMaterializedVolume`.
 ///
 /// No damage crashes the storage.
 final class SafetyNetCorruptStoreTests: XCTestCase {
@@ -127,6 +129,21 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         try await assertBoot(Self.refusedAsWipeRequired, observes: .wipeRequired)
     }
 
+    /// A fact whose content is gone from `volumes.db` is refused. Boot asks
+    /// only whether each Volume is present: its bytes are checked against
+    /// its CID when they are read.
+    func testBootRefusesMissingVolumeWithMissingMaterializedVolume() async throws {
+        let fixture = try await buildFixture()
+        let root = try damagedCopy(
+            of: fixture, database: "volumes.db",
+            // Members before manifests, so the store stays self-consistent
+            // and only the facts' references dangle.
+            applying: ["DELETE FROM volume_entries", "DELETE FROM volume_metadata"]
+        )
+        let observed = await observeBoot(at: root)
+        XCTAssertEqual(observed, .missingMaterializedVolume)
+    }
+
     /// A leaf flag that disagrees with the parent links is a derived index
     /// and is REPAIRED at boot, not refused.
     func testBootRepairsDisagreeingLeafFlag() async throws {
@@ -224,10 +241,12 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         return root
     }
 
-    private func damagedCopy(of fixture: URL, applying sql: [String]) throws -> URL {
+    private func damagedCopy(
+        of fixture: URL, database name: String = "state.db", applying sql: [String]
+    ) throws -> URL {
         let copy = temporaryDirectory()
         try FileManager.default.copyItem(at: fixture, to: copy)
-        let database = try NodeSQLite(path: copy.appendingPathComponent("state.db").path)
+        let database = try NodeSQLite(path: copy.appendingPathComponent(name).path)
         for statement in sql {
             let changed = try database.execute(statement)
             XCTAssertGreaterThan(
