@@ -23,6 +23,10 @@ Configuration (environment):
                 "Nexus=bafy...,Nexus/Payments=bafy..."; default none
                 (every chain burns its reward and fees)
   LOG_FILE      default /var/log/lattice-mining.log
+  ROUND_TIMEOUT_SECONDS  the longest one round may take, default 600; a
+                         round still running then (a coordinator waiting on
+                         a call that never returns) is killed, with its
+                         workers, and the next one starts
   CARRIER_PACE_SECONDS  optional sleep after a carrier round, default 0
                         (an operator damper; the retarget finds the
                         ~target-block-time equilibrium on its own)
@@ -59,6 +63,7 @@ RECIPIENTS = [
     for entry in os.environ.get("RECIPIENTS", "").split(",")
     if entry.strip()
 ]
+ROUND_TIMEOUT_SECONDS = float(os.environ.get("ROUND_TIMEOUT_SECONDS", "600"))
 CARRIER_PACE_SECONDS = float(os.environ.get("CARRIER_PACE_SECONDS", "0"))
 LOG_FILE = os.environ.get("LOG_FILE", "/var/log/lattice-mining.log")
 
@@ -70,6 +75,29 @@ def log(message):
     LOG.write(time.strftime("%FT%T") + " " + message + "\n")
 
 
+def round_once(arguments):
+    """One coordinator round: (exit status, stdout, stderr), or None for a
+    round that outlived ROUND_TIMEOUT_SECONDS and was killed. The round runs
+    in its own process group so its workers die with it."""
+    child = subprocess.Popen(
+        arguments,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        out, err = child.communicate(timeout=ROUND_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.communicate()
+        return None
+    return child.returncode, out, err
+
+
 def main():
     recipient_args = []
     for entry in RECIPIENTS:
@@ -77,7 +105,7 @@ def main():
     log("supervisor start; recipients: %s"
         % (", ".join(RECIPIENTS) or "none (rewards and fees burn)"))
     while True:
-        run = subprocess.run(
+        run = round_once(
             [
                 COORDINATOR,
                 "--node", NODE_URL,
@@ -86,18 +114,20 @@ def main():
                 "--workers", WORKERS,
                 "--batch-size", BATCH_SIZE,
                 "--once",
-            ] + recipient_args,
-            capture_output=True,
-            text=True,
+            ] + recipient_args
         )
+        if run is None:
+            log("round: timedOut after %gs; killed" % ROUND_TIMEOUT_SECONDS)
+            continue
+        status, out, err = run
         result = {}
-        for line in reversed((run.stdout or "").strip().splitlines()):
+        for line in reversed((out or "").strip().splitlines()):
             try:
                 result = json.loads(line)
                 break
             except Exception:
                 continue
-        kind = result.get("result", "exit=%d" % run.returncode)
+        kind = result.get("result", "exit=%d" % status)
         log("round: %s %s" % (kind, result.get("disposition")))
         if kind == "submitted" and result.get("accepted"):
             log("accepted tip=%s" % str(result.get("tipCID", ""))[:24])
@@ -118,7 +148,7 @@ def main():
             continue
         if kind in ("workerFailed", "nodeFailed") or kind.startswith("exit="):
             log("retrying after %s (stderr: %s)"
-                % (kind, (run.stderr or "")[-200:]))
+                % (kind, (err or "")[-200:]))
         time.sleep(5)
 
 
