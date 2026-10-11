@@ -290,8 +290,24 @@ final class MergedMiningTests: XCTestCase {
         let spentVerified = await LightClientProtocol.verify(spentPage.proof)
         XCTAssertTrue(spentVerified)
         XCTAssertEqual(spentPage.proof.claims.first?.value, "0")
-        let activeResult = try await alphaReads.explorerDeposits(limit: 1, after: afterSpent)
-        let activePage = try XCTUnwrap(activeResult)
+        // `mineBlock` returns once Nexus has the block; the Alpha block it
+        // carries is imported after. A loop that mines again before then
+        // builds a sibling on Alpha's old tip, and Alpha's fork choice may
+        // swap its tip for that sibling just after the loop ends. A page read
+        // across the swap names no creating blocks (the chain moved under its
+        // search), so the page is read until it is placed. Nothing more is
+        // mined meanwhile, so the swap is the last change and this ends.
+        func placedDeposits(limit: Int, after: String?) async throws -> ExplorerDepositsPage {
+            var placed: ExplorerDepositsPage?
+            try await eventually("Alpha places every listed deposit") {
+                guard let page = try await alphaReads.explorerDeposits(limit: limit, after: after),
+                      page.deposits.allSatisfy({ $0.blockHeight != nil && $0.blockHash != nil }) else { return false }
+                placed = page
+                return true
+            }
+            return try XCTUnwrap(placed)
+        }
+        let activePage = try await placedDeposits(limit: 1, after: afterSpent)
         XCTAssertEqual(activePage.deposits.count, 1)
         XCTAssertEqual(activePage.deposits.first?.nonce, "2")
         XCTAssertEqual(activePage.deposits.first?.amountDemanded, 4)
@@ -316,13 +332,24 @@ final class MergedMiningTests: XCTestCase {
             receiptActions: [], withdrawalActions: [],
             signers: [demanderAddress], nonce: 2, chainPath: Self.alpha
         )), on: alphaReads, "Alpha confirms a third deposit")
-        let bothResult = try await alphaReads.explorerDeposits(limit: 10, after: nil)
-        let bothPage = try XCTUnwrap(bothResult)
+        // The third deposit is in Alpha's tip block, the one a sibling can
+        // replace: either sibling carries it (both were built while it was
+        // pooled) at the same height, under a different hash. The page and
+        // the transaction are two reads, so they are taken until they name
+        // the same block, which they do for good once the tip is still.
+        var bothRead: (page: ExplorerDepositsPage, third: ExplorerTransaction)?
+        try await eventually("the page and the transaction name the third deposit's block alike") {
+            let page = try await placedDeposits(limit: 10, after: nil)
+            guard let third = await alphaReads.explorerTransaction(cid: thirdDepositCID), third.blockHash != nil,
+                  page.deposits.last?.blockHash == third.blockHash else { return false }
+            bothRead = (page, third)
+            return true
+        }
+        let (bothPage, thirdTransaction) = try XCTUnwrap(bothRead)
         XCTAssertEqual(bothPage.deposits.map(\.nonce), ["2", "3"])
-        let thirdTransaction = await alphaReads.explorerTransaction(cid: thirdDepositCID)
-        let thirdCreatedAt = try XCTUnwrap(thirdTransaction?.blockHeight)
+        let thirdCreatedAt = try XCTUnwrap(thirdTransaction.blockHeight)
         XCTAssertEqual(bothPage.deposits.map(\.blockHeight), [createdAt, thirdCreatedAt])
-        XCTAssertEqual(bothPage.deposits.map(\.blockHash), [depositTransaction?.blockHash, thirdTransaction?.blockHash])
+        XCTAssertEqual(bothPage.deposits.map(\.blockHash), [depositTransaction?.blockHash, thirdTransaction.blockHash])
         XCTAssertGreaterThan(thirdCreatedAt, createdAt)
         let bothVerified = await LightClientProtocol.verify(bothPage.proof)
         XCTAssertTrue(bothVerified)
