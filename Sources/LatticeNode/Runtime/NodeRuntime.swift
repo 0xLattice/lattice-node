@@ -174,6 +174,8 @@ public final class NodeRuntime: Sendable {
             await runtime.stop()
             throw error
         }
+        // The first maintenance pass, once the overlay is up: where a node
+        // dials the peers it remembers.
         runtime.inputs.yield(.maintenance)
         return runtime
     }
@@ -313,9 +315,6 @@ public final class NodeRuntime: Sendable {
         loop = Task {
             var state = initial
             state.refreshView()
-            // A node that remembers peers dials them as it starts, not at the
-            // first maintenance interval.
-            if await peerMemory?.isEmpty == false { inputs.yield(.maintenance) }
             // After the loop ends, inputs are only drained until the stream
             // finishes, so no RPC waits forever.
             var running = true
