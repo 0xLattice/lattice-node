@@ -163,6 +163,12 @@ final class DefaultBootstrapPeersTests: XCTestCase {
             XCTAssertFalse(endpoint.host.isEmpty)
             XCTAssertNotEqual(endpoint.port, 0)
         }
+        // The seeds are the project's own names, seed1 onward: a host can
+        // move provider with a DNS change, and no release names a provider.
+        XCTAssertEqual(
+            DefaultBootstrapPeers.nexus.map(\.host),
+            (1...DefaultBootstrapPeers.nexus.count).map { "seed\($0).lattice.build" }
+        )
     }
 
     /// The shipped defaults and the deployed peer list are ONE constant living

@@ -15,35 +15,41 @@ import Ivy
 /// temporary rather than permanent, and defaults need no reconnect machinery
 /// of their own.
 public enum DefaultBootstrapPeers {
-    /// The public Nexus overlay, as deployed. `deploy/read-replica/entrypoint.sh`
-    /// carries this COMPLETE set and is the drift anchor the tests check
-    /// against.
+    /// The public Nexus overlay's seeds: the project's own names, each pinned
+    /// to the identity of the host behind it.
     ///
-    /// Hostnames rather than IP literals, so a host that moves stays
-    /// reachable. The first three are the mainnet backbone and today resolve
-    /// into one 137.66.0.0/16 netgroup; the fourth is the public follower in a
-    /// different /16, so the set is neither a single host nor a single
-    /// netgroup. Wider address diversity is a deployment question — hosts off
-    /// this provider — not a code one.
+    /// Names under `lattice.build`, not a hosting provider's: `seedN` is a
+    /// DNS alias for whichever host serves that identity, so a host can move
+    /// provider or region with a DNS change and no release. A name alone
+    /// grants nothing: a seed is dialled by name and accepted by key, so
+    /// whoever answers at the name without the pinned key is refused.
+    ///
+    /// `deploy/read-replica/entrypoint.sh` carries this COMPLETE set and is
+    /// the drift anchor the tests check against.
+    ///
+    /// Today `seed1`-`seed3` are the mainnet backbone, in one 137.66.0.0/16
+    /// netgroup; `seed4` is the public follower in a different /16, so the set
+    /// is neither a single host nor a single netgroup. Wider address
+    /// diversity is a deployment question, not a code one.
     public static let nexus: [PeerEndpoint] = [
         PeerEndpoint(
             publicKey: "139b8f3639e7c515417c63bd3a652a5c6fd4a1a2d0baed8e33ea63047995fe64",
-            host: "lattice-mainnet-iad.fly.dev",
+            host: "seed1.lattice.build",
             port: 4001
         ),
         PeerEndpoint(
             publicKey: "35edf67bfe3d612aeb1f0e25da9d3f0ced44dbf79d34f00c548cf9005be6eb7d",
-            host: "lattice-mainnet-ams.fly.dev",
+            host: "seed2.lattice.build",
             port: 4001
         ),
         PeerEndpoint(
             publicKey: "9cace839489acb30385a9f20025cb9d6365283c81dce14cadab26507065acd4e",
-            host: "lattice-mainnet-sjc.fly.dev",
+            host: "seed3.lattice.build",
             port: 4001
         ),
         PeerEndpoint(
             publicKey: "57f80deb3b00da1b14b630638a4d0307be98126ec1d550476e4889087bb22d0f",
-            host: "lattice-mainnet-testnet.fly.dev",
+            host: "seed4.lattice.build",
             port: 4001
         ),
     ]
