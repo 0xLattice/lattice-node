@@ -50,9 +50,9 @@ key moved along with it; a different key behind the same name needs a release,
 because the key is what a node accepts. A name that does not resolve costs a
 fresh node that seed and nothing else: it keeps dialling the others.
 
-The deployed hosts list each other by their provider names
-(`deploy/read-replica/entrypoint.sh`), so they do not depend on these records
-to find their neighbours.
+The deployed hosts list each other by the same names
+(`deploy/read-replica/entrypoint.sh`), so a host that moves is found by
+everyone through one record.
 
 ## Process lifecycle
 

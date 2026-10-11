@@ -171,10 +171,8 @@ final class DefaultBootstrapPeersTests: XCTestCase {
         )
     }
 
-    /// The shipped defaults and the deployed peer list name the SAME
-    /// identities in two places, and nothing else ties them together. The
-    /// hosts differ on purpose: the binary ships the project's `seedN` names,
-    /// the deployment its provider's, so only identity and port are compared. Without this anchor
+    /// The shipped defaults and the deployed peer list are ONE constant living
+    /// in two places, and nothing else ties them together. Without this anchor
     /// a rotated backbone identity leaves every other test green while every
     /// fresh node silently loses that seed: it dials, the identity check
     /// fails, and it backs off forever with no log saying the default is wrong.
@@ -197,8 +195,7 @@ final class DefaultBootstrapPeersTests: XCTestCase {
             .appendingPathComponent("deploy/read-replica/entrypoint.sh")
         let script = try String(contentsOf: entrypoint, encoding: .utf8)
 
-        struct Identity: Hashable { let publicKey: String; let port: UInt16 }
-        var deployed: Set<Identity> = []
+        var deployed: Set<PeerEndpoint> = []
         let tokens = script.split(whereSeparator: \.isWhitespace).map(String.init)
         for (index, token) in tokens.enumerated() where token == "--peer" {
             guard index + 1 < tokens.count else { continue }
@@ -209,7 +206,11 @@ final class DefaultBootstrapPeersTests: XCTestCase {
             guard let colon = address.lastIndex(of: ":"),
                   let port = UInt16(address[address.index(after: colon)...])
             else { continue }
-            deployed.insert(Identity(publicKey: String(value[..<at]), port: port))
+            deployed.insert(PeerEndpoint(
+                publicKey: String(value[..<at]),
+                host: String(address[..<colon]),
+                port: port
+            ))
         }
 
         XCTAssertFalse(
@@ -218,11 +219,11 @@ final class DefaultBootstrapPeersTests: XCTestCase {
         )
         XCTAssertEqual(
             deployed,
-            Set(DefaultBootstrapPeers.nexus.map { Identity(publicKey: $0.publicKey, port: $0.port) }),
+            Set(DefaultBootstrapPeers.nexus),
             """
             DefaultBootstrapPeers.nexus and deploy/read-replica/entrypoint.sh \
-            have drifted. They name the same identities in two places: update \
-            BOTH so they agree. If a backbone identity rotated or a peer was added or \
+            have drifted. They are one constant in two places: update BOTH so \
+            they agree. If a backbone identity rotated or a peer was added or \
             removed from the deployment, make the same change in the other file.
             """
         )

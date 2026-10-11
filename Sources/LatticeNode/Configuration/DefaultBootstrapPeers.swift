@@ -24,10 +24,8 @@ public enum DefaultBootstrapPeers {
     /// grants nothing: a seed is dialled by name and accepted by key, so
     /// whoever answers at the name without the pinned key is refused.
     ///
-    /// `deploy/read-replica/entrypoint.sh` carries the same identities and
-    /// ports under the hosts' provider names (a deployed host does not depend
-    /// on the project's DNS to find its neighbours), and the tests check the
-    /// two against each other.
+    /// `deploy/read-replica/entrypoint.sh` carries this COMPLETE set and is
+    /// the drift anchor the tests check against.
     ///
     /// Today `seed1`-`seed3` are the mainnet backbone, in one 137.66.0.0/16
     /// netgroup; `seed4` is the public follower in a different /16, so the set
