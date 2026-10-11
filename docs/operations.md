@@ -30,43 +30,67 @@ Before exposing a node:
 9. Reserve enough disk for unbounded fact history and retained content.
 10. Test a clean shutdown, restart, and recovery before accepting traffic.
 
-## Seed names
+## How a node finds the network
 
-A node with no `peers` configured dials the built-in Nexus seeds,
-`seed1.lattice.build` to `seed4.lattice.build` on port 4001, each pinned to
-the identity of the host behind it. The names are DNS aliases the project
-keeps; the binary never names a hosting provider.
+A node with `peers` configured dials those peers from the start and keeps
+them, and that is all it is told. A node with none configured looks in three
+places, each only if the one before left it with fewer than two peers:
 
-| Name | Alias of | Identity (public key) |
-|---|---|---|
-| `seed1.lattice.build` | `lattice-mainnet-iad.fly.dev` | `139b8f36…7995fe64` |
-| `seed2.lattice.build` | `lattice-mainnet-ams.fly.dev` | `35edf67b…5be6eb7d` |
-| `seed3.lattice.build` | `lattice-mainnet-sjc.fly.dev` | `9cace839…065acd4e` |
-| `seed4.lattice.build` | `lattice-mainnet-testnet.fly.dev` | `57f80deb…7bb22d0f` |
+1. **The peers it remembers** (`peers.json`, below).
+2. **The seeds by name**, `seed1.lattice.build` to `seed4.lattice.build` on
+   port 4001.
+3. **The same seeds at fixed addresses**, for when names cannot be resolved.
 
-Each is a DNS-only `CNAME` (no HTTP proxy in front: the overlay is not HTTP).
-Moving a seed to another host is a change to its record, with the identity
-key moved along with it; a different key behind the same name needs a release,
-because the key is what a node accepts. A name that does not resolve costs a
-fresh node that seed and nothing else: it keeps dialling the others.
+A seed is an introduction, not a peer the node depends on. A node that
+already knows the network rejoins through what it remembers and does not ask
+a seed at all, so the seeds shape the network as little as possible and carry
+only the nodes that need them. Left with fewer than two peers at any time, the
+node looks again within seconds rather than at the next maintenance interval.
+
+### Seed names
+
+Each name is a DNS alias the project keeps, pinned to the identity of the host
+behind it; the binary never names a hosting provider.
+
+| Name | Alias of | Fixed address | Identity (public key) |
+|---|---|---|---|
+| `seed1.lattice.build` | `lattice-mainnet-iad.fly.dev` | `137.66.36.149` | `139b8f36…7995fe64` |
+| `seed2.lattice.build` | `lattice-mainnet-ams.fly.dev` | `137.66.14.188` | `35edf67b…5be6eb7d` |
+| `seed3.lattice.build` | `lattice-mainnet-sjc.fly.dev` | `137.66.16.78` | `9cace839…065acd4e` |
+| `seed4.lattice.build` | `lattice-mainnet-testnet.fly.dev` | `169.155.61.57` | `57f80deb…7bb22d0f` |
+
+Each record is a DNS-only `CNAME` (no HTTP proxy in front: the overlay is not
+HTTP). A seed is dialled by name or address and accepted by key, so whoever
+answers without the pinned key is refused.
+
+- Moving a seed to another host is a change to its record, with the identity
+  key moved along with it. No release is needed for nodes to follow.
+- The fixed address is each host's dedicated address at release time. It
+  cannot follow a host that moves, so it is refreshed with a release; a stale
+  one costs a failed dial and nothing else.
+- A different key behind a name needs a release, because the key is what a
+  node accepts.
 
 The deployed hosts list each other by the same names
 (`deploy/read-replica/entrypoint.sh`), so a host that moves is found by
 everyone through one record.
 
-## Remembered peers
+### Remembered peers
 
-A node keeps the peers it has held a session with in `peers.json`, in its
-data directory beside the store, and dials some of them when it starts or
-runs short of peers. A node that has been on the network therefore finds it
-again without its bootstrap peers, and when none of them answers.
+A node keeps the peers it has reached in `peers.json`, in its data directory
+beside the store, and dials some of them when it starts or runs short of
+peers.
 
-- Only peers a session was actually held with are kept, one address per
-  identity, at most 256, at most 8 per network group, none unseen for 30 days,
-  and none that refused ten dials in a row.
+- Only an address the node dialled itself and reached the peer at is kept.
+  Never one merely heard about, and never the address a peer advertises for
+  itself: that is a claim, and it is wrong for any host whose outbound address
+  is not the one it listens on.
+- One address per identity, at most 256, at most 8 per network group, none
+  unseen for 30 days, and none that refused ten dials in a row.
 - A remembered peer is dialled like any discovered peer and accepted only by
   its key. It is never treated as configured.
-- Configured peers and the node's own identity are not written to it.
+- Configured peers and the node's own identity are not written to it. A seed
+  the node reached is: it is a peer like any other.
 - A node started with no peers (`"peers": []`) neither reads nor writes it.
 - The file is advisory. Deleting it costs nothing but the next start's head
   start; a damaged one is ignored.

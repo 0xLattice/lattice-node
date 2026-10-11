@@ -57,7 +57,19 @@ public struct NodeConfiguration: Sendable {
     public let processPublicKey: String
     public let listenPort: UInt16
     public let rpcPort: UInt16
+    /// The operator's peers: dialled from the start and kept for the life of
+    /// the process.
     public let bootstrapPeers: [PeerEndpoint]
+    /// Introductions of last resort (the built-in seeds, when the operator
+    /// configured no peers): dialled only while the node has too few peers
+    /// after trying the ones it remembers. A node that already knows the
+    /// network does not touch them, so they shape it as little as possible
+    /// and carry only the nodes that need them.
+    public let seedPeers: [PeerEndpoint]
+    /// The seeds again at fixed addresses, behind them: dialled only while
+    /// the node still has too few peers after the seeds by name, so that it
+    /// can find the network when names cannot be resolved.
+    public let fixedSeedPeers: [PeerEndpoint]
     public let minPeerKeyBits: Int
     /// Per-netgroup inbound/outbound overlay connection cap. Ivy buckets peers by
     /// the connection's observed remote host (/16), an anti-eclipse defense that
@@ -126,6 +138,8 @@ public struct NodeConfiguration: Sendable {
         listenPort: UInt16 = 4001,
         rpcPort: UInt16 = 8080,
         bootstrapPeers: [PeerEndpoint] = [],
+        seedPeers: [PeerEndpoint] = [],
+        fixedSeedPeers: [PeerEndpoint] = [],
         minPeerKeyBits: Int = 0,
         overlayMaxConnectionsPerNetgroup: Int = IvyConfig.defaultMaxConnections,
         contentServing: ContentServingLimits = .default,
@@ -177,6 +191,8 @@ public struct NodeConfiguration: Sendable {
         self.listenPort = listenPort
         self.rpcPort = rpcPort
         self.bootstrapPeers = bootstrapPeers
+        self.seedPeers = seedPeers
+        self.fixedSeedPeers = fixedSeedPeers
         self.minPeerKeyBits = minPeerKeyBits
         self.overlayMaxConnectionsPerNetgroup = max(1, overlayMaxConnectionsPerNetgroup)
         self.contentServing = contentServing

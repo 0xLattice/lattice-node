@@ -171,6 +171,25 @@ final class DefaultBootstrapPeersTests: XCTestCase {
         )
     }
 
+    /// The fixed addresses are the named seeds again, for when names cannot be
+    /// resolved: the same identities and ports, each at a literal IPv4
+    /// address, so that dialling one needs no lookup at all.
+    func testFixedSeedsAreTheNamedSeedsAtLiteralAddresses() {
+        XCTAssertEqual(
+            DefaultBootstrapPeers.nexusFixed.map(\.publicKey),
+            DefaultBootstrapPeers.nexus.map(\.publicKey)
+        )
+        XCTAssertEqual(DefaultBootstrapPeers.nexusFixed.map(\.port), DefaultBootstrapPeers.nexus.map(\.port))
+        for endpoint in DefaultBootstrapPeers.nexusFixed {
+            let octets = endpoint.host.split(separator: ".", omittingEmptySubsequences: false)
+            XCTAssertTrue(
+                octets.count == 4 && octets.allSatisfy { UInt8($0) != nil },
+                "\(endpoint.host) is not a literal IPv4 address"
+            )
+        }
+        XCTAssertEqual(Set(DefaultBootstrapPeers.nexusFixed.map(\.host)).count, DefaultBootstrapPeers.nexusFixed.count)
+    }
+
     /// The shipped defaults and the deployed peer list are ONE constant living
     /// in two places, and nothing else ties them together. Without this anchor
     /// a rotated backbone identity leaves every other test green while every

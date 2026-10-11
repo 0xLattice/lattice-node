@@ -13,10 +13,12 @@ import Ivy
 ///
 /// What is remembered is deliberately narrow:
 ///
-/// - Only peers a session was actually held with, at the address the overlay
-///   accepted for them (the one dialled, or the listen address the peer
-///   advertised and the overlay admitted). Never an address merely heard
-///   about: a peer cannot plant third parties in the book by gossip.
+/// - Only an address this node dialled itself and reached the peer at. Never
+///   one merely heard about, so a peer cannot plant third parties in the
+///   book by gossip; and never the address a peer advertises for itself,
+///   which is a claim, and is wrong for any host whose outbound address is
+///   not the one it listens on. An address is in the book because a dial to
+///   it worked.
 /// - One address per identity, so an identity cannot fill the book.
 /// - A bounded number, a bounded number per network group, and none older
 ///   than the horizon, so the book cannot grow without limit or be filled
@@ -56,10 +58,10 @@ struct PeerBook: Equatable, Sendable {
         for entry in entries where Self.acceptable(entry) { self.entries[entry.publicKey] = entry }
     }
 
-    /// Record that sessions are open with `endpoints` at `now`. `excluded`
-    /// are identities never remembered: this node's own and its configured
-    /// peers, which it dials anyway.
-    mutating func saw(_ endpoints: [PeerEndpoint], excluding excluded: Set<String>, now: Int64) {
+    /// Record that a dial to each of `endpoints` reached its peer at `now`.
+    /// `excluded` are identities never remembered: this node's own and its
+    /// configured peers, which it dials anyway.
+    mutating func reached(_ endpoints: [PeerEndpoint], excluding excluded: Set<String>, now: Int64) {
         for endpoint in endpoints where !excluded.contains(endpoint.publicKey) {
             let entry = Entry(
                 publicKey: endpoint.publicKey, host: endpoint.host, port: endpoint.port,
@@ -67,6 +69,18 @@ struct PeerBook: Equatable, Sendable {
             )
             guard Self.acceptable(entry) else { continue }
             entries[endpoint.publicKey] = entry
+        }
+        prune(now: now)
+    }
+
+    /// Record that sessions with `publicKeys` are still open at `now`: a
+    /// remembered peer that is still here is not ageing.
+    mutating func stillOpen(_ publicKeys: Set<String>, now: Int64) {
+        for key in publicKeys {
+            guard var entry = entries[key] else { continue }
+            entry.lastSeen = now
+            entry.failures = 0
+            entries[key] = entry
         }
         prune(now: now)
     }
@@ -174,9 +188,14 @@ actor PeerMemory {
         book.failed(publicKey)
     }
 
-    /// Record the open sessions and write the book if it changed.
-    func saw(_ endpoints: [PeerEndpoint], now: Int64) {
-        book.saw(endpoints, excluding: excluded, now: now)
+    /// Record that a dial to `endpoint` reached its peer.
+    func reached(_ endpoint: PeerEndpoint, now: Int64) {
+        book.reached([endpoint], excluding: excluded, now: now)
+    }
+
+    /// Record which sessions are still open, and write the book if it changed.
+    func stillOpen(_ publicKeys: Set<String>, now: Int64) {
+        book.stillOpen(publicKeys, now: now)
         save()
     }
 
@@ -203,5 +222,21 @@ actor PeerMemory {
             return PeerBook()
         }
         return PeerBook(entries: Array(decoded.peers.prefix(PeerBook.capacity * 4)))
+    }
+}
+
+/// When the seeds are asked. A seed is an introduction, not a peer the node
+/// depends on: Bitcoin Core asks its seeds only "if address need is acute",
+/// below two outbound peers, so that seeds shape the network as little as
+/// possible and a node that knows the network stays off them.
+enum SeedPolicy {
+    /// With fewer peers than this, the node dials its seeds.
+    static let peersBeforeSeeds = 2
+    /// The least time, in milliseconds, between maintenance passes brought
+    /// forward by a lost session.
+    static let retryInterval: Int64 = 10_000
+
+    static func needsSeeds(peers: Int) -> Bool {
+        peers < peersBeforeSeeds
     }
 }
