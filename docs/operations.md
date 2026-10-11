@@ -30,6 +30,30 @@ Before exposing a node:
 9. Reserve enough disk for unbounded fact history and retained content.
 10. Test a clean shutdown, restart, and recovery before accepting traffic.
 
+## Seed names
+
+A node with no `peers` configured dials the built-in Nexus seeds,
+`seed1.lattice.build` to `seed4.lattice.build` on port 4001, each pinned to
+the identity of the host behind it. The names are DNS aliases the project
+keeps; the binary never names a hosting provider.
+
+| Name | Alias of | Identity (public key) |
+|---|---|---|
+| `seed1.lattice.build` | `lattice-mainnet-iad.fly.dev` | `139b8f36…7995fe64` |
+| `seed2.lattice.build` | `lattice-mainnet-ams.fly.dev` | `35edf67b…5be6eb7d` |
+| `seed3.lattice.build` | `lattice-mainnet-sjc.fly.dev` | `9cace839…065acd4e` |
+| `seed4.lattice.build` | `lattice-mainnet-testnet.fly.dev` | `57f80deb…7bb22d0f` |
+
+Each is a DNS-only `CNAME` (no HTTP proxy in front: the overlay is not HTTP).
+Moving a seed to another host is a change to its record, with the identity
+key moved along with it; a different key behind the same name needs a release,
+because the key is what a node accepts. A name that does not resolve costs a
+fresh node that seed and nothing else: it keeps dialling the others.
+
+The deployed hosts list each other by their provider names
+(`deploy/read-replica/entrypoint.sh`), so they do not depend on these records
+to find their neighbours.
+
 ## Process lifecycle
 
 ```bash
