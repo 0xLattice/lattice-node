@@ -175,18 +175,19 @@ final class MergedMiningTests: XCTestCase {
         func export(_ name: String, kind: UInt8, index: UInt8) -> [UInt8] {
             [UInt8(name.utf8.count)] + Array(name.utf8) + [kind, index]
         }
-        return Data(
-            [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]
-                // (i32) -> i32 and (i32, i32) -> i32
-                + section(1, [0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f])
-                + section(3, [0x02, 0x00, 0x01])
-                + section(5, [0x01, 0x00, 0x01])
-                + section(7, [0x03] + export("memory", kind: 2, index: 0)
-                    + export("lattice_alloc", kind: 0, index: 0)
-                    + export("lattice_validate_transaction", kind: 0, index: 1))
-                // lattice_alloc returns 1024; the entrypoint returns the verdict.
-                + section(10, [0x02, 0x05, 0x00, 0x41, 0x80, 0x08, 0x0b, 0x04, 0x00, 0x41, verdict, 0x0b])
-        )
+        var exports: [UInt8] = [0x03]
+        exports += export("memory", kind: 2, index: 0)
+        exports += export("lattice_alloc", kind: 0, index: 0)
+        exports += export("lattice_validate_transaction", kind: 0, index: 1)
+        var module: [UInt8] = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]
+        // (i32) -> i32 and (i32, i32) -> i32
+        module += section(1, [0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f])
+        module += section(3, [0x02, 0x00, 0x01])
+        module += section(5, [0x01, 0x00, 0x01])
+        module += section(7, exports)
+        // lattice_alloc returns 1024; the entrypoint returns the verdict.
+        module += section(10, [0x02, 0x05, 0x00, 0x41, 0x80, 0x08, 0x0b, 0x04, 0x00, 0x41, verdict, 0x0b])
+        return Data(module)
     }
 
     /// A node hosting Nexus and Alpha. With `module`, Alpha's spec names it
