@@ -272,8 +272,6 @@ final class BundledBlockFetchTests: XCTestCase {
 
         var bundleRequestCount: Int { lock.withLock { bundleRequests } }
 
-        func content(rootCID: String, cids: [String], maxDataBytes: Int) async -> [ContentEntry] { [] }
-
         func volume(rootCID: String, maxDataBytes: Int) async -> [ContentEntry] {
             if rootCID == "never" { try? await Task.sleep(for: .seconds(60)) }
             return await source.volume(rootCID: rootCID, maxDataBytes: maxDataBytes)

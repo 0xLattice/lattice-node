@@ -33,8 +33,8 @@ let package = Package(
             exact: "5.0.0"
         ),
         .package(
-            url: "https://github.com/adalinxx/Ivy.git",
-            exact: "15.1.0"
+            url: "https://github.com/adalinxx/Ivy2.git",
+            exact: "2.0.1"
         ),
         .package(
             url: "https://github.com/adalinxx/Tally.git",
@@ -85,7 +85,7 @@ let package = Package(
                 "LatticeLightClient",
                 "LatticeNodeCore",
                 .product(name: "Lattice", package: "lattice"),
-                .product(name: "Ivy", package: "Ivy"),
+                .product(name: "Ivy", package: "Ivy2"),
                 .product(name: "Tally", package: "Tally"),
                 .product(name: "VolumeBroker", package: "VolumeBroker"),
                 .product(name: "Crypto", package: "swift-crypto"),
@@ -98,7 +98,7 @@ let package = Package(
                 "LatticeNodeCore",
                 "LatticeCtlCore",
                 .product(name: "Lattice", package: "lattice"),
-                .product(name: "Ivy", package: "Ivy"),
+                .product(name: "Ivy", package: "Ivy2"),
                 .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Crypto", package: "swift-crypto"),
@@ -147,7 +147,7 @@ let package = Package(
                 "LatticeMinerCore",
                 "LatticeMiningCoordinator",
                 .product(name: "Lattice", package: "lattice"),
-                .product(name: "Ivy", package: "Ivy"),
+                .product(name: "Ivy", package: "Ivy2"),
                 .product(name: "VolumeBroker", package: "VolumeBroker"),
                 .product(name: "cashew", package: "cashew"),
                 .product(name: "Crypto", package: "swift-crypto"),
@@ -175,7 +175,7 @@ let package = Package(
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "LatticeBlockTree", package: "lattice"),
                 .product(name: "LatticeProofs", package: "lattice"),
-                .product(name: "Ivy", package: "Ivy"),
+                .product(name: "Ivy", package: "Ivy2"),
                 .product(name: "Tally", package: "Tally"),
                 .product(name: "VolumeBroker", package: "VolumeBroker"),
                 .product(name: "Crypto", package: "swift-crypto"),
@@ -203,7 +203,7 @@ let package = Package(
                 "LatticeMiningCoordinatorTool",
                 "LatticeMiner",
                 .product(name: "Lattice", package: "lattice"),
-                .product(name: "Ivy", package: "Ivy"),
+                .product(name: "Ivy", package: "Ivy2"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "cashew", package: "cashew"),
             ],

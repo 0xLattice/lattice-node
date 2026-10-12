@@ -107,20 +107,6 @@ struct VolumeSource: IvyContentSource, Sendable {
         self.value = value
     }
 
-    func content(
-        rootCID: String,
-        cids: [String],
-        maxDataBytes: Int
-    ) -> [ContentEntry] {
-        guard rootCID == value.root,
-              cids.allSatisfy({ value.entries[$0] != nil }),
-              cids.reduce(0, { $0 + value.entries[$1]!.count }) <= maxDataBytes
-        else { return [] }
-        return cids.map { cid in
-            ContentEntry(cid: cid, data: value.entries[cid]!)
-        }
-    }
-
     func volume(rootCID: String, maxDataBytes: Int) -> [ContentEntry] {
         guard rootCID == value.root,
               value.entries.values.reduce(0, { $0 + $1.count }) <= maxDataBytes
@@ -140,14 +126,6 @@ actor RecordingVolumesSource: IvyContentSource {
         self.values = Dictionary(
             uniqueKeysWithValues: values.map { ($0.root, $0) }
         )
-    }
-
-    func content(
-        rootCID: String,
-        cids: [String],
-        maxDataBytes: Int
-    ) -> [ContentEntry] {
-        []
     }
 
     func volume(
@@ -175,10 +153,6 @@ actor BlockingVolumeSource: IvyContentSource {
 
     init(value: SerializedVolume) {
         self.value = value
-    }
-
-    func content(rootCID: String, cids: [String], maxDataBytes: Int) -> [ContentEntry] {
-        []
     }
 
     func volume(rootCID: String, maxDataBytes: Int) async -> [ContentEntry] {

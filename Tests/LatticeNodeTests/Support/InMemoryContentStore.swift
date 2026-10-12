@@ -45,22 +45,6 @@ actor InMemoryContentStore: Fetcher, Storer, VolumeStorer, ContentSource, IvyCon
 
     // MARK: IvyContentSource
 
-    func content(
-        rootCID: String,
-        cids: [String],
-        maxDataBytes: Int
-    ) -> [ContentEntry] {
-        var total = 0
-        var served: [ContentEntry] = []
-        for cid in cids {
-            guard let data = entries[cid] else { return [] }
-            total += data.count
-            guard total <= maxDataBytes else { return [] }
-            served.append(ContentEntry(cid: cid, data: data))
-        }
-        return served
-    }
-
     func volume(rootCID: String, maxDataBytes: Int) -> [ContentEntry] {
         guard let volume = volumes[rootCID],
               volume.entries.values.reduce(0, { $0 + $1.count }) <= maxDataBytes
