@@ -234,20 +234,22 @@ final class PeerMemoryTests: XCTestCase {
         XCTAssertTrue(inAlpha.isEmpty)
     }
 
-    /// A peer in a chain's book that is connected and no longer serves that
-    /// chain leaves that book, and stays in the books of chains it serves.
-    func testAPeerThatStoppedHostingAChainLeavesThatChainsBook() async throws {
+    /// A peer that is connected and no longer serves a chain is not refreshed
+    /// in that chain's book, and ages out of it; it is never struck from it
+    /// for not saying so, since a peer on an older build says nothing.
+    func testAPeerThatStoppedHostingAChainAgesOutOfThatChainsBook() async throws {
         let (nexus, alpha) = (Self.nexus, Self.alpha)
         let memory = PeerMemory(directory: try scratch(), chains: [nexus, alpha], excluding: [], now: 1_000)
         await memory.reached(endpoint(1), chains: [nexus, alpha], now: 1_000)
         await memory.reached(endpoint(2), chains: [nexus, alpha], now: 1_000)
         // Peer 1 is open and serves only Nexus; peer 2 still serves Alpha.
-        for _ in 0..<(PeerBook.maxFailures - 1) {
+        for _ in 0..<(PeerBook.maxFailures * 2) {
             await memory.stillOpen(byChain: [nexus: [key(1), key(2)], alpha: [key(2)]], now: 2_000)
         }
         var inAlpha = await memory.remembered(for: alpha)
-        XCTAssertEqual(Set(inAlpha), [endpoint(1), endpoint(2)], "not on one pass: its claim may be late")
-        await memory.stillOpen(byChain: [nexus: [key(1), key(2)], alpha: [key(2)]], now: 2_000)
+        XCTAssertEqual(Set(inAlpha), [endpoint(1), endpoint(2)])
+        let later = 1_000 + PeerBook.horizon + 1
+        await memory.stillOpen(byChain: [nexus: [key(1), key(2)], alpha: [key(2)]], now: later)
         inAlpha = await memory.remembered(for: alpha)
         XCTAssertEqual(inAlpha, [endpoint(2)])
         let inNexus = await memory.remembered(for: nexus)

@@ -218,16 +218,14 @@ actor PeerMemory {
     }
 
     /// Record each chain's current peers: one a dial of this process reached
-    /// enters the chain's book, one already there is not ageing. A peer in
-    /// a chain's book whose open session does not serve that chain is
-    /// counted like a failed dial there, so a peer that stopped hosting a
-    /// chain leaves its book. Writes the books if they changed.
+    /// enters the chain's book, one already there is not ageing. A peer that
+    /// stopped hosting a chain is no longer refreshed in its book, and ages
+    /// out of it. Writes the books if they changed.
     func stillOpen(byChain current: [ChainPath: Set<String>], now: Int64) {
         let open = current.values.reduce(into: Set<String>()) { $0.formUnion($1) }
         for (chain, keys) in current {
             books[chain]?.reached(keys.compactMap { dialled[$0] }, excluding: excluded, now: now)
             books[chain]?.stillOpen(keys, now: now)
-            for key in open.subtracting(keys) { books[chain]?.failed(key) }
         }
         dialled = dialled.filter { open.contains($0.key) }
         save()

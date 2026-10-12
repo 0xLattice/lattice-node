@@ -710,8 +710,7 @@ extension NodeRuntime {
                     // this chain is for its session to say.
                     if let peerMemory, current.count < target || chain.stalled {
                         let remembered = await peerMemory.candidates(
-                            for: chain.path, excluding: connected.union(attempted.map(\.publicKey)),
-                            count: NodeRuntime.rememberedPeerDials
+                            for: chain.path, excluding: connected, count: NodeRuntime.rememberedPeerDials
                         )
                         for endpoint in remembered {
                             switch await dial(endpoint) {
@@ -729,7 +728,7 @@ extension NodeRuntime {
                     // few nodes does not search on every pass.
                     if let hosts = chain.hosts, current.isEmpty || chain.stalled {
                         let fresh = (await ivy.discoverProviders(rootCID: hosts.key))
-                            .filter { $0.publicKey != ownKey && !connected.contains($0.publicKey) }
+                            .filter { $0.publicKey != ownKey && !connected.contains($0.publicKey) && !attempted.contains($0) }
                         for endpoint in fresh.shuffled().prefix(4) where await dial(endpoint) == true {
                             current.insert(endpoint.publicKey)
                             await peerMemory?.reached(endpoint, chains: chain.lineage, now: now)
