@@ -62,6 +62,12 @@ private func isAlive(_ pid: Int32, named expected: String?) -> Bool {
         probe.standardOutput = out
         probe.standardError = FileHandle.nullDevice
         guard (try? probe.run()) != nil else { return true }
+        // Closed here, not left to the pipe's deallocation: `up --foreground`
+        // asks this every second for as long as the node runs, and a read
+        // end left open each time uses up the process's descriptors in a
+        // few hours.
+        try? out.fileHandleForWriting.close()
+        defer { try? out.fileHandleForReading.close() }
         // Captured while the probe is alive, for the same reason the bounded
         // wait does it: a group derived after the child is reaped is gone.
         let teardown = ProcessTeardownTarget.capture(
