@@ -70,6 +70,16 @@ public struct NodeConfiguration: Sendable {
     /// the node still has too few peers after the seeds by name, so that it
     /// can find the network when names cannot be resolved.
     public let fixedSeedPeers: [PeerEndpoint]
+    /// A hosted child chain's own seeds (operator's list), beside what it
+    /// finds through its parent: dialled only while that chain has too few
+    /// peers after trying the ones it remembers and its rendezvous.
+    public let childSeedPeers: [[String]: [PeerEndpoint]]
+    /// With fewer current peers than this, a hosted chain dials peers it
+    /// remembers (operator choice).
+    public let peerTarget: Int
+    /// With fewer current peers than this, a hosted chain dials its seeds
+    /// (operator choice).
+    public let peersBeforeSeeds: Int
     public let minPeerKeyBits: Int
     /// Per-netgroup inbound/outbound overlay connection cap. Ivy buckets peers by
     /// the connection's observed remote host (/16), an anti-eclipse defense that
@@ -140,6 +150,9 @@ public struct NodeConfiguration: Sendable {
         bootstrapPeers: [PeerEndpoint] = [],
         seedPeers: [PeerEndpoint] = [],
         fixedSeedPeers: [PeerEndpoint] = [],
+        childSeedPeers: [[String]: [PeerEndpoint]] = [:],
+        peerTarget: Int = 8,
+        peersBeforeSeeds: Int = 2,
         minPeerKeyBits: Int = 0,
         overlayMaxConnectionsPerNetgroup: Int = IvyConfig.defaultMaxConnections,
         contentServing: ContentServingLimits = .default,
@@ -163,9 +176,13 @@ public struct NodeConfiguration: Sendable {
                 throw NodeConfigurationError.invalidChainPath
             }
         }
+        guard childSeedPeers.keys.allSatisfy({ $0 != chainPath && listed.contains($0) }) else {
+            throw NodeConfigurationError.invalidChainPath
+        }
         guard (try? ChainHandshake(
             nexusGenesisCID: NexusGenesis.expectedBlockHash,
-            chainPath: address.components
+            chainPath: address.components,
+            capabilities: Set(hostedChildren.map(ChainHandshake.hosting))
         ).encode()) != nil else {
             throw NodeConfigurationError.invalidChainPath
         }
@@ -193,6 +210,9 @@ public struct NodeConfiguration: Sendable {
         self.bootstrapPeers = bootstrapPeers
         self.seedPeers = seedPeers
         self.fixedSeedPeers = fixedSeedPeers
+        self.childSeedPeers = childSeedPeers
+        self.peerTarget = max(0, peerTarget)
+        self.peersBeforeSeeds = max(0, peersBeforeSeeds)
         self.minPeerKeyBits = minPeerKeyBits
         self.overlayMaxConnectionsPerNetgroup = max(1, overlayMaxConnectionsPerNetgroup)
         self.contentServing = contentServing

@@ -9,6 +9,34 @@ import Foundation
 import Lattice
 import LatticeNode
 
+/// `peers` in `lattice.json`: an object keyed by chain path. An array is
+/// Nexus's list, as every file written before chains had lists of their own.
+public struct ChainPeers: Codable, Sendable, Equatable {
+    public var byChain: [String: [String]]
+
+    public init(byChain: [String: [String]]) {
+        self.byChain = byChain
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let nexus = try? container.decode([String].self) {
+            byChain = [ChainAddress.nexus: nexus]
+        } else {
+            byChain = try container.decode([String: [String]].self)
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        if byChain.count == 1, let nexus = byChain[ChainAddress.nexus] {
+            try container.encode(nexus)
+        } else {
+            try container.encode(byChain)
+        }
+    }
+}
+
 public struct Topology: Codable, Sendable {
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case listen, rpc, peers, publicRead, externalAddress
@@ -19,8 +47,11 @@ public struct Topology: Codable, Sendable {
     }
     public var listen: UInt16
     public var rpc: UInt16
-    /// Overlay bootstrap peers as `publicKey@host:port`.
-    public var peers: [String]?
+    /// Each chain's peers as `publicKey@host:port`, by chain path. Nexus's
+    /// list is its bootstrap peers (absent: the built-in ones; empty: none);
+    /// a hosted child's is extra seeds for that chain, beside what it finds
+    /// through its parent.
+    public var peers: ChainPeers?
     /// Public read-only HTTP port (the node's `--public-read-port`): binds
     /// all interfaces and serves only the bounded GET read routes. Absent =
     /// no public read listener for this hosted tree.
@@ -77,7 +108,7 @@ public struct Topology: Codable, Sendable {
     ) {
         self.listen = listen
         self.rpc = rpc
-        self.peers = peers
+        self.peers = peers.map { ChainPeers(byChain: [ChainAddress.nexus: $0]) }
         self.publicRead = publicRead
         self.externalAddress = externalAddress
         self.publicReadRate = publicReadRate
@@ -117,6 +148,21 @@ public struct Topology: Codable, Sendable {
         )
     }
 
+    /// Nexus's list replaces the built-in peers (empty: none at all); a
+    /// child's list is extra seeds for that chain, and an empty one is the
+    /// same as none.
+    public var peerArguments: [String] {
+        var arguments: [String] = []
+        if let nexus = peers?.byChain[ChainAddress.nexus] {
+            arguments += nexus.isEmpty ? ["--no-default-peers"] : ["--peer"] + nexus
+        }
+        for (chain, list) in (peers?.byChain ?? [:]).sorted(by: { $0.key < $1.key })
+        where chain != ChainAddress.nexus {
+            for peer in list { arguments += ["--chain-peer", "\(chain)=\(peer)"] }
+        }
+        return arguments
+    }
+
     public func validated() throws -> Topology {
         var listed: Set<String> = [ChainAddress.nexus]
         for child in hostedChains ?? [] {
@@ -125,6 +171,9 @@ public struct Topology: Codable, Sendable {
                   listed.insert(child).inserted else {
                 throw CtlError("hosted chain \(child) is not a new Nexus-rooted path listed after its parent")
             }
+        }
+        for chain in (peers?.byChain ?? [:]).keys where !listed.contains(chain) {
+            throw CtlError("peers are listed for \(chain), which is not a hosted chain")
         }
         var ports: Set<UInt16> = []
         for port in [listen, rpc] + (publicRead.map { [$0] } ?? []) {

@@ -252,7 +252,7 @@ final class LatticeCtlE2ETests: XCTestCase {
         topology.rpc = ports[1]
         // Explicitly empty: this host seeds itself, so the shipped default
         // bootstrap peers must not send it at the public network.
-        topology.peers = []
+        topology.peers = ChainPeers(byChain: ["Nexus": []])
         topology.mine = TopologyMine(
             worker: "cpu", workers: 1, batchSize: 100_000,
             recipients: miner.map { ["Nexus": $0.address] }

@@ -1,5 +1,6 @@
 import Foundation
 import Ivy
+import LatticeNodeCore
 
 /// The peers this node has held an authenticated session with, kept across
 /// restarts so that a node which has been on the network finds it again
@@ -146,82 +147,123 @@ struct PeerBook: Equatable, Sendable {
     }
 }
 
-/// The peer book and the file it is kept in, beside the node's store. The
-/// file is advisory: absent, unreadable or malformed, it is an empty book,
+/// Each hosted chain's peer book and the file they are kept in, beside the
+/// node's store. Every chain, Nexus included, has a book of its own under
+/// the same rules: the peers this node dialled and reached that said they
+/// host that chain. A peer hosting several chains is in each of their books.
+/// The file is advisory: absent, unreadable or malformed, it is empty books,
 /// never a reason not to start.
 actor PeerMemory {
     static let fileName = "peers.json"
-    /// A file larger than this is not this node's doing, and is not read.
+    /// A file larger than this for each hosted chain is not this node's
+    /// doing, and is not read.
     static let maxFileBytes = 256 * 1024
 
-    private struct File: Codable {
+    /// Version 1: one book for the node, read as Nexus's.
+    private struct FileV1: Codable {
         var version: Int
         var peers: [PeerBook.Entry]
     }
 
+    /// Version 2: a book per chain, keyed by chain path.
+    private struct File: Codable {
+        var version: Int
+        var chains: [String: [PeerBook.Entry]]
+    }
+
     private let file: URL
     private let excluded: Set<String>
-    private var book: PeerBook
-    private var written: PeerBook
+    private var books: [ChainPath: PeerBook]
+    private var written: [ChainPath: PeerBook]
+    /// Where a dial of this process reached each peer whose session is still
+    /// open: what a book remembers once the peer says it hosts its chain.
+    private var dialled: [String: PeerEndpoint] = [:]
 
-    /// `excluded`: identities never remembered (this node's own key and its
-    /// configured peers).
-    init(directory: URL, excluding excluded: Set<String>, now: Int64) {
+    /// `chains`: the hosted chains, Nexus first; a book kept for any other
+    /// chain is dropped. `excluded`: identities never remembered (this
+    /// node's own key and its configured peers).
+    init(directory: URL, chains: [ChainPath], excluding excluded: Set<String>, now: Int64) {
         file = directory.appendingPathComponent(Self.fileName)
         self.excluded = excluded
-        var loaded = Self.load(file)
-        loaded.prune(now: now)
-        book = loaded
+        var loaded = Self.load(file, chains: chains)
+        for chain in chains { loaded[chain, default: PeerBook()].prune(now: now) }
+        books = loaded
         written = loaded
     }
 
-    var isEmpty: Bool { book.entries.isEmpty }
-    var remembered: [PeerEndpoint] { book.entries.values.map(\.endpoint) }
+    func remembered(for chain: ChainPath) -> [PeerEndpoint] {
+        books[chain]?.entries.values.map(\.endpoint) ?? []
+    }
 
-    /// Remembered peers to dial, none of them `connected` or excluded.
-    func candidates(excluding connected: Set<String>, count: Int) -> [PeerEndpoint] {
+    /// Peers remembered for `chain` to dial, none of them `connected` or
+    /// excluded.
+    func candidates(for chain: ChainPath, excluding connected: Set<String>, count: Int) -> [PeerEndpoint] {
         var generator = SystemRandomNumberGenerator()
-        return book.candidates(excluding: connected.union(excluded), count: count, using: &generator)
+        return books[chain]?.candidates(
+            excluding: connected.union(excluded), count: count, using: &generator
+        ) ?? []
     }
 
+    /// A dial to `publicKey` failed: counted in every book that holds it.
     func failed(_ publicKey: String) {
-        book.failed(publicKey)
+        for chain in books.keys { books[chain]?.failed(publicKey) }
     }
 
-    /// Record that a dial to `endpoint` reached its peer.
-    func reached(_ endpoint: PeerEndpoint, now: Int64) {
-        book.reached([endpoint], excluding: excluded, now: now)
+    /// Record that a dial to `endpoint` reached its peer, which hosts
+    /// `chains` as far as is known now. What else it hosts is learned from
+    /// its session, in `stillOpen`.
+    func reached(_ endpoint: PeerEndpoint, chains: [ChainPath], now: Int64) {
+        dialled[endpoint.publicKey] = endpoint
+        for chain in chains { books[chain]?.reached([endpoint], excluding: excluded, now: now) }
     }
 
-    /// Record which sessions are still open, and write the book if it changed.
-    func stillOpen(_ publicKeys: Set<String>, now: Int64) {
-        book.stillOpen(publicKeys, now: now)
+    /// Record each chain's current peers: one a dial of this process reached
+    /// enters the chain's book, one already there is not ageing. Writes the
+    /// books if they changed.
+    func stillOpen(byChain current: [ChainPath: Set<String>], now: Int64) {
+        for (chain, keys) in current {
+            books[chain]?.reached(keys.compactMap { dialled[$0] }, excluding: excluded, now: now)
+            books[chain]?.stillOpen(keys, now: now)
+        }
+        let open = current.values.reduce(into: Set<String>()) { $0.formUnion($1) }
+        dialled = dialled.filter { open.contains($0.key) }
         save()
     }
 
     private func save() {
-        guard book != written else { return }
-        let peers = book.entries.values.sorted { $0.publicKey < $1.publicKey }
-        guard let data = try? JSONEncoder().encode(File(version: 1, peers: peers)) else { return }
+        guard books != written else { return }
+        let chains = Dictionary(uniqueKeysWithValues: books.map { chain, book in
+            (chain.joined(separator: "/"), book.entries.values.sorted { $0.publicKey < $1.publicKey })
+        })
+        guard let data = try? JSONEncoder().encode(File(version: 2, chains: chains)) else { return }
         do {
             try data.write(to: file, options: .atomic)
             try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
-            written = book
+            written = books
         } catch {
             // Advisory: a book that cannot be written is rebuilt from the
             // network next time. The node does not stop for it.
         }
     }
 
-    static func load(_ file: URL) -> PeerBook {
+    static func load(_ file: URL, chains: [ChainPath]) -> [ChainPath: PeerBook] {
+        var books = Dictionary(uniqueKeysWithValues: chains.map { ($0, PeerBook()) })
         guard let size = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.size] as? Int,
-              size <= maxFileBytes,
-              let data = try? Data(contentsOf: file),
-              let decoded = try? JSONDecoder().decode(File.self, from: data),
-              decoded.version == 1 else {
-            return PeerBook()
+              size <= maxFileBytes * max(1, chains.count),
+              let data = try? Data(contentsOf: file) else {
+            return books
         }
-        return PeerBook(entries: Array(decoded.peers.prefix(PeerBook.capacity * 4)))
+        let decoder = JSONDecoder()
+        if let decoded = try? decoder.decode(File.self, from: data), decoded.version == 2 {
+            for chain in chains {
+                guard let peers = decoded.chains[chain.joined(separator: "/")] else { continue }
+                books[chain] = PeerBook(entries: Array(peers.prefix(PeerBook.capacity * 4)))
+            }
+        } else if let decoded = try? decoder.decode(FileV1.self, from: data), decoded.version == 1,
+                  let nexus = chains.first {
+            books[nexus] = PeerBook(entries: Array(decoded.peers.prefix(PeerBook.capacity * 4)))
+        }
+        return books
     }
 }
 
@@ -236,7 +278,7 @@ enum SeedPolicy {
     /// forward by a lost session.
     static let retryInterval: Int64 = 10_000
 
-    static func needsSeeds(peers: Int) -> Bool {
-        peers < peersBeforeSeeds
+    static func needsSeeds(peers: Int, below threshold: Int = peersBeforeSeeds) -> Bool {
+        peers < threshold
     }
 }

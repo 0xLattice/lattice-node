@@ -26,17 +26,20 @@ final class PeerSearchRuntimeTests: XCTestCase {
     private static func advertised(_ port: UInt16) -> String { "8.8.\(port >> 8).\(port & 0xFF)" }
 
     private func start(
-        keyByte: UInt8, hosted: [[String]], peers: [PeerEndpoint] = [], interval: TimeInterval = 5
+        keyByte: UInt8, hosted: [[String]], peers: [PeerEndpoint] = [], interval: TimeInterval = 5,
+        storage: URL? = nil, alphaSeeds: [PeerEndpoint] = [], peerTarget: Int = 8
     ) async throws -> Node {
         let port = NetworkTransportTestPorts.allocate()
         let host = Self.advertised(port)
         let configuration = try NodeConfiguration(
             chainPath: ["Nexus"],
-            storagePath: temporaryDirectory(),
+            storagePath: storage ?? temporaryDirectory(),
             privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
             listenPort: port,
             rpcPort: NetworkTransportTestPorts.allocate(),
             bootstrapPeers: peers,
+            childSeedPeers: alphaSeeds.isEmpty ? [:] : [Self.alpha: alphaSeeds],
+            peerTarget: peerTarget,
             externalAddress: host,
             peerSearchInterval: interval,
             hostedChildren: hosted,
@@ -122,5 +125,95 @@ final class PeerSearchRuntimeTests: XCTestCase {
             guard await ivy.connectedPeers.contains(hostID) else { return false }
             return await ivy.providers(for: key).contains(hostID)
         }
+    }
+
+    /// A chain counts its own peers: the follower's one peer, a Nexus-only
+    /// hub, is a peer of Nexus and not of Alpha.
+    private func assertOnlyNexusHasAPeer(_ follower: Node) async throws {
+        try await eventually("the follower joins through the hub") { follower.runtime.peerCount == 1 }
+        XCTAssertEqual(follower.runtime.levelReads[Self.alpha]?.peerCount(), 0)
+    }
+
+    /// A child with no peer of its own dials the peers it remembers for
+    /// itself, however well connected Nexus is. The host is on no rendezvous
+    /// the follower can reach (they share no peer) and is not configured:
+    /// only Alpha's own book names it. The follower's Nexus has all the
+    /// peers it wants, so nothing node-wide would dial anyone.
+    func testAChildWithNoPeersDialsItsOwnBookWhileNexusHasEnough() async throws {
+        let hub = try await start(keyByte: 0x6a, hosted: [], interval: 3_600)
+        let host = try await start(keyByte: 0x6b, hosted: [Self.alpha], interval: 3_600)
+
+        let directory = temporaryDirectory(create: true)
+        let entry = PeerBook.Entry(
+            publicKey: host.endpoint.publicKey, host: host.endpoint.host, port: host.endpoint.port,
+            lastSeen: NodeRuntime.now(), failures: 0
+        )
+        try JSONSerialization.data(withJSONObject: [
+            "version": 2,
+            "chains": ["Nexus/Alpha": [try JSONSerialization.jsonObject(with: JSONEncoder().encode(entry))]],
+        ]).write(to: directory.appendingPathComponent(PeerMemory.fileName))
+
+        let follower = try await start(
+            keyByte: 0x6c, hosted: [Self.alpha], peers: [hub.endpoint], interval: 3_600,
+            storage: directory, peerTarget: 1
+        )
+        let hostID = PeerID(publicKey: host.endpoint.publicKey)
+        let ivy = follower.runtime.ivy
+        try await eventually("the follower dials the host Alpha remembers", within: .seconds(20)) {
+            await ivy.connectedPeers.contains(hostID)
+        }
+        // The host's hello names Alpha: it is Alpha's peer, and Nexus's.
+        try await eventually("Alpha counts its own peer", within: .seconds(20)) {
+            follower.runtime.levelReads[Self.alpha]?.peerCount() == 1 && follower.runtime.peerCount == 2
+        }
+        // Nexus's book was never asked (it has its target), and learns the
+        // host only because a dial reached it.
+        try await eventually("the host is remembered for both chains") {
+            let nexus = await follower.runtime.peerMemory?.remembered(for: ["Nexus"]).map(\.publicKey)
+            let alpha = await follower.runtime.peerMemory?.remembered(for: Self.alpha).map(\.publicKey)
+            return nexus == [host.endpoint.publicKey] && alpha == [host.endpoint.publicKey]
+        }
+    }
+
+    /// A child's own seeds, given by its operator, are dialled when the
+    /// chain is short of peers and nothing else names one: here the host
+    /// shares no peer with the follower, and nothing is remembered.
+    func testAChildShortOfPeersDialsItsOwnSeeds() async throws {
+        let hub = try await start(keyByte: 0x6d, hosted: [], interval: 3_600)
+        let host = try await start(keyByte: 0x6e, hosted: [Self.alpha], interval: 3_600)
+        let follower = try await start(
+            keyByte: 0x6f, hosted: [Self.alpha], peers: [hub.endpoint], interval: 3_600,
+            alphaSeeds: [host.endpoint], peerTarget: 1
+        )
+        try await eventually("Alpha is served by its seed", within: .seconds(20)) {
+            follower.runtime.levelReads[Self.alpha]?.peerCount() == 1 && follower.runtime.peerCount == 2
+        }
+        // A seed that was reached is remembered like any other peer.
+        try await eventually("the seed is in Alpha's book") {
+            await follower.runtime.peerMemory?.remembered(for: Self.alpha).map(\.publicKey) == [host.endpoint.publicKey]
+        }
+    }
+
+    /// With no seed and nothing remembered, a child with no host in reach
+    /// has no peer, and says so, while Nexus has one.
+    func testAChildCountsOnlyThePeersThatHostIt() async throws {
+        let hub = try await start(keyByte: 0x70, hosted: [], interval: 3_600)
+        let follower = try await start(keyByte: 0x71, hosted: [Self.alpha], peers: [hub.endpoint], interval: 3_600)
+        try await assertOnlyNexusHasAPeer(follower)
+    }
+
+    /// Seeds for a chain this node does not host are refused.
+    func testSeedsForAChainNotHostedAreRefused() throws {
+        func configuration(hosted: [[String]], seeds: [[String]: [PeerEndpoint]]) throws -> NodeConfiguration {
+            try NodeConfiguration(
+                chainPath: ["Nexus"], storagePath: temporaryDirectory(),
+                privateKeyHex: String(repeating: "72", count: 32),
+                childSeedPeers: seeds, hostedChildren: hosted
+            )
+        }
+        let seed = PeerEndpoint(publicKey: String(repeating: "73", count: 32), host: "198.51.100.1", port: 4001)
+        XCTAssertNoThrow(try configuration(hosted: [Self.alpha], seeds: [Self.alpha: [seed]]))
+        XCTAssertThrowsError(try configuration(hosted: [], seeds: [Self.alpha: [seed]]))
+        XCTAssertThrowsError(try configuration(hosted: [Self.alpha], seeds: [["Nexus"]: [seed]]))
     }
 }

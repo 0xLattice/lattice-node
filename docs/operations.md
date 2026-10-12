@@ -32,20 +32,60 @@ Before exposing a node:
 
 ## How a node finds the network
 
-A node with `peers` configured dials those peers from the start and keeps
-them, and that is all it is told. A node with none configured looks in three
-places, each only if the one before left it with fewer than two peers:
+Every hosted chain, Nexus and each child alike, keeps its own peers by the
+same routine. A chain's current peers are the open sessions that serve it:
+every session for Nexus, since every node hosts it; for a child, the sessions
+whose peer says it hosts that chain. Sessions themselves are shared: one
+connection to a peer serves every chain that peer hosts.
 
-1. **The peers it remembers** (`peers.json`, below).
-2. **The seeds by name**, `seed1.lattice.build` to `seed4.lattice.build` on
-   port 4001.
-3. **The same seeds at fixed addresses**, for when names cannot be resolved.
+On each maintenance pass, each chain in turn, Nexus first:
 
-A seed is an introduction, not a peer the node depends on. A node that
-already knows the network rejoins through what it remembers and does not ask
+1. **Counts its current peers.**
+2. **Dials peers it remembers** for that chain (`peers.json`, below), up to
+   four, while it has fewer than eight current peers or has stopped
+   progressing.
+3. **Discovers.** A child chain with no current peer, or one that has stopped
+   progressing, looks up its rendezvous among its parent's peers and dials up
+   to four of the hosts named there (see "Discovery and peer health").
+4. **Dials its seeds**, only while it still has fewer than two current peers.
+   Nexus's seeds are the built-in ones: by name, `seed1.lattice.build` to
+   `seed4.lattice.build` on port 4001, then the same seeds at fixed addresses
+   for when names cannot be resolved. A child's seeds are the list its
+   operator gave it, if any.
+
+A peer is dialled once however many chains want it. The two thresholds are
+operator choices, applied to each chain on its own: `--peer-target` (8) and
+`--peers-before-seeds` (2).
+
+The levels differ only in where discovery asks. A child asks the peers of its
+parent who serves it; Nexus has no parent, so its seed list stands in for one.
+
+A seed is an introduction, not a peer the node depends on. A chain that
+already knows its network rejoins through what it remembers and does not ask
 a seed at all, so the seeds shape the network as little as possible and carry
-only the nodes that need them. Left with fewer than two peers at any time, the
-node looks again within seconds rather than at the next maintenance interval.
+only the nodes that need them. Left with fewer than two Nexus peers at any
+time, the node looks again within seconds rather than at the next maintenance
+interval.
+
+### Configured peers
+
+`peers` in `lattice.json` is keyed by chain path:
+
+```json
+"peers": {
+  "Nexus": ["<public-key>@node.example:4001"],
+  "Nexus/Alpha": ["<public-key>@alpha-host.example:4001"]
+}
+```
+
+- **Nexus's list** replaces the built-in seeds: those peers are dialled from
+  the start and kept, and that is all the node is told. An empty list means
+  connect to no one. Absent, Nexus uses the built-in seeds.
+- **A child chain's list** is extra seeds for that chain, beside what it
+  finds through its parent: dialled only on need, as step 4 above, and
+  remembered like any other peer once reached. An empty list is the same as
+  none. The chain must be hosted.
+- An array, `"peers": ["<public-key>@node.example:4001"]`, is Nexus's list.
 
 ### Seed names
 
@@ -78,20 +118,28 @@ everyone through one record.
 ### Remembered peers
 
 A node keeps the peers it has reached in `peers.json`, in its data directory
-beside the store, and dials some of them when it starts or runs short of
-peers.
+beside the store: one book per hosted chain, each under the same rules. A
+chain dials some of the peers in its own book when the node starts, or when
+that chain runs short of peers or stops progressing.
+
+- A peer is in the book of each chain it said it hosts. Its claim decides
+  whom to dial and whom to ask, never what to accept: content is verified the
+  same whoever sent it.
 
 - Only an address the node dialled itself and reached the peer at is kept.
   Never one merely heard about, and never the address a peer advertises for
   itself: that is a claim, and it is wrong for any host whose outbound address
   is not the one it listens on.
-- One address per identity, at most 256, at most 8 per network group, none
-  unseen for 30 days, and none that refused ten dials in a row.
+- Per chain: one address per identity, at most 256, at most 8 per network
+  group, none unseen for 30 days, and none that refused ten dials in a row.
+  A failed dial counts in every book holding that peer.
 - A remembered peer is dialled like any discovered peer and accepted only by
   its key. It is never treated as configured.
 - Configured peers and the node's own identity are not written to it. A seed
   the node reached is: it is a peer like any other.
 - A node started with no peers (`"peers": []`) neither reads nor writes it.
+- The book of a chain the node no longer hosts is dropped at the next start.
+- A file written before chains had their own books is read as Nexus's book.
 - The file is advisory. Deleting it costs nothing but the next start's head
   start; a damaged one is ignored.
 
@@ -142,9 +190,10 @@ The example Fly read replica uses nginx as the public boundary.
 
 ## Discovery and peer health
 
-Every peer follows Nexus on the same overlay, so Nexus has no record: every
-peer is a Nexus peer. The node periodically announces one provider record per
-hosted child chain, its rendezvous:
+Every peer follows Nexus on the same overlay, so every open session is a
+Nexus peer and its seed list is where Nexus discovers. A node names each
+child chain it hosts in its session hello (`host:<path>`), and periodically
+announces one provider record per hosted child chain, its rendezvous:
 `lattice.chain-peers.v1:<nexus genesis>:<path>`. A child is keyed by path, not genesis, so a joiner is findable and can search
 before it holds any of the child's blocks, and competing geneses share one
 rendezvous. Provider records name chain availability, not individual blocks or
@@ -152,8 +201,10 @@ states. A node that declares a public read URL also announces each hosted
 child under that child's read-endpoint key (below).
 
 A node announces what it hosts on every announcement turn and whenever a
-session opens. Each hosted child chain searches its own rendezvous while no
-connected peer is named there - looked at at those same moments - and when it has not progressed since boot or for `peerSearchInterval`:
+session opens. A child chain's current peers are the sessions whose hello
+named it, and those its rendezvous names, so a peer on a build that predates
+the hello's claim still counts. Each hosted child chain searches its own
+rendezvous while it has no current peer - looked at at those same moments - and when it has not progressed since boot or for `peerSearchInterval`:
 the node asks the DHT for that chain's providers and dials up to four, drawn
 at random, that it is not already connected to. Peers that host only other
 chains cannot sync it. When Nexus is the stalled chain, the node re-dials

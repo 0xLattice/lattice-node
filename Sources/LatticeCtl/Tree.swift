@@ -166,9 +166,7 @@ func spawnHost(layout: HostLayout) throws {
         "--listen-port", String(topology.listen),
         "--rpc-port", String(topology.rpc),
     ]
-    if let peers = topology.peers {
-        arguments += peers.isEmpty ? ["--no-default-peers"] : ["--peer"] + peers
-    }
+    arguments += topology.peerArguments
     if let port = topology.publicRead { arguments += ["--public-read-port", String(port)] }
     if let host = topology.externalAddress { arguments += ["--external-address", host] }
     if let rate = topology.publicReadRate { arguments += ["--public-read-rate", String(rate)] }

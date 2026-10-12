@@ -11,6 +11,8 @@ import cashew
 /// advertised bundles and recorded this one, the per-Volume traversal for
 /// whatever a bundle lacks, and no bundle request to any other peer.
 final class BundledBlockFetchTests: XCTestCase {
+    private static let alpha = ChainHosts(nexusGenesisCID: "nexus", chainPath: ["Nexus", "Alpha"])
+
     private actor Requests {
         private(set) var bundles: [String] = []
         private(set) var volumes: [String] = []
@@ -420,9 +422,9 @@ final class BundledBlockFetchTests: XCTestCase {
     func testAChainsBundleIsAskedOfThePeerItsRendezvousNames() async throws {
         let producer = try await storage(keyByte: 0x71)
         let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
-        let (remote, host, bystander) = try await hostAndBystander(producer, producer, rendezvous: "alpha")
+        let (remote, host, bystander) = try await hostAndBystander(producer, producer, rendezvous: Self.alpha.key)
         for keyByte in [UInt8(0x72), 0x73, 0x74, 0x75, 0x76] {
-            _ = try await storage(keyByte: keyByte).fetchChainBody(cid, remote: remote, hosts: "alpha")
+            _ = try await storage(keyByte: keyByte).fetchChainBody(cid, remote: remote, hosts: Self.alpha)
         }
         XCTAssertEqual(host.bundleRequestCount, 5)
         XCTAssertEqual(bystander.bundleRequestCount, 0)
@@ -434,10 +436,10 @@ final class BundledBlockFetchTests: XCTestCase {
         let producer = try await storage(keyByte: 0x7B)
         let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
         let (remote, host, bystander) = try await hostAndBystander(
-            producer, producer, rendezvous: "alpha", recordsPerPeer: 1
+            producer, producer, rendezvous: Self.alpha.key, recordsPerPeer: 1
         )
         for keyByte in [UInt8(0x7C), 0x7D, 0x7E] {
-            _ = try await storage(keyByte: keyByte).fetchChainBody(cid, remote: remote, hosts: "alpha")
+            _ = try await storage(keyByte: keyByte).fetchChainBody(cid, remote: remote, hosts: Self.alpha)
         }
         XCTAssertEqual(host.bundleRequestCount, 3)
         XCTAssertEqual(bystander.bundleRequestCount, 0)
@@ -451,10 +453,10 @@ final class BundledBlockFetchTests: XCTestCase {
         let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
         let recorded = await producer.volumeBundle(cid)
         let (remote, host, bystander) = try await hostAndBystander(
-            try await storage(keyByte: 0x78), producer, rendezvous: "alpha"
+            try await storage(keyByte: 0x78), producer, rendezvous: Self.alpha.key
         )
         for (count, keyByte) in [(1, UInt8(0x79)), (2, 0x7A)] {
-            let stored = try await storage(keyByte: keyByte).fetchChainBody(cid, remote: remote, hosts: "alpha")
+            let stored = try await storage(keyByte: keyByte).fetchChainBody(cid, remote: remote, hosts: Self.alpha)
             XCTAssertEqual(Set(stored), Set(recorded))
             XCTAssertEqual(host.bundleRequestCount, count)
             XCTAssertEqual(bystander.bundleRequestCount, count)
@@ -469,13 +471,13 @@ final class BundledBlockFetchTests: XCTestCase {
         let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
         let recorded = await producer.volumeBundle(cid)
         let (remote, host, bystander) = try await hostAndBystander(
-            producer, producer, rendezvous: "alpha", requestTimeout: .seconds(1)
+            producer, producer, rendezvous: Self.alpha.key, requestTimeout: .seconds(1)
         )
         host.neverEnds = true
         // The first block keeps what the bundle sent before it stalled and
         // fetches the rest per Volume; the second asks the other session.
         for (others, keyByte) in [(0, UInt8(0x80)), (1, 0x81)] {
-            let stored = try await storage(keyByte: keyByte).fetchChainBody(cid, remote: remote, hosts: "alpha")
+            let stored = try await storage(keyByte: keyByte).fetchChainBody(cid, remote: remote, hosts: Self.alpha)
             XCTAssertEqual(Set(stored), Set(recorded))
             XCTAssertEqual(host.bundleRequestCount, 1)
             XCTAssertEqual(bystander.bundleRequestCount, others)

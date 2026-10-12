@@ -25,6 +25,13 @@ public struct ChainHandshake: Codable, Equatable, Sendable {
     /// The peer answers a Volume bundle request.
     public static let volumeBundle = "volume-bundle"
 
+    /// The peer hosts the child chain at `chainPath`: one name per hosted
+    /// child. Its own claim, a hint for whom to dial and whom to ask, never
+    /// a reason to accept data. Nexus is not named: every node hosts it.
+    public static func hosting(_ chainPath: [String]) -> String {
+        "host:" + chainPath.joined(separator: "/")
+    }
+
     public let version: UInt16
     public let nexusGenesisCID: String
     public let chainPath: [String]

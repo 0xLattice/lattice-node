@@ -250,7 +250,8 @@ extension NodeRuntime {
             },
             mempool: { _ in
                 view.value?.mempool ?? ChainReads.MempoolListing(count: 0, bytes: 0, cids: [])
-            }
+            },
+            peerCount: { view.value?.peers ?? 0 }
         )
     }
 
@@ -299,7 +300,7 @@ extension NodeRuntime {
         )
     }
 
-    /// Ready overlay sessions.
+    /// Ready overlay sessions: Nexus's current peers.
     public var peerCount: Int { readView.value?.peers ?? 0 }
 
     public func metricsExposition(peers: Int, processStartTime: Date) -> String {

@@ -39,10 +39,12 @@ default.
 }
 ```
 
-This is intentionally one schema, without legacy decoding:
+This is intentionally one schema:
 
-- `listen`, `rpc`, `peers`, public-read policy, and identity apply once to the
+- `listen`, `rpc`, public-read policy, and identity apply once to the
   process;
+- `peers` is a list per chain, keyed by absolute path; an array is Nexus's
+  list (see "Configured peers" in `operations.md`);
 - `hostedChains` lists child paths parent before child;
 - mining maps are keyed by hosted absolute path;
 - ports must be nonzero and unique;

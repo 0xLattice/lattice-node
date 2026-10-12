@@ -53,6 +53,15 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(parsing: .upToNextOption, help: "Overlay peer as public-key@host:port. Any peer given here REPLACES the built-in default bootstrap peers; the two are never merged.")
     var peer: [String] = []
 
+    @Option(help: "An extra seed for a hosted child chain, as chain-path=public-key@host:port, e.g. Nexus/testnet=<key>@node.example:4001 (repeatable). Beside what the chain finds through its parent: dialled only while that chain has too few peers after the ones it remembers and its lookup, and remembered like any peer once reached. The chain must be hosted (--host-chain).")
+    var chainPeer: [String] = []
+
+    @Option(help: "With fewer current peers than this, a hosted chain dials peers it remembers. Applies to each chain on its own.")
+    var peerTarget = 8
+
+    @Option(help: "With fewer current peers than this, a hosted chain dials its seeds: the built-in ones for Nexus, its --chain-peer list for a child. Applies to each chain on its own.")
+    var peersBeforeSeeds = 2
+
     @Flag(help: "Start with no built-in default bootstrap peers. Without --peer this means no bootstrap peers at all; the node then finds peers only through discovery or inbound connections.")
     var noDefaultPeers = false
 
@@ -68,7 +77,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Bytes of Volumes this node reads or sends to peers at once.")
     var servingMaxInFlightVolumeBytes = IvyConfig.defaultMaxInFlightVolumeBytes
 
-    @Option(help: "Seconds with no newly accepted Nexus block after which the node widens its peer search: re-dial configured peers without a session and look up providers of Nexus genesis. The node also announces each hosted chain by genesis. Staleness is measured from the verified local tip. Discovery never affects validation or fork choice. 0 disables search.")
+    @Option(help: "Seconds with no newly accepted block on a hosted chain after which the node widens that chain's peer search: Nexus re-dials configured peers without a session, a child chain looks up its providers, and either dials peers it remembers. The node also announces each hosted child chain. Staleness is measured from the verified local tip. Discovery never affects validation or fork choice. 0 disables search.")
     var peerSearchInterval: Double = 600
 
     @Option(help: "Public read-only HTTP port; binds all interfaces and serves ONLY the bounded GET read routes (the read-replica allowlist, enforced in code). Chain data is public; this exposes no operator or write surface.")
@@ -148,6 +157,18 @@ struct LatticeNodeCommand: AsyncParsableCommand {
 
         // Each spec file read once: the paths and specs agree.
         let hosted = try hostedChains()
+        var childSeedPeers: [[String]: [PeerEndpoint]] = [:]
+        for entry in chainPeer {
+            let parts = entry.split(separator: "=", maxSplits: 1).map(String.init)
+            guard parts.count == 2 else {
+                throw ValidationError("--chain-peer must use chain-path=public-key@host:port")
+            }
+            let path = parts[0].split(separator: "/").map(String.init)
+            guard hosted.contains(where: { $0.path == path }) else {
+                throw ValidationError("--chain-peer names \(parts[0]), which is not a hosted chain")
+            }
+            childSeedPeers[path, default: []].append(try parsePeerEndpoint(parts[1]))
+        }
         let configuration = try NodeConfiguration(
             chainPath: address.components,
             storagePath: storage,
@@ -157,6 +178,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             bootstrapPeers: overlayPeers,
             seedPeers: seedPeers,
             fixedSeedPeers: fixedSeedPeers,
+            childSeedPeers: childSeedPeers,
+            peerTarget: peerTarget,
+            peersBeforeSeeds: peersBeforeSeeds,
             minPeerKeyBits: minimumPeerKeyBits,
             overlayMaxConnectionsPerNetgroup: overlayMaxConnectionsPerNetgroup,
             contentServing: ContentServingLimits(
@@ -740,9 +764,12 @@ private func addPublicReadRoutes<Context: RequestContext>(
             context: context
         )
     }
+    // A chain's own current peers; with no `chainPath`, Nexus's.
     router.get("api/peers") { request, context in
-        try jsonCached(
-            await peers(),
+        let service = try byPath(request)
+        return try jsonCached(
+            service.chainPath == byPath.root.chainPath
+                ? await peers() : ExplorerPeersResponse(count: service.peerCount(), peers: []),
             cacheControl: statusCacheControl,
             request: request,
             context: context

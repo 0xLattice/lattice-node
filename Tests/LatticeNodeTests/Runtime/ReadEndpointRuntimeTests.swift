@@ -165,6 +165,23 @@ final class ReadEndpointRuntimeTests: XCTestCase {
                 XCTAssertEqual(body.children.map(\.directory), ["Beta"])
                 XCTAssertNil(body.children.first?.height, "the follower does not hold Beta's block")
             }
+            // Each chain's own peer count; with no path, Nexus's. A chain
+            // the node does not host is refused like any other route.
+            for (uri, count) in [
+                ("/api/peers", alphaFollower.runtime.peerCount),
+                ("/api/peers?chainPath=Nexus", alphaFollower.runtime.peerCount),
+                ("/api/peers?chainPath=Nexus/Alpha", alphaFollower.runtime.levelReads[Self.alpha]?.peerCount() ?? -1),
+            ] {
+                try await client.execute(uri: uri, method: .get) { response in
+                    XCTAssertEqual(response.status, .ok, uri)
+                    let body = try JSONDecoder().decode(ExplorerPeersResponse.self, from: Data(buffer: response.body))
+                    XCTAssertEqual(body.count, count, uri)
+                }
+            }
+            XCTAssertGreaterThanOrEqual(alphaFollower.runtime.levelReads[Self.alpha]?.peerCount() ?? 0, 1)
+            try await client.execute(uri: "/api/peers?chainPath=Nexus/Alpha/Beta", method: .get) { response in
+                XCTAssertNotEqual(response.status, .ok)
+            }
             // The block list at a hosted child level: Alpha's own chain.
             try await client.execute(uri: "/api/blocks?chainPath=Nexus/Alpha", method: .get) { response in
                 XCTAssertEqual(response.status, .ok)

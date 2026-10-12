@@ -73,10 +73,10 @@ extension NodeStorage {
     ///
     /// `bundle` is false on a retry: a bundle is an optimisation, so a block
     /// whose first attempt failed is fetched one Volume at a time, as it
-    /// would be from peers that speak no bundles. `hosts` is the rendezvous
-    /// of the block's chain: the bundle is asked first of the peers it names.
+    /// would be from peers that speak no bundles. `hosts` names the
+    /// block's child chain: the bundle is asked first of its current peers.
     nonisolated func fetchChainBody(
-        _ cid: String, remote: IvyRootContentSource, bundle: Bool = true, hosts: String? = nil
+        _ cid: String, remote: IvyRootContentSource, bundle: Bool = true, hosts: ChainHosts? = nil
     ) async throws -> [String] {
         let capture = IvyRootContentSource.AttributionCapture()
         do {

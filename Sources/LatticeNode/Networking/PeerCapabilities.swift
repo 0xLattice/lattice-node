@@ -39,12 +39,18 @@ final class PeerCapabilities: @unchecked Sendable {
         ))
     }
 
-    /// The open sessions of `peers`: for a chain's providers, the sessions
-    /// that host it. Like the record that names them, a hint for whom to
-    /// ask, never for what to accept.
-    func sessions(of peers: [PeerID]) -> [AuthenticatedPeer] {
-        let peers = Set(peers)
-        return lock.withLock { sessions.map(\.peer).filter { peers.contains($0.id) } }
+    /// A chain's current peers: the open sessions that serve it. Nexus
+    /// (`child` nil) is served by every session, since every node hosts it;
+    /// a child by the sessions whose hello named it, and by those its
+    /// rendezvous names, so a peer whose build predates the hello's claim
+    /// still counts. A hint for whom to ask, never for what to accept.
+    func sessions(hosting child: ChainHosts?, ivy: Ivy) async -> [AuthenticatedPeer] {
+        guard let child else { return lock.withLock { sessions.map(\.peer) } }
+        let named = Set(await ivy.providers(for: child.key))
+        let capability = ChainHandshake.hosting(child.path)
+        return lock.withLock {
+            sessions.filter { $0.capabilities.contains(capability) || named.contains($0.peer.id) }.map(\.peer)
+        }
     }
 
     func sessions(speaking capability: String) -> [AuthenticatedPeer] {

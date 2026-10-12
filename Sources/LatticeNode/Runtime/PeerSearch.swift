@@ -13,6 +13,18 @@ enum ChainPeersKey {
     }
 }
 
+/// How a hosted child level's peers are recognised: by the claim in their
+/// hello, and by the level's rendezvous. Nexus has none.
+public struct ChainHosts: Hashable, Sendable {
+    let path: ChainPath
+    let key: String
+
+    public init(nexusGenesisCID: String, chainPath: ChainPath) {
+        path = chainPath
+        key = ChainPeersKey.key(nexusGenesisCID: nexusGenesisCID, chainPath: chainPath)
+    }
+}
+
 /// When to look for more peers, per hosted level: a level that has not
 /// progressed since boot, or not for a whole interval, is due a search of its
 /// own rendezvous, at most once per interval. Peers that host another level
