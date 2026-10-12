@@ -34,7 +34,7 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/adalinxx/Ivy.git",
-            exact: "15.0.1"
+            exact: "15.1.0"
         ),
         .package(
             url: "https://github.com/adalinxx/Tally.git",
