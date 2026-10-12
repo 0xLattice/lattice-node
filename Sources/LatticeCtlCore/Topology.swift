@@ -425,6 +425,12 @@ public struct HostLayout: Sendable {
         root.appendingPathComponent("specs").appendingPathComponent(Self.encoded(path) + ".json")
     }
 
+    /// The WASM policy modules a hosted child's spec names, one file per
+    /// module, kept beside the spec.
+    public func policyModules(for path: String) -> URL {
+        root.appendingPathComponent("specs").appendingPathComponent(Self.encoded(path) + ".policies")
+    }
+
     /// The one process identity. Callers pass `Nexus`; the parameter keeps
     /// filesystem helpers explicit about what the file belongs to.
     public func identityKey(for path: String) -> URL {

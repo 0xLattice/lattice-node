@@ -102,6 +102,22 @@ lattice child create Nexus/Alpha \
   --spec alpha-spec.json
 ```
 
+A spec names each WASM policy module by CID in `wasmPolicies`. Give the file
+for every module it names:
+
+```bash
+lattice child create Nexus/Alpha \
+  --root /var/lib/lattice \
+  --spec alpha-spec.json \
+  --policy-module transfer-rules.wasm \
+  --policy-module action-rules.wasm
+```
+
+Each file is matched to the spec by its CID and checked against the policy
+ABI; creation is refused if a file is one the spec does not name, or a named
+module has no file. The modules are kept beside the spec, and the node stores
+them at start, so it can store and serve the genesis it mines.
+
 Creation writes one immutable spec and adds the path to `hostedChains`. The
 node builds the genesis candidate from that spec when the parent has an
 executed state it can commit, and ordinary merged mining secures it. There is

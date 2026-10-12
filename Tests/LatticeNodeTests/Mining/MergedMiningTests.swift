@@ -168,6 +168,161 @@ final class MergedMiningTests: XCTestCase {
         }
     }
 
+    /// A WASM policy module that gives `verdict` for every transaction: the
+    /// memory, allocator and transaction entrypoint the policy ABI requires.
+    private static func policyModule(verdict: UInt8) -> Data {
+        func section(_ id: UInt8, _ body: [UInt8]) -> [UInt8] { [id, UInt8(body.count)] + body }
+        func export(_ name: String, kind: UInt8, index: UInt8) -> [UInt8] {
+            [UInt8(name.utf8.count)] + Array(name.utf8) + [kind, index]
+        }
+        return Data(
+            [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]
+                // (i32) -> i32 and (i32, i32) -> i32
+                + section(1, [0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f])
+                + section(3, [0x02, 0x00, 0x01])
+                + section(5, [0x01, 0x00, 0x01])
+                + section(7, [0x03] + export("memory", kind: 2, index: 0)
+                    + export("lattice_alloc", kind: 0, index: 0)
+                    + export("lattice_validate_transaction", kind: 0, index: 1))
+                // lattice_alloc returns 1024; the entrypoint returns the verdict.
+                + section(10, [0x02, 0x05, 0x00, 0x41, 0x80, 0x08, 0x0b, 0x04, 0x00, 0x41, verdict, 0x0b])
+        )
+    }
+
+    /// A node hosting Nexus and Alpha. With `module`, Alpha's spec names it
+    /// as its transaction policy and the node is given its bytes; without,
+    /// the node only follows the Alpha others mine.
+    private func policyHost(
+        _ keyByte: String, module: Data?, peers: [PeerEndpoint] = []
+    ) throws -> (NodeConfiguration, IvyConfig, PeerEndpoint) {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-policy-\(UUID().uuidString)", isDirectory: true
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let port = NetworkTransportTestPorts.allocate()
+        let spec = try module.map { module in
+            ChainSpec(
+                maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
+                targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10,
+                wasmPolicies: [WasmPolicyRef(
+                    moduleCID: try WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: module)).rawCID,
+                    scope: .transaction
+                )]
+            )
+        }
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"], storagePath: directory, privateKeyHex: String(repeating: keyByte, count: 32),
+            listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
+            hostedChildren: [Self.alpha], childSpecs: spec.map { [Self.alpha: $0] } ?? [:],
+            policyModules: module.map { [$0] } ?? []
+        )
+        let overlay = IvyConfig(
+            signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: peers,
+            requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        )
+        return (configuration, overlay, PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port))
+    }
+
+    /// A payer the node's mining has funded on Alpha, and a transfer of theirs on it.
+    private func fundedAlphaTransfer(
+        _ miner: NodeRuntime
+    ) async throws -> (recipients: MiningTemplateRequest, transfer: Transaction) {
+        let alpha = try XCTUnwrap(miner.levelReads[Self.alpha])
+        let payer = CryptoUtils.generateKeyPair()
+        let payerAddress = CryptoUtils.createAddress(from: payer.publicKey)
+        let payee = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
+        let recipients = MiningTemplateRequest(recipients: [
+            MiningRecipient(chainPath: ["Nexus"], address: payerAddress),
+            MiningRecipient(chainPath: Self.alpha, address: payerAddress),
+        ])
+        try await eventually("the payer is funded on Alpha") {
+            _ = try await miner.mineBlock(recipients)
+            guard let tip = await alpha.readSnapshot().tipCID else { return false }
+            return (await alpha.account(owner: payerAddress, blockCID: tip)?.balance ?? 0) >= 5
+        }
+        let body = TransactionBody(
+            accountActions: [AccountAction(owner: payerAddress, delta: -2), AccountAction(owner: payee, delta: 1)],
+            actions: [], depositActions: [], receiptActions: [], withdrawalActions: [],
+            signers: [payerAddress], nonce: 0, chainPath: Self.alpha
+        )
+        let header = try HeaderImpl(node: body)
+        return (recipients, Transaction(
+            signatures: [payer.publicKey: try XCTUnwrap(TransactionSigning.sign(
+                bodyHeader: header, privateKeyHex: payer.privateKey
+            ))],
+            body: header
+        ))
+    }
+
+    /// A child chain whose spec names a policy module reaches a second node
+    /// whole: a node given neither the spec nor the module follows the chain
+    /// from the node that mined it, executes a block whose transaction the
+    /// policy had to accept, and holds the module afterwards.
+    func testAPeerSyncsAPolicyChildAndItsModuleFromTheNodeThatMinedIt() async throws {
+        let module = Self.policyModule(verdict: 1)
+        let moduleCID = try WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: module)).rawCID
+        let (minerConfiguration, minerOverlay, minerEndpoint) = try policyHost("6a", module: module)
+        let miner = try await NodeRuntime.start(
+            storage: try await NodeStorage.open(configuration: minerConfiguration),
+            configuration: minerConfiguration, overlay: minerOverlay
+        )
+        addTeardownBlock { await miner.stop() }
+        let minerAlpha = try XCTUnwrap(miner.levelReads[Self.alpha])
+        let (recipients, transfer) = try await fundedAlphaTransfer(miner)
+        let transferCID = try await miner.submitTransaction(SubmitTransactionRequest(transaction: transfer)).transactionCID
+        try await eventually("the miner includes the transfer its policy accepts") {
+            _ = try await miner.mineBlock(recipients)
+            let included = await minerAlpha.explorerTransaction(cid: transferCID)?.blockHeight
+            return included != nil
+        }
+
+        let (followerConfiguration, followerOverlay, _) = try policyHost("6b", module: nil, peers: [minerEndpoint])
+        let followerStorage = try await NodeStorage.open(configuration: followerConfiguration)
+        let before = await followerStorage.broker.fetchVolumeLocal(root: moduleCID)
+        XCTAssertNil(before, "the follower starts without the module")
+        let follower = try await NodeRuntime.start(
+            storage: followerStorage, configuration: followerConfiguration, overlay: followerOverlay
+        )
+        addTeardownBlock { await follower.stop() }
+        let followerAlpha = try XCTUnwrap(follower.levelReads[Self.alpha])
+        try await eventually("the follower executes Alpha to the miner's tip") {
+            let minerTip = await minerAlpha.readSnapshot().tipCID, followerTip = await followerAlpha.readSnapshot().tipCID
+            return minerTip != nil && minerTip == followerTip
+        }
+        let followed = await followerAlpha.explorerTransaction(cid: transferCID)?.blockHeight
+        XCTAssertNotNil(followed, "the follower executed the block carrying the transfer")
+        let after = await followerStorage.broker.fetchVolumeLocal(root: moduleCID)
+        XCTAssertNotNil(after, "the follower holds the module it fetched with the chain")
+    }
+
+    /// A policy that rejects every transaction keeps them off its chain: the
+    /// same transfer the accepting policy's chain mines is refused at
+    /// submission here, while the chain itself still advances.
+    func testARejectingPolicyRefusesTheTransferAnAcceptingOneMines() async throws {
+        let (configuration, overlay, _) = try policyHost("6c", module: Self.policyModule(verdict: 0))
+        let node = try await NodeRuntime.start(
+            storage: try await NodeStorage.open(configuration: configuration),
+            configuration: configuration, overlay: overlay
+        )
+        addTeardownBlock { await node.stop() }
+        let alpha = try XCTUnwrap(node.levelReads[Self.alpha])
+        let (recipients, transfer) = try await fundedAlphaTransfer(node)
+        do {
+            _ = try await node.submitTransaction(SubmitTransactionRequest(transaction: transfer))
+            XCTFail("the policy rejects the transfer")
+        } catch {
+            XCTAssertEqual(error as? MempoolError, .invalidState, "refused as invalid: \(error)")
+        }
+        let height = await alpha.readSnapshot().height ?? 0
+        try await eventually("Alpha advances without the transfer") {
+            _ = try await node.mineBlock(recipients)
+            return (await alpha.readSnapshot().height ?? 0) > height
+        }
+        let pooled = await alpha.readSnapshot().mempoolCount
+        XCTAssertEqual(pooled, 0)
+    }
+
     /// The cross-chain swap end to end on one node that hosts Nexus and
     /// Alpha: A deposits on Alpha, B pays the receipt on Nexus, and B's
     /// withdrawal on Alpha is mined by merged mining. Preflight has no

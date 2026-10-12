@@ -35,6 +35,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         }
     }
 
+    @Option(name: .customLong("policy-module"), help: "A WASM policy module a hosted child's spec names by CID (repeatable). Stored at start, so the node can store the genesis it mines from that spec.")
+    var policyModule: [String] = []
+
     @Option(help: "Hosted-tree overlay listen port")
     var listenPort: UInt16 = 4001
 
@@ -191,6 +194,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             peerSearchInterval: peerSearchInterval,
             hostedChildren: hosted.map(\.path),
             childSpecs: Dictionary(hosted.compactMap { entry in entry.spec.map { (entry.path, $0) } }) { first, _ in first },
+            policyModules: try policyModule.map { try Data(contentsOf: URL(fileURLWithPath: $0)) },
             publicReadURL: publicReadUrl,
             publicSubmit: publicSubmit,
             minRelayFee: minRelayFee

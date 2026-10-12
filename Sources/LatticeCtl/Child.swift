@@ -28,6 +28,9 @@ struct Child: AsyncParsableCommand {
         @Option(help: "A ChainSpec JSON file (every field, maxBlockSize and wasmPolicies included); flags below build one otherwise.")
         var spec: String?
 
+        @Option(help: "A WASM policy module the spec names by CID (repeatable; one for every module in the spec's wasmPolicies). Kept beside the spec and stored by the host, which could not otherwise store the genesis.")
+        var policyModule: [String] = []
+
         @Option(help: "Target block time, milliseconds.")
         var blockTime: UInt64 = 10_000
 
@@ -49,6 +52,28 @@ struct Child: AsyncParsableCommand {
                     targetBlockTime: blockTime, initialReward: reward, halvingInterval: 1_000_000, halfLife: 100
                 )
             }
+            // The spec names each module by CID; the host stores a genesis
+            // only with every one of them in hand.
+            var modules: [String: Data] = [:]
+            for file in policyModule {
+                let bytes = try Data(contentsOf: URL(fileURLWithPath: file))
+                let cid = try WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: bytes)).rawCID
+                let policies = chainSpec.wasmPolicies.filter { $0.moduleCID == cid }
+                guard !policies.isEmpty else {
+                    throw CtlError("\(file) is module \(cid), which the spec's wasmPolicies do not name")
+                }
+                for policy in policies {
+                    do {
+                        try WasmPolicyEvaluator.validate(policy: policy, moduleBytes: bytes)
+                    } catch {
+                        throw CtlError("\(file) is not a valid module for policy \(policy.entrypoint): \(error)")
+                    }
+                }
+                modules[cid] = bytes
+            }
+            if let missing = chainSpec.wasmPolicies.map(\.moduleCID).first(where: { modules[$0] == nil }) {
+                throw CtlError("the spec names policy module \(missing); give its file with --policy-module")
+            }
             // A chain is created once: its spec fixes its genesis.
             guard !(topology.hostedChains ?? []).contains(path),
                   !FileManager.default.fileExists(atPath: layout.childSpec(for: path).path) else {
@@ -63,6 +88,13 @@ struct Child: AsyncParsableCommand {
                 at: file.deletingLastPathComponent(), withIntermediateDirectories: true
             )
             try encoder.encode(chainSpec).write(to: file, options: .atomic)
+            if !modules.isEmpty {
+                let directory = layout.policyModules(for: path)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                for (cid, bytes) in modules {
+                    try bytes.write(to: directory.appendingPathComponent(cid + ".wasm"), options: .atomic)
+                }
+            }
             try topology.save(root: layout.root)
             let restarted = try await withSpawnLock(layout) { try await restartHostIfRunningLocked(layout) }
             print("\(path): spec \(file.path); genesis mined from it in the next template that carries it")

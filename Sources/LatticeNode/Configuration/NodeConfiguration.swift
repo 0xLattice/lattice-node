@@ -121,6 +121,9 @@ public struct NodeConfiguration: Sendable {
     /// The spec a hosted child's genesis is built from while it has no root
     /// (operator choice; a child with none only follows roots others mine).
     public let childSpecs: [[String]: ChainSpec]
+    /// The WASM policy modules those specs name by CID (operator-supplied
+    /// bytes): stored at start, so a genesis that names one can be stored.
+    public let policyModules: [Data]
     /// The URL at which the public read routes of every level this process
     /// hosts are reachable (operator declaration; never derived). A peer's
     /// read-endpoint request for a hosted level is answered with it, and each
@@ -161,6 +164,7 @@ public struct NodeConfiguration: Sendable {
         resourcePolicy: NodeResourcePolicy = .default,
         hostedChildren: [[String]] = [],
         childSpecs: [[String]: ChainSpec] = [:],
+        policyModules: [Data] = [],
         publicReadURL: String? = nil,
         publicSubmit: Bool = false,
         minRelayFee: UInt64 = 0
@@ -222,6 +226,7 @@ public struct NodeConfiguration: Sendable {
         self.resourcePolicy = resourcePolicy
         self.childSpecs = childSpecs.filter { hostedChildren.contains($0.key) }
         self.hostedChildren = hostedChildren
+        self.policyModules = policyModules
         self.publicReadURL = publicReadURL
         self.publicSubmit = publicSubmit
         self.minRelayFee = minRelayFee

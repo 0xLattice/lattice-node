@@ -355,6 +355,89 @@ final class LatticeCtlE2ETests: XCTestCase {
         }
     }
 
+    /// A WASM policy module that accepts everything: the memory, allocator
+    /// and transaction entrypoint the policy ABI requires, and nothing else.
+    /// `heapPage` is where its allocator points, so two values give two modules.
+    private static func acceptAllPolicyModule(heapPage: UInt8) -> Data {
+        func section(_ id: UInt8, _ body: [UInt8]) -> [UInt8] { [id, UInt8(body.count)] + body }
+        func export(_ name: String, kind: UInt8, index: UInt8) -> [UInt8] {
+            [UInt8(name.utf8.count)] + Array(name.utf8) + [kind, index]
+        }
+        return Data(
+            [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]
+                // (i32) -> i32 and (i32, i32) -> i32
+                + section(1, [0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f])
+                + section(3, [0x02, 0x00, 0x01])
+                + section(5, [0x01, 0x00, 0x01])
+                + section(7, [0x03] + export("memory", kind: 2, index: 0)
+                    + export("lattice_alloc", kind: 0, index: 0)
+                    + export("lattice_validate_transaction", kind: 0, index: 1))
+                // lattice_alloc returns heapPage * 128; the entrypoint returns 1.
+                + section(10, [0x02, 0x05, 0x00, 0x41, 0x80, heapPage, 0x0b, 0x04, 0x00, 0x41, 0x01, 0x0b])
+        )
+    }
+
+    /// A child chain whose spec names two WASM policies, all through the CLI:
+    /// created only with every module the spec names, mined by merged mining,
+    /// and a transaction on it that both policies have to accept.
+    func testAChildChainWithAPolicyIsCreatedMergeMinedAndTransactedThroughTheCLI() async throws {
+        let alpha = "Nexus/Alpha"
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lattice-node-e2e-ctlpolicy-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let miner = try await makeKey(scratch, "alpha-miner")
+        let recipient = try await makeKey(scratch, "alpha-recipient")
+
+        let modules = [Self.acceptAllPolicyModule(heapPage: 8), Self.acceptAllPolicyModule(heapPage: 16)]
+        let moduleFiles = ["first.wasm", "second.wasm"].map { scratch.appendingPathComponent($0) }
+        for (module, file) in zip(modules, moduleFiles) { try module.write(to: file) }
+        let otherFile = scratch.appendingPathComponent("other.wasm")
+        try Self.acceptAllPolicyModule(heapPage: 24).write(to: otherFile)
+        let moduleCIDs = try modules.map { try WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: $0)).rawCID }
+        let specFile = scratch.appendingPathComponent("alpha-spec.json")
+        try JSONEncoder().encode(ChainSpec(
+            maxNumberOfTransactionsPerBlock: 1_000, maxStateGrowth: 1_000_000, premine: 0,
+            targetBlockTime: 1_000, initialReward: 100, halvingInterval: 1_000_000, halfLife: 100,
+            wasmPolicies: moduleCIDs.map { WasmPolicyRef(moduleCID: $0, scope: .transaction) }
+        )).write(to: specFile)
+
+        let host = try await bringUpMiningHost(miner: nil)
+        let create = ["child", "create", alpha, "--spec", specFile.path]
+        let partial = try await runCtl(
+            create + ["--policy-module", moduleFiles[0].path], root: host.root, expectFailure: true
+        )
+        XCTAssertTrue(partial.contains(moduleCIDs[1]), "every module the spec names must be given: \(partial)")
+        let wrong = try await runCtl(
+            create + ["--policy-module", otherFile.path], root: host.root, expectFailure: true
+        )
+        XCTAssertTrue(wrong.contains("do not name"), "a module the spec does not name is refused: \(wrong)")
+        _ = try await runCtl(
+            create + moduleFiles.flatMap { ["--policy-module", $0.path] }, root: host.root
+        )
+
+        var topology = try Topology.load(root: host.root)
+        topology.mine?.recipients = [alpha: miner.address]
+        try topology.validated().save(root: host.root)
+        try await waitFor("Nexus active after the restart") {
+            await self.health(host.nexusRPC)?["phase"] as? String == "active"
+        }
+        _ = try await runCtl(["mine", "start"], root: host.root)
+        try await waitFor("Alpha mined by merged mining", seconds: 180) {
+            await self.height(host.nexusRPC, chain: alpha) >= 2
+        }
+        try await waitFor("the Alpha miner is funded", seconds: 180) {
+            await self.balance(host, miner.address, chain: alpha) >= 10
+        }
+        try await submitUntilAccepted("Alpha accepts the transfer", host, [
+            "send", "--chain", alpha, "--key", miner.file.path,
+            "--to", recipient.address, "--amount", "10",
+        ])
+        try await waitFor("the Alpha transfer is mined", seconds: 240) {
+            await self.balance(host, recipient.address, chain: alpha) == 10
+        }
+    }
+
     /// Read with the node's loopback cookie, as every operator client must.
     private func balance(_ host: CtlHost, _ address: String, chain: String = "Nexus") async -> UInt64 {
         guard let url = URL(
