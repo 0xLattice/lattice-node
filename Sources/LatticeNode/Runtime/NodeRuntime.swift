@@ -308,8 +308,7 @@ public final class NodeRuntime: Sendable {
             hello: try? ChainHandshake(
                 nexusGenesisCID: configuration.nexusGenesisCID,
                 chainPath: configuration.chainPath,
-                capabilities: Set([ChainHandshake.volumeBundle]
-                    + configuration.hostedChildren.map(ChainHandshake.hosting))
+                capabilities: configuration.helloCapabilities
             ).encode(),
             configuration: configuration,
             outputs: outputs,
@@ -670,10 +669,29 @@ extension NodeRuntime {
                     await ivy.announceProvider(rootCID: key, expiresAt: expiry)
                 }
                 var connected = Set((await ivy.connectedPeers).map(\.publicKey))
+                // An address is dialled at most once in a pass, whichever
+                // chains want it and however the dial ends. True when this dial
+                // reached it, false when it failed, nil when none was made:
+                // a session that is already open was not reached at this
+                // address, which is then not one to remember.
+                var attempted: Set<PeerEndpoint> = []
+                func dial(_ endpoint: PeerEndpoint) async -> Bool? {
+                    guard attempted.insert(endpoint).inserted else { return nil }
+                    guard !(await ivy.connectedPeers).contains(where: { $0.publicKey == endpoint.publicKey }) else {
+                        connected.insert(endpoint.publicKey)
+                        return nil
+                    }
+                    do {
+                        try await ivy.connect(to: endpoint)
+                        connected.insert(endpoint.publicKey)
+                        return true
+                    } catch {
+                        return false
+                    }
+                }
                 // One routine, run for each hosted chain: keep the chain's
                 // own current peers up from the peers it remembers, then
-                // from discovery. A peer is dialled once however many chains
-                // want it, and every dial is a random draw, so whoever
+                // from discovery. Every dial is a random draw, so whoever
                 // orders a book or a lookup's answer does not pick them.
                 for chain in chains {
                     var current = chain.hosts == nil ? connected
@@ -682,28 +700,26 @@ extension NodeRuntime {
                     // when it stalls.
                     for endpoint in bootstrap
                     where chain.hosts == nil && chain.stalled && !connected.contains(endpoint.publicKey) {
-                        do {
-                            try await ivy.connect(to: endpoint)
-                            connected.insert(endpoint.publicKey)
-                            current.insert(endpoint.publicKey)
-                        } catch {}
+                        if await dial(endpoint) == true { current.insert(endpoint.publicKey) }
                     }
                     // The chain's network as this node last knew it. Short
                     // of peers (always, just after a start) or stalled, it
                     // dials some it remembers, so it rejoins without leaning
-                    // on its seeds or a lookup, or when neither answers.
+                    // on its seeds or a lookup, or when neither answers. A
+                    // peer reached is a Nexus peer; whether it still hosts
+                    // this chain is for its session to say.
                     if let peerMemory, current.count < target || chain.stalled {
                         let remembered = await peerMemory.candidates(
-                            for: chain.path, excluding: connected, count: NodeRuntime.rememberedPeerDials
+                            for: chain.path, excluding: connected.union(attempted.map(\.publicKey)),
+                            count: NodeRuntime.rememberedPeerDials
                         )
                         for endpoint in remembered {
-                            do {
-                                try await ivy.connect(to: endpoint)
-                                connected.insert(endpoint.publicKey)
+                            switch await dial(endpoint) {
+                            case true?:
                                 current.insert(endpoint.publicKey)
-                                await peerMemory.reached(endpoint, chains: chain.lineage, now: now)
-                            } catch {
-                                await peerMemory.failed(endpoint.publicKey)
+                                await peerMemory.reached(endpoint, chains: [root], now: now)
+                            case false?: await peerMemory.failed(endpoint.publicKey)
+                            case nil: break
                             }
                         }
                     }
@@ -714,13 +730,9 @@ extension NodeRuntime {
                     if let hosts = chain.hosts, current.isEmpty || chain.stalled {
                         let fresh = (await ivy.discoverProviders(rootCID: hosts.key))
                             .filter { $0.publicKey != ownKey && !connected.contains($0.publicKey) }
-                        for endpoint in fresh.shuffled().prefix(4) {
-                            do {
-                                try await ivy.connect(to: endpoint)
-                                connected.insert(endpoint.publicKey)
-                                current.insert(endpoint.publicKey)
-                                await peerMemory?.reached(endpoint, chains: chain.lineage, now: now)
-                            } catch {}
+                        for endpoint in fresh.shuffled().prefix(4) where await dial(endpoint) == true {
+                            current.insert(endpoint.publicKey)
+                            await peerMemory?.reached(endpoint, chains: chain.lineage, now: now)
                         }
                     }
                     // Seeds last, and only on need: with too few peers still,
@@ -729,13 +741,11 @@ extension NodeRuntime {
                     // layer is asked only if the one before left the chain
                     // short.
                     for layer in chain.seeds where SeedPolicy.needsSeeds(peers: current.count, below: beforeSeeds) {
-                        for endpoint in layer.shuffled() where !connected.contains(endpoint.publicKey) {
-                            do {
-                                try await ivy.connect(to: endpoint)
-                                connected.insert(endpoint.publicKey)
-                                current.insert(endpoint.publicKey)
-                                await peerMemory?.reached(endpoint, chains: chain.lineage, now: now)
-                            } catch {}
+                        for endpoint in layer.shuffled()
+                        where !connected.contains(endpoint.publicKey) {
+                            guard await dial(endpoint) == true else { continue }
+                            current.insert(endpoint.publicKey)
+                            await peerMemory?.reached(endpoint, chains: chain.lineage, now: now)
                         }
                     }
                 }

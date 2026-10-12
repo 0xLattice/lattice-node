@@ -138,6 +138,7 @@ that chain runs short of peers or stops progressing.
 - Configured peers and the node's own identity are not written to it. A seed
   the node reached is: it is a peer like any other.
 - A node started with no peers (`"peers": []`) neither reads nor writes it.
+- A connected peer that no longer serves a chain leaves that chain's book.
 - The book of a chain the node no longer hosts is dropped at the next start.
 - A file written before chains had their own books is read as Nexus's book.
 - The file is advisory. Deleting it costs nothing but the next start's head

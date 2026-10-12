@@ -166,8 +166,8 @@ final class PeerSearchRuntimeTests: XCTestCase {
         try await eventually("Alpha counts its own peer", within: .seconds(20)) {
             follower.runtime.levelReads[Self.alpha]?.peerCount() == 1 && follower.runtime.peerCount == 2
         }
-        // Nexus's book was never asked (it has its target), and learns the
-        // host only because a dial reached it.
+        // Nexus learns the host because a dial reached it; Alpha keeps it
+        // because its session says it hosts Alpha.
         try await eventually("the host is remembered for both chains") {
             let nexus = await follower.runtime.peerMemory?.remembered(for: ["Nexus"]).map(\.publicKey)
             let alpha = await follower.runtime.peerMemory?.remembered(for: Self.alpha).map(\.publicKey)
@@ -213,6 +213,11 @@ final class PeerSearchRuntimeTests: XCTestCase {
         }
         let seed = PeerEndpoint(publicKey: String(repeating: "73", count: 32), host: "198.51.100.1", port: 4001)
         XCTAssertNoThrow(try configuration(hosted: [Self.alpha], seeds: [Self.alpha: [seed]]))
+        // The hello names what is hosted, beside what the node speaks.
+        XCTAssertEqual(
+            try configuration(hosted: [Self.alpha], seeds: [:]).helloCapabilities,
+            [ChainHandshake.volumeBundle, "host:Nexus/Alpha"]
+        )
         XCTAssertThrowsError(try configuration(hosted: [], seeds: [Self.alpha: [seed]]))
         XCTAssertThrowsError(try configuration(hosted: [Self.alpha], seeds: [["Nexus"]: [seed]]))
     }
