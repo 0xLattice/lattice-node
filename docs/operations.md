@@ -87,6 +87,13 @@ interval.
   none. The chain must be hosted.
 - An array, `"peers": ["<public-key>@node.example:4001"]`, is Nexus's list.
 
+Going back to an older node: a node from before chains had peers of their own
+reads `peers` only as an array, and refuses to start on the keyed form. The
+file is written keyed only once a child chain has a list, so a host that never
+gave a child a list can go back as it is. Otherwise keep a copy of
+`lattice.json` from before the upgrade, or rewrite `peers` as Nexus's array
+(dropping the child lists) before starting the older node.
+
 ### Seed names
 
 Each name is a DNS alias the project keeps, pinned to the identity of the host
@@ -142,6 +149,8 @@ that chain runs short of peers or stops progressing.
   and ages out of it.
 - The book of a chain the node no longer hosts is dropped at the next start.
 - A file written before chains had their own books is read as Nexus's book.
+- An older node reads the per-chain file as an empty book and starts as if
+  it remembered no one; nothing fails, and it relearns its peers.
 - The file is advisory. Deleting it costs nothing but the next start's head
   start; a damaged one is ignored.
 
