@@ -268,6 +268,44 @@ final class LatticeCtlE2ETests: XCTestCase {
         return host
     }
 
+    /// The descriptors `pid` holds open, or nil where this cannot be read.
+    private func openDescriptors(_ pid: Int32) -> Int? {
+        try? FileManager.default
+            .contentsOfDirectory(atPath: "/proc/\(pid)/fd").count
+    }
+
+    /// `up --foreground` is a container's PID 1: it checks on the node every
+    /// second for as long as the node runs. A descriptor kept from each check
+    /// reaches the process's limit within hours, after which the supervisor
+    /// can read nothing, takes the node for dead and exits.
+    func testTheForegroundSupervisorHoldsNoMoreDescriptorsAsItWatches() async throws {
+        let host = try await bringUpMiningHost(miner: nil)
+        let supervisor = Process()
+        supervisor.executableURL = try binary("E2E_CTL_BIN", "lattice")
+        supervisor.arguments = ["up", "--foreground", "--root", host.root.path]
+        supervisor.standardOutput = FileHandle.nullDevice
+        supervisor.standardError = FileHandle.nullDevice
+        try supervisor.run()
+        defer {
+            supervisor.terminate()
+            supervisor.waitUntilExit()
+        }
+        try XCTSkipIf(
+            openDescriptors(ProcessInfo.processInfo.processIdentifier) == nil,
+            "no /proc here to count another process's descriptors"
+        )
+        // Past start-up, where descriptors are still being opened.
+        try await Task.sleep(for: .seconds(5))
+        let before = try XCTUnwrap(openDescriptors(supervisor.processIdentifier))
+        try await Task.sleep(for: .seconds(15))
+        XCTAssertTrue(supervisor.isRunning, "the supervisor is still watching")
+        let after = try XCTUnwrap(openDescriptors(supervisor.processIdentifier))
+        XCTAssertLessThanOrEqual(
+            after, before + 3,
+            "fifteen checks on the node left \(after - before) more descriptors open"
+        )
+    }
+
     func testNexusMiningAndTransferThroughTheCLI() async throws {
         let scratch = FileManager.default.temporaryDirectory
             .appendingPathComponent("lattice-node-e2e-ctlkeys-\(UUID().uuidString)")
