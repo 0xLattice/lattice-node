@@ -147,13 +147,15 @@ key carrying the full path.
 
 Provider discovery is keyed per child chain: the node periodically announces
 each hosted child under its path
-(`lattice.chain-peers.v1:<nexus genesis>:<path>`); Nexus, which every node
-hosts, has no record. It does not publish a provider record per block or
-state. While no connected peer is among a hosted child's providers, or when
+(`lattice.chain-peers.v1:<nexus genesis>:<path>`), and names each in its
+session hello as the capability `host:<path>`; Nexus, which every node
+hosts, has neither. It does not publish a provider record per block or
+state. A child's current peers are the sessions whose hello named it or that
+its providers include. While a hosted child has no current peer, or when
 its verified progress stalls, the node dials a bounded random set of that
 chain's providers. On a child block's first attempt its bundle is asked of the
-capable sessions among those providers before other capable sessions; nothing
-else is routed by the rendezvous. A Nexus stall retries disconnected bootstrap peers.
+capable sessions among its current peers before other capable sessions; nothing
+else is routed by them. A Nexus stall retries disconnected bootstrap peers.
 
 Parent facts, run reports and merged-mining candidates never cross a network
 plane: they pass in-process between co-hosted levels.

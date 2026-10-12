@@ -46,6 +46,8 @@ public struct ChainReads: Sendable {
     public let chainPath: [String]
     /// Whether this chain durably accepted a block (its own journal).
     let accepted: @Sendable (String) async -> Bool
+    /// This chain's current peers: the open sessions that serve it.
+    public let peerCount: @Sendable () -> Int
 
     init(
         storage: NodeStorage,
@@ -53,7 +55,8 @@ public struct ChainReads: Sendable {
         accepted: (@Sendable (String) async -> Bool)? = nil,
         tip: @escaping @Sendable () async -> ChainStatus,
         canonicalCID: @escaping @Sendable (UInt64) async -> String?,
-        mempool: @escaping @Sendable (_ listing: Bool) async -> MempoolListing
+        mempool: @escaping @Sendable (_ listing: Bool) async -> MempoolListing,
+        peerCount: @escaping @Sendable () -> Int = { 0 }
     ) {
         self.storage = storage
         self.chainPath = chainPath ?? storage.configuration.chainPath
@@ -65,6 +68,7 @@ public struct ChainReads: Sendable {
         self.tip = tip
         self.canonicalCID = canonicalCID
         self.mempool = mempool
+        self.peerCount = peerCount
     }
 
     /// Public status read over the immutable published view.

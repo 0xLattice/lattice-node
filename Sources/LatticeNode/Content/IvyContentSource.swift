@@ -248,7 +248,7 @@ public struct IvyRootContentSource: Sendable {
     /// others; the record is a hint for whom to ask, never for what to accept.
     fileprivate typealias BundleFetch =
         @Sendable (String) async -> (volumes: [AttributedVolumeResponse], session: AuthenticatedPeer?)
-    private let fetchBundle: @Sendable (_ rootCID: String, _ hosts: String?) async
+    private let fetchBundle: @Sendable (_ rootCID: String, _ hosts: ChainHosts?) async
         -> (volumes: [AttributedVolumeResponse], session: AuthenticatedPeer?)
     /// Credits the peer that served a requested Volume once it verifies, so
     /// the overlay favours peers that serve this node when it is contended.
@@ -381,12 +381,12 @@ public struct IvyRootContentSource: Sendable {
         // then fetched from one Volume at a time, like a peer that speaks no
         // bundles. An answer this node cut short or never asked for (its
         // own capacity or boundary, a request not sent, its cancellation)
-        // reports a failure and is not the peer's. The sessions the DHT names
-        // as hosts of the block's chain are asked before the others.
+        // reports a failure and is not the peer's. The current peers of the
+        // block's chain are asked before the others.
         fetchBundle = { rootCID, hosts in
             var named = Set<Data>()
             if let hosts {
-                named = Set(capabilities.sessions(of: await ivy.providers(for: hosts)).map(\.sessionID))
+                named = Set(await capabilities.sessions(hosting: hosts, ivy: ivy).map(\.sessionID))
             }
             var asked = Set<Data>()
             while let peer = ({
@@ -433,7 +433,7 @@ public struct IvyRootContentSource: Sendable {
     public func withRootTracing<T: Sendable>(
         _ rootCID: String,
         bundle: Bool = true,
-        hosts: String? = nil,
+        hosts: ChainHosts? = nil,
         initialResponse: AttributedVolumeResponse? = nil,
         capture: AttributionCapture? = nil,
         operation: @Sendable (Session) async throws -> T

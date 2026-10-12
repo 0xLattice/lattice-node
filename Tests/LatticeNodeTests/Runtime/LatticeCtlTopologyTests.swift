@@ -161,6 +161,54 @@ final class LatticeCtlTopologyTests: XCTestCase {
         }
     }
 
+    /// `peers` is a list per chain. An array is Nexus's list, as in every
+    /// file written before chains had their own; a list for a chain that is
+    /// not hosted is refused.
+    func testPeersLoadPerChainAndAnArrayIsTheNexusList() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ctl-chain-peers-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        func load(_ body: String) throws -> Topology {
+            try Data(body.utf8).write(to: root.appendingPathComponent(Topology.fileName))
+            return try Topology.load(root: root).validated()
+        }
+
+        let array = try load(#"{"listen":4001,"rpc":4003,"peers":["k@a.example:4001"]}"#)
+        XCTAssertEqual(array.peers?.byChain, ["Nexus": ["k@a.example:4001"]])
+        XCTAssertEqual(array.peerArguments, ["--peer", "k@a.example:4001"])
+        // Written back as it was read.
+        try array.save(root: root)
+        XCTAssertEqual(try Topology.load(root: root).peers, array.peers)
+        XCTAssertTrue(String(decoding: try Data(contentsOf: root.appendingPathComponent(Topology.fileName)), as: UTF8.self)
+            .contains("\"peers\" : ["))
+
+        XCTAssertEqual(try load(#"{"listen":4001,"rpc":4003,"peers":[]}"#).peerArguments, ["--no-default-peers"])
+        XCTAssertEqual(try load(#"{"listen":4001,"rpc":4003}"#).peerArguments, [])
+
+        let perChain = try load(
+            #"{"listen":4001,"rpc":4003,"hostedChains":["Nexus/Alpha","Nexus/Beta"],"peers":{"Nexus/Alpha":["k@a.example:4001","j@b.example:4001"],"Nexus/Beta":[]}}"#
+        )
+        // Nexus keeps the built-in peers; an empty child list is no list.
+        XCTAssertEqual(perChain.peerArguments, [
+            "--chain-peer", "Nexus/Alpha=k@a.example:4001",
+            "--chain-peer", "Nexus/Alpha=j@b.example:4001",
+        ])
+        try perChain.save(root: root)
+        XCTAssertEqual(try Topology.load(root: root).peers, perChain.peers)
+        XCTAssertEqual(
+            try load(#"{"listen":4001,"rpc":4003,"hostedChains":["Nexus/Alpha"],"peers":{"Nexus":[],"Nexus/Alpha":["k@a.example:4001"]}}"#).peerArguments,
+            ["--no-default-peers", "--chain-peer", "Nexus/Alpha=k@a.example:4001"]
+        )
+
+        XCTAssertThrowsError(
+            try load(#"{"listen":4001,"rpc":4003,"peers":{"Nexus/Alpha":["k@a.example:4001"]}}"#)
+        ) { error in
+            XCTAssertTrue(String(describing: error).contains("Nexus/Alpha"))
+        }
+        XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"peers":"k@a.example:4001"}"#))
+    }
+
     /// `mine.minWork` reaches the coordinator as a search plan. There is no
     /// companion setting that commits it: blocks still commit their schedule.
     func testMinimumWorkPassesThroughAsASearchPlan() throws {

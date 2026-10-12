@@ -86,7 +86,7 @@ Mining templates are requested at Nexus and can carry every hosted descendant.
 | `GET /api/deposit-state?key=<demander/amount/nonce>` | One deposit key: its locked amount, `0` once withdrawn, or absent; with a state proof | yes |
 | `GET /api/receipt-state?demander=&amount=&nonce=&chainPath=P/D` | The withdrawer a receipt on `P` records for a deposit on `P/D`, with a state proof | yes |
 | `GET /api/mempool` | Bounded mempool listing | yes |
-| `GET /api/peers` | Ready peer count | yes |
+| `GET /api/peers?chainPath=P` | The chain's own current peer count: the open sessions that serve it. Without `chainPath`, Nexus's, which is every ready session | yes |
 | `GET /api/chain/info` | Chain metadata | yes |
 | `GET /api/chain/spec` | Active chain spec | yes |
 | `GET /api/chain/genesis` | Selected genesis CID | yes |

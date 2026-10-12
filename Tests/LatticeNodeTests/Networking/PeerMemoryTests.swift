@@ -124,44 +124,177 @@ final class PeerMemoryTests: XCTestCase {
         XCTAssertGreaterThan(seen.count, 2)
     }
 
-    func testTheFileSurvivesARestartAndABadOneIsAnEmptyBookNotAFailure() async throws {
+    private static let nexus = ["Nexus"]
+    private static let alpha = ["Nexus", "Alpha"]
+
+    private func scratch() throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("lattice-peers-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
-        let file = directory.appendingPathComponent(PeerMemory.fileName)
+        return directory
+    }
 
-        let first = PeerMemory(directory: directory, excluding: [key(9)], now: 1_000)
-        let empty = await first.isEmpty
+    func testTheFileSurvivesARestartAndABadOneIsAnEmptyBookNotAFailure() async throws {
+        let directory = try scratch()
+        let file = directory.appendingPathComponent(PeerMemory.fileName)
+        let nexus = Self.nexus
+
+        let first = PeerMemory(directory: directory, chains: [nexus], excluding: [key(9)], now: 1_000)
+        let empty = await first.remembered(for: nexus).isEmpty
         XCTAssertTrue(empty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.path), "nothing to remember writes nothing")
-        for reached in [endpoint(1), endpoint(2), endpoint(9)] { await first.reached(reached, now: 1_000) }
+        for reached in [endpoint(1), endpoint(2), endpoint(9)] { await first.reached(reached, chains: [nexus], now: 1_000) }
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.path), "written with the pass, not with each dial")
-        await first.stillOpen([key(1), key(2), key(9)], now: 1_000)
+        await first.stillOpen(byChain: [nexus: [key(1), key(2), key(9)]], now: 1_000)
         let permissions = try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? Int
         XCTAssertEqual(permissions, 0o600)
 
         // A new process: the same peers, minus what has aged out since, and never an excluded one.
-        let second = PeerMemory(directory: directory, excluding: [key(2)], now: 2_000)
-        let remembered = await second.remembered
+        let second = PeerMemory(directory: directory, chains: [nexus], excluding: [key(2)], now: 2_000)
+        let remembered = await second.remembered(for: nexus)
         XCTAssertEqual(Set(remembered), [endpoint(1), endpoint(2)])
-        let offered = await second.candidates(excluding: [], count: 10)
+        let offered = await second.candidates(for: nexus, excluding: [], count: 10)
         XCTAssertEqual(offered, [endpoint(1)], "a peer now configured is not also dialled from memory")
-        let later = PeerMemory(directory: directory, excluding: [], now: 1_000 + PeerBook.horizon + 1)
-        let stale = await later.isEmpty
+        let later = PeerMemory(directory: directory, chains: [nexus], excluding: [], now: 1_000 + PeerBook.horizon + 1)
+        let stale = await later.remembered(for: nexus).isEmpty
         XCTAssertTrue(stale)
 
         // Garbage, a future format, entries that could not be dialled, or a file far too large.
         for contents in [
             Data("not json".utf8),
+            Data(#"{"version":3,"chains":{}}"#.utf8),
             Data(#"{"version":2,"peers":[]}"#.utf8),
             Data(#"{"version":1,"peers":[{"publicKey":"zz","host":"198.51.100.1","port":4001,"lastSeen":1,"failures":0}]}"#.utf8),
             Data(count: PeerMemory.maxFileBytes + 1),
         ] {
             try contents.write(to: file)
-            let reopened = PeerMemory(directory: directory, excluding: [], now: 1_000)
-            let nothing = await reopened.isEmpty
+            let reopened = PeerMemory(directory: directory, chains: [nexus], excluding: [], now: 1_000)
+            let nothing = await reopened.remembered(for: nexus).isEmpty
             XCTAssertTrue(nothing)
         }
+    }
+
+    /// Every hosted chain has a book of its own, under the same limits. A
+    /// peer is in the book of each chain it said it hosts, and only once a
+    /// dial of this node reached it.
+    func testEachChainHasItsOwnBookUnderTheSameLimits() async throws {
+        let directory = try scratch()
+        let (nexus, alpha) = (Self.nexus, Self.alpha)
+        let memory = PeerMemory(directory: directory, chains: [nexus, alpha], excluding: [], now: 1_000)
+
+        // Reached for Nexus alone: Alpha's book is not touched.
+        await memory.reached(endpoint(1), chains: [nexus], now: 1_000)
+        // Reached for Alpha: it hosts Alpha and so Nexus.
+        await memory.reached(endpoint(2), chains: [nexus, alpha], now: 1_000)
+        var inAlpha = await memory.remembered(for: alpha)
+        XCTAssertEqual(inAlpha, [endpoint(2)])
+        var inNexus = await memory.remembered(for: nexus)
+        XCTAssertEqual(Set(inNexus), [endpoint(1), endpoint(2)])
+
+        // Peer 1's session then says it hosts Alpha: the address this node
+        // dialled enters Alpha's book. Peer 3 says so too, but connected to
+        // us: no address of ours reached it, so no book holds it.
+        await memory.stillOpen(byChain: [nexus: [key(1), key(2), key(3)], alpha: [key(1), key(2), key(3)]], now: 2_000)
+        inAlpha = await memory.remembered(for: alpha)
+        XCTAssertEqual(Set(inAlpha), [endpoint(1), endpoint(2)])
+        inNexus = await memory.remembered(for: nexus)
+        XCTAssertEqual(Set(inNexus), [endpoint(1), endpoint(2)])
+
+        // Candidates are drawn from the chain's own book.
+        await memory.reached(endpoint(4), chains: [nexus], now: 2_000)
+        let forAlpha = await memory.candidates(for: alpha, excluding: [key(1)], count: 10)
+        XCTAssertEqual(forAlpha, [endpoint(2)])
+        let forUnhosted = await memory.candidates(for: ["Nexus", "Beta"], excluding: [], count: 10)
+        XCTAssertTrue(forUnhosted.isEmpty)
+
+        // The limits count per chain: one network group fills its share of
+        // each book, not one share between them.
+        for index in 0..<(PeerBook.capacityPerGroup + 4) {
+            await memory.reached(
+                endpoint(UInt8(100 + index), host: "203.0.113.\(index + 1)"), chains: [nexus, alpha], now: 3_000
+            )
+        }
+        await memory.stillOpen(byChain: [:], now: 3_000)
+        for chain in [nexus, alpha] {
+            let group = await memory.remembered(for: chain).filter { $0.host.hasPrefix("203.0.") }
+            XCTAssertEqual(group.count, PeerBook.capacityPerGroup, "\(chain)")
+        }
+    }
+
+    /// A dial that fails counts against the peer in every book holding it.
+    func testAFailedDialCountsInEveryBookHoldingThePeer() async throws {
+        let (nexus, alpha) = (Self.nexus, Self.alpha)
+        let memory = PeerMemory(directory: try scratch(), chains: [nexus, alpha], excluding: [], now: 1_000)
+        await memory.reached(endpoint(1), chains: [nexus, alpha], now: 1_000)
+        await memory.reached(endpoint(2), chains: [nexus], now: 1_000)
+        for _ in 0..<PeerBook.maxFailures { await memory.failed(key(1)) }
+        let inNexus = await memory.remembered(for: nexus)
+        XCTAssertEqual(inNexus, [endpoint(2)])
+        let inAlpha = await memory.remembered(for: alpha)
+        XCTAssertTrue(inAlpha.isEmpty)
+    }
+
+    /// A peer that is connected and no longer serves a chain is not refreshed
+    /// in that chain's book, and ages out of it; it is never struck from it
+    /// for not saying so, since a peer on an older build says nothing.
+    func testAPeerThatStoppedHostingAChainAgesOutOfThatChainsBook() async throws {
+        let (nexus, alpha) = (Self.nexus, Self.alpha)
+        let memory = PeerMemory(directory: try scratch(), chains: [nexus, alpha], excluding: [], now: 1_000)
+        await memory.reached(endpoint(1), chains: [nexus, alpha], now: 1_000)
+        await memory.reached(endpoint(2), chains: [nexus, alpha], now: 1_000)
+        // Peer 1 is open and serves only Nexus; peer 2 still serves Alpha.
+        for _ in 0..<(PeerBook.maxFailures * 2) {
+            await memory.stillOpen(byChain: [nexus: [key(1), key(2)], alpha: [key(2)]], now: 2_000)
+        }
+        var inAlpha = await memory.remembered(for: alpha)
+        XCTAssertEqual(Set(inAlpha), [endpoint(1), endpoint(2)])
+        let later = 1_000 + PeerBook.horizon + 1
+        await memory.stillOpen(byChain: [nexus: [key(1), key(2)], alpha: [key(2)]], now: later)
+        inAlpha = await memory.remembered(for: alpha)
+        XCTAssertEqual(inAlpha, [endpoint(2)])
+        let inNexus = await memory.remembered(for: nexus)
+        XCTAssertEqual(Set(inNexus), [endpoint(1), endpoint(2)])
+    }
+
+    /// The file holds a book per chain. One written before chains had their
+    /// own is Nexus's book, and a book for a chain no longer hosted is dropped.
+    func testTheFileHoldsABookPerChainAndAnOlderFileIsTheNexusBook() async throws {
+        let directory = try scratch()
+        let file = directory.appendingPathComponent(PeerMemory.fileName)
+        let (nexus, alpha) = (Self.nexus, Self.alpha)
+
+        let entry = #"{"publicKey":"\#(key(1))","host":"198.51.1.7","port":4001,"lastSeen":1000,"failures":0}"#
+        try Data(#"{"version":1,"peers":[\#(entry)]}"#.utf8).write(to: file)
+        let upgraded = PeerMemory(directory: directory, chains: [nexus, alpha], excluding: [], now: 1_000)
+        var inNexus = await upgraded.remembered(for: nexus)
+        XCTAssertEqual(inNexus, [endpoint(1)])
+        var inAlpha = await upgraded.remembered(for: alpha)
+        XCTAssertTrue(inAlpha.isEmpty)
+
+        await upgraded.reached(endpoint(2), chains: [nexus, alpha], now: 2_000)
+        await upgraded.stillOpen(byChain: [nexus: [key(2)], alpha: [key(2)]], now: 2_000)
+        let written = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        XCTAssertEqual(written["version"] as? Int, 2)
+        let chains = try XCTUnwrap(written["chains"] as? [String: [[String: Any]]])
+        XCTAssertEqual(Set(chains.keys), ["Nexus", "Nexus/Alpha"])
+        XCTAssertEqual(chains["Nexus"]?.count, 2)
+        XCTAssertEqual(chains["Nexus/Alpha"]?.compactMap { $0["publicKey"] as? String }, [key(2)])
+
+        // Restarted hosting both: each book as it was.
+        let again = PeerMemory(directory: directory, chains: [nexus, alpha], excluding: [], now: 3_000)
+        inAlpha = await again.remembered(for: alpha)
+        XCTAssertEqual(inAlpha, [endpoint(2)])
+        // Restarted without Alpha: its book is gone, at once and on disk.
+        let without = PeerMemory(directory: directory, chains: [nexus], excluding: [], now: 3_000)
+        inAlpha = await without.remembered(for: alpha)
+        XCTAssertTrue(inAlpha.isEmpty)
+        await without.reached(endpoint(3), chains: [nexus], now: 3_000)
+        await without.stillOpen(byChain: [nexus: [key(3)]], now: 3_000)
+        let back = PeerMemory(directory: directory, chains: [nexus, alpha], excluding: [], now: 4_000)
+        inAlpha = await back.remembered(for: alpha)
+        XCTAssertTrue(inAlpha.isEmpty)
+        inNexus = await back.remembered(for: nexus)
+        XCTAssertEqual(Set(inNexus), [endpoint(1), endpoint(2), endpoint(3)])
     }
 
     /// End to end, three real runtimes over loopback: a node that has been on
@@ -217,7 +350,7 @@ final class PeerMemoryTests: XCTestCase {
             // By identity: the address kept is the one the overlay accepted
             // for it, which the next run then has to be able to dial.
             try await eventually("the node remembers the peer it met") {
-                await node.peerMemory?.remembered.map(\.publicKey) == [otherEndpoint.publicKey]
+                await node.peerMemory?.remembered(for: ["Nexus"]).map(\.publicKey) == [otherEndpoint.publicKey]
             }
             await node.stop()
         }
@@ -333,7 +466,7 @@ final class PeerMemoryTests: XCTestCase {
                 await sessions(node) == [firstSeed.publicKey, one.publicKey, two.publicKey]
             }
             try await eventually("the node remembers the three peers it met") {
-                Set(await node.peerMemory?.remembered.map(\.publicKey) ?? [])
+                Set(await node.peerMemory?.remembered(for: ["Nexus"]).map(\.publicKey) ?? [])
                     == [firstSeed.publicKey, one.publicKey, two.publicKey]
             }
             await node.stop()

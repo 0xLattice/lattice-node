@@ -117,6 +117,9 @@ public final class NodeRuntime: Sendable {
         case maintenance
         /// The network I/O started by a maintenance turn ended.
         case maintenanceFinished
+        /// Each hosted chain's current peers, by key, as a maintenance pass
+        /// counted them.
+        case currentPeers([ChainPath: Set<String>])
         case stop
     }
 
@@ -273,8 +276,10 @@ public final class NodeRuntime: Sendable {
         // keeps no memory of peers either. A seed is remembered like any
         // other peer, so a node that has met the network dials what it
         // remembers, the seeds among them, before it asks a seed afresh.
-        let peerMemory: PeerMemory? = overlayPeers.isEmpty && configuration.seedPeers.isEmpty ? nil : PeerMemory(
+        let peerMemory: PeerMemory? = overlayPeers.isEmpty && configuration.seedPeers.isEmpty
+            && configuration.childSeedPeers.values.allSatisfy(\.isEmpty) ? nil : PeerMemory(
             directory: configuration.storagePath,
+            chains: [configuration.chainPath] + configuration.hostedChildren,
             excluding: Set([configuration.processPublicKey] + overlayPeers.map(\.publicKey)),
             now: Self.now()
         )
@@ -303,7 +308,7 @@ public final class NodeRuntime: Sendable {
             hello: try? ChainHandshake(
                 nexusGenesisCID: configuration.nexusGenesisCID,
                 chainPath: configuration.chainPath,
-                capabilities: [ChainHandshake.volumeBundle]
+                capabilities: configuration.helloCapabilities
             ).encode(),
             configuration: configuration,
             outputs: outputs,
@@ -372,9 +377,7 @@ public final class NodeRuntime: Sendable {
         Int64(Date().timeIntervalSince1970 * 1_000)
     }
 
-    /// Below this many peers, a maintenance pass dials remembered ones.
-    static let rememberedPeerTarget = 8
-    /// The most remembered peers one maintenance pass dials.
+    /// The most remembered peers one maintenance pass dials for a chain.
     static let rememberedPeerDials = 4
 }
 
@@ -438,6 +441,10 @@ extension NodeRuntime {
         var maintenanceInFlight = false
         /// When a lost session last brought maintenance forward.
         var lastUrgentMaintenanceAt: Int64 = .min / 2
+        /// Each hosted chain's current peers as the last maintenance pass
+        /// counted them: for a child, what its rendezvous adds to the
+        /// sessions whose hello named it.
+        var currentPeers: [ChainPath: Set<String>] = [:]
         /// A maintenance pass asked for while one was running: run it next.
         var maintenancePending = false
 
@@ -587,6 +594,10 @@ extension NodeRuntime {
             case .maintenance:
                 startNetworkMaintenance()
                 return true
+            case .currentPeers(let current):
+                currentPeers = current
+                refreshView()
+                return true
             case .maintenanceFinished:
                 maintenanceInFlight = false
                 if maintenancePending {
@@ -610,18 +621,7 @@ extension NodeRuntime {
             maintenanceInFlight = true
 
             let expiry = UInt64(max(0, now / 1_000)) + 1_200
-            // Each hosted child level's rendezvous, its path. Nexus has none:
-            // every node hosts it.
             let nexus = configuration.nexusGenesisCID
-            let rendezvous = core.ordered.filter { $0 != core.rootPath }.map { path in
-                (path: path, key: ChainPeersKey.key(nexusGenesisCID: nexus, chainPath: path))
-            }
-            // A declared read URL is findable from the parent of each hosted
-            // child level: announced under the level's read-endpoint key.
-            let announced = rendezvous.map(\.key) + (configuration.publicReadURL == nil ? [] : core.ordered
-                .filter { $0 != core.rootPath }
-                .map { ReadEndpointKey.key(nexusGenesisCID: configuration.nexusGenesisCID, chainPath: $0) })
-
             // Conversion from an operator-supplied Double must not trap even
             // for a finite but unreasonably large value.
             let maximumSeconds = Double(Int64.max / 1_000)
@@ -633,89 +633,140 @@ extension NodeRuntime {
                 now: now, interval: interval,
                 connected: sessions.values.contains(where: \.ready)
             )
-            let stalled = Set(rendezvous.filter { due.contains($0.path) }.map(\.key))
-            let redialBootstrap = due.contains(core.rootPath)
+            // Every hosted chain, Nexus down, with what its routine needs.
+            // The levels differ only in where discovery asks: a child has a
+            // rendezvous among its parent's peers and the seeds its operator
+            // gave it; Nexus, with no parent, has its seeds alone, by name
+            // and then at fixed addresses.
+            let root = core.rootPath
+            let chains = core.ordered.map { path in
+                (
+                    path: path,
+                    // The chain and its ancestors: a peer that hosts a chain
+                    // hosts every one of them.
+                    lineage: (root.count...path.count).map { Array(path.prefix($0)) },
+                    hosts: path == root ? nil : ChainHosts(nexusGenesisCID: nexus, chainPath: path),
+                    stalled: due.contains(path),
+                    seeds: path == root
+                        ? [configuration.seedPeers, configuration.fixedSeedPeers]
+                        : [configuration.childSeedPeers[path] ?? []]
+                )
+            }
+            // A declared read URL is findable from the parent of each hosted
+            // child level: announced under the level's read-endpoint key.
+            let announced = chains.compactMap(\.hosts?.key) + (configuration.publicReadURL == nil ? [] : core.ordered
+                .filter { $0 != core.rootPath }
+                .map { ReadEndpointKey.key(nexusGenesisCID: configuration.nexusGenesisCID, chainPath: $0) })
             let (ivy, inputs, bootstrap, ownKey, capabilities) = (
                 ivy, inputs, configuration.bootstrapPeers, configuration.processPublicKey, remote.peerCapabilities
             )
-            let (peerMemory, seeds, fixedSeeds) = (peerMemory, configuration.seedPeers, configuration.fixedSeedPeers)
+            let (peerMemory, target, beforeSeeds) = (
+                peerMemory, configuration.peerTarget, configuration.peersBeforeSeeds
+            )
+            let retriesSeeds = !configuration.seedPeers.isEmpty
             spawn {
                 for key in announced {
                     await ivy.announceProvider(rootCID: key, expiresAt: expiry)
                 }
                 var connected = Set((await ivy.connectedPeers).map(\.publicKey))
-                for endpoint in bootstrap where redialBootstrap && !connected.contains(endpoint.publicKey) {
+                // An address is dialled at most once in a pass, whichever
+                // chains want it and however the dial ends. True when this dial
+                // reached it, false when it failed, nil when none was made:
+                // a session that is already open was not reached at this
+                // address, which is then not one to remember.
+                var attempted: Set<PeerEndpoint> = []
+                func dial(_ endpoint: PeerEndpoint) async -> Bool? {
+                    guard attempted.insert(endpoint).inserted else { return nil }
+                    guard !(await ivy.connectedPeers).contains(where: { $0.publicKey == endpoint.publicKey }) else {
+                        connected.insert(endpoint.publicKey)
+                        return nil
+                    }
                     do {
                         try await ivy.connect(to: endpoint)
                         connected.insert(endpoint.publicKey)
-                    } catch {}
-                }
-                // A level's rendezvous names the peers that can sync it. It
-                // is searched while no open session is one of them, and
-                // when the level stalled. Ourselves and peers already
-                // connected are skipped; the dials are a random draw, so
-                // whoever orders the lookup's answer does not pick them.
-                for key in rendezvous.map(\.key) {
-                    let hosted = !capabilities.sessions(of: await ivy.providers(for: key)).isEmpty
-                    guard !hosted || stalled.contains(key) else { continue }
-                    let fresh = (await ivy.discoverProviders(rootCID: key))
-                        .filter { $0.publicKey != ownKey && !connected.contains($0.publicKey) }
-                    for endpoint in fresh.shuffled().prefix(4) {
-                        do {
-                            try await ivy.connect(to: endpoint)
-                            connected.insert(endpoint.publicKey)
-                            await peerMemory?.reached(endpoint, now: now)
-                        } catch {}
+                        return true
+                    } catch {
+                        return false
                     }
                 }
-                // The network as this node last knew it. With few peers
-                // (always, just after a start) it dials some it remembers, so
-                // it rejoins without leaning on its bootstrap peers, or when
-                // none of them answers. What it remembers is every address
-                // one of its own dials reached a peer at, kept fresh while
-                // that session stays open.
-                if let peerMemory {
-                    if connected.count < NodeRuntime.rememberedPeerTarget {
+                // One routine, run for each hosted chain: keep the chain's
+                // own current peers up from the peers it remembers, then
+                // from discovery. Every dial is a random draw, so whoever
+                // orders a book or a lookup's answer does not pick them.
+                for chain in chains {
+                    var current = chain.hosts == nil ? connected
+                        : Set(await capabilities.sessions(hosting: chain.hosts, ivy: ivy).map(\.id.publicKey))
+                    // The operator's configured peers are Nexus's: redialled
+                    // when it stalls.
+                    for endpoint in bootstrap
+                    where chain.hosts == nil && chain.stalled && !connected.contains(endpoint.publicKey) {
+                        if await dial(endpoint) == true { current.insert(endpoint.publicKey) }
+                    }
+                    // The chain's network as this node last knew it. Short
+                    // of peers (always, just after a start) or stalled, it
+                    // dials some it remembers, so it rejoins without leaning
+                    // on its seeds or a lookup, or when neither answers. A
+                    // peer reached is a Nexus peer; whether it still hosts
+                    // this chain is for its session to say.
+                    if let peerMemory, current.count < target || chain.stalled {
                         let remembered = await peerMemory.candidates(
-                            excluding: connected, count: NodeRuntime.rememberedPeerDials
+                            for: chain.path, excluding: connected, count: NodeRuntime.rememberedPeerDials
                         )
                         for endpoint in remembered {
-                            do {
-                                try await ivy.connect(to: endpoint)
-                                connected.insert(endpoint.publicKey)
-                                await peerMemory.reached(endpoint, now: now)
-                            } catch {
-                                await peerMemory.failed(endpoint.publicKey)
+                            switch await dial(endpoint) {
+                            case true?:
+                                current.insert(endpoint.publicKey)
+                                await peerMemory.reached(endpoint, chains: [root], now: now)
+                            case false?: await peerMemory.failed(endpoint.publicKey)
+                            case nil: break
                             }
+                        }
+                    }
+                    // A child's rendezvous names the peers that can sync it.
+                    // It is searched while the chain has no current peer,
+                    // and when it stalled: a chain whose whole network is a
+                    // few nodes does not search on every pass.
+                    if let hosts = chain.hosts, current.isEmpty || chain.stalled {
+                        let fresh = (await ivy.discoverProviders(rootCID: hosts.key))
+                            .filter { $0.publicKey != ownKey && !connected.contains($0.publicKey) && !attempted.contains($0) }
+                        for endpoint in fresh.shuffled().prefix(4) where await dial(endpoint) == true {
+                            current.insert(endpoint.publicKey)
+                            await peerMemory?.reached(endpoint, chains: chain.lineage, now: now)
                         }
                     }
                     // Seeds last, and only on need: with too few peers still,
                     // after the remembered ones had their turn. A fresh node
-                    // has nothing to remember and comes straight here.
-                    // Each layer is asked only if the one before left the node
-                    // short: the seeds by name, then the same seeds at fixed
-                    // addresses, for when names cannot be resolved.
-                    for layer in [seeds, fixedSeeds] where SeedPolicy.needsSeeds(peers: connected.count) {
-                        for endpoint in layer.shuffled() where !connected.contains(endpoint.publicKey) {
-                            do {
-                                try await ivy.connect(to: endpoint)
-                                connected.insert(endpoint.publicKey)
-                                await peerMemory.reached(endpoint, now: now)
-                            } catch {}
+                    // has nothing to remember and comes straight here. Each
+                    // layer is asked only if the one before left the chain
+                    // short.
+                    for layer in chain.seeds where SeedPolicy.needsSeeds(peers: current.count, below: beforeSeeds) {
+                        for endpoint in layer.shuffled()
+                        where !connected.contains(endpoint.publicKey) {
+                            guard await dial(endpoint) == true else { continue }
+                            current.insert(endpoint.publicKey)
+                            await peerMemory?.reached(endpoint, chains: chain.lineage, now: now)
                         }
                     }
-                    let open = Set((await ivy.connectedPeers).map(\.publicKey))
-                    await peerMemory.stillOpen(open, now: now)
-                    // Still short of peers (a seed that was down, no network
-                    // yet): nothing else will look again before the next
-                    // interval, so this pass asks for another soon. The
-                    // overlay no longer redials the seeds itself.
-                    if !seeds.isEmpty, SeedPolicy.needsSeeds(peers: open.count) {
-                        inputs.yield(.maintenanceFinished)
-                        guard await Timers.sleep(nanoseconds: UInt64(SeedPolicy.retryInterval) * 1_000_000) else { return }
-                        inputs.yield(.maintenance)
-                        return
-                    }
+                }
+                // Each chain's current peers now: every open session for
+                // Nexus, the sessions that say they host it for a child.
+                var open: [ChainPath: Set<String>] = [:]
+                for chain in chains {
+                    open[chain.path] = chain.hosts == nil
+                        ? Set((await ivy.connectedPeers).map(\.publicKey))
+                        : Set(await capabilities.sessions(hosting: chain.hosts, ivy: ivy).map(\.id.publicKey))
+                }
+                await peerMemory?.stillOpen(byChain: open, now: now)
+                inputs.yield(.currentPeers(open))
+                // Nexus still short of peers (a seed that was down, no
+                // network yet): nothing else will look again before the next
+                // interval, so this pass asks for another soon. The overlay
+                // no longer redials the seeds itself.
+                if retriesSeeds, SeedPolicy.needsSeeds(peers: open[root]?.count ?? 0, below: beforeSeeds) {
+                    inputs.yield(.maintenanceFinished)
+                    guard await Timers.sleep(nanoseconds: UInt64(SeedPolicy.retryInterval) * 1_000_000) else { return }
+                    inputs.yield(.maintenance)
+                    return
                 }
                 inputs.yield(.maintenanceFinished)
             }
@@ -753,7 +804,13 @@ extension NodeRuntime {
             var view = views[path] ?? NodeReadView()
             let snapshot = level.snapshot
             let tip = (hash: snapshot.actOnTip, height: snapshot.actOnHeight)
-            let peers = sessions.values.filter(\.ready).count
+            // The chain's own current peers: every session for Nexus; for
+            // a child, those whose hello named it or its rendezvous names.
+            let hosting = ChainHandshake.hosting(path)
+            let peers = sessions.values.filter {
+                $0.ready && (path == core.rootPath || $0.capabilities.contains(hosting)
+                    || currentPeers[path]?.contains($0.peer.id.publicKey) == true)
+            }.count
             let pool = level.mining.mempool
             let children = path == core.rootPath
                 ? core.ordered.dropFirst().compactMap {
@@ -847,7 +904,8 @@ extension NodeRuntime {
                 // `SeedPolicy.retryInterval`, so a peer that keeps dropping
                 // cannot make it spin.
                 let now = NodeRuntime.now()
-                if !configuration.seedPeers.isEmpty, SeedPolicy.needsSeeds(peers: sessions.count),
+                if !configuration.seedPeers.isEmpty,
+                   SeedPolicy.needsSeeds(peers: sessions.count, below: configuration.peersBeforeSeeds),
                    now - lastUrgentMaintenanceAt >= SeedPolicy.retryInterval {
                     lastUrgentMaintenanceAt = now
                     inputs.yield(.maintenance)
@@ -1078,9 +1136,9 @@ extension NodeRuntime {
                 let key = BodyKey(path: path, cid: cid)
                 guard bodies[key] == nil else { break }
                 let (storage, remote, inputs) = (storage, remote, inputs)
-                // Every peer hosts Nexus; a child's hosts are those its
-                // rendezvous names: a hint for whom to ask for the bundle.
-                let rendezvous = path == core.rootPath ? nil : ChainPeersKey.key(
+                // Every peer hosts Nexus; a child's hosts are its current
+                // peers: a hint for whom to ask for the bundle.
+                let rendezvous = path == core.rootPath ? nil : ChainHosts(
                     nexusGenesisCID: configuration.nexusGenesisCID, chainPath: path
                 )
                 bodies[key] = Task {
