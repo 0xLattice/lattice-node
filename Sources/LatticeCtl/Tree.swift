@@ -179,6 +179,10 @@ func spawnHost(layout: HostLayout) throws {
     for child in topology.hostedChains ?? [] {
         let spec = layout.childSpec(for: child)
         arguments += ["--host-chain", FileManager.default.fileExists(atPath: spec.path) ? "\(child)=\(spec.path)" : child]
+        let modules = (try? manager.contentsOfDirectory(
+            at: layout.policyModules(for: child), includingPropertiesForKeys: nil
+        )) ?? []
+        for module in modules.sorted(by: { $0.path < $1.path }) { arguments += ["--policy-module", module.path] }
     }
     process.arguments = arguments
     let log = layout.logFile(for: hostProcessName)

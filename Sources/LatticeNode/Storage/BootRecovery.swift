@@ -33,7 +33,7 @@ enum BootRecovery {
     static func run(configuration: NodeConfiguration) async throws -> Result {
         let directoryLock = try lockStorageDirectory(configuration: configuration)
         let stores = try openStores(configuration: configuration)
-        let constantRoots = try await materializeConstantRoots(stores)
+        let constantRoots = try await materializeConstantRoots(stores, configuration: configuration)
         try await reconcileRetainedRoots(stores, constantRoots: constantRoots)
         try await pinMempool(stores)
         try await seedNexusGenesis(stores, configuration: configuration)
@@ -97,9 +97,11 @@ enum BootRecovery {
         )
     }
 
-    /// Stage 3: the protocol-constant roots.
+    /// Stage 3: the protocol-constant roots, and the operator's policy
+    /// modules beside them.
     private static func materializeConstantRoots(
-        _ stores: Stores
+        _ stores: Stores,
+        configuration: NodeConfiguration
     ) async throws -> [String] {
         let broker = stores.broker
         // Protocol constants are ordinary Volumes and therefore ordinary GC
@@ -108,6 +110,12 @@ enum BootRecovery {
         try await LatticeState.emptyHeader.storeRecursively(
             storer: constantStorage as any VolumeStorer
         )
+        // A hosted child's genesis names its policy modules by CID, and
+        // storing that genesis resolves each from this store.
+        for bytes in configuration.policyModules {
+            try await WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: bytes))
+                .store(storer: constantStorage)
+        }
         try await constantStorage.commit()
         let constantRoots = await constantStorage.takeStoredVolumeRoots()
         return constantRoots
