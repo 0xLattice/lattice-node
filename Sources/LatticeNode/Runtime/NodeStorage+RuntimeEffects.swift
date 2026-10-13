@@ -87,6 +87,27 @@ extension NodeStorage {
         CoalescingFetcher(CompositeContentSource([workSource, readCache, readCache.remembering(peers)]))
     }
 
+    /// Stores a block and pins what was stored. Storing and pinning are two
+    /// commits, and a body let go of in between can take a transaction this
+    /// block carries too: the pin is then refused whole, and the block is
+    /// stored and pinned again.
+    nonisolated func storingAndRetaining(
+        _ blockCID: String, built: Bool = false, _ store: (NodeImportStorage) async throws -> Void
+    ) async throws -> [String] {
+        while true {
+            let storage = NodeImportStorage(storage: broker)
+            try await store(storage)
+            try await storage.commit()
+            let roots = await storage.takeStoredVolumeRoots()
+            do {
+                try await retainStored(roots, ofBlock: blockCID, built: built)
+                return roots
+            } catch BrokerError.missingRetainedRoot {
+                continue
+            }
+        }
+    }
+
     /// `ChainEffect.fetchBody`: the block's Volume and the nested Volumes its
     /// execution reads, through the content layer (local store first, then
     /// any overlay provider of the root), stored and retained locally.
@@ -106,11 +127,9 @@ extension NodeStorage {
         do {
             return try await remote.withRootTracing(cid, bundle: bundle, hosts: hosts, capture: capture) { session in
                 let fetcher = CoalescingFetcher(CompositeContentSource([broker, session]))
-                let storage = NodeImportStorage(storage: broker)
-                try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: storage)
-                try await storage.commit()
-                let roots = await storage.takeStoredVolumeRoots()
-                try await retainStored(roots, ofBlock: cid)
+                let roots = try await storingAndRetaining(cid) { storage in
+                    try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: storage)
+                }
                 bundles.record(root: cid, roots: roots)
                 return roots
             }.value
@@ -166,11 +185,9 @@ extension NodeStorage {
     private nonisolated func storeMinedBlock(
         _ header: BlockHeader, _ block: Block, fetcher: any Fetcher
     ) async throws -> FlatDictionary<BlockHeader> {
-        let storage = NodeImportStorage(storage: broker)
-        try await header.storeBlock(fetcher: fetcher, storer: storage)
-        try await storage.commit()
-        let roots = await storage.takeStoredVolumeRoots()
-        try await retainStored(roots, ofBlock: header.rawCID, built: true)
+        let roots = try await storingAndRetaining(header.rawCID, built: true) { storage in
+            try await header.storeBlock(fetcher: fetcher, storer: storage)
+        }
         bundles.record(root: header.rawCID, roots: roots)
         guard let children = try await block.children.resolve(fetcher: fetcher).node else {
             throw NodeStorageError.missingMaterializedVolume(block.children.rawCID)
@@ -212,11 +229,9 @@ extension NodeStorage {
                 // Only a block the grind's work meets is stored and walked.
                 guard case .success(let evidence) = await proof.verifySecuringWork(child: block, chainPath: childPath),
                       evidence.contribution != nil else { continue }
-                let storage = NodeImportStorage(storage: broker)
-                try await child.storeBlock(fetcher: localFetcher, storer: storage)
-                try await storage.commit()
-                let roots = await storage.takeStoredVolumeRoots()
-                try await retainStored(roots, ofBlock: child.rawCID, built: true)
+                let roots = try await storingAndRetaining(child.rawCID, built: true) { storage in
+                    try await child.storeBlock(fetcher: localFetcher, storer: storage)
+                }
                 bundles.record(root: child.rawCID, roots: roots)
                 frontier.append((block, childPath, proof))
                 guard let grandchildren = try await block.children.resolve(fetcher: localFetcher).node else { continue }

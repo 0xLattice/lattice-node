@@ -51,6 +51,64 @@ extension NodeStorage {
         await release(scope: scopes.built(blockCID))
     }
 
+    // MARK: - Block bodies: none
+
+    /// Bodies a job is about to read stay until it has.
+    func holdBodies(_ blockCIDs: [String]) {
+        for cid in blockCIDs { reading[cid, default: 0] += 1 }
+    }
+
+    func unholdBodies(_ blockCIDs: [String]) async {
+        for cid in blockCIDs {
+            let count = (reading[cid] ?? 1) - 1
+            reading[cid] = count > 0 ? count : nil
+            if count <= 0, lettingGo.remove(cid) != nil { await releaseBody(cid) }
+        }
+    }
+
+    /// The working set lets go of these bodies: none is its chain's tip or
+    /// waits to execute any more, and the operator keeps no others. One a
+    /// job is reading goes when the job has read it.
+    func letGo(ofBodies blockCIDs: [String]) async {
+        guard configuration.blockBodies == .none else { return }
+        // Every node holds each chain's genesis block.
+        for cid in blockCIDs where (try? await store.isGenesis(cid)) != true {
+            if reading[cid] != nil {
+                lettingGo.insert(cid)
+            } else {
+                await releaseBody(cid)
+            }
+        }
+    }
+
+    /// At a start with `none`: lets go of every executed body this store
+    /// holds but `tips`. Bodies pinned under their own names are found by
+    /// name. A store written before bodies had names holds them under the
+    /// chain's, and is gone through once, block by block.
+    func letGoOfBodies(except tips: Set<String>) async {
+        guard configuration.blockBodies == .none else { return }
+        do {
+            if try await !store.bodiesAreNamed() {
+                for cid in try await store.executedBlockCIDsPastGenesis() where await broker.hasVolume(root: cid) {
+                    let body = [cid] + (await NodeRuntime.transactionIDs(ofBlock: cid, fetcher: localFetcher))
+                    if tips.contains(cid) {
+                        try await broker.mergeRetainedRoots(scope: scopes.body(cid), roots: body)
+                    }
+                    try await broker.releaseRetainedRoots(scope: scopes.chain, roots: body)
+                }
+                try await store.markBodiesNamed()
+            }
+            for scope in try await broker.retainedScopes(prefix: scopes.bodyPrefix) {
+                let cid = String(scope.dropFirst(scopes.bodyPrefix.count))
+                guard !tips.contains(cid), try await store.recordsExecution(of: cid),
+                      try await !store.isGenesis(cid) else { continue }
+                await releaseBody(cid)
+            }
+        } catch {
+            syncTrace("bodies not let go of at start: \(error)")
+        }
+    }
+
     private nonisolated func release(scope: String) async {
         do {
             let roots = try await broker.retainedRoots(scope: scope)

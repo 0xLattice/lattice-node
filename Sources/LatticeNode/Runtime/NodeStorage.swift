@@ -60,6 +60,9 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     let liveMempoolOwner: String
     private let directoryLock: StorageDirectoryLock
     private var livePinnedMempoolRoots = Set<String>()
+    /// Bodies a job is reading, and bodies to let go of once it has.
+    var reading: [String: Int] = [:]
+    var lettingGo = Set<String>()
 
     // Actors are reentrant. This queue keeps each retained-root update in
     // one order across its suspension points.

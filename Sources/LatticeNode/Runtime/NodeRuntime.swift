@@ -355,6 +355,10 @@ public final class NodeRuntime: Sendable {
         )
         loop = Task {
             var state = initial
+            // With no bodies kept beyond the working set, a start lets go
+            // of the ones a run that kept them left, before any step.
+            for (path, level) in state.core.levels { state.bodyTips[path] = level.snapshot.actOnTip }
+            await storage.letGoOfBodies(except: Set(state.bodyTips.values))
             state.refreshView()
             // After the loop ends, inputs are only drained until the stream
             // finishes, so no RPC waits forever.
@@ -513,6 +517,12 @@ extension NodeRuntime {
         /// Why each held block's connect ended without a verdict, until the
         /// block leaves the body window.
         var connectWaits: [BodyKey: BodyWait] = [:]
+
+        /// Blocks whose execution this step journaled, and each level's
+        /// tip as of the last step: what the working set compares to let
+        /// go of a body when the operator keeps none beyond it.
+        var executedThisStep: [BodyKey] = []
+        var bodyTips: [ChainPath: String] = [:]
 
         struct BodyKey: Hashable {
             let path: ChainPath
@@ -1058,6 +1068,9 @@ extension NodeRuntime {
             for effect in ordered {
                 guard await execute(effect) else { return false }
             }
+            // After every effect of the step: the jobs it queued to read
+            // blocks' transactions hold those bodies by now.
+            await settleBodies()
             // A tree copy is kept only for the current epoch's jobs.
             preflightLevels = preflightLevels.filter { core.levels[$0.key]?.mining.tipEpoch == $0.value.epoch }
             refreshView()
@@ -1084,6 +1097,7 @@ extension NodeRuntime {
                         batch, logID: core.logID, bodyRoots: roots
                     )
                     for key in persistedBodyKeys { bodyRoots[key] = nil }
+                    executedThisStep.append(contentsOf: persistedBodyKeys)
                     // A block found invalid is no block: its body goes.
                     for (_, levelBatch) in batch.levels {
                         for case .exclusion(let excluded) in levelBatch.facts.flatMap(\.facts) {
@@ -1234,7 +1248,7 @@ extension NodeRuntime {
                 })
                 startJobs()
             case .readTransactions(let blocks):
-                executionJobs.append(NodeRuntime.readJob(blocks, at: path, storage: storage))
+                executionJobs.append(await reading(blocks, NodeRuntime.readJob(blocks, at: path, storage: storage)))
                 startJobs()
             case .lookupProofs(let cids):
                 let found = cids.compactMap { cid in
@@ -1306,8 +1320,10 @@ extension NodeRuntime {
                     effect, at: path, level: level, storage: storage, remote: remote, children: childTemplateInputs(below: path)
                 ))
                 startJobs()
-            case .returnTransactions:
-                miningJobs.append(NodeRuntime.miningJob(effect, at: path, level: nil, storage: storage))
+            case .returnTransactions(let left, _):
+                miningJobs.append(await reading(
+                    left, NodeRuntime.miningJob(effect, at: path, level: nil, storage: storage)
+                ))
                 startJobs()
             }
             return true
@@ -1366,6 +1382,37 @@ extension NodeRuntime {
                 runningJobs += 1
                 let inputs = inputs
                 spawn { inputs.yield(.jobDone(await job.run())) }
+            }
+        }
+
+        /// The working set, when the operator keeps no bodies beyond it:
+        /// a body stays while it is its chain's tip. One that executed this
+        /// step and is not, and the tip another block replaced, are let go.
+        private mutating func settleBodies() async {
+            guard configuration.blockBodies == .none else { return }
+            var tips = Set<String>()
+            var past = executedThisStep.map(\.cid)
+            executedThisStep.removeAll()
+            for (path, level) in core.levels {
+                let tip = level.snapshot.actOnTip
+                tips.insert(tip)
+                if let last = bodyTips[path], last != tip { past.append(last) }
+                bodyTips[path] = tip
+            }
+            past.removeAll { tips.contains($0) }
+            if !past.isEmpty { await storage.letGo(ofBodies: past) }
+        }
+
+        /// A job that reads blocks' transactions, with their bodies held
+        /// until it has.
+        private func reading(_ blocks: [String], _ job: RuntimeJob) async -> RuntimeJob {
+            guard configuration.blockBodies == .none else { return job }
+            let storage = storage
+            await storage.holdBodies(blocks)
+            return RuntimeJob(path: job.path, epoch: job.epoch) {
+                let events = await job.run()
+                await storage.unholdBodies(blocks)
+                return events
             }
         }
 

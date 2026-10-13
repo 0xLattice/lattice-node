@@ -27,7 +27,8 @@ Before exposing a node:
 7. Keep RPC on loopback. Use `publicRead` or the checked-in nginx allowlist for
    public reads.
 8. Configure a mining recipient for every chain that should pay rewards.
-9. Reserve enough disk for unbounded fact history and retained content.
+9. Reserve enough disk for unbounded fact history and retained content, or
+   set `blockBodies` (see "What a node keeps").
 10. Test a clean shutdown, restart, and recovery before accepting traffic.
 
 ## How a node finds the network
@@ -422,6 +423,46 @@ Persistence order is:
 
 Every commit is synchronous (`synchronous=FULL`): nothing is announced,
 served, or built on before the write that makes it durable returns.
+
+### What a node keeps
+
+Facts and headers are kept for good. Content is kept because a rule says so.
+Two rules are built in: a node always holds each hosted chain's genesis
+block, and the block bodies it needs to operate, which are those waiting to
+execute and each chain's tip, so that a new block can be passed on. A body
+is a block's own Volume and its transactions'.
+
+`blockBodies` in `lattice.json` (`--block-bodies`) says which bodies it keeps
+beyond those:
+
+- `all`, the default: every body it executed.
+- `none`: no others. A body is let go of once another block is its chain's
+  tip, and so is the body of a block that executed off that chain.
+
+State, chain specs and policy modules are not bodies. What the node weighs
+and which tip it selects do not depend on this setting, and it goes on
+executing, mining and answering state reads on a block whose body it let go
+of, from the header record it keeps for every block.
+
+A body a node let go of is gone from that node:
+
+- it answers `404` for that block and its transactions on the read routes,
+  and "not held" to a peer that asks for it;
+- the explorer routes that place a transaction or a deposit in a block
+  report it unplaced;
+- transactions of a block the chain left are read back into the pool before
+  its body goes, but a block whose body was already let go of when the
+  chain moves back onto it confirms nothing out of the pool.
+
+A node that executes a chain from its genesis needs every body from some
+peer, so a network needs nodes on `all`; people with a stake in a chain have
+their own reason to run one. Keep `all` on a node an explorer reads.
+
+Switching to `none` takes effect at the next start, which lets go of every
+body but the tips'. The first such start on a store written by an earlier
+version goes through its blocks once. Switching back to `all` keeps every
+body from then on and brings none back. `volumes.db` does not shrink: the
+space is reused.
 
 Back up only while the process is stopped, and snapshot both databases
 together. The identity and child specs need separate backups.

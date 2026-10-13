@@ -65,6 +65,11 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   can cause (a submitted transaction, a public read) read this store alone.
   Pinned by `AbsentContentTests` and
   `SafetyNetCorruptStoreTests.testBootOpensAStoreWhoseVolumesAreGone`.
+- **NODE-STORAGE-002.g** — With `blockBodies: none` the node holds a body
+  only while its block waits to execute or is its chain's tip, and each
+  genesis block always; a body a job is reading goes when the job has read
+  it. State and facts are untouched, and the node builds on a block whose
+  body is gone. Pinned by `BlockBodiesTests`.
 - **NODE-STORAGE-002.d** — Levels write parent before child; a crash
   between them restores with the child behind, never ahead. Pinned by
   `ChildLevelRestartTests.testACrashBetweenLevelWritesRestoresTheParentAhead`.
