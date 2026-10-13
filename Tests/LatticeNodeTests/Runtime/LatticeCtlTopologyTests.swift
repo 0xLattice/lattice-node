@@ -129,6 +129,29 @@ final class LatticeCtlTopologyTests: XCTestCase {
         XCTAssertThrowsError(try submitWithoutPublicRead.validated(), "public submit rides the public read port")
     }
 
+    func testBlockRetentionLoadsFromConfigAndProducesItsNodeFlag() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ctl-retention-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        func load(_ body: String) throws -> Topology {
+            try Data(body.utf8).write(to: root.appendingPathComponent(Topology.fileName))
+            return try Topology.load(root: root).validated()
+        }
+
+        XCTAssertEqual(
+            try load(#"{"listen":4001,"rpc":4003,"retainBlockBytes":0}"#).contentServingArguments,
+            ["--retain-block-bytes", "0"]
+        )
+        XCTAssertEqual(
+            try load(#"{"listen":4001,"rpc":4003,"retainBlockBytes":1073741824}"#).contentServingArguments,
+            ["--retain-block-bytes", "1073741824"]
+        )
+        // Unset keeps every body: no flag.
+        XCTAssertEqual(try load(#"{"listen":4001,"rpc":4003}"#).contentServingArguments, [])
+        XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"retainBlockBytes":-1}"#))
+    }
+
     func testContentServingLimitsLoadFromConfigAndProduceNodeFlags() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ctl-serving-limits-\(UUID().uuidString)")

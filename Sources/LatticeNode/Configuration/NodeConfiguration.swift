@@ -138,6 +138,11 @@ public struct NodeConfiguration: Sendable {
     /// stalled-peer search; provider announcements continue.
     public let peerSearchInterval: TimeInterval
     public let resourcePolicy: NodeResourcePolicy
+    /// How many bytes of executed block bodies (each block's own Volume and
+    /// its transactions') this node keeps for each chain it hosts, newest
+    /// first (operator choice). Nil keeps every body; 0 keeps the tip's
+    /// alone. Facts, headers and state are not bodies.
+    public let retainBlockBytes: Int?
     /// The child chains this process hosts as levels under Nexus (operator
     /// choice), parent before child; every parent is Nexus or listed.
     public let hostedChildren: [[String]]
@@ -186,6 +191,7 @@ public struct NodeConfiguration: Sendable {
         externalAddress: String? = nil,
         peerSearchInterval: TimeInterval = 600,
         resourcePolicy: NodeResourcePolicy = .default,
+        retainBlockBytes: Int? = nil,
         hostedChildren: [[String]] = [],
         childSpecs: [[String]: ChainSpec] = [:],
         policyModules: [Data] = [],
@@ -260,6 +266,7 @@ public struct NodeConfiguration: Sendable {
         self.peerSearchInterval = peerSearchInterval.isFinite
             ? max(0, peerSearchInterval) : 0
         self.resourcePolicy = resourcePolicy
+        self.retainBlockBytes = retainBlockBytes
         self.childSpecs = childSpecs.filter { hostedChildren.contains($0.key) }
         self.hostedChildren = hostedChildren
         self.policyModules = policyModules

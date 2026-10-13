@@ -122,23 +122,20 @@ enum BootRecovery {
     }
 
     /// Stage 4: the journal audited, and the chain's retained roots set to
-    /// exactly what its facts name.
+    /// what its facts name and this store holds. Content a fact names and
+    /// the store lacks is no fault: it was released, or is fetched when
+    /// something reads it.
     private static func reconcileRetainedRoots(
         _ stores: Stores,
         constantRoots: [String]
     ) async throws {
         let staged = try await stores.store.stagedImports()
         try await stores.store.auditNormalizedIndexes()
-        let roots = Set(staged.flatMap(\.volumeRoots)).union(constantRoots).sorted()
-        // Presence only, and the broker checks it as it retains each root:
-        // every read of a stored Volume validates its content against its
-        // CID, so hashing the whole store here would repeat that on each
-        // boot, before the node can listen.
-        do {
-            try await stores.broker.advanceRetainedRoots(scope: stores.retentionScope, roots: roots)
-        } catch BrokerError.missingRetainedRoot(let root) {
-            throw NodeStorageError.missingMaterializedVolume(root)
+        var held = Set(constantRoots)
+        for root in Set(staged.flatMap(\.volumeRoots)) where await stores.broker.hasVolume(root: root) {
+            held.insert(root)
         }
+        try await stores.broker.advanceRetainedRoots(scope: stores.retentionScope, roots: held.sorted())
     }
 
     /// Stage 6: the durable mempool's pins rebuilt, the live pool's cleared.

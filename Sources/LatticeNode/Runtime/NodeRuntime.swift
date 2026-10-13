@@ -353,7 +353,10 @@ public final class NodeRuntime: Sendable {
             failStop: failStop,
             peerMemory: peerMemory
         )
+        let hostedPaths = Array(initial.core.levels.keys)
         loop = Task {
+            // Beside the loop, and ended with it: `stop` waits for both.
+            async let bodiesLoaded: Void = storage.loadBodies(hosting: hostedPaths)
             var state = initial
             state.refreshView()
             // After the loop ends, inputs are only drained until the stream
@@ -367,6 +370,7 @@ public final class NodeRuntime: Sendable {
                 }
             }
             state.cancelAll()
+            await bodiesLoaded
         }
     }
 
@@ -513,6 +517,10 @@ extension NodeRuntime {
         /// Why each held block's connect ended without a verdict, until the
         /// block leaves the body window.
         var connectWaits: [BodyKey: BodyWait] = [:]
+
+        /// Blocks whose execution this step journaled, for the pass over
+        /// block bodies that follows the step.
+        var executedThisStep: [BodyKey] = []
 
         struct BodyKey: Hashable {
             let path: ChainPath
@@ -1058,6 +1066,13 @@ extension NodeRuntime {
             for effect in ordered {
                 guard await execute(effect) else { return false }
             }
+            // After every effect of the step: the jobs it queued to read
+            // blocks' transactions hold those bodies by now.
+            if !executedThisStep.isEmpty {
+                let executed = executedThisStep
+                executedThisStep.removeAll()
+                await collectBodies(executed: executed)
+            }
             // A tree copy is kept only for the current epoch's jobs.
             preflightLevels = preflightLevels.filter { core.levels[$0.key]?.mining.tipEpoch == $0.value.epoch }
             refreshView()
@@ -1084,6 +1099,7 @@ extension NodeRuntime {
                         batch, logID: core.logID, bodyRoots: roots
                     )
                     for key in persistedBodyKeys { bodyRoots[key] = nil }
+                    executedThisStep.append(contentsOf: persistedBodyKeys)
                     for (path, levelBatch) in batch.levels {
                         for stored in levelBatch.proofs {
                             proofs[path, default: [:]][stored.childCID, default: [:]][stored.proof.rootCID] = stored.proof
@@ -1226,7 +1242,7 @@ extension NodeRuntime {
                 })
                 startJobs()
             case .readTransactions(let blocks):
-                executionJobs.append(NodeRuntime.readJob(blocks, at: path, storage: storage))
+                executionJobs.append(await reading(blocks, NodeRuntime.readJob(blocks, at: path, storage: storage)))
                 startJobs()
             case .lookupProofs(let cids):
                 let found = cids.compactMap { cid in
@@ -1298,8 +1314,10 @@ extension NodeRuntime {
                     effect, at: path, level: level, storage: storage, children: childTemplateInputs(below: path)
                 ))
                 startJobs()
-            case .returnTransactions:
-                miningJobs.append(NodeRuntime.miningJob(effect, at: path, level: nil, storage: storage))
+            case .returnTransactions(let left, _):
+                miningJobs.append(await reading(
+                    left, NodeRuntime.miningJob(effect, at: path, level: nil, storage: storage)
+                ))
                 startJobs()
             }
             return true
@@ -1358,6 +1376,35 @@ extension NodeRuntime {
                 runningJobs += 1
                 let inputs = inputs
                 spawn { inputs.yield(.jobDone(await job.run())) }
+            }
+        }
+
+        /// Has storage keep each level's block bodies within the operator's
+        /// budget, after the step that executed `executed`: it is given each
+        /// level's act-on chain and the blocks the node builds from.
+        private mutating func collectBodies(executed: [BodyKey]) async {
+            guard storage.configuration.retainBlockBytes != nil else { return }
+            refreshView()
+            let chains = core.levels.compactMap { path, level -> ChainRetentionView? in
+                guard let view = views[path] else { return nil }
+                return ChainRetentionView(
+                    path: path, chain: view.heights,
+                    held: [level.snapshot.actOnTip, level.snapshot.bestHeaderTip]
+                )
+            }
+            await storage.collect(chains, executed: executed.map { (path: $0.path, cid: $0.cid) })
+        }
+
+        /// A job that reads blocks' transactions, with their bodies held
+        /// until it has.
+        private func reading(_ blocks: [String], _ job: RuntimeJob) async -> RuntimeJob {
+            guard storage.configuration.retainBlockBytes != nil else { return job }
+            let storage = storage
+            await storage.holdBodies(blocks)
+            return RuntimeJob(path: job.path, epoch: job.epoch) {
+                let events = await job.run()
+                await storage.unholdBodies(blocks)
+                return events
             }
         }
 

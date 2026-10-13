@@ -42,7 +42,7 @@ public struct Topology: Codable, Sendable {
         case listen, rpc, webSocket, peers, publicRead, externalAddress
         case publicReadRate, publicReadExpensiveRate, publicReadMaxRate
         case publicReadURL, publicSubmit, publicSubmitRate, minRelayFee
-        case servingMaxConcurrent, servingMaxInFlightVolumeBytes
+        case servingMaxConcurrent, servingMaxInFlightVolumeBytes, retainBlockBytes
         case hostedChains, mine, rpcAllowedOrigins
     }
     public var listen: UInt16
@@ -91,6 +91,9 @@ public struct Topology: Codable, Sendable {
     /// Content-serving limits (`--serving-max-*`). Absent = the node's defaults.
     public var servingMaxConcurrent: Int?
     public var servingMaxInFlightVolumeBytes: Int?
+    /// Bytes of executed block bodies kept per hosted chain, newest first
+    /// (`--retain-block-bytes`). Absent = every body is kept.
+    public var retainBlockBytes: Int?
     /// Child chains this process hosts as levels, parent before child.
     public var hostedChains: [String]?
     public var mine: TopologyMine?
@@ -179,6 +182,9 @@ public struct Topology: Codable, Sendable {
         for chain in (peers?.byChain ?? [:]).keys where !listed.contains(chain) {
             throw CtlError("peers are listed for \(chain), which is not a hosted chain")
         }
+        if let retainBlockBytes, retainBlockBytes < 0 {
+            throw CtlError("retainBlockBytes must not be negative")
+        }
         var ports: Set<UInt16> = []
         for port in [listen, rpc] + (publicRead.map { [$0] } ?? []) {
             guard port != 0, ports.insert(port).inserted else {
@@ -227,13 +233,15 @@ public struct Topology: Codable, Sendable {
         return self
     }
 
-    /// Node flags for the content-serving limits in `lattice.json`.
+    /// Node flags for the content-serving limits and block retention in
+    /// `lattice.json`.
     public var contentServingArguments: [String] {
         var arguments: [String] = []
         if let value = servingMaxConcurrent { arguments += ["--serving-max-concurrent", String(value)] }
         if let value = servingMaxInFlightVolumeBytes {
             arguments += ["--serving-max-in-flight-volume-bytes", String(value)]
         }
+        if let value = retainBlockBytes { arguments += ["--retain-block-bytes", String(value)] }
         return arguments
     }
 

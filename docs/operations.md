@@ -27,7 +27,8 @@ Before exposing a node:
 7. Keep RPC on loopback. Use `publicRead` or the checked-in nginx allowlist for
    public reads.
 8. Configure a mining recipient for every chain that should pay rewards.
-9. Reserve enough disk for unbounded fact history and retained content.
+9. Reserve enough disk for unbounded fact history and retained content, or
+   set `retainBlockBytes` (see "Releasing block bodies").
 10. Test a clean shutdown, restart, and recovery before accepting traffic.
 
 ## How a node finds the network
@@ -423,6 +424,53 @@ Persistence order is:
 Every commit is synchronous (`synchronous=FULL`): nothing is announced,
 served, or built on before the write that makes it durable returns.
 
+### Releasing block bodies
+
+By default a node keeps every block body it executed. `retainBlockBytes` in
+`lattice.json` (`--retain-block-bytes`) is how many bytes of bodies it keeps
+for each chain it hosts. A body is a block's own Volume and its
+transactions'.
+
+- The newest bodies on the chain the node builds on are kept while they fit
+  the budget, and the tip's whatever its size. Older ones are released as
+  the chain grows, and so is the body of every executed block off that
+  chain (a losing fork's).
+- `0` keeps the tip's body alone.
+- Each hosted chain's genesis block is never released and is not counted.
+- A block that is not executed yet keeps what was fetched for it.
+- Headers, facts, state, chain specs and policy modules are not bodies and
+  are never released. What the node weighs and which tip it selects do not
+  depend on this setting.
+
+The node goes on executing, mining and answering state reads on blocks whose
+bodies it released: it keeps every block's header record, and reads a
+block's own fields from that.
+
+A released body is gone from this node:
+
+- it answers `404` for that block and its transactions on the read routes,
+  and "not held" to a peer that asks for it;
+- the explorer routes that place a transaction or a deposit in a block
+  report it unplaced;
+- transactions of a block that left the chain are returned to the pool
+  before its body is released, unless the node first has to read the
+  blocks it moved onto (right after a restart, or a move deeper than its
+  body window) and executes another block meanwhile; and a block whose body
+  was already released when the chain moves back onto it confirms nothing
+  out of the pool.
+
+A node that executes a chain from its genesis needs every body from some
+peer, so a network needs nodes that leave this unset. Leave it unset on a
+node an explorer reads. A miner that sets `0` releases each block it mined
+as soon as it builds the next, so its peers must have fetched it by then.
+
+Bodies are released after each step that executed a block. At start the
+node reads which bodies it holds, and releases nothing until it has; it
+keeps the name of every block and transaction it holds in memory, so a large
+budget costs memory as well as disk. `volumes.db` does not shrink: the space
+is reused. Unsetting `retainBlockBytes` keeps every body from then on and
+brings none back.
+
 Back up only while the process is stopped, and snapshot both databases
 together. The identity and child specs need separate backups.
 
@@ -437,7 +485,8 @@ Startup fails closed when:
 
 - the schema epoch or Nexus genesis does not match;
 - a journal/index audit disagrees;
-- referenced retained content is missing;
+- a hosted chain's genesis spec or one of the node's own pending
+  transactions is missing from `volumes.db`;
 - saved child proofs do not decode or do not match their index;
 - another process owns the storage lock.
 
@@ -484,8 +533,14 @@ tree and use `lattice wipe`; there is no migration path.
 
 ### `missingMaterializedVolume`
 
-A fact references content absent from the matched `volumes.db`. Restore the
-whole backup set or wipe. Copying only `state.db` is not recovery.
+A hosted chain's genesis spec, or a transaction in the node's own pending
+journal, is absent from `volumes.db`. Restore the whole backup set or wipe.
+
+Other content a fact names may be absent without stopping the node: it
+starts on what it holds. A `state.db` copied without its `volumes.db` runs,
+validating new blocks with what it fetches, but it holds only the state
+those blocks read: it cannot answer other state reads, and that state does
+not come back by itself. Resync it.
 
 ### Saved proof corruption
 

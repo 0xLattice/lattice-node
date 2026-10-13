@@ -85,6 +85,15 @@ extension NodeStore {
         ).isEmpty
     }
 
+    /// Every executed block at `chainPath`, on its act-on chain or not.
+    func executedBlockCIDs(at chainPath: [String]) throws -> [String] {
+        try database.rows(
+            AcceptedBlockRow.self,
+            "SELECT block_cid FROM accepted_blocks WHERE chain_path = ?1 AND validated != ?2",
+            params: [.text(chainPath.joined(separator: "/")), BlockStatus.header.sqlValue]
+        ).map { try $0.blockCID }
+    }
+
     static func acceptedBlocks(
         in batch: BlockImportBatch
     ) throws -> [AcceptedBlockRecord] {

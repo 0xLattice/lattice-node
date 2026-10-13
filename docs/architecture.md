@@ -134,6 +134,16 @@ which the next boot stops retaining, but it cannot leave a durable fact without 
 content, part of a block's content, or a parent-level half of a multi-level
 grind.
 
+A node whose operator set `retainBlockBytes` releases executed blocks' bodies
+past that budget, after each step that executed a block, by name: the Volume store removes exactly
+the roots given and is never swept. The node counts which held bodies name
+each root, so a transaction two blocks carry goes with the second. The facts
+and headers that name a released body stay, so the trees replay the same,
+and execution and mining read a released block's own node from its header
+record. Boot retains the journal's roots the store holds, and does not ask
+that it hold them all. Storing and retaining content hold one gate that a
+release takes alone, so nothing is removed between the two.
+
 `BootRecovery` validates the databases and retained roots before networking
 starts. `NodeRuntime.boot` then rebuilds every `ChainCore` from one ordered
 scan grouped by path. Saved child proofs must decode and match their indexes;

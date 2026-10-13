@@ -343,7 +343,7 @@ extension NodeRuntime {
         storage: NodeStorage,
         children: [ChildTemplateInput] = []
     ) -> RuntimeJob {
-        let fetcher = storage.localFetcher
+        let fetcher = storage.workFetcher
         switch effect {
         case .preflight(let job):
             return RuntimeJob(path: path, epoch: job.tipEpoch) {
@@ -400,7 +400,7 @@ extension NodeRuntime {
         parentFacts: ParentLevelFacts?,
         storage: NodeStorage
     ) -> RuntimeJob {
-        let fetcher = storage.localFetcher
+        let fetcher = storage.workFetcher
         return RuntimeJob(path: path, epoch: nil) {
             let verdict = await ChainTree.connect(
                 job,
@@ -434,7 +434,7 @@ extension NodeRuntime {
         chainPath: [String],
         children: [ChildTemplateInput] = []
     ) async -> TemplateBuild? {
-        let fetcher = storage.localFetcher
+        let fetcher = storage.workFetcher
         guard job.request.parentCarrier == nil,
               let previous = try? await BlockHeader(rawCID: job.tipCID).resolve(fetcher: fetcher).node,
               let spec = try? await previous.spec.resolve(fetcher: fetcher).node,

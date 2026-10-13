@@ -105,6 +105,16 @@ public struct ChainReads: Sendable {
         return _contentBoundBlock(cid: cid, data: data)
     }
 
+    /// An accepted block's own node, for reading the state it commits to:
+    /// held here even when the block's body was released.
+    func blockNode(cid: String) async -> Block? {
+        guard await accepted(cid), let data = await storage.blockNodeBytes(cid),
+              data.count <= Self.maximumReadResponseBytes else {
+            return nil
+        }
+        return _contentBoundBlock(cid: cid, data: data)
+    }
+
     /// Bounded public read: a decoded, content-verified transaction. Resolving
     /// and content-binding as a `Transaction` is itself the gate that keeps
     /// internal (non-transaction) objects from being served by CID.
@@ -126,12 +136,7 @@ public struct ChainReads: Sendable {
         owner: String,
         blockCID: String
     ) async -> (balance: UInt64, nonce: UInt64)? {
-        guard await accepted(blockCID) else { return nil }
-        guard let data = await storage.content([blockCID])[blockCID],
-              data.count <= Self.maximumReadResponseBytes,
-              let block = _contentBoundBlock(cid: blockCID, data: data) else {
-            return nil
-        }
+        guard let block = await blockNode(cid: blockCID) else { return nil }
         guard let state = try? await block.postState.resolve(fetcher: storage).node else {
             return nil
         }
@@ -447,7 +452,7 @@ public struct ChainReads: Sendable {
         body: TransactionBody
     ) async -> (height: UInt64, hash: String, timestamp: Int64)? {
         guard body.chainPath == chainPath, let signer = body.signers.first,
-              let tipCID = await tip().tipCID, let tipBlock = await block(cid: tipCID),
+              let tipCID = await tip().tipCID, let tipBlock = await blockNode(cid: tipCID),
               let tipNonce = await nextNonce(of: signer, in: tipBlock),
               tipNonce > body.nonce else {
             return nil
@@ -506,7 +511,7 @@ public struct ChainReads: Sendable {
     /// resolving trie values so this remains safe on the public read surface.
     public func explorerDeposits(limit: Int, after: String?) async throws -> ExplorerDepositsPage? {
         guard let tipCID = await tip().tipCID,
-              let block = await block(cid: tipCID),
+              let block = await blockNode(cid: tipCID),
               let resolvedState = try? await block.postState.resolve(fetcher: storage),
               let state = resolvedState.node,
               let deposits = try? await state.depositState.resolve(fetcher: storage).node else {
@@ -624,7 +629,7 @@ public struct ChainReads: Sendable {
     /// listing: a wallet settles a purchase on the exact keys it bought.
     public func explorerDepositState(key: String) async throws -> ExplorerDepositState? {
         guard let tipCID = await tip().tipCID,
-              let block = await block(cid: tipCID),
+              let block = await blockNode(cid: tipCID),
               let resolvedState = try? await block.postState.resolve(fetcher: storage),
               let state = resolvedState.node else {
             return nil
@@ -659,7 +664,7 @@ public struct ChainReads: Sendable {
     ) async throws -> ExplorerReceiptState? {
         guard let directory = destinationPath.last,
               let tipCID = await tip().tipCID,
-              let block = await block(cid: tipCID),
+              let block = await blockNode(cid: tipCID),
               let resolvedState = try? await block.postState.resolve(fetcher: storage),
               let state = resolvedState.node else {
             return nil
@@ -704,7 +709,7 @@ public struct ChainReads: Sendable {
         let storagePaths = Swift.Dictionary(uniqueKeysWithValues: claims.map { ([$0.key], StorageStrategy.targeted) })
         try await dictionaryHeader.store(paths: storagePaths, storer: collector)
         try await state.store(storer: collector)
-        let blockData = try await storage.fetch(rawCid: blockCID)
+        guard let blockData = await storage.blockNodeBytes(blockCID) else { throw DataErrors.nodeNotAvailable }
         return StateDictionaryProof(
             blockHash: blockCID, blockHeight: block.height,
             block: .init(cid: blockCID, data: blockData), stateRoot: state.rawCID,
@@ -736,7 +741,7 @@ public struct ChainReads: Sendable {
 
     public func explorerChainSpec() async -> ExplorerChainSpec? {
         guard let tip = await tip().tipCID,
-              let block = await block(cid: tip),
+              let block = await blockNode(cid: tip),
               let spec = try? await block.spec.resolve(fetcher: storage).node else {
             return nil
         }

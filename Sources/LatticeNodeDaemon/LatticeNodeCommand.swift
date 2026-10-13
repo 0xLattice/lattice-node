@@ -83,6 +83,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Bytes of Volumes this node reads or sends to peers at once.")
     var servingMaxInFlightVolumeBytes = IvyConfig.defaultMaxInFlightVolumeBytes
 
+    @Option(help: "Bytes of executed block bodies (each block's own Volume and its transactions') this node keeps for each chain it hosts, newest first. Older bodies and those of losing forks are released and no longer served; headers, facts and state stay, so what the node weighs and selects does not change. 0 keeps the tip's body alone. A chain's genesis block is never released. Unset keeps every body. A node that syncs from genesis needs peers that kept them.")
+    var retainBlockBytes: Int?
+
     @Option(help: "Seconds with no newly accepted block on a hosted chain after which the node widens that chain's peer search: Nexus re-dials configured peers without a session, a child chain looks up its providers, and either dials peers it remembers. The node also announces each hosted child chain. Staleness is measured from the verified local tip. Discovery never affects validation or fork choice. 0 disables search.")
     var peerSearchInterval: Double = 600
 
@@ -139,6 +142,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         }
         if publicSubmit, publicReadPort == nil {
             throw ValidationError("--public-submit requires --public-read-port")
+        }
+        if let retainBlockBytes, retainBlockBytes < 0 {
+            throw ValidationError("--retain-block-bytes must not be negative")
         }
         let publicReadLimits = try PublicReadRateLimits.validated(
             generalRate: publicReadRate,
@@ -209,6 +215,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             ),
             externalAddress: externalAddress,
             peerSearchInterval: peerSearchInterval,
+            retainBlockBytes: retainBlockBytes,
             hostedChildren: hosted.map(\.path),
             childSpecs: Dictionary(hosted.compactMap { entry in entry.spec.map { (entry.path, $0) } }) { first, _ in first },
             policyModules: try policyModule.map { try Data(contentsOf: URL(fileURLWithPath: $0)) },

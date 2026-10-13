@@ -46,10 +46,16 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   streamed before it is durable. Enforced by `Simulator` and
   `LevelSimulator` ("published tip … is not durable", "served … before it
   was durable", "relayed … before it was durable").
-- **NODE-STORAGE-002.c** — Boot retains exactly the roots every level's
-  journal names, so a sweep keeps them. Pinned by
+- **NODE-STORAGE-002.c** — Boot retains the roots every level's journal
+  names that the store holds, and no others, so a sweep keeps them. Pinned by
   `ChildLevelRestartTests.testAWeighedUnexecutedChildGenesisSurvivesARestart`
   and `NodeRuntimeTests.testJoinerSyncsHeadersAndExecutesBodiesOverLoopbackIvy`.
+- **NODE-STORAGE-002.f** — Only an operator's `retainBlockBytes` releases
+  content a fact names, and only the body of an executed block that is not
+  its chain's tip or genesis: the block's own Volume and its transactions',
+  less any root another held or pending body names. The facts stay, and the
+  node executes and mines on a released block from its header record.
+  Pinned by `BlockRetentionTests`.
 - **NODE-STORAGE-002.d** — Levels write parent before child; a crash
   between them restores with the child behind, never ahead. Pinned by
   `ChildLevelRestartTests.testACrashBetweenLevelWritesRestoresTheParentAhead`.

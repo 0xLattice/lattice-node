@@ -51,6 +51,9 @@ This is intentionally one schema:
 - ports must be nonzero and unique, except that `webSocket` may be 0, which
   turns the browser listener off (see "Network surfaces" in `operations.md`);
 - rates must be finite and nonnegative;
+- `retainBlockBytes`, when set, is a nonnegative number of bytes and is
+  passed as `--retain-block-bytes` (see "Releasing block bodies" in
+  `operations.md`);
 - `publicReadURL`, when set, is an absolute `https://` (or `http://`) URL with
   a host and no credentials, query or fragment; it is passed as
   `--public-read-url` and declared for every hosted level (see

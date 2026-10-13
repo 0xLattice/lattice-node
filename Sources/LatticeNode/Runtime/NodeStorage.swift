@@ -48,11 +48,20 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     nonisolated let bundles: VolumeBundleCache
     let broker: DiskBroker
     let localFetcher: CoalescingFetcher
+    /// Local content, and behind it the header records: a block's own node
+    /// is read from them when its body was released. Execution and mining
+    /// build on blocks through this; nothing is fetched from peers.
+    nonisolated let workFetcher: CoalescingFetcher
     let retentionScope: String
     let durableMempoolOwner: String
     let liveMempoolOwner: String
     private let directoryLock: StorageDirectoryLock
     private var livePinnedMempoolRoots = Set<String>()
+    nonisolated let contentGate = ContentGate()
+    var ledger = BodyLedger()
+    var ledgerLoaded = false
+    var pendingBodies: [String: [String]] = [:]
+    var reading: [String: Int] = [:]
 
     // Actors are reentrant. This queue keeps each retained-root update in
     // one order across its suspension points.
@@ -80,6 +89,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         self.bundles = bundles
         self.broker = broker
         self.localFetcher = localFetcher
+        self.workFetcher = CoalescingFetcher(CompositeContentSource([broker, HeaderRecords(store: store)]))
         self.retentionScope = retentionScope
         self.durableMempoolOwner = durableMempoolOwner
         self.liveMempoolOwner = liveMempoolOwner
@@ -123,6 +133,13 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         await broker.fetchDataLocal(cids: cids)
     }
 
+    /// A block's own node: from its Volume, or from its header record when
+    /// its body was released. Enough to reach the state it commits to.
+    nonisolated func blockNodeBytes(_ cid: String) async -> Data? {
+        if let held = await broker.fetchDataLocal(cid: cid) { return held }
+        return store.headerBlockBytes(cid)
+    }
+
     /// Peer content exchange serves complete local Volumes. Membership is a
     /// storage fact and cannot be reconstructed from an arbitrary CID list.
     func volume(_ rootCID: String) async -> SerializedVolume? {
@@ -157,9 +174,11 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         }) {
             return volume.rawCID
         }
-        try await volume.store(storer: broker)
-        try Task.checkCancellation()
-        try await broker.retain([volume.rawCID], owner: durableMempoolOwner)
+        try await holdingContent {
+            try await volume.store(storer: broker)
+            try Task.checkCancellation()
+            try await broker.retain([volume.rawCID], owner: durableMempoolOwner)
+        }
         do {
             try await store.persistLocalMempoolTransaction(
                 transactionCID: volume.rawCID,
@@ -180,13 +199,20 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         try await acquireMutationOperation()
         defer { releaseOperation() }
         let volume = try VolumeImpl<Transaction>(node: transaction)
-        try await volume.store(storer: broker)
-        // Eviction uses the same storage mutation gate, so publishing the
-        // complete Volume and its live owner pin is atomic at the node boundary.
-        if !livePinnedMempoolRoots.contains(volume.rawCID) {
-            try await broker.retain([volume.rawCID], owner: liveMempoolOwner)
-            livePinnedMempoolRoots.insert(volume.rawCID)
+        // A collection holds the content gate alone, so the Volume and its
+        // live owner pin are published together or not at all.
+        await contentGate.enter()
+        do {
+            try await volume.store(storer: broker)
+            if !livePinnedMempoolRoots.contains(volume.rawCID) {
+                try await broker.retain([volume.rawCID], owner: liveMempoolOwner)
+                livePinnedMempoolRoots.insert(volume.rawCID)
+            }
+        } catch {
+            await contentGate.leave()
+            throw error
         }
+        await contentGate.leave()
         return volume.rawCID
     }
 
