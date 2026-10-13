@@ -38,6 +38,8 @@ USER lattice
 
 VOLUME /home/lattice/.lattice
 EXPOSE 4001
+EXPOSE 4002/tcp
+EXPOSE 4002/udp
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \

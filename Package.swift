@@ -34,7 +34,7 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/adalinxx/Ivy2.git",
-            exact: "2.0.1"
+            exact: "2.2.0"
         ),
         .package(
             url: "https://github.com/adalinxx/Tally.git",
@@ -86,6 +86,7 @@ let package = Package(
                 "LatticeNodeCore",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "Ivy", package: "Ivy2"),
+                .product(name: "IvyWebSocket", package: "Ivy2"),
                 .product(name: "Tally", package: "Tally"),
                 .product(name: "VolumeBroker", package: "VolumeBroker"),
                 .product(name: "Crypto", package: "swift-crypto"),

@@ -39,7 +39,7 @@ public struct ChainPeers: Codable, Sendable, Equatable {
 
 public struct Topology: Codable, Sendable {
     private enum CodingKeys: String, CodingKey, CaseIterable {
-        case listen, rpc, peers, publicRead, externalAddress
+        case listen, rpc, webSocket, peers, publicRead, externalAddress
         case publicReadRate, publicReadExpensiveRate, publicReadMaxRate
         case publicReadURL, publicSubmit, publicSubmitRate, minRelayFee
         case servingMaxConcurrent, servingMaxInFlightVolumeBytes
@@ -47,6 +47,10 @@ public struct Topology: Codable, Sendable {
     }
     public var listen: UInt16
     public var rpc: UInt16
+    /// Port for browsers (the node's `--websocket-port`): overlay sessions
+    /// over WebSocket on TCP and STUN on UDP. Absent = the node's default,
+    /// which it does without if the port is taken; 0 = off.
+    public var webSocket: UInt16?
     /// Each chain's peers as `publicKey@host:port`, by chain path. Nexus's
     /// list is its bootstrap peers (absent: the built-in ones; empty: none);
     /// a hosted child's is extra seeds for that chain, beside what it finds
@@ -180,6 +184,9 @@ public struct Topology: Codable, Sendable {
             guard port != 0, ports.insert(port).inserted else {
                 throw CtlError("port \(port) is zero or used twice")
             }
+        }
+        if let webSocket, webSocket != 0, !ports.insert(webSocket).inserted {
+            throw CtlError("port \(webSocket) is used twice")
         }
         for (name, rate) in [
             ("publicReadRate", publicReadRate),

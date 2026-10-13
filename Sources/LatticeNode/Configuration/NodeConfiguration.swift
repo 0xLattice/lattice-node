@@ -42,9 +42,31 @@ public enum NodeConfigurationError: Error, Equatable, CustomStringConvertible {
         case .invalidChainPath:
             "chain path must be Nexus-rooted, consensus-valid, and fit the setup wire frame"
         case .invalidPrivateKey: "process private key must be a 32-byte Ed25519 key"
-        case .invalidPorts: "overlay and RPC ports must be nonzero and distinct"
+        case .invalidPorts: "overlay, RPC and WebSocket ports must be nonzero and distinct"
         case .invalidPublicReadURL:
             "public read URL must be an absolute http(s) URL with a host and no credentials, query or fragment"
+        }
+    }
+}
+
+/// Whether the node listens for peers that cannot open a TCP connection:
+/// browsers. On that port it accepts overlay sessions over WebSocket (TCP)
+/// and answers STUN (UDP), and while it listens it relays between its peers,
+/// which is how two browsers meet before they connect to each other.
+public enum WebSocketListener: Sendable, Equatable {
+    case off
+    /// Listen if the port can be bound and start without it if not, so a
+    /// second node on one machine still starts. The default.
+    case ifAvailable(UInt16)
+    /// Listen, and fail to start if the port cannot be bound.
+    case required(UInt16)
+
+    public static let defaultPort: UInt16 = 4002
+
+    public var port: UInt16? {
+        switch self {
+        case .off: nil
+        case .ifAvailable(let port), .required(let port): port
         }
     }
 }
@@ -57,6 +79,7 @@ public struct NodeConfiguration: Sendable {
     public let processPublicKey: String
     public let listenPort: UInt16
     public let rpcPort: UInt16
+    public let webSocket: WebSocketListener
     /// The operator's peers: dialled from the start and kept for the life of
     /// the process.
     public let bootstrapPeers: [PeerEndpoint]
@@ -150,6 +173,7 @@ public struct NodeConfiguration: Sendable {
         privateKeyHex: String,
         listenPort: UInt16 = 4001,
         rpcPort: UInt16 = 8080,
+        webSocket: WebSocketListener = .ifAvailable(WebSocketListener.defaultPort),
         bootstrapPeers: [PeerEndpoint] = [],
         seedPeers: [PeerEndpoint] = [],
         fixedSeedPeers: [PeerEndpoint] = [],
@@ -211,6 +235,18 @@ public struct NodeConfiguration: Sendable {
         ).hex
         self.listenPort = listenPort
         self.rpcPort = rpcPort
+        switch webSocket {
+        case .required(let port):
+            guard port != 0, port != listenPort, port != rpcPort else {
+                throw NodeConfigurationError.invalidPorts
+            }
+            self.webSocket = webSocket
+        case .ifAvailable(let port):
+            // A port given to something else is not available.
+            self.webSocket = port == 0 || port == listenPort || port == rpcPort ? .off : webSocket
+        case .off:
+            self.webSocket = .off
+        }
         self.bootstrapPeers = bootstrapPeers
         self.seedPeers = seedPeers
         self.fixedSeedPeers = fixedSeedPeers

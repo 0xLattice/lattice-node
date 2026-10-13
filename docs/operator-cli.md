@@ -13,6 +13,7 @@ default.
 {
   "listen": 4001,
   "rpc": 8080,
+  "webSocket": 4002,
   "peers": ["<public-key>@node.example:4001"],
   "externalAddress": "192.0.2.10",
   "publicRead": 8081,
@@ -47,7 +48,8 @@ This is intentionally one schema:
   list (see "Configured peers" in `operations.md`);
 - `hostedChains` lists child paths parent before child;
 - mining maps are keyed by hosted absolute path;
-- ports must be nonzero and unique;
+- ports must be nonzero and unique, except that `webSocket` may be 0, which
+  turns the browser listener off (see "Network surfaces" in `operations.md`);
 - rates must be finite and nonnegative;
 - `publicReadURL`, when set, is an absolute `https://` (or `http://`) URL with
   a host and no credentials, query or fragment; it is passed as

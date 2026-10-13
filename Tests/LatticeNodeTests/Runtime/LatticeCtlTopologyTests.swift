@@ -49,6 +49,16 @@ final class LatticeCtlTopologyTests: XCTestCase {
         collision.publicRead = collision.listen
         XCTAssertThrowsError(try collision.validated())
 
+        var browsers = configured
+        browsers.webSocket = 4002
+        let roundTripped = try JSONDecoder().decode(Topology.self, from: JSONEncoder().encode(browsers))
+        XCTAssertEqual(roundTripped.webSocket, 4002)
+        XCTAssertNoThrow(try roundTripped.validated())
+        browsers.webSocket = 0
+        XCTAssertNoThrow(try browsers.validated(), "0 turns the browser listener off")
+        browsers.webSocket = browsers.rpc
+        XCTAssertThrowsError(try browsers.validated())
+
         let legacy = Data(#"{"chains":{"Nexus":{"listen":4001,"rpc":4003}}}"#.utf8)
         XCTAssertThrowsError(try JSONDecoder().decode(Topology.self, from: legacy))
     }

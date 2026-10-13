@@ -189,8 +189,28 @@ systemctl enable --now lattice-mining-coordinator
 | Surface | Default | Exposure |
 |---|---:|---|
 | Ivy tree overlay | `4001/tcp` | Public when accepting inbound peers |
+| Browser peers | `4002/tcp` and `4002/udp` | Public when accepting browsers; `--websocket-port 0` turns it off |
 | Operator RPC | `8080/tcp` | Loopback only; the daemon rejects other bind addresses |
 | Public reads | disabled | Public only when explicitly configured |
+
+A browser cannot open the overlay's TCP connection, so it reaches a node over
+WebSocket, at `ws://<host>:4002/ivy`. Two browsers cannot accept a connection
+from each other either: they meet through a node both reach, which relays
+between them, and then connect to each other directly. For that each needs
+the address the other can reach it at, and it asks the node, by STUN on the
+same port over UDP. No other server is involved.
+
+- Open the port for both TCP and UDP. A node that listens here relays
+  between its peers: signalling only when the two then connect directly, and
+  their traffic when they cannot.
+- Left unset, the node listens on 4002 if it can bind it and starts without
+  it, with a line on standard error, if it cannot; a second node on one
+  machine needs a port of its own. With `--websocket-port` given (topology:
+  `webSocket`), failing to bind is an error.
+- There is no TLS in the node, and a page served over `https` may only open
+  `wss`. Terminate it in a proxy in front. STUN does not pass through that
+  proxy: a browser asks at the host and port it dialled, so UDP on that port
+  has to be forwarded to the node's.
 
 The public-read listener serves the bounded GET routes and never registers
 operator status, metrics, or mining handlers; it registers

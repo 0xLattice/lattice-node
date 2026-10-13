@@ -1,5 +1,6 @@
 import Foundation
 import Ivy
+import IvyWebSocket
 import Lattice
 import LatticeNodeCore
 import cashew
@@ -80,6 +81,8 @@ public final class NodeRuntime: Sendable {
     let inputs: AsyncStream<Input>.Continuation
     private let loop: Task<Void, Never>
     let ivy: Ivy
+    /// Listens for browsers; see `WebSocketListener`.
+    private let webSocket: WebSocketTransport
     private let delegate: NodeRuntimeIvyDelegate
     private let gate: NodeRuntimeInputGate
     private let maintenance: Task<Void, Never>
@@ -173,6 +176,19 @@ public final class NodeRuntime: Sendable {
         }
         do {
             try await runtime.ivy.start()
+            switch configuration.webSocket {
+            case .off:
+                break
+            case .required(let port):
+                try await runtime.webSocket.listen(port: port)
+            case .ifAvailable(let port):
+                do {
+                    try await runtime.webSocket.listen(port: port)
+                } catch {
+                    FileHandle.standardError.write(Data(
+                        "lattice-node: not listening for WebSocket and STUN on port \(port): \(error)\n".utf8))
+                }
+            }
         } catch {
             await runtime.stop()
             throw error
@@ -260,6 +276,7 @@ public final class NodeRuntime: Sendable {
         self.levelReads = levelReads
         self.inputs = inputs
         self.ivy = ivy
+        webSocket = WebSocketTransport(ivy: ivy)
         let gate = NodeRuntimeInputGate(capacity: Self.networkCapacity)
         self.gate = gate
         let readEndpoints = ReadEndpointDirectory(
@@ -344,6 +361,7 @@ public final class NodeRuntime: Sendable {
         // Free the delegates waiting for room first: stopping Ivy waits for
         // its deliveries.
         await gate.close()
+        await webSocket.stopListening()
         await ivy.stop()
         await ivy.setContentSource(nil)
         inputs.yield(.stop)
