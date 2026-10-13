@@ -36,6 +36,9 @@ struct OverlayConfiguration {
                 externalAddress: configuration.externalAddress.map {
                     (host: $0, port: configuration.listenPort)
                 },
+                // Two browsers meet through a node both reach, and only a
+                // node browsers can reach is asked to carry them.
+                relayEnabled: configuration.webSocket != .off,
                 mode: .overlay
             )
         )

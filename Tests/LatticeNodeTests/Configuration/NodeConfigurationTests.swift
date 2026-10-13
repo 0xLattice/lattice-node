@@ -35,6 +35,7 @@ final class NodeConfigurationTests: XCTestCase {
 
         XCTAssertEqual(configuration.nexusGenesisCID, NexusGenesis.expectedBlockHash)
         XCTAssertEqual(configuration.minPeerKeyBits, 0)
+        XCTAssertEqual(configuration.webSocket, .ifAvailable(4002), "browsers are listened for by default")
 
         XCTAssertThrowsError(try NodeConfiguration(
             chainPath: ["Nexus"],
@@ -44,6 +45,33 @@ final class NodeConfigurationTests: XCTestCase {
         )) { error in
             XCTAssertEqual(error as? NodeConfigurationError, .invalidPorts)
         }
+    }
+
+    func testTheBrowserPortIsOneOfTheNodesOwn() throws {
+        func configuration(_ webSocket: WebSocketListener) throws -> NodeConfiguration {
+            try NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: URL(fileURLWithPath: "/tmp/lattice-node-test"),
+                privateKeyHex: String(repeating: "01", count: 32),
+                listenPort: 4002,
+                rpcPort: 8080,
+                webSocket: webSocket
+            )
+        }
+        XCTAssertEqual(try configuration(.required(4003)).webSocket, .required(4003))
+        XCTAssertEqual(try configuration(.off).webSocket, .off)
+        for taken: UInt16 in [0, 4002, 8080] {
+            XCTAssertThrowsError(try configuration(.required(taken))) { error in
+                XCTAssertEqual(error as? NodeConfigurationError, .invalidPorts)
+            }
+            XCTAssertEqual(
+                try configuration(.ifAvailable(taken)).webSocket, .off,
+                "a port given to something else is not available")
+        }
+
+        // A node that browsers reach is the one that carries them to each other.
+        XCTAssertTrue(try OverlayConfiguration(configuration(.ifAvailable(4003))).overlay.relayEnabled)
+        XCTAssertFalse(try OverlayConfiguration(configuration(.off)).overlay.relayEnabled)
     }
 
     func testZeroMinimumRootWorkIsValidLocalPolicy() throws {
