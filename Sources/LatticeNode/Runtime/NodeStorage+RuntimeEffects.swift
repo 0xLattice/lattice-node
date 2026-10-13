@@ -32,6 +32,10 @@ extension NodeStorage {
         bodyRoots: [ChainPath: [String]] = [:]
     ) async throws {
         var durable: [NodeFactBatch] = []
+        // What this step's executions created. A fetched body was pinned
+        // under its block's name when it was stored, and the journal still
+        // names it.
+        var stored: [String] = []
         let storage = NodeImportStorage(storage: broker)
         for (path, level) in batch.levels.sorted(by: {
             $0.path.count != $1.path.count
@@ -45,7 +49,9 @@ extension NodeStorage {
             for spec in level.headers.compactMap(\.spec) {
                 try await VolumeImpl<ChainSpec>(node: spec).store(storer: storage)
             }
-            let roots = await storage.takeStoredVolumeRoots() + (bodyRoots[path] ?? [])
+            let created = await storage.takeStoredVolumeRoots()
+            stored.append(contentsOf: created)
+            let roots = created + (bodyRoots[path] ?? [])
             durable.append(NodeFactBatch(
                 path: path,
                 facts: level.facts,
@@ -56,7 +62,7 @@ extension NodeStorage {
             ))
         }
         try await storage.commit()
-        try await retainHeld(durable.flatMap(\.volumeRoots))
+        try await retainHeld(stored)
         try await store.stageNodeFacts(durable, logID: logID)
     }
 
@@ -104,7 +110,7 @@ extension NodeStorage {
                 try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: storage)
                 try await storage.commit()
                 let roots = await storage.takeStoredVolumeRoots()
-                try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots)
+                try await retainStored(roots, ofBlock: cid)
                 bundles.record(root: cid, roots: roots)
                 return roots
             }.value
@@ -164,7 +170,7 @@ extension NodeStorage {
         try await header.storeBlock(fetcher: fetcher, storer: storage)
         try await storage.commit()
         let roots = await storage.takeStoredVolumeRoots()
-        try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots)
+        try await retainStored(roots, ofBlock: header.rawCID, built: true)
         bundles.record(root: header.rawCID, roots: roots)
         guard let children = try await block.children.resolve(fetcher: fetcher).node else {
             throw NodeStorageError.missingMaterializedVolume(block.children.rawCID)
@@ -210,7 +216,7 @@ extension NodeStorage {
                 try await child.storeBlock(fetcher: localFetcher, storer: storage)
                 try await storage.commit()
                 let roots = await storage.takeStoredVolumeRoots()
-                try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots)
+                try await retainStored(roots, ofBlock: child.rawCID, built: true)
                 bundles.record(root: child.rawCID, roots: roots)
                 frontier.append((block, childPath, proof))
                 guard let grandchildren = try await block.children.resolve(fetcher: localFetcher).node else { continue }

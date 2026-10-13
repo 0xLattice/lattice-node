@@ -34,9 +34,13 @@ enum BootRecovery {
         let directoryLock = try lockStorageDirectory(configuration: configuration)
         let stores = try openStores(configuration: configuration)
         let constantRoots = try await materializeConstantRoots(stores, configuration: configuration)
-        try await reconcileRetainedRoots(stores, constantRoots: constantRoots)
+        try await settleRetention(stores, constantRoots: constantRoots)
         try await pinMempool(stores)
         try await seedNexusGenesis(stores, configuration: configuration)
+        // Content stays only because a scope names it. What none does (a
+        // write a crash cut short, a pool entry of the last run) goes now,
+        // while nothing is being stored.
+        try await stores.broker.sweep()
         return Result(
             store: stores.store,
             broker: stores.broker,
@@ -121,20 +125,27 @@ enum BootRecovery {
         return constantRoots
     }
 
-    /// Stage 4: the journal audited, and the chain's retained roots set to
-    /// what its facts name and this store holds. Content a fact names and
-    /// the store lacks is no fault: it is fetched when something reads it.
-    private static func reconcileRetainedRoots(
+    /// Stage 4: the journal audited and the pins settled. Pins are in the
+    /// store and stay as a start finds them: nothing is rebuilt from the
+    /// journal, and content a fact names and the store lacks is no fault.
+    /// The constants are pinned, and a block this node built is given its
+    /// body's name if a fact records it and let go of if none does.
+    private static func settleRetention(
         _ stores: Stores,
         constantRoots: [String]
     ) async throws {
-        let staged = try await stores.store.stagedImports()
         try await stores.store.auditNormalizedIndexes()
-        var held = Set(constantRoots)
-        for root in Set(staged.flatMap(\.volumeRoots)) where await stores.broker.hasVolume(root: root) {
-            held.insert(root)
+        let broker = stores.broker
+        let scopes = RetentionScopes(chain: stores.retentionScope)
+        try await broker.mergeRetainedRoots(scope: scopes.chain, roots: constantRoots)
+        for scope in try await broker.retainedScopes(prefix: scopes.builtPrefix) {
+            let blockCID = String(scope.dropFirst(scopes.builtPrefix.count))
+            let roots = try await broker.retainedRoots(scope: scope)
+            if try await stores.store.recordsBlock(blockCID) {
+                try await broker.mergeRetainedRoots(scope: scopes.body(blockCID), roots: roots)
+            }
+            try await broker.releaseRetainedRoots(scope: scope, roots: roots)
         }
-        try await stores.broker.advanceRetainedRoots(scope: stores.retentionScope, roots: held.sorted())
     }
 
     /// Stage 6: the durable mempool's pins rebuilt, the live pool's cleared.

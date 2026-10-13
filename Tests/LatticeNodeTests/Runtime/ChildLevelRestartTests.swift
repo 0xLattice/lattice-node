@@ -74,36 +74,43 @@ final class ChildLevelRestartTests: XCTestCase {
         XCTAssertEqual(Set(proofs.keys), Set(work))
     }
 
-    /// A kill after content is stored and retained, before the facts that
-    /// name it commit: the restart retains only what facts name, and boots.
-    func testContentWithoutItsFactIsReleasedOnRestart() async throws {
+    /// A kill between a write and the fact that names it. Pins are in the
+    /// store and a start leaves them as it finds them, so what decides is
+    /// the name content was pinned under: content no scope names goes, a
+    /// block this node built and no fact records goes, and what the chain
+    /// scope names stays (a block that is executed again stores the same).
+    func testAStartKeepsWhatAScopeNamesAndDropsTheRest() async throws {
         let configuration = try configuration()
-        let orphan = try VolumeImpl<ChainSpec>(node: ChainSpec(
-            maxNumberOfTransactionsPerBlock: 10, maxStateGrowth: 100_000, premine: 7,
-            targetBlockTime: 1_000, initialReward: 1, halvingInterval: 10_000, halfLife: 10
-        ))
-        try await storeAndRetain(orphan, configuration)
+        func spec(_ premine: UInt64) throws -> VolumeImpl<ChainSpec> {
+            try VolumeImpl<ChainSpec>(node: ChainSpec(
+                maxNumberOfTransactionsPerBlock: 10, maxStateGrowth: 100_000, premine: premine,
+                targetBlockTime: 1_000, initialReward: 1, halvingInterval: 10_000, halfLife: 10
+            ))
+        }
+        let (unpinned, built, chained) = (try spec(7), try spec(8), try spec(9))
+        do {
+            let storage = try await NodeStorage.open(configuration: configuration)
+            let storer = NodeImportStorage(storage: await storage.broker)
+            for volume in [unpinned, built, chained] { try await volume.store(storer: storer) }
+            try await storer.commit()
+            let scopes = storage.scopes
+            try await storage.broker.mergeRetainedRoots(scope: scopes.built(built.rawCID), roots: [built.rawCID])
+            try await storage.broker.mergeRetainedRoots(scope: scopes.chain, roots: [chained.rawCID])
+        }
 
         let reopened = try await NodeStorage.open(configuration: configuration)
-        let retained = try await reopened.broker.retainedRoots(scope: reopened.retentionScope)
-        XCTAssertFalse(retained.contains(orphan.rawCID))
-        _ = try await reopened.broker.sweep()
-        let swept = await reopened.volume(orphan.rawCID)
-        XCTAssertNil(swept)
+        let sweptUnpinned = await reopened.volume(unpinned.rawCID)
+        XCTAssertNil(sweptUnpinned, "no scope named it")
+        let droppedBuilt = await reopened.volume(built.rawCID)
+        XCTAssertNil(droppedBuilt, "no fact records the block it was built as")
+        let leftovers = try await reopened.broker.retainedScopes(prefix: reopened.scopes.builtPrefix)
+        XCTAssertEqual(leftovers, [])
+        let kept = await reopened.volume(chained.rawCID)
+        XCTAssertNotNil(kept, "the chain scope named it, and a start leaves pins as it finds them")
         let restored = try await NodeRuntime.boot(
             storage: reopened, configuration: configuration, coreConfig: .init()
         )
         XCTAssertEqual(restored.levels[["Nexus"]]?.snapshot.actOnHeight, 0)
-    }
-
-    private func storeAndRetain(_ volume: VolumeImpl<ChainSpec>, _ configuration: NodeConfiguration) async throws {
-        let storage = try await NodeStorage.open(configuration: configuration)
-        let storer = NodeImportStorage(storage: await storage.broker)
-        try await volume.store(storer: storer)
-        try await storer.commit()
-        try await storage.broker.mergeRetainedRoots(
-            scope: await storage.retentionScope, roots: await storer.takeStoredVolumeRoots()
-        )
     }
 
     private func weighChildGenesis(_ configuration: NodeConfiguration) async throws -> String {

@@ -1084,6 +1084,12 @@ extension NodeRuntime {
                         batch, logID: core.logID, bodyRoots: roots
                     )
                     for key in persistedBodyKeys { bodyRoots[key] = nil }
+                    // A block found invalid is no block: its body goes.
+                    for (_, levelBatch) in batch.levels {
+                        for case .exclusion(let excluded) in levelBatch.facts.flatMap(\.facts) {
+                            await storage.releaseBody(excluded.blockHash)
+                        }
+                    }
                     for (path, levelBatch) in batch.levels {
                         for stored in levelBatch.proofs {
                             proofs[path, default: [:]][stored.childCID, default: [:]][stored.proof.rootCID] = stored.proof
@@ -1214,6 +1220,8 @@ extension NodeRuntime {
                 bodies.removeValue(forKey: BodyKey(path: path, cid: cid))?.cancel()
                 bodyRoots[BodyKey(path: path, cid: cid)] = nil
                 fetchWaits[BodyKey(path: path, cid: cid)] = nil
+                // No longer waited for: what was fetched of it goes.
+                await storage.releaseBody(cid)
             case .verifyProof(let job):
                 // A job without its block reads it from the header store.
                 guard let block = job.block ?? storage.store.header(job.childCID)?.block else {

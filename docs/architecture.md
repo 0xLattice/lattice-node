@@ -129,9 +129,19 @@ fact transaction that names them. One admission's Volumes (a fetched or mined
 block's, or the post-states of one step) are one `volumes.db` transaction,
 then retained. The complete `NodeBatch` then commits in one SQLite transaction
 across every affected chain path, including each path's headers, child
-proofs, and sync cursors. A crash may leave content that no fact references,
-which the next boot stops retaining, but it cannot leave part of a block's
-content or a parent-level half of a multi-level grind.
+proofs, and sync cursors. A crash cannot leave part of a block's content or a
+parent-level half of a multi-level grind.
+
+Content stays in `volumes.db` because a retention scope names it, and each
+scope says why. A block's body (its own Volume and its transactions') is
+named by that block, so a transaction two blocks carry stays until both are
+let go of. What executions read and create (state, specs, policy modules) and
+each genesis block are named by the chain. A block this node built is named
+as built until a fact records it. A body is let go of when its block is found
+invalid or is no longer waited for. Pins are in the store and a start leaves
+them as it finds them: it gives a recorded built block its body's name, lets
+go of one no fact records, and sweeps what no scope names. The journal still
+lists the roots each batch stored, and nothing reads that list.
 
 A fact does not depend on its content being held, so a store that lacks
 content its facts name is not damaged.

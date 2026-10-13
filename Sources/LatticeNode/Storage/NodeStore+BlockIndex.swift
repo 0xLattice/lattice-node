@@ -85,6 +85,13 @@ extension NodeStore {
         ).isEmpty
     }
 
+    /// Whether a fact on any hosted chain records `blockCID`.
+    func recordsBlock(_ blockCID: String) throws -> Bool {
+        try !database.query(
+            "SELECT 1 FROM accepted_blocks WHERE block_cid = ?1 LIMIT 1", params: [.text(blockCID)]
+        ).isEmpty
+    }
+
     /// Whether this chain executed `blockCID`: its post-state is the state
     /// of a block this node validated, not one it has only weighed.
     func hasExecutedBlock(_ blockCID: String, at chainPath: [String]) throws -> Bool {

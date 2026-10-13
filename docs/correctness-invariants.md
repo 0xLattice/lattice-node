@@ -46,9 +46,15 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   streamed before it is durable. Enforced by `Simulator` and
   `LevelSimulator` ("published tip … is not durable", "served … before it
   was durable", "relayed … before it was durable").
-- **NODE-STORAGE-002.c** — Boot retains the roots every level's journal
-  names that the store holds, and no others, so a sweep keeps them. Pinned
-  by `ChildLevelRestartTests.testAWeighedUnexecutedChildGenesisSurvivesARestart`
+- **NODE-STORAGE-002.c** — Content stays because a scope names it, and a
+  start leaves pins as it finds them: nothing is rebuilt from the journal.
+  A block's body is named by that block, what executions read and create
+  by the chain, a block this node built by a name of its own until a fact
+  records it. A start gives a recorded built block its body's name, lets go
+  of one no fact records, and sweeps what no scope names. Pinned by
+  `RetentionRulesTests`,
+  `ChildLevelRestartTests.testAStartKeepsWhatAScopeNamesAndDropsTheRest`,
+  `ChildLevelRestartTests.testAWeighedUnexecutedChildGenesisSurvivesARestart`
   and `NodeRuntimeTests.testJoinerSyncsHeadersAndExecutesBodiesOverLoopbackIvy`.
 - **NODE-STORAGE-002.f** — Content a fact names and the store lacks is no
   fault. The node starts on its facts, with the Nexus genesis block stored
