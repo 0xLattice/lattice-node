@@ -1275,12 +1275,12 @@ extension NodeRuntime {
                 // The carried blocks of hosted levels, each with its proof
                 // verified, join the grind: one step weighs every level the
                 // grind meets.
-                let (storage, inputs) = (storage, inputs)
+                let (storage, remote, inputs) = (storage, remote, inputs)
                 let hosted = Set(core.levels.keys)
                 spawn {
                     do {
-                        let children = try await storage.storeMinedBlock(block)
-                        let carried = try await storage.carriedGrinds(of: block, hosted: hosted)
+                        let children = try await storage.storeMinedBlock(block, remote: remote)
+                        let carried = try await storage.carriedGrinds(of: block, hosted: hosted, remote: remote)
                         inputs.yield(.event(.mined(
                             MinedGrind(root: block, rootChildren: children, carried: carried), replyID: replyID
                         )))
@@ -1295,7 +1295,7 @@ extension NodeRuntime {
             case .buildTemplate(let job):
                 guard let level = await epochLevel(at: path, epoch: job.tipEpoch) else { break }
                 miningJobs.append(NodeRuntime.miningJob(
-                    effect, at: path, level: level, storage: storage, children: childTemplateInputs(below: path)
+                    effect, at: path, level: level, storage: storage, remote: remote, children: childTemplateInputs(below: path)
                 ))
                 startJobs()
             case .returnTransactions:

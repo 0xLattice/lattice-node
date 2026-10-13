@@ -437,7 +437,9 @@ Startup fails closed when:
 
 - the schema epoch or Nexus genesis does not match;
 - a journal/index audit disagrees;
-- referenced retained content is missing;
+- a hosted child chain's genesis spec is in neither `volumes.db` nor the
+  node's own `specs`, or one of the node's own pending transactions is
+  missing from `volumes.db`;
 - saved child proofs do not decode or do not match their index;
 - another process owns the storage lock.
 
@@ -484,8 +486,19 @@ tree and use `lattice wipe`; there is no migration path.
 
 ### `missingMaterializedVolume`
 
-A fact references content absent from the matched `volumes.db`. Restore the
-whole backup set or wipe. Copying only `state.db` is not recovery.
+A hosted child chain's genesis spec is in neither `volumes.db` nor this
+node's own `specs`, or a transaction in the node's own pending journal is
+absent from `volumes.db`. Restore the whole backup set or wipe.
+
+Other content a fact names may be absent without stopping the node. It
+starts on its facts, stores the Nexus genesis block again, and reads what it
+needs to execute a block or build a template from its peers, each entry
+checked against its CID. A `state.db` copied without its `volumes.db`
+therefore runs, but it holds only what the blocks it has executed and mined
+since have stored:
+the public read routes and the check of a submitted transaction answer from
+this store alone, so they report content it lacks as not found and leave
+such a transaction pooled. Resync it to hold the rest.
 
 ### Saved proof corruption
 

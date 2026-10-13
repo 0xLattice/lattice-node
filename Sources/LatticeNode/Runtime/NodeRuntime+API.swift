@@ -341,22 +341,28 @@ extension NodeRuntime {
         at path: ChainPath,
         level: ChainLevel?,
         storage: NodeStorage,
+        remote: IvyRootContentSource? = nil,
         children: [ChildTemplateInput] = []
     ) -> RuntimeJob {
-        let fetcher = storage.localFetcher
+        let fetcher = storage.workFetcher
         switch effect {
         case .preflight(let job):
             return RuntimeJob(path: path, epoch: job.tipEpoch) {
                 guard let level else { return [] }
+                // From this store alone: a transaction anyone may submit
+                // does not spend this node's requests to its peers.
                 let result = await level.preflightTransaction(job.transaction, at: job.tipCID, fetcher: fetcher)
                 return [.level(path, .mining(.preflighted(job, disposition(result.disposition))))]
             }
         case .buildTemplate(let job):
             return RuntimeJob(path: path, epoch: job.tipEpoch) {
                 let anchor = await level?.chain.difficultyAnchor(forBlockHash: job.tipCID)
-                return [.level(path, .mining(.templateBuilt(job, await buildTemplate(
-                    job, difficultyAnchor: anchor, storage: storage, chainPath: path, children: children
-                ))))]
+                let built = await reading(job.tipCID, storage: storage, remote: remote) { fetcher in
+                    await buildTemplate(
+                        job, difficultyAnchor: anchor, fetcher: fetcher, chainPath: path, children: children
+                    )
+                }
+                return [.level(path, .mining(.templateBuilt(job, built)))]
             }
         case .returnTransactions(let left, let carried):
             return RuntimeJob(path: path, epoch: nil) {
@@ -400,7 +406,7 @@ extension NodeRuntime {
         parentFacts: ParentLevelFacts?,
         storage: NodeStorage
     ) -> RuntimeJob {
-        let fetcher = storage.localFetcher
+        let fetcher = storage.workFetcher
         return RuntimeJob(path: path, epoch: nil) {
             let verdict = await ChainTree.connect(
                 job,
@@ -424,17 +430,35 @@ extension NodeRuntime {
         }
     }
 
+    /// The operator's own work reads content the one way: what this store
+    /// holds, then a block's header record, then what its earlier reads
+    /// asked of peers, then peers, each answer checked against its CID by
+    /// the reader. What a read asked for is remembered in memory, never
+    /// written to the store: only the node's own storing of a block does
+    /// that.
+    /// Without an overlay (`remote` nil) the read is from this store.
+    static func reading<T: Sendable>(
+        _ rootCID: String,
+        storage: NodeStorage,
+        remote: IvyRootContentSource?,
+        _ work: @Sendable (any Fetcher) async -> T
+    ) async -> T {
+        guard let remote else { return await work(storage.workFetcher) }
+        return await remote.withRootTracing(rootCID, bundle: false) { session in
+            await work(storage.ownReads(through: session))
+        }.value
+    }
+
     /// `MiningEffect.buildTemplate`: today's assembly (the bisecting fit, the
     /// policy filter, the minimum-work search target) on the job's tip.
     /// Nil when no block can be built there.
     static func buildTemplate(
         _ job: TemplateJob,
         difficultyAnchor: DifficultyAnchor?,
-        storage: NodeStorage,
+        fetcher: any Fetcher,
         chainPath: [String],
         children: [ChildTemplateInput] = []
     ) async -> TemplateBuild? {
-        let fetcher = storage.localFetcher
         guard job.request.parentCarrier == nil,
               let previous = try? await BlockHeader(rawCID: job.tipCID).resolve(fetcher: fetcher).node,
               let spec = try? await previous.spec.resolve(fetcher: fetcher).node,

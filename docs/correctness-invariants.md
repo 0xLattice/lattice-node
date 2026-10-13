@@ -36,7 +36,7 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   proof check the shell cannot run. Pinned by
   `ChildGenesisSpecTests`.
 
-## NODE-STORAGE-002 — a durable fact never outruns its content
+## NODE-STORAGE-002 — content is stored before the facts that name it, and a fact never depends on it being held
 
 - **NODE-STORAGE-002.a** — A step's content (headers, post-states, specs)
   is stored and retained before the facts that name it. Enforced by
@@ -46,10 +46,19 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   streamed before it is durable. Enforced by `Simulator` and
   `LevelSimulator` ("published tip … is not durable", "served … before it
   was durable", "relayed … before it was durable").
-- **NODE-STORAGE-002.c** — Boot retains exactly the roots every level's
-  journal names, so a sweep keeps them. Pinned by
-  `ChildLevelRestartTests.testAWeighedUnexecutedChildGenesisSurvivesARestart`
+- **NODE-STORAGE-002.c** — Boot retains the roots every level's journal
+  names that the store holds, and no others, so a sweep keeps them. Pinned
+  by `ChildLevelRestartTests.testAWeighedUnexecutedChildGenesisSurvivesARestart`
   and `NodeRuntimeTests.testJoinerSyncsHeadersAndExecutesBodiesOverLoopbackIvy`.
+- **NODE-STORAGE-002.f** — Content a fact names and the store lacks is no
+  fault. The node starts on its facts, with the Nexus genesis block stored
+  again; executing a block and building on one read this store, a block's
+  header record, then peers, checked against the CID; what peers served
+  reaches the Volume store only as the Volumes this node derives when it
+  stores a block; retaining a root that is gone retains the rest. The checks anyone
+  can cause (a submitted transaction, a public read) read this store alone.
+  Pinned by `AbsentContentTests` and
+  `SafetyNetCorruptStoreTests.testBootOpensAStoreWhoseVolumesAreGone`.
 - **NODE-STORAGE-002.d** — Levels write parent before child; a crash
   between them restores with the child behind, never ahead. Pinned by
   `ChildLevelRestartTests.testACrashBetweenLevelWritesRestoresTheParentAhead`.

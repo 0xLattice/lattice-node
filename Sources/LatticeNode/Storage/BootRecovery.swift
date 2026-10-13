@@ -122,23 +122,19 @@ enum BootRecovery {
     }
 
     /// Stage 4: the journal audited, and the chain's retained roots set to
-    /// exactly what its facts name.
+    /// what its facts name and this store holds. Content a fact names and
+    /// the store lacks is no fault: it is fetched when something reads it.
     private static func reconcileRetainedRoots(
         _ stores: Stores,
         constantRoots: [String]
     ) async throws {
         let staged = try await stores.store.stagedImports()
         try await stores.store.auditNormalizedIndexes()
-        let roots = Set(staged.flatMap(\.volumeRoots)).union(constantRoots).sorted()
-        // Presence only, and the broker checks it as it retains each root:
-        // every read of a stored Volume validates its content against its
-        // CID, so hashing the whole store here would repeat that on each
-        // boot, before the node can listen.
-        do {
-            try await stores.broker.advanceRetainedRoots(scope: stores.retentionScope, roots: roots)
-        } catch BrokerError.missingRetainedRoot(let root) {
-            throw NodeStorageError.missingMaterializedVolume(root)
+        var held = Set(constantRoots)
+        for root in Set(staged.flatMap(\.volumeRoots)) where await stores.broker.hasVolume(root: root) {
+            held.insert(root)
         }
+        try await stores.broker.advanceRetainedRoots(scope: stores.retentionScope, roots: held.sorted())
     }
 
     /// Stage 6: the durable mempool's pins rebuilt, the live pool's cleared.
@@ -166,13 +162,16 @@ enum BootRecovery {
         try await broker.advanceRetainedRoots(scope: liveMempoolOwner, roots: [])
     }
 
-    /// Stage 7: an empty journal starts from the configured Nexus genesis:
-    /// its content stored and retained, then its executed batch journaled.
+    /// Stage 7: the configured Nexus genesis, whole: its content stored and
+    /// retained whenever the store lacks its block, and for an empty journal
+    /// its executed batch journaled. Every node holds it; nothing later can
+    /// supply its block's own node, which has no header record.
     private static func seedNexusGenesis(
         _ stores: Stores,
         configuration: NodeConfiguration
     ) async throws {
-        guard try await stores.store.stagedImports().isEmpty else { return }
+        let seeded = try await !stores.store.stagedImports().isEmpty
+        if seeded, await stores.broker.hasVolume(root: configuration.nexusGenesisCID) { return }
         let genesis = try await NexusGenesis.create(fetcher: stores.localFetcher)
         guard try NexusGenesis.verifyGenesis(genesis) else {
             throw NodeStorageError.invalidNexusGenesis
@@ -197,6 +196,7 @@ enum BootRecovery {
         try await storage.commit()
         let roots = await storage.takeStoredVolumeRoots()
         try await stores.broker.mergeRetainedRoots(scope: stores.retentionScope, roots: roots)
+        guard !seeded else { return }
         try await stores.store.stageChainFacts(
             [boot.facts], volumeRoots: roots, logID: UUID().uuidString.lowercased()
         )

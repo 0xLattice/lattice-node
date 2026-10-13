@@ -85,6 +85,18 @@ extension NodeStore {
         ).isEmpty
     }
 
+    /// Whether this chain executed `blockCID`: its post-state is the state
+    /// of a block this node validated, not one it has only weighed.
+    func hasExecutedBlock(_ blockCID: String, at chainPath: [String]) throws -> Bool {
+        guard CIDIdentity.isCanonical(blockCID) else {
+            throw NodeStoreError.corrupt("invalid executed block lookup")
+        }
+        return try !database.query(
+            "SELECT 1 FROM accepted_blocks WHERE chain_path = ?1 AND block_cid = ?2 AND validated != ?3 LIMIT 1",
+            params: [.text(chainPath.joined(separator: "/")), .text(blockCID), BlockStatus.header.sqlValue]
+        ).isEmpty
+    }
+
     static func acceptedBlocks(
         in batch: BlockImportBatch
     ) throws -> [AcceptedBlockRecord] {

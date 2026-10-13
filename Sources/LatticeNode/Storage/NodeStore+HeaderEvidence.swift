@@ -89,10 +89,40 @@ extension NodeStore {
         return (block, children)
     }
 
+    /// A weighed block's own node, as it was weighed.
+    nonisolated func headerBlockBytes(_ cid: String) -> Data? {
+        try? database.row(
+            HeaderBlockRow.self, "SELECT block FROM headers WHERE cid = ?1", params: [.text(cid)]
+        )?.block
+    }
+
     nonisolated func childIndexBytes(_ cid: String) -> Data? {
         try? database.row(
             ChildIndexEvidenceRow.self, "SELECT bytes FROM child_indexes WHERE cid = ?1", params: [.text(cid)]
         )?.bytes
+    }
+}
+
+struct HeaderBlockRow: NodeStoreRecord {
+    static let table = "headers"
+    private let row: Row
+
+    init(_ row: Row) { self.row = row }
+
+    var block: Data { get throws { try row.blob("block") } }
+}
+
+/// Every weighed block's node and child index, by CID: what execution and
+/// mining read of a block whose body this store does not hold.
+struct HeaderRecords: ContentSource {
+    let store: NodeStore
+
+    func fetch(_ cids: Set<String>) async -> [String: Data] {
+        var found: [String: Data] = [:]
+        for cid in cids {
+            if let bytes = store.headerBlockBytes(cid) ?? store.childIndexBytes(cid) { found[cid] = bytes }
+        }
+        return found
     }
 }
 
