@@ -34,11 +34,11 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/adalinxx/Ivy2.git",
-            exact: "2.2.0"
+            exact: "2.3.0"
         ),
         .package(
             url: "https://github.com/adalinxx/Tally.git",
-            exact: "3.1.0"
+            exact: "3.1.1"
         ),
         .package(
             url: "https://github.com/adalinxx/VolumeBroker.git",

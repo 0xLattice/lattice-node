@@ -81,6 +81,8 @@ public final class NodeRuntime: Sendable {
     let inputs: AsyncStream<Input>.Continuation
     private let loop: Task<Void, Never>
     let ivy: Ivy
+    /// Moves a peer met through another peer onto a connection of its own.
+    private let punch: PunchConnector
     /// Listens for browsers; see `WebSocketListener`.
     private let webSocket: WebSocketTransport
     private let delegate: NodeRuntimeIvyDelegate
@@ -151,6 +153,7 @@ public final class NodeRuntime: Sendable {
             configuration: configuration,
             ivy: Ivy(config: overlay),
             overlayPeers: overlay.bootstrapPeers,
+            relays: overlay.relayEnabled,
             helloTimeout: overlay.requestTimeout,
             workers: workers,
             // A store that cannot read its proofs fails the boot: it would
@@ -159,7 +162,7 @@ public final class NodeRuntime: Sendable {
             failStop: failStop
         )
         await runtime.ivy.installNodeRuntime(
-            delegate: runtime.delegate,
+            delegate: runtime.punch,
             contentSource: NodeStorageIvyContentSource(storage: storage) { root in
                 // A child index travels by CID as its own one-node Volume.
                 storage.store.childIndexBytes(root).map { SerializedVolume(root: root, entries: [root: $0]) }
@@ -249,6 +252,7 @@ public final class NodeRuntime: Sendable {
         configuration: NodeConfiguration,
         ivy: Ivy,
         overlayPeers: [PeerEndpoint],
+        relays: Bool,
         helloTimeout: Duration,
         workers: Int,
         proofs: SavedChildProofs,
@@ -308,6 +312,16 @@ public final class NodeRuntime: Sendable {
             publicSubmit: configuration.publicSubmit,
             readEndpoints: readEndpoints
         ) { inputs.yield(.network($0)) }
+        // Stands in front of the delegate, which it passes everything on to
+        // but its own signalling. The loop asks it for each relayed session.
+        var punchOptions = PunchConnector.Options()
+        punchOptions.autoUpgrade = false
+        // One line for each attempt, saying how it ended.
+        punchOptions.log = { FileHandle.standardError.write(Data("lattice-node: \($0)\n".utf8)) }
+        let punch = PunchConnector(
+            ivy: ivy, localKey: configuration.processPublicKey,
+            forwardingTo: delegate, options: punchOptions)
+        self.punch = punch
         let cadence = max(1, min(configuration.peerSearchInterval > 0
             ? configuration.peerSearchInterval : 600, 600))
         maintenance = Task {
@@ -322,10 +336,11 @@ public final class NodeRuntime: Sendable {
             core: core,
             storage: storage,
             ivy: ivy,
+            punch: punch,
             hello: try? ChainHandshake(
                 nexusGenesisCID: configuration.nexusGenesisCID,
                 chainPath: configuration.chainPath,
-                capabilities: configuration.helloCapabilities
+                capabilities: configuration.helloCapabilities(relays: relays)
             ).encode(),
             configuration: configuration,
             outputs: outputs,
@@ -361,6 +376,7 @@ public final class NodeRuntime: Sendable {
         // Free the delegates waiting for room first: stopping Ivy waits for
         // its deliveries.
         await gate.close()
+        punch.close()
         await webSocket.stopListening()
         await ivy.stop()
         await ivy.setContentSource(nil)
@@ -405,6 +421,7 @@ extension NodeRuntime {
         var core: NodeCore
         let storage: NodeStorage
         let ivy: Ivy
+        let punch: PunchConnector
         /// Each session's outgoing sync messages, in order, surviving backpressure.
         let outbox: SessionOutbox
         let hello: Data?
@@ -515,6 +532,7 @@ extension NodeRuntime {
             core: NodeCore,
             storage: NodeStorage,
             ivy: Ivy,
+            punch: PunchConnector,
             hello: Data?,
             configuration: NodeConfiguration,
             outputs: [ChainPath: LevelOutput],
@@ -534,6 +552,7 @@ extension NodeRuntime {
             self.core = core
             self.storage = storage
             self.ivy = ivy
+            self.punch = punch
             self.outbox = SessionOutbox(ivy: ivy)
             self.hello = hello
             self.configuration = configuration
@@ -702,7 +721,13 @@ extension NodeRuntime {
                     do {
                         try await ivy.connect(to: endpoint)
                         connected.insert(endpoint.publicKey)
-                        return true
+                        // A peer that could not be dialled may have been
+                        // reached through another: connected, but not at
+                        // this address.
+                        guard let peer = await ivy.connectedPeers.first(where: {
+                            $0.publicKey == endpoint.publicKey
+                        }) else { return true }
+                        return await ivy.session(with: peer)?.route == .direct
                     } catch {
                         return false
                     }
@@ -909,6 +934,15 @@ extension NodeRuntime {
                 if let hello {
                     await outbox.send(to: peer, topic: OverlayTopic.overlayHello, payload: hello)
                 }
+                if peer.route != .direct {
+                    // A peer met through another is worth a connection of
+                    // its own, and only that: one that cannot be made is
+                    // let go, so no peer is left carrying the two of them.
+                    let (ivy, punch) = (ivy, punch)
+                    Task {
+                        if await !punch.upgrade(peer) { _ = await ivy.disconnectSession(ifCurrent: peer) }
+                    }
+                }
                 if let replaced, replaced.ready {
                     return await step(.peerGone(replaced.coreID))
                 }
@@ -946,6 +980,11 @@ extension NodeRuntime {
                 session.ready = true
                 session.capabilities = Set(remote.capabilities ?? [])
                 sessions[peer.key.hex] = session
+                // Asked for a route when a peer cannot be dialled. A session
+                // that is itself relayed cannot carry another.
+                if peer.route == .direct, session.capabilities.contains(ChainHandshake.relay) {
+                    await ivy.setRelaying(peer.id, true)
+                }
                 return await step(.peerReady(session.coreID))
             case .sync(let peer, let chainPath, let message):
                 guard let session = sessions[peer.key.hex], session.peer.sessionID == peer.sessionID,

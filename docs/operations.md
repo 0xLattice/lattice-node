@@ -212,6 +212,26 @@ same port over UDP. No other server is involved.
   proxy: a browser asks at the host and port it dialled, so UDP on that port
   has to be forwarded to the node's.
 
+### Nodes behind NATs
+
+A node that accepts no inbound connections, as one behind a home router does
+not, still connects to other such nodes. When it cannot dial a peer it asks
+a peer it is connected to for a route to it. Only a peer whose hello said it
+relays is asked, which is every node that listens for browsers. The two then
+tell each other where they are and both connect at the same moment, each
+from a port it named, so each one's first packet opens its own router for
+the other's. The session that results is direct, and the relaying peer
+carries nothing more for the pair.
+
+- Nothing is configured, and nothing is opened on the router.
+- It works where the router keeps a connection's port, which most home
+  routers do. Behind one that gives each connection another port, or with
+  no public address known, the pair cannot connect: the relayed session is
+  let go, and each keeps the peers it can reach.
+- A node learns its own public address as before: from `--external-address`
+  or from the STUN servers its overlay asks at start.
+- A relaying node carries a pair only while they try, some seconds.
+
 The public-read listener serves the bounded GET routes and never registers
 operator status, metrics, or mining handlers; it registers
 `POST /transactions` only with public submit on (below). Set all three read-rate controls to

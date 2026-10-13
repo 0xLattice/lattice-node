@@ -1,5 +1,5 @@
 {
-  "originHash" : "b2ede08cd724f1decfff415277de4b4bf9278c044ce0546002eb3ba0f15d8cfe",
+  "originHash" : "51637aa8df6420889c72ea668235d650e9b39adee1f73ac708ba10716f23ed87",
   "pins" : [
     {
       "identity" : "arraytrie",
@@ -60,8 +60,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/adalinxx/Ivy2.git",
       "state" : {
-        "revision" : "1eb5b0e32e5036e1c155172ec773fd7f7b10276c",
-        "version" : "2.2.0"
+        "revision" : "ed877d4da0a501c487db2e08f9e1812c2acc9dcd",
+        "version" : "2.3.0"
       }
     },
     {
@@ -348,8 +348,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/adalinxx/Tally.git",
       "state" : {
-        "revision" : "f6c5e3571e0ab3cb67432bb720a0a65e9191da6a",
-        "version" : "3.1.0"
+        "revision" : "63919ea78de06bc493fe5913dcfcdaad4edabdf6",
+        "version" : "3.1.1"
       }
     },
     {

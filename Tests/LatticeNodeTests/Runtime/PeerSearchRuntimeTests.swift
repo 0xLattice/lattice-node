@@ -215,8 +215,13 @@ final class PeerSearchRuntimeTests: XCTestCase {
         XCTAssertNoThrow(try configuration(hosted: [Self.alpha], seeds: [Self.alpha: [seed]]))
         // The hello names what is hosted, beside what the node speaks.
         XCTAssertEqual(
-            try configuration(hosted: [Self.alpha], seeds: [:]).helloCapabilities,
+            try configuration(hosted: [Self.alpha], seeds: [:]).helloCapabilities(relays: false),
             [ChainHandshake.volumeBundle, "host:Nexus/Alpha"]
+        )
+        // And that it relays, where its overlay does.
+        XCTAssertEqual(
+            try configuration(hosted: [], seeds: [:]).helloCapabilities(relays: true),
+            [ChainHandshake.volumeBundle, ChainHandshake.relay]
         )
         XCTAssertThrowsError(try configuration(hosted: [], seeds: [Self.alpha: [seed]]))
         XCTAssertThrowsError(try configuration(hosted: [Self.alpha], seeds: [["Nexus"]: [seed]]))
