@@ -479,16 +479,6 @@ struct NodeStorageIvyContentSource: IvyContentSource {
         self.transientRootVolume = transientRootVolume
     }
 
-    func content(
-        rootCID: String,
-        cids: [String],
-        maxDataBytes: Int
-    ) async -> [ContentEntry] {
-        // Node protocol v3 exchanges complete Volumes. Entry selection cannot
-        // prove membership in the named root and is therefore never served.
-        []
-    }
-
     func volumeBundle(rootCID: String) async -> [String] {
         await storage.volumeBundle(rootCID)
     }
