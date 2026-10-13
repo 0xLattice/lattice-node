@@ -1,5 +1,5 @@
 {
-  "originHash" : "51637aa8df6420889c72ea668235d650e9b39adee1f73ac708ba10716f23ed87",
+  "originHash" : "84cf55ec37f85f1743ada1e149e58d8e14faf7ec51a194773d0713483acf430f",
   "pins" : [
     {
       "identity" : "arraytrie",
@@ -375,8 +375,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/adalinxx/VolumeBroker.git",
       "state" : {
-        "revision" : "0455f6d28019938914ee804d639a288f46ff2ac0",
-        "version" : "8.0.1"
+        "revision" : "a02c54c3036cd2d105fdf125e820034fde4f4188",
+        "version" : "9.0.0"
       }
     },
     {
