@@ -25,6 +25,11 @@ public struct ChainHandshake: Codable, Equatable, Sendable {
     /// The peer answers a Volume bundle request.
     public static let volumeBundle = "volume-bundle"
 
+    /// The peer relays: asked for a route to a peer it has a session with,
+    /// it carries the two to each other. A node asks only a peer that said
+    /// so, since one that does not relay ends the session of whoever asks.
+    public static let relay = "relay"
+
     /// The peer hosts the child chain at `chainPath`: one name per hosted
     /// child. Its own claim, a hint for whom to dial and whom to ask, never
     /// a reason to accept data. Nexus is not named: every node hosts it.

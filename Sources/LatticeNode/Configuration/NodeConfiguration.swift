@@ -210,7 +210,7 @@ public struct NodeConfiguration: Sendable {
         guard (try? ChainHandshake(
             nexusGenesisCID: NexusGenesis.expectedBlockHash,
             chainPath: address.components,
-            capabilities: Self.helloCapabilities(hostedChildren: hostedChildren)
+            capabilities: Self.helloCapabilities(hostedChildren: hostedChildren, relays: true)
         ).encode()) != nil else {
             throw NodeConfigurationError.invalidChainPath
         }
@@ -270,10 +270,14 @@ public struct NodeConfiguration: Sendable {
 
     /// What this node's hello says it speaks and hosts: the one list the
     /// hello is built from and its size is checked against.
-    var helloCapabilities: Set<String> { Self.helloCapabilities(hostedChildren: hostedChildren) }
+    /// `relays` is whether the overlay it is said over relays.
+    func helloCapabilities(relays: Bool) -> Set<String> {
+        Self.helloCapabilities(hostedChildren: hostedChildren, relays: relays)
+    }
 
-    private static func helloCapabilities(hostedChildren: [[String]]) -> Set<String> {
-        Set([ChainHandshake.volumeBundle] + hostedChildren.map(ChainHandshake.hosting))
+    private static func helloCapabilities(hostedChildren: [[String]], relays: Bool) -> Set<String> {
+        Set([ChainHandshake.volumeBundle] + (relays ? [ChainHandshake.relay] : [])
+            + hostedChildren.map(ChainHandshake.hosting))
     }
 
     /// An absolute http(s) URL naming a host, without credentials, query or
