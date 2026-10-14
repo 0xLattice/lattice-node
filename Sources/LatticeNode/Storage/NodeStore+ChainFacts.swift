@@ -193,19 +193,6 @@ extension NodeStore {
         )?.value
     }
 
-    /// Whether every body this store holds is pinned under its block's own
-    /// name. A store written before bodies had names of their own holds
-    /// them under the chain's, until it has been gone through once.
-    func bodiesAreNamed() throws -> Bool {
-        try database.row(
-            ChainFactMetadataRow.self, "SELECT value FROM core_meta WHERE key = 'bodies_named'"
-        ) != nil
-    }
-
-    func markBodiesNamed() throws {
-        _ = try database.execute("INSERT OR IGNORE INTO core_meta (key, value) VALUES ('bodies_named', '1')")
-    }
-
     func chainCursors(at path: ChainPath = ["Nexus"]) throws -> [String: StreamCursor] {
         Dictionary(uniqueKeysWithValues: try database.rows(
             StreamCursorRow.self,

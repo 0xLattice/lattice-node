@@ -4,9 +4,9 @@ import VolumeBroker
 import cashew
 
 /// Boot recovery for one hosted tree's storage: everything `NodeStorage.open`
-/// does before the runtime starts. Content is retained before the facts that
-/// reference it, so boot only re-asserts the retained roots the journal
-/// names; an empty journal is seeded with the configured Nexus genesis.
+/// does before the runtime starts. Content stays because a scope names it,
+/// so boot leaves pins as it finds them and drops what no scope names; an
+/// empty journal is seeded with the configured Nexus genesis.
 enum BootRecovery {
     /// What `NodeStorage.open` builds the storage from.
     struct Result {
@@ -109,7 +109,7 @@ enum BootRecovery {
     ) async throws -> [String] {
         let broker = stores.broker
         // Protocol constants are ordinary Volumes and therefore ordinary GC
-        // roots. Materialize them before the one exact startup reconciliation.
+        // roots. Materialize them before they are pinned.
         let constantStorage = NodeImportStorage(storage: broker)
         try await LatticeState.emptyHeader.storeRecursively(
             storer: constantStorage as any VolumeStorer
@@ -128,8 +128,7 @@ enum BootRecovery {
     /// Stage 4: the journal audited and the pins settled. Pins are in the
     /// store and stay as a start finds them: nothing is rebuilt from the
     /// journal, and content a fact names and the store lacks is no fault.
-    /// The constants are pinned, and a block this node built is given its
-    /// body's name if a fact records it and let go of if none does.
+    /// The constants are pinned.
     private static func settleRetention(
         _ stores: Stores,
         constantRoots: [String]
@@ -138,14 +137,6 @@ enum BootRecovery {
         let broker = stores.broker
         let scopes = RetentionScopes(chain: stores.retentionScope)
         try await broker.mergeRetainedRoots(scope: scopes.chain, roots: constantRoots)
-        for scope in try await broker.retainedScopes(prefix: scopes.builtPrefix) {
-            let blockCID = String(scope.dropFirst(scopes.builtPrefix.count))
-            let roots = try await broker.retainedRoots(scope: scope)
-            if try await stores.store.recordsBlock(blockCID) {
-                try await broker.mergeRetainedRoots(scope: scopes.body(blockCID), roots: roots)
-            }
-            try await broker.releaseRetainedRoots(scope: scope, roots: roots)
-        }
     }
 
     /// Stage 6: the durable mempool's pins rebuilt, the live pool's cleared.

@@ -87,25 +87,19 @@ extension NodeStorage {
         CoalescingFetcher(CompositeContentSource([workSource, readCache, readCache.remembering(peers)]))
     }
 
-    /// Stores a block and pins what was stored. Storing and pinning are two
-    /// commits, and a body let go of in between can take a transaction this
-    /// block carries too: the pin is then refused whole, and the block is
-    /// stored and pinned again.
+    /// Stores a block and pins what was stored: its body is what `fetcher`,
+    /// the content it was stored from, says it carries.
     nonisolated func storingAndRetaining(
-        _ blockCID: String, built: Bool = false, _ store: (NodeImportStorage) async throws -> Void
+        _ blockCID: String, at path: ChainPath, from fetcher: any Fetcher,
+        _ store: (NodeImportStorage) async throws -> Void
     ) async throws -> [String] {
-        while true {
-            let storage = NodeImportStorage(storage: broker)
-            try await store(storage)
-            try await storage.commit()
-            let roots = await storage.takeStoredVolumeRoots()
-            do {
-                try await retainStored(roots, ofBlock: blockCID, built: built)
-                return roots
-            } catch BrokerError.missingRetainedRoot {
-                continue
-            }
-        }
+        let storage = NodeImportStorage(storage: broker)
+        try await store(storage)
+        try await storage.commit()
+        let roots = await storage.takeStoredVolumeRoots()
+        let body = [blockCID] + (try await NodeRuntime.carriedTransactionIDs(ofBlock: blockCID, fetcher: fetcher))
+        try await retainStored(roots, body: body, ofBlock: blockCID, at: path)
+        return roots
     }
 
     /// `ChainEffect.fetchBody`: the block's Volume and the nested Volumes its
@@ -121,13 +115,15 @@ extension NodeStorage {
     /// would be from peers that speak no bundles. `hosts` names the
     /// block's child chain: the bundle is asked first of its current peers.
     nonisolated func fetchChainBody(
-        _ cid: String, remote: IvyRootContentSource, bundle: Bool = true, hosts: ChainHosts? = nil
+        _ cid: String, at path: ChainPath? = nil, remote: IvyRootContentSource, bundle: Bool = true,
+        hosts: ChainHosts? = nil
     ) async throws -> [String] {
+        let path = path ?? configuration.chainPath
         let capture = IvyRootContentSource.AttributionCapture()
         do {
             return try await remote.withRootTracing(cid, bundle: bundle, hosts: hosts, capture: capture) { session in
                 let fetcher = CoalescingFetcher(CompositeContentSource([broker, session]))
-                let roots = try await storingAndRetaining(cid) { storage in
+                let roots = try await storingAndRetaining(cid, at: path, from: fetcher) { storage in
                     try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: storage)
                 }
                 bundles.record(root: cid, roots: roots)
@@ -185,7 +181,7 @@ extension NodeStorage {
     private nonisolated func storeMinedBlock(
         _ header: BlockHeader, _ block: Block, fetcher: any Fetcher
     ) async throws -> FlatDictionary<BlockHeader> {
-        let roots = try await storingAndRetaining(header.rawCID, built: true) { storage in
+        let roots = try await storingAndRetaining(header.rawCID, at: configuration.chainPath, from: fetcher) { storage in
             try await header.storeBlock(fetcher: fetcher, storer: storage)
         }
         bundles.record(root: header.rawCID, roots: roots)
@@ -229,7 +225,7 @@ extension NodeStorage {
                 // Only a block the grind's work meets is stored and walked.
                 guard case .success(let evidence) = await proof.verifySecuringWork(child: block, chainPath: childPath),
                       evidence.contribution != nil else { continue }
-                let roots = try await storingAndRetaining(child.rawCID, built: true) { storage in
+                let roots = try await storingAndRetaining(child.rawCID, at: childPath, from: localFetcher) { storage in
                     try await child.storeBlock(fetcher: localFetcher, storer: storage)
                 }
                 bundles.record(root: child.rawCID, roots: roots)

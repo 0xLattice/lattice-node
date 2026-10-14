@@ -48,10 +48,8 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   was durable", "relayed … before it was durable").
 - **NODE-STORAGE-002.c** — Content stays because a scope names it, and a
   start leaves pins as it finds them: nothing is rebuilt from the journal.
-  A block's body is named by that block, what executions read and create
-  by the chain, a block this node built by a name of its own until a fact
-  records it. A start gives a recorded built block its body's name, lets go
-  of one no fact records, and sweeps what no scope names. Pinned by
+  A block's body is named by that block on its chain, what executions read
+  and create by the chain. A start sweeps what no scope names. Pinned by
   `RetentionRulesTests`,
   `ChildLevelRestartTests.testAStartKeepsWhatAScopeNamesAndDropsTheRest`,
   `ChildLevelRestartTests.testAWeighedUnexecutedChildGenesisSurvivesARestart`
@@ -65,11 +63,13 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   can cause (a submitted transaction, a public read) read this store alone.
   Pinned by `AbsentContentTests` and
   `SafetyNetCorruptStoreTests.testBootOpensAStoreWhoseVolumesAreGone`.
-- **NODE-STORAGE-002.g** — With `blockBodies: none` the node holds a body
-  only while its block waits to execute or is its chain's tip, and each
-  genesis block always; a body a job is reading goes when the job has read
-  it. State and facts are untouched, and the node builds on a block whose
-  body is gone. Pinned by `BlockBodiesTests`.
+- **NODE-STORAGE-002.g** — With `blockBodies: none` the node lets go of a
+  body it executed once another block is its chain's tip, and never of a
+  genesis block. A tip the chain moves back onto after its body went is
+  not fetched again. Transactions of the blocks a move leaves are returned
+  to the pool from this store, and from peers for a body it let go of; one
+  no peer serves is not returned. State and facts are untouched, and the node builds
+  on a block whose body is gone. Pinned by `BlockBodiesTests`.
 - **NODE-STORAGE-002.d** — Levels write parent before child; a crash
   between them restores with the child behind, never ahead. Pinned by
   `ChildLevelRestartTests.testACrashBetweenLevelWritesRestoresTheParentAhead`.

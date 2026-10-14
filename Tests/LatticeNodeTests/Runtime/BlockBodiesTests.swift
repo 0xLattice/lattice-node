@@ -18,11 +18,18 @@ final class BlockBodiesTests: XCTestCase {
         let endpoint: PeerEndpoint
     }
 
+    private static let alpha = ["Nexus", "Alpha"]
+    private static let alphaSpec = ChainSpec(
+        maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
+        targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
+    )
+
     private func host(
         keyByte: UInt8,
         peers: [PeerEndpoint] = [],
         storageDirectory reused: URL? = nil,
-        blockBodies: BlockBodies = .all
+        blockBodies: BlockBodies = .all,
+        hosted: Bool = false
     ) throws -> Host {
         let storageDirectory = reused ?? FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-node-bodies-\(UUID().uuidString)", isDirectory: true
@@ -36,7 +43,9 @@ final class BlockBodiesTests: XCTestCase {
             listenPort: port,
             rpcPort: NetworkTransportTestPorts.allocate(),
             webSocket: .off,
-            blockBodies: blockBodies
+            blockBodies: blockBodies,
+            hostedChildren: hosted ? [Self.alpha] : [],
+            childSpecs: hosted ? [Self.alpha: Self.alphaSpec] : [:]
         )
         return Host(
             configuration: configuration,
@@ -65,8 +74,10 @@ final class BlockBodiesTests: XCTestCase {
         )
     }
 
-    private func mine(_ runtime: NodeRuntime) async throws -> String {
-        try BlockHeader(node: try await runtime.mineBlock()).rawCID
+    private func mine(
+        _ runtime: NodeRuntime, _ request: MiningTemplateRequest = MiningTemplateRequest()
+    ) async throws -> String {
+        try BlockHeader(node: try await runtime.mineBlock(request)).rawCID
     }
 
     private func start(_ host: Host) async throws -> (NodeRuntime, NodeStorage) {
@@ -144,98 +155,129 @@ final class BlockBodiesTests: XCTestCase {
         XCTAssertEqual(booted.levels[booted.rootPath]?.snapshot.actOnTip, tip)
     }
 
-    /// A transaction in the block the chain left is read back into the pool
-    /// before that body goes, and the tip that carries it now holds it: the
-    /// left block's body going does not take it.
-    func testATransactionOfTheLeftBlockIsReturnedAndStaysWithTheTipThatCarriesIt() async throws {
-        let shared = try transaction()
-        let node = try host(keyByte: 0x94, blockBodies: .none)
-        var (runtime, storage) = try await start(node)
-        let admitted = try await runtime.submitTransaction(SubmitTransactionRequest(transaction: shared))
-        let left = try await mine(runtime)
-        let carried = await NodeRuntime.transactionIDs(ofBlock: left, fetcher: storage)
-        XCTAssertEqual(carried, [admitted.transactionCID])
+    /// A node that kept every body is switched to `none`: at its next start
+    /// it lets go of all but its tip's.
+    func testSwitchingToNoneLetsGoOfTheBodiesARunThatKeptAllLeft() async throws {
+        let all = try host(keyByte: 0x96)
+        var blocks: [String] = []
+        do {
+            let (runtime, storage) = try await start(all)
+            for _ in 0..<4 { blocks.append(try await mine(runtime)) }
+            await runtime.stop()
+            let held = await bodiesHeld(storage, of: blocks)
+            XCTAssertEqual(held, blocks)
+        }
+
+        let none = try host(keyByte: 0x96, storageDirectory: all.configuration.storagePath, blockBodies: .none)
+        let (runtime, storage) = try await start(none)
+        let tip = try XCTUnwrap(blocks.last)
+        try await eventually("only the tip's body is left") {
+            await self.bodiesHeld(storage, of: blocks) == [tip]
+        }
+        let genesis = await storage.volume(none.configuration.nexusGenesisCID)
+        XCTAssertNotNil(genesis)
+        let next = try await mine(runtime)
+        XCTAssertEqual(runtime.published.value?.actOnTip, next)
         await runtime.stop()
-
-        // A producer with a heavier branch from genesis that does not carry it.
-        let producer = try host(keyByte: 0x95)
-        let (producerRuntime, _) = try await start(producer)
-        _ = try await mine(producerRuntime)
-        let producerTip = try await mine(producerRuntime)
-
-        let again = try host(
-            keyByte: 0x94, peers: [producer.endpoint],
-            storageDirectory: node.configuration.storagePath, blockBodies: .none
-        )
-        runtime = try await NodeRuntime.start(
-            storage: storage, configuration: again.configuration, overlay: again.overlay
-        )
-        try await eventually("the node reorgs onto the heavier branch") {
-            runtime.published.value?.actOnTip == producerTip
-        }
-        try await eventually("the left block's transaction is returned to the pool") {
-            runtime.published.value?.mempoolCount == 1
-        }
-        try await eventually("the left block's body is let go of") {
-            await storage.volume(left) == nil
-        }
-
-        let tip = try await mine(runtime)
-        let now = await NodeRuntime.transactionIDs(ofBlock: tip, fetcher: storage)
-        XCTAssertEqual(now, [admitted.transactionCID], "the tip carries the transaction, and holds it")
-        _ = try await mine(runtime)
-        try await eventually("the transaction goes with the body that carried it") {
-            await storage.volume(admitted.transactionCID) == nil
-        }
-        await runtime.stop()
-        await producerRuntime.stop()
     }
 
-    /// A node that kept every body is switched to `none`: at its next start
-    /// it lets go of all but its tip's, whether a body was pinned under its
-    /// block's name or, in a store written before bodies had names, under
-    /// the chain's.
-    func testSwitchingToNoneLetsGoOfTheBodiesARunThatKeptAllLeft() async throws {
-        for legacy in [false, true] {
-            let all = try host(keyByte: legacy ? 0x97 : 0x96)
-            var blocks: [String] = []
-            do {
-                let (runtime, storage) = try await start(all)
-                for _ in 0..<4 { blocks.append(try await mine(runtime)) }
-                try await eventually("each body is pinned under its block's name") {
-                    for cid in blocks where try await storage.broker.retainedRoots(scope: storage.scopes.body(cid)).isEmpty {
+    /// When the chain moves to another branch, the bodies of the blocks it
+    /// left are let go of, and their transactions are read from a peer and
+    /// returned to the pool. The tip that then carries one holds it, and it
+    /// goes with that tip's body.
+    func testTransactionsOfTheBlocksTheChainLeftAreReadFromAPeer() async throws {
+        let left = try host(keyByte: 0xa4)
+        let (leftRuntime, _) = try await start(left)
+        let carried = try await leftRuntime.submitTransaction(
+            SubmitTransactionRequest(transaction: try transaction())
+        ).transactionCID
+        _ = try await mine(leftRuntime)
+        let a2 = try await mine(leftRuntime)
+
+        let heavier = try host(keyByte: 0xa5)
+        let (heavierRuntime, _) = try await start(heavier)
+        for _ in 0..<2 { _ = try await mine(heavierRuntime) }
+        let b3 = try await mine(heavierRuntime)
+
+        var node = try host(keyByte: 0xa6, peers: [left.endpoint], blockBodies: .none)
+        let (runtime, storage) = try await start(node)
+        try await eventually("the node executes the first branch") { runtime.published.value?.actOnTip == a2 }
+        await runtime.stop()
+        node = try host(
+            keyByte: 0xa6, peers: [left.endpoint, heavier.endpoint],
+            storageDirectory: node.configuration.storagePath, blockBodies: .none
+        )
+        let again = try await NodeRuntime.start(
+            storage: storage, configuration: node.configuration, overlay: node.overlay
+        )
+        try await eventually("the node moves onto the heavier branch") { again.published.value?.actOnTip == b3 }
+        try await eventually("the left block's transaction is returned") {
+            again.published.value?.mempoolCount == 1
+        }
+        try await eventually("the left tip's body is let go of") { await storage.volume(a2) == nil }
+
+        let tip = try await mine(again)
+        let now = await NodeRuntime.transactionIDs(ofBlock: tip, fetcher: storage)
+        XCTAssertEqual(now, [carried], "the tip carries the transaction, and holds it")
+        _ = try await mine(again)
+        try await eventually("the transaction goes with the body that carried it") {
+            await storage.volume(carried) == nil
+        }
+        await again.stop()
+        await leftRuntime.stop()
+        await heavierRuntime.stop()
+    }
+
+    /// A node on `none` that hosts a child chain holds each level's tip
+    /// and the child's genesis block, and both levels go on advancing
+    /// across a restart.
+    func testAHostedChildOnNoneAdvancesAndRestarts() async throws {
+        let paid = MiningTemplateRequest(recipients: [
+            MiningRecipient(
+                chainPath: ["Nexus"], address: CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
+            ),
+            MiningRecipient(
+                chainPath: Self.alpha, address: CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
+            ),
+        ])
+        let miner = try host(keyByte: 0xa8, blockBodies: .none, hosted: true)
+        var roots: [String] = []
+        var children: [String] = []
+        var childGenesis = ""
+        do {
+            let (runtime, storage) = try await start(miner)
+            let alpha = try XCTUnwrap(runtime.levelReads[Self.alpha])
+            for round in 0..<4 {
+                roots.append(try await mine(runtime, paid))
+                try await eventually("the child advances (round \(round))") {
+                    guard let tip = await alpha.readSnapshot().tipCID, !tip.isEmpty, children.last != tip else {
                         return false
                     }
+                    children.append(tip)
                     return true
                 }
-                await runtime.stop()
-                if legacy {
-                    // As the previous version left it: every body under the chain's scope.
-                    for cid in blocks {
-                        let roots = try await storage.broker.retainedRoots(scope: storage.scopes.body(cid))
-                        try await storage.broker.mergeRetainedRoots(scope: storage.scopes.chain, roots: roots)
-                        try await storage.broker.releaseRetainedRoots(scope: storage.scopes.body(cid), roots: roots)
-                    }
-                }
-                let held = await bodiesHeld(storage, of: blocks)
-                XCTAssertEqual(held, blocks)
             }
-
-            let none = try host(
-                keyByte: legacy ? 0x97 : 0x96, storageDirectory: all.configuration.storagePath, blockBodies: .none
-            )
-            let (runtime, storage) = try await start(none)
-            let tip = try XCTUnwrap(blocks.last)
-            try await eventually("only the tip's body is left (legacy: \(legacy))") {
-                await self.bodiesHeld(storage, of: blocks) == [tip]
+            childGenesis = try XCTUnwrap(children.first)
+            let (rootTip, childTip) = (try XCTUnwrap(roots.last), try XCTUnwrap(children.last))
+            try await eventually("each level holds its tip's body, and the child its genesis block") {
+                let heldRoots = await self.bodiesHeld(storage, of: roots)
+                let heldChildren = await self.bodiesHeld(storage, of: children)
+                return heldRoots == [rootTip] && heldChildren == [childGenesis, childTip]
             }
-            let pinned = try await storage.broker.retainedRoots(scope: storage.scopes.body(tip))
-            XCTAssertEqual(pinned, [tip], "the tip's body is under its own name")
-            let genesis = await storage.volume(none.configuration.nexusGenesisCID)
-            XCTAssertNotNil(genesis)
-            let next = try await mine(runtime)
-            XCTAssertEqual(runtime.published.value?.actOnTip, next)
+            let named = try await storage.broker.retainedRoots(scope: storage.scopes.body(childTip, at: Self.alpha))
+            XCTAssertTrue(named.contains(childTip), "a body is named by its block on its chain")
             await runtime.stop()
         }
+
+        let (runtime, storage) = try await start(miner)
+        let alpha = try XCTUnwrap(runtime.levelReads[Self.alpha])
+        let before = await alpha.readSnapshot().height ?? 0
+        _ = try await mine(runtime, paid)
+        try await eventually("the child advances after the restart") {
+            (await alpha.readSnapshot().height ?? 0) > before
+        }
+        let genesis = await storage.volume(childGenesis)
+        XCTAssertNotNil(genesis, "every node holds each chain's genesis block")
+        await runtime.stop()
     }
 }

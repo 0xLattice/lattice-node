@@ -4,6 +4,7 @@ import Ivy
 import Lattice
 import LatticeNodeCore
 import VolumeBroker
+import Tally
 import XCTest
 import cashew
 @testable import LatticeNode
@@ -83,8 +84,6 @@ final class RetentionRulesTests: XCTestCase {
             try await eventually("the body is pinned under the block's own name") {
                 try await Set(storage.broker.retainedRoots(scope: storage.scopes.body(mined))) == [mined, carried]
             }
-            let built = try await storage.broker.retainedRoots(scope: storage.scopes.built(mined))
-            XCTAssertEqual(built, [], "a recorded block is no longer one this node only built")
             let chain = try await Set(storage.broker.retainedRoots(scope: storage.scopes.chain))
             XCTAssertTrue(chain.isDisjoint(with: [mined, carried]), "a body is not the chain's to name")
             XCTAssertFalse(chain.isEmpty, "what its execution read and created is")
@@ -102,6 +101,91 @@ final class RetentionRulesTests: XCTestCase {
             storage: reopened, configuration: node.configuration, coreConfig: .init()
         )
         XCTAssertEqual(booted.levels[booted.rootPath]?.snapshot.actOnTip, mined)
+    }
+
+    /// A block's body is every entry of its transaction index, as storing
+    /// the block finds them: consensus puts no rule on the index's keys.
+    func testABodyIsEveryEntryOfTheTransactionIndexWhateverItsKey() async throws {
+        for key in ["0", "a", "1"] {
+            let producer = try await NodeStorage.open(configuration: try host(keyByte: 0x86).configuration)
+            let joiner = try await NodeStorage.open(configuration: try host(keyByte: 0x87).configuration)
+            let genesisCID = NexusGenesis.expectedBlockHash
+            let genesisData = await producer.content([genesisCID])[genesisCID]
+            let genesis = try XCTUnwrap(Block(data: try XCTUnwrap(genesisData)))
+            let carried = try transaction()
+            var nonce: UInt64 = 0
+            var block: Block
+            repeat {
+                let built = try await BlockBuilder.buildBlockWithTransition(
+                    previous: genesis, transactions: [carried],
+                    timestamp: TestBlockClock().next(), nonce: nonce, fetcher: producer
+                ).block
+                let index = try HeaderImpl(node: MerkleDictionaryImpl<VolumeImpl<Transaction>>()
+                    .inserting(key: key, value: try VolumeImpl<Transaction>(node: carried)))
+                block = Block(
+                    version: built.version, parent: built.parent, transactions: index,
+                    target: built.target, nextTarget: built.nextTarget, spec: built.spec,
+                    parentState: built.parentState, prevState: built.prevState, postState: built.postState,
+                    children: built.children, height: built.height, timestamp: built.timestamp,
+                    rewardRecipient: built.rewardRecipient, nonce: nonce
+                )
+                nonce += 1
+            } while block.proofOfWorkHash() > block.target
+            let header = try BlockHeader(node: block)
+            let producerBroker = await producer.broker
+            let storer = NodeImportStorage(storage: producerBroker)
+            try await header.storeBlock(fetcher: producer, storer: storer)
+            try await storer.commit()
+            try await producer.retainHeld(await storer.takeStoredVolumeRoots())
+            let valid = try await block.validateNexus(fetcher: producer.localFetcher).0
+            XCTAssertTrue(valid, "key \(key)")
+
+            let source = NodeStorageIvyContentSource(storage: producer)
+            let server = PeerID(publicKey: String(repeating: "ab", count: 32))
+            let remote = IvyRootContentSource(fetch: { root in
+                let entries = await source.volume(rootCID: root, maxDataBytes: .max)
+                guard !entries.isEmpty else { return .empty }
+                return AttributedVolumeResponse(
+                    rootCID: root,
+                    entries: Dictionary(uniqueKeysWithValues: entries.map { ($0.cid, $0.data) }),
+                    servedBy: server
+                )
+            }, fetchBundle: { _ in [] })
+            _ = try await joiner.fetchChainBody(header.rawCID, remote: remote)
+            let pinned = try await Set(joiner.broker.retainedRoots(scope: joiner.scopes.body(header.rawCID)))
+            XCTAssertEqual(pinned, [header.rawCID, try Mempool.cid(of: carried)], "key \(key)")
+        }
+    }
+
+    /// What executions created stays with the chain: after a restart, which
+    /// drops what no scope names, the state of every block is read from
+    /// this store and the node builds on its tip.
+    func testExecutedStateStaysAcrossARestart() async throws {
+        let node = try host(keyByte: 0x85)
+        let miner = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
+        let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: miner)])
+        var blocks: [String] = []
+        do {
+            let storage = try await NodeStorage.open(configuration: node.configuration)
+            let runtime = try await NodeRuntime.start(
+                storage: storage, configuration: node.configuration, overlay: node.overlay
+            )
+            for _ in 0..<4 { blocks.append(try BlockHeader(node: try await runtime.mineBlock(paid)).rawCID) }
+            await runtime.stop()
+        }
+
+        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let runtime = try await NodeRuntime.start(
+            storage: storage, configuration: node.configuration, overlay: node.overlay
+        )
+        var balances: [UInt64] = []
+        for cid in blocks { balances.append(await runtime.reads.account(owner: miner, blockCID: cid)?.balance ?? 0) }
+        XCTAssertEqual(balances, balances.sorted(), "each block's own state is read")
+        XCTAssertGreaterThan(try XCTUnwrap(balances.first), 0)
+        XCTAssertEqual(Set(balances).count, blocks.count)
+        _ = try await runtime.mineBlock(paid)
+        XCTAssertEqual(runtime.published.value?.actOnHeight, UInt64(blocks.count + 1))
+        await runtime.stop()
     }
 
     /// Letting go of a body removes the block's own Volume and its
@@ -159,44 +243,5 @@ final class RetentionRulesTests: XCTestCase {
         await storage.releaseBody("second")
         let gone = await storage.volume(shared.rawCID)
         XCTAssertNil(gone)
-    }
-
-    /// A block this node built and a fact records is given its body's name
-    /// at a start; one no fact records is let go of.
-    func testAStartSettlesTheBlocksThisNodeBuilt() async throws {
-        let node = try host(keyByte: 0x84)
-        var mined = ""
-        let orphan = try VolumeImpl<Transaction>(node: try transaction())
-        do {
-            let storage = try await NodeStorage.open(configuration: node.configuration)
-            let runtime = try await NodeRuntime.start(
-                storage: storage, configuration: node.configuration, overlay: node.overlay
-            )
-            mined = try await mine(runtime)
-            try await eventually("the body is pinned under the block's own name") {
-                try await storage.broker.retainedRoots(scope: storage.scopes.body(mined)) == [mined]
-            }
-            await runtime.stop()
-            // As a crash would leave them: a recorded block still under the
-            // name it was built with, and a built block nothing records.
-            try await storage.broker.mergeRetainedRoots(scope: storage.scopes.built(mined), roots: [mined])
-            try await storage.broker.releaseRetainedRoots(scope: storage.scopes.body(mined), roots: [mined])
-            let storer = NodeImportStorage(storage: await storage.broker)
-            try await orphan.store(storer: storer)
-            try await storer.commit()
-            try await storage.broker.mergeRetainedRoots(
-                scope: storage.scopes.built(orphan.rawCID), roots: [orphan.rawCID]
-            )
-        }
-
-        let reopened = try await NodeStorage.open(configuration: node.configuration)
-        let built = try await reopened.broker.retainedScopes(prefix: reopened.scopes.builtPrefix)
-        XCTAssertEqual(built, [])
-        let pinned = try await reopened.broker.retainedRoots(scope: reopened.scopes.body(mined))
-        XCTAssertEqual(pinned, [mined])
-        let body = await reopened.volume(mined)
-        XCTAssertNotNil(body)
-        let dropped = await reopened.volume(orphan.rawCID)
-        XCTAssertNil(dropped)
     }
 }

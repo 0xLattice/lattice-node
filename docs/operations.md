@@ -436,8 +436,8 @@ is a block's own Volume and its transactions'.
 beyond those:
 
 - `all`, the default: every body it executed.
-- `none`: no others. A body is let go of once another block is its chain's
-  tip, and so is the body of a block that executed off that chain.
+- `none`: no others it executed. A body is let go of once another block is
+  its chain's tip. A body stored for a block that never executed stays.
 
 State, chain specs and policy modules are not bodies. What the node weighs
 and which tip it selects do not depend on this setting, and it goes on
@@ -450,18 +450,30 @@ A body a node let go of is gone from that node:
   and "not held" to a peer that asks for it;
 - the explorer routes that place a transaction or a deposit in a block
   report it unplaced;
-- transactions of a block the chain left are read back into the pool before
-  its body goes, but a block whose body was already let go of when the
-  chain moves back onto it confirms nothing out of the pool.
+- when the chain moves to another branch, the transactions of the blocks
+  it left go back into the pool. Their bodies have been let go of, so they
+  are read from peers, and a transaction of a block that no peer serves is
+  not returned;
+- a block the chain moves back onto after its body went is not fetched
+  again: it confirms nothing out of the pool, and the node cannot pass it
+  on until another block is the tip.
+
+A node that mines on `none` lets go of each block it built as soon as it
+builds the next. A peer that has not fetched that block by then cannot get
+it from this node, and a chain whose only miner is on `none` cannot be
+synced by anyone. Run `all` on a node that mines a chain others should be
+able to follow.
 
 A node that executes a chain from its genesis needs every body from some
 peer, so a network needs nodes on `all`; people with a stake in a chain have
 their own reason to run one. Keep `all` on a node an explorer reads.
 
 Switching to `none` takes effect at the next start, which lets go of every
-body but the tips'. The first such start on a store written by an earlier
-version goes through its blocks once. Switching back to `all` keeps every
-body from then on and brings none back. `volumes.db` does not shrink: the
+executed body but the tips' and the genesis blocks' before the node answers
+anything: the time that takes grows with the number of bodies it held.
+Bodies stored by a version before this setting are not let go of: sync the
+node again to drop them. Switching back to `all` keeps every body from then
+on and brings none back. `volumes.db` does not shrink: the
 space is reused.
 
 Back up only while the process is stopped, and snapshot both databases

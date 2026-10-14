@@ -85,35 +85,11 @@ extension NodeStore {
         ).isEmpty
     }
 
-    /// Every block any hosted chain executed, but each chain's genesis.
-    func executedBlockCIDsPastGenesis() throws -> [String] {
-        try database.rows(
-            AcceptedBlockRow.self,
-            "SELECT block_cid FROM accepted_blocks WHERE validated != ?1 AND parent_cid IS NOT NULL",
-            params: [BlockStatus.header.sqlValue]
-        ).map { try $0.blockCID }
-    }
-
-    /// Whether `blockCID` is a hosted chain's genesis block.
-    func isGenesis(_ blockCID: String) throws -> Bool {
+    /// Whether `blockCID` is the genesis block of the chain at `chainPath`.
+    func isGenesis(_ blockCID: String, at chainPath: [String]) throws -> Bool {
         try !database.query(
-            "SELECT 1 FROM accepted_blocks WHERE block_cid = ?1 AND parent_cid IS NULL LIMIT 1",
-            params: [.text(blockCID)]
-        ).isEmpty
-    }
-
-    /// Whether any hosted chain executed `blockCID`.
-    func recordsExecution(of blockCID: String) throws -> Bool {
-        try !database.query(
-            "SELECT 1 FROM accepted_blocks WHERE block_cid = ?1 AND validated != ?2 LIMIT 1",
-            params: [.text(blockCID), BlockStatus.header.sqlValue]
-        ).isEmpty
-    }
-
-    /// Whether a fact on any hosted chain records `blockCID`.
-    func recordsBlock(_ blockCID: String) throws -> Bool {
-        try !database.query(
-            "SELECT 1 FROM accepted_blocks WHERE block_cid = ?1 LIMIT 1", params: [.text(blockCID)]
+            "SELECT 1 FROM accepted_blocks WHERE chain_path = ?1 AND block_cid = ?2 AND parent_cid IS NULL LIMIT 1",
+            params: [.text(chainPath.joined(separator: "/")), .text(blockCID)]
         ).isEmpty
     }
 

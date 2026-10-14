@@ -358,7 +358,7 @@ public final class NodeRuntime: Sendable {
             // With no bodies kept beyond the working set, a start lets go
             // of the ones a run that kept them left, before any step.
             for (path, level) in state.core.levels { state.bodyTips[path] = level.snapshot.actOnTip }
-            await storage.letGoOfBodies(except: Set(state.bodyTips.values))
+            await storage.letGoOfBodies(except: state.bodyTips)
             state.refreshView()
             // After the loop ends, inputs are only drained until the stream
             // finishes, so no RPC waits forever.
@@ -1097,11 +1097,11 @@ extension NodeRuntime {
                         batch, logID: core.logID, bodyRoots: roots
                     )
                     for key in persistedBodyKeys { bodyRoots[key] = nil }
-                    executedThisStep.append(contentsOf: persistedBodyKeys)
+                    if configuration.blockBodies == .none { executedThisStep.append(contentsOf: persistedBodyKeys) }
                     // A block found invalid is no block: its body goes.
-                    for (_, levelBatch) in batch.levels {
+                    for (path, levelBatch) in batch.levels {
                         for case .exclusion(let excluded) in levelBatch.facts.flatMap(\.facts) {
-                            await storage.releaseBody(excluded.blockHash)
+                            await storage.releaseBody(excluded.blockHash, at: path)
                         }
                     }
                     for (path, levelBatch) in batch.levels {
@@ -1221,7 +1221,7 @@ extension NodeRuntime {
                 bodies[key] = Task {
                     let roots = await NodeRuntime.retryingBody { bundle in
                         try await storage.fetchChainBody(
-                            cid, remote: remote, bundle: bundle, hosts: rendezvous
+                            cid, at: path, remote: remote, bundle: bundle, hosts: rendezvous
                         )
                     } waiting: { error in
                         inputs.yield(.bodyWaiting(
@@ -1234,8 +1234,6 @@ extension NodeRuntime {
                 bodies.removeValue(forKey: BodyKey(path: path, cid: cid))?.cancel()
                 bodyRoots[BodyKey(path: path, cid: cid)] = nil
                 fetchWaits[BodyKey(path: path, cid: cid)] = nil
-                // No longer waited for: what was fetched of it goes.
-                await storage.releaseBody(cid)
             case .verifyProof(let job):
                 // A job without its block reads it from the header store.
                 guard let block = job.block ?? storage.store.header(job.childCID)?.block else {
@@ -1248,7 +1246,7 @@ extension NodeRuntime {
                 })
                 startJobs()
             case .readTransactions(let blocks):
-                executionJobs.append(await reading(blocks, NodeRuntime.readJob(blocks, at: path, storage: storage)))
+                executionJobs.append(NodeRuntime.readJob(blocks, at: path, storage: storage))
                 startJobs()
             case .lookupProofs(let cids):
                 let found = cids.compactMap { cid in
@@ -1320,10 +1318,8 @@ extension NodeRuntime {
                     effect, at: path, level: level, storage: storage, remote: remote, children: childTemplateInputs(below: path)
                 ))
                 startJobs()
-            case .returnTransactions(let left, _):
-                miningJobs.append(await reading(
-                    left, NodeRuntime.miningJob(effect, at: path, level: nil, storage: storage)
-                ))
+            case .returnTransactions:
+                miningJobs.append(NodeRuntime.miningJob(effect, at: path, level: nil, storage: storage, remote: remote))
                 startJobs()
             }
             return true
@@ -1390,29 +1386,15 @@ extension NodeRuntime {
         /// step and is not, and the tip another block replaced, are let go.
         private mutating func settleBodies() async {
             guard configuration.blockBodies == .none else { return }
-            var tips = Set<String>()
-            var past = executedThisStep.map(\.cid)
+            let executed = Dictionary(grouping: executedThisStep, by: \.path)
             executedThisStep.removeAll()
             for (path, level) in core.levels {
                 let tip = level.snapshot.actOnTip
-                tips.insert(tip)
+                var past = (executed[path] ?? []).map(\.cid)
                 if let last = bodyTips[path], last != tip { past.append(last) }
                 bodyTips[path] = tip
-            }
-            past.removeAll { tips.contains($0) }
-            if !past.isEmpty { await storage.letGo(ofBodies: past) }
-        }
-
-        /// A job that reads blocks' transactions, with their bodies held
-        /// until it has.
-        private func reading(_ blocks: [String], _ job: RuntimeJob) async -> RuntimeJob {
-            guard configuration.blockBodies == .none else { return job }
-            let storage = storage
-            await storage.holdBodies(blocks)
-            return RuntimeJob(path: job.path, epoch: job.epoch) {
-                let events = await job.run()
-                await storage.unholdBodies(blocks)
-                return events
+                past.removeAll { $0 == tip }
+                if !past.isEmpty { await storage.letGo(ofBodies: past, at: path) }
             }
         }
 

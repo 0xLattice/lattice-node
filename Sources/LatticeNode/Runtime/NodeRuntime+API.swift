@@ -368,7 +368,7 @@ extension NodeRuntime {
             return RuntimeJob(path: path, epoch: nil) {
                 var returned: [NodeEvent] = []
                 for cid in left {
-                    for transaction in await transactions(ofBlock: cid, fetcher: fetcher)
+                    for transaction in await transactions(ofLeftBlock: cid, storage: storage, remote: remote)
                     where (try? Mempool.cid(of: transaction)).map({ !carried.contains($0) }) ?? false {
                         returned.append(.level(path, .mining(.transactionReceived(transaction, origin: .returned))))
                     }
@@ -394,8 +394,33 @@ extension NodeRuntime {
         return resolved
     }
 
+    /// The transactions of a block the chain left, which are this node's
+    /// to return to its pool: from this store, and when it let go of the
+    /// body, from peers, the block's own Volume first (its header record
+    /// names the transactions and does not hold them).
+    static func transactions(
+        ofLeftBlock cid: String, storage: NodeStorage, remote: IvyRootContentSource?
+    ) async -> [Transaction] {
+        guard let remote, await !storage.broker.hasVolume(root: cid) else {
+            return await transactions(ofBlock: cid, fetcher: storage.localFetcher)
+        }
+        return await remote.withRootTracing(cid, bundle: false) { session in
+            await transactions(ofBlock: cid, fetcher: CoalescingFetcher(CompositeContentSource([storage.broker, session])))
+        }.value
+    }
+
     static func transactionIDs(ofBlock cid: String, fetcher: any Fetcher) async -> [String] {
         await transactions(ofBlock: cid, fetcher: fetcher).compactMap { try? Mempool.cid(of: $0) }
+    }
+
+    /// The transactions a block carries, by CID, as storing the block
+    /// finds them: every entry of its transaction index, whatever its key.
+    static func carriedTransactionIDs(ofBlock cid: String, fetcher: any Fetcher) async throws -> [String] {
+        guard let block = try await BlockHeader(rawCID: cid).resolve(fetcher: fetcher).node,
+              let index = try await block.transactions.resolve(fetcher: fetcher).node else {
+            throw NodeAPIError.unresolvedTransactionContent
+        }
+        return try await index.boundedKeysAndValues(limit: index.count, fetcher: fetcher).map(\.1.rawCID)
     }
 
     /// A level's connect job: `ChainTree.connect`, and for a valid block the

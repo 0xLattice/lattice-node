@@ -134,16 +134,15 @@ parent-level half of a multi-level grind.
 
 Content stays in `volumes.db` because a retention scope names it, and each
 scope says why. A block's body (its own Volume and its transactions') is
-named by that block, so a transaction two blocks carry stays until both are
-let go of. What executions read and create (state, specs, policy modules) and
-each genesis block are named by the chain. A block this node built is named
-as built until a fact records it. A body is let go of when its block is found
-invalid or is no longer waited for, and, when the operator keeps no bodies
-beyond the ones the node operates on (`blockBodies: none`), when another
-block becomes its chain's tip. Pins are in the store and a start leaves
-them as it finds them: it gives a recorded built block its body's name, lets
-go of one no fact records, and sweeps what no scope names. The journal still
-lists the roots each batch stored, and nothing reads that list.
+named by that block on its chain, so a transaction two blocks carry stays
+until both are let go of. What executions read and create (state, specs,
+policy modules) and the Nexus genesis block are named by the chain. A body
+is let go of when its block is found invalid, and, when the operator keeps
+no bodies beyond the ones the node operates on (`blockBodies: none`), when
+another block becomes its chain's tip. A body stored for a block that never
+executes stays. Pins are in the store and a start leaves them as it finds
+them, and sweeps what no scope names. The journal still lists the roots
+each batch stored, and nothing reads that list.
 
 A fact does not depend on its content being held, so a store that lacks
 content its facts name is not damaged.

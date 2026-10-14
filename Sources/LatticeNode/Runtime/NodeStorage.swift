@@ -60,9 +60,6 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     let liveMempoolOwner: String
     private let directoryLock: StorageDirectoryLock
     private var livePinnedMempoolRoots = Set<String>()
-    /// Bodies a job is reading, and bodies to let go of once it has.
-    var reading: [String: Int] = [:]
-    var lettingGo = Set<String>()
 
     // Actors are reentrant. This queue keeps each retained-root update in
     // one order across its suspension points.
@@ -99,7 +96,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         self.directoryLock = directoryLock
     }
 
-    /// Completes store validation and retained-root reconciliation before
+    /// Completes store validation and settles what the store pins before
     /// returning a storage the runtime may expose.
     public static func open(
         configuration: NodeConfiguration
