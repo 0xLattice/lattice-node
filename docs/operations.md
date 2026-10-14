@@ -473,6 +473,9 @@ their own reason to run one. Keep `all` on a node an explorer reads.
 - `all`, the default: the state of every block it executed.
 - `tip`: the state of each chain's tip. State a newer block replaced is
   let go of.
+- `none`: none between blocks. What a block reads comes from peers with its
+  body and is let go of once the block has executed; only what the last
+  execution touched stays until the next one.
 
 On `tip` the node answers state reads at its tip, and `404` for what an
 older block's state held and the tip's does not. When the chain moves to
@@ -480,9 +483,14 @@ another branch, state it let go of is needed again: what the first block
 there reads comes from a peer with that block's body, and the rest of the
 new tip's state is read from peers once the node is on it. Until then, and
 for as long as no peer serves it, reads of that state answer `404` and
-transactions that need it stay in the pool. A node that is the only holder
+transactions that need it stay in the pool.
+
+On `none` the node answers state reads only for what the last block
+touched. A submitted transaction is checked against the state this node
+holds, so most are pooled unchecked; mining reads the state a template
+needs from peers. A node that is the only holder
 of a state and lets go of it has lost it, so a network needs nodes on
-`all`. Switching to `tip` applies to state stored from then on: what a
+`all`. Switching to `tip` or `none` applies to state stored from then on: what a
 run on `all` stored stays until the node is synced again.
 
 Switching `blockBodies` to `none` takes effect at the next start, which lets go of every

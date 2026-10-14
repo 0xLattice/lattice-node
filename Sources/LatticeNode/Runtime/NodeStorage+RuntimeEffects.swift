@@ -36,8 +36,8 @@ extension NodeStorage {
         // under its block's name when it was stored, and the journal still
         // names it.
         var stored: [String] = []
-        // With only the tip's state kept: the state each level's executions
-        // created, which stays while the tip's state holds it.
+        // With only the tip's state kept, or none: the state each level's
+        // executions created, under the level's state scope.
         var states: [ChainPath: [String]] = [:]
         let storage = NodeImportStorage(storage: broker)
         for (path, level) in batch.levels.sorted(by: {
@@ -55,11 +55,12 @@ extension NodeStorage {
             }
             let specs = await storage.takeStoredVolumeRoots()
             let created = executed + specs
-            if configuration.state == .tip {
+            switch configuration.state {
+            case .all:
+                stored.append(contentsOf: created)
+            case .tip, .none:
                 states[path] = executed
                 stored.append(contentsOf: specs)
-            } else {
-                stored.append(contentsOf: created)
             }
             let roots = created + (bodyRoots[path] ?? [])
             durable.append(NodeFactBatch(
@@ -73,7 +74,15 @@ extension NodeStorage {
         }
         try await storage.commit()
         try await retainHeld(stored)
-        for (path, roots) in states { try await retainHeld(roots, scope: scopes.state(at: path)) }
+        for (path, roots) in states where !roots.isEmpty {
+            let scope = scopes.state(at: path)
+            // With no state kept, only what the last execution touched
+            // stays: the next block most likely reads it.
+            let earlier = configuration.state == .none ? try await broker.retainedRoots(scope: scope) : []
+            try await retainHeld(roots, scope: scope)
+            let gone = Set(earlier).subtracting(roots)
+            if !gone.isEmpty { try await broker.releaseRetainedRoots(scope: scope, roots: gone.sorted()) }
+        }
         try await store.stageNodeFacts(durable, logID: logID)
     }
 

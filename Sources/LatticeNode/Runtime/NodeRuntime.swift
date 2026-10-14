@@ -1102,10 +1102,12 @@ extension NodeRuntime {
                     )
                     for key in persistedBodyKeys { bodyRoots[key] = nil }
                     if configuration.blockBodies == .none { executedThisStep.append(contentsOf: persistedBodyKeys) }
+                    for key in persistedBodyKeys { await storage.releaseReads(key.cid, at: key.path) }
                     // A block found invalid is no block: its body goes.
                     for (path, levelBatch) in batch.levels {
                         for case .exclusion(let excluded) in levelBatch.facts.flatMap(\.facts) {
                             await storage.releaseBody(excluded.blockHash, at: path)
+                            await storage.releaseReads(excluded.blockHash, at: path)
                         }
                     }
                     for (path, levelBatch) in batch.levels {

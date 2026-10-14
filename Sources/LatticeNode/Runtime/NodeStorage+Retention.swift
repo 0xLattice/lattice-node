@@ -22,6 +22,12 @@ struct RetentionScopes: Sendable {
     /// keeps no other.
     func state(at path: ChainPath) -> String { chain + ":state:" + path.joined(separator: "/") }
 
+    /// What a block reads, until it executes, when the operator keeps no
+    /// state.
+    func reads(_ blockCID: String, at path: ChainPath) -> String {
+        chain + ":reads:" + path.joined(separator: "/") + ":" + blockCID
+    }
+
     func body(_ blockCID: String, at path: ChainPath = ["Nexus"]) -> String {
         bodyPrefix + path.joined(separator: "/") + ":" + blockCID
     }
@@ -50,9 +56,26 @@ extension NodeStorage {
     ) async throws {
         let named = Set(body)
         try await broker.mergeRetainedRoots(scope: scopes.body(blockCID, at: path), roots: named.sorted())
-        try await retainHeld(
-            roots.filter { !named.contains($0) }, scope: configuration.state == .tip ? scopes.state(at: path) : nil
-        )
+        let scope = switch configuration.state {
+        case .all: retentionScope
+        case .tip: scopes.state(at: path)
+        case .none: scopes.reads(blockCID, at: path)
+        }
+        try await retainHeld(roots.filter { !named.contains($0) }, scope: scope)
+    }
+
+    /// With `state: none`: what a block read goes once it has executed, or
+    /// was found invalid.
+    nonisolated func releaseReads(_ blockCID: String, at path: ChainPath) async {
+        guard configuration.state == .none else { return }
+        do {
+            let scope = scopes.reads(blockCID, at: path)
+            let roots = try await broker.retainedRoots(scope: scope)
+            guard !roots.isEmpty else { return }
+            try await broker.releaseRetainedRoots(scope: scope, roots: roots)
+        } catch {
+            syncTrace("reads of \(blockCID) not released: \(error)")
+        }
     }
 
     /// Lets go of a block's body. What another block's body or the chain

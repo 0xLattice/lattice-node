@@ -94,7 +94,7 @@ public struct Topology: Codable, Sendable {
     /// The block bodies kept beyond what the node needs to operate
     /// (`--block-bodies`): `all` or `none`. Absent = `all`.
     public var blockBodies: String?
-    /// The state kept (`--state`): `all` or `tip`. Absent = `all`.
+    /// The state kept (`--state`): `all`, `tip` or `none`. Absent = `all`.
     public var state: String?
     /// Child chains this process hosts as levels, parent before child.
     public var hostedChains: [String]?
@@ -187,8 +187,8 @@ public struct Topology: Codable, Sendable {
         if let blockBodies, blockBodies != "all", blockBodies != "none" {
             throw CtlError("blockBodies is all or none, not \(blockBodies)")
         }
-        if let state, state != "all", state != "tip" {
-            throw CtlError("state is all or tip, not \(state)")
+        if let state, !["all", "tip", "none"].contains(state) {
+            throw CtlError("state is all, tip or none, not \(state)")
         }
         var ports: Set<UInt16> = []
         for port in [listen, rpc] + (publicRead.map { [$0] } ?? []) {

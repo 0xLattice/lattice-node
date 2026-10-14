@@ -300,6 +300,56 @@ final class StateTipTests: XCTestCase {
         await runtime.stop()
     }
 
+    /// A node on `none` syncs a chain whose blocks pay and spend, restarts
+    /// and keeps validating. Between blocks it holds only what the last
+    /// execution touched: no older block's state, and nothing a block read
+    /// once that block has executed.
+    func testANodeOnNoneSyncsAndKeepsValidatingHoldingNoState() async throws {
+        let (payer, payee): (Key, Key) = (CryptoUtils.generateKeyPair(), CryptoUtils.generateKeyPair())
+        let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(payer))])
+        let producer = try host(keyByte: 0xbc)
+        let (producerRuntime, _) = try await start(producer)
+        var nonce: UInt64 = 0
+        func produce(_ count: Int, paying: Bool = true) async throws -> [String] {
+            var blocks: [String] = []
+            for _ in 0..<count {
+                if paying {
+                    _ = try await producerRuntime.submitTransaction(SubmitTransactionRequest(
+                        transaction: try transaction(payer, nonce: nonce, moves: [(address(payer), -2), (address(payee), 1)])
+                    ))
+                    nonce += 1
+                }
+                blocks.append(try BlockHeader(node: try await producerRuntime.mineBlock(paid)).rawCID)
+            }
+            return blocks
+        }
+        var blocks = try await produce(2, paying: false)
+        blocks += try await produce(6)
+
+        let node = try host(keyByte: 0xbd, peers: [producer.endpoint], state: .none)
+        func holdsNoState(_ runtime: NodeRuntime, _ storage: NodeStorage, through tip: String) async throws {
+            try await eventually("the node executes \(tip.suffix(6))") { runtime.published.value?.actOnTip == tip }
+            for block in blocks.dropLast() {
+                let state = try await stateNodes(of: block, in: storage)
+                XCTAssertNil(state, "an older block's state is not held")
+            }
+            let reads = try await storage.broker.retainedScopes(prefix: storage.scopes.chain + ":reads:")
+            XCTAssertEqual(reads, [], "nothing a block read is held once it has executed")
+        }
+        do {
+            let (runtime, storage) = try await start(node)
+            try await holdsNoState(runtime, storage, through: try XCTUnwrap(blocks.last))
+            await runtime.stop()
+        }
+        blocks += try await produce(3)
+        let (runtime, storage) = try await start(node)
+        try await holdsNoState(runtime, storage, through: try XCTUnwrap(blocks.last))
+        let balance = await producerRuntime.reads.account(owner: address(payee), blockCID: try XCTUnwrap(blocks.last))?.balance
+        XCTAssertEqual(balance, 9, "the chain the node validated pays and spends")
+        await runtime.stop()
+        await producerRuntime.stop()
+    }
+
     /// The default keeps the state of every block, and counts nothing.
     func testANodeOnAllKeepsEveryState() async throws {
         let node = try host(keyByte: 0xb6)

@@ -88,6 +88,9 @@ public enum StateRetention: String, Sendable, CaseIterable {
     case all
     /// The state of each chain's tip.
     case tip
+    /// None between blocks: what a block reads is held until it executes,
+    /// and what the last execution touched until the next.
+    case none
 }
 
 /// Immutable setup and process identity for one Nexus-rooted hosted tree.

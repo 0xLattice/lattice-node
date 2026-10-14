@@ -78,6 +78,10 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   of a node nothing names. A node of the new state it lacks, after a move
   to another branch, is read from peers; if one cannot be read the kept
   state stays where it was until the next move. Pinned by `StateTipTests`.
+- **NODE-STORAGE-002.i** — With `state: none` what a stored block reads is
+  named by that block until it executes or is found invalid, and the state
+  scope names only what the last execution of its chain touched. Pinned by
+  `StateTipTests.testANodeOnNoneSyncsAndKeepsValidatingHoldingNoState`.
 - **NODE-STORAGE-002.d** — Levels write parent before child; a crash
   between them restores with the child behind, never ahead. Pinned by
   `ChildLevelRestartTests.testACrashBetweenLevelWritesRestoresTheParentAhead`.

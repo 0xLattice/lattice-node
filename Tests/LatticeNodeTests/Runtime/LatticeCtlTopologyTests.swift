@@ -153,6 +153,9 @@ final class LatticeCtlTopologyTests: XCTestCase {
         XCTAssertEqual(
             try load(#"{"listen":4001,"rpc":4003,"state":"tip"}"#).contentServingArguments, ["--state", "tip"]
         )
+        XCTAssertEqual(
+            try load(#"{"listen":4001,"rpc":4003,"state":"none"}"#).contentServingArguments, ["--state", "none"]
+        )
         XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"state":"some"}"#))
     }
 
