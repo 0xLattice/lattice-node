@@ -22,10 +22,16 @@ struct RetentionScopes: Sendable {
     /// keeps no other.
     func state(at path: ChainPath) -> String { chain + ":state:" + path.joined(separator: "/") }
 
+    /// What the last step's executions stored, until the kept state has
+    /// counted what of it the tip's state holds.
+    func executed(at path: ChainPath) -> String { chain + ":executed:" + path.joined(separator: "/") }
+
+    var readsPrefix: String { chain + ":reads:" }
+
     /// What a block reads, until it executes, when the operator does not
     /// keep all state.
     func reads(_ blockCID: String, at path: ChainPath) -> String {
-        chain + ":reads:" + path.joined(separator: "/") + ":" + blockCID
+        readsPrefix + path.joined(separator: "/") + ":" + blockCID
     }
 
     func body(_ blockCID: String, at path: ChainPath = ["Nexus"]) -> String {
@@ -34,8 +40,8 @@ struct RetentionScopes: Sendable {
 
     /// The block a body scope names. A CID holds no colon, so the last one
     /// ends the chain's path.
-    func block(named scope: String) -> (path: ChainPath, cid: String)? {
-        let name = scope.dropFirst(bodyPrefix.count)
+    func block(named scope: String, after prefix: String? = nil) -> (path: ChainPath, cid: String)? {
+        let name = scope.dropFirst((prefix ?? bodyPrefix).count)
         guard let colon = name.lastIndex(of: ":") else { return nil }
         return (name[..<colon].split(separator: "/").map(String.init), String(name[name.index(after: colon)...]))
     }
@@ -60,6 +66,23 @@ extension NodeStorage {
         try await broker.mergeRetainedRoots(scope: scopes.body(blockCID, at: path), roots: named.sorted())
         let scope = configuration.state == .all ? retentionScope : scopes.reads(blockCID, at: path)
         try await retainHeld(roots.filter { !named.contains($0) }, scope: scope)
+    }
+
+    /// At a start: what a block read goes when the block has executed (a
+    /// stop came between), or when the operator keeps all state.
+    nonisolated func letGoOfReads() async {
+        do {
+            for scope in try await broker.retainedScopes(prefix: scopes.readsPrefix) {
+                guard let (path, cid) = scopes.block(named: scope, after: scopes.readsPrefix) else { continue }
+                if configuration.state == .all, let roots = try? await broker.retainedRoots(scope: scope) {
+                    try await broker.releaseRetainedRoots(scope: scope, roots: roots)
+                } else if try await store.hasExecutedBlock(cid, at: path) {
+                    await releaseReads(cid, at: path)
+                }
+            }
+        } catch {
+            syncTrace("reads not let go of at start: \(error)")
+        }
     }
 
     /// When the operator does not keep all state: what a block read goes
@@ -145,9 +168,20 @@ extension NodeStorage {
             let walk = TipStateWalk(storage: self, path: path)
             try await walk.hold(LatticeStateHeader(rawCID: root))
             if let lastRoot { await walk.letGo(LatticeStateHeader(rawCID: lastRoot)) }
-            let (entered, left) = try await store.moveStateCounts(at: path, to: tip, changes: await walk.changes)
+            let changes = await walk.changes
+            let (entered, left) = try await store.moveStateCounts(at: path, to: tip, changes: changes)
             try await retainHeld(entered, scope: scopes.state(at: path))
-            try await broker.releaseRetainedRoots(scope: scopes.state(at: path), roots: left)
+            var gone = left
+            if last == nil {
+                // Counted afresh: what an earlier run left pinned and this
+                // state does not hold goes.
+                let counted = Set(changes.filter { $0.value > 0 }.keys)
+                gone += try await broker.retainedRoots(scope: scopes.state(at: path)).filter { !counted.contains($0) }
+            }
+            try await broker.releaseRetainedRoots(scope: scopes.state(at: path), roots: gone)
+            // What executions stored and the tip's state does not hold goes.
+            let executed = try await broker.retainedRoots(scope: scopes.executed(at: path))
+            try await broker.releaseRetainedRoots(scope: scopes.executed(at: path), roots: executed)
         } catch {
             syncTrace("state of \(tip) not kept: \(error)")
         }

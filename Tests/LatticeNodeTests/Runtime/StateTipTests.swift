@@ -496,6 +496,52 @@ final class StateTipTests: XCTestCase {
         }
     }
 
+    /// Whatever ran before, the state scope of a node on `tip` pins exactly
+    /// what it counts, and it counts what it holds of the tip's state:
+    /// after a run on `none` and a block that reads state without changing
+    /// it, and after a run on `all` between runs on `tip`.
+    func testTheStateScopePinsExactlyWhatIsCounted() async throws {
+        let miner: Key = CryptoUtils.generateKeyPair()
+        let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(miner))])
+        var node = try host(keyByte: 0xc8)
+        var nonce: UInt64 = 0
+        func check(_ runtime: NodeRuntime, _ storage: NodeStorage, _ phase: String) async throws {
+            let tip = try XCTUnwrap(runtime.published.value?.actOnTip)
+            try await eventually("the kept state is moved to the tip (\(phase))") {
+                try await storage.store.stateTip(at: ["Nexus"]) == tip
+            }
+            let counted = try await storage.store.stateCounts(at: ["Nexus"])
+            let held = try await heldStateNodes(of: tip, in: storage)
+            XCTAssertEqual(counted, held, phase)
+            let pinned = try await storage.broker.retainedRoots(scope: storage.scopes.state(at: ["Nexus"]))
+            XCTAssertEqual(Set(pinned), Set(counted.keys), "\(phase): pinned is what is counted")
+        }
+        for (phase, state) in [("tip", StateRetention.tip), ("all", .all), ("tip again", .tip), ("none", .none), ("tip after none", .tip)] {
+            node = try host(keyByte: 0xc8, storageDirectory: node.configuration.storagePath, state: state)
+            let (runtime, storage) = try await start(node)
+            if nonce == 0 {
+                _ = try await runtime.mineBlock(paid)
+                _ = try await runtime.mineBlock(paid)
+            }
+            _ = try await runtime.submitTransaction(SubmitTransactionRequest(transaction: try transaction(
+                miner, nonce: nonce, actions: [Action(key: "a\(nonce)", oldValue: nil, newValue: "1")]
+            )))
+            nonce += 1
+            _ = try await runtime.mineBlock(paid)
+            if state == .tip {
+                try await check(runtime, storage, phase)
+                // A block that reads state and changes nothing.
+                _ = try await runtime.submitTransaction(SubmitTransactionRequest(transaction: try transaction(
+                    miner, nonce: nonce, actions: [Action(key: "a0", oldValue: "1", newValue: "1")]
+                )))
+                nonce += 1
+                _ = try await runtime.mineBlock(paid)
+                try await check(runtime, storage, "\(phase), after a block that changes nothing")
+            }
+            await runtime.stop()
+        }
+    }
+
     /// The default keeps the state of every block, and counts nothing.
     func testANodeOnAllKeepsEveryState() async throws {
         let node = try host(keyByte: 0xb6)

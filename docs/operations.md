@@ -486,8 +486,8 @@ another branch, state the branch it left had changed is needed again. A
 block that reads it reads it from peers; the node holds it again once a
 block changes it. Until then reads of it answer `404`, and a transaction
 that needs it is pooled unchecked and is mined by a peer, not by this node.
-The first start on `tip` counts the whole state of each tip before the
-node answers anything.
+The first start on `tip` counts the whole state of each tip; state reads
+are answered meanwhile, while submissions and mining wait for it.
 
 On `none` the node answers state reads only for what the last block
 touched. A submitted transaction is checked against what this node holds:

@@ -359,6 +359,7 @@ public final class NodeRuntime: Sendable {
             // of the ones a run that kept them left, before any step.
             for (path, level) in state.core.levels { state.bodyTips[path] = level.snapshot.actOnTip }
             await storage.letGoOfBodies(except: state.bodyTips)
+            await storage.letGoOfReads()
             // Counts describe a state only `tip` keeps; any other run lets
             // that state go, so a later run on `tip` counts afresh.
             if configuration.state != .tip { await storage.forgetStateCounts() }

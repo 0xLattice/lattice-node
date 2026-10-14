@@ -75,6 +75,11 @@ extension NodeStorage {
         try await storage.commit()
         try await retainHeld(stored)
         for (path, roots) in states where !roots.isEmpty {
+            if configuration.state == .tip {
+                // Until the kept state has counted what of it the tip holds.
+                try await retainHeld(roots, scope: scopes.executed(at: path))
+                continue
+            }
             let scope = scopes.state(at: path)
             // With no state kept, only what the last execution touched
             // stays: the next block most likely reads it.
