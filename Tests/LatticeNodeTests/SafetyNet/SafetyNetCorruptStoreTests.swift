@@ -22,8 +22,8 @@ import XCTest
 /// - Semantic damage the row layer cannot see (undecodable batches, facts
 ///   that disagree with their batch): refused with `NodeStoreError.corrupt`.
 /// - accepted_blocks.leaf disagreeing with the parent links: repaired at boot.
-/// - A Volume a fact names gone from volumes.db: refused with
-///   `NodeStorageError.missingMaterializedVolume`.
+/// - A Volume a fact names gone from volumes.db: opened. Content is fetched
+///   when read; its absence is no damage.
 ///
 /// No damage crashes the storage.
 final class SafetyNetCorruptStoreTests: XCTestCase {
@@ -129,10 +129,10 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         try await assertBoot(Self.refusedAsWipeRequired, observes: .wipeRequired)
     }
 
-    /// A fact whose content is gone from `volumes.db` is refused. Boot asks
-    /// only whether each Volume is present: its bytes are checked against
-    /// its CID when they are read.
-    func testBootRefusesMissingVolumeWithMissingMaterializedVolume() async throws {
+    /// A fact whose content is gone from `volumes.db` does not stop boot:
+    /// the store retains what it holds, and what it lacks is fetched when
+    /// something reads it.
+    func testBootOpensAStoreWhoseVolumesAreGone() async throws {
         let fixture = try await buildFixture()
         let root = try damagedCopy(
             of: fixture, database: "volumes.db",
@@ -141,7 +141,7 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             applying: ["DELETE FROM volume_entries", "DELETE FROM volume_metadata"]
         )
         let observed = await observeBoot(at: root)
-        XCTAssertEqual(observed, .missingMaterializedVolume)
+        XCTAssertEqual(observed, .opened)
     }
 
     /// A leaf flag that disagrees with the parent links is a derived index

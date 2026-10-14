@@ -71,6 +71,16 @@ public enum WebSocketListener: Sendable, Equatable {
     }
 }
 
+/// Which block bodies a node keeps beyond the ones it needs to operate (the
+/// bodies waiting to execute, and each chain's tip). A body is a block's
+/// own Volume and its transactions'.
+public enum BlockBodies: String, Sendable, CaseIterable {
+    /// Every body it executed.
+    case all
+    /// No others.
+    case none
+}
+
 /// Immutable setup and process identity for one Nexus-rooted hosted tree.
 public struct NodeConfiguration: Sendable {
     public let address: ChainAddress
@@ -138,6 +148,9 @@ public struct NodeConfiguration: Sendable {
     /// stalled-peer search; provider announcements continue.
     public let peerSearchInterval: TimeInterval
     public let resourcePolicy: NodeResourcePolicy
+    /// The block bodies kept beyond what the node needs to operate
+    /// (operator choice). Facts, headers and state are not bodies.
+    public let blockBodies: BlockBodies
     /// The child chains this process hosts as levels under Nexus (operator
     /// choice), parent before child; every parent is Nexus or listed.
     public let hostedChildren: [[String]]
@@ -186,6 +199,7 @@ public struct NodeConfiguration: Sendable {
         externalAddress: String? = nil,
         peerSearchInterval: TimeInterval = 600,
         resourcePolicy: NodeResourcePolicy = .default,
+        blockBodies: BlockBodies = .all,
         hostedChildren: [[String]] = [],
         childSpecs: [[String]: ChainSpec] = [:],
         policyModules: [Data] = [],
@@ -260,6 +274,7 @@ public struct NodeConfiguration: Sendable {
         self.peerSearchInterval = peerSearchInterval.isFinite
             ? max(0, peerSearchInterval) : 0
         self.resourcePolicy = resourcePolicy
+        self.blockBodies = blockBodies
         self.childSpecs = childSpecs.filter { hostedChildren.contains($0.key) }
         self.hostedChildren = hostedChildren
         self.policyModules = policyModules

@@ -238,6 +238,7 @@ public struct IvyRootContentSource: Sendable {
             guard rootCID == self.rootCID else { return nil }
             return await broker.fetchVolume(root: rootCID)
         }
+
     }
 
     private let fetch: @Sendable (String) async -> AttributedVolumeResponse

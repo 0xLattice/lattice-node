@@ -32,6 +32,10 @@ extension NodeStorage {
         bodyRoots: [ChainPath: [String]] = [:]
     ) async throws {
         var durable: [NodeFactBatch] = []
+        // What this step's executions created. A fetched body was pinned
+        // under its block's name when it was stored, and the journal still
+        // names it.
+        var stored: [String] = []
         let storage = NodeImportStorage(storage: broker)
         for (path, level) in batch.levels.sorted(by: {
             $0.path.count != $1.path.count
@@ -45,7 +49,9 @@ extension NodeStorage {
             for spec in level.headers.compactMap(\.spec) {
                 try await VolumeImpl<ChainSpec>(node: spec).store(storer: storage)
             }
-            let roots = await storage.takeStoredVolumeRoots() + (bodyRoots[path] ?? [])
+            let created = await storage.takeStoredVolumeRoots()
+            stored.append(contentsOf: created)
+            let roots = created + (bodyRoots[path] ?? [])
             durable.append(NodeFactBatch(
                 path: path,
                 facts: level.facts,
@@ -56,11 +62,44 @@ extension NodeStorage {
             ))
         }
         try await storage.commit()
-        let roots = durable.flatMap(\.volumeRoots)
-        if !roots.isEmpty {
-            try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots)
-        }
+        try await retainHeld(stored)
         try await store.stageNodeFacts(durable, logID: logID)
+    }
+
+    /// Retains the roots this store holds. One it lacks (a body fetched for
+    /// this step and gone since) is no fault: the facts still name it, and
+    /// whatever reads it next fetches and keeps it.
+    nonisolated func retainHeld(_ roots: [String]) async throws {
+        var roots = Set(roots)
+        while !roots.isEmpty {
+            do {
+                return try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots.sorted())
+            } catch BrokerError.missingRetainedRoot(let root) {
+                roots.remove(root)
+            }
+        }
+    }
+
+    /// How the operator's own work reads: this store, a block's header
+    /// record, what its earlier reads asked of peers, then peers, whose
+    /// answers are remembered for the next read.
+    nonisolated func ownReads(through peers: any ContentSource) -> CoalescingFetcher {
+        CoalescingFetcher(CompositeContentSource([workSource, readCache, readCache.remembering(peers)]))
+    }
+
+    /// Stores a block and pins what was stored: its body is what `fetcher`,
+    /// the content it was stored from, says it carries.
+    nonisolated func storingAndRetaining(
+        _ blockCID: String, at path: ChainPath, from fetcher: any Fetcher,
+        _ store: (NodeImportStorage) async throws -> Void
+    ) async throws -> [String] {
+        let storage = NodeImportStorage(storage: broker)
+        try await store(storage)
+        try await storage.commit()
+        let roots = await storage.takeStoredVolumeRoots()
+        let body = [blockCID] + (try await NodeRuntime.carriedTransactionIDs(ofBlock: blockCID, fetcher: fetcher))
+        try await retainStored(roots, body: body, ofBlock: blockCID, at: path)
+        return roots
     }
 
     /// `ChainEffect.fetchBody`: the block's Volume and the nested Volumes its
@@ -76,17 +115,17 @@ extension NodeStorage {
     /// would be from peers that speak no bundles. `hosts` names the
     /// block's child chain: the bundle is asked first of its current peers.
     nonisolated func fetchChainBody(
-        _ cid: String, remote: IvyRootContentSource, bundle: Bool = true, hosts: ChainHosts? = nil
+        _ cid: String, at path: ChainPath? = nil, remote: IvyRootContentSource, bundle: Bool = true,
+        hosts: ChainHosts? = nil
     ) async throws -> [String] {
+        let path = path ?? configuration.chainPath
         let capture = IvyRootContentSource.AttributionCapture()
         do {
             return try await remote.withRootTracing(cid, bundle: bundle, hosts: hosts, capture: capture) { session in
                 let fetcher = CoalescingFetcher(CompositeContentSource([broker, session]))
-                let storage = NodeImportStorage(storage: broker)
-                try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: storage)
-                try await storage.commit()
-                let roots = await storage.takeStoredVolumeRoots()
-                try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots)
+                let roots = try await storingAndRetaining(cid, at: path, from: fetcher) { storage in
+                    try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: storage)
+                }
                 bundles.record(root: cid, roots: roots)
                 return roots
             }.value
@@ -123,16 +162,30 @@ extension NodeStorage {
 
     /// `MiningEffect.mined`: the mined block's content, stored and retained
     /// before its header is weighed (content first). Returns its child
-    /// index, which the root header is inserted with.
-    nonisolated func storeMinedBlock(_ block: Block) async throws -> FlatDictionary<BlockHeader> {
-        let storage = NodeImportStorage(storage: broker)
+    /// index, which the root header is inserted with. What the block names
+    /// and this store lacks is read from peers, as the template that built
+    /// it read it.
+    nonisolated func storeMinedBlock(
+        _ block: Block, remote: IvyRootContentSource? = nil
+    ) async throws -> FlatDictionary<BlockHeader> {
         let header = try BlockHeader(node: block)
-        try await header.storeBlock(fetcher: localFetcher, storer: storage)
-        try await storage.commit()
-        let roots = await storage.takeStoredVolumeRoots()
-        try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots)
+        guard let remote else { return try await storeMinedBlock(header, block, fetcher: localFetcher) }
+        return try await remote.withRootTracing(header.rawCID, bundle: false) { session in
+            let children = try await storeMinedBlock(
+                header, block, fetcher: ownReads(through: session)
+            )
+            return children
+        }.value
+    }
+
+    private nonisolated func storeMinedBlock(
+        _ header: BlockHeader, _ block: Block, fetcher: any Fetcher
+    ) async throws -> FlatDictionary<BlockHeader> {
+        let roots = try await storingAndRetaining(header.rawCID, at: configuration.chainPath, from: fetcher) { storage in
+            try await header.storeBlock(fetcher: fetcher, storer: storage)
+        }
         bundles.record(root: header.rawCID, roots: roots)
-        guard let children = try await block.children.resolve(fetcher: localFetcher).node else {
+        guard let children = try await block.children.resolve(fetcher: fetcher).node else {
             throw NodeStorageError.missingMaterializedVolume(block.children.rawCID)
         }
         return children
@@ -141,7 +194,22 @@ extension NodeStorage {
     /// The child blocks a mined root carries at hosted levels, outermost
     /// first, each stored and with its proof from this root: only those the
     /// grind's work meets (a verified contribution).
-    nonisolated func carriedGrinds(of root: Block, hosted: Set<ChainPath>) async throws -> [MinedGrind.Carried] {
+    nonisolated func carriedGrinds(
+        of root: Block, hosted: Set<ChainPath>, remote: IvyRootContentSource? = nil
+    ) async throws -> [MinedGrind.Carried] {
+        guard let remote else { return try await carriedGrinds(of: root, hosted: hosted, fetcher: localFetcher) }
+        let rootCID = try BlockHeader(node: root).rawCID
+        return try await remote.withRootTracing(rootCID, bundle: false) { session in
+            let carried = try await carriedGrinds(
+                of: root, hosted: hosted, fetcher: ownReads(through: session)
+            )
+            return carried
+        }.value
+    }
+
+    private nonisolated func carriedGrinds(
+        of root: Block, hosted: Set<ChainPath>, fetcher localFetcher: any Fetcher
+    ) async throws -> [MinedGrind.Carried] {
         var carried: [MinedGrind.Carried] = []
         // (carrier block, its path, the proof from the root to it)
         var frontier: [(block: Block, path: ChainPath, proof: ChildBlockProof?)] = [(root, configuration.chainPath, nil)]
@@ -157,11 +225,9 @@ extension NodeStorage {
                 // Only a block the grind's work meets is stored and walked.
                 guard case .success(let evidence) = await proof.verifySecuringWork(child: block, chainPath: childPath),
                       evidence.contribution != nil else { continue }
-                let storage = NodeImportStorage(storage: broker)
-                try await child.storeBlock(fetcher: localFetcher, storer: storage)
-                try await storage.commit()
-                let roots = await storage.takeStoredVolumeRoots()
-                try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots)
+                let roots = try await storingAndRetaining(child.rawCID, at: childPath, from: localFetcher) { storage in
+                    try await child.storeBlock(fetcher: localFetcher, storer: storage)
+                }
                 bundles.record(root: child.rawCID, roots: roots)
                 frontier.append((block, childPath, proof))
                 guard let grandchildren = try await block.children.resolve(fetcher: localFetcher).node else { continue }
@@ -199,7 +265,19 @@ extension NodeStorage {
     /// fetched yet); its spec Volume was stored with it.
     nonisolated func chainGenesisSpec(_ cid: String) async throws -> ChainSpec? {
         guard let block = await chainHeader(cid)?.block else { return nil }
-        return try await block.spec.resolve(fetcher: localFetcher).node
+        if let held = try? await block.spec.resolve(fetcher: localFetcher).node { return held }
+        // Not in the store: the operator's own spec for a chain it created
+        // is the same content if it has the same CID, and is stored again.
+        for spec in configuration.childSpecs.values {
+            let volume = try VolumeImpl<ChainSpec>(node: spec)
+            guard volume.rawCID == block.spec.rawCID else { continue }
+            let storage = NodeImportStorage(storage: broker)
+            try await volume.store(storer: storage)
+            try await storage.commit()
+            try await retainHeld(await storage.takeStoredVolumeRoots())
+            return spec
+        }
+        return nil
     }
 
     nonisolated func chainHeader(_ cid: String) async -> (block: Block, children: FlatDictionary<BlockHeader>)? {

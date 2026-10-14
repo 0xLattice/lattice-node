@@ -129,13 +129,48 @@ fact transaction that names them. One admission's Volumes (a fetched or mined
 block's, or the post-states of one step) are one `volumes.db` transaction,
 then retained. The complete `NodeBatch` then commits in one SQLite transaction
 across every affected chain path, including each path's headers, child
-proofs, and sync cursors. A crash may leave content that no fact references,
-which the next boot stops retaining, but it cannot leave a durable fact without its
-content, part of a block's content, or a parent-level half of a multi-level
-grind.
+proofs, and sync cursors. A crash cannot leave part of a block's content or a
+parent-level half of a multi-level grind.
 
-`BootRecovery` validates the databases and retained roots before networking
-starts. `NodeRuntime.boot` then rebuilds every `ChainCore` from one ordered
+Content stays in `volumes.db` because a retention scope names it, and each
+scope says why. A block's body (its own Volume and its transactions') is
+named by that block on its chain, so a transaction two blocks carry stays
+until both are let go of. What executions read and create (state, specs,
+policy modules) and the Nexus genesis block are named by the chain. A body
+is let go of when its block is found invalid, and, when the operator keeps
+no bodies beyond the ones the node operates on (`blockBodies: none`), when
+another block becomes its chain's tip. A body stored for a block that never
+executes stays. Pins are in the store and a start leaves them as it finds
+them, and sweeps what no scope names. The journal still lists the roots
+each batch stored, and nothing reads that list.
+
+A fact does not depend on its content being held, so a store that lacks
+content its facts name is not damaged.
+
+- Executing a block reads what its body fetch brought: the block and the
+  state it touches come from this store or from peers. The parent's own
+  node comes from its header record when its body is not held.
+- Building a template, and storing a mined block and the child blocks it
+  carries, read this store, then a block's header record, then peers. What
+  a read asked of peers is remembered in memory, within the operator's
+  budget for one fetch, so a template's reads can serve the block mined on
+  it. A peer chooses what else it sends with a Volume: none of that is
+  remembered, and nothing a peer sent is written to the Volume store as it
+  came. The store's Volumes are only the ones this node derives when it
+  stores a block.
+- Checking a submitted transaction reads this store alone, and so do the
+  public read routes: anyone may submit or read, and neither spends this
+  node's requests to its peers. A transaction whose state is not held stays
+  pooled, unchecked.
+
+Every entry is checked against its CID. A read nobody can serve is no
+verdict: a block parks and is asked for again, and a template is not built.
+Boot retains the journal's roots the store holds and does not ask that it
+hold them all; it stores the Nexus genesis block again when the store lacks
+it, since nothing else can supply that block's own node. Retaining a root
+that has gone since it was fetched retains the rest.
+
+`BootRecovery` validates the databases before networking starts. `NodeRuntime.boot` then rebuilds every `ChainCore` from one ordered
 scan grouped by path. Saved child proofs must decode and match their indexes;
 each commits in the transaction of the work fact it produced.
 

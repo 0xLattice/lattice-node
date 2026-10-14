@@ -4,9 +4,9 @@ import VolumeBroker
 import cashew
 
 /// Boot recovery for one hosted tree's storage: everything `NodeStorage.open`
-/// does before the runtime starts. Content is retained before the facts that
-/// reference it, so boot only re-asserts the retained roots the journal
-/// names; an empty journal is seeded with the configured Nexus genesis.
+/// does before the runtime starts. Content stays because a scope names it,
+/// so boot leaves pins as it finds them and drops what no scope names; an
+/// empty journal is seeded with the configured Nexus genesis.
 enum BootRecovery {
     /// What `NodeStorage.open` builds the storage from.
     struct Result {
@@ -34,9 +34,13 @@ enum BootRecovery {
         let directoryLock = try lockStorageDirectory(configuration: configuration)
         let stores = try openStores(configuration: configuration)
         let constantRoots = try await materializeConstantRoots(stores, configuration: configuration)
-        try await reconcileRetainedRoots(stores, constantRoots: constantRoots)
+        try await settleRetention(stores, constantRoots: constantRoots)
         try await pinMempool(stores)
         try await seedNexusGenesis(stores, configuration: configuration)
+        // Content stays only because a scope names it. What none does (a
+        // write a crash cut short, a pool entry of the last run) goes now,
+        // while nothing is being stored.
+        try await stores.broker.sweep()
         return Result(
             store: stores.store,
             broker: stores.broker,
@@ -105,7 +109,7 @@ enum BootRecovery {
     ) async throws -> [String] {
         let broker = stores.broker
         // Protocol constants are ordinary Volumes and therefore ordinary GC
-        // roots. Materialize them before the one exact startup reconciliation.
+        // roots. Materialize them before they are pinned.
         let constantStorage = NodeImportStorage(storage: broker)
         try await LatticeState.emptyHeader.storeRecursively(
             storer: constantStorage as any VolumeStorer
@@ -121,24 +125,18 @@ enum BootRecovery {
         return constantRoots
     }
 
-    /// Stage 4: the journal audited, and the chain's retained roots set to
-    /// exactly what its facts name.
-    private static func reconcileRetainedRoots(
+    /// Stage 4: the journal audited and the pins settled. Pins are in the
+    /// store and stay as a start finds them: nothing is rebuilt from the
+    /// journal, and content a fact names and the store lacks is no fault.
+    /// The constants are pinned.
+    private static func settleRetention(
         _ stores: Stores,
         constantRoots: [String]
     ) async throws {
-        let staged = try await stores.store.stagedImports()
         try await stores.store.auditNormalizedIndexes()
-        let roots = Set(staged.flatMap(\.volumeRoots)).union(constantRoots).sorted()
-        // Presence only, and the broker checks it as it retains each root:
-        // every read of a stored Volume validates its content against its
-        // CID, so hashing the whole store here would repeat that on each
-        // boot, before the node can listen.
-        do {
-            try await stores.broker.advanceRetainedRoots(scope: stores.retentionScope, roots: roots)
-        } catch BrokerError.missingRetainedRoot(let root) {
-            throw NodeStorageError.missingMaterializedVolume(root)
-        }
+        let broker = stores.broker
+        let scopes = RetentionScopes(chain: stores.retentionScope)
+        try await broker.mergeRetainedRoots(scope: scopes.chain, roots: constantRoots)
     }
 
     /// Stage 6: the durable mempool's pins rebuilt, the live pool's cleared.
@@ -166,13 +164,16 @@ enum BootRecovery {
         try await broker.advanceRetainedRoots(scope: liveMempoolOwner, roots: [])
     }
 
-    /// Stage 7: an empty journal starts from the configured Nexus genesis:
-    /// its content stored and retained, then its executed batch journaled.
+    /// Stage 7: the configured Nexus genesis, whole: its content stored and
+    /// retained whenever the store lacks its block, and for an empty journal
+    /// its executed batch journaled. Every node holds it; nothing later can
+    /// supply its block's own node, which has no header record.
     private static func seedNexusGenesis(
         _ stores: Stores,
         configuration: NodeConfiguration
     ) async throws {
-        guard try await stores.store.stagedImports().isEmpty else { return }
+        let seeded = try await !stores.store.stagedImports().isEmpty
+        if seeded, await stores.broker.hasVolume(root: configuration.nexusGenesisCID) { return }
         let genesis = try await NexusGenesis.create(fetcher: stores.localFetcher)
         guard try NexusGenesis.verifyGenesis(genesis) else {
             throw NodeStorageError.invalidNexusGenesis
@@ -197,6 +198,7 @@ enum BootRecovery {
         try await storage.commit()
         let roots = await storage.takeStoredVolumeRoots()
         try await stores.broker.mergeRetainedRoots(scope: stores.retentionScope, roots: roots)
+        guard !seeded else { return }
         try await stores.store.stageChainFacts(
             [boot.facts], volumeRoots: roots, logID: UUID().uuidString.lowercased()
         )

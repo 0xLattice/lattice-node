@@ -36,7 +36,7 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   proof check the shell cannot run. Pinned by
   `ChildGenesisSpecTests`.
 
-## NODE-STORAGE-002 — a durable fact never outruns its content
+## NODE-STORAGE-002 — content is stored before the facts that name it, and a fact never depends on it being held
 
 - **NODE-STORAGE-002.a** — A step's content (headers, post-states, specs)
   is stored and retained before the facts that name it. Enforced by
@@ -46,10 +46,30 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   streamed before it is durable. Enforced by `Simulator` and
   `LevelSimulator` ("published tip … is not durable", "served … before it
   was durable", "relayed … before it was durable").
-- **NODE-STORAGE-002.c** — Boot retains exactly the roots every level's
-  journal names, so a sweep keeps them. Pinned by
+- **NODE-STORAGE-002.c** — Content stays because a scope names it, and a
+  start leaves pins as it finds them: nothing is rebuilt from the journal.
+  A block's body is named by that block on its chain, what executions read
+  and create by the chain. A start sweeps what no scope names. Pinned by
+  `RetentionRulesTests`,
+  `ChildLevelRestartTests.testAStartKeepsWhatAScopeNamesAndDropsTheRest`,
   `ChildLevelRestartTests.testAWeighedUnexecutedChildGenesisSurvivesARestart`
   and `NodeRuntimeTests.testJoinerSyncsHeadersAndExecutesBodiesOverLoopbackIvy`.
+- **NODE-STORAGE-002.f** — Content a fact names and the store lacks is no
+  fault. The node starts on its facts, with the Nexus genesis block stored
+  again; executing a block and building on one read this store, a block's
+  header record, then peers, checked against the CID; what peers served
+  reaches the Volume store only as the Volumes this node derives when it
+  stores a block; retaining a root that is gone retains the rest. The checks anyone
+  can cause (a submitted transaction, a public read) read this store alone.
+  Pinned by `AbsentContentTests` and
+  `SafetyNetCorruptStoreTests.testBootOpensAStoreWhoseVolumesAreGone`.
+- **NODE-STORAGE-002.g** — With `blockBodies: none` the node lets go of a
+  body it executed once another block is its chain's tip, and never of a
+  genesis block. A tip the chain moves back onto after its body went is
+  not fetched again. Transactions of the blocks a move leaves are returned
+  to the pool from this store, and from peers for a body it let go of; one
+  no peer serves is not returned. State and facts are untouched, and the node builds
+  on a block whose body is gone. Pinned by `BlockBodiesTests`.
 - **NODE-STORAGE-002.d** — Levels write parent before child; a crash
   between them restores with the child behind, never ahead. Pinned by
   `ChildLevelRestartTests.testACrashBetweenLevelWritesRestoresTheParentAhead`.

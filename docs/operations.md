@@ -27,7 +27,8 @@ Before exposing a node:
 7. Keep RPC on loopback. Use `publicRead` or the checked-in nginx allowlist for
    public reads.
 8. Configure a mining recipient for every chain that should pay rewards.
-9. Reserve enough disk for unbounded fact history and retained content.
+9. Reserve enough disk for unbounded fact history and retained content, or
+   set `blockBodies` (see "What a node keeps").
 10. Test a clean shutdown, restart, and recovery before accepting traffic.
 
 ## How a node finds the network
@@ -423,6 +424,58 @@ Persistence order is:
 Every commit is synchronous (`synchronous=FULL`): nothing is announced,
 served, or built on before the write that makes it durable returns.
 
+### What a node keeps
+
+Facts and headers are kept for good. Content is kept because a rule says so.
+Two rules are built in: a node always holds each hosted chain's genesis
+block, and the block bodies it needs to operate, which are those waiting to
+execute and each chain's tip, so that a new block can be passed on. A body
+is a block's own Volume and its transactions'.
+
+`blockBodies` in `lattice.json` (`--block-bodies`) says which bodies it keeps
+beyond those:
+
+- `all`, the default: every body it executed.
+- `none`: no others it executed. A body is let go of once another block is
+  its chain's tip. A body stored for a block that never executed stays.
+
+State, chain specs and policy modules are not bodies. What the node weighs
+and which tip it selects do not depend on this setting, and it goes on
+executing, mining and answering state reads on a block whose body it let go
+of, from the header record it keeps for every block.
+
+A body a node let go of is gone from that node:
+
+- it answers `404` for that block and its transactions on the read routes,
+  and "not held" to a peer that asks for it;
+- the explorer routes that place a transaction or a deposit in a block
+  report it unplaced;
+- when the chain moves to another branch, the transactions of the blocks
+  it left go back into the pool. Their bodies have been let go of, so they
+  are read from peers, and a transaction of a block that no peer serves is
+  not returned;
+- a block the chain moves back onto after its body went is not fetched
+  again: it confirms nothing out of the pool, and the node cannot pass it
+  on until another block is the tip.
+
+A node that mines on `none` lets go of each block it built as soon as it
+builds the next. A peer that has not fetched that block by then cannot get
+it from this node, and a chain whose only miner is on `none` cannot be
+synced by anyone. Run `all` on a node that mines a chain others should be
+able to follow.
+
+A node that executes a chain from its genesis needs every body from some
+peer, so a network needs nodes on `all`; people with a stake in a chain have
+their own reason to run one. Keep `all` on a node an explorer reads.
+
+Switching to `none` takes effect at the next start, which lets go of every
+executed body but the tips' and the genesis blocks' before the node answers
+anything: the time that takes grows with the number of bodies it held.
+Bodies stored by a version before this setting are not let go of: sync the
+node again to drop them. Switching back to `all` keeps every body from then
+on and brings none back. `volumes.db` does not shrink: the
+space is reused.
+
 Back up only while the process is stopped, and snapshot both databases
 together. The identity and child specs need separate backups.
 
@@ -437,7 +490,9 @@ Startup fails closed when:
 
 - the schema epoch or Nexus genesis does not match;
 - a journal/index audit disagrees;
-- referenced retained content is missing;
+- a hosted child chain's genesis spec is in neither `volumes.db` nor the
+  node's own `specs`, or one of the node's own pending transactions is
+  missing from `volumes.db`;
 - saved child proofs do not decode or do not match their index;
 - another process owns the storage lock.
 
@@ -484,8 +539,19 @@ tree and use `lattice wipe`; there is no migration path.
 
 ### `missingMaterializedVolume`
 
-A fact references content absent from the matched `volumes.db`. Restore the
-whole backup set or wipe. Copying only `state.db` is not recovery.
+A hosted child chain's genesis spec is in neither `volumes.db` nor this
+node's own `specs`, or a transaction in the node's own pending journal is
+absent from `volumes.db`. Restore the whole backup set or wipe.
+
+Other content a fact names may be absent without stopping the node. It
+starts on its facts, stores the Nexus genesis block again, and reads what it
+needs to execute a block or build a template from its peers, each entry
+checked against its CID. A `state.db` copied without its `volumes.db`
+therefore runs, but it holds only what the blocks it has executed and mined
+since have stored:
+the public read routes and the check of a submitted transaction answer from
+this store alone, so they report content it lacks as not found and leave
+such a transaction pooled. Resync it to hold the rest.
 
 ### Saved proof corruption
 

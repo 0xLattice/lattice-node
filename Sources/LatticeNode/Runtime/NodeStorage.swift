@@ -48,6 +48,13 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     nonisolated let bundles: VolumeBundleCache
     let broker: DiskBroker
     let localFetcher: CoalescingFetcher
+    /// Local content, and behind it the header records: a block's own node
+    /// is read from them when its body is not held. Execution and mining
+    /// build on blocks through this.
+    nonisolated let workFetcher: CoalescingFetcher
+    nonisolated let workSource: CompositeContentSource
+    /// What the operator's own reads took from peers, in memory.
+    nonisolated let readCache: ReadCache
     let retentionScope: String
     let durableMempoolOwner: String
     let liveMempoolOwner: String
@@ -80,13 +87,16 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         self.bundles = bundles
         self.broker = broker
         self.localFetcher = localFetcher
+        self.workSource = CompositeContentSource([broker, HeaderRecords(store: store)])
+        self.workFetcher = CoalescingFetcher(workSource)
+        self.readCache = ReadCache(maximumBytes: configuration.resourcePolicy.maximumAcquisitionStorageBytes)
         self.retentionScope = retentionScope
         self.durableMempoolOwner = durableMempoolOwner
         self.liveMempoolOwner = liveMempoolOwner
         self.directoryLock = directoryLock
     }
 
-    /// Completes store validation and retained-root reconciliation before
+    /// Completes store validation and settles what the store pins before
     /// returning a storage the runtime may expose.
     public static func open(
         configuration: NodeConfiguration
@@ -119,8 +129,19 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         (try? await store.hasAcceptedBlock(cid, at: chainPath)) ?? false
     }
 
+    func hasExecutedBlock(_ cid: String, at chainPath: [String]) async -> Bool {
+        (try? await store.hasExecutedBlock(cid, at: chainPath)) ?? false
+    }
+
     public func fetch(_ cids: Set<String>) async -> [String: Data] {
         await broker.fetchDataLocal(cids: cids)
+    }
+
+    /// A block's own node: from its Volume, or from its header record when
+    /// its body is not held. Enough to reach the state it commits to.
+    nonisolated func blockNodeBytes(_ cid: String) async -> Data? {
+        if let held = await broker.fetchDataLocal(cid: cid) { return held }
+        return store.headerBlockBytes(cid)
     }
 
     /// Peer content exchange serves complete local Volumes. Membership is a
@@ -326,5 +347,67 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
             return
         }
         operationWaiters.removeFirst().continuation.resume(returning: true)
+    }
+}
+
+/// Content the operator's own reads took from peers, by CID, in memory: a
+/// template's reads then serve the block mined on it and the next template
+/// without asking again.
+///
+/// Only what a reader asked for is remembered, as the reader got it: a peer
+/// chooses what else it sends with a Volume, and none of that is kept. Each
+/// entry was checked against its CID by the session that fetched it, and
+/// its reader checks it again.
+///
+/// It is not the Volume store: the store's Volumes are only the ones this
+/// node derives when it stores a block. Bounded by the operator's budget
+/// for one fetch, each entry charged as a session charges it; an answer
+/// that would pass the bound starts the cache again first.
+actor ReadCache: ContentSource {
+    private var entries: [String: Data] = [:]
+    private var bytes = 0
+    private let maximumBytes: Int
+
+    init(maximumBytes: Int) {
+        self.maximumBytes = maximumBytes
+    }
+
+    var isEmpty: Bool { entries.isEmpty }
+
+    func fetch(_ cids: Set<String>) async -> [String: Data] {
+        var found: [String: Data] = [:]
+        for cid in cids { found[cid] = entries[cid] }
+        return found
+    }
+
+    /// Remembers one answer to a read, whole or not at all.
+    func put(_ answer: [String: Data]) {
+        let new = answer.filter { entries[$0.key] == nil }
+        let charge = new.reduce(0) {
+            $0 + $1.key.utf8.count + $1.value.count + IvyRootContentSource.retainedEntryOverhead
+        }
+        guard charge <= maximumBytes else { return }
+        if bytes + charge > maximumBytes {
+            entries.removeAll()
+            bytes = 0
+        }
+        entries.merge(new) { held, _ in held }
+        bytes += charge
+    }
+
+    /// `source`, with what it answers remembered here.
+    nonisolated func remembering(_ source: any ContentSource) -> any ContentSource {
+        Remembering(source: source, cache: self)
+    }
+
+    private struct Remembering: ContentSource {
+        let source: any ContentSource
+        let cache: ReadCache
+
+        func fetch(_ cids: Set<String>) async -> [String: Data] {
+            let answer = await source.fetch(cids)
+            await cache.put(answer.filter { cids.contains($0.key) })
+            return answer
+        }
     }
 }
