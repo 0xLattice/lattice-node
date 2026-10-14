@@ -90,14 +90,12 @@ public struct ExplorerBlockChildren: Codable, Sendable, Equatable {
     public let children: [ExplorerChildBlock]
 }
 
-/// `GET /api/chain/children`: every directory the chain's canonical blocks
-/// have committed, in order, each with its newest child block and the
-/// height that committed it. `next`, when present, is the `after` that reads
-/// the following page.
+/// `GET /api/chain/children`: the directories the chain's canonical blocks
+/// have committed, the most recently committed first, each with its newest
+/// child block and the height that committed it.
 public struct ExplorerChainChildren: Codable, Sendable, Equatable {
     public let chainPath: [String]
     public let children: [ExplorerCommittedChild]
-    public let next: String?
 }
 
 public struct ExplorerCommittedChild: Codable, Sendable, Equatable {

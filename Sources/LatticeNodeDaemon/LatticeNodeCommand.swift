@@ -695,18 +695,16 @@ private func addPublicReadRoutes<Context: RequestContext>(
             context: context
         )
     }
-    // Every directory this chain's canonical blocks have committed, each
-    // with its newest child block, from the read view's index; paged by
-    // directory with `after`.
+    // The directories this chain's canonical blocks have committed, the most
+    // recently committed first, from the read view's index.
     router.get("api/chain/children") { request, context in
         let service = try byPath(request)
         guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
             throw HTTPError(.notFound)
         }
         let limit = try explorerParseLimit(request, defaultValue: 100, cap: 100)
-        let after = request.uri.queryParameters["after"].map(String.init)
         return try jsonCached(
-            await service.explorerChainChildren(after: after, limit: limit),
+            await service.explorerChainChildren(limit: limit),
             cacheControl: statusCacheControl,
             request: request,
             context: context

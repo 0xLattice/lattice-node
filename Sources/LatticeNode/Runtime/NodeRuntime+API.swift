@@ -4,6 +4,7 @@ import Lattice
 import LatticeNodeCore
 import cashew
 import UInt256
+import Synchronization
 import VolumeBroker
 
 /// What RPC reads besides the core's snapshot, published by the loop with
@@ -14,7 +15,9 @@ struct NodeReadView: Sendable {
     var heights = HeightIndex()
     /// Every directory the act-on chain has committed, each with its newest
     /// commitment: what a block's header records, kept as the chain moves.
-    private(set) var children: [String: CommittedChild] = [:]
+    /// Shared with every published copy and changed in place, so publishing
+    /// never copies it.
+    let children = ChildDirectoryIndex()
     var poolVersion: UInt64?
     var mempool = ChainReads.MempoolListing(count: 0, bytes: 0, cids: [])
     var templateDigest: String?
@@ -35,9 +38,8 @@ struct NodeReadView: Sendable {
 
     /// Move the act-on chain to `tip` at `height`: walk down from it to where
     /// the view already agrees, drop what is above, take the new blocks in.
-    /// A directory whose newest commitment left the chain falls back to its
-    /// newest on what remains. `commitments` are what a held block's header
-    /// records (nil for a block the tree does not hold).
+    /// `commitments` are what a held block's header records (nil for a block
+    /// the tree does not hold).
     mutating func moveActOnChain(
         to tip: String,
         parent: (String) -> String?,
@@ -52,25 +54,62 @@ struct NodeReadView: Sendable {
             cursor = parent(cid)
             keep -= 1
         }
-        let left = children.filter { $0.value.height >= UInt64(keep) }.map(\.key)
-        for directory in left { children[directory] = nil }
         heights.truncate(to: keep)
-        for cid in entered.reversed() {
-            let at = UInt64(heights.count)
-            heights.append(cid)
-            for (directory, child) in commitments(cid) ?? [:] {
-                children[directory] = CommittedChild(cid: child, height: at)
+        let reversed = Array(entered.reversed())
+        for cid in reversed { heights.append(cid) }
+        children.move(keep: keep, entered: reversed.map { commitments($0) ?? [:] })
+    }
+}
+
+/// The child directories of one chain's act-on chain, each with its newest
+/// commitment. Each height keeps what its block changed, so moving the tip
+/// costs only what changed: undo the heights that left, apply the ones that
+/// entered. The loop writes; readers take a lock.
+final class ChildDirectoryIndex: Sendable {
+    private struct State {
+        var entries: [String: NodeReadView.CommittedChild] = [:]
+        /// Per height: each directory its block committed, and its entry
+        /// before that block.
+        var undo: [[(directory: String, before: NodeReadView.CommittedChild?)]] = []
+    }
+
+    private let state = Mutex(State())
+
+    /// Keep the first `keep` heights, then apply `entered`: the commitments
+    /// of the blocks at the following heights, in order.
+    func move(keep: Int, entered: [[String: String]]) {
+        state.withLock { state in
+            while state.undo.count > max(0, keep) {
+                for change in state.undo.removeLast().reversed() {
+                    state.entries[change.directory] = change.before
+                }
+            }
+            for commitments in entered {
+                let height = UInt64(state.undo.count)
+                var changes: [(directory: String, before: NodeReadView.CommittedChild?)] = []
+                for (directory, child) in commitments.sorted(by: { $0.key < $1.key }) {
+                    changes.append((directory, state.entries[directory]))
+                    state.entries[directory] = NodeReadView.CommittedChild(cid: child, height: height)
+                }
+                state.undo.append(changes)
             }
         }
-        var missing = Set(left.filter { children[$0] == nil })
-        var below = keep - 1
-        while !missing.isEmpty, below >= 0, let cid = heights[below] {
-            for (directory, child) in commitments(cid) ?? [:] where missing.contains(directory) {
-                children[directory] = CommittedChild(cid: child, height: UInt64(below))
-                missing.remove(directory)
-            }
-            below -= 1
-        }
+    }
+
+    /// The newest commitment under `directory`, if any.
+    subscript(directory: String) -> NodeReadView.CommittedChild? {
+        state.withLock { $0.entries[directory] }
+    }
+
+    var count: Int { state.withLock { $0.entries.count } }
+
+    /// At most `limit` directories, the most recently committed first (ties
+    /// by directory).
+    func mostRecent(_ limit: Int) -> [(directory: String, child: NodeReadView.CommittedChild)] {
+        let all = state.withLock { $0.entries }
+        return all.sorted {
+            $0.value.height != $1.value.height ? $0.value.height > $1.value.height : $0.key < $1.key
+        }.prefix(max(0, limit)).map { ($0.key, $0.value) }
     }
 }
 
@@ -328,7 +367,7 @@ extension NodeRuntime {
             canonicalCID: { height in
                 view.value?.heights[Int(clamping: height)]
             },
-            committedChildren: { view.value?.children ?? [:] },
+            committedChildren: { view.value?.children },
             mempool: { _ in
                 view.value?.mempool ?? ChainReads.MempoolListing(count: 0, bytes: 0, cids: [])
             },

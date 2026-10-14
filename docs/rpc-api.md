@@ -90,7 +90,7 @@ Mining templates are requested at Nexus and can carry every hosted descendant.
 | `GET /api/chain/info` | Chain metadata | yes |
 | `GET /api/chain/spec` | Active chain spec | yes |
 | `GET /api/chain/genesis` | Selected genesis CID | yes |
-| `GET /api/chain/children?chainPath=P&after=<dir>&limit=<n>` | Every child directory P's canonical chain has committed, each with its newest child block | yes |
+| `GET /api/chain/children?chainPath=P&limit=<n>` | The child directories P's canonical chain has committed, most recent first, each with its newest child block | yes |
 | `GET /api/chain/endpoints?chainPath=P/D` | Declared read URLs of a child chain, unverified | yes |
 | `GET /status` | Operator status including template digest | no |
 | `GET /metrics` | Prometheus exposition | no |
@@ -135,22 +135,22 @@ does not host that child chain).
 
 ## Child directories
 
-`GET /api/chain/children?chainPath=Nexus/Alpha` lists every directory the
-chain's canonical blocks have ever committed, in order, each with its newest
-child block (`blockHash`) and the height that committed it
-(`committedAtHeight`). It is read from an index the node keeps of what each
-header on the chain it acts on records, so a child that has gone quiet stays
-listed, and a reorg moves a directory back to its newest commitment on the
-chain that remains. At most `limit` (default and cap 100) per page; `next`,
-when present, is the `after` for the following page.
+`GET /api/chain/children?chainPath=Nexus/Alpha` lists the directories the
+chain's canonical blocks have committed, the most recently committed first
+(ties by directory), each with its newest child block (`blockHash`) and the
+height that committed it (`committedAtHeight`); at most `limit` (default and
+cap 100). It is read from an index the node keeps of what each header on the
+chain it acts on records: a child that has gone quiet stays in it, and a
+reorg returns a directory to its newest commitment on the chain that remains.
+Each height keeps what its block changed, so a tip move costs only what
+changed.
 
 ```json
 {
   "chainPath": ["Nexus", "Alpha"],
   "children": [
     { "directory": "Beta", "blockHash": "<cid>", "committedAtHeight": "812" }
-  ],
-  "next": null
+  ]
 }
 ```
 

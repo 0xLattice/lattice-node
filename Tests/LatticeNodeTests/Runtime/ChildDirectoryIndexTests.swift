@@ -30,6 +30,8 @@ final class ChildDirectoryIndexTests: XCTestCase {
         XCTAssertEqual(entry(view, "swap"), .init(cid: "w1", height: 1), "a quiet child stays listed")
         XCTAssertEqual(view.children.count, 2)
         XCTAssertEqual(view.heights.count, 4)
+        XCTAssertEqual(view.children.mostRecent(10).map(\.directory), ["stoa", "swap"], "most recent first")
+        XCTAssertEqual(view.children.mostRecent(1).map(\.directory), ["stoa"])
     }
 
     func testTheTipAdvancingAddsOnlyWhatTheNewBlocksCommit() {
@@ -60,6 +62,29 @@ final class ChildDirectoryIndexTests: XCTestCase {
         XCTAssertNil(entry(view, "gone"), "committed only on the abandoned branch")
         XCTAssertEqual(entry(view, "other"), .init(cid: "o3", height: 3))
         XCTAssertEqual((0..<view.heights.count).compactMap { view.heights[$0] }, ["g", "b1", "c2", "c3"])
+    }
+
+    /// The tip moving back and forth between siblings returns the index to
+    /// the same state each time: each height undoes exactly what it did.
+    func testFlippingBetweenSiblingsRestoresTheSameIndex() {
+        commitments = [
+            "g": ["a": "a0"],
+            "b1": ["a": "a1", "b": "b1"],
+            "x2": ["a": "ax", "c": "cx"],
+            "y2": ["b": "by"],
+        ]
+        var view = NodeReadView()
+        move(&view, to: ["g", "b1", "x2"])
+        let onX = view.children.mostRecent(10).map { "\($0.directory)=\($0.child.cid)@\($0.child.height)" }
+        move(&view, to: ["g", "b1", "y2"])
+        XCTAssertEqual(entry(view, "a"), .init(cid: "a1", height: 1))
+        XCTAssertEqual(entry(view, "b"), .init(cid: "by", height: 2))
+        XCTAssertNil(entry(view, "c"))
+        move(&view, to: ["g", "b1", "x2"])
+        XCTAssertEqual(view.children.mostRecent(10).map { "\($0.directory)=\($0.child.cid)@\($0.child.height)" }, onX)
+        move(&view, to: ["g"])
+        XCTAssertEqual(entry(view, "a"), .init(cid: "a0", height: 0))
+        XCTAssertEqual(view.children.count, 1)
     }
 
     func testABlockWithNoRecordedCommitmentsCommitsNothing() {

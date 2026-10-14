@@ -41,7 +41,7 @@ public struct ChainReads: Sendable {
     let canonicalCID: @Sendable (UInt64) async -> String?
     /// Every directory the chain to that tip commits, with its newest
     /// commitment (the read view's index of what headers record).
-    let committedChildren: @Sendable () async -> [String: NodeReadView.CommittedChild]
+    let committedChildren: @Sendable () async -> ChildDirectoryIndex?
     /// The pool's size, and its CIDs only when `listing` (status reads
     /// never build the listing).
     let mempool: @Sendable (_ listing: Bool) async -> MempoolListing
@@ -58,7 +58,7 @@ public struct ChainReads: Sendable {
         accepted: (@Sendable (String) async -> Bool)? = nil,
         tip: @escaping @Sendable () async -> ChainStatus,
         canonicalCID: @escaping @Sendable (UInt64) async -> String?,
-        committedChildren: @escaping @Sendable () async -> [String: NodeReadView.CommittedChild] = { [:] },
+        committedChildren: @escaping @Sendable () async -> ChildDirectoryIndex? = { nil },
         mempool: @escaping @Sendable (_ listing: Bool) async -> MempoolListing,
         peerCount: @escaping @Sendable () -> Int = { 0 }
     ) {
@@ -383,23 +383,19 @@ public struct ChainReads: Sendable {
     /// The newest child block this chain's canonical blocks commit under
     /// `directory`, however long ago.
     public func committedChild(directory: String) async -> String? {
-        await committedChildren()[directory]?.cid
+        await committedChildren()?[directory]?.cid
     }
 
-    /// The directories this chain's canonical blocks have committed, in
-    /// order, each with its newest commitment: at most `limit`, after
-    /// `after` when given.
-    public func explorerChainChildren(after: String?, limit: Int) async -> ExplorerChainChildren {
-        let all = await committedChildren()
-        let directories = all.keys.sorted().filter { after == nil || $0 > after! }
-        let page = directories.prefix(Self.boundedExplorerLimit(limit))
+    /// The directories this chain's canonical blocks have committed, the most
+    /// recently committed first, each with its newest commitment: at most
+    /// `limit`.
+    public func explorerChainChildren(limit: Int) async -> ExplorerChainChildren {
+        let recent = await committedChildren()?.mostRecent(Self.boundedExplorerLimit(limit)) ?? []
         return ExplorerChainChildren(
             chainPath: chainPath,
-            children: page.map { directory in
-                let child = all[directory]!
-                return ExplorerCommittedChild(directory: directory, blockHash: child.cid, committedAtHeight: child.height)
-            },
-            next: page.count < directories.count ? page.last : nil
+            children: recent.map {
+                ExplorerCommittedChild(directory: $0.directory, blockHash: $0.child.cid, committedAtHeight: $0.child.height)
+            }
         )
     }
 
