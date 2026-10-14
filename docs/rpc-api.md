@@ -135,10 +135,8 @@ does not host that child chain).
 ## Child read endpoints
 
 `GET /api/chain/endpoints?chainPath=Nexus/Alpha/Beta` names a child; this node
-must host its parent (`Nexus/Alpha`), else 404. It also answers 404 when none
-of the parent's last 64 canonical blocks commits the child's directory and
-the node does not host the child. 400 for a missing or malformed path, or
-`Nexus` itself.
+must host its parent (`Nexus/Alpha`), else 404. 400 for a missing or
+malformed path, or `Nexus` itself.
 
 ```json
 {
@@ -163,8 +161,10 @@ then URLs other hosts declared over the overlay
 only for a level it hosts). The lookup asks at most 8 hosts found through the
 child's read-endpoint provider records, in random order, takes at most 2 URLs
 from any one, ends within 2 seconds (provider discovery included), closes any
-session it dialed only to ask, coalesces identical concurrent lookups, and
-caches a result for 30 seconds (an empty one for 5). The URLs are NOT
+session it dialed only to ask, coalesces identical concurrent lookups,
+caches a result for 30 seconds (an empty one for 5), and runs at most 16
+lookups at once: past that, a lookup for another name finds nothing and is
+not cached. The URLs are NOT
 verified and may name any host, internal addresses included: check what a URL
 serves before using it (`GET /api/chain/info?chainPath=...` there names the
 chain), and do not dial a non-public host on a third party's behalf.

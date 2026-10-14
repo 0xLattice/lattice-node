@@ -91,8 +91,9 @@ public struct ExplorerBlockChildren: Codable, Sendable, Equatable {
 }
 
 /// `GET /api/chain/endpoints`: the read URLs declared for a child chain,
-/// UNVERIFIED, beside the child block its parent commits under its
-/// directory. A reader accepts a URL only if it serves that block.
+/// UNVERIFIED, beside the child block its parent most recently commits
+/// under its directory (information only: it can be a block the child
+/// chain did not keep, or one nobody serves).
 public struct ExplorerChainEndpoints: Codable, Sendable, Equatable {
     public let chainPath: [String]
     public let committedBlock: String?

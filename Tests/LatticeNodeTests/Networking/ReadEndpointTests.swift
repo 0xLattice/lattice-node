@@ -215,6 +215,29 @@ final class ReadEndpointTests: XCTestCase {
         XCTAssertEqual(expired, 2)
     }
 
+    /// Distinct names miss the cache and never coalesce, so the number of
+    /// lookups running at once is what bounds the overlay work a public
+    /// caller can start. Past it a request gets nothing, uncached; once the
+    /// running ones end, lookups start again.
+    func testLookupsRunningAtOnceAreBounded() async throws {
+        let script = Script(providers: []) { _, _ in [] }
+        await script.slowDiscovery(200_000_000)
+        let directory = await directory(script)
+        let fired = 40
+        let results = await withTaskGroup(of: Int.self) { group in
+            for n in 0..<fired {
+                group.addTask { await directory.lookup(["Nexus", "Made-up-\(n)"]).count }
+            }
+            return await group.reduce(into: []) { $0.append($1) }
+        }
+        XCTAssertEqual(results, Array(repeating: 0, count: fired))
+        let started = await script.lookups
+        XCTAssertEqual(started, ReadEndpointDirectory.maximumConcurrentLookups)
+        _ = await directory.lookup(["Nexus", "Made-up-after"])
+        let after = await script.lookups
+        XCTAssertEqual(after, started + 1, "a lookup runs again once the others ended")
+    }
+
     /// Nothing found is remembered only briefly: a host that just announced
     /// is found on a lookup soon after.
     func testAnEmptyResultIsCachedOnlyBriefly() async throws {
