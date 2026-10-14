@@ -481,7 +481,11 @@ extension NodeRuntime {
     ) async -> T {
         guard let remote else { return await work(storage.workFetcher) }
         return await remote.withRootTracing(rootCID, bundle: false) { session in
-            await work(storage.ownReads(through: session))
+            // Peers serve whole Volumes by their roots. A block's own Volume
+            // this store does not hold is read whole first, so what it lists
+            // is read from it, not asked of peers one entry at a time.
+            if await !storage.broker.hasVolume(root: rootCID) { _ = await session.volume(rootCID: rootCID) }
+            return await work(storage.ownReads(through: session))
         }.value
     }
 

@@ -29,7 +29,8 @@ final class BlockBodiesTests: XCTestCase {
         peers: [PeerEndpoint] = [],
         storageDirectory reused: URL? = nil,
         blockBodies: BlockBodies = .all,
-        hosted: Bool = false
+        hosted: Bool = false,
+        resourcePolicy: NodeResourcePolicy = .default
     ) throws -> Host {
         let storageDirectory = reused ?? FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-node-bodies-\(UUID().uuidString)", isDirectory: true
@@ -43,6 +44,7 @@ final class BlockBodiesTests: XCTestCase {
             listenPort: port,
             rpcPort: NetworkTransportTestPorts.allocate(),
             webSocket: .off,
+            resourcePolicy: resourcePolicy,
             blockBodies: blockBodies,
             hostedChildren: hosted ? [Self.alpha] : [],
             childSpecs: hosted ? [Self.alpha: Self.alphaSpec] : [:]
@@ -279,5 +281,51 @@ final class BlockBodiesTests: XCTestCase {
         let genesis = await storage.volume(childGenesis)
         XCTAssertNotNil(genesis, "every node holds each chain's genesis block")
         await runtime.stop()
+    }
+
+    /// A joiner whose memory for what it reads is far smaller than the
+    /// bodies it fetches ahead: a body it fetched is gone from memory by the
+    /// time its block executes, and is read again whole. It syncs, and holds
+    /// every body it executed.
+    func testAJoinerWithLittleMemoryForReadsSyncsAndKeepsEveryBody() async throws {
+        let producer = try host(keyByte: 0xae)
+        let (producerRuntime, _) = try await start(producer)
+        let keys = (0..<3).map { _ in CryptoUtils.generateKeyPair() }
+        var blocks: [String] = [try await mine(producerRuntime)]
+        var transactions: [String] = []
+        for round in 0..<30 {
+            for key in keys {
+                let header = try HeaderImpl(node: TransactionBody(
+                    accountActions: [], actions: [], depositActions: [], receiptActions: [], withdrawalActions: [],
+                    signers: [CryptoUtils.createAddress(from: key.publicKey)], nonce: UInt64(round), chainPath: ["Nexus"]
+                ))
+                let transaction = Transaction(
+                    signatures: [key.publicKey: try XCTUnwrap(TransactionSigning.sign(
+                        bodyHeader: header, privateKeyHex: key.privateKey
+                    ))],
+                    body: header
+                )
+                transactions.append(try await producerRuntime.submitTransaction(
+                    SubmitTransactionRequest(transaction: transaction)
+                ).transactionCID)
+            }
+            blocks.append(try await mine(producerRuntime))
+        }
+        let tip = try XCTUnwrap(blocks.last)
+
+        let joiner = try host(
+            keyByte: 0xaf, peers: [producer.endpoint],
+            resourcePolicy: NodeResourcePolicy(maximumAcquisitionStorageBytes: 32 * 1024)
+        )
+        let (runtime, storage) = try await start(joiner)
+        try await eventually("the joiner reaches the producer's tip", within: .seconds(60)) {
+            runtime.published.value?.actOnTip == tip
+        }
+        await runtime.stop()
+        await producerRuntime.stop()
+        let heldBlocks = await bodiesHeld(storage, of: blocks)
+        XCTAssertEqual(heldBlocks, blocks, "every body it executed is stored")
+        let heldTransactions = await bodiesHeld(storage, of: transactions)
+        XCTAssertEqual(heldTransactions, transactions)
     }
 }
