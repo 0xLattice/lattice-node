@@ -28,7 +28,7 @@ Before exposing a node:
    public reads.
 8. Configure a mining recipient for every chain that should pay rewards.
 9. Reserve enough disk for unbounded fact history and retained content, or
-   set `blockBodies` (see "What a node keeps").
+   set `blockBodies` and `state` (see "What a node keeps").
 10. Test a clean shutdown, restart, and recovery before accepting traffic.
 
 ## How a node finds the network
@@ -468,7 +468,38 @@ A node that executes a chain from its genesis needs every body from some
 peer, so a network needs nodes on `all`; people with a stake in a chain have
 their own reason to run one. Keep `all` on a node an explorer reads.
 
-Switching to `none` takes effect at the next start, which lets go of every
+`state` in `lattice.json` (`--state`) says which state it keeps:
+
+- `all`, the default: the state of every block it executed.
+- `tip`: the state of each chain's tip. State a newer block replaced is
+  let go of.
+- `none`: none between blocks. What a block reads is held until it has
+  executed, and what the last execution touched until the next one.
+
+Executing a block is the node's own work: state it reads and does not
+hold comes from peers. What anyone can cause, a submitted transaction's
+check and a state read, uses only what the node holds.
+
+On `tip` the node answers state reads at its tip, and `404` for what an
+older block's state held and the tip's does not. When the chain moves to
+another branch, state the branch it left had changed is needed again. A
+block that reads it reads it from peers; the node holds it again once a
+block changes it. Until then reads of it answer `404`, and a transaction
+that needs it is pooled unchecked and is mined by a peer, not by this node.
+The first start on `tip` counts the whole state of each tip; state reads
+are answered meanwhile, while submissions and mining wait for it.
+
+On `none` the node answers state reads only for what the last block
+touched. A submitted transaction is checked against what this node holds:
+one that needs other state is pooled unchecked, relayed, and mined by a
+peer, not by this node.
+
+A node that is the only holder of a state and lets it go has lost it, so a
+network needs nodes on `all`. Switching to `tip` or `none` applies to state
+stored from then on: what a run on `all` stored stays until the node is
+synced again.
+
+Switching `blockBodies` to `none` takes effect at the next start, which lets go of every
 executed body but the tips' and the genesis blocks' before the node answers
 anything: the time that takes grows with the number of bodies it held.
 Bodies stored by a version before this setting are not let go of: sync the
