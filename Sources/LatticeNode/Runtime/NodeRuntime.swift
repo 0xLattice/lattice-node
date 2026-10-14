@@ -467,6 +467,9 @@ extension NodeRuntime {
         }
         var nextSession: UInt64 = 1
         var runningJobs = 0
+        /// The Volumes the operator pinned, as last read: announced with the
+        /// chains by each maintenance pass.
+        var operatorPins: [String] = []
         /// The running jobs, which the loop waits for before it lets the
         /// store go: a job reading from peers can outlast a step.
         var jobs: [UInt64: Task<Void, Never>] = [:]
@@ -660,6 +663,9 @@ extension NodeRuntime {
                 guard let event else { return true }
                 return await step(event)
             case .maintenance:
+                // Read here, on the loop: the pass runs off it and must not
+                // hold the store open past a stop.
+                operatorPins = await storage.operatorPins()
                 startNetworkMaintenance()
                 return true
             case .currentPeers(let current):
@@ -732,10 +738,10 @@ extension NodeRuntime {
                 peerMemory, configuration.peerTarget, configuration.peersBeforeSeeds
             )
             let retriesSeeds = !configuration.seedPeers.isEmpty
-            let storage = storage
+            // What the operator pinned is announced with the chains.
+            let announcing = announced + operatorPins
             spawn {
-                // What the operator pinned is announced with the chains.
-                for key in announced + (await storage.operatorPins()) {
+                for key in announcing {
                     await ivy.announceProvider(rootCID: key, expiresAt: expiry)
                 }
                 var connected = Set((await ivy.connectedPeers).map(\.publicKey))
