@@ -206,7 +206,7 @@ final class BundledBlockFetchTests: XCTestCase {
         return (try HeaderImpl(node: node).rawCID, try XCTUnwrap(node.toData()))
     }
 
-    func testABundledVolumeWithACorruptedEntryIsRejectedAndAttributedToItsServer() async throws {
+    func testABundledVolumeWithACorruptedEntryIsRejectedAndItsServerBlocked() async throws {
         let root = try content(1)
         let member = try content(2)
         let unused = try content(3)
@@ -217,6 +217,7 @@ final class BundledBlockFetchTests: XCTestCase {
         let other = PeerID(publicKey: String(repeating: "cd", count: 32))
         let requests = Requests()
         let credits = Requests()
+        let blocked = Requests()
         let source = IvyRootContentSource(
             fetch: { requested in
                 await requests.volume(requested)
@@ -231,7 +232,8 @@ final class BundledBlockFetchTests: XCTestCase {
                     AttributedVolumeResponse(rootCID: unused.cid, entries: [unused.cid: unused.data], servedBy: server),
                 ]
             },
-            credit: { _, bytes in await credits.volume("\(bytes)") }
+            credit: { _, bytes in await credits.volume("\(bytes)") },
+            block: { root, peer in await blocked.volume("\(root) \(peer.publicKey)") }
         )
         let result = await source.withRootTracing(root.cid) { session in
             let first = await session.fetch([root.cid])
@@ -239,10 +241,11 @@ final class BundledBlockFetchTests: XCTestCase {
             return (first, second, session.accountedBytes)
         }
         XCTAssertEqual(result.value.0, [root.cid: root.data])
-        // The bad Volume is its server's deficiency, and is then requested
-        // like any Volume: the session still gets it.
+        // The bad Volume blocks its server, and is then requested like any
+        // Volume: the session still gets it, from the other peer.
         XCTAssertEqual(result.value.1, [member.cid: member.data])
-        XCTAssertEqual(result.attribution.deficientVolumeSuppliers, [member.cid: [server.publicKey]])
+        let blockedPeers = await blocked.volumes
+        XCTAssertEqual(blockedPeers, ["\(member.cid) \(server.publicKey)"])
         let bundles = await requests.bundles
         let volumes = await requests.volumes
         XCTAssertEqual(bundles, [root.cid])
@@ -267,6 +270,8 @@ final class BundledBlockFetchTests: XCTestCase {
         var answersBundles = true
         /// The bundle names a Volume whose read never returns.
         var neverEnds = false
+        /// Every Volume is served with an entry that does not match its CID.
+        var corrupts = false
 
         init(_ storage: NodeStorage) { source = NodeStorageIvyContentSource(storage: storage) }
 
@@ -274,7 +279,13 @@ final class BundledBlockFetchTests: XCTestCase {
 
         func volume(rootCID: String, maxDataBytes: Int) async -> [ContentEntry] {
             if rootCID == "never" { try? await Task.sleep(for: .seconds(60)) }
-            return await source.volume(rootCID: rootCID, maxDataBytes: maxDataBytes)
+            let entries = await source.volume(rootCID: rootCID, maxDataBytes: maxDataBytes)
+            guard corrupts else { return entries }
+            return entries.map { entry in
+                var data = entry.data
+                if !data.isEmpty { data[data.startIndex] ^= 0xFF }
+                return ContentEntry(cid: entry.cid, data: data)
+            }
         }
 
         func volumeBundle(rootCID: String) async -> [String] {
@@ -480,6 +491,52 @@ final class BundledBlockFetchTests: XCTestCase {
             XCTAssertEqual(host.bundleRequestCount, 1)
             XCTAssertEqual(bystander.bundleRequestCount, others)
         }
+    }
+
+    /// Over a real overlay: a peer that serves a Volume whose entries do not
+    /// match their CIDs is blocked (its session closed, not redialled), and
+    /// the block then arrives from an honest peer, which stays connected.
+    func testAPeerThatServesACorruptVolumeIsBlockedAndTheBlockComesFromAnother() async throws {
+        let producer = try await storage(keyByte: 0x64)
+        let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
+        let recorded = await producer.volumeBundle(cid)
+        let (client, bad, badPeer) = try await overlay(serving: producer)
+        bad.corrupts = true
+        let remote = IvyRootContentSource(ivy: client)
+        do {
+            _ = try await storage(keyByte: 0x65).fetchChainBody(cid, remote: remote)
+            XCTFail("only a corrupt Volume was served")
+        } catch {}
+        var deadline = ContinuousClock.now + .seconds(10)
+        while await client.connectedPeers.contains(badPeer.id), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let stillConnected = await client.connectedPeers
+        XCTAssertFalse(stillConnected.contains(badPeer.id))
+
+        let honestKey = Curve25519.Signing.PrivateKey()
+        let honestPort = NetworkTransportTestPorts.allocate()
+        let honest = Ivy(config: IvyConfig(
+            signingKey: honestKey, listenPort: honestPort, stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false),
+            externalAddress: ("127.0.0.1", honestPort), mode: .overlay
+        ))
+        await honest.installNodeRuntime(delegate: Connections(), contentSource: CountingSource(producer))
+        try await honest.start()
+        addTeardownBlock { await honest.stop() }
+        try await client.connect(to: PeerEndpoint(
+            publicKey: honestKey.publicKey.rawRepresentation.map { String(format: "%02x", $0) }.joined(),
+            host: "127.0.0.1", port: honestPort
+        ))
+        let honestID = await honest.localID
+        deadline = ContinuousClock.now + .seconds(10)
+        while await !client.connectedPeers.contains(honestID), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let stored = try await storage(keyByte: 0x66).fetchChainBody(cid, remote: remote)
+        XCTAssertEqual(Set(stored), Set(recorded))
+        let connected = await client.connectedPeers
+        XCTAssertEqual(connected, [honestID])
     }
 
     /// A session whose bundle does not end loses the capability: it is asked

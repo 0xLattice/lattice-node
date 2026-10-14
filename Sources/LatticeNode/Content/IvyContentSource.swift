@@ -27,7 +27,6 @@ public struct IvyRootContentSource: Sendable {
         /// served. Never a size a peer only declared.
         public let byteBudgetExceeded: Bool
         public let contentUnavailable: Bool
-        public let deficientVolumeSuppliers: [String: Set<String>]
 
         public var soleRemoteSupplierPublicKey: String? {
             servedByPublicKeys.count == 1 ? servedByPublicKeys.first : nil
@@ -56,23 +55,11 @@ public struct IvyRootContentSource: Sendable {
         private var locallyLimited = false
         private var overBudget = false
         private var unavailable = false
-        private var deficientVolumeSuppliers: [String: Set<String>] = [:]
 
-        func record(
-            _ response: AttributedVolumeResponse,
-            requestedRoot: String,
-            complete: Bool,
-            providerDeficient: Bool
-        ) {
+        func record(_ response: AttributedVolumeResponse, complete: Bool) {
             lock.lock()
             if let peer = response.servedBy {
                 peerPublicKeys.insert(peer.publicKey)
-                if providerDeficient {
-                    deficientVolumeSuppliers[
-                        requestedRoot,
-                        default: []
-                    ].insert(peer.publicKey)
-                }
             }
             self.complete = self.complete && complete
             locallyLimited = locallyLimited
@@ -89,8 +76,7 @@ public struct IvyRootContentSource: Sendable {
                 allResponsesComplete: complete,
                 localCapacityUnavailable: locallyLimited,
                 byteBudgetExceeded: overBudget,
-                contentUnavailable: unavailable,
-                deficientVolumeSuppliers: deficientVolumeSuppliers
+                contentUnavailable: unavailable
             )
         }
 
@@ -254,6 +240,9 @@ public struct IvyRootContentSource: Sendable {
     /// Credits the peer that served a requested Volume once it verifies, so
     /// the overlay favours peers that serve this node when it is contended.
     private let credit: @Sendable (PeerID, Int) async -> Void
+    /// Blocks the peer that served a Volume failing its check for a root:
+    /// the bytes it sent are not what their CIDs name.
+    private let block: @Sendable (String, PeerID) async -> Void
     /// What the connected peers' hellos said they speak: who a bundle is asked of.
     let peerCapabilities = PeerCapabilities()
     let maximumStorageBytes: Int
@@ -262,6 +251,7 @@ public struct IvyRootContentSource: Sendable {
         private let fetchVolume: @Sendable (String) async -> AttributedVolumeResponse
         private let fetchBundle: BundleFetch
         private let credit: @Sendable (PeerID, Int) async -> Void
+        private let block: @Sendable (String, PeerID) async -> Void
         private let peerCapabilities: PeerCapabilities
         private let context: Context
 
@@ -271,11 +261,13 @@ public struct IvyRootContentSource: Sendable {
             fetch: @escaping @Sendable (String) async -> AttributedVolumeResponse,
             fetchBundle: @escaping BundleFetch,
             credit: @escaping @Sendable (PeerID, Int) async -> Void,
+            block: @escaping @Sendable (String, PeerID) async -> Void,
             peerCapabilities: PeerCapabilities
         ) {
             self.fetchVolume = fetch
             self.fetchBundle = fetchBundle
             self.credit = credit
+            self.block = block
             self.peerCapabilities = peerCapabilities
             context = Context(rootCID: rootCID, maximumStorageBytes: maximumStorageBytes)
         }
@@ -292,12 +284,8 @@ public struct IvyRootContentSource: Sendable {
                 && context.reserve(rootCID: context.rootCID)
             let complete = valid ? await context.store(volume) : false
             if complete { await creditServer(of: response, volume: volume) }
-            context.trace.record(
-                response,
-                requestedRoot: context.rootCID,
-                complete: complete,
-                providerDeficient: !valid
-            )
+            if !valid, let peer = response.servedBy { await block(context.rootCID, peer) }
+            context.trace.record(response, complete: complete)
         }
 
         public func fetch(_ cids: Set<String>) async -> [String: Data] {
@@ -308,10 +296,14 @@ public struct IvyRootContentSource: Sendable {
             let cached = await context.cached(cids)
             for rootCID in cids.subtracting(cached.keys).sorted() {
                 guard context.reserve(rootCID: rootCID) else { continue }
-                // A bundled Volume that does not verify is its server's
-                // deficiency, as a requested one's is, and the Volume is then
-                // requested: a bad bundle costs its server, never the block.
+                // A Volume that does not verify, bundled or requested, blocks
+                // the peer that sent it, and the Volume is then requested
+                // again: a bad Volume costs its server, never the block.
+                // A Volume nobody sent (none found, or this node's own
+                // capacity or cancellation) blames no one and is not retried,
+                // nor is one from a peer already blocked here.
                 var bundled = await context.bundled(rootCID, fetch: fetchBundle)
+                var blocked = Set<PeerID>()
                 while true {
                     let response = if let bundled { bundled.volume } else { await fetchVolume(rootCID) }
                     let volume = SerializedVolume(
@@ -322,14 +314,11 @@ public struct IvyRootContentSource: Sendable {
                         && (try? volume.validate()) != nil
                     let complete = valid ? await context.store(volume) : false
                     if complete { await creditServer(of: response, volume: volume) }
-                    context.trace.record(
-                        response,
-                        requestedRoot: rootCID,
-                        complete: complete,
-                        providerDeficient: !valid
-                    )
-                    guard let asked = bundled, !valid else { break }
-                    if let session = asked.session {
+                    let blamed = valid ? nil : response.servedBy.flatMap { blocked.insert($0).inserted ? $0 : nil }
+                    if let blamed { await block(rootCID, blamed) }
+                    context.trace.record(response, complete: complete)
+                    guard !valid, bundled != nil || blamed != nil else { break }
+                    if let session = bundled?.session {
                         peerCapabilities.revoke(ChainHandshake.volumeBundle, from: session)
                     }
                     bundled = nil
@@ -370,6 +359,7 @@ public struct IvyRootContentSource: Sendable {
     public init(ivy: Ivy, policy: NodeResourcePolicy = .default) {
         let capabilities = peerCapabilities
         credit = Self.tallyCredit(ivy)
+        block = Self.tallyBlock(ivy)
         maximumStorageBytes = policy.maximumAcquisitionStorageBytes
         // A Volume is taken at whatever size the wire carries and measured
         // here once verified: the size a peer declares is its claim, and a
@@ -411,13 +401,26 @@ public struct IvyRootContentSource: Sendable {
         { peer, bytes in await ivy.tally.recordUsefulReceived(peer: peer, bytes: bytes) }
     }
 
+    /// A peer that served a Volume failing its check broke the protocol
+    /// provably: Tally records the violation, the overlay passes the peer
+    /// over for that root, and its session is closed without reconnecting.
+    private static func tallyBlock(_ ivy: Ivy) -> @Sendable (String, PeerID) async -> Void {
+        { rootCID, peer in
+            await ivy.tally.recordProtocolViolation(peer: peer)
+            await ivy.reportDeficientContent(rootCID: rootCID, servedBy: peer)
+            await ivy.disconnect(peer)
+        }
+    }
+
     init(
         maximumStorageBytes: Int = Self.defaultPolicy.maximumAcquisitionStorageBytes,
         fetch: @escaping @Sendable (String) async -> AttributedVolumeResponse,
         fetchBundle: @escaping @Sendable (String) async -> [AttributedVolumeResponse] = { _ in [] },
-        credit: @escaping @Sendable (PeerID, Int) async -> Void = { _, _ in }
+        credit: @escaping @Sendable (PeerID, Int) async -> Void = { _, _ in },
+        block: @escaping @Sendable (String, PeerID) async -> Void = { _, _ in }
     ) {
         self.credit = credit
+        self.block = block
         self.maximumStorageBytes = maximumStorageBytes
         self.fetch = fetch
         self.fetchBundle = { rootCID, _ in (await fetchBundle(rootCID), nil) }
@@ -449,6 +452,7 @@ public struct IvyRootContentSource: Sendable {
             fetch: fetch,
             fetchBundle: bundled,
             credit: credit,
+            block: block,
             peerCapabilities: peerCapabilities
         )
         defer { session.cancelBundle() }
