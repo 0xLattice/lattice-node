@@ -152,6 +152,13 @@ final class RetentionRulesTests: XCTestCase {
                 )
             }, fetchBundle: { _ in [] })
             _ = try await joiner.fetchChainBody(header.rawCID, remote: remote)
+            let unpinned = try await joiner.broker.retainedRoots(scope: joiner.scopes.body(header.rawCID))
+            XCTAssertEqual(unpinned, [], "nothing is stored before the block is found valid")
+            let joinerBroker = await joiner.broker
+            try await joiner.storeValidBlock(
+                header.rawCID, at: ["Nexus"],
+                from: CoalescingFetcher(CompositeContentSource([joinerBroker, joiner.readCache]))
+            )
             let pinned = try await Set(joiner.broker.retainedRoots(scope: joiner.scopes.body(header.rawCID)))
             XCTAssertEqual(pinned, [header.rawCID, try Mempool.cid(of: carried)], "key \(key)")
         }

@@ -1257,7 +1257,7 @@ extension NodeRuntime {
                 bodies[key] = Task {
                     let roots = await NodeRuntime.retryingBody { bundle in
                         try await storage.fetchChainBody(
-                            cid, at: path, remote: remote, bundle: bundle, hosts: rendezvous
+                            cid, remote: remote, bundle: bundle, hosts: rendezvous
                         )
                     } waiting: { error in
                         inputs.yield(.bodyWaiting(
