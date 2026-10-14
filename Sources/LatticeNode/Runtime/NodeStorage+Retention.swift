@@ -18,6 +18,10 @@ struct RetentionScopes: Sendable {
 
     var bodyPrefix: String { chain + ":body:" }
 
+    /// The state of the tip of the chain at `path`, when the operator
+    /// keeps no other.
+    func state(at path: ChainPath) -> String { chain + ":state:" + path.joined(separator: "/") }
+
     func body(_ blockCID: String, at path: ChainPath = ["Nexus"]) -> String {
         bodyPrefix + path.joined(separator: "/") + ":" + blockCID
     }
@@ -46,7 +50,9 @@ extension NodeStorage {
     ) async throws {
         let named = Set(body)
         try await broker.mergeRetainedRoots(scope: scopes.body(blockCID, at: path), roots: named.sorted())
-        try await retainHeld(roots.filter { !named.contains($0) })
+        try await retainHeld(
+            roots.filter { !named.contains($0) }, scope: configuration.state == .tip ? scopes.state(at: path) : nil
+        )
     }
 
     /// Lets go of a block's body. What another block's body or the chain
@@ -88,5 +94,94 @@ extension NodeStorage {
         } catch {
             syncTrace("bodies not let go of at start: \(error)")
         }
+    }
+
+    // MARK: - State: tip
+
+    /// With `state: tip`: the state kept for the chain at `path` becomes
+    /// that of `tip`. A node of the state is named by its content, so one
+    /// can be named from several places: each is counted once for every
+    /// node of the tip's state that names it. The new state is walked
+    /// from its root down to the nodes already counted, and the last one
+    /// from its root down to the nodes still named; a node nothing names
+    /// any more is let go of. A node of the new state this store lacks (a
+    /// move to another branch brings back what was let go of) is read
+    /// from peers. If one cannot be read nothing changes, and the next
+    /// move starts from the same place.
+    nonisolated func keepState(of tip: String, at path: ChainPath, remote: IvyRootContentSource?) async {
+        guard configuration.state == .tip else { return }
+        do {
+            let last = try await store.stateTip(at: path)
+            guard last != tip, let root = try await store.blockFact(tip, at: path)?.postStateCID else { return }
+            var lastRoot: String?
+            if let last { lastRoot = try await store.blockFact(last, at: path)?.postStateCID }
+            let walk = TipStateWalk(storage: self, path: path)
+            let state = LatticeStateHeader(rawCID: root)
+            if let remote {
+                try await remote.withRootTracing(root, bundle: false) { session in
+                    try await walk.hold(state, fetcher: CoalescingFetcher(CompositeContentSource([broker, session])))
+                }.value
+            } else {
+                try await walk.hold(state, fetcher: localFetcher)
+            }
+            if let lastRoot { await walk.letGo(LatticeStateHeader(rawCID: lastRoot)) }
+            let (entered, left) = try await store.moveStateCounts(at: path, to: tip, changes: try await walk.finish())
+            try await retainHeld(entered, scope: scopes.state(at: path))
+            try await broker.releaseRetainedRoots(scope: scopes.state(at: path), roots: left)
+        } catch {
+            syncTrace("state of \(tip) not kept: \(error)")
+        }
+    }
+}
+
+/// One move of the kept state: the counts it read and how it changes them.
+private actor TipStateWalk {
+    private let storage: NodeStorage
+    private let path: ChainPath
+    private let storer: NodeImportStorage
+    private var counted: [String: Int] = [:]
+    private var changes: [String: Int] = [:]
+
+    init(storage: NodeStorage, path: ChainPath) {
+        self.storage = storage
+        self.path = path
+        storer = NodeImportStorage(storage: storage.broker)
+    }
+
+    private func count(_ cid: String) async throws -> Int {
+        if counted[cid] == nil { counted[cid] = try await storage.store.stateCount(cid, at: path) }
+        return (counted[cid] ?? 0) + (changes[cid] ?? 0)
+    }
+
+    /// One more node names `header`. A node not counted before is new to
+    /// the state: it is stored if this store lacks it, and names its own.
+    func hold(_ header: any Header, fetcher: any Fetcher) async throws {
+        let named = try await count(header.rawCID)
+        changes[header.rawCID, default: 0] += 1
+        guard named == 0 else { return }
+        let resolved = try await Self.resolved(header, fetcher: fetcher)
+        if let volume = resolved as? any Volume, await !storage.broker.hasVolume(root: header.rawCID) {
+            try await volume.store(storer: storer)
+        }
+        for child in NodeStorage.children(of: resolved) { try await hold(child, fetcher: fetcher) }
+    }
+
+    /// One node fewer names `header`. A node nothing names any more has
+    /// left the state, and no longer names its own.
+    func letGo(_ header: any Header) async {
+        guard let named = try? await count(header.rawCID), named > 0 else { return }
+        changes[header.rawCID, default: 0] -= 1
+        guard named == 1, let resolved = try? await Self.resolved(header, fetcher: storage.localFetcher) else { return }
+        for child in NodeStorage.children(of: resolved) { await letGo(child) }
+    }
+
+    /// What the walk read from peers is stored; the changes to the counts.
+    func finish() async throws -> [String: Int] {
+        try await storer.commit()
+        return changes
+    }
+
+    private static func resolved<H: Header>(_ header: H, fetcher: any Fetcher) async throws -> any Header {
+        try await header.resolve(fetcher: fetcher)
     }
 }

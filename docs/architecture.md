@@ -140,7 +140,9 @@ policy modules) and the Nexus genesis block are named by the chain. A body
 is let go of when its block is found invalid, and, when the operator keeps
 no bodies beyond the ones the node operates on (`blockBodies: none`), when
 another block becomes its chain's tip. A body stored for a block that never
-executes stays. Pins are in the store and a start leaves them as it finds
+executes stays. When the operator keeps only the tip's state (`state:
+tip`), state is named by its chain's state scope, and a node of it is let
+go of when no node of the tip's state names it. Pins are in the store and a start leaves them as it finds
 them, and sweeps what no scope names. The journal still lists the roots
 each batch stored, and nothing reads that list.
 

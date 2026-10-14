@@ -28,7 +28,7 @@ Before exposing a node:
    public reads.
 8. Configure a mining recipient for every chain that should pay rewards.
 9. Reserve enough disk for unbounded fact history and retained content, or
-   set `blockBodies` (see "What a node keeps").
+   set `blockBodies` and `state` (see "What a node keeps").
 10. Test a clean shutdown, restart, and recovery before accepting traffic.
 
 ## How a node finds the network
@@ -468,7 +468,24 @@ A node that executes a chain from its genesis needs every body from some
 peer, so a network needs nodes on `all`; people with a stake in a chain have
 their own reason to run one. Keep `all` on a node an explorer reads.
 
-Switching to `none` takes effect at the next start, which lets go of every
+`state` in `lattice.json` (`--state`) says which state it keeps:
+
+- `all`, the default: the state of every block it executed.
+- `tip`: the state of each chain's tip. State a newer block replaced is
+  let go of.
+
+On `tip` the node answers state reads at its tip, and `404` for what an
+older block's state held and the tip's does not. When the chain moves to
+another branch, state it let go of is needed again: what the first block
+there reads comes from a peer with that block's body, and the rest of the
+new tip's state is read from peers once the node is on it. Until then, and
+for as long as no peer serves it, reads of that state answer `404` and
+transactions that need it stay in the pool. A node that is the only holder
+of a state and lets go of it has lost it, so a network needs nodes on
+`all`. Switching to `tip` applies to state stored from then on: what a
+run on `all` stored stays until the node is synced again.
+
+Switching `blockBodies` to `none` takes effect at the next start, which lets go of every
 executed body but the tips' and the genesis blocks' before the node answers
 anything: the time that takes grows with the number of bodies it held.
 Bodies stored by a version before this setting are not let go of: sync the

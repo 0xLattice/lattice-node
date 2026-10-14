@@ -359,6 +359,7 @@ public final class NodeRuntime: Sendable {
             // of the ones a run that kept them left, before any step.
             for (path, level) in state.core.levels { state.bodyTips[path] = level.snapshot.actOnTip }
             await storage.letGoOfBodies(except: state.bodyTips)
+            state.settleState()
             state.refreshView()
             // After the loop ends, inputs are only drained until the stream
             // finishes, so no RPC waits forever.
@@ -523,6 +524,10 @@ extension NodeRuntime {
         /// go of a body when the operator keeps none beyond it.
         var executedThisStep: [BodyKey] = []
         var bodyTips: [ChainPath: String] = [:]
+        /// Each level's tip the kept state was last asked to move to, and
+        /// the move, which runs off the loop, one after another.
+        var stateTips: [ChainPath: String] = [:]
+        var stateMoves: [ChainPath: Task<Void, Never>] = [:]
 
         struct BodyKey: Hashable {
             let path: ChainPath
@@ -1068,9 +1073,8 @@ extension NodeRuntime {
             for effect in ordered {
                 guard await execute(effect) else { return false }
             }
-            // After every effect of the step: the jobs it queued to read
-            // blocks' transactions hold those bodies by now.
             await settleBodies()
+            settleState()
             // A tree copy is kept only for the current epoch's jobs.
             preflightLevels = preflightLevels.filter { core.levels[$0.key]?.mining.tipEpoch == $0.value.epoch }
             refreshView()
@@ -1395,6 +1399,21 @@ extension NodeRuntime {
                 bodyTips[path] = tip
                 past.removeAll { $0 == tip }
                 if !past.isEmpty { await storage.letGo(ofBodies: past, at: path) }
+            }
+        }
+
+        /// With only the tip's state kept: the kept state follows each
+        /// level's tip.
+        mutating func settleState() {
+            guard configuration.state == .tip else { return }
+            for (path, level) in core.levels where stateTips[path] != level.snapshot.actOnTip {
+                let tip = level.snapshot.actOnTip
+                stateTips[path] = tip
+                let (earlier, storage, remote) = (stateMoves[path], storage, remote)
+                stateMoves[path] = Task {
+                    await earlier?.value
+                    await storage.keepState(of: tip, at: path, remote: remote)
+                }
             }
         }
 

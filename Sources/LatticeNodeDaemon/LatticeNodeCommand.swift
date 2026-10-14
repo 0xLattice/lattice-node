@@ -86,6 +86,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Which block bodies (a block's own Volume and its transactions') this node keeps beyond the ones it needs to operate: all, or none. It always holds the bodies waiting to execute, each chain's tip, and each genesis block. With none, a body is let go of once another block is the tip, and is no longer served; headers, facts and state stay, so what the node weighs and selects does not change. A node that syncs from genesis needs peers that keep all.")
     var blockBodies = "all"
 
+    @Option(help: "Which state this node keeps: all, the state of every block it executed, or tip, the state of each chain's tip. With tip, state a newer block replaced is let go of and is no longer served or read at an older block; the node fetches from peers the state it needs to execute a block on another branch. A node that syncs from genesis needs peers that keep all.")
+    var state = "all"
+
     @Option(help: "Seconds with no newly accepted block on a hosted chain after which the node widens that chain's peer search: Nexus re-dials configured peers without a session, a child chain looks up its providers, and either dials peers it remembers. The node also announces each hosted child chain. Staleness is measured from the verified local tip. Discovery never affects validation or fork choice. 0 disables search.")
     var peerSearchInterval: Double = 600
 
@@ -145,6 +148,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         }
         guard let blockBodies = BlockBodies(rawValue: blockBodies) else {
             throw ValidationError("--block-bodies is all or none")
+        }
+        guard let state = StateRetention(rawValue: state) else {
+            throw ValidationError("--state is all or tip")
         }
         let publicReadLimits = try PublicReadRateLimits.validated(
             generalRate: publicReadRate,
@@ -216,6 +222,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             externalAddress: externalAddress,
             peerSearchInterval: peerSearchInterval,
             blockBodies: blockBodies,
+            state: state,
             hostedChildren: hosted.map(\.path),
             childSpecs: Dictionary(hosted.compactMap { entry in entry.spec.map { (entry.path, $0) } }) { first, _ in first },
             policyModules: try policyModule.map { try Data(contentsOf: URL(fileURLWithPath: $0)) },

@@ -70,6 +70,14 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   to the pool from this store, and from peers for a body it let go of; one
   no peer serves is not returned. State and facts are untouched, and the node builds
   on a block whose body is gone. Pinned by `BlockBodiesTests`.
+- **NODE-STORAGE-002.h** — With `state: tip` the node keeps the state each
+  chain's tip is made of. A node of the state is named by its content and
+  can be named from several places: the node counts, for each, the nodes of
+  the tip's state that name it, walking the new tip's state down to what is
+  already counted and the last one down to what is still named, and lets go
+  of a node nothing names. A node of the new state it lacks, after a move
+  to another branch, is read from peers; if one cannot be read the kept
+  state stays where it was until the next move. Pinned by `StateTipTests`.
 - **NODE-STORAGE-002.d** — Levels write parent before child; a crash
   between them restores with the child behind, never ahead. Pinned by
   `ChildLevelRestartTests.testACrashBetweenLevelWritesRestoresTheParentAhead`.

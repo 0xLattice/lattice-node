@@ -42,7 +42,7 @@ public struct Topology: Codable, Sendable {
         case listen, rpc, webSocket, peers, publicRead, externalAddress
         case publicReadRate, publicReadExpensiveRate, publicReadMaxRate
         case publicReadURL, publicSubmit, publicSubmitRate, minRelayFee
-        case servingMaxConcurrent, servingMaxInFlightVolumeBytes, blockBodies
+        case servingMaxConcurrent, servingMaxInFlightVolumeBytes, blockBodies, state
         case hostedChains, mine, rpcAllowedOrigins
     }
     public var listen: UInt16
@@ -94,6 +94,8 @@ public struct Topology: Codable, Sendable {
     /// The block bodies kept beyond what the node needs to operate
     /// (`--block-bodies`): `all` or `none`. Absent = `all`.
     public var blockBodies: String?
+    /// The state kept (`--state`): `all` or `tip`. Absent = `all`.
+    public var state: String?
     /// Child chains this process hosts as levels, parent before child.
     public var hostedChains: [String]?
     public var mine: TopologyMine?
@@ -185,6 +187,9 @@ public struct Topology: Codable, Sendable {
         if let blockBodies, blockBodies != "all", blockBodies != "none" {
             throw CtlError("blockBodies is all or none, not \(blockBodies)")
         }
+        if let state, state != "all", state != "tip" {
+            throw CtlError("state is all or tip, not \(state)")
+        }
         var ports: Set<UInt16> = []
         for port in [listen, rpc] + (publicRead.map { [$0] } ?? []) {
             guard port != 0, ports.insert(port).inserted else {
@@ -242,6 +247,7 @@ public struct Topology: Codable, Sendable {
             arguments += ["--serving-max-in-flight-volume-bytes", String(value)]
         }
         if let value = blockBodies { arguments += ["--block-bodies", value] }
+        if let value = state { arguments += ["--state", value] }
         return arguments
     }
 
