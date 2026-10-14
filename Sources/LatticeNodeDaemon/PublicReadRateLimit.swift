@@ -160,7 +160,7 @@ enum PublicReadRouteClass: Sendable, Equatable {
             // post-states, then one block's transaction list.
             self = .expensive
         case 3 where components[0] == "api" && components[1] == "chain" && components[2] == "endpoints":
-            // A peer fan-out.
+            // A peer fan-out, and a walk of the parent's recent commitments.
             self = .expensive
         case 2 where components[0] == "api" && components[1] == "deposits":
             // One response constructs a sparse witness for every raw key in

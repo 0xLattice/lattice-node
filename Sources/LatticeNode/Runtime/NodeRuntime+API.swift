@@ -281,7 +281,7 @@ extension NodeRuntime {
             canonicalCID: { height in
                 view.value?.heights[Int(clamping: height)]
             },
-            committedChildren: { view.value?.children },
+            childDirectories: { view.value?.children },
             mempool: { _ in
                 view.value?.mempool ?? ChainReads.MempoolListing(count: 0, bytes: 0, cids: [])
             },

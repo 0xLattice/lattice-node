@@ -176,14 +176,12 @@ final class ReadEndpointRuntimeTests: XCTestCase {
                     XCTAssertEqual(response.status, status, uri)
                 }
             }
-            // The directories Alpha has committed, from the index of what its
-            // headers record: Beta, with the block the endpoint listing names.
+            // The child directories Alpha's executed blocks have committed.
             try await client.execute(uri: "/api/chain/children?chainPath=Nexus/Alpha", method: .get) { response in
                 XCTAssertEqual(response.status, .ok)
                 let body = try JSONDecoder().decode(ExplorerChainChildren.self, from: Data(buffer: response.body))
                 XCTAssertEqual(body.chainPath, Self.alpha)
-                XCTAssertEqual(body.children.map(\.directory), ["Beta"])
-                XCTAssertEqual(body.children.first?.blockHash, committed)
+                XCTAssertEqual(body.directories, ["Beta"])
             }
             try await client.execute(
                 uri: "/api/block/\(alphaTip)/children?chainPath=Nexus/Alpha", method: .get

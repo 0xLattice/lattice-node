@@ -90,18 +90,11 @@ public struct ExplorerBlockChildren: Codable, Sendable, Equatable {
     public let children: [ExplorerChildBlock]
 }
 
-/// `GET /api/chain/children`: the directories the chain's executed blocks
-/// have committed, the most recently committed first, each with its newest
-/// child block and the height that committed it.
+/// `GET /api/chain/children`: the child directories the chain's executed
+/// blocks have committed, in order.
 public struct ExplorerChainChildren: Codable, Sendable, Equatable {
     public let chainPath: [String]
-    public let children: [ExplorerCommittedChild]
-}
-
-public struct ExplorerCommittedChild: Codable, Sendable, Equatable {
-    public let directory: String
-    public let blockHash: String
-    @DecimalString public var committedAtHeight: UInt64
+    public let directories: [String]
 }
 
 /// `GET /api/chain/endpoints`: the read URLs declared for a child chain,

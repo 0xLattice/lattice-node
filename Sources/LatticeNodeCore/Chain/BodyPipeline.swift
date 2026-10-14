@@ -132,7 +132,7 @@ extension ChainCore {
             if !update.excluded {
                 executedTransactions[cid] = transactions
                 if let meta = tree.getConsensusBlock(hash: cid) {
-                    executedChildren.record(meta.childCommitments, height: meta.blockHeight)
+                    executedChildren.record(meta.childCommitments.keys)
                 }
             }
             if let replyID = minedReplies.removeValue(forKey: cid) {

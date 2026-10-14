@@ -695,16 +695,15 @@ private func addPublicReadRoutes<Context: RequestContext>(
             context: context
         )
     }
-    // The directories this chain's executed blocks have committed, the most
-    // recently committed first, from the level core's list.
+    // The child directories this chain's executed blocks have committed, in
+    // order, from the level core's list.
     router.get("api/chain/children") { request, context in
         let service = try byPath(request)
         guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
             throw HTTPError(.notFound)
         }
-        let limit = try explorerParseLimit(request, defaultValue: 100, cap: 100)
         return try jsonCached(
-            await service.explorerChainChildren(limit: limit),
+            await service.explorerChainChildren(),
             cacheControl: statusCacheControl,
             request: request,
             context: context
