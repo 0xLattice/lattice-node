@@ -366,12 +366,15 @@ final class StateTipTests: XCTestCase {
         let node = try host(keyByte: 0xbd, peers: [producer.endpoint], state: .none)
         func holdsNoState(_ runtime: NodeRuntime, _ storage: NodeStorage, through tip: String) async throws {
             try await eventually("the node executes \(tip.suffix(6))") { runtime.published.value?.actOnTip == tip }
+            // The tip is published within the step that executed it; what it
+            // read is let go of at the end of that step.
+            try await eventually("nothing a block read is held once it has executed") {
+                (try? await storage.broker.retainedScopes(prefix: storage.scopes.chain + ":reads:"))?.isEmpty == true
+            }
             for block in blocks.dropLast() {
                 let state = try await stateNodes(of: block, in: storage)
                 XCTAssertNil(state, "an older block's state is not held")
             }
-            let reads = try await storage.broker.retainedScopes(prefix: storage.scopes.chain + ":reads:")
-            XCTAssertEqual(reads, [], "nothing a block read is held once it has executed")
         }
         do {
             let (runtime, storage) = try await start(node)
