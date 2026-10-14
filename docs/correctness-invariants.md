@@ -59,7 +59,8 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   again; executing a block and building on one read this store, a block's
   header record, then peers, checked against the CID; what peers served
   reaches the Volume store only as the Volumes this node derives when it
-  stores a block; retaining a root that is gone retains the rest. The checks anyone
+  stores a block, and only once the block's execution found it valid (a
+  fetched body is held in memory until then); retaining a root that is gone retains the rest. The checks anyone
   can cause (a submitted transaction, a public read) read this store alone.
   Pinned by `AbsentContentTests` and
   `SafetyNetCorruptStoreTests.testBootOpensAStoreWhoseVolumesAreGone`.

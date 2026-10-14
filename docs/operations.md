@@ -415,8 +415,10 @@ from local content.
 
 Persistence order is:
 
-1. store the content in one `volumes.db` transaction (a fetched or mined
-   block's Volumes together; a step's post-states together), then retain it;
+1. store the content in one `volumes.db` transaction (a block's Volumes
+   together, once its execution found it valid or it was mined here; a
+   step's post-states together), then retain it. A body fetched from peers
+   is held in memory until then, and a node does not serve it before;
 2. commit the complete multi-level `NodeBatch` (headers, child proofs, facts,
    and cursors) in one `state.db` transaction;
 3. publish the new snapshots.

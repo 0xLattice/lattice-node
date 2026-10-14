@@ -443,6 +443,13 @@ extension NodeRuntime {
                     validationContext: ValidationContext(nowMilliseconds: now())
                 )
                 let valid = verdict.retryFailure == nil && !verdict.provesInvalid
+                if valid {
+                    do {
+                        try await storage.storeValidBlock(job.blockHash, at: path, from: fetcher)
+                    } catch {
+                        storage.syncTrace("body of \(job.blockHash) not stored: \(error)")
+                    }
+                }
                 let transactions = valid ? await transactionIDs(ofBlock: job.blockHash, fetcher: fetcher) : []
                 return [.level(path, .connected(verdict, transactions: transactions))]
             }

@@ -127,6 +127,16 @@ extension NodeStorage {
         return roots
     }
 
+    /// Stores a block execution found valid, as `fetcher` reads it, and pins
+    /// it. None of it is in the store before: a body fetched from peers is
+    /// held in memory until then.
+    nonisolated func storeValidBlock(_ cid: String, at path: ChainPath, from fetcher: any Fetcher) async throws {
+        let roots = try await storingAndRetaining(cid, at: path, from: fetcher) { storage in
+            try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: storage)
+        }
+        bundles.record(root: cid, roots: roots)
+    }
+
     /// `ChainEffect.fetchBody`: the block's Volume and the nested Volumes its
     /// execution reads, through the content layer (local store first, then
     /// any overlay provider of the root), stored and retained locally.
@@ -140,19 +150,19 @@ extension NodeStorage {
     /// would be from peers that speak no bundles. `hosts` names the
     /// block's child chain: the bundle is asked first of its current peers.
     nonisolated func fetchChainBody(
-        _ cid: String, at path: ChainPath? = nil, remote: IvyRootContentSource, bundle: Bool = true,
-        hosts: ChainHosts? = nil
+        _ cid: String, remote: IvyRootContentSource, bundle: Bool = true, hosts: ChainHosts? = nil
     ) async throws -> [String] {
-        let path = path ?? configuration.chainPath
         let capture = IvyRootContentSource.AttributionCapture()
         do {
             return try await remote.withRootTracing(cid, bundle: bundle, hosts: hosts, capture: capture) { session in
-                let fetcher = CoalescingFetcher(CompositeContentSource([broker, session]))
-                let roots = try await storingAndRetaining(cid, at: path, from: fetcher) { storage in
-                    try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: storage)
-                }
-                bundles.record(root: cid, roots: roots)
-                return roots
+                // Read into memory, never into the store: what a peer sent is
+                // stored once the block's execution has found it valid. The
+                // session reads whole Volumes, so it is asked before what an
+                // earlier, failed attempt left in memory.
+                let fetcher = CoalescingFetcher(CompositeContentSource([broker, readCache.remembering(session)]))
+                let walked = NodeImportStorage(storage: nil)
+                try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: walked)
+                return await walked.takeStoredVolumeRoots()
             }.value
         } catch {
             // Content this node's own budget declined is named as that, not

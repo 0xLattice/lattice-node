@@ -125,8 +125,9 @@ bundle serving reads it, a node runs without it, and it may be deleted while
 the node is stopped.
 
 Persistence is content-first: referenced Volumes become durable before the
-fact transaction that names them. One admission's Volumes (a fetched or mined
-block's, or the post-states of one step) are one `volumes.db` transaction,
+fact transaction that names them. One admission's Volumes (a block's once
+its execution found it valid or it was mined here, or the post-states of
+one step) are one `volumes.db` transaction,
 then retained. The complete `NodeBatch` then commits in one SQLite transaction
 across every affected chain path, including each path's headers, child
 proofs, and sync cursors. A crash cannot leave part of a block's content or a
@@ -161,7 +162,8 @@ content its facts name is not damaged.
   it. A peer chooses what else it sends with a Volume: none of that is
   remembered, and nothing a peer sent is written to the Volume store as it
   came. The store's Volumes are only the ones this node derives when it
-  stores a block.
+  stores a block, and a block a peer sent is stored only once its execution
+  has found it valid: until then its body is held in memory.
 - Checking a submitted transaction reads this store alone, and so do the
   public read routes: anyone may submit or read, and neither spends this
   node's requests to its peers. A transaction whose state is not held stays
