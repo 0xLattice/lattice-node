@@ -206,7 +206,7 @@ final class BundledBlockFetchTests: XCTestCase {
         return (try HeaderImpl(node: node).rawCID, try XCTUnwrap(node.toData()))
     }
 
-    func testABundledVolumeWithACorruptedEntryIsRejectedAndItsServerBlocked() async throws {
+    func testABundledVolumeWithACorruptedEntryIsRejectedAndItsServerReported() async throws {
         let root = try content(1)
         let member = try content(2)
         let unused = try content(3)
@@ -217,7 +217,7 @@ final class BundledBlockFetchTests: XCTestCase {
         let other = PeerID(publicKey: String(repeating: "cd", count: 32))
         let requests = Requests()
         let credits = Requests()
-        let blocked = Requests()
+        let reported = Requests()
         let source = IvyRootContentSource(
             fetch: { requested in
                 await requests.volume(requested)
@@ -233,7 +233,7 @@ final class BundledBlockFetchTests: XCTestCase {
                 ]
             },
             credit: { _, bytes in await credits.volume("\(bytes)") },
-            block: { root, peer in await blocked.volume("\(root) \(peer.publicKey)") }
+            report: { root, peer in await reported.volume("\(root) \(peer.publicKey)") }
         )
         let result = await source.withRootTracing(root.cid) { session in
             let first = await session.fetch([root.cid])
@@ -244,8 +244,8 @@ final class BundledBlockFetchTests: XCTestCase {
         // The bad Volume blocks its server, and is then requested like any
         // Volume: the session still gets it, from the other peer.
         XCTAssertEqual(result.value.1, [member.cid: member.data])
-        let blockedPeers = await blocked.volumes
-        XCTAssertEqual(blockedPeers, ["\(member.cid) \(server.publicKey)"])
+        let reportedPeers = await reported.volumes
+        XCTAssertEqual(reportedPeers, ["\(member.cid) \(server.publicKey)"])
         let bundles = await requests.bundles
         let volumes = await requests.volumes
         XCTAssertEqual(bundles, [root.cid])
@@ -270,8 +270,6 @@ final class BundledBlockFetchTests: XCTestCase {
         var answersBundles = true
         /// The bundle names a Volume whose read never returns.
         var neverEnds = false
-        /// Every Volume is served with an entry that does not match its CID.
-        var corrupts = false
 
         init(_ storage: NodeStorage) { source = NodeStorageIvyContentSource(storage: storage) }
 
@@ -279,13 +277,7 @@ final class BundledBlockFetchTests: XCTestCase {
 
         func volume(rootCID: String, maxDataBytes: Int) async -> [ContentEntry] {
             if rootCID == "never" { try? await Task.sleep(for: .seconds(60)) }
-            let entries = await source.volume(rootCID: rootCID, maxDataBytes: maxDataBytes)
-            guard corrupts else { return entries }
-            return entries.map { entry in
-                var data = entry.data
-                if !data.isEmpty { data[data.startIndex] ^= 0xFF }
-                return ContentEntry(cid: entry.cid, data: data)
-            }
+            return await source.volume(rootCID: rootCID, maxDataBytes: maxDataBytes)
         }
 
         func volumeBundle(rootCID: String) async -> [String] {

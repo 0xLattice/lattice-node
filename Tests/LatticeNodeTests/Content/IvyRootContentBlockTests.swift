@@ -11,10 +11,10 @@ import cashew
 /// is requested again; a failure this node caused blames no one.
 final class IvyRootContentBlockTests: XCTestCase {
     private actor Log {
-        private(set) var blocked: [(root: String, peer: PeerID)] = []
+        private(set) var reported: [(root: String, peer: PeerID)] = []
         private(set) var credited: [PeerID] = []
         private(set) var asked = 0
-        func block(_ root: String, _ peer: PeerID) { blocked.append((root, peer)) }
+        func report(_ root: String, _ peer: PeerID) { reported.append((root, peer)) }
         func credit(_ peer: PeerID) { credited.append(peer) }
         func ask() -> Int {
             asked += 1
@@ -48,11 +48,11 @@ final class IvyRootContentBlockTests: XCTestCase {
                 return n <= answers.count ? answers[n - 1] : .empty
             },
             credit: { peer, _ in await log.credit(peer) },
-            block: { root, peer in await log.block(root, peer) }
+            report: { root, peer in await log.report(root, peer) }
         )
     }
 
-    func testAPeerSendingAnEntryThatDoesNotMatchItsCIDIsBlockedAndTheVolumeComesFromAnother() async throws {
+    func testAPeerSendingAnEntryThatDoesNotMatchItsCIDIsReportedAndTheVolumeComesFromAnother() async throws {
         let item = try content(1)
         var tampered = item.data
         tampered[tampered.startIndex] ^= 0xFF
@@ -63,14 +63,14 @@ final class IvyRootContentBlockTests: XCTestCase {
         ], log: log)
         let fetched = await source.withRoot(item.cid) { session in await session.fetch([item.cid]) }
         XCTAssertEqual(fetched, [item.cid: item.data])
-        let blocked = await log.blocked
-        XCTAssertEqual(blocked.map(\.root), [item.cid])
-        XCTAssertEqual(blocked.map(\.peer), [bad])
+        let reported = await log.reported
+        XCTAssertEqual(reported.map(\.root), [item.cid])
+        XCTAssertEqual(reported.map(\.peer), [bad])
         let credited = await log.credited
         XCTAssertEqual(credited, [honest])
     }
 
-    func testAPeerSendingAnotherRootIsBlockedAndTheVolumeComesFromAnother() async throws {
+    func testAPeerSendingAnotherRootIsReportedAndTheVolumeComesFromAnother() async throws {
         let wanted = try content(2)
         let other = try content(3)
         let log = Log()
@@ -80,11 +80,11 @@ final class IvyRootContentBlockTests: XCTestCase {
         ], log: log)
         let fetched = await source.withRoot(wanted.cid) { session in await session.fetch([wanted.cid]) }
         XCTAssertEqual(fetched, [wanted.cid: wanted.data])
-        let blocked = await log.blocked
-        XCTAssertEqual(blocked.map(\.peer), [bad])
+        let reported = await log.reported
+        XCTAssertEqual(reported.map(\.peer), [bad])
     }
 
-    func testAnHonestPeerIsNotBlocked() async throws {
+    func testAnHonestPeerIsNotReported() async throws {
         let item = try content(4)
         let log = Log()
         let source = source([
@@ -92,15 +92,15 @@ final class IvyRootContentBlockTests: XCTestCase {
         ], log: log)
         let fetched = await source.withRoot(item.cid) { session in await session.fetch([item.cid]) }
         XCTAssertEqual(fetched, [item.cid: item.data])
-        let blocked = await log.blocked
-        XCTAssertTrue(blocked.isEmpty)
+        let reported = await log.reported
+        XCTAssertTrue(reported.isEmpty)
         let asked = await log.asked
         XCTAssertEqual(asked, 1)
     }
 
-    /// A peer already blocked in this fetch is not blocked again, and its
+    /// A peer already reported in this fetch is not reported again, and its
     /// next bad Volume ends the attempt rather than asking again.
-    func testAPeerThatKeepsSendingABadVolumeIsBlockedOnce() async throws {
+    func testAPeerThatKeepsSendingABadVolumeIsReportedOnce() async throws {
         let item = try content(5)
         var tampered = item.data
         tampered[tampered.startIndex] ^= 0xFF
@@ -109,14 +109,14 @@ final class IvyRootContentBlockTests: XCTestCase {
         let source = source([bad, bad, bad], log: log)
         let fetched = await source.withRoot(item.cid) { session in await session.fetch([item.cid]) }
         XCTAssertTrue(fetched.isEmpty)
-        let blocked = await log.blocked
-        XCTAssertEqual(blocked.map(\.peer), [self.bad])
+        let reported = await log.reported
+        XCTAssertEqual(reported.map(\.peer), [self.bad])
         let asked = await log.asked
         XCTAssertEqual(asked, 2)
     }
 
     /// No Volume found, this node's own capacity, and this node's own byte
-    /// budget are not a peer's fault: nobody is blocked.
+    /// budget are not a peer's fault: nobody is reported.
     func testAFailureThisNodeCausedBlamesNoOne() async throws {
         let item = try content(6)
         let log = Log()
@@ -132,10 +132,10 @@ final class IvyRootContentBlockTests: XCTestCase {
         let declined = await overBudget.withRootTracing(item.cid) { session in await session.fetch([item.cid]) }
         XCTAssertTrue(declined.value.isEmpty)
         XCTAssertTrue(declined.attribution.byteBudgetExceeded)
-        let blocked = await log.blocked
-        XCTAssertTrue(blocked.isEmpty)
-        let blockedOverBudget = await budgetLog.blocked
-        XCTAssertTrue(blockedOverBudget.isEmpty)
+        let reported = await log.reported
+        XCTAssertTrue(reported.isEmpty)
+        let reportedOverBudget = await budgetLog.reported
+        XCTAssertTrue(reportedOverBudget.isEmpty)
     }
 
     /// A bad Volume handed to the session up front blocks its sender, and
@@ -153,7 +153,7 @@ final class IvyRootContentBlockTests: XCTestCase {
             await session.fetch([item.cid])
         }
         XCTAssertEqual(result.value, [item.cid: item.data])
-        let blocked = await log.blocked
-        XCTAssertEqual(blocked.map(\.peer), [bad])
+        let reported = await log.reported
+        XCTAssertEqual(reported.map(\.peer), [bad])
     }
 }
