@@ -80,6 +80,10 @@ final class ChildDirectoryIndexTests: XCTestCase {
         XCTAssertEqual(entry(view, "a"), .init(cid: "a1", height: 1))
         XCTAssertEqual(entry(view, "b"), .init(cid: "by", height: 2))
         XCTAssertNil(entry(view, "c"))
+        XCTAssertEqual(
+            view.children.mostRecent(10).map(\.directory), ["b", "a"],
+            "the most recent list is rebuilt after the tip moves"
+        )
         move(&view, to: ["g", "b1", "x2"])
         XCTAssertEqual(view.children.mostRecent(10).map { "\($0.directory)=\($0.child.cid)@\($0.child.height)" }, onX)
         move(&view, to: ["g"])

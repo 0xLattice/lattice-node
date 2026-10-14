@@ -71,7 +71,12 @@ final class ChildDirectoryIndex: Sendable {
         /// Per height: each directory its block committed, and its entry
         /// before that block.
         var undo: [[(directory: String, before: NodeReadView.CommittedChild?)]] = []
+        /// The most recently committed, built once per move when first read.
+        var recent: [(directory: String, child: NodeReadView.CommittedChild)]?
     }
+
+    /// The most a reader asks `mostRecent` for.
+    static let recentLimit = 100
 
     private let state = Mutex(State())
 
@@ -79,6 +84,7 @@ final class ChildDirectoryIndex: Sendable {
     /// of the blocks at the following heights, in order.
     func move(keep: Int, entered: [[String: String]]) {
         state.withLock { state in
+            state.recent = nil
             while state.undo.count > max(0, keep) {
                 for change in state.undo.removeLast().reversed() {
                     state.entries[change.directory] = change.before
@@ -103,13 +109,19 @@ final class ChildDirectoryIndex: Sendable {
 
     var count: Int { state.withLock { $0.entries.count } }
 
-    /// At most `limit` directories, the most recently committed first (ties
-    /// by directory).
+    /// At most `limit` (up to `recentLimit`) directories, the most recently
+    /// committed first (ties by directory). Sorted once per move, however
+    /// many readers ask.
     func mostRecent(_ limit: Int) -> [(directory: String, child: NodeReadView.CommittedChild)] {
-        let all = state.withLock { $0.entries }
-        return all.sorted {
-            $0.value.height != $1.value.height ? $0.value.height > $1.value.height : $0.key < $1.key
-        }.prefix(max(0, limit)).map { ($0.key, $0.value) }
+        let recent = state.withLock { state in
+            if let recent = state.recent { return recent }
+            let built = state.entries.sorted {
+                $0.value.height != $1.value.height ? $0.value.height > $1.value.height : $0.key < $1.key
+            }.prefix(Self.recentLimit).map { (directory: $0.key, child: $0.value) }
+            state.recent = built
+            return built
+        }
+        return Array(recent.prefix(max(0, limit)))
     }
 }
 
