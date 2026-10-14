@@ -5,9 +5,9 @@ import Tally
 /// Operator-declared public read URLs, discovered over the overlay. One rule
 /// at every level: a node answers "your read URL for chain P" only for a
 /// level it hosts, and a node hosting P's parent finds the hosts of P through
-/// the provider records they announce under P's read-endpoint key. Answers
-/// are UNVERIFIED claims: a reader accepts one only after the URL serves the
-/// block P's parent commits under P's directory.
+/// the provider records they announce under P's read-endpoint key: P's
+/// rendezvous. Answers are UNVERIFIED claims: a reader checks what a URL
+/// serves before it uses it.
 enum ReadEndpointTopic {
     static let request = "lattice.overlay.read-endpoint.request.v1"
     static let response = "lattice.overlay.read-endpoint.response.v1"

@@ -131,9 +131,28 @@ final class ReadEndpointRuntimeTests: XCTestCase {
         let own = await host.runtime.chainEndpoints(Self.beta)
         XCTAssertEqual(own?.endpoints.first, hostURL)
         XCTAssertEqual(own?.submitEndpoints, [hostURL])
-        // An uncommitted, unhosted name is not looked up.
-        let unknown = await alphaFollower.runtime.chainEndpoints(Self.alpha + ["Gamma"])
+        // A name nobody hosts and Alpha never commits lists nothing.
+        let unknown = await alphaFollower.runtime.chainEndpoints(Self.alpha + ["Delta"])
         XCTAssertNil(unknown)
+        // A child is found through its hosts' rendezvous, whatever Alpha
+        // commits: Gamma has no block anywhere, yet its host is listed.
+        let gamma = Self.alpha + ["Gamma"]
+        let gammaURL = "https://gamma-host.example"
+        // Connected to the follower directly: loopback Ivy refuses DHT
+        // referrals to loopback addresses.
+        let gammaHost = try await start(
+            keyByte: 0x55, hosted: [Self.alpha, gamma], url: gammaURL,
+            peers: [host.endpoint, alphaFollower.endpoint]
+        )
+        var gammaFound: ExplorerChainEndpoints?
+        try await eventually("Gamma's URL is found through Alpha's follower") {
+            for node in [host, alphaFollower, gammaHost] {
+                node.runtime.inputs.yield(.maintenance)
+            }
+            gammaFound = await alphaFollower.runtime.chainEndpoints(gamma)
+            return gammaFound?.endpoints == [gammaURL]
+        }
+        XCTAssertNil(gammaFound?.committedBlock, "Alpha commits no Gamma block")
 
         // The public route, and the children listing at a level the node
         // hosts without hosting the child: Beta listed by CID.

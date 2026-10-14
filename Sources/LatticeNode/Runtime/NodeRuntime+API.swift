@@ -286,16 +286,18 @@ extension NodeRuntime {
     }
 
     /// The read URLs declared for `chainPath`, a child of a level this node
-    /// hosts that the parent recently committed (or this node hosts): this
-    /// node's own when it hosts the child, then what the child's other hosts
-    /// answer. Nil when the parent is not hosted or commits no such child.
+    /// hosts: this node's own when it hosts the child, then what the hosts
+    /// found at the child's rendezvous answer. A child is found through its
+    /// hosts, never through what the parent commits: a committed block can
+    /// lose or be withheld. `committedBlock` is the child block the parent
+    /// most recently committed, for information. Nil when the parent is not
+    /// hosted, or nothing hosts, declares or commits the child.
     public func chainEndpoints(_ chainPath: [String]) async -> ExplorerChainEndpoints? {
         guard chainPath.count > 1, ChainAddress(chainPath) != nil else { return nil }
         let parent = Array(chainPath.dropLast())
         guard let parentReads = parent == reads.chainPath ? reads : levelReads[parent] else { return nil }
         let hostsChild = levelReads[chainPath] != nil
         let committed = await parentReads.committedChild(directory: chainPath[chainPath.count - 1])
-        guard committed != nil || hostsChild else { return nil }
         var declared = hostsChild
             ? configuration.publicReadURL.map {
                 [DeclaredReadEndpoint(url: $0, acceptsSubmit: configuration.publicSubmit)]
@@ -304,6 +306,7 @@ extension NodeRuntime {
         for endpoint in await readEndpoints.lookup(chainPath) where !declared.contains(where: { $0.url == endpoint.url }) {
             declared.append(endpoint)
         }
+        guard committed != nil || hostsChild || !declared.isEmpty else { return nil }
         return ExplorerChainEndpoints(
             chainPath: chainPath,
             committedBlock: committed,
