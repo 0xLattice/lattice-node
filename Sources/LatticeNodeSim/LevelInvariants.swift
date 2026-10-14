@@ -140,6 +140,17 @@ public enum LevelInvariants {
             if (world.invalid[path] ?? []).contains(hash) { throw fail("executed block \(hash) is invalid") }
         }
 
+        // The listed child directories are exactly those the executed blocks
+        // commit: every branch's, none from a weighed-only or invalid block.
+        var committed = Set<String>()
+        for hash in digest.executed {
+            committed.formUnion((core.tree.recordedChildCommitments(of: hash) ?? [:]).keys)
+        }
+        let listed = core.executedChildren.names
+        guard listed == committed.sorted() else {
+            throw fail("lists child directories \(listed); its executed blocks commit \(committed.sorted())")
+        }
+
         // Continuity against any executed parent state.
         if path.count > 1, let facts = host.parentFacts(for: path) {
             let parentPath = Array(path.dropLast())

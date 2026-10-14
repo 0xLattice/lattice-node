@@ -884,6 +884,7 @@ extension NodeRuntime {
         mutating func refreshView(_ path: ChainPath) {
             guard let level = core.levels[path], let output = outputs[path] else { return }
             var view = views[path] ?? NodeReadView()
+            view.children = level.executedChildren
             let snapshot = level.snapshot
             let tip = (hash: snapshot.actOnTip, height: snapshot.actOnHeight)
             // The chain's own current peers: every session for Nexus; for

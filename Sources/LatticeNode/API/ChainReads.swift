@@ -2,6 +2,7 @@ import Foundation
 import Ivy
 import Lattice
 import LatticeLightClient
+import LatticeNodeCore
 import cashew
 
 /// The node's read surface — chain status, blocks, transactions, state reads
@@ -39,6 +40,9 @@ public struct ChainReads: Sendable {
     let tip: @Sendable () async -> ChainStatus
     /// The block at a height of the chain to that tip.
     let canonicalCID: @Sendable (UInt64) async -> String?
+    /// The child directories this chain's executed blocks commit (the level
+    /// core's grow-only list).
+    let childDirectories: @Sendable () async -> ExecutedChildren?
     /// The pool's size, and its CIDs only when `listing` (status reads
     /// never build the listing).
     let mempool: @Sendable (_ listing: Bool) async -> MempoolListing
@@ -55,6 +59,7 @@ public struct ChainReads: Sendable {
         accepted: (@Sendable (String) async -> Bool)? = nil,
         tip: @escaping @Sendable () async -> ChainStatus,
         canonicalCID: @escaping @Sendable (UInt64) async -> String?,
+        childDirectories: @escaping @Sendable () async -> ExecutedChildren? = { nil },
         mempool: @escaping @Sendable (_ listing: Bool) async -> MempoolListing,
         peerCount: @escaping @Sendable () -> Int = { 0 }
     ) {
@@ -67,6 +72,7 @@ public struct ChainReads: Sendable {
         }
         self.tip = tip
         self.canonicalCID = canonicalCID
+        self.childDirectories = childDirectories
         self.mempool = mempool
         self.peerCount = peerCount
     }
@@ -390,6 +396,12 @@ public struct ChainReads: Sendable {
             height -= 1
         }
         return nil
+    }
+
+    /// The child directories this chain's executed blocks have committed,
+    /// in order.
+    public func explorerChainChildren() async -> ExplorerChainChildren {
+        ExplorerChainChildren(chainPath: chainPath, directories: await childDirectories()?.names ?? [])
     }
 
     public func explorerTransaction(cid: String) async -> ExplorerTransaction? {

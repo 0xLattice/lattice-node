@@ -262,6 +262,9 @@ public struct ChainCore: Sendable {
     /// The blocks this step's admissions weighed (`ChainTreeUpdate.weighed`),
     /// for the host to forward to run attribution. Reset by every step.
     public internal(set) var weighed: [String] = []
+    /// The child directories this level's executed blocks commit: built from
+    /// the held tree, then grown by every block that executes valid.
+    public let executedChildren = ExecutedChildren()
 
     /// A core over a bootstrapped, restored or empty tree, with its weigh
     /// log and the per-peer stream cursors the shell persisted. `roots` are
@@ -281,6 +284,9 @@ public struct ChainCore: Sendable {
         while let hash = stack.popLast() {
             guard let meta = tree.getConsensusBlock(hash: hash) else { continue }
             index.add(hash, parent: meta.parentBlockHash, height: meta.blockHeight)
+            if tree.isExecuted(blockHash: hash) {
+                executedChildren.record(meta.childCommitments.keys)
+            }
             stack += meta.childHashes
         }
         mining = MiningState(

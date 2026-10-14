@@ -90,6 +90,13 @@ public struct ExplorerBlockChildren: Codable, Sendable, Equatable {
     public let children: [ExplorerChildBlock]
 }
 
+/// `GET /api/chain/children`: the child directories the chain's executed
+/// blocks have committed, in order.
+public struct ExplorerChainChildren: Codable, Sendable, Equatable {
+    public let chainPath: [String]
+    public let directories: [String]
+}
+
 /// `GET /api/chain/endpoints`: the read URLs declared for a child chain,
 /// UNVERIFIED, beside the child block its parent most recently commits
 /// under its directory (information only: it can be a block the child

@@ -339,6 +339,20 @@ final class LatticeCtlE2ETests: XCTestCase {
         chain == "Nexus" ? "" : "?chainPath=\(chain)"
     }
 
+    /// The child directories `chain`'s executed blocks have committed, read
+    /// with the node's loopback cookie.
+    private func childDirectories(_ host: CtlHost, chain: String = "Nexus") async -> [String]? {
+        guard let url = URL(string: "http://127.0.0.1:\(host.nexusRPC)/api/chain/children?chainPath=\(chain)"),
+              let cookie = try? String(contentsOf: HostLayout(root: host.root.path).rpcCookie, encoding: .utf8) else {
+            return nil
+        }
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("Basic " + Data(cookie.utf8).base64EncodedString(), forHTTPHeaderField: "Authorization")
+        guard let (data, _) = try? await URLSession.shared.data(for: request) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["directories"] as? [String]
+    }
+
     private func height(_ rpc: UInt16, chain: String) async -> Int {
         (await health(rpc, chain: chain)?["height"] as? String).flatMap { Int($0) } ?? -1
     }
@@ -368,6 +382,9 @@ final class LatticeCtlE2ETests: XCTestCase {
         try await waitFor("Alpha mined by merged mining", seconds: 180) {
             await self.height(host.nexusRPC, chain: alpha) >= 2
         }
+        try await waitFor("Nexus lists Alpha as a child") {
+            await self.childDirectories(host) == ["Alpha"]
+        }
         try await waitFor("the Alpha miner is funded", seconds: 180) {
             await self.balance(host, miner.address, chain: alpha) >= 10
         }
@@ -385,6 +402,8 @@ final class LatticeCtlE2ETests: XCTestCase {
         try await waitFor("Alpha resumes where it was") {
             await self.height(host.nexusRPC, chain: alpha) >= before
         }
+        let listed = await childDirectories(host)
+        XCTAssertEqual(listed, ["Alpha"], "the list is rebuilt from the store on restart")
         let balance = await balance(host, recipient.address, chain: alpha)
         XCTAssertEqual(balance, 10)
         _ = try await runCtl(["mine", "start"], root: host.root)

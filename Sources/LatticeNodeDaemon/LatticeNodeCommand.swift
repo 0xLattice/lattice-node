@@ -695,6 +695,20 @@ private func addPublicReadRoutes<Context: RequestContext>(
             context: context
         )
     }
+    // The child directories this chain's executed blocks have committed, in
+    // order, from the level core's list.
+    router.get("api/chain/children") { request, context in
+        let service = try byPath(request)
+        guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
+            throw HTTPError(.notFound)
+        }
+        return try jsonCached(
+            await service.explorerChainChildren(),
+            cacheControl: statusCacheControl,
+            request: request,
+            context: context
+        )
+    }
     router.get("api/block/:id/children") { request, context in
         let service = try byPath(request)
         guard let id = context.parameters.get("id"), isPlausibleCID(id) else {

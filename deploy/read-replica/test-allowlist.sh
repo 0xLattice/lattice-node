@@ -87,6 +87,7 @@ check GET  /api/block/1/children   200 "block children"
 check GET  "/api/transaction/$CID" 200 "transaction inclusion"
 check GET  "/api/blocks?before=10&limit=10" 200 "block summary page"
 check GET  "/api/chain/endpoints?chainPath=Nexus/testnet" 200 "child read endpoints"
+check GET  "/api/chain/children?chainPath=Nexus/testnet" 200 "child directories"
 
 echo "== denied: gated/mutating + writes + unknown get 403 =="
 check GET  /status                 403 "gated status off the public surface"
@@ -106,6 +107,7 @@ check POST /api/receipt-state      403 "POST to receipt state"
 check POST /api/block/1/transactions 403 "POST to block transactions"
 check POST /api/blocks             403 "POST to block summary page"
 check POST /api/chain/endpoints    403 "POST to child read endpoints"
+check POST /api/chain/children     403 "POST to child directories"
 
 ok()  { echo "  ok   $1"; }
 bad() { echo "  FAIL $1"; fail=1; }

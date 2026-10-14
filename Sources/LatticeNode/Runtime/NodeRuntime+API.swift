@@ -7,7 +7,8 @@ import UInt256
 import VolumeBroker
 
 /// What RPC reads besides the core's snapshot, published by the loop with
-/// it: the act-on chain by height, the pool listing and the template digest.
+/// it: the act-on chain by height, the pool listing and the template digest,
+/// and the level's executed child directories.
 struct NodeReadView: Sendable {
     var actOnTip: String?
     var heights = HeightIndex()
@@ -17,6 +18,8 @@ struct NodeReadView: Sendable {
     var peers = 0
     /// The first block of the body window, when it waits, and why.
     var waiting: Waiting?
+    /// The level core's directories of committed children (shared, grow-only).
+    var children: ExecutedChildren?
 
     struct Waiting: Sendable, Equatable {
         let cid: String
@@ -278,6 +281,7 @@ extension NodeRuntime {
             canonicalCID: { height in
                 view.value?.heights[Int(clamping: height)]
             },
+            childDirectories: { view.value?.children },
             mempool: { _ in
                 view.value?.mempool ?? ChainReads.MempoolListing(count: 0, bytes: 0, cids: [])
             },

@@ -90,6 +90,7 @@ Mining templates are requested at Nexus and can carry every hosted descendant.
 | `GET /api/chain/info` | Chain metadata | yes |
 | `GET /api/chain/spec` | Active chain spec | yes |
 | `GET /api/chain/genesis` | Selected genesis CID | yes |
+| `GET /api/chain/children?chainPath=P` | The child directories P's executed blocks have committed | yes |
 | `GET /api/chain/endpoints?chainPath=P/D` | Declared read URLs of a child chain, unverified | yes |
 | `GET /status` | Operator status including template digest | no |
 | `GET /metrics` | Prometheus exposition | no |
@@ -131,6 +132,18 @@ non-positive `limit`, is 400.
 entry is the child's `directory` and committed `blockHash`; `height` and
 `transactionCount` are omitted when this node does not hold the child block (it
 does not host that child chain).
+
+## Child directories
+
+`GET /api/chain/children?chainPath=Nexus/Alpha` lists, in order, every child
+directory the chain's executed blocks have committed. The node keeps the list
+in memory: built from the blocks it holds when it starts, then grown by every
+block that executes valid. It only grows. A listed child is reached through
+its hosts (`/api/chain/endpoints`).
+
+```json
+{ "chainPath": ["Nexus", "Alpha"], "directories": ["Beta"] }
+```
 
 ## Child read endpoints
 
