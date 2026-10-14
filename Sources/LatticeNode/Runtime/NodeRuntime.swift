@@ -76,6 +76,7 @@ public final class NodeRuntime: Sendable {
         let view: PublishedValue<NodeReadView>
     }
     let configuration: NodeConfiguration
+    let storage: NodeStorage
     /// What the open sessions' hellos advertised, as the content layer reads it.
     let peerCapabilities: PeerCapabilities
     let inputs: AsyncStream<Input>.Continuation
@@ -87,7 +88,8 @@ public final class NodeRuntime: Sendable {
     private let webSocket: WebSocketTransport
     private let delegate: NodeRuntimeIvyDelegate
     private let gate: NodeRuntimeInputGate
-    private let maintenance: Task<Void, Never>
+    /// Cancelled first when the runtime stops.
+    let maintenance: Task<Void, Never>
     /// Read URLs other hosts declare, found through their provider records.
     let readEndpoints: ReadEndpointDirectory
     /// The peers remembered across restarts; nil for a node told to connect
@@ -264,6 +266,7 @@ public final class NodeRuntime: Sendable {
         self.published = published
         self.readView = readView
         self.configuration = configuration
+        self.storage = storage
         reads = Self.reads(storage: storage, configuration: configuration, published: published, view: readView)
         var outputs: [ChainPath: LevelOutput] = [core.rootPath: LevelOutput(published: published, view: readView)]
         var levelReads: [ChainPath: ChainReads] = [:]
@@ -729,8 +732,10 @@ extension NodeRuntime {
                 peerMemory, configuration.peerTarget, configuration.peersBeforeSeeds
             )
             let retriesSeeds = !configuration.seedPeers.isEmpty
+            let storage = storage
             spawn {
-                for key in announced {
+                // What the operator pinned is announced with the chains.
+                for key in announced + (await storage.operatorPins()) {
                     await ivy.announceProvider(rootCID: key, expiresAt: expiry)
                 }
                 var connected = Set((await ivy.connectedPeers).map(\.publicKey))

@@ -507,6 +507,15 @@ node again to drop them. Switching back to `all` keeps every body from then
 on and brings none back. `volumes.db` does not shrink: the
 space is reused.
 
+Content outside the chain, such as a file an application names by CID, is
+kept when the operator pins it: `POST /pins` on the operator port (see
+`rpc-api.md`). The operator provides the bytes of a Volume the node does not
+hold: the node never stores a pin a peer sent. An application that keeps
+someone else's media reads it with `GET /fetch/:cid`, which stores nothing,
+validates it, and then pins it. It serves it, announces it,
+and keeps it across restarts until `DELETE /pins/:cid`.
+Only the Volume the CID names is kept: Volumes it links to are not.
+
 Back up only while the process is stopped, and snapshot both databases
 together. The identity and child specs need separate backups.
 

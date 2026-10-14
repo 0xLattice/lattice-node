@@ -7,6 +7,7 @@ import Lattice
 import LatticeNode
 import LatticeNodeCore
 import UInt256
+import VolumeBroker
 
 @main
 struct LatticeNodeCommand: AsyncParsableCommand {
@@ -325,6 +326,28 @@ protocol OperatorWrites: Sendable {
     func submitTransaction(_ request: SubmitTransactionRequest) async throws -> SubmitTransactionResponse
     func miningTemplate(_ request: MiningTemplateRequest) async throws -> MiningTemplateResponse
     func submitWork(_ request: SubmitWorkRequest) async throws -> SubmitWorkResponse
+    func pinVolume(_ root: String, entries: [String: Data]?) async throws
+    func fetchVolume(_ root: String) async throws -> SerializedVolume?
+    func unpinVolume(_ root: String) async throws
+    func pinnedVolumes() async -> [String]
+}
+
+/// `POST /pins`: the Volume an operator pins, by its root CID.
+struct PinRequest: Codable, Sendable {
+    let cid: String
+    /// The Volume's entries, CID to bytes (base64), when the node does not
+    /// hold it: a pin is stored only as the operator provides it.
+    let entries: [String: Data]?
+
+    init(cid: String, entries: [String: Data]? = nil) {
+        self.cid = cid
+        self.entries = entries
+    }
+}
+
+/// The Volumes the operator pinned.
+struct PinsResponse: Codable, Sendable {
+    let pins: [String]
 }
 
 extension NodeRuntime: OperatorWrites {}
@@ -917,6 +940,42 @@ private func addOperatorWriteRoutes(
             try await service.submitWork(input)
         }
     }
+    // Operator pins: a Volume the node holds, serves and announces until
+    // the operator unpins it.
+    router.get("pins") { request, context in
+        try json(PinsResponse(pins: await service.pinnedVolumes()), request: request, context: context)
+    }
+    // A Volume read from peers for the operator and not stored, in the shape
+    // `POST /pins` takes.
+    router.get("fetch/:cid") { request, context in
+        guard let cid = context.parameters.get("cid"), isPlausibleCID(cid) else {
+            throw HTTPError(.badRequest, message: "invalidCID")
+        }
+        return try await serviceCall(request: request, context: context) {
+            guard let volume = try await service.fetchVolume(cid) else {
+                throw HTTPError(.notFound, message: "notServed")
+            }
+            return PinRequest(cid: volume.root, entries: volume.entries)
+        }
+    }
+    router.post("pins") { request, context in
+        let input: PinRequest = try await decode(request, context: context)
+        guard isPlausibleCID(input.cid) else { throw HTTPError(.badRequest, message: "invalidCID") }
+        return try await serviceCall(request: request, context: context) {
+            try await service.pinVolume(input.cid, entries: input.entries)
+            return PinsResponse(pins: await service.pinnedVolumes())
+        }
+    }
+    router.delete("pins/:cid") { request, context in
+        try requireLoopbackHost(request)
+        guard let cid = context.parameters.get("cid"), isPlausibleCID(cid) else {
+            throw HTTPError(.badRequest, message: "invalidCID")
+        }
+        return try await serviceCall(request: request, context: context) {
+            try await service.unpinVolume(cid)
+            return PinsResponse(pins: await service.pinnedVolumes())
+        }
+    }
 }
 
 private func decode<Value: Decodable>(
@@ -958,16 +1017,20 @@ private func decode<Value: Decodable, Context: RequestContext>(
 }
 
 private func requireLoopbackJSON(_ request: Request) throws {
-    let hosts = [request.head.authority].compactMap { $0 }
-        + request.headers.filter { $0.name.canonicalName == "host" }.map(\.value)
-    for host in hosts where !isLoopbackAuthority(host) {
-        throw HTTPError(.forbidden, message: "operator routes answer only a loopback Host")
-    }
+    try requireLoopbackHost(request)
     let mediaType = request.headers[.contentType]?
         .split(separator: ";").first?
         .trimmingCharacters(in: .whitespaces).lowercased()
     guard mediaType == "application/json" else {
         throw HTTPError(.unsupportedMediaType, message: "Content-Type must be application/json")
+    }
+}
+
+private func requireLoopbackHost(_ request: Request) throws {
+    let hosts = [request.head.authority].compactMap { $0 }
+        + request.headers.filter { $0.name.canonicalName == "host" }.map(\.value)
+    for host in hosts where !isLoopbackAuthority(host) {
+        throw HTTPError(.forbidden, message: "operator routes answer only a loopback Host")
     }
 }
 
@@ -1011,6 +1074,12 @@ private func serviceCall<Value: Encodable, Context: RequestContext>(
         throw HTTPError(.serviceUnavailable, message: "shuttingDown")
     } catch NodeRuntimeError.unknownChain {
         throw HTTPError(.notFound, message: "unknownChain")
+    } catch NodeStorageError.missingMaterializedVolume {
+        throw HTTPError(.notFound, message: "notHeld")
+    } catch BrokerError.conflictingVolume {
+        throw HTTPError(.conflict, message: "conflictingVolume")
+    } catch BrokerError.missingRetainedRoot {
+        throw HTTPError(.serviceUnavailable, message: "contextChanged")
     }
 }
 

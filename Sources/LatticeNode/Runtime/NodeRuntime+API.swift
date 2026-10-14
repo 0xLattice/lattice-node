@@ -119,6 +119,36 @@ enum NodeRuntimeReply: Sendable {
 // MARK: - Operator writes: events with reply IDs, answered from effects
 
 extension NodeRuntime {
+    /// Operator pins: the node holds the Volume `root` names, serves it, and
+    /// announces that it has it, until the operator unpins it. A Volume the
+    /// node does not hold is stored only as the operator provides it
+    /// (`entries`), never read from peers. Throws when it is neither held
+    /// nor provided.
+    public func pinVolume(_ root: String, entries: [String: Data]? = nil) async throws {
+        guard !maintenance.isCancelled else { throw NodeRuntimeError.stopped }
+        try await storage.pin(root, entries: entries)
+        await ivy.announceProvider(rootCID: root, expiresAt: UInt64(Date().timeIntervalSince1970) + 1_200)
+    }
+
+    /// A Volume read from peers for the operator, checked against its CIDs
+    /// and not stored: an application validates it, then pins it if it
+    /// keeps it. Nil when no peer serves it.
+    public func fetchVolume(_ root: String) async throws -> SerializedVolume? {
+        guard !maintenance.isCancelled else { throw NodeRuntimeError.stopped }
+        let answer = await ivy.fetchVolume(rootCID: root)
+        let volume = SerializedVolume(root: answer.rootCID, entries: answer.entries)
+        return volume.root == root && (try? volume.validate()) != nil ? volume : nil
+    }
+
+    public func unpinVolume(_ root: String) async throws {
+        guard !maintenance.isCancelled else { throw NodeRuntimeError.stopped }
+        try await storage.unpin(root)
+    }
+
+    public func pinnedVolumes() async -> [String] {
+        await storage.operatorPins()
+    }
+
     public func submitTransaction(
         _ request: SubmitTransactionRequest
     ) async throws -> SubmitTransactionResponse {

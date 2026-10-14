@@ -122,6 +122,8 @@ The API has one unversioned route set. There are no `/v1` aliases.
 | `/transactions` | POST | Submit a signed transaction |
 | `/mining/templates` | POST | Build merged-mining work |
 | `/mining/work` | POST | Submit a nonce for issued work |
+| `/pins` | GET, POST, `DELETE /pins/:cid` | Volumes the operator keeps |
+| `/fetch/:cid` | GET | Read a Volume from peers, not stored |
 | `/api/...` | GET | Explorer and chain reads |
 
 Use `?chainPath=Nexus/Payments` on chain-selectable reads. A submitted
