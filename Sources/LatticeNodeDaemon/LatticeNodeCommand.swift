@@ -696,7 +696,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
         )
     }
     // The directories this chain's executed blocks have committed, the most
-    // recently committed first, from the read view's index.
+    // recently committed first, from the level core's list.
     router.get("api/chain/children") { request, context in
         let service = try byPath(request)
         guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
