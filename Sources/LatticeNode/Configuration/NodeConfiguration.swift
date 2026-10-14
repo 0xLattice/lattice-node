@@ -36,6 +36,7 @@ public enum NodeConfigurationError: Error, Equatable, CustomStringConvertible {
     case invalidPrivateKey
     case invalidPorts
     case invalidPublicReadURL
+    case invalidAnnounceLifetime
 
     public var description: String {
         switch self {
@@ -45,6 +46,8 @@ public enum NodeConfigurationError: Error, Equatable, CustomStringConvertible {
         case .invalidPorts: "overlay, RPC and WebSocket ports must be nonzero and distinct"
         case .invalidPublicReadURL:
             "public read URL must be an absolute http(s) URL with a host and no credentials, query or fragment"
+        case .invalidAnnounceLifetime:
+            "announce lifetime must be 1 to \(NodeConfiguration.maximumAnnounceLifetime) seconds: peers drop announcements that last longer"
         }
     }
 }
@@ -159,6 +162,14 @@ public struct NodeConfiguration: Sendable {
     /// peer, and it has no bearing on validation or fork choice. `0` disables
     /// stalled-peer search; provider announcements continue.
     public let peerSearchInterval: TimeInterval
+    /// Seconds a provider announcement lasts: each hosted chain's and each
+    /// operator pin's (operator choice). The maintenance pass renews them,
+    /// so a lifetime shorter than its cadence leaves gaps in which peers
+    /// cannot find this node as a provider.
+    public let announceLifetime: UInt64
+    /// The longest announcement the overlay accepts: an expiry further out
+    /// is dropped, by this node's overlay and by every peer's.
+    public static let maximumAnnounceLifetime = IvyConfig.defaultMaxProviderTTLSeconds
     public let resourcePolicy: NodeResourcePolicy
     /// The block bodies kept beyond what the node needs to operate
     /// (operator choice). Facts, headers and state are not bodies.
@@ -212,6 +223,7 @@ public struct NodeConfiguration: Sendable {
         contentServing: ContentServingLimits = .default,
         externalAddress: String? = nil,
         peerSearchInterval: TimeInterval = 600,
+        announceLifetime: UInt64 = 1_200,
         resourcePolicy: NodeResourcePolicy = .default,
         blockBodies: BlockBodies = .all,
         state: StateRetention = .all,
@@ -255,6 +267,9 @@ public struct NodeConfiguration: Sendable {
         if let publicReadURL, !Self.isValidPublicReadURL(publicReadURL) {
             throw NodeConfigurationError.invalidPublicReadURL
         }
+        guard (1...Self.maximumAnnounceLifetime).contains(announceLifetime) else {
+            throw NodeConfigurationError.invalidAnnounceLifetime
+        }
 
         self.address = address
         self.storagePath = storagePath
@@ -288,6 +303,7 @@ public struct NodeConfiguration: Sendable {
         self.externalAddress = externalAddress
         self.peerSearchInterval = peerSearchInterval.isFinite
             ? max(0, peerSearchInterval) : 0
+        self.announceLifetime = announceLifetime
         self.resourcePolicy = resourcePolicy
         self.blockBodies = blockBodies
         self.state = state
@@ -297,6 +313,11 @@ public struct NodeConfiguration: Sendable {
         self.publicReadURL = publicReadURL
         self.publicSubmit = publicSubmit
         self.minRelayFee = minRelayFee
+    }
+
+    /// When an announcement made at `now` (milliseconds) lapses, in seconds.
+    func announcementExpiry(at now: Int64) -> UInt64 {
+        UInt64(max(0, now / 1_000)) + announceLifetime
     }
 
     /// What this node's hello says it speaks and hosts: the one list the

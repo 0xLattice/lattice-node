@@ -93,6 +93,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Seconds with no newly accepted block on a hosted chain after which the node widens that chain's peer search: Nexus re-dials configured peers without a session, a child chain looks up its providers, and either dials peers it remembers. The node also announces each hosted child chain. Staleness is measured from the verified local tip. Discovery never affects validation or fork choice. 0 disables search.")
     var peerSearchInterval: Double = 600
 
+    @Option(help: "Seconds each provider announcement lasts: each hosted chain's and each pinned Volume's. The node renews them at least every 10 minutes (every --peer-search-interval when shorter), so a lifetime shorter than that leaves gaps in which peers cannot find this node as a provider. At most 86400: peers drop announcements that last longer.")
+    var announceLifetime: UInt64 = 1_200
+
     @Option(help: "Public read-only HTTP port; binds all interfaces and serves ONLY the bounded GET read routes (the read-replica allowlist, enforced in code). Chain data is public; this exposes no operator or write surface.")
     var publicReadPort: UInt16?
 
@@ -222,6 +225,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             ),
             externalAddress: externalAddress,
             peerSearchInterval: peerSearchInterval,
+            announceLifetime: announceLifetime,
             blockBodies: blockBodies,
             state: state,
             hostedChildren: hosted.map(\.path),
@@ -1076,6 +1080,8 @@ private func serviceCall<Value: Encodable, Context: RequestContext>(
         throw HTTPError(.notFound, message: "unknownChain")
     } catch NodeStorageError.missingMaterializedVolume {
         throw HTTPError(.notFound, message: "notHeld")
+    } catch NodeStorageError.invalidVolume {
+        throw HTTPError(.badRequest, message: "invalidVolume")
     } catch BrokerError.conflictingVolume {
         throw HTTPError(.conflict, message: "conflictingVolume")
     } catch BrokerError.missingRetainedRoot {

@@ -69,7 +69,8 @@ final class DaemonHTTPTests: XCTestCase {
     }
 
     /// The operator pins a Volume the node holds, lists it, and unpins it;
-    /// one no peer serves is `404`; a foreign Host is refused.
+    /// one it lacks is `404`, one given with bytes that are not it `400`; a
+    /// foreign Host is refused.
     func testOperatorPinRoutes() async throws {
         let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-http-pins-\(UUID().uuidString)"
@@ -108,6 +109,15 @@ final class DaemonHTTPTests: XCTestCase {
                 body: ByteBuffer(bytes: try JSONEncoder().encode(PinRequest(cid: absent)))
             ) { response in
                 XCTAssertEqual(response.status, .notFound)
+            }
+            try await client.execute(
+                uri: "/pins", method: .post, headers: json,
+                body: ByteBuffer(bytes: try JSONEncoder().encode(
+                    PinRequest(cid: absent, entries: [absent: Data("not the volume".utf8)])
+                ))
+            ) { response in
+                XCTAssertEqual(response.status, .badRequest)
+                XCTAssertTrue(String(buffer: response.body).contains("invalidVolume"))
             }
             try await client.execute(uri: "/pins", method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
                 XCTAssertEqual(try JSONDecoder().decode(PinsResponse.self, from: Data(buffer: response.body)).pins, [held.rawCID])

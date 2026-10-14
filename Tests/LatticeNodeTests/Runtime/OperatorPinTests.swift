@@ -162,6 +162,26 @@ final class OperatorPinTests: XCTestCase {
         await holderRuntime.stop()
     }
 
+    /// Bytes the operator provides that are not the Volume its CID names are
+    /// refused as invalid, not taken for a Volume the node lacks.
+    func testProvidedBytesThatAreNotTheVolumeAreRefused() async throws {
+        let storage = try await NodeStorage.open(configuration: try host(keyByte: 0xc8).configuration)
+        let volume = try VolumeImpl<ChainSpec>(node: ChainSpec(
+            maxNumberOfTransactionsPerBlock: 8, maxStateGrowth: 8_888, premine: 8,
+            targetBlockTime: 8_000, initialReward: 8, halvingInterval: 8_888, halfLife: 8
+        ))
+        do {
+            try await storage.pin(volume.rawCID, entries: [volume.rawCID: Data("not the volume".utf8)])
+            XCTFail("bytes that are not the Volume are not pinned")
+        } catch NodeStorageError.invalidVolume(let root) {
+            XCTAssertEqual(root, volume.rawCID)
+        }
+        let pins = await storage.operatorPins()
+        XCTAssertEqual(pins, [])
+        let held = await storage.volume(volume.rawCID)
+        XCTAssertNil(held)
+    }
+
     /// Unpinning a CID the operator did not pin lets go of nothing.
     func testUnpinningWhatWasNotPinnedKeepsIt() async throws {
         let storage = try await NodeStorage.open(configuration: try host(keyByte: 0xc6).configuration)

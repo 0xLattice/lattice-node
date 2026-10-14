@@ -26,6 +26,30 @@ final class NodeConfigurationTests: XCTestCase {
         ).encode())
     }
 
+    /// Every announcement lasts the operator's one lifetime; one peers would
+    /// drop, too long or none at all, is refused at start.
+    func testAnnouncementsLastTheOperatorsLifetime() throws {
+        func configuration(_ lifetime: UInt64) throws -> NodeConfiguration {
+            try NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: URL(fileURLWithPath: "/tmp/lattice-node-test"),
+                privateKeyHex: String(repeating: "01", count: 32),
+                announceLifetime: lifetime
+            )
+        }
+        XCTAssertEqual(try configuration(3_600).announcementExpiry(at: 10_000), 3_610)
+        XCTAssertEqual(
+            try configuration(NodeConfiguration.maximumAnnounceLifetime).announcementExpiry(at: 10_000),
+            10 + NodeConfiguration.maximumAnnounceLifetime
+        )
+        XCTAssertThrowsError(try configuration(0)) {
+            XCTAssertEqual($0 as? NodeConfigurationError, .invalidAnnounceLifetime)
+        }
+        XCTAssertThrowsError(try configuration(NodeConfiguration.maximumAnnounceLifetime + 1)) {
+            XCTAssertEqual($0 as? NodeConfigurationError, .invalidAnnounceLifetime)
+        }
+    }
+
     func testNexusIdentityIsFixed() throws {
         let configuration = try NodeConfiguration(
             chainPath: ["Nexus"],

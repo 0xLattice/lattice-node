@@ -253,7 +253,11 @@ states. A node that declares a public read URL also announces each hosted
 child under that child's read-endpoint key (below).
 
 A node announces what it hosts on every announcement turn and whenever a
-session opens. A child chain's current peers are the sessions whose hello
+session opens. Each announcement, a hosted chain's or an operator pin's,
+lasts `announceLifetime` seconds (`--announce-lifetime`, default 1200, 1 to
+86400: peers drop announcements that last longer). The turns renew them
+about every 10 minutes, later when a turn is slow, so a lifetime near that
+leaves gaps in which peers cannot find the node as a provider. A child chain's current peers are the sessions whose hello
 named it, and those its rendezvous names, so a peer on a build that predates
 the hello's claim still counts. Each hosted child chain searches its own
 rendezvous while it has no current peer - looked at at those same moments - and when it has not progressed since boot or for `peerSearchInterval`:

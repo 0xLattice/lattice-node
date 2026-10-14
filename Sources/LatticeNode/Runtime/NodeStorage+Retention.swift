@@ -155,8 +155,9 @@ extension NodeStorage {
     /// not look inside it or follow what it names.
     nonisolated func pin(_ root: String, entries: [String: Data]?) async throws {
         if await !broker.hasVolume(root: root) {
-            let volume = SerializedVolume(root: root, entries: entries ?? [:])
-            guard (try? volume.validate()) != nil else { throw NodeStorageError.missingMaterializedVolume(root) }
+            guard let entries else { throw NodeStorageError.missingMaterializedVolume(root) }
+            let volume = SerializedVolume(root: root, entries: entries)
+            guard (try? volume.validate()) != nil else { throw NodeStorageError.invalidVolume(root) }
             try await broker.store(volume: volume)
         }
         try await broker.mergeRetainedRoots(scope: scopes.operatorPins, roots: [root])

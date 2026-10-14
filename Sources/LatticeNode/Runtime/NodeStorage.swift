@@ -9,6 +9,8 @@ public enum NodeStorageError: Error, Equatable, Sendable {
     case storageUnavailable
     case invalidNexusGenesis
     case missingMaterializedVolume(String)
+    /// Entries given for a Volume that do not match their CIDs or lack its root.
+    case invalidVolume(String)
     /// A body's content is past this node's byte budget for one fetch.
     case bodyExceedsLocalBudget(bytes: Int)
 }

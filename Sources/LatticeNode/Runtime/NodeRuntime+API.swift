@@ -123,11 +123,11 @@ extension NodeRuntime {
     /// announces that it has it, until the operator unpins it. A Volume the
     /// node does not hold is stored only as the operator provides it
     /// (`entries`), never read from peers. Throws when it is neither held
-    /// nor provided.
+    /// nor provided, or when what is provided does not match its CIDs.
     public func pinVolume(_ root: String, entries: [String: Data]? = nil) async throws {
         guard !maintenance.isCancelled else { throw NodeRuntimeError.stopped }
         try await storage.pin(root, entries: entries)
-        await ivy.announceProvider(rootCID: root, expiresAt: UInt64(Date().timeIntervalSince1970) + 1_200)
+        await ivy.announceProvider(rootCID: root, expiresAt: configuration.announcementExpiry(at: NodeRuntime.now()))
     }
 
     /// A Volume read from peers for the operator, checked against its CIDs

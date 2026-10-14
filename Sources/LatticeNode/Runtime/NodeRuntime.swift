@@ -694,7 +694,7 @@ extension NodeRuntime {
             }
             maintenanceInFlight = true
 
-            let expiry = UInt64(max(0, now / 1_000)) + 1_200
+            let expiry = configuration.announcementExpiry(at: now)
             let nexus = configuration.nexusGenesisCID
             // Conversion from an operator-supplied Double must not trap even
             // for a finite but unreasonably large value.
