@@ -95,7 +95,7 @@ public enum ChainEffect: Sendable {
     case serveHeaders(PeerID, token: UInt64, requestID: UInt64, blockCIDs: [String], hasMore: Bool)
     case fetchByCID(PeerID, cid: String)
     /// Fetch a block's body Volume by CID through the content layer, and
-    /// report `bodyFetched` once it is held locally.
+    /// report `bodyFetched` once it has been read.
     case fetchBody(cid: String)
     /// The window no longer wants this body: stop fetching it.
     case cancelBody(cid: String)

@@ -191,7 +191,12 @@ final class BundledBlockFetchTests: XCTestCase {
             timestamp: chain.transfer.timestamp, nonce: chain.transfer.nonce, fetcher: joiner
         )
         XCTAssertEqual(replayed.postState.rawCID, chain.transfer.postState.rawCID)
-        // It recorded the same bundle, so it serves the block the same way.
+        // Nothing a peer sent is stored before the block is found valid.
+        let unrecorded = await joiner.volumeBundle(cid)
+        XCTAssertEqual(unrecorded, [cid])
+        // Once it is, the joiner records the same bundle, so it serves the
+        // block the same way.
+        try await joiner.storeValidBlock(cid, at: ["Nexus"], from: Self.held(joiner))
         let rerecorded = await joiner.volumeBundle(cid)
         XCTAssertEqual(rerecorded, recorded)
     }
@@ -657,6 +662,7 @@ final class BundledBlockFetchTests: XCTestCase {
         ).execute("DROP TABLE volume_bundles")
 
         let stored = try await joiner.fetchChainBody(cid, remote: remote(producer, requests: Requests()))
+        try await joiner.storeValidBlock(cid, at: ["Nexus"], from: Self.held(joiner))
 
         XCTAssertEqual(Set(stored), Set(recorded))
         XCTAssertNil(joiner.bundles.bundle(root: cid))
@@ -664,5 +670,11 @@ final class BundledBlockFetchTests: XCTestCase {
             let held = await joiner.volume(root)
             XCTAssertNotNil(held, root)
         }
+    }
+
+    /// What the node holds and what its reads keep in memory: what a block
+    /// found valid is stored from.
+    private static func held(_ storage: NodeStorage) async -> any Fetcher {
+        CoalescingFetcher(CompositeContentSource([await storage.broker, storage.readCache]))
     }
 }
