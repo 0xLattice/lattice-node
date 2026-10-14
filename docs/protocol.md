@@ -231,8 +231,12 @@ bundle of its root from the connected peers that advertised `volume-bundle`,
 and is sent those Volumes with one request; a root with nothing recorded
 bundles only itself. A bundled Volume is verified, charged to the session and
 credited to its server only when the session's traversal asks for its root,
-exactly as a requested Volume is; one that does not verify is its server's
-deficiency and is then requested like any other. A bundle is an optimisation
+exactly as a requested Volume is. A Volume, bundled or requested, that does
+not verify (another root, or an entry that does not match its CID) costs the
+peer that sent it: Tally records a protocol violation, which lowers its
+standing. The Volume is then requested again. A Volume nobody sent (none found,
+this node's own capacity or byte budget, its cancellation) blames no one. A
+bundle is an optimisation
 and never the only way to a block: it is asked for on a block's first attempt
 only, so a retry is the per-Volume traversal; and a session keeps
 `volume-bundle` only while every bundle it is asked for ends (whole, or "no

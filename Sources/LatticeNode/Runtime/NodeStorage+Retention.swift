@@ -197,9 +197,11 @@ extension NodeStorage {
             try await walk.hold(LatticeStateHeader(rawCID: root))
             if let lastRoot { await walk.letGo(LatticeStateHeader(rawCID: lastRoot)) }
             let changes = await walk.changes
-            let (entered, left) = try await store.moveStateCounts(at: path, to: tip, changes: changes)
-            try await retainHeld(entered, scope: scopes.state(at: path))
-            var gone = left
+            // A node enters the state scope before the counts say it is
+            // held: a stop between the two leaves a pin too many, never a
+            // counted node the next start sweeps.
+            try await retainHeld(await walk.entering, scope: scopes.state(at: path))
+            var gone = try await store.moveStateCounts(at: path, to: tip, changes: changes).left
             if last == nil {
                 // Counted afresh: what an earlier run left pinned and this
                 // state does not hold goes.
@@ -222,6 +224,11 @@ private actor TipStateWalk {
     private let path: ChainPath
     private var counted: [String: Int] = [:]
     private(set) var changes: [String: Int] = [:]
+
+    /// The nodes the changes bring into the state: counted by none before.
+    var entering: [String] {
+        changes.filter { $0.value > 0 && (counted[$0.key] ?? 0) == 0 }.keys.sorted()
+    }
 
     init(storage: NodeStorage, path: ChainPath) {
         self.storage = storage

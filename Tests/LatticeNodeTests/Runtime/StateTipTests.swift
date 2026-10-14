@@ -513,8 +513,11 @@ final class StateTipTests: XCTestCase {
             let counted = try await storage.store.stateCounts(at: ["Nexus"])
             let held = try await heldStateNodes(of: tip, in: storage)
             XCTAssertEqual(counted, held, phase)
-            let pinned = try await storage.broker.retainedRoots(scope: storage.scopes.state(at: ["Nexus"]))
-            XCTAssertEqual(Set(pinned), Set(counted.keys), "\(phase): pinned is what is counted")
+            // What left the state is let go of after the counts commit.
+            try await eventually("\(phase): pinned is what is counted") {
+                let pinned = try await storage.broker.retainedRoots(scope: storage.scopes.state(at: ["Nexus"]))
+                return Set(pinned) == Set(counted.keys)
+            }
         }
         for (phase, state) in [("tip", StateRetention.tip), ("all", .all), ("tip again", .tip), ("none", .none), ("tip after none", .tip)] {
             node = try host(keyByte: 0xc8, storageDirectory: node.configuration.storagePath, state: state)
