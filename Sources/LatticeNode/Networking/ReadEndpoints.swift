@@ -113,11 +113,14 @@ struct ReadEndpointResponseV2Message: CanonicalJSONMessage, Equatable, Sendable 
 /// who is asked), at most `perResponderCap` URLs from any one responder, one
 /// shared deadline, identical concurrent lookups coalesced, results cached
 /// for `cacheSeconds` (an empty one for `emptyCacheSeconds`, so a host that
-/// just announced is found soon).
+/// just announced is found soon), and at most `maximumConcurrentLookups`
+/// running at once: distinct names neither coalesce nor hit the cache, so
+/// under that pressure a request gets nothing rather than starting another.
 actor ReadEndpointDirectory {
     static let maximumAsked = 8
     static let perResponderCap = 2
     static let emptyCacheSeconds = 5.0
+    static let maximumConcurrentLookups = 16
 
     private let transport: ReadEndpointTransport
     private let nexusGenesisCID: String
@@ -167,6 +170,8 @@ actor ReadEndpointDirectory {
     func lookup(_ chainPath: [String]) async -> [DeclaredReadEndpoint] {
         if let cached = cache[chainPath], fresh(cached) { return cached.urls }
         if let running = inFlight[chainPath] { return await running.value }
+        // Under pressure: nothing, and nothing cached.
+        guard inFlight.count < Self.maximumConcurrentLookups else { return [] }
         let task = Task { await self.run(chainPath) }
         inFlight[chainPath] = task
         let urls = await task.value

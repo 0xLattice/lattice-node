@@ -376,8 +376,7 @@ public struct ChainReads: Sendable {
     }
 
     /// The newest child block this chain's canonical blocks commit under
-    /// `directory`, looking back at most `depth` blocks from the tip: the
-    /// commitment a reader checks a child's claimed read URL against.
+    /// `directory`, looking back at most `depth` blocks from the tip.
     public func committedChild(directory: String, depth: UInt64 = 64) async -> String? {
         guard let top = await tip().height else { return nil }
         var height = top

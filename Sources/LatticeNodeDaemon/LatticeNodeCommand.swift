@@ -866,9 +866,10 @@ private func addPublicReadRoutes<Context: RequestContext>(
             context: context
         )
     }
-    // A child chain's declared read URLs, UNVERIFIED (the reader checks each
-    // serves `committedBlock`). `chainPath` names the child; its parent must
-    // be hosted here. Bounded: a few providers asked, one deadline, cached.
+    // A child chain's declared read URLs, UNVERIFIED (the reader checks what
+    // each serves), found through the child's rendezvous. `chainPath` names
+    // the child; its parent must be hosted here. Bounded: a few providers
+    // asked, one deadline, cached, a few lookups at once.
     router.get("api/chain/endpoints") { request, context in
         guard let raw = request.uri.queryParameters["chainPath"].map(String.init),
               let address = ChainAddress(string: raw), !address.isNexus else {
