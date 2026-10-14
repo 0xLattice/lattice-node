@@ -52,4 +52,26 @@ final class ExecutedChildrenTests: XCTestCase {
         for n in 0..<150 { children.record(["d\(n)": "c\(n)"], height: 10) }
         XCTAssertEqual(children.mostRecent(500).count, ExecutedChildren.recentLimit)
     }
+
+    /// The kept list is always what sorting everything would give, through
+    /// any order of records, including entries rising back into the top.
+    func testTheKeptListMatchesAFullSort() {
+        var generator = SystemRandomNumberGenerator()
+        for _ in 0..<20 {
+            let children = ExecutedChildren()
+            var newest: [String: (cid: String, height: UInt64)] = [:]
+            for _ in 0..<600 {
+                let directory = "d\(Int.random(in: 0..<250, using: &generator))"
+                let height = UInt64.random(in: 0..<40, using: &generator)
+                let cid = "c\(Int.random(in: 0..<5, using: &generator))"
+                children.record([directory: cid], height: height)
+                if let held = newest[directory], held.height > height || (held.height == height && held.cid <= cid) { continue }
+                newest[directory] = (cid, height)
+            }
+            let sorted = newest.sorted {
+                $0.value.height != $1.value.height ? $0.value.height > $1.value.height : $0.key < $1.key
+            }.prefix(ExecutedChildren.recentLimit).map { "\($0.key)=\($0.value.cid)@\($0.value.height)" }
+            XCTAssertEqual(listed(children), Array(sorted))
+        }
+    }
 }

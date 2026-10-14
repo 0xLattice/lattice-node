@@ -139,8 +139,8 @@ does not host that child chain).
 chain's executed blocks have committed, the most recently committed first
 (ties by directory), each with its newest child block (`blockHash`) and the
 height that committed it (`committedAtHeight`); at most `limit` (default and
-cap 100). The node keeps this list from what each executed block's header
-records: built from the blocks it holds when it starts, then grown by every
+cap 100). The node keeps this list in memory from what each executed
+block's header records: built from the blocks it holds when it starts, then grown by every
 block that executes valid. Execution is irrevocable, so the list only grows:
 a child that has gone quiet stays, and so does one committed only on a
 branch that later lost. Listing a child does not make it reachable; its

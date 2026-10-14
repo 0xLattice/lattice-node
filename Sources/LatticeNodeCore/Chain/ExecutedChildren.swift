@@ -19,25 +19,43 @@ public final class ExecutedChildren: Sendable {
 
     private struct State {
         var newest: [String: Commitment] = [:]
-        /// The most recently committed, built when first read after a change.
-        var recent: [Commitment]?
+        /// The `recentLimit` most recently committed, kept as `newest` grows:
+        /// a directory's rank only rises (a higher height, or the same height
+        /// with a smaller CID), so one that falls out returns only through
+        /// its own record.
+        var recent: [Commitment] = []
     }
 
     private let state = Mutex(State())
 
     public init() {}
 
+    /// Whether `a` is listed before `b`: the higher height, then the directory.
+    private static func before(_ a: Commitment, _ b: Commitment) -> Bool {
+        a.height != b.height ? a.height > b.height : a.directory < b.directory
+    }
+
     /// An executed block at `height` committed `commitments` (directory →
     /// child block). A directory keeps its highest commitment; at one height,
-    /// the smaller CID.
+    /// the smaller CID. Costs O(`recentLimit`) per directory changed.
     public func record(_ commitments: [String: String], height: UInt64) {
         guard !commitments.isEmpty else { return }
         state.withLock { state in
             for (directory, cid) in commitments {
                 if let held = state.newest[directory],
                    held.height > height || (held.height == height && held.cid <= cid) { continue }
-                state.newest[directory] = Commitment(directory: directory, cid: cid, height: height)
-                state.recent = nil
+                let entry = Commitment(directory: directory, cid: cid, height: height)
+                state.newest[directory] = entry
+                state.recent.removeAll { $0.directory == directory }
+                if state.recent.count < Self.recentLimit || Self.before(entry, state.recent[state.recent.count - 1]) {
+                    var low = 0, high = state.recent.count
+                    while low < high {
+                        let middle = (low + high) / 2
+                        if Self.before(state.recent[middle], entry) { low = middle + 1 } else { high = middle }
+                    }
+                    state.recent.insert(entry, at: low)
+                    if state.recent.count > Self.recentLimit { state.recent.removeLast() }
+                }
             }
         }
     }
@@ -50,16 +68,8 @@ public final class ExecutedChildren: Sendable {
     public var count: Int { state.withLock { $0.newest.count } }
 
     /// At most `limit` (up to `recentLimit`) directories, the most recently
-    /// committed first, ties by directory. Sorted once per change.
+    /// committed first, ties by directory. A copy: nothing is sorted here.
     public func mostRecent(_ limit: Int) -> [Commitment] {
-        let recent = state.withLock { state in
-            if let recent = state.recent { return recent }
-            let built = Array(state.newest.values.sorted {
-                $0.height != $1.height ? $0.height > $1.height : $0.directory < $1.directory
-            }.prefix(Self.recentLimit))
-            state.recent = built
-            return built
-        }
-        return Array(recent.prefix(max(0, limit)))
+        state.withLock { Array($0.recent.prefix(max(0, limit))) }
     }
 }
