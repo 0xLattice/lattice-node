@@ -36,6 +36,13 @@ extension NodeStore {
         )?.value
     }
 
+    /// Drops every chain's counts and the tips they describe.
+    func forgetStateCounts() throws {
+        _ = try database.execute(
+            "DELETE FROM core_meta WHERE substr(key, 1, 10) IN ('state_pin:', 'state_tip:')"
+        )
+    }
+
     /// Moves the counts by `changes` and to `tip`, in one transaction.
     /// Returns the nodes that entered the state and the ones that left it.
     func moveStateCounts(

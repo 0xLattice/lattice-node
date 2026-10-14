@@ -425,23 +425,27 @@ extension NodeRuntime {
 
     /// A level's connect job: `ChainTree.connect`, and for a valid block the
     /// IDs of the transactions it carries, read from the body it executed.
+    /// Execution is the node's own work: what this store lacks is read from
+    /// peers.
     static func connectJob(
         _ job: ConnectJob,
         at path: ChainPath,
         parentFacts: ParentLevelFacts?,
-        storage: NodeStorage
+        storage: NodeStorage,
+        remote: IvyRootContentSource? = nil
     ) -> RuntimeJob {
-        let fetcher = storage.workFetcher
-        return RuntimeJob(path: path, epoch: nil) {
-            let verdict = await ChainTree.connect(
-                job,
-                fetcher: fetcher,
-                parentFacts: parentFacts,
-                validationContext: ValidationContext(nowMilliseconds: now())
-            )
-            let valid = verdict.retryFailure == nil && !verdict.provesInvalid
-            let transactions = valid ? await transactionIDs(ofBlock: job.blockHash, fetcher: fetcher) : []
-            return [.level(path, .connected(verdict, transactions: transactions))]
+        RuntimeJob(path: path, epoch: nil) {
+            await reading(job.blockHash, storage: storage, remote: remote) { fetcher in
+                let verdict = await ChainTree.connect(
+                    job,
+                    fetcher: fetcher,
+                    parentFacts: parentFacts,
+                    validationContext: ValidationContext(nowMilliseconds: now())
+                )
+                let valid = verdict.retryFailure == nil && !verdict.provesInvalid
+                let transactions = valid ? await transactionIDs(ofBlock: job.blockHash, fetcher: fetcher) : []
+                return [.level(path, .connected(verdict, transactions: transactions))]
+            }
         }
     }
 

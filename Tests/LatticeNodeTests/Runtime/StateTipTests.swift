@@ -93,6 +93,24 @@ final class StateTipTests: XCTestCase {
         return counts
     }
 
+    /// Every node of the state of `block` this store holds, counted as the
+    /// node counts them: a node it lacks is left out with what it names.
+    private func heldStateNodes(of block: String, in storage: NodeStorage) async throws -> [String: Int] {
+        let fact = try await storage.store.blockFact(block, at: ["Nexus"])
+        var counts: [String: Int] = [:]
+        func resolved<H: Header>(_ header: H) async -> (any Header)? {
+            try? await header.resolve(fetcher: storage.localFetcher)
+        }
+        func count(_ header: any Header) async {
+            guard counts[header.rawCID] == nil else { counts[header.rawCID, default: 0] += 1; return }
+            guard let node = await resolved(header) else { return }
+            counts[header.rawCID] = 1
+            for child in NodeStorage.children(of: node) { await count(child) }
+        }
+        await count(LatticeStateHeader(rawCID: try XCTUnwrap(fact?.postStateCID)))
+        return counts
+    }
+
     private func assertKeepsExactlyTheStateOf(
         _ tip: String, _ storage: NodeStorage, _ message: String, file: StaticString = #filePath, line: UInt = #line
     ) async throws {
@@ -202,11 +220,11 @@ final class StateTipTests: XCTestCase {
         await secondRuntime.stop()
     }
 
-    /// The state of a chain's tip is kept whole after a move to another
-    /// branch: an account the branch it left changed and the new branch
-    /// never touches is read from a peer, so its state is read at the tip
-    /// and its transaction is mined.
-    func testStateTheNewBranchNeverTouchesComesFromAPeer() async throws {
+    /// After a move to another branch, state the branch it left changed and
+    /// no block of the new one changes is not held: it is left out of the
+    /// counts. A block that reads it reads it from a peer; once a block
+    /// changes it, the node holds it again.
+    func testStateNoBlockOfTheNewBranchReadsComesBackWithABlockThatReadsIt() async throws {
         let (payer, account): (Key, Key) = (CryptoUtils.generateKeyPair(), CryptoUtils.generateKeyPair())
         let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(payer))])
         let first = try host(keyByte: 0xb8)
@@ -251,14 +269,33 @@ final class StateTipTests: XCTestCase {
         )
         let (runtime, storage) = try await start(node)
         try await eventually("the node moves onto the heavier branch") { runtime.published.value?.actOnTip == secondTip }
-        try await assertKeepsExactlyTheStateOf(secondTip, storage, "the heavier branch")
-        let balance = await runtime.reads.account(owner: address(account), blockCID: secondTip)?.balance
-        XCTAssertEqual(balance, 5)
-        let tip = try await mine(runtime, [try transaction(account, nonce: 0, moves: [(address(account), -1)])])
-        // The payment of the branch it left is returned and mined with it.
-        let after = await runtime.reads.account(owner: address(account), blockCID: tip)
-        XCTAssertEqual(after?.nonce, 1, "the account's transaction is mined on the node that had let go of its state")
-        XCTAssertEqual(after?.balance, 5)
+        try await eventually("the kept state is moved to the heavier branch") {
+            try await storage.store.stateTip(at: ["Nexus"]) == secondTip
+        }
+        let counted = try await storage.store.stateCounts(at: ["Nexus"])
+        let held = try await heldStateNodes(of: secondTip, in: storage)
+        XCTAssertEqual(counted, held, "the counts are what the node holds of the tip's state")
+        let missing = await runtime.reads.account(owner: address(account), blockCID: secondTip)
+        XCTAssertNil(missing, "no block of the new branch read the account")
+
+        // The heavier branch's producer mines the account's transaction,
+        // which changes its balance whatever else the block carries.
+        _ = try await secondRuntime.submitTransaction(SubmitTransactionRequest(
+            transaction: try transaction(account, nonce: 0, moves: [(address(account), -2)])
+        ))
+        let spending = try await mine(secondRuntime)
+        try await eventually("the node executes the block that reads the account") {
+            runtime.published.value?.actOnTip == spending
+        }
+        try await eventually("the kept state is moved to that block") {
+            try await storage.store.stateTip(at: ["Nexus"]) == spending
+        }
+        let after = await runtime.reads.account(owner: address(account), blockCID: spending)
+        XCTAssertEqual(after?.nonce, 1, "the account's state is held again")
+        XCTAssertNotNil(after?.balance)
+        let countedAfter = try await storage.store.stateCounts(at: ["Nexus"])
+        let heldAfter = try await heldStateNodes(of: spending, in: storage)
+        XCTAssertEqual(countedAfter, heldAfter)
         await runtime.stop()
         await firstRuntime.stop()
         await secondRuntime.stop()
@@ -348,6 +385,115 @@ final class StateTipTests: XCTestCase {
         XCTAssertEqual(balance, 9, "the chain the node validated pays and spends")
         await runtime.stop()
         await producerRuntime.stop()
+    }
+
+    /// A start on `tip` over a large state, then blocks that set a value
+    /// back to one a block before them replaced: the node that value is
+    /// stays, the kept state is the tip's exactly, and the value can be
+    /// written again.
+    func testAValueSetBackWhileTheKeptStateMovesBehindTheTipStays() async throws {
+        let miner: Key = CryptoUtils.generateKeyPair()
+        let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(miner))])
+        var node = try host(keyByte: 0xbe)
+        var nonce: UInt64 = 0
+        do {
+            let (runtime, _) = try await start(node)
+            _ = try await runtime.mineBlock(paid)
+            _ = try await runtime.mineBlock(paid)
+            for _ in 0..<3 {
+                let accounts = (0..<500).map { _ in (address(CryptoUtils.generateKeyPair()), Int64(1)) }
+                _ = try await runtime.submitTransaction(SubmitTransactionRequest(
+                    transaction: try transaction(miner, nonce: nonce, moves: accounts + [(address(miner), -500)])
+                ))
+                nonce += 1
+                _ = try await runtime.mineBlock(paid)
+            }
+            _ = try await runtime.submitTransaction(SubmitTransactionRequest(
+                transaction: try transaction(miner, nonce: nonce, actions: [Action(key: "t", oldValue: nil, newValue: "0")])
+            ))
+            nonce += 1
+            _ = try await runtime.mineBlock(paid)
+            await runtime.stop()
+        }
+        node = try host(keyByte: 0xbe, storageDirectory: node.configuration.storagePath, state: .tip)
+        let (runtime, storage) = try await start(node)
+        var (value, tip) = ("0", "")
+        for next in ["1", "2", "1", "9"] {
+            _ = try await runtime.submitTransaction(SubmitTransactionRequest(
+                transaction: try transaction(miner, nonce: nonce, actions: [Action(key: "t", oldValue: value, newValue: next)])
+            ))
+            nonce += 1
+            tip = try BlockHeader(node: try await runtime.mineBlock(paid)).rawCID
+            value = next
+        }
+        try await assertKeepsExactlyTheStateOf(tip, storage, "after the values were set back")
+        XCTAssertEqual(runtime.published.value?.mempoolCount, 0, "every write of the value is mined")
+        await runtime.stop()
+    }
+
+    /// A node on `none` follows a chain whose blocks delete keys and empty
+    /// accounts: a deletion merges a node's neighbour into its parent, and
+    /// the neighbour, which no block's read set names, is read from a peer.
+    func testANodeOnNoneFollowsBlocksThatDeleteState() async throws {
+        let miner: Key = CryptoUtils.generateKeyPair()
+        let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(miner))])
+        let producer = try host(keyByte: 0xc4)
+        let (producerRuntime, _) = try await start(producer)
+        var nonce: UInt64 = 0
+        var payees: [Key] = []
+        var tip = try BlockHeader(node: try await producerRuntime.mineBlock(paid)).rawCID
+        tip = try BlockHeader(node: try await producerRuntime.mineBlock(paid)).rawCID
+        for round in 0..<40 {
+            let payee: Key = CryptoUtils.generateKeyPair()
+            payees.append(payee)
+            var actions = [Action(key: "k\(round)", oldValue: nil, newValue: "v\(round)")]
+            if round >= 3 { actions.append(Action(key: "k\(round - 3)", oldValue: "v\(round - 3)", newValue: nil)) }
+            _ = try await producerRuntime.submitTransaction(SubmitTransactionRequest(transaction: try transaction(
+                miner, nonce: nonce, moves: [(address(miner), -4), (address(payee), 3)], actions: actions
+            )))
+            nonce += 1
+            if round >= 4, round % 4 == 0 {
+                // An earlier payee spends all it has.
+                let drained = payees[round - 4]
+                _ = try await producerRuntime.submitTransaction(SubmitTransactionRequest(
+                    transaction: try transaction(drained, nonce: 0, moves: [(address(drained), -3), (address(miner), 2)])
+                ))
+            }
+            tip = try BlockHeader(node: try await producerRuntime.mineBlock(paid)).rawCID
+        }
+        XCTAssertEqual(producerRuntime.published.value?.mempoolCount, 0)
+
+        let node = try host(keyByte: 0xc5, peers: [producer.endpoint], state: .none)
+        let (runtime, _) = try await start(node)
+        try await eventually("the node on none executes every block") { runtime.published.value?.actOnTip == tip }
+        await runtime.stop()
+        await producerRuntime.stop()
+    }
+
+    /// A run on `none` between runs on `tip` lets the tip's state go: the
+    /// next run on `tip` counts afresh what it holds.
+    func testARunOnNoneBetweenRunsOnTipLeavesNoStaleCounts() async throws {
+        let miner: Key = CryptoUtils.generateKeyPair()
+        let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(miner))])
+        var node = try host(keyByte: 0xc6, state: .tip)
+        for (round, state) in [StateRetention.tip, .none, .tip].enumerated() {
+            node = try host(keyByte: 0xc6, storageDirectory: node.configuration.storagePath, state: state)
+            let (runtime, storage) = try await start(node)
+            var tip = ""
+            for _ in 0..<3 { tip = try BlockHeader(node: try await runtime.mineBlock(paid)).rawCID }
+            if state == .tip {
+                try await eventually("the kept state is moved to the tip (run \(round))") {
+                    try await storage.store.stateTip(at: ["Nexus"]) == tip
+                }
+                let counted = try await storage.store.stateCounts(at: ["Nexus"])
+                let held = try await heldStateNodes(of: tip, in: storage)
+                XCTAssertEqual(counted, held, "run \(round)")
+            } else {
+                let counted = try await storage.store.stateCounts(at: ["Nexus"])
+                XCTAssertEqual(counted, [:], "a run on none counts nothing")
+            }
+            await runtime.stop()
+        }
     }
 
     /// The default keeps the state of every block, and counts nothing.

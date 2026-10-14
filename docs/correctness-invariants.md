@@ -75,11 +75,14 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   can be named from several places: the node counts, for each, the nodes of
   the tip's state that name it, walking the new tip's state down to what is
   already counted and the last one down to what is still named, and lets go
-  of a node nothing names. A node of the new state it lacks, after a move
-  to another branch, is read from peers; if one cannot be read the kept
-  state stays where it was until the next move. Pinned by `StateTipTests`.
-- **NODE-STORAGE-002.i** — With `state: none` what a stored block reads is
-  named by that block until it executes or is found invalid, and the state
+  of a node nothing names. The walk reads this store alone and runs in the
+  step that stored the tip, before what the step's blocks read is let go
+  of, so nothing else writes the state scope meanwhile. A node of the tip's
+  state the store lacks is not counted. A run on another setting drops the
+  counts. Pinned by `StateTipTests`.
+- **NODE-STORAGE-002.i** — With `state: tip` or `none` what a stored block
+  reads is named by that block until it executes or is found invalid; with
+  `none` and the state
   scope names only what the last execution of its chain touched. Pinned by
   `StateTipTests.testANodeOnNoneSyncsAndKeepsValidatingHoldingNoState`.
 - **NODE-STORAGE-002.d** — Levels write parent before child; a crash

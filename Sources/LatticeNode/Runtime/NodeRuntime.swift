@@ -111,7 +111,7 @@ public final class NodeRuntime: Sendable {
         /// A session's hello deadline passed.
         case helloDeadline(peerKey: String, session: UInt64)
         /// A worker finished: its slot frees, then its results step.
-        case jobDone([NodeEvent])
+        case jobDone(UInt64, [NodeEvent])
         /// An RPC: its mining event under a fresh reply ID.
         case request(ChainPath, @Sendable (UInt64) -> MiningEvent, CheckedContinuation<NodeRuntimeReply, any Error>)
         /// An RPC answered outside a step (the shell could not run its part).
@@ -359,7 +359,10 @@ public final class NodeRuntime: Sendable {
             // of the ones a run that kept them left, before any step.
             for (path, level) in state.core.levels { state.bodyTips[path] = level.snapshot.actOnTip }
             await storage.letGoOfBodies(except: state.bodyTips)
-            state.settleState()
+            // Counts describe a state only `tip` keeps; any other run lets
+            // that state go, so a later run on `tip` counts afresh.
+            if configuration.state != .tip { await storage.forgetStateCounts() }
+            await state.settleState()
             state.refreshView()
             // After the loop ends, inputs are only drained until the stream
             // finishes, so no RPC waits forever.
@@ -372,6 +375,10 @@ public final class NodeRuntime: Sendable {
                 }
             }
             state.cancelAll()
+            for job in state.jobs.values {
+                job.cancel()
+                await job.value
+            }
         }
     }
 
@@ -456,6 +463,10 @@ extension NodeRuntime {
         }
         var nextSession: UInt64 = 1
         var runningJobs = 0
+        /// The running jobs, which the loop waits for before it lets the
+        /// store go: a job reading from peers can outlast a step.
+        var jobs: [UInt64: Task<Void, Never>] = [:]
+        var nextJob: UInt64 = 0
         /// Two FIFOs: execution (connect, proof verification) runs before
         /// mining jobs.
         var executionJobs: [RuntimeJob] = []
@@ -524,10 +535,10 @@ extension NodeRuntime {
         /// go of a body when the operator keeps none beyond it.
         var executedThisStep: [BodyKey] = []
         var bodyTips: [ChainPath: String] = [:]
-        /// Each level's tip the kept state was last asked to move to, and
-        /// the move, which runs off the loop, one after another.
+        /// Each level's tip the kept state was last moved to, and the blocks
+        /// executed or found invalid this step, whose reads go after it.
         var stateTips: [ChainPath: String] = [:]
-        var stateMoves: [ChainPath: Task<Void, Never>] = [:]
+        var readsDone: [BodyKey] = []
 
         struct BodyKey: Hashable {
             let path: ChainPath
@@ -603,8 +614,9 @@ extension NodeRuntime {
                 sessions[key] = nil
                 _ = await ivy.disconnectSession(ifCurrent: session.peer)
                 return true
-            case .jobDone(let events):
+            case .jobDone(let id, let events):
                 runningJobs -= 1
+                jobs[id] = nil
                 startJobs()
                 for event in events {
                     // A connect without a verdict is a wait with its reason.
@@ -1074,7 +1086,11 @@ extension NodeRuntime {
                 guard await execute(effect) else { return false }
             }
             await settleBodies()
-            settleState()
+            await settleState()
+            // What an executed block read goes once the kept state has
+            // counted what of it the tip's state holds.
+            for key in readsDone { await storage.releaseReads(key.cid, at: key.path) }
+            readsDone.removeAll()
             // A tree copy is kept only for the current epoch's jobs.
             preflightLevels = preflightLevels.filter { core.levels[$0.key]?.mining.tipEpoch == $0.value.epoch }
             refreshView()
@@ -1102,12 +1118,12 @@ extension NodeRuntime {
                     )
                     for key in persistedBodyKeys { bodyRoots[key] = nil }
                     if configuration.blockBodies == .none { executedThisStep.append(contentsOf: persistedBodyKeys) }
-                    for key in persistedBodyKeys { await storage.releaseReads(key.cid, at: key.path) }
+                    readsDone.append(contentsOf: persistedBodyKeys)
                     // A block found invalid is no block: its body goes.
                     for (path, levelBatch) in batch.levels {
                         for case .exclusion(let excluded) in levelBatch.facts.flatMap(\.facts) {
                             await storage.releaseBody(excluded.blockHash, at: path)
-                            await storage.releaseReads(excluded.blockHash, at: path)
+                            readsDone.append(BodyKey(path: path, cid: excluded.blockHash))
                         }
                     }
                     for (path, levelBatch) in batch.levels {
@@ -1132,7 +1148,9 @@ extension NodeRuntime {
                     _ = await ivy.disconnectSession(ifCurrent: session.peer)
                 }
             case .connect(let path, let job, let parentFacts):
-                executionJobs.append(NodeRuntime.connectJob(job, at: path, parentFacts: parentFacts, storage: storage))
+                executionJobs.append(NodeRuntime.connectJob(
+                    job, at: path, parentFacts: parentFacts, storage: storage, remote: remote
+                ))
                 startJobs()
             case .wakeAt(let time):
                 if let wake, wake.time <= time { break }
@@ -1382,8 +1400,9 @@ extension NodeRuntime {
                 let job = executionJobs.isEmpty ? miningJobs.removeFirst() : executionJobs.removeFirst()
                 guard job.isCurrent(in: core) else { continue }
                 runningJobs += 1
-                let inputs = inputs
-                spawn { inputs.yield(.jobDone(await job.run())) }
+                nextJob += 1
+                let (inputs, id) = (inputs, nextJob)
+                jobs[id] = Task { inputs.yield(.jobDone(id, await job.run())) }
             }
         }
 
@@ -1406,16 +1425,11 @@ extension NodeRuntime {
 
         /// With only the tip's state kept: the kept state follows each
         /// level's tip.
-        mutating func settleState() {
+        mutating func settleState() async {
             guard configuration.state == .tip else { return }
             for (path, level) in core.levels where stateTips[path] != level.snapshot.actOnTip {
-                let tip = level.snapshot.actOnTip
-                stateTips[path] = tip
-                let (earlier, storage, remote) = (stateMoves[path], storage, remote)
-                stateMoves[path] = Task {
-                    await earlier?.value
-                    await storage.keepState(of: tip, at: path, remote: remote)
-                }
+                stateTips[path] = level.snapshot.actOnTip
+                await storage.keepState(of: level.snapshot.actOnTip, at: path)
             }
         }
 
