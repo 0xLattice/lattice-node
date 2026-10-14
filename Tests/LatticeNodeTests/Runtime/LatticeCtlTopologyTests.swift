@@ -150,6 +150,13 @@ final class LatticeCtlTopologyTests: XCTestCase {
         // Unset is the node's default, all: no flag.
         XCTAssertEqual(try load(#"{"listen":4001,"rpc":4003}"#).contentServingArguments, [])
         XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"blockBodies":"some"}"#))
+        XCTAssertEqual(
+            try load(#"{"listen":4001,"rpc":4003,"state":"tip"}"#).contentServingArguments, ["--state", "tip"]
+        )
+        XCTAssertEqual(
+            try load(#"{"listen":4001,"rpc":4003,"state":"none"}"#).contentServingArguments, ["--state", "none"]
+        )
+        XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"state":"some"}"#))
     }
 
     func testContentServingLimitsLoadFromConfigAndProduceNodeFlags() throws {

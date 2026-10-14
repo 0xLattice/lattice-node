@@ -36,6 +36,9 @@ extension NodeStorage {
         // under its block's name when it was stored, and the journal still
         // names it.
         var stored: [String] = []
+        // With only the tip's state kept, or none: the state each level's
+        // executions created, under the level's state scope.
+        var states: [ChainPath: [String]] = [:]
         let storage = NodeImportStorage(storage: broker)
         for (path, level) in batch.levels.sorted(by: {
             $0.path.count != $1.path.count
@@ -45,12 +48,20 @@ extension NodeStorage {
             for state in level.states {
                 try await Self.storeExecutedState(state, in: storage)
             }
+            let executed = await storage.takeStoredVolumeRoots()
             // A child genesis's spec: what restore holds as its root's.
             for spec in level.headers.compactMap(\.spec) {
                 try await VolumeImpl<ChainSpec>(node: spec).store(storer: storage)
             }
-            let created = await storage.takeStoredVolumeRoots()
-            stored.append(contentsOf: created)
+            let specs = await storage.takeStoredVolumeRoots()
+            let created = executed + specs
+            switch configuration.state {
+            case .all:
+                stored.append(contentsOf: created)
+            case .tip, .none:
+                states[path] = executed
+                stored.append(contentsOf: specs)
+            }
             let roots = created + (bodyRoots[path] ?? [])
             durable.append(NodeFactBatch(
                 path: path,
@@ -63,17 +74,31 @@ extension NodeStorage {
         }
         try await storage.commit()
         try await retainHeld(stored)
+        for (path, roots) in states where !roots.isEmpty {
+            if configuration.state == .tip {
+                // Until the kept state has counted what of it the tip holds.
+                try await retainHeld(roots, scope: scopes.executed(at: path))
+                continue
+            }
+            let scope = scopes.state(at: path)
+            // With no state kept, only what the last execution touched
+            // stays: the next block most likely reads it.
+            let earlier = configuration.state == .none ? try await broker.retainedRoots(scope: scope) : []
+            try await retainHeld(roots, scope: scope)
+            let gone = Set(earlier).subtracting(roots)
+            if !gone.isEmpty { try await broker.releaseRetainedRoots(scope: scope, roots: gone.sorted()) }
+        }
         try await store.stageNodeFacts(durable, logID: logID)
     }
 
     /// Retains the roots this store holds. One it lacks (a body fetched for
     /// this step and gone since) is no fault: the facts still name it, and
     /// whatever reads it next fetches and keeps it.
-    nonisolated func retainHeld(_ roots: [String]) async throws {
+    nonisolated func retainHeld(_ roots: [String], scope: String? = nil) async throws {
         var roots = Set(roots)
         while !roots.isEmpty {
             do {
-                return try await broker.mergeRetainedRoots(scope: retentionScope, roots: roots.sorted())
+                return try await broker.mergeRetainedRoots(scope: scope ?? retentionScope, roots: roots.sorted())
             } catch BrokerError.missingRetainedRoot(let root) {
                 roots.remove(root)
             }
@@ -296,17 +321,23 @@ extension NodeStorage {
     }
 
     private static func storeLoaded(_ header: any Header, in storer: any VolumeStorer) async throws {
-        guard let node: any cashew.Node = loadedNode(of: header) else { return }
+        guard loadedNode(of: header) != nil else { return }
         if let volume = header as? any Volume {
             try await volume.store(storer: storer)
         }
+        for child in children(of: header) {
+            try await storeLoaded(child, in: storer)
+        }
+    }
+
+    /// The headers a loaded node names; none when it is not loaded.
+    static func children(of header: any Header) -> [any Header] {
+        guard let node: any cashew.Node = loadedNode(of: header) else { return [] }
         var children: [any Header] = node.properties().sorted().compactMap { node.get(property: $0) }
         if let radix = node as? any RadixNode, let value = radix.value as? any Header {
             children.append(value)
         }
-        for child in children {
-            try await storeLoaded(child, in: storer)
-        }
+        return children
     }
 
     private static func loadedNode<H: Header>(of header: H) -> (any cashew.Node)? {

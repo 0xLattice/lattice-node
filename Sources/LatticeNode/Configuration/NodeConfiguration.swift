@@ -81,6 +81,18 @@ public enum BlockBodies: String, Sendable, CaseIterable {
     case none
 }
 
+/// Which state a node keeps. State is what executions read and create; it
+/// is not a block body.
+public enum StateRetention: String, Sendable, CaseIterable {
+    /// The state of every block it executed.
+    case all
+    /// The state of each chain's tip.
+    case tip
+    /// None between blocks: what a block reads is held until it executes,
+    /// and what the last execution touched until the next.
+    case none
+}
+
 /// Immutable setup and process identity for one Nexus-rooted hosted tree.
 public struct NodeConfiguration: Sendable {
     public let address: ChainAddress
@@ -151,6 +163,8 @@ public struct NodeConfiguration: Sendable {
     /// The block bodies kept beyond what the node needs to operate
     /// (operator choice). Facts, headers and state are not bodies.
     public let blockBodies: BlockBodies
+    /// The state kept (operator choice).
+    public let state: StateRetention
     /// The child chains this process hosts as levels under Nexus (operator
     /// choice), parent before child; every parent is Nexus or listed.
     public let hostedChildren: [[String]]
@@ -200,6 +214,7 @@ public struct NodeConfiguration: Sendable {
         peerSearchInterval: TimeInterval = 600,
         resourcePolicy: NodeResourcePolicy = .default,
         blockBodies: BlockBodies = .all,
+        state: StateRetention = .all,
         hostedChildren: [[String]] = [],
         childSpecs: [[String]: ChainSpec] = [:],
         policyModules: [Data] = [],
@@ -275,6 +290,7 @@ public struct NodeConfiguration: Sendable {
             ? max(0, peerSearchInterval) : 0
         self.resourcePolicy = resourcePolicy
         self.blockBodies = blockBodies
+        self.state = state
         self.childSpecs = childSpecs.filter { hostedChildren.contains($0.key) }
         self.hostedChildren = hostedChildren
         self.policyModules = policyModules

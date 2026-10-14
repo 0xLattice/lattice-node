@@ -70,6 +70,23 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   to the pool from this store, and from peers for a body it let go of; one
   no peer serves is not returned. State and facts are untouched, and the node builds
   on a block whose body is gone. Pinned by `BlockBodiesTests`.
+- **NODE-STORAGE-002.h** — With `state: tip` the node keeps the state each
+  chain's tip is made of. A node of the state is named by its content and
+  can be named from several places: the node counts, for each, the nodes of
+  the tip's state that name it, walking the new tip's state down to what is
+  already counted and the last one down to what is still named, and lets go
+  of a node nothing names. The walk reads this store alone and runs in the
+  step that stored the tip; what that step's executions stored is named by
+  its own scope until then. The state scope names exactly what is counted.
+  A node of the tip's state the store lacks is not counted. A run on another
+  setting drops the counts, and the next run on `tip` counts afresh and lets
+  go of what an earlier one left pinned. Pinned by `StateTipTests`.
+- **NODE-STORAGE-002.i** — With `state: tip` or `none` what a stored block
+  reads is named by that block until it executes or is found invalid (a
+  start lets go of what an executed block's scope still names); with
+  `none` the state
+  scope names only what the last execution of its chain touched. Pinned by
+  `StateTipTests.testANodeOnNoneSyncsAndKeepsValidatingHoldingNoState`.
 - **NODE-STORAGE-002.d** — Levels write parent before child; a crash
   between them restores with the child behind, never ahead. Pinned by
   `ChildLevelRestartTests.testACrashBetweenLevelWritesRestoresTheParentAhead`.
