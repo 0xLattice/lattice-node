@@ -143,7 +143,7 @@ the node does not host the child. 400 for a missing or malformed path, or
 ```json
 {
   "chainPath": ["Nexus", "Alpha", "Beta"],
-  "committedBlock": "<cid of the newest child block the parent commits>",
+  "committedBlock": "<cid of the newest child block the parent commits, or null>",
   "endpoints": ["https://reads.example.org"],
   "submitEndpoints": ["https://reads.example.org"]
 }
@@ -165,12 +165,17 @@ child's read-endpoint provider records, in random order, takes at most 2 URLs
 from any one, ends within 2 seconds (provider discovery included), closes any
 session it dialed only to ask, coalesces identical concurrent lookups, and
 caches a result for 30 seconds (an empty one for 5). The URLs are NOT
-verified and may name any host, internal addresses included: accept one only
-after it serves `committedBlock` at `/api/block/<committedBlock>?chainPath=...`,
-and do not dial a non-public host on a third party's behalf. `committedBlock`
-is null only when this node hosts the child but the parent's recent blocks
-commit none; there is then nothing to verify against. Billed to the expensive
-public read budget.
+verified and may name any host, internal addresses included: check what a URL
+serves before using it (`GET /api/chain/info?chainPath=...` there names the
+chain), and do not dial a non-public host on a third party's behalf.
+
+A child is found through the hosts that announce it, so it is listed whether
+or not the parent's recent blocks commit it. `committedBlock` is information
+only: the newest child block the parent's last 64 canonical blocks commit,
+null when they commit none. It can be a block the child chain did not keep,
+or one nobody serves, so a reader never requires a URL to serve it. The route
+answers 404 when this node does not host the parent, or when nothing hosts,
+declares or commits the child. Billed to the expensive public read budget.
 
 ## Health and status
 

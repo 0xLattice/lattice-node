@@ -309,21 +309,21 @@ lattice.build, at any depth, without asking anyone:
    level the host serves, selected with `?chainPath=`.
 
 The rule is the same at every level. A node that hosts the parent `P` of a
-chain `P/D` answers `GET /api/chain/endpoints?chainPath=P/D`: it checks that
-`P`'s recent canonical blocks commit a block under `D`, finds the hosts that
-announced `P/D`'s read-endpoint key, and asks a bounded number of them over
-the overlay for their declared URL. A node answers that question only for a
-level it hosts. The URLs come back unverified, beside the committed child
-block; a reader accepts a URL only if it serves that block at `?chainPath=P/D`.
-The explorer starts from its configured Nexus nodes and repeats this one step
-per level, so a chain appears once a node hosting its parent can reach a
-declaring host.
+chain `P/D` answers `GET /api/chain/endpoints?chainPath=P/D`: it finds the
+hosts that announced `P/D`'s read-endpoint key (the chain's rendezvous) and
+asks a bounded number of them over the overlay for their declared URL. A node
+answers that question only for a level it hosts. The URLs come back
+unverified; a reader checks what each serves at `?chainPath=P/D`. What `P`
+commits never decides whether `P/D` is found: a committed child block can be
+one the child chain did not keep, or one nobody serves. The explorer starts
+from its configured Nexus nodes and repeats this one step per level, so a
+chain appears once a node hosting its parent can reach a declaring host.
 
 Check a declaration from the parent's side:
 
 ```bash
 curl -s 'https://<parent-reads>/api/chain/endpoints?chainPath=Nexus/Alpha' | jq
-curl -s 'https://reads.example.org/api/block/<committedBlock>?chainPath=Nexus/Alpha' | jq .hash
+curl -s 'https://reads.example.org/api/chain/info?chainPath=Nexus/Alpha' | jq .chain
 ```
 
 ## Running a public submit endpoint
