@@ -232,10 +232,9 @@ and is sent those Volumes with one request; a root with nothing recorded
 bundles only itself. A bundled Volume is verified, charged to the session and
 credited to its server only when the session's traversal asks for its root,
 exactly as a requested Volume is. A Volume, bundled or requested, that does
-not verify (another root, or an entry that does not match its CID) blocks the
-peer that sent it: Tally records a protocol violation, the overlay passes the
-peer over for that root, and its session is closed without redialling. The
-Volume is then requested from another peer. A Volume nobody sent (none found,
+not verify (another root, or an entry that does not match its CID) costs the
+peer that sent it: Tally records a protocol violation, which lowers its
+standing. The Volume is then requested again. A Volume nobody sent (none found,
 this node's own capacity or byte budget, its cancellation) blames no one. A
 bundle is an optimisation
 and never the only way to a block: it is asked for on a block's first attempt

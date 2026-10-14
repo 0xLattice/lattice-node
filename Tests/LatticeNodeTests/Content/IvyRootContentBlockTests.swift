@@ -7,8 +7,8 @@ import cashew
 @testable import LatticeNode
 
 /// A peer that sends a Volume failing its check (an entry not matching its
-/// CID, or another root) is blocked when the check fails, and the Volume is
-/// requested again; a failure this node caused blames no one.
+/// CID, or another root) is reported when the check fails, and the Volume
+/// is requested again; a failure this node caused blames no one.
 final class IvyRootContentBlockTests: XCTestCase {
     private actor Log {
         private(set) var blocked: [(root: String, peer: PeerID)] = []

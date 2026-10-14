@@ -402,14 +402,9 @@ public struct IvyRootContentSource: Sendable {
     }
 
     /// A peer that served a Volume failing its check broke the protocol
-    /// provably: Tally records the violation, the overlay passes the peer
-    /// over for that root, and its session is closed without reconnecting.
+    /// provably: Tally records the violation.
     private static func tallyBlock(_ ivy: Ivy) -> @Sendable (String, PeerID) async -> Void {
-        { rootCID, peer in
-            await ivy.tally.recordProtocolViolation(peer: peer)
-            await ivy.reportDeficientContent(rootCID: rootCID, servedBy: peer)
-            await ivy.disconnect(peer)
-        }
+        { _, peer in await ivy.tally.recordProtocolViolation(peer: peer) }
     }
 
     init(

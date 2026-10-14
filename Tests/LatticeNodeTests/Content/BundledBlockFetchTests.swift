@@ -493,52 +493,6 @@ final class BundledBlockFetchTests: XCTestCase {
         }
     }
 
-    /// Over a real overlay: a peer that serves a Volume whose entries do not
-    /// match their CIDs is blocked (its session closed, not redialled), and
-    /// the block then arrives from an honest peer, which stays connected.
-    func testAPeerThatServesACorruptVolumeIsBlockedAndTheBlockComesFromAnother() async throws {
-        let producer = try await storage(keyByte: 0x64)
-        let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
-        let recorded = await producer.volumeBundle(cid)
-        let (client, bad, badPeer) = try await overlay(serving: producer)
-        bad.corrupts = true
-        let remote = IvyRootContentSource(ivy: client)
-        do {
-            _ = try await storage(keyByte: 0x65).fetchChainBody(cid, remote: remote)
-            XCTFail("only a corrupt Volume was served")
-        } catch {}
-        var deadline = ContinuousClock.now + .seconds(10)
-        while await client.connectedPeers.contains(badPeer.id), ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(20))
-        }
-        let stillConnected = await client.connectedPeers
-        XCTAssertFalse(stillConnected.contains(badPeer.id))
-
-        let honestKey = Curve25519.Signing.PrivateKey()
-        let honestPort = NetworkTransportTestPorts.allocate()
-        let honest = Ivy(config: IvyConfig(
-            signingKey: honestKey, listenPort: honestPort, stunServers: [],
-            healthConfig: PeerHealthConfig(enabled: false),
-            externalAddress: ("127.0.0.1", honestPort), mode: .overlay
-        ))
-        await honest.installNodeRuntime(delegate: Connections(), contentSource: CountingSource(producer))
-        try await honest.start()
-        addTeardownBlock { await honest.stop() }
-        try await client.connect(to: PeerEndpoint(
-            publicKey: honestKey.publicKey.rawRepresentation.map { String(format: "%02x", $0) }.joined(),
-            host: "127.0.0.1", port: honestPort
-        ))
-        let honestID = await honest.localID
-        deadline = ContinuousClock.now + .seconds(10)
-        while await !client.connectedPeers.contains(honestID), ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(20))
-        }
-        let stored = try await storage(keyByte: 0x66).fetchChainBody(cid, remote: remote)
-        XCTAssertEqual(Set(stored), Set(recorded))
-        let connected = await client.connectedPeers
-        XCTAssertEqual(connected, [honestID])
-    }
-
     /// A session whose bundle does not end loses the capability: it is asked
     /// for one bundle, and from then on fetched from per Volume.
     func testAPeerThatNeverEndsABundleIsAskedExactlyOnce() async throws {
