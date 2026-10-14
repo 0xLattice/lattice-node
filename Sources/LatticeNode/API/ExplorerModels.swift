@@ -90,6 +90,22 @@ public struct ExplorerBlockChildren: Codable, Sendable, Equatable {
     public let children: [ExplorerChildBlock]
 }
 
+/// `GET /api/chain/children`: every directory the chain's canonical blocks
+/// have committed, in order, each with its newest child block and the
+/// height that committed it. `next`, when present, is the `after` that reads
+/// the following page.
+public struct ExplorerChainChildren: Codable, Sendable, Equatable {
+    public let chainPath: [String]
+    public let children: [ExplorerCommittedChild]
+    public let next: String?
+}
+
+public struct ExplorerCommittedChild: Codable, Sendable, Equatable {
+    public let directory: String
+    public let blockHash: String
+    @DecimalString public var committedAtHeight: UInt64
+}
+
 /// `GET /api/chain/endpoints`: the read URLs declared for a child chain,
 /// UNVERIFIED, beside the child block its parent most recently commits
 /// under its directory (information only: it can be a block the child

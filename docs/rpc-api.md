@@ -90,6 +90,7 @@ Mining templates are requested at Nexus and can carry every hosted descendant.
 | `GET /api/chain/info` | Chain metadata | yes |
 | `GET /api/chain/spec` | Active chain spec | yes |
 | `GET /api/chain/genesis` | Selected genesis CID | yes |
+| `GET /api/chain/children?chainPath=P&after=<dir>&limit=<n>` | Every child directory P's canonical chain has committed, each with its newest child block | yes |
 | `GET /api/chain/endpoints?chainPath=P/D` | Declared read URLs of a child chain, unverified | yes |
 | `GET /status` | Operator status including template digest | no |
 | `GET /metrics` | Prometheus exposition | no |
@@ -132,6 +133,27 @@ entry is the child's `directory` and committed `blockHash`; `height` and
 `transactionCount` are omitted when this node does not hold the child block (it
 does not host that child chain).
 
+## Child directories
+
+`GET /api/chain/children?chainPath=Nexus/Alpha` lists every directory the
+chain's canonical blocks have ever committed, in order, each with its newest
+child block (`blockHash`) and the height that committed it
+(`committedAtHeight`). It is read from an index the node keeps of what each
+header on the chain it acts on records, so a child that has gone quiet stays
+listed, and a reorg moves a directory back to its newest commitment on the
+chain that remains. At most `limit` (default and cap 100) per page; `next`,
+when present, is the `after` for the following page.
+
+```json
+{
+  "chainPath": ["Nexus", "Alpha"],
+  "children": [
+    { "directory": "Beta", "blockHash": "<cid>", "committedAtHeight": "812" }
+  ],
+  "next": null
+}
+```
+
 ## Child read endpoints
 
 `GET /api/chain/endpoints?chainPath=Nexus/Alpha/Beta` names a child; this node
@@ -171,8 +193,8 @@ chain), and do not dial a non-public host on a third party's behalf.
 
 A child is found through the hosts that announce it, so it is listed whether
 or not the parent's recent blocks commit it. `committedBlock` is information
-only: the newest child block the parent's last 64 canonical blocks commit,
-null when they commit none. It can be a block the child chain did not keep,
+only: the newest child block the parent's canonical chain commits under the
+directory, null when it never has. It can be a block the child chain did not keep,
 or one nobody serves, so a reader never requires a URL to serve it. The route
 answers 404 when this node does not host the parent, or when nothing hosts,
 declares or commits the child. Billed to the expensive public read budget.

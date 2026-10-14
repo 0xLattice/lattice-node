@@ -7,10 +7,14 @@ import UInt256
 import VolumeBroker
 
 /// What RPC reads besides the core's snapshot, published by the loop with
-/// it: the act-on chain by height, the pool listing and the template digest.
+/// it: the act-on chain by height, the child directories it commits, the
+/// pool listing and the template digest.
 struct NodeReadView: Sendable {
     var actOnTip: String?
     var heights = HeightIndex()
+    /// Every directory the act-on chain has committed, each with its newest
+    /// commitment: what a block's header records, kept as the chain moves.
+    private(set) var children: [String: CommittedChild] = [:]
     var poolVersion: UInt64?
     var mempool = ChainReads.MempoolListing(count: 0, bytes: 0, cids: [])
     var templateDigest: String?
@@ -21,6 +25,52 @@ struct NodeReadView: Sendable {
     struct Waiting: Sendable, Equatable {
         let cid: String
         let reason: BodyWait
+    }
+
+    /// A child block the act-on chain commits, and the height committing it.
+    struct CommittedChild: Sendable, Equatable {
+        let cid: String
+        let height: UInt64
+    }
+
+    /// Move the act-on chain to `tip` at `height`: walk down from it to where
+    /// the view already agrees, drop what is above, take the new blocks in.
+    /// A directory whose newest commitment left the chain falls back to its
+    /// newest on what remains. `commitments` are what a held block's header
+    /// records (nil for a block the tree does not hold).
+    mutating func moveActOnChain(
+        to tip: String,
+        parent: (String) -> String?,
+        height: Int,
+        commitments: (String) -> [String: String]?
+    ) {
+        var entered: [String] = []
+        var keep = tip.isEmpty ? 0 : height + 1
+        var cursor: String? = tip
+        while keep > 0, let cid = cursor, !(keep <= heights.count && heights[keep - 1] == cid) {
+            entered.append(cid)
+            cursor = parent(cid)
+            keep -= 1
+        }
+        let left = children.filter { $0.value.height >= UInt64(keep) }.map(\.key)
+        for directory in left { children[directory] = nil }
+        heights.truncate(to: keep)
+        for cid in entered.reversed() {
+            let at = UInt64(heights.count)
+            heights.append(cid)
+            for (directory, child) in commitments(cid) ?? [:] {
+                children[directory] = CommittedChild(cid: child, height: at)
+            }
+        }
+        var missing = Set(left.filter { children[$0] == nil })
+        var below = keep - 1
+        while !missing.isEmpty, below >= 0, let cid = heights[below] {
+            for (directory, child) in commitments(cid) ?? [:] where missing.contains(directory) {
+                children[directory] = CommittedChild(cid: child, height: UInt64(below))
+                missing.remove(directory)
+            }
+            below -= 1
+        }
     }
 }
 
@@ -278,6 +328,7 @@ extension NodeRuntime {
             canonicalCID: { height in
                 view.value?.heights[Int(clamping: height)]
             },
+            committedChildren: { view.value?.children ?? [:] },
             mempool: { _ in
                 view.value?.mempool ?? ChainReads.MempoolListing(count: 0, bytes: 0, cids: [])
             },

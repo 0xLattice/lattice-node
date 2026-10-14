@@ -39,6 +39,9 @@ public struct ChainReads: Sendable {
     let tip: @Sendable () async -> ChainStatus
     /// The block at a height of the chain to that tip.
     let canonicalCID: @Sendable (UInt64) async -> String?
+    /// Every directory the chain to that tip commits, with its newest
+    /// commitment (the read view's index of what headers record).
+    let committedChildren: @Sendable () async -> [String: NodeReadView.CommittedChild]
     /// The pool's size, and its CIDs only when `listing` (status reads
     /// never build the listing).
     let mempool: @Sendable (_ listing: Bool) async -> MempoolListing
@@ -55,6 +58,7 @@ public struct ChainReads: Sendable {
         accepted: (@Sendable (String) async -> Bool)? = nil,
         tip: @escaping @Sendable () async -> ChainStatus,
         canonicalCID: @escaping @Sendable (UInt64) async -> String?,
+        committedChildren: @escaping @Sendable () async -> [String: NodeReadView.CommittedChild] = { [:] },
         mempool: @escaping @Sendable (_ listing: Bool) async -> MempoolListing,
         peerCount: @escaping @Sendable () -> Int = { 0 }
     ) {
@@ -67,6 +71,7 @@ public struct ChainReads: Sendable {
         }
         self.tip = tip
         self.canonicalCID = canonicalCID
+        self.committedChildren = committedChildren
         self.mempool = mempool
         self.peerCount = peerCount
     }
@@ -376,20 +381,26 @@ public struct ChainReads: Sendable {
     }
 
     /// The newest child block this chain's canonical blocks commit under
-    /// `directory`, looking back at most `depth` blocks from the tip.
-    public func committedChild(directory: String, depth: UInt64 = 64) async -> String? {
-        guard let top = await tip().height else { return nil }
-        var height = top
-        while top - height < depth {
-            if let cid = await canonicalCID(height), let block = await block(cid: cid),
-               let index = (try? await block.children.resolve(fetcher: storage))?.node,
-               let child = index.entries[directory] {
-                return child.rawCID
-            }
-            guard height > 0 else { return nil }
-            height -= 1
-        }
-        return nil
+    /// `directory`, however long ago.
+    public func committedChild(directory: String) async -> String? {
+        await committedChildren()[directory]?.cid
+    }
+
+    /// The directories this chain's canonical blocks have committed, in
+    /// order, each with its newest commitment: at most `limit`, after
+    /// `after` when given.
+    public func explorerChainChildren(after: String?, limit: Int) async -> ExplorerChainChildren {
+        let all = await committedChildren()
+        let directories = all.keys.sorted().filter { after == nil || $0 > after! }
+        let page = directories.prefix(Self.boundedExplorerLimit(limit))
+        return ExplorerChainChildren(
+            chainPath: chainPath,
+            children: page.map { directory in
+                let child = all[directory]!
+                return ExplorerCommittedChild(directory: directory, blockHash: child.cid, committedAtHeight: child.height)
+            },
+            next: page.count < directories.count ? page.last : nil
+        )
     }
 
     public func explorerTransaction(cid: String) async -> ExplorerTransaction? {

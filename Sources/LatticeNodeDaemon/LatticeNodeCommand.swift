@@ -695,6 +695,23 @@ private func addPublicReadRoutes<Context: RequestContext>(
             context: context
         )
     }
+    // Every directory this chain's canonical blocks have committed, each
+    // with its newest child block, from the read view's index; paged by
+    // directory with `after`.
+    router.get("api/chain/children") { request, context in
+        let service = try byPath(request)
+        guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
+            throw HTTPError(.notFound)
+        }
+        let limit = try explorerParseLimit(request, defaultValue: 100, cap: 100)
+        let after = request.uri.queryParameters["after"].map(String.init)
+        return try jsonCached(
+            await service.explorerChainChildren(after: after, limit: limit),
+            cacheControl: statusCacheControl,
+            request: request,
+            context: context
+        )
+    }
     router.get("api/block/:id/children") { request, context in
         let service = try byPath(request)
         guard let id = context.parameters.get("id"), isPlausibleCID(id) else {

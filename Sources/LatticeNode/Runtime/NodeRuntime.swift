@@ -928,17 +928,12 @@ extension NodeRuntime {
             if view.actOnTip != tip.hash {
                 view.actOnTip = tip.hash
                 // The act-on chain is the tip's ancestry, on the best header
-                // chain or not: walk down to where the view already agrees.
-                var entered: [String] = []
-                var keep = tip.hash.isEmpty ? 0 : Int(tip.height) + 1
-                var cursor: String? = tip.hash
-                while keep > 0, let cid = cursor, !(keep <= view.heights.count && view.heights[keep - 1] == cid) {
-                    entered.append(cid)
-                    cursor = level.parent(of: cid)
-                    keep -= 1
-                }
-                view.heights.truncate(to: keep)
-                for cid in entered.reversed() { view.heights.append(cid) }
+                // chain or not.
+                let tree = level.tree
+                view.moveActOnChain(
+                    to: tip.hash, parent: { level.parent(of: $0) }, height: Int(tip.height),
+                    commitments: { tree.recordedChildCommitments(of: $0) }
+                )
             }
             view.poolVersion = pool.version
             view.mempool = ChainReads.MempoolListing(
