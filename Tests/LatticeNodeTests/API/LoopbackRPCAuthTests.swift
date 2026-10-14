@@ -130,6 +130,8 @@ final class LoopbackRPCAuthTests: XCTestCase {
                 XCTAssertEqual(response.status, .noContent)
                 XCTAssertEqual(response.headers[.accessControlAllowOrigin], Self.extensionOrigin)
                 XCTAssertTrue(response.headers[.accessControlAllowMethods]?.contains("POST") == true)
+                // An allowed origin may unpin.
+                XCTAssertTrue(response.headers[.accessControlAllowMethods]?.contains("DELETE") == true)
                 XCTAssertTrue(response.headers[.accessControlAllowHeaders]?.contains("Authorization") == true)
             }
             try await client.execute(uri: "/status", method: .get, headers: [.origin: Self.extensionOrigin]) { response in

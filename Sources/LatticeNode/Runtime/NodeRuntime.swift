@@ -76,6 +76,7 @@ public final class NodeRuntime: Sendable {
         let view: PublishedValue<NodeReadView>
     }
     let configuration: NodeConfiguration
+    let storage: NodeStorage
     /// What the open sessions' hellos advertised, as the content layer reads it.
     let peerCapabilities: PeerCapabilities
     let inputs: AsyncStream<Input>.Continuation
@@ -87,7 +88,8 @@ public final class NodeRuntime: Sendable {
     private let webSocket: WebSocketTransport
     private let delegate: NodeRuntimeIvyDelegate
     private let gate: NodeRuntimeInputGate
-    private let maintenance: Task<Void, Never>
+    /// Cancelled first when the runtime stops.
+    let maintenance: Task<Void, Never>
     /// Read URLs other hosts declare, found through their provider records.
     let readEndpoints: ReadEndpointDirectory
     /// The peers remembered across restarts; nil for a node told to connect
@@ -264,6 +266,7 @@ public final class NodeRuntime: Sendable {
         self.published = published
         self.readView = readView
         self.configuration = configuration
+        self.storage = storage
         reads = Self.reads(storage: storage, configuration: configuration, published: published, view: readView)
         var outputs: [ChainPath: LevelOutput] = [core.rootPath: LevelOutput(published: published, view: readView)]
         var levelReads: [ChainPath: ChainReads] = [:]
@@ -464,6 +467,9 @@ extension NodeRuntime {
         }
         var nextSession: UInt64 = 1
         var runningJobs = 0
+        /// The Volumes the operator pinned, as last read: announced with the
+        /// chains by each maintenance pass.
+        var operatorPins: [String] = []
         /// The running jobs, which the loop waits for before it lets the
         /// store go: a job reading from peers can outlast a step.
         var jobs: [UInt64: Task<Void, Never>] = [:]
@@ -657,6 +663,9 @@ extension NodeRuntime {
                 guard let event else { return true }
                 return await step(event)
             case .maintenance:
+                // Read here, on the loop: the pass runs off it and must not
+                // hold the store open past a stop.
+                operatorPins = await storage.operatorPins()
                 startNetworkMaintenance()
                 return true
             case .currentPeers(let current):
@@ -729,8 +738,10 @@ extension NodeRuntime {
                 peerMemory, configuration.peerTarget, configuration.peersBeforeSeeds
             )
             let retriesSeeds = !configuration.seedPeers.isEmpty
+            // What the operator pinned is announced with the chains.
+            let announcing = announced + operatorPins
             spawn {
-                for key in announced {
+                for key in announcing {
                     await ivy.announceProvider(rootCID: key, expiresAt: expiry)
                 }
                 var connected = Set((await ivy.connectedPeers).map(\.publicKey))

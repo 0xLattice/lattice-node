@@ -102,7 +102,7 @@ struct LoopbackRPCAuthMiddleware<Context: RequestContext>: RouterMiddleware {
             // A preflight carries no credentials; it only learns what the real
             // request may send.
             var headers = cors
-            headers[.accessControlAllowMethods] = "GET, HEAD, POST"
+            headers[.accessControlAllowMethods] = "GET, HEAD, POST, DELETE"
             headers[.accessControlAllowHeaders] = "Authorization, Content-Type"
             headers[.accessControlMaxAge] = "600"
             return Response(status: .noContent, headers: headers)

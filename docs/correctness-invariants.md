@@ -89,6 +89,9 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   `none` the state
   scope names only what the last execution of its chain touched. Pinned by
   `StateTipTests.testANodeOnNoneSyncsAndKeepsValidatingHoldingNoState`.
+- **NODE-STORAGE-002.j** — A Volume the operator pins is named by the
+  operator scope until it is unpinned, whatever the other rules keep. Pinned
+  by `OperatorPinTests` and `DaemonHTTPTests.testOperatorPinRoutes`.
 - **NODE-STORAGE-002.d** — Levels write parent before child; a crash
   between them restores with the child behind, never ahead. Pinned by
   `ChildLevelRestartTests.testACrashBetweenLevelWritesRestoresTheParentAhead`.

@@ -68,6 +68,66 @@ final class DaemonHTTPTests: XCTestCase {
         }
     }
 
+    /// The operator pins a Volume the node holds, lists it, and unpins it;
+    /// one no peer serves is `404`; a foreign Host is refused.
+    func testOperatorPinRoutes() async throws {
+        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-http-pins-\(UUID().uuidString)"
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
+        let storage = try await NodeStorage.open(configuration: NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: storageDirectory,
+            privateKeyHex: String(repeating: "01", count: 32)
+        ))
+        let held = try VolumeImpl<ChainSpec>(node: ChainSpec(
+            maxNumberOfTransactionsPerBlock: 3, maxStateGrowth: 3_333, premine: 3,
+            targetBlockTime: 3_000, initialReward: 3, halvingInterval: 3_333, halfLife: 3
+        ))
+        let storer = NodeImportStorage(storage: await storage.broker)
+        try await held.store(storer: storer)
+        try await storer.commit()
+        let absent = try VolumeImpl<ChainSpec>(node: ChainSpec(
+            maxNumberOfTransactionsPerBlock: 4, maxStateGrowth: 4_444, premine: 4,
+            targetBlockTime: 4_000, initialReward: 4, halvingInterval: 4_444, halfLife: 4
+        )).rawCID
+        let service = try await startRuntime(storage)
+        let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
+        let json: HTTPFields = [.authorization: testOperatorAuthorization, .contentType: "application/json"]
+
+        try await app.test(.router) { client in
+            try await client.execute(
+                uri: "/pins", method: .post, headers: json,
+                body: ByteBuffer(bytes: try JSONEncoder().encode(PinRequest(cid: held.rawCID)))
+            ) { response in
+                XCTAssertEqual(response.status, .ok)
+                XCTAssertEqual(try JSONDecoder().decode(PinsResponse.self, from: Data(buffer: response.body)).pins, [held.rawCID])
+            }
+            try await client.execute(
+                uri: "/pins", method: .post, headers: json,
+                body: ByteBuffer(bytes: try JSONEncoder().encode(PinRequest(cid: absent)))
+            ) { response in
+                XCTAssertEqual(response.status, .notFound)
+            }
+            try await client.execute(uri: "/pins", method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
+                XCTAssertEqual(try JSONDecoder().decode(PinsResponse.self, from: Data(buffer: response.body)).pins, [held.rawCID])
+            }
+            var foreign: HTTPFields = [.authorization: testOperatorAuthorization]
+            foreign.append(.init(name: .init("Host")!, value: "rebound.example:8080"))
+            try await client.execute(uri: "/pins/\(held.rawCID)", method: .delete, headers: foreign) { response in
+                XCTAssertEqual(response.status, .forbidden)
+            }
+            try await client.execute(
+                uri: "/pins/\(held.rawCID)", method: .delete, headers: [.authorization: testOperatorAuthorization]
+            ) { response in
+                XCTAssertEqual(response.status, .ok)
+                XCTAssertEqual(try JSONDecoder().decode(PinsResponse.self, from: Data(buffer: response.body)).pins, [])
+            }
+        }
+        let gone = await storage.volume(held.rawCID)
+        XCTAssertNil(gone)
+    }
+
     /// A web page can send a cross-origin "simple" POST (no preflight) or
     /// reach the loopback listener under a rebound hostname: the operator
     /// write routes refuse both before touching the service.

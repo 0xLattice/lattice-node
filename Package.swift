@@ -103,6 +103,7 @@ let package = Package(
                 .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "VolumeBroker", package: "VolumeBroker"),
             ]),
         .executableTarget(
             name: "LatticeProofVerifier",

@@ -34,6 +34,9 @@ struct RetentionScopes: Sendable {
         readsPrefix + path.joined(separator: "/") + ":" + blockCID
     }
 
+    /// The Volumes the operator named on the private port.
+    var operatorPins: String { chain + ":operator" }
+
     func body(_ blockCID: String, at path: ChainPath = ["Nexus"]) -> String {
         bodyPrefix + path.joined(separator: "/") + ":" + blockCID
     }
@@ -138,6 +141,31 @@ extension NodeStorage {
         } catch {
             syncTrace("bodies not let go of at start: \(error)")
         }
+    }
+
+    // MARK: - Operator pins
+
+    /// The Volumes the operator pinned.
+    nonisolated func operatorPins() async -> [String] {
+        (try? await broker.retainedRoots(scope: scopes.operatorPins)) ?? []
+    }
+
+    /// Pins the Volume `root` names, already stored or as the operator
+    /// provides it in `entries`, each checked against its CID. The node does
+    /// not look inside it or follow what it names.
+    nonisolated func pin(_ root: String, entries: [String: Data]?) async throws {
+        if await !broker.hasVolume(root: root) {
+            let volume = SerializedVolume(root: root, entries: entries ?? [:])
+            guard (try? volume.validate()) != nil else { throw NodeStorageError.missingMaterializedVolume(root) }
+            try await broker.store(volume: volume)
+        }
+        try await broker.mergeRetainedRoots(scope: scopes.operatorPins, roots: [root])
+    }
+
+    /// Unpinning what the operator did not pin changes nothing.
+    nonisolated func unpin(_ root: String) async throws {
+        guard await operatorPins().contains(root) else { return }
+        try await broker.releaseRetainedRoots(scope: scopes.operatorPins, roots: [root])
     }
 
     // MARK: - State: tip

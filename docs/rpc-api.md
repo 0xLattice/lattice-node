@@ -358,6 +358,47 @@ secured by that hash.
 The reply is sent after the resulting node step is durable. Every affected
 level's facts and stream cursors commit in one `state.db` transaction.
 
+## Operator pins
+
+A Volume the operator names by its root CID is held, served to peers and
+announced as held, until the operator unpins it. The node does not look
+inside it or follow anything it names, and it is kept whatever
+`blockBodies` says. These routes are on the operator port only.
+
+### `GET /pins`
+
+```json
+{"pins": ["<cid>"]}
+```
+
+### `POST /pins`
+
+```json
+{"cid": "<cid>", "entries": {"<cid>": "<base64 bytes>"}}
+```
+
+Pins the Volume and answers the pins as `GET /pins` does. A Volume the node
+holds needs only `cid`. One it does not hold is stored only as the operator
+provides it in `entries`, the root and the entries it lists, each checked
+against its CID; the node never reads a pin from peers. `404` (`notHeld`)
+when the node does not hold it and `entries` does not provide it; `409`
+(`conflictingVolume`) when the store holds that root with other entries;
+`503` (`contextChanged`) when the Volume went from the store before it was
+pinned.
+
+### `GET /fetch/:cid`
+
+Reads the Volume from peers and answers it in the shape `POST /pins` takes,
+each entry checked against its CID, without storing it: an application
+validates what it reads and pins it if it keeps it. `404` (`notServed`)
+when no peer serves it.
+
+### `DELETE /pins/:cid`
+
+Unpins the Volume and answers the pins left. It goes from the store unless
+something else the node keeps names it. A CID the operator did not pin
+changes nothing.
+
 ## Errors
 
 - `400 Bad Request` — malformed JSON, invalid content, policy refusal, or
@@ -366,6 +407,7 @@ level's facts and stream cursors commit in one `state.db` transaction.
 - `401 Unauthorized` — operator route without the node's cookie (no challenge header);
 - `403 Forbidden` — browser `Origin` not listed, or a non-loopback `Host`;
 - `404 Not Found` — unknown resource or unhosted `chainPath`;
+- `409 Conflict` — a pin whose root the store holds with other entries;
 - `415 Unsupported Media Type` — operator POST without JSON content type;
 - `429 Too Many Requests` — mempool or public-read rate limit;
 - `503 Service Unavailable` — stopping process or transient core context.
