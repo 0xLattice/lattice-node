@@ -157,6 +157,10 @@ final class LatticeCtlTopologyTests: XCTestCase {
             try load(#"{"listen":4001,"rpc":4003,"state":"none"}"#).contentServingArguments, ["--state", "none"]
         )
         XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"state":"some"}"#))
+        XCTAssertEqual(
+            try load(#"{"listen":4001,"rpc":4003,"announceLifetime":3600}"#).contentServingArguments,
+            ["--announce-lifetime", "3600"]
+        )
     }
 
     func testContentServingLimitsLoadFromConfigAndProduceNodeFlags() throws {

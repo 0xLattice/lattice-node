@@ -381,7 +381,9 @@ Pins the Volume and answers the pins as `GET /pins` does. A Volume the node
 holds needs only `cid`. One it does not hold is stored only as the operator
 provides it in `entries`, the root and the entries it lists, each checked
 against its CID; the node never reads a pin from peers. `404` (`notHeld`)
-when the node does not hold it and `entries` does not provide it; `409`
+when the node does not hold it and `entries` does not provide it; `400`
+(`invalidVolume`) when `entries` lacks the root or an entry is not the bytes
+its CID names; `409`
 (`conflictingVolume`) when the store holds that root with other entries;
 `503` (`contextChanged`) when the Volume went from the store before it was
 pinned.

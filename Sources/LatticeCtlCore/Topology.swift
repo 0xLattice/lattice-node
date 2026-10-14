@@ -42,7 +42,7 @@ public struct Topology: Codable, Sendable {
         case listen, rpc, webSocket, peers, publicRead, externalAddress
         case publicReadRate, publicReadExpensiveRate, publicReadMaxRate
         case publicReadURL, publicSubmit, publicSubmitRate, minRelayFee
-        case servingMaxConcurrent, servingMaxInFlightVolumeBytes, blockBodies, state
+        case servingMaxConcurrent, servingMaxInFlightVolumeBytes, blockBodies, state, announceLifetime
         case hostedChains, mine, rpcAllowedOrigins
     }
     public var listen: UInt16
@@ -96,6 +96,9 @@ public struct Topology: Codable, Sendable {
     public var blockBodies: String?
     /// The state kept (`--state`): `all`, `tip` or `none`. Absent = `all`.
     public var state: String?
+    /// Seconds each provider announcement lasts (`--announce-lifetime`).
+    /// Absent = the node's default.
+    public var announceLifetime: UInt64?
     /// Child chains this process hosts as levels, parent before child.
     public var hostedChains: [String]?
     public var mine: TopologyMine?
@@ -238,8 +241,8 @@ public struct Topology: Codable, Sendable {
         return self
     }
 
-    /// Node flags for the content-serving limits and what the node keeps
-    /// in `lattice.json`.
+    /// Node flags for the content-serving limits, what the node keeps and
+    /// how long its announcements last, in `lattice.json`.
     public var contentServingArguments: [String] {
         var arguments: [String] = []
         if let value = servingMaxConcurrent { arguments += ["--serving-max-concurrent", String(value)] }
@@ -248,6 +251,7 @@ public struct Topology: Codable, Sendable {
         }
         if let value = blockBodies { arguments += ["--block-bodies", value] }
         if let value = state { arguments += ["--state", value] }
+        if let value = announceLifetime { arguments += ["--announce-lifetime", String(value)] }
         return arguments
     }
 

@@ -26,6 +26,21 @@ final class NodeConfigurationTests: XCTestCase {
         ).encode())
     }
 
+    /// Every announcement lasts the operator's one lifetime; a lifetime too
+    /// large to add lasts as long as an expiry can say.
+    func testAnnouncementsLastTheOperatorsLifetime() throws {
+        func configuration(_ lifetime: UInt64) throws -> NodeConfiguration {
+            try NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: URL(fileURLWithPath: "/tmp/lattice-node-test"),
+                privateKeyHex: String(repeating: "01", count: 32),
+                announceLifetime: lifetime
+            )
+        }
+        XCTAssertEqual(try configuration(3_600).announcementExpiry(at: 10_000), 3_610)
+        XCTAssertEqual(try configuration(.max).announcementExpiry(at: 10_000), .max)
+    }
+
     func testNexusIdentityIsFixed() throws {
         let configuration = try NodeConfiguration(
             chainPath: ["Nexus"],
