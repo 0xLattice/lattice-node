@@ -49,8 +49,19 @@ final class ReadEndpointTests: XCTestCase {
 
         func slowDiscovery(_ nanoseconds: UInt64) { discoveryDelay = nanoseconds }
 
+        /// While held, discovery waits until `release` opens the gate.
+        private var held = false
+        private var waiting: [CheckedContinuation<Void, Never>] = []
+        func hold() { held = true }
+        func release() {
+            held = false
+            waiting.forEach { $0.resume() }
+            waiting = []
+        }
+
         func lookup() async -> [PeerEndpoint] {
             lookups += 1
+            if held { await withCheckedContinuation { waiting.append($0) } }
             if discoveryDelay > 0 { try? await Task.sleep(nanoseconds: discoveryDelay) }
             return providers
         }
@@ -68,6 +79,12 @@ final class ReadEndpointTests: XCTestCase {
         }
 
         func release(_ provider: PeerEndpoint) { released.append(provider.publicKey) }
+    }
+
+    private final class Counter: Sendable {
+        private let count = Mutex(0)
+        var value: Int { count.withLock { $0 } }
+        func add() { count.withLock { $0 += 1 } }
     }
 
     private final class Clock: Sendable {
@@ -221,18 +238,29 @@ final class ReadEndpointTests: XCTestCase {
     /// running ones end, lookups start again.
     func testLookupsRunningAtOnceAreBounded() async throws {
         let script = Script(providers: []) { _, _ in [] }
-        await script.slowDiscovery(200_000_000)
-        let directory = await directory(script)
+        // Discovery is held, and the deadline is far off, so no running
+        // lookup can end until every request has arrived.
+        await script.hold()
+        let directory = await directory(script, deadline: .seconds(600))
+        let cap = ReadEndpointDirectory.maximumConcurrentLookups
         let fired = 40
-        let results = await withTaskGroup(of: Int.self) { group in
-            for n in 0..<fired {
-                group.addTask { await directory.lookup(["Nexus", "Made-up-\(n)"]).count }
+        let answered = Counter()
+        let requests = (0..<fired).map { n in
+            Task {
+                let count = await directory.lookup(["Nexus", "Made-up-\(n)"]).count
+                answered.add()
+                return count
             }
-            return await group.reduce(into: []) { $0.append($1) }
         }
-        XCTAssertEqual(results, Array(repeating: 0, count: fired))
+        try await eventually("every request past the cap is answered at once") {
+            answered.value == fired - cap
+        }
         let started = await script.lookups
-        XCTAssertEqual(started, ReadEndpointDirectory.maximumConcurrentLookups)
+        XCTAssertEqual(started, cap)
+        await script.release()
+        var results: [Int] = []
+        for request in requests { results.append(await request.value) }
+        XCTAssertEqual(results, Array(repeating: 0, count: fired))
         _ = await directory.lookup(["Nexus", "Made-up-after"])
         let after = await script.lookups
         XCTAssertEqual(after, started + 1, "a lookup runs again once the others ended")
