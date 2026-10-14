@@ -140,8 +140,7 @@ until both are let go of. What executions read and create (state, specs,
 policy modules) and the Nexus genesis block are named by the chain. A body
 is let go of when its block is found invalid, and, when the operator keeps
 no bodies beyond the ones the node operates on (`blockBodies: none`), when
-another block becomes its chain's tip. A body stored for a block that never
-executes stays. When the operator keeps only the tip's state (`state:
+another block becomes its chain's tip. When the operator keeps only the tip's state (`state:
 tip`), state is named by its chain's state scope, and a node of it is let
 go of when no node of the tip's state names it. On `tip` and on `none`,
 what a block reads is named by that block until it executes; on `none` the
@@ -163,7 +162,8 @@ content its facts name is not damaged.
   remembered, and nothing a peer sent is written to the Volume store as it
   came. The store's Volumes are only the ones this node derives when it
   stores a block, and a block a peer sent is stored only once its execution
-  has found it valid: until then its body is held in memory.
+  has found it valid: until then its body is read into memory, and read
+  again whole from peers if memory let it go.
 - Checking a submitted transaction reads this store alone, and so do the
   public read routes: anyone may submit or read, and neither spends this
   node's requests to its peers. A transaction whose state is not held stays

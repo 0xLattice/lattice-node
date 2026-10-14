@@ -32,9 +32,9 @@ extension NodeStorage {
         bodyRoots: [ChainPath: [String]] = [:]
     ) async throws {
         var durable: [NodeFactBatch] = []
-        // What this step's executions created. A fetched body was pinned
-        // under its block's name when it was stored, and the journal still
-        // names it.
+        // What this step's executions created. An executed block's body was
+        // pinned under its block's name by the job that executed it, and the
+        // journal still names it.
         var stored: [String] = []
         // With only the tip's state kept, or none: the state each level's
         // executions created, under the level's state scope.
@@ -93,7 +93,7 @@ extension NodeStorage {
 
     /// Retains the roots this store holds. One it lacks (a body fetched for
     /// this step and gone since) is no fault: the facts still name it, and
-    /// whatever reads it next fetches and keeps it.
+    /// whatever reads it next fetches it.
     nonisolated func retainHeld(_ roots: [String], scope: String? = nil) async throws {
         var roots = Set(roots)
         while !roots.isEmpty {
@@ -139,11 +139,9 @@ extension NodeStorage {
 
     /// `ChainEffect.fetchBody`: the block's Volume and the nested Volumes its
     /// execution reads, through the content layer (local store first, then
-    /// any overlay provider of the root), stored and retained locally.
-    /// What it stored is recorded as the block's bundle, so a peer fetching the
-    /// block from this node is sent it all with one request.
-    /// Returns the roots it stored in, for the validation that references
-    /// them.
+    /// any overlay provider of the root), read into memory and not stored:
+    /// the block is stored once its execution finds it valid. Returns the
+    /// roots it read.
     ///
     /// `bundle` is false on a retry: a bundle is an optimisation, so a block
     /// whose first attempt failed is fetched one Volume at a time, as it

@@ -418,7 +418,8 @@ Persistence order is:
 1. store the content in one `volumes.db` transaction (a block's Volumes
    together, once its execution found it valid or it was mined here; a
    step's post-states together), then retain it. A body fetched from peers
-   is held in memory until then, and a node does not serve it before;
+   is read into memory until then (and read again from peers if memory
+   let it go), and a node does not serve it before;
 2. commit the complete multi-level `NodeBatch` (headers, child proofs, facts,
    and cursors) in one `state.db` transaction;
 3. publish the new snapshots.
@@ -430,8 +431,9 @@ served, or built on before the write that makes it durable returns.
 
 Facts and headers are kept for good. Content is kept because a rule says so.
 Two rules are built in: a node always holds each hosted chain's genesis
-block, and the block bodies it needs to operate, which are those waiting to
-execute and each chain's tip, so that a new block can be passed on. A body
+block, and the body of each chain's tip, so that a new block can be passed
+on. A body fetched for a block waiting to execute is read into memory, not
+stored: it is stored once the block's execution finds it valid. A body
 is a block's own Volume and its transactions'.
 
 `blockBodies` in `lattice.json` (`--block-bodies`) says which bodies it keeps
@@ -439,7 +441,7 @@ beyond those:
 
 - `all`, the default: every body it executed.
 - `none`: no others it executed. A body is let go of once another block is
-  its chain's tip. A body stored for a block that never executed stays.
+  its chain's tip.
 
 State, chain specs and policy modules are not bodies. What the node weighs
 and which tip it selects do not depend on this setting, and it goes on
