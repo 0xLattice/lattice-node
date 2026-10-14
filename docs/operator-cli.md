@@ -55,7 +55,8 @@ This is intentionally one schema:
   `--block-bodies` (see "What a node keeps" in `operations.md`);
 - `state`, when set, is `all`, `tip` or `none` and is passed as `--state` (same
   section);
-- `announceLifetime`, when set, is passed as `--announce-lifetime` (see
+- `announceLifetime`, when set, is 1 to 86400 and is passed as
+  `--announce-lifetime` (see
   "Discovery and peer health" in `operations.md`);
 - `publicReadURL`, when set, is an absolute `https://` (or `http://`) URL with
   a host and no credentials, query or fragment; it is passed as

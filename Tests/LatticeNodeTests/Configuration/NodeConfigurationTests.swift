@@ -26,8 +26,8 @@ final class NodeConfigurationTests: XCTestCase {
         ).encode())
     }
 
-    /// Every announcement lasts the operator's one lifetime; a lifetime too
-    /// large to add lasts as long as an expiry can say.
+    /// Every announcement lasts the operator's one lifetime; one peers would
+    /// drop, too long or none at all, is refused at start.
     func testAnnouncementsLastTheOperatorsLifetime() throws {
         func configuration(_ lifetime: UInt64) throws -> NodeConfiguration {
             try NodeConfiguration(
@@ -38,7 +38,16 @@ final class NodeConfigurationTests: XCTestCase {
             )
         }
         XCTAssertEqual(try configuration(3_600).announcementExpiry(at: 10_000), 3_610)
-        XCTAssertEqual(try configuration(.max).announcementExpiry(at: 10_000), .max)
+        XCTAssertEqual(
+            try configuration(NodeConfiguration.maximumAnnounceLifetime).announcementExpiry(at: 10_000),
+            10 + NodeConfiguration.maximumAnnounceLifetime
+        )
+        XCTAssertThrowsError(try configuration(0)) {
+            XCTAssertEqual($0 as? NodeConfigurationError, .invalidAnnounceLifetime)
+        }
+        XCTAssertThrowsError(try configuration(NodeConfiguration.maximumAnnounceLifetime + 1)) {
+            XCTAssertEqual($0 as? NodeConfigurationError, .invalidAnnounceLifetime)
+        }
     }
 
     func testNexusIdentityIsFixed() throws {

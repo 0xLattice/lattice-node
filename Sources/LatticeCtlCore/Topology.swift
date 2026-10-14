@@ -193,6 +193,9 @@ public struct Topology: Codable, Sendable {
         if let state, !["all", "tip", "none"].contains(state) {
             throw CtlError("state is all, tip or none, not \(state)")
         }
+        if let announceLifetime, !(1...NodeConfiguration.maximumAnnounceLifetime).contains(announceLifetime) {
+            throw CtlError(NodeConfigurationError.invalidAnnounceLifetime.description)
+        }
         var ports: Set<UInt16> = []
         for port in [listen, rpc] + (publicRead.map { [$0] } ?? []) {
             guard port != 0, ports.insert(port).inserted else {
