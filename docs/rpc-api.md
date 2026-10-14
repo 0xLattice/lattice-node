@@ -90,7 +90,7 @@ Mining templates are requested at Nexus and can carry every hosted descendant.
 | `GET /api/chain/info` | Chain metadata | yes |
 | `GET /api/chain/spec` | Active chain spec | yes |
 | `GET /api/chain/genesis` | Selected genesis CID | yes |
-| `GET /api/chain/children?chainPath=P&limit=<n>` | The child directories P's canonical chain has committed, most recent first, each with its newest child block | yes |
+| `GET /api/chain/children?chainPath=P&limit=<n>` | The child directories P's executed blocks have committed, most recent first, each with its newest child block | yes |
 | `GET /api/chain/endpoints?chainPath=P/D` | Declared read URLs of a child chain, unverified | yes |
 | `GET /status` | Operator status including template digest | no |
 | `GET /metrics` | Prometheus exposition | no |
@@ -136,14 +136,15 @@ does not host that child chain).
 ## Child directories
 
 `GET /api/chain/children?chainPath=Nexus/Alpha` lists the directories the
-chain's canonical blocks have committed, the most recently committed first
+chain's executed blocks have committed, the most recently committed first
 (ties by directory), each with its newest child block (`blockHash`) and the
 height that committed it (`committedAtHeight`); at most `limit` (default and
-cap 100). It is read from an index the node keeps of what each header on the
-chain it acts on records: a child that has gone quiet stays in it, and a
-reorg returns a directory to its newest commitment on the chain that remains.
-Each height keeps what its block changed, so a tip move costs only what
-changed.
+cap 100). The node keeps this list from what each executed block's header
+records: built from the blocks it holds when it starts, then grown by every
+block that executes valid. Execution is irrevocable, so the list only grows:
+a child that has gone quiet stays, and so does one committed only on a
+branch that later lost. Listing a child does not make it reachable; its
+hosts' rendezvous does (`/api/chain/endpoints`).
 
 ```json
 {
@@ -193,8 +194,8 @@ chain), and do not dial a non-public host on a third party's behalf.
 
 A child is found through the hosts that announce it, so it is listed whether
 or not the parent's recent blocks commit it. `committedBlock` is information
-only: the newest child block the parent's canonical chain commits under the
-directory, null when it never has. It can be a block the child chain did not keep,
+only: the newest child block the parent's executed blocks commit under the
+directory, null when none has. It can be a block the child chain did not keep,
 or one nobody serves, so a reader never requires a URL to serve it. The route
 answers 404 when this node does not host the parent, or when nothing hosts,
 declares or commits the child. Billed to the expensive public read budget.

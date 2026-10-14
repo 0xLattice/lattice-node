@@ -90,7 +90,7 @@ public struct ExplorerBlockChildren: Codable, Sendable, Equatable {
     public let children: [ExplorerChildBlock]
 }
 
-/// `GET /api/chain/children`: the directories the chain's canonical blocks
+/// `GET /api/chain/children`: the directories the chain's executed blocks
 /// have committed, the most recently committed first, each with its newest
 /// child block and the height that committed it.
 public struct ExplorerChainChildren: Codable, Sendable, Equatable {

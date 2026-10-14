@@ -2,6 +2,7 @@ import Foundation
 import Ivy
 import Lattice
 import LatticeLightClient
+import LatticeNodeCore
 import cashew
 
 /// The node's read surface — chain status, blocks, transactions, state reads
@@ -39,9 +40,9 @@ public struct ChainReads: Sendable {
     let tip: @Sendable () async -> ChainStatus
     /// The block at a height of the chain to that tip.
     let canonicalCID: @Sendable (UInt64) async -> String?
-    /// Every directory the chain to that tip commits, with its newest
-    /// commitment (the read view's index of what headers record).
-    let committedChildren: @Sendable () async -> ChildDirectoryIndex?
+    /// Every directory this chain's executed blocks commit, each with its
+    /// newest commitment (the level core's grow-only list).
+    let committedChildren: @Sendable () async -> ExecutedChildren?
     /// The pool's size, and its CIDs only when `listing` (status reads
     /// never build the listing).
     let mempool: @Sendable (_ listing: Bool) async -> MempoolListing
@@ -58,7 +59,7 @@ public struct ChainReads: Sendable {
         accepted: (@Sendable (String) async -> Bool)? = nil,
         tip: @escaping @Sendable () async -> ChainStatus,
         canonicalCID: @escaping @Sendable (UInt64) async -> String?,
-        committedChildren: @escaping @Sendable () async -> ChildDirectoryIndex? = { nil },
+        committedChildren: @escaping @Sendable () async -> ExecutedChildren? = { nil },
         mempool: @escaping @Sendable (_ listing: Bool) async -> MempoolListing,
         peerCount: @escaping @Sendable () -> Int = { 0 }
     ) {
@@ -380,13 +381,13 @@ public struct ChainReads: Sendable {
         return ExplorerBlockChildren(children: children)
     }
 
-    /// The newest child block this chain's canonical blocks commit under
+    /// The newest child block this chain's executed blocks commit under
     /// `directory`, however long ago.
     public func committedChild(directory: String) async -> String? {
         await committedChildren()?[directory]?.cid
     }
 
-    /// The directories this chain's canonical blocks have committed, the most
+    /// The directories this chain's executed blocks have committed, the most
     /// recently committed first, each with its newest commitment: at most
     /// `limit`.
     public func explorerChainChildren(limit: Int) async -> ExplorerChainChildren {
@@ -394,7 +395,7 @@ public struct ChainReads: Sendable {
         return ExplorerChainChildren(
             chainPath: chainPath,
             children: recent.map {
-                ExplorerCommittedChild(directory: $0.directory, blockHash: $0.child.cid, committedAtHeight: $0.child.height)
+                ExplorerCommittedChild(directory: $0.directory, blockHash: $0.cid, committedAtHeight: $0.height)
             }
         )
     }

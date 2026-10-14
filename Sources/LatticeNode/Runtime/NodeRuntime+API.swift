@@ -4,124 +4,26 @@ import Lattice
 import LatticeNodeCore
 import cashew
 import UInt256
-import Synchronization
 import VolumeBroker
 
 /// What RPC reads besides the core's snapshot, published by the loop with
-/// it: the act-on chain by height, the child directories it commits, the
-/// pool listing and the template digest.
+/// it: the act-on chain by height, the pool listing and the template digest,
+/// and the level's executed child directories.
 struct NodeReadView: Sendable {
     var actOnTip: String?
     var heights = HeightIndex()
-    /// Every directory the act-on chain has committed, each with its newest
-    /// commitment: what a block's header records, kept as the chain moves.
-    /// Shared with every published copy and changed in place, so publishing
-    /// never copies it.
-    let children = ChildDirectoryIndex()
     var poolVersion: UInt64?
     var mempool = ChainReads.MempoolListing(count: 0, bytes: 0, cids: [])
     var templateDigest: String?
     var peers = 0
     /// The first block of the body window, when it waits, and why.
     var waiting: Waiting?
+    /// The level core's directories of committed children (shared, grow-only).
+    var children: ExecutedChildren?
 
     struct Waiting: Sendable, Equatable {
         let cid: String
         let reason: BodyWait
-    }
-
-    /// A child block the act-on chain commits, and the height committing it.
-    struct CommittedChild: Sendable, Equatable {
-        let cid: String
-        let height: UInt64
-    }
-
-    /// Move the act-on chain to `tip` at `height`: walk down from it to where
-    /// the view already agrees, drop what is above, take the new blocks in.
-    /// `commitments` are what a held block's header records (nil for a block
-    /// the tree does not hold).
-    mutating func moveActOnChain(
-        to tip: String,
-        parent: (String) -> String?,
-        height: Int,
-        commitments: (String) -> [String: String]?
-    ) {
-        var entered: [String] = []
-        var keep = tip.isEmpty ? 0 : height + 1
-        var cursor: String? = tip
-        while keep > 0, let cid = cursor, !(keep <= heights.count && heights[keep - 1] == cid) {
-            entered.append(cid)
-            cursor = parent(cid)
-            keep -= 1
-        }
-        heights.truncate(to: keep)
-        let reversed = Array(entered.reversed())
-        for cid in reversed { heights.append(cid) }
-        children.move(keep: keep, entered: reversed.map { commitments($0) ?? [:] })
-    }
-}
-
-/// The child directories of one chain's act-on chain, each with its newest
-/// commitment. Each height keeps what its block changed, so moving the tip
-/// costs only what changed: undo the heights that left, apply the ones that
-/// entered. The loop writes; readers take a lock.
-final class ChildDirectoryIndex: Sendable {
-    private struct State {
-        var entries: [String: NodeReadView.CommittedChild] = [:]
-        /// Per height: each directory its block committed, and its entry
-        /// before that block.
-        var undo: [[(directory: String, before: NodeReadView.CommittedChild?)]] = []
-        /// The most recently committed, built once per move when first read.
-        var recent: [(directory: String, child: NodeReadView.CommittedChild)]?
-    }
-
-    /// The most a reader asks `mostRecent` for.
-    static let recentLimit = 100
-
-    private let state = Mutex(State())
-
-    /// Keep the first `keep` heights, then apply `entered`: the commitments
-    /// of the blocks at the following heights, in order.
-    func move(keep: Int, entered: [[String: String]]) {
-        state.withLock { state in
-            state.recent = nil
-            while state.undo.count > max(0, keep) {
-                for change in state.undo.removeLast().reversed() {
-                    state.entries[change.directory] = change.before
-                }
-            }
-            for commitments in entered {
-                let height = UInt64(state.undo.count)
-                var changes: [(directory: String, before: NodeReadView.CommittedChild?)] = []
-                for (directory, child) in commitments.sorted(by: { $0.key < $1.key }) {
-                    changes.append((directory, state.entries[directory]))
-                    state.entries[directory] = NodeReadView.CommittedChild(cid: child, height: height)
-                }
-                state.undo.append(changes)
-            }
-        }
-    }
-
-    /// The newest commitment under `directory`, if any.
-    subscript(directory: String) -> NodeReadView.CommittedChild? {
-        state.withLock { $0.entries[directory] }
-    }
-
-    var count: Int { state.withLock { $0.entries.count } }
-
-    /// At most `limit` (up to `recentLimit`) directories, the most recently
-    /// committed first (ties by directory). Sorted once per move, however
-    /// many readers ask.
-    func mostRecent(_ limit: Int) -> [(directory: String, child: NodeReadView.CommittedChild)] {
-        let recent = state.withLock { state in
-            if let recent = state.recent { return recent }
-            let built = state.entries.sorted {
-                $0.value.height != $1.value.height ? $0.value.height > $1.value.height : $0.key < $1.key
-            }.prefix(Self.recentLimit).map { (directory: $0.key, child: $0.value) }
-            state.recent = built
-            return built
-        }
-        return Array(recent.prefix(max(0, limit)))
     }
 }
 

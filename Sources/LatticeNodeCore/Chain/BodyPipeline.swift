@@ -129,7 +129,12 @@ extension ChainCore {
             if let state = update.materializedPostState { turn.states.append(state) }
             turn.facts += update.batches
             weighed += update.weighed
-            if !update.excluded { executedTransactions[cid] = transactions }
+            if !update.excluded {
+                executedTransactions[cid] = transactions
+                if let meta = tree.getConsensusBlock(hash: cid) {
+                    executedChildren.record(meta.childCommitments, height: meta.blockHeight)
+                }
+            }
             if let replyID = minedReplies.removeValue(forKey: cid) {
                 turn.effects.append(.workSubmitted(
                     replyID: replyID,
