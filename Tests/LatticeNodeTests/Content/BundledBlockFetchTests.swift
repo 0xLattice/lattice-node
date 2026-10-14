@@ -211,7 +211,7 @@ final class BundledBlockFetchTests: XCTestCase {
         return (try HeaderImpl(node: node).rawCID, try XCTUnwrap(node.toData()))
     }
 
-    func testABundledVolumeWithACorruptedEntryIsRejectedAndAttributedToItsServer() async throws {
+    func testABundledVolumeWithACorruptedEntryIsRejectedAndItsServerReported() async throws {
         let root = try content(1)
         let member = try content(2)
         let unused = try content(3)
@@ -222,6 +222,7 @@ final class BundledBlockFetchTests: XCTestCase {
         let other = PeerID(publicKey: String(repeating: "cd", count: 32))
         let requests = Requests()
         let credits = Requests()
+        let reported = Requests()
         let source = IvyRootContentSource(
             fetch: { requested in
                 await requests.volume(requested)
@@ -236,7 +237,8 @@ final class BundledBlockFetchTests: XCTestCase {
                     AttributedVolumeResponse(rootCID: unused.cid, entries: [unused.cid: unused.data], servedBy: server),
                 ]
             },
-            credit: { _, bytes in await credits.volume("\(bytes)") }
+            credit: { _, bytes in await credits.volume("\(bytes)") },
+            report: { root, peer in await reported.volume("\(root) \(peer.publicKey)") }
         )
         let result = await source.withRootTracing(root.cid) { session in
             let first = await session.fetch([root.cid])
@@ -244,10 +246,11 @@ final class BundledBlockFetchTests: XCTestCase {
             return (first, second, session.accountedBytes)
         }
         XCTAssertEqual(result.value.0, [root.cid: root.data])
-        // The bad Volume is its server's deficiency, and is then requested
-        // like any Volume: the session still gets it.
+        // The bad Volume blocks its server, and is then requested like any
+        // Volume: the session still gets it, from the other peer.
         XCTAssertEqual(result.value.1, [member.cid: member.data])
-        XCTAssertEqual(result.attribution.deficientVolumeSuppliers, [member.cid: [server.publicKey]])
+        let reportedPeers = await reported.volumes
+        XCTAssertEqual(reportedPeers, ["\(member.cid) \(server.publicKey)"])
         let bundles = await requests.bundles
         let volumes = await requests.volumes
         XCTAssertEqual(bundles, [root.cid])
