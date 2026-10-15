@@ -313,12 +313,16 @@ extension NodeStorage {
     /// The spec a stored genesis header names, from local content.
     /// A child genesis header lives in the header store (its body may not be
     /// fetched yet); its spec Volume was stored with it.
-    nonisolated func chainGenesisSpec(_ cid: String) async throws -> ChainSpec? {
+    /// `operatorSpecs` are the operator's specs now, when they changed since
+    /// start.
+    nonisolated func chainGenesisSpec(
+        _ cid: String, operatorSpecs: [ChainPath: ChainSpec]? = nil
+    ) async throws -> ChainSpec? {
         guard let block = await chainHeader(cid)?.block else { return nil }
         if let held = try? await block.spec.resolve(fetcher: localFetcher).node { return held }
         // Not in the store: the operator's own spec for a chain it created
         // is the same content if it has the same CID, and is stored again.
-        for spec in configuration.childSpecs.values {
+        for spec in (operatorSpecs ?? configuration.childSpecs).values {
             let volume = try VolumeImpl<ChainSpec>(node: spec)
             guard volume.rawCID == block.spec.rawCID else { continue }
             let storage = NodeImportStorage(storage: broker)

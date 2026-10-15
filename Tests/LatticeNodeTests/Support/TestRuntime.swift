@@ -36,6 +36,7 @@ func makeApplication(
 ) -> Application<RouterResponder<BasicRequestContext>> {
     makeApplication(
         reads: runtime.reads,
+        levelReads: { Array(runtime.levelReads.values) },
         writes: runtime,
         status: { await runtime.status() },
         metrics: { runtime.metricsExposition(peers: $0, processStartTime: $1) },
@@ -58,7 +59,7 @@ func makePublicReadApplication(
     submit: Bool = false
 ) -> Application<RouterResponder<PublicReadRequestContext>> {
     makePublicReadApplication(
-        reads: runtime.reads, levelReads: Array(runtime.levelReads.values), host: host, port: port,
+        reads: runtime.reads, levelReads: { Array(runtime.levelReads.values) }, host: host, port: port,
         peers: { ExplorerPeersResponse(count: runtime.peerCount, peers: []) },
         limits: limits, healthClock: healthClock, endpoints: { await runtime.chainEndpoints($0) },
         submit: submit ? { @Sendable request in try await runtime.submitPublicTransaction(request) } : nil

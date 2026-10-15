@@ -458,7 +458,9 @@ public struct NodeCore: Sendable {
         for peer in peers.sorted() { run(path, .peerReady(peer), &turn) }
     }
 
-    /// The root is never unhosted.
+    /// The root is never unhosted. The parent level keeps serving runs for
+    /// the stopped directory (serving is idempotent, so hosting it again
+    /// needs nothing more); a restart drops them.
     mutating func unhost(_ path: ChainPath) {
         guard path != rootPath else { return }
         for held in levels.keys where held.starts(with: path) {

@@ -35,7 +35,7 @@ extension LatticeNodeCommand {
         }
         let app = makeApplication(
             reads: runtime.reads,
-            levelReads: Array(runtime.levelReads.values),
+            levelReads: { Array(runtime.levelReads.values) },
             writes: runtime,
             status: { await runtime.status() },
             metrics: { runtime.metricsExposition(peers: $0, processStartTime: $1) },
@@ -68,7 +68,7 @@ extension LatticeNodeCommand {
         let publicReadApp = publicReadPort.map { port in
             makePublicReadApplication(
                 reads: runtime.reads,
-                levelReads: Array(runtime.levelReads.values),
+                levelReads: { Array(runtime.levelReads.values) },
                 host: "0.0.0.0",
                 port: Int(port),
                 peers: peers,

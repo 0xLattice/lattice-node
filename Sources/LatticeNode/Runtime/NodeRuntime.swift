@@ -490,7 +490,7 @@ extension NodeRuntime {
         var executionJobs: [RuntimeJob] = []
         var miningJobs: [RuntimeJob] = []
         /// RPCs waiting on their answer, by reply ID.
-        var replies: [UInt64: CheckedContinuation<NodeRuntimeReply, any Error>] = [:]
+        var replies: [UInt64: (path: ChainPath, reply: CheckedContinuation<NodeRuntimeReply, any Error>)] = [:]
         var nextReply: UInt64 = 1
         /// Announced transactions being fetched, by CID.
         var transactionFetches: Set<String> = []
@@ -667,7 +667,7 @@ extension NodeRuntime {
                 }
                 let id = nextReply
                 nextReply += 1
-                replies[id] = reply
+                replies[id] = (path, reply)
                 return await step(.level(path, .mining(event(id))))
             case .answer(let id, let result):
                 answer(id, result)
@@ -721,7 +721,7 @@ extension NodeRuntime {
             var failure: (any Error)?
             for path in next.hostedChildren where core.levels[path] == nil {
                 do {
-                    try await start(path)
+                    try await start(path, specs: next.childSpecs)
                 } catch NodeRuntimeError.stopped {
                     throw NodeRuntimeError.stopped
                 } catch {
@@ -736,12 +736,17 @@ extension NodeRuntime {
                 currentPeers[path] = nil
             }
             // A stopped level's body fetches would retry for good: no
-            // `cancelBody` comes from a level that is gone.
+            // `cancelBody` comes from a level that is gone. Its RPCs would
+            // wait for good: no answer comes from it either.
             for key in bodies.keys where core.levels[key.path] == nil {
                 bodies.removeValue(forKey: key)?.cancel()
-                bodyRoots[key] = nil
-                fetchWaits[key] = nil
-                connectWaits[key] = nil
+            }
+            bodyRoots = bodyRoots.filter { core.levels[$0.key.path] != nil }
+            fetchWaits = fetchWaits.filter { core.levels[$0.key.path] != nil }
+            connectWaits = connectWaits.filter { core.levels[$0.key.path] != nil }
+            for (id, entry) in replies where core.levels[entry.path] == nil {
+                replies[id] = nil
+                entry.reply.resume(throwing: NodeRuntimeError.unknownChain)
             }
             try configuration.host(
                 next.hostedChildren.filter { core.levels[$0] != nil },
@@ -768,11 +773,11 @@ extension NodeRuntime {
 
         /// One child level started over what it journaled, as boot does,
         /// with the operator's own pooled transactions for it.
-        private mutating func start(_ path: ChainPath) async throws {
+        private mutating func start(_ path: ChainPath, specs operatorSpecs: [ChainPath: ChainSpec]) async throws {
             let facts = try await storage.nodeFacts(at: path)
             var specs: [ChainSpec] = []
             for case .block(let block) in facts.flatMap(\.facts) where block.parentBlockHash == nil {
-                guard let spec = try await storage.chainGenesisSpec(block.blockHash) else {
+                guard let spec = try await storage.chainGenesisSpec(block.blockHash, operatorSpecs: operatorSpecs) else {
                     throw NodeStorageError.missingMaterializedVolume(block.blockHash)
                 }
                 specs.append(spec)
@@ -783,6 +788,7 @@ extension NodeRuntime {
             }
             guard let level = core.levels[path] else { throw NodeRuntimeError.unknownChain }
             outputs[path] = LevelOutput(published: PublishedValue(level.snapshot), view: PublishedValue())
+            await peerMemory?.track(path, now: NodeRuntime.now())
             for item in try await storage.localTransactions()
             where item.transaction.body.node?.chainPath == path {
                 guard await step(.level(path, .mining(.transactionReceived(
@@ -964,7 +970,7 @@ extension NodeRuntime {
         }
 
         private mutating func answer(_ id: UInt64, _ result: Result<NodeRuntimeReply, any Error>) {
-            replies.removeValue(forKey: id)?.resume(with: result)
+            replies.removeValue(forKey: id)?.reply.resume(with: result)
         }
 
         /// Record why a block waits. A reason is logged when it changes,
@@ -1563,7 +1569,7 @@ extension NodeRuntime {
         }
 
         mutating func cancelAll() {
-            for reply in replies.values { reply.resume(throwing: NodeRuntimeError.stopped) }
+            for entry in replies.values { entry.reply.resume(throwing: NodeRuntimeError.stopped) }
             replies.removeAll()
             wake?.task.cancel()
             for task in bodies.values { task.cancel() }

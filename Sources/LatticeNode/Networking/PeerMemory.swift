@@ -191,6 +191,17 @@ actor PeerMemory {
         written = loaded
     }
 
+    /// Keep a book for a chain hosted since start: the one remembered for it,
+    /// or a new one.
+    func track(_ chain: ChainPath, now: Int64) {
+        guard books[chain] == nil else { return }
+        let chains = books.keys.sorted { $0.count < $1.count } + [chain]
+        var book = Self.load(file, chains: chains)[chain] ?? PeerBook()
+        book.prune(now: now)
+        books[chain] = book
+        written[chain] = book
+    }
+
     func remembered(for chain: ChainPath) -> [PeerEndpoint] {
         books[chain]?.entries.values.map(\.endpoint) ?? []
     }

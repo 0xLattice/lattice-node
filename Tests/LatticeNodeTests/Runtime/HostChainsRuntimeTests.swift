@@ -1,9 +1,12 @@
 import Foundation
+import Hummingbird
+import HummingbirdTesting
 import Ivy
 import Lattice
 import LatticeNodeCore
 import XCTest
 @testable import LatticeNode
+@testable import LatticeNodeDaemon
 
 /// A running node starts and stops hosting a child chain when its operator
 /// says so, without a restart: a started level syncs from the peers it
@@ -75,14 +78,26 @@ final class HostChainsRuntimeTests: XCTestCase {
         } catch NodeConfigurationError.invalidChainPath {}
         XCTAssertEqual(follower.runtime.hostedChildren, [])
 
-        try await follower.runtime.host([Self.alpha])
+        // Through the operator API, as `lattice` asks: Alpha's reads answer
+        // on the same running listener once it is hosted, and not after.
+        let app = makeApplication(service: follower.runtime, host: "127.0.0.1", port: 0)
+        try await app.test(.router) { client in
+            try await Self.hostedChains(client, ["Nexus/Alpha"])
+            try await client.execute(
+                uri: "/hosted-chains", method: .get, headers: [.authorization: testOperatorAuthorization]
+            ) { XCTAssertEqual(String(buffer: $0.body), #"{"chains":["Nexus\/Alpha"]}"#) }
+            try await Self.alphaHealth(client, .ok)
+        }
         XCTAssertEqual(follower.runtime.hostedChildren, [Self.alpha])
         let followerAlpha = try XCTUnwrap(follower.runtime.levelReads[Self.alpha])
         try await eventually("the follower syncs Alpha from the peer it already has", within: .seconds(20)) {
             (await followerAlpha.readSnapshot().height ?? 0) >= 2
         }
 
-        try await follower.runtime.host([])
+        try await app.test(.router) { client in
+            try await Self.hostedChains(client, [])
+            try await Self.alphaHealth(client, .notFound)
+        }
         XCTAssertNil(follower.runtime.levelReads[Self.alpha])
         XCTAssertEqual(follower.runtime.hostedChildren, [])
         let held = await followerAlpha.readSnapshot().height ?? 0
@@ -94,5 +109,21 @@ final class HostChainsRuntimeTests: XCTestCase {
         try await eventually("the follower follows Alpha again", within: .seconds(20)) {
             (await resumed.readSnapshot().height ?? 0) > held
         }
+    }
+
+    private static func hostedChains(_ client: some TestClientProtocol, _ chains: [String]) async throws {
+        try await client.execute(
+            uri: "/hosted-chains", method: .post,
+            headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
+            body: ByteBuffer(bytes: try JSONEncoder().encode(HostedChainsRequest(
+                hostChain: chains, premineTo: nil, chainPeer: nil, policyModule: nil
+            )))
+        ) { XCTAssertEqual($0.status, .ok, String(buffer: $0.body)) }
+    }
+
+    private static func alphaHealth(_ client: some TestClientProtocol, _ status: HTTPResponse.Status) async throws {
+        try await client.execute(
+            uri: "/health?chainPath=Nexus/Alpha", method: .get, headers: [.authorization: testOperatorAuthorization]
+        ) { XCTAssertEqual($0.status, status) }
     }
 }

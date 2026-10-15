@@ -262,7 +262,10 @@ struct HostedChildren {
         policyModules = try policyModule.map { try Data(contentsOf: URL(fileURLWithPath: $0)) }
         for entry in hostChain {
             let parts = entry.split(separator: "=", maxSplits: 1).map(String.init)
-            let path = parts[0].split(separator: "/").map(String.init)
+            guard let first = parts.first else {
+                throw ValidationError("--host-chain must name a chain path")
+            }
+            let path = first.split(separator: "/").map(String.init)
             children.append(path)
             guard parts.count == 2 else { continue }
             guard specs[path] == nil else { continue }
@@ -427,7 +430,7 @@ typealias ChainEndpointsLookup = @Sendable ([String]) async -> ExplorerChainEndp
 
 func makeApplication(
     reads: ChainReads,
-    levelReads: [ChainReads] = [],
+    levelReads: @escaping @Sendable () -> [ChainReads] = { [] },
     writes: any OperatorWrites,
     status: @Sendable @escaping () async -> NodeStatusResponse,
     metrics: @Sendable @escaping (_ peers: Int, _ processStartTime: Date) async -> String,
@@ -485,7 +488,7 @@ func makeApplication(
 /// surface so the two cannot drift apart.
 func makePublicReadApplication(
     reads: ChainReads,
-    levelReads: [ChainReads] = [],
+    levelReads: @escaping @Sendable () -> [ChainReads] = { [] },
     host: String,
     port: Int,
     peers: @Sendable @escaping () async -> ExplorerPeersResponse = {
@@ -970,11 +973,17 @@ private func addPublicReadRoutes<Context: RequestContext>(
 /// root's when it names none, a hosted child level's, or 404.
 struct ChainReadsByPath: Sendable {
     let root: ChainReads
-    let levels: [String: ChainReads]
+    /// The hosted child levels as they are now: the operator changes them
+    /// while the node runs.
+    let hosted: @Sendable () -> [ChainReads]
 
-    init(root: ChainReads, levels: [ChainReads]) {
+    init(root: ChainReads, levels: @escaping @Sendable () -> [ChainReads]) {
         self.root = root
-        self.levels = Dictionary(uniqueKeysWithValues: levels.map { ($0.chainPath.joined(separator: "/"), $0) })
+        self.hosted = levels
+    }
+
+    private var levels: [String: ChainReads] {
+        Dictionary(hosted().map { ($0.chainPath.joined(separator: "/"), $0) }) { first, _ in first }
     }
 
     func callAsFunction(_ request: Request) throws -> ChainReads {
