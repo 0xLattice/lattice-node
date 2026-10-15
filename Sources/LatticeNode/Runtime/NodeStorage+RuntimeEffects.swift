@@ -14,6 +14,23 @@ extension NodeStorage {
             .mapValues { $0.map(\.batch) }
     }
 
+    /// One level's journaled facts, in order.
+    nonisolated func nodeFacts(at path: ChainPath) async throws -> [BlockImportBatch] {
+        try await store.stagedImports(at: path).map(\.batch)
+    }
+
+    /// Policy modules an operator supplies while the node runs, stored as
+    /// at start, so a genesis that names one can be stored.
+    nonisolated func storePolicyModules(_ modules: [Data]) async throws {
+        guard !modules.isEmpty else { return }
+        let storage = NodeImportStorage(storage: broker)
+        for bytes in modules {
+            try await WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: bytes)).store(storer: storage)
+        }
+        try await storage.commit()
+        try await retainHeld(await storage.takeStoredVolumeRoots())
+    }
+
     /// The weigh log id state.db recorded with its first chain fact.
     nonisolated func chainLogID() async throws -> String? {
         try await store.chainLogID()
@@ -296,12 +313,16 @@ extension NodeStorage {
     /// The spec a stored genesis header names, from local content.
     /// A child genesis header lives in the header store (its body may not be
     /// fetched yet); its spec Volume was stored with it.
-    nonisolated func chainGenesisSpec(_ cid: String) async throws -> ChainSpec? {
+    /// `operatorSpecs` are the operator's specs now, when they changed since
+    /// start.
+    nonisolated func chainGenesisSpec(
+        _ cid: String, operatorSpecs: [ChainPath: ChainSpec]? = nil
+    ) async throws -> ChainSpec? {
         guard let block = await chainHeader(cid)?.block else { return nil }
         if let held = try? await block.spec.resolve(fetcher: localFetcher).node { return held }
         // Not in the store: the operator's own spec for a chain it created
         // is the same content if it has the same CID, and is stored again.
-        for spec in configuration.childSpecs.values {
+        for spec in (operatorSpecs ?? configuration.childSpecs).values {
             let volume = try VolumeImpl<ChainSpec>(node: spec)
             guard volume.rawCID == block.spec.rawCID else { continue }
             let storage = NodeImportStorage(storage: broker)

@@ -25,16 +25,6 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(name: .customLong("host-chain"), help: "A child chain to host as a level of this storage, e.g. Nexus/Alpha, optionally =<spec.json> to mine its genesis (repeatable; a parent before its children)")
     var hostChain: [String] = []
 
-    /// `--host-chain` entries: each path, and the spec file it names.
-    private func hostedChains() throws -> [(path: [String], spec: ChainSpec?)] {
-        try hostChain.map { entry in
-            let parts = entry.split(separator: "=", maxSplits: 1).map(String.init)
-            let path = parts[0].split(separator: "/").map(String.init)
-            guard parts.count == 2 else { return (path, nil) }
-            let data = try Data(contentsOf: URL(fileURLWithPath: parts[1]))
-            return (path, try JSONDecoder().decode(ChainSpec.self, from: data))
-        }
-    }
 
     @Option(name: .customLong("premine-to"), help: "The account a hosted child's genesis pays its spec's premine to, as chain-path=address, e.g. Nexus/Alpha=<address> (repeatable). The chain must be hosted with a spec (--host-chain path=spec.json); without one, its genesis pays no premine.")
     var premineTo: [String] = []
@@ -193,40 +183,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         let fixedSeedPeers = seedPeers.isEmpty ? [] : DefaultBootstrapPeers.nexusFixed
         let overlayPeers = configuredPeers ?? []
 
-        // Each spec file read once: the paths and specs agree.
-        let hosted = try hostedChains()
-        var childSeedPeers: [[String]: [PeerEndpoint]] = [:]
-        for entry in chainPeer {
-            let parts = entry.split(separator: "=", maxSplits: 1).map(String.init)
-            guard parts.count == 2 else {
-                throw ValidationError("--chain-peer must use chain-path=public-key@host:port")
-            }
-            let path = parts[0].split(separator: "/").map(String.init)
-            guard hosted.contains(where: { $0.path == path }) else {
-                throw ValidationError("--chain-peer names \(parts[0]), which is not a hosted chain")
-            }
-            childSeedPeers[path, default: []].append(try parsePeerEndpoint(parts[1]))
-        }
-        var childPremineRecipients: [[String]: String] = [:]
-        for entry in premineTo {
-            let parts = entry.split(separator: "=", maxSplits: 1).map(String.init)
-            guard parts.count == 2, !parts[1].isEmpty else {
-                throw ValidationError("--premine-to must use chain-path=address")
-            }
-            let path = parts[0].split(separator: "/").map(String.init)
-            guard let spec = hosted.first(where: { $0.path == path })?.spec else {
-                throw ValidationError("--premine-to names \(parts[0]), which is not a hosted chain with a spec")
-            }
-            do {
-                try NodeRuntime.checkPremine(
-                    spec: spec, to: parts[1], on: path,
-                    modules: try policyModule.map { try Data(contentsOf: URL(fileURLWithPath: $0)) }
-                )
-            } catch {
-                throw ValidationError("--premine-to \(entry): \(error)")
-            }
-            childPremineRecipients[path] = parts[1]
-        }
+        let hosted = try HostedChildren(
+            hostChain: hostChain, premineTo: premineTo, chainPeer: chainPeer, policyModule: policyModule
+        )
         let configuration = try NodeConfiguration(
             chainPath: address.components,
             storagePath: storage,
@@ -237,7 +196,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             bootstrapPeers: overlayPeers,
             seedPeers: seedPeers,
             fixedSeedPeers: fixedSeedPeers,
-            childSeedPeers: childSeedPeers,
+            childSeedPeers: hosted.seedPeers,
             peerTarget: peerTarget,
             peersBeforeSeeds: peersBeforeSeeds,
             minPeerKeyBits: minimumPeerKeyBits,
@@ -251,10 +210,10 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             announceLifetime: announceLifetime,
             blockBodies: blockBodies,
             state: state,
-            hostedChildren: hosted.map(\.path),
-            childSpecs: Dictionary(hosted.compactMap { entry in entry.spec.map { (entry.path, $0) } }) { first, _ in first },
-            childPremineRecipients: childPremineRecipients,
-            policyModules: try policyModule.map { try Data(contentsOf: URL(fileURLWithPath: $0)) },
+            hostedChildren: hosted.children,
+            childSpecs: hosted.specs,
+            childPremineRecipients: hosted.premineRecipients,
+            policyModules: hosted.policyModules,
             publicReadURL: publicReadUrl,
             publicSubmit: publicSubmit,
             minRelayFee: minRelayFee
@@ -285,6 +244,61 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         }
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+}
+
+/// The child chains `--host-chain`, `--premine-to`, `--chain-peer` and
+/// `--policy-module` name: read the same at start and when the operator
+/// changes them on a running node (`POST /hosted-chains`). Each spec file is
+/// read once, so the paths and specs agree.
+struct HostedChildren {
+    var children: [[String]] = []
+    var specs: [[String]: ChainSpec] = [:]
+    var premineRecipients: [[String]: String] = [:]
+    var seedPeers: [[String]: [PeerEndpoint]] = [:]
+    var policyModules: [Data] = []
+
+    init(hostChain: [String], premineTo: [String], chainPeer: [String], policyModule: [String]) throws {
+        policyModules = try policyModule.map { try Data(contentsOf: URL(fileURLWithPath: $0)) }
+        for entry in hostChain {
+            let parts = entry.split(separator: "=", maxSplits: 1).map(String.init)
+            guard let first = parts.first else {
+                throw ValidationError("--host-chain must name a chain path")
+            }
+            let path = first.split(separator: "/").map(String.init)
+            children.append(path)
+            guard parts.count == 2 else { continue }
+            guard specs[path] == nil else { continue }
+            let data = try Data(contentsOf: URL(fileURLWithPath: parts[1]))
+            specs[path] = try JSONDecoder().decode(ChainSpec.self, from: data)
+        }
+        for entry in chainPeer {
+            let parts = entry.split(separator: "=", maxSplits: 1).map(String.init)
+            guard parts.count == 2 else {
+                throw ValidationError("--chain-peer must use chain-path=public-key@host:port")
+            }
+            let path = parts[0].split(separator: "/").map(String.init)
+            guard children.contains(path) else {
+                throw ValidationError("--chain-peer names \(parts[0]), which is not a hosted chain")
+            }
+            seedPeers[path, default: []].append(try parsePeerEndpoint(parts[1]))
+        }
+        for entry in premineTo {
+            let parts = entry.split(separator: "=", maxSplits: 1).map(String.init)
+            guard parts.count == 2, !parts[1].isEmpty else {
+                throw ValidationError("--premine-to must use chain-path=address")
+            }
+            let path = parts[0].split(separator: "/").map(String.init)
+            guard let spec = specs[path] else {
+                throw ValidationError("--premine-to names \(parts[0]), which is not a hosted chain with a spec")
+            }
+            do {
+                try NodeRuntime.checkPremine(spec: spec, to: parts[1], on: path, modules: policyModules)
+            } catch {
+                throw ValidationError("--premine-to \(entry): \(error)")
+            }
+            premineRecipients[path] = parts[1]
+        }
     }
 }
 
@@ -358,6 +372,23 @@ protocol OperatorWrites: Sendable {
     func fetchVolume(_ root: String) async throws -> SerializedVolume?
     func unpinVolume(_ root: String) async throws
     func pinnedVolumes() async -> [String]
+    func hostChains(_ request: HostedChainsRequest) async throws
+    var hostedChildren: [[String]] { get }
+}
+
+/// `POST /hosted-chains`: the child chains the node hosts from now on, in the
+/// shape of the flags that name them at start (`--host-chain`, ...). A chain
+/// left out stops; its data stays.
+struct HostedChainsRequest: Codable, Sendable {
+    let hostChain: [String]
+    let premineTo: [String]?
+    let chainPeer: [String]?
+    let policyModule: [String]?
+}
+
+/// The child chains the node hosts, parent first, as `Nexus/Alpha`.
+struct HostedChainsResponse: Codable, Sendable {
+    let chains: [String]
 }
 
 /// `POST /pins`: the Volume an operator pins, by its root CID.
@@ -378,7 +409,18 @@ struct PinsResponse: Codable, Sendable {
     let pins: [String]
 }
 
-extension NodeRuntime: OperatorWrites {}
+extension NodeRuntime: OperatorWrites {
+    func hostChains(_ request: HostedChainsRequest) async throws {
+        let hosted = try HostedChildren(
+            hostChain: request.hostChain, premineTo: request.premineTo ?? [],
+            chainPeer: request.chainPeer ?? [], policyModule: request.policyModule ?? []
+        )
+        try await host(
+            hosted.children, childSpecs: hosted.specs, childPremineRecipients: hosted.premineRecipients,
+            childSeedPeers: hosted.seedPeers, policyModules: hosted.policyModules
+        )
+    }
+}
 
 /// The public listener's `POST /transactions`, when its operator turned it on.
 typealias PublicSubmit = @Sendable (SubmitTransactionRequest) async throws -> SubmitTransactionResponse
@@ -388,7 +430,7 @@ typealias ChainEndpointsLookup = @Sendable ([String]) async -> ExplorerChainEndp
 
 func makeApplication(
     reads: ChainReads,
-    levelReads: [ChainReads] = [],
+    levelReads: @escaping @Sendable () -> [ChainReads] = { [] },
     writes: any OperatorWrites,
     status: @Sendable @escaping () async -> NodeStatusResponse,
     metrics: @Sendable @escaping (_ peers: Int, _ processStartTime: Date) async -> String,
@@ -446,7 +488,7 @@ func makeApplication(
 /// surface so the two cannot drift apart.
 func makePublicReadApplication(
     reads: ChainReads,
-    levelReads: [ChainReads] = [],
+    levelReads: @escaping @Sendable () -> [ChainReads] = { [] },
     host: String,
     port: Int,
     peers: @Sendable @escaping () async -> ExplorerPeersResponse = {
@@ -931,11 +973,17 @@ private func addPublicReadRoutes<Context: RequestContext>(
 /// root's when it names none, a hosted child level's, or 404.
 struct ChainReadsByPath: Sendable {
     let root: ChainReads
-    let levels: [String: ChainReads]
+    /// The hosted child levels as they are now: the operator changes them
+    /// while the node runs.
+    let hosted: @Sendable () -> [ChainReads]
 
-    init(root: ChainReads, levels: [ChainReads]) {
+    init(root: ChainReads, levels: @escaping @Sendable () -> [ChainReads]) {
         self.root = root
-        self.levels = Dictionary(uniqueKeysWithValues: levels.map { ($0.chainPath.joined(separator: "/"), $0) })
+        self.hosted = levels
+    }
+
+    private var levels: [String: ChainReads] {
+        Dictionary(hosted().map { ($0.chainPath.joined(separator: "/"), $0) }) { first, _ in first }
     }
 
     func callAsFunction(_ request: Request) throws -> ChainReads {
@@ -992,6 +1040,20 @@ private func addOperatorWriteRoutes(
                 throw HTTPError(.notFound, message: "notServed")
             }
             return PinRequest(cid: volume.root, entries: volume.entries)
+        }
+    }
+    // The child chains this node hosts, changed without a restart.
+    router.get("hosted-chains") { request, context in
+        try json(
+            HostedChainsResponse(chains: service.hostedChildren.map { $0.joined(separator: "/") }),
+            request: request, context: context
+        )
+    }
+    router.post("hosted-chains") { request, context in
+        let input: HostedChainsRequest = try await decode(request, context: context)
+        return try await serviceCall(request: request, context: context) {
+            try await service.hostChains(input)
+            return HostedChainsResponse(chains: service.hostedChildren.map { $0.joined(separator: "/") })
         }
     }
     router.post("pins") { request, context in
@@ -1112,6 +1174,10 @@ private func serviceCall<Value: Encodable, Context: RequestContext>(
         throw HTTPError(.notFound, message: "unknownChain")
     } catch NodeStorageError.missingMaterializedVolume {
         throw HTTPError(.notFound, message: "notHeld")
+    } catch let error as ValidationError {
+        throw HTTPError(.badRequest, message: error.message)
+    } catch NodeConfigurationError.invalidChainPath {
+        throw HTTPError(.badRequest, message: "invalidChainPath")
     } catch NodeStorageError.invalidVolume {
         throw HTTPError(.badRequest, message: "invalidVolume")
     } catch BrokerError.conflictingVolume {

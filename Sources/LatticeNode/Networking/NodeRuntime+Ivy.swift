@@ -57,14 +57,14 @@ final class NodeRuntimeIvyDelegate: IvyDelegate {
     private let gate: NodeRuntimeInputGate
     /// Read-endpoint requests are answered here and responses handed to the
     /// directory: neither touches the chain, so neither enters the loop.
-    private let hosted: Set<[String]>
+    private let hosted: PublishedValue<Set<[String]>>
     private let publicReadURL: String?
     private let publicSubmit: Bool
     private let readEndpoints: ReadEndpointDirectory?
 
     init(
         gate: NodeRuntimeInputGate,
-        hosted: Set<[String]> = [],
+        hosted: PublishedValue<Set<[String]>> = PublishedValue([]),
         publicReadURL: String? = nil,
         publicSubmit: Bool = false,
         readEndpoints: ReadEndpointDirectory? = nil,
@@ -94,13 +94,13 @@ final class NodeRuntimeIvyDelegate: IvyDelegate {
         if message.topic == ReadEndpointTopic.request {
             if let request = try? ReadEndpointRequestMessage.decoded(message.payload),
                let response = ReadEndpointDirectory.answerV2(
-                   request, hosted: hosted, url: publicReadURL, acceptsSubmit: publicSubmit
+                   request, hosted: hosted.value ?? [], url: publicReadURL, acceptsSubmit: publicSubmit
                ),
                let payload = try? response.encoded() {
                 _ = await ivy.sendMessage(to: peer, topic: ReadEndpointTopic.responseV2, payload: payload)
             }
             if let request = try? ReadEndpointRequestMessage.decoded(message.payload),
-               let response = ReadEndpointDirectory.answer(request, hosted: hosted, url: publicReadURL),
+               let response = ReadEndpointDirectory.answer(request, hosted: hosted.value ?? [], url: publicReadURL),
                let payload = try? response.encoded() {
                 _ = await ivy.sendMessage(to: peer, topic: ReadEndpointTopic.response, payload: payload)
             }

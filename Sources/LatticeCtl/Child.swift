@@ -120,9 +120,9 @@ struct Child: AsyncParsableCommand {
                 }
             }
             try topology.save(root: layout.root)
-            let restarted = try await withSpawnLock(layout) { try await restartHostIfRunningLocked(layout) }
+            let updated = try await withSpawnLock(layout) { try await updateHostIfRunningLocked(layout) }
             print("\(path): spec \(file.path); genesis mined from it in the next template that carries it")
-            if restarted { print("restarted the host to run \(path)") }
+            if updated { print("the host now runs \(path)") }
         }
     }
 }

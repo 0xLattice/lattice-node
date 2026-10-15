@@ -20,6 +20,12 @@ public enum NodeEvent: Sendable {
     /// stored and its carried blocks' proofs verified by the shell. With a
     /// reply ID, the step answers `workSubmitted`.
     case mined(MinedGrind, replyID: UInt64? = nil)
+    /// Start hosting a child level while running, over what it journaled
+    /// when it was last hosted (nothing for a new one).
+    case host(ChainPath, facts: [BlockImportBatch], specs: [ChainSpec], cursors: [String: StreamCursor])
+    /// Stop hosting a child level and every level below it. What they
+    /// journaled stays.
+    case unhost(ChainPath)
 }
 
 /// What a submitted grind did at the root level.
@@ -151,7 +157,7 @@ public struct NodeBatch: Sendable {
 public struct NodeCore: Sendable {
     public let rootPath: ChainPath
     /// The child chains this host runs (operator choice).
-    public let hosted: Set<ChainPath>
+    public private(set) var hosted: Set<ChainPath>
     public let config: ChainCoreConfig
     /// Names this host's weigh logs: level `path` logs as `logID/path`. A
     /// host whose store resets takes a new one.
@@ -248,17 +254,27 @@ public struct NodeCore: Sendable {
             // The restored parent serves this level's runs (the empty one
             // `init` served is gone).
             guard host.serve(path), let parent = host.levels[Array(path.dropLast())] else { continue }
-            host.levels[path] = try ChainCore.restore(
-                replaying: facts[path] ?? [],
-                context: try ChainRuntimeContext(path: path),
-                specs: specs[path] ?? [],
-                parent: parent.tree,
-                config: config,
-                logID: NodeCore.logID(logID, path),
-                cursors: cursors[path] ?? [:]
+            host.levels[path] = try host.restoreLevel(
+                path, parent: parent, facts: facts[path] ?? [], specs: specs[path] ?? [], cursors: cursors[path] ?? [:]
             )
         }
         return host
+    }
+
+    /// One child level over its journaled facts and its restored parent.
+    func restoreLevel(
+        _ path: ChainPath, parent: ChainCore,
+        facts: [BlockImportBatch], specs: [ChainSpec], cursors: [String: StreamCursor]
+    ) throws -> ChainCore {
+        try ChainCore.restore(
+            replaying: facts,
+            context: try ChainRuntimeContext(path: path),
+            specs: specs,
+            parent: parent.tree,
+            config: config,
+            logID: NodeCore.logID(logID, path),
+            cursors: cursors
+        )
     }
 
     static func order(_ a: ChainPath, _ b: ChainPath) -> Bool {
@@ -314,6 +330,10 @@ public struct NodeCore: Sendable {
             for path in ordered { run(path, .tick, &turn) }
         case .mined(let grind, let replyID):
             mined(grind, replyID: replyID, &turn)
+        case .host(let path, let facts, let specs, let cursors):
+            host(path, facts: facts, specs: specs, cursors: cursors, &turn)
+        case .unhost(let path):
+            unhost(path)
         }
         dropDisconnected(&turn)
         attributeRuns(&turn)
@@ -417,6 +437,35 @@ public struct NodeCore: Sendable {
             }
         case .stream, .headers:
             return
+        }
+    }
+
+    // MARK: - Hosted levels
+
+    /// A child level starts like a hosted one at boot, then meets every
+    /// current peer. A level whose parent is not hosted, or one already
+    /// hosted, is left as it is.
+    mutating func host(
+        _ path: ChainPath, facts: [BlockImportBatch], specs: [ChainSpec],
+        cursors: [String: StreamCursor], _ turn: inout Turn
+    ) {
+        guard levels[path] == nil, levels[Array(path.dropLast())] != nil, serve(path),
+              let parent = levels[Array(path.dropLast())],
+              let level = try? restoreLevel(path, parent: parent, facts: facts, specs: specs, cursors: cursors)
+        else { return }
+        hosted.insert(path)
+        levels[path] = level
+        for peer in peers.sorted() { run(path, .peerReady(peer), &turn) }
+    }
+
+    /// The root is never unhosted. The parent level keeps serving runs for
+    /// the stopped directory (serving is idempotent, so hosting it again
+    /// needs nothing more); a restart drops them.
+    mutating func unhost(_ path: ChainPath) {
+        guard path != rootPath else { return }
+        for held in levels.keys where held.starts(with: path) {
+            levels[held] = nil
+            hosted.remove(held)
         }
     }
 

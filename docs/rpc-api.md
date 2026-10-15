@@ -376,6 +376,41 @@ secured by that hash.
 The reply is sent after the resulting node step is durable. Every affected
 level's facts and stream cursors commit in one `state.db` transaction.
 
+## Hosted chains
+
+The child chains the node hosts change while it runs. These routes are on the
+operator port only.
+
+### `GET /hosted-chains`
+
+```json
+{"chains": ["Nexus/Alpha"]}
+```
+
+The hosted child chains, parent first.
+
+### `POST /hosted-chains`
+
+```json
+{"hostChain": ["Nexus/Alpha", "Nexus/Beta=/path/to/spec.json"],
+ "premineTo": ["Nexus/Beta=<address>"],
+ "chainPeer": ["Nexus/Alpha=<public-key>@host:port"],
+ "policyModule": ["/path/to/module.wasm"]}
+```
+
+The node hosts these chains and only these, from now on. Each entry reads as
+the start flag of the same name (`--host-chain`, ...); only `hostChain` is
+required. A newly listed chain starts as it would at start and syncs from the
+node's peers; a chain left out stops with every chain below it, and what it
+stored stays, so listing it again resumes it. Answers as `GET
+/hosted-chains`. `400` when the list does not hold together (a child before
+its parent, a flag value that does not parse); `404` (`notHeld`,
+`unknownChain`) when a chain could not start from what it stored.
+
+The hello names what the node hosted at start. Peers learn a newly hosted
+chain from its provider record, and a peer that asks for a stopped one is
+answered as by any node that does not host it.
+
 ## Operator pins
 
 A Volume the operator names by its root CID is held, served to peers and

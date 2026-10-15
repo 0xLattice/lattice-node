@@ -67,9 +67,8 @@ public final class NodeRuntime: Sendable {
     public let reads: ChainReads
     /// Each hosted child level's read surface, over its own published
     /// snapshot and view.
-    public let levelReads: [ChainPath: ChainReads]
-    /// Each level's published snapshot and view, the root's included.
-    let outputs: [ChainPath: LevelOutput]
+    public var levelReads: [ChainPath: ChainReads] { publishedLevelReads.value ?? [:] }
+    let publishedLevelReads: PublishedValue<[ChainPath: ChainReads]>
 
     struct LevelOutput: Sendable {
         let published: PublishedValue<ChainSnapshot>
@@ -127,6 +126,9 @@ public final class NodeRuntime: Sendable {
         /// Each hosted chain's current peers, by key, as a maintenance pass
         /// counted them.
         case currentPeers([ChainPath: Set<String>])
+        /// The operator changed the chains this node hosts: the hosted
+        /// children of this configuration, and what goes with them.
+        case host(NodeConfiguration, CheckedContinuation<Void, any Error>)
         case stop
     }
 
@@ -279,8 +281,8 @@ public final class NodeRuntime: Sendable {
                 accepted: { await storage.hasAcceptedBlock($0, at: path) }
             )
         }
-        self.outputs = outputs
-        self.levelReads = levelReads
+        let publishedLevelReads = PublishedValue(levelReads)
+        self.publishedLevelReads = publishedLevelReads
         self.inputs = inputs
         self.ivy = ivy
         webSocket = WebSocketTransport(ivy: ivy)
@@ -308,9 +310,10 @@ public final class NodeRuntime: Sendable {
             now: Self.now()
         )
         self.peerMemory = peerMemory
+        let hosted = PublishedValue(Set([configuration.chainPath] + configuration.hostedChildren))
         delegate = NodeRuntimeIvyDelegate(
             gate: gate,
-            hosted: Set([configuration.chainPath] + configuration.hostedChildren),
+            hosted: hosted,
             publicReadURL: configuration.publicReadURL,
             publicSubmit: configuration.publicSubmit,
             readEndpoints: readEndpoints
@@ -347,6 +350,8 @@ public final class NodeRuntime: Sendable {
             ).encode(),
             configuration: configuration,
             outputs: outputs,
+            levelReads: publishedLevelReads,
+            hosted: hosted,
             inputs: inputs,
             gate: gate,
             helloTimeout: helloTimeout,
@@ -375,6 +380,8 @@ public final class NodeRuntime: Sendable {
                 if running {
                     running = await state.handle(input)
                 } else if case .request(_, _, let reply) = input {
+                    reply.resume(throwing: NodeRuntimeError.stopped)
+                } else if case .host(_, let reply) = input {
                     reply.resume(throwing: NodeRuntimeError.stopped)
                 }
             }
@@ -441,8 +448,12 @@ extension NodeRuntime {
         /// Each session's outgoing sync messages, in order, surviving backpressure.
         let outbox: SessionOutbox
         let hello: Data?
-        let configuration: NodeConfiguration
-        let outputs: [ChainPath: LevelOutput]
+        var configuration: NodeConfiguration
+        var outputs: [ChainPath: LevelOutput]
+        /// What RPC and the overlay read of the hosted levels, republished
+        /// when the operator changes them.
+        let levelReads: PublishedValue<[ChainPath: ChainReads]>
+        let hosted: PublishedValue<Set<ChainPath>>
         let inputs: AsyncStream<Input>.Continuation
         let gate: NodeRuntimeInputGate
         let helloTimeout: Duration
@@ -479,7 +490,7 @@ extension NodeRuntime {
         var executionJobs: [RuntimeJob] = []
         var miningJobs: [RuntimeJob] = []
         /// RPCs waiting on their answer, by reply ID.
-        var replies: [UInt64: CheckedContinuation<NodeRuntimeReply, any Error>] = [:]
+        var replies: [UInt64: (path: ChainPath, reply: CheckedContinuation<NodeRuntimeReply, any Error>)] = [:]
         var nextReply: UInt64 = 1
         /// Announced transactions being fetched, by CID.
         var transactionFetches: Set<String> = []
@@ -569,6 +580,8 @@ extension NodeRuntime {
             hello: Data?,
             configuration: NodeConfiguration,
             outputs: [ChainPath: LevelOutput],
+            levelReads: PublishedValue<[ChainPath: ChainReads]>,
+            hosted: PublishedValue<Set<ChainPath>>,
             inputs: AsyncStream<Input>.Continuation,
             gate: NodeRuntimeInputGate,
             helloTimeout: Duration,
@@ -590,6 +603,8 @@ extension NodeRuntime {
             self.hello = hello
             self.configuration = configuration
             self.outputs = outputs
+            self.levelReads = levelReads
+            self.hosted = hosted
             self.inputs = inputs
             self.remote = remote
             self.workers = workers
@@ -652,7 +667,7 @@ extension NodeRuntime {
                 }
                 let id = nextReply
                 nextReply += 1
-                replies[id] = reply
+                replies[id] = (path, reply)
                 return await step(.level(path, .mining(event(id))))
             case .answer(let id, let result):
                 answer(id, result)
@@ -672,6 +687,16 @@ extension NodeRuntime {
                 currentPeers = current
                 refreshView()
                 return true
+            case .host(let next, let reply):
+                do {
+                    try await host(next)
+                    reply.resume()
+                } catch {
+                    reply.resume(throwing: error)
+                    // A step that ended the loop.
+                    if case NodeRuntimeError.stopped = error { return false }
+                }
+                return true
             case .maintenanceFinished:
                 maintenanceInFlight = false
                 if maintenancePending {
@@ -679,6 +704,96 @@ extension NodeRuntime {
                     startNetworkMaintenance()
                 }
                 return true
+            }
+        }
+
+        /// Host the children `next` lists, and only those: a level no longer
+        /// listed stops with every level below it, and a newly listed one
+        /// starts, parent first, as it would at boot. What a stopped level
+        /// journaled stays, so listing it again resumes it. A level that
+        /// cannot start is left out, and the error says why.
+        mutating func host(_ next: NodeConfiguration) async throws {
+            try await storage.storePolicyModules(next.policyModules)
+            let listed = Set(next.hostedChildren)
+            for path in core.ordered where path != core.rootPath && !listed.contains(path) {
+                guard await step(.unhost(path)) else { throw NodeRuntimeError.stopped }
+            }
+            var failure: (any Error)?
+            for path in next.hostedChildren where core.levels[path] == nil {
+                do {
+                    try await start(path, specs: next.childSpecs)
+                } catch NodeRuntimeError.stopped {
+                    throw NodeRuntimeError.stopped
+                } catch {
+                    failure = failure ?? error
+                }
+            }
+            for path in outputs.keys where core.levels[path] == nil {
+                outputs[path] = nil
+                views[path] = nil
+                digests[path] = nil
+                preflightLevels[path] = nil
+                currentPeers[path] = nil
+            }
+            // A stopped level's body fetches would retry for good: no
+            // `cancelBody` comes from a level that is gone. Its RPCs would
+            // wait for good: no answer comes from it either.
+            for key in bodies.keys where core.levels[key.path] == nil {
+                bodies.removeValue(forKey: key)?.cancel()
+            }
+            bodyRoots = bodyRoots.filter { core.levels[$0.key.path] != nil }
+            fetchWaits = fetchWaits.filter { core.levels[$0.key.path] != nil }
+            connectWaits = connectWaits.filter { core.levels[$0.key.path] != nil }
+            for (id, entry) in replies where core.levels[entry.path] == nil {
+                replies[id] = nil
+                entry.reply.resume(throwing: NodeRuntimeError.unknownChain)
+            }
+            try configuration.host(
+                next.hostedChildren.filter { core.levels[$0] != nil },
+                childSpecs: next.childSpecs,
+                childPremineRecipients: next.childPremineRecipients,
+                childSeedPeers: next.childSeedPeers.filter { core.levels[$0.key] != nil },
+                policyModules: next.policyModules
+            )
+            var reads: [ChainPath: ChainReads] = [:]
+            for path in core.ordered where path != core.rootPath {
+                guard let output = outputs[path] else { continue }
+                reads[path] = levelReads.value?[path] ?? NodeRuntime.reads(
+                    storage: storage, configuration: configuration, published: output.published, view: output.view,
+                    chainPath: path,
+                    accepted: { [storage] in await storage.hasAcceptedBlock($0, at: path) }
+                )
+            }
+            levelReads.publish(reads)
+            hosted.publish(Set(core.levels.keys))
+            refreshView()
+            startNetworkMaintenance()
+            if let failure { throw failure }
+        }
+
+        /// One child level started over what it journaled, as boot does,
+        /// with the operator's own pooled transactions for it.
+        private mutating func start(_ path: ChainPath, specs operatorSpecs: [ChainPath: ChainSpec]) async throws {
+            let facts = try await storage.nodeFacts(at: path)
+            var specs: [ChainSpec] = []
+            for case .block(let block) in facts.flatMap(\.facts) where block.parentBlockHash == nil {
+                guard let spec = try await storage.chainGenesisSpec(block.blockHash, operatorSpecs: operatorSpecs) else {
+                    throw NodeStorageError.missingMaterializedVolume(block.blockHash)
+                }
+                specs.append(spec)
+            }
+            let cursors = try await storage.chainCursors(at: path)
+            guard await step(.host(path, facts: facts, specs: specs, cursors: cursors)) else {
+                throw NodeRuntimeError.stopped
+            }
+            guard let level = core.levels[path] else { throw NodeRuntimeError.unknownChain }
+            outputs[path] = LevelOutput(published: PublishedValue(level.snapshot), view: PublishedValue())
+            await peerMemory?.track(path, now: NodeRuntime.now())
+            for item in try await storage.localTransactions()
+            where item.transaction.body.node?.chainPath == path {
+                guard await step(.level(path, .mining(.transactionReceived(
+                    item.transaction, origin: .restored(addedAt: item.addedAt * 1_000)
+                )))) else { throw NodeRuntimeError.stopped }
             }
         }
 
@@ -855,7 +970,7 @@ extension NodeRuntime {
         }
 
         private mutating func answer(_ id: UInt64, _ result: Result<NodeRuntimeReply, any Error>) {
-            replies.removeValue(forKey: id)?.resume(with: result)
+            replies.removeValue(forKey: id)?.reply.resume(with: result)
         }
 
         /// Record why a block waits. A reason is logged when it changes,
@@ -1454,7 +1569,7 @@ extension NodeRuntime {
         }
 
         mutating func cancelAll() {
-            for reply in replies.values { reply.resume(throwing: NodeRuntimeError.stopped) }
+            for entry in replies.values { entry.reply.resume(throwing: NodeRuntimeError.stopped) }
             replies.removeAll()
             wake?.task.cancel()
             for task in bodies.values { task.cancel() }
