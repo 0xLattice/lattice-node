@@ -407,9 +407,10 @@ stored stays, so listing it again resumes it. Answers as `GET
 its parent, a flag value that does not parse); `404` (`notHeld`,
 `unknownChain`) when a chain could not start from what it stored.
 
-The hello names what the node hosted at start. Peers learn a newly hosted
-chain from its provider record, and a peer that asks for a stopped one is
-answered as by any node that does not host it.
+A peer that connects afterwards is told the new list in the hello. A peer
+already connected learns a newly hosted chain from its provider record, and a
+peer that asks for a stopped one is answered as by any node that does not
+host it.
 
 ## Operator pins
 

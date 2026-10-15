@@ -243,13 +243,6 @@ public struct NodeConfiguration: Sendable {
             throw NodeConfigurationError.invalidChainPath
         }
         try Self.checkHosted(hostedChildren, seedPeers: childSeedPeers, under: chainPath)
-        guard (try? ChainHandshake(
-            nexusGenesisCID: NexusGenesis.expectedBlockHash,
-            chainPath: address.components,
-            capabilities: Self.helloCapabilities(hostedChildren: hostedChildren, relays: true)
-        ).encode()) != nil else {
-            throw NodeConfigurationError.invalidChainPath
-        }
         guard let bytes = Self.hexData(privateKeyHex),
               let signingKey = try? Curve25519.Signing.PrivateKey(rawRepresentation: bytes) else {
             throw NodeConfigurationError.invalidPrivateKey
@@ -345,6 +338,14 @@ public struct NodeConfiguration: Sendable {
             }
         }
         guard seedPeers.keys.allSatisfy({ $0 != chainPath && listed.contains($0) }) else {
+            throw NodeConfigurationError.invalidChainPath
+        }
+        // The hello names every hosted child, and must still fit.
+        guard (try? ChainHandshake(
+            nexusGenesisCID: NexusGenesis.expectedBlockHash,
+            chainPath: chainPath,
+            capabilities: helloCapabilities(hostedChildren: hostedChildren, relays: true)
+        ).encode()) != nil else {
             throw NodeConfigurationError.invalidChainPath
         }
     }

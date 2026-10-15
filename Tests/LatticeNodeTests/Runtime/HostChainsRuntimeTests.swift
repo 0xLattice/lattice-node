@@ -93,6 +93,12 @@ final class HostChainsRuntimeTests: XCTestCase {
         try await eventually("the follower syncs Alpha from the peer it already has", within: .seconds(20)) {
             (await followerAlpha.readSnapshot().height ?? 0) >= 2
         }
+        // A peer that connects now is told Alpha is hosted.
+        let late = try await start(keyByte: 0x83, hosted: [], peers: [follower.endpoint])
+        try await eventually("the follower's hello names Alpha") {
+            late.runtime.peerCapabilities.sessions(speaking: ChainHandshake.hosting(Self.alpha))
+                .contains { $0.key.hex == follower.endpoint.publicKey }
+        }
 
         try await app.test(.router) { client in
             try await Self.hostedChains(client, [])
