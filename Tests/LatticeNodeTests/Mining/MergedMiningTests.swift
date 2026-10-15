@@ -163,30 +163,39 @@ final class MergedMiningTests: XCTestCase {
         XCTAssertThrowsError(try NodeRuntime.checkPremine(spec: try spec(refuse), to: artist, on: Self.alpha, modules: [refuse]))
         XCTAssertThrowsError(try NodeRuntime.checkPremine(spec: try spec(accept), to: artist, on: Self.alpha, modules: []))
 
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-premine-refused-\(UUID().uuidString)", isDirectory: true
-        )
-        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"], storagePath: directory, privateKeyHex: String(repeating: "6c", count: 32),
-            listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
-            hostedChildren: [Self.alpha], childSpecs: [Self.alpha: try spec(refuse)],
-            childPremineRecipients: [Self.alpha: artist], policyModules: [refuse]
-        )
-        let overlay = IvyConfig(
-            signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: [],
-            requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
-            mode: .overlay
-        )
-        let runtime = try await NodeRuntime.start(
-            storage: try await NodeStorage.open(configuration: configuration), configuration: configuration, overlay: overlay
-        )
-        addTeardownBlock { await runtime.stop() }
-        let template = try await runtime.miningTemplate(MiningTemplateRequest())
+        // The same node with a policy that accepts the credit offers the genesis.
+        func host(_ module: Data, _ keyByte: String) async throws -> NodeRuntime {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "lattice-premine-policy-\(UUID().uuidString)", isDirectory: true
+            )
+            addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+            let port = NetworkTransportTestPorts.allocate()
+            let configuration = try NodeConfiguration(
+                chainPath: ["Nexus"], storagePath: directory, privateKeyHex: String(repeating: keyByte, count: 32),
+                listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
+                hostedChildren: [Self.alpha], childSpecs: [Self.alpha: try spec(module)],
+                childPremineRecipients: [Self.alpha: artist], policyModules: [module]
+            )
+            let overlay = IvyConfig(
+                signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: [],
+                requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
+                mode: .overlay
+            )
+            let runtime = try await NodeRuntime.start(
+                storage: try await NodeStorage.open(configuration: configuration), configuration: configuration, overlay: overlay
+            )
+            addTeardownBlock { await runtime.stop() }
+            return runtime
+        }
+        let accepting = try await host(accept, "6d")
+        let offered = try await accepting.miningTemplate(MiningTemplateRequest())
+        XCTAssertNotNil(offered.block.children.node?.entries["Alpha"], "a genesis its policy accepts is offered")
+
+        let refusing = try await host(refuse, "6c")
+        let template = try await refusing.miningTemplate(MiningTemplateRequest())
         XCTAssertNil(template.block.children.node?.entries["Alpha"], "no template carries the refused genesis")
-        _ = try await runtime.mineBlock()
-        let alpha = await runtime.levelReads[Self.alpha]?.readSnapshot()
+        _ = try await refusing.mineBlock()
+        let alpha = await refusing.levelReads[Self.alpha]?.readSnapshot()
         XCTAssertNil(alpha?.tipCID)
         XCTAssertNil(alpha?.bestHeaderHeight, "nothing weighed")
     }
