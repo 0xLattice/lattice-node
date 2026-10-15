@@ -73,6 +73,75 @@ final class MergedMiningTests: XCTestCase {
         await restarted.stop()
     }
 
+    /// A child genesis pays its spec's premine to the account the creator
+    /// names, as Nexus's genesis does, and a node that only follows the
+    /// child reads the same balance from the genesis it syncs.
+    func testAChildGenesisPaysItsPremineToTheNamedAccount() async throws {
+        let spec = ChainSpec(
+            maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 21,
+            targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
+        )
+        let artist = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
+        XCTAssertEqual(try NodeRuntime.premine(spec: spec, to: nil, on: Self.alpha).count, 0)
+        XCTAssertEqual(try NodeRuntime.premine(spec: Self.alphaSpec, to: artist, on: Self.alpha).count, 0)
+        XCTAssertThrowsError(try NodeRuntime.premine(spec: spec, to: "a/b", on: Self.alpha), "not an account")
+        XCTAssertThrowsError(try NodeRuntime.premine(spec: spec, to: "", on: Self.alpha), "not an account")
+
+        func host(_ keyByte: String, creator: Bool, peers: [PeerEndpoint] = []) throws -> (NodeConfiguration, IvyConfig, PeerEndpoint) {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "lattice-premine-\(UUID().uuidString)", isDirectory: true
+            )
+            addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+            let port = NetworkTransportTestPorts.allocate()
+            let configuration = try NodeConfiguration(
+                chainPath: ["Nexus"], storagePath: directory, privateKeyHex: String(repeating: keyByte, count: 32),
+                listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
+                hostedChildren: [Self.alpha],
+                childSpecs: creator ? [Self.alpha: spec] : [:],
+                childPremineRecipients: creator ? [Self.alpha: artist] : [:]
+            )
+            let overlay = IvyConfig(
+                signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: peers,
+                requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
+                mode: .overlay
+            )
+            return (configuration, overlay, PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port))
+        }
+        func balance(_ reads: ChainReads) async -> UInt64? {
+            guard let tip = await reads.readSnapshot().tipCID else { return nil }
+            return await reads.account(owner: artist, blockCID: tip)?.balance
+        }
+
+        let (minerConfiguration, minerOverlay, minerEndpoint) = try host("6a", creator: true)
+        let miner = try await NodeRuntime.start(
+            storage: try await NodeStorage.open(configuration: minerConfiguration),
+            configuration: minerConfiguration, overlay: minerOverlay
+        )
+        addTeardownBlock { await miner.stop() }
+        let minerAlpha = try XCTUnwrap(miner.levelReads[Self.alpha])
+        try await eventually("Alpha's genesis is mined") {
+            _ = try await miner.mineBlock()
+            return await minerAlpha.readSnapshot().tipCID != nil
+        }
+        let paid = await balance(minerAlpha)
+        XCTAssertEqual(paid, spec.premineAmount())
+        XCTAssertEqual(paid, 210)
+
+        let (followerConfiguration, followerOverlay, _) = try host("6b", creator: false, peers: [minerEndpoint])
+        let follower = try await NodeRuntime.start(
+            storage: try await NodeStorage.open(configuration: followerConfiguration),
+            configuration: followerConfiguration, overlay: followerOverlay
+        )
+        addTeardownBlock { await follower.stop() }
+        let followerAlpha = try XCTUnwrap(follower.levelReads[Self.alpha])
+        try await eventually("the follower syncs Alpha") {
+            let tip = await followerAlpha.readSnapshot().tipCID, minerTip = await minerAlpha.readSnapshot().tipCID
+            return tip != nil && tip == minerTip
+        }
+        let followed = await balance(followerAlpha)
+        XCTAssertEqual(followed, spec.premineAmount())
+    }
+
     /// A transaction for a hosted child chain reaches a peer that hosts the
     /// same child, just as a Nexus transaction reaches it: the peer learns of
     /// it by announcement and pools it on the level the transaction names.

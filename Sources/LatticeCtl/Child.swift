@@ -37,8 +37,11 @@ struct Child: AsyncParsableCommand {
         @Option(help: "Initial block reward.")
         var reward: UInt64 = 1_000
 
-        @Option(help: "Premine to the genesis's reward recipient.")
+        @Option(help: "Premine: blocks of the reward schedule the genesis pays to --premine-to.")
         var premine: UInt64 = 0
+
+        @Option(help: "The account the genesis pays the spec's premine to. Required when the spec has a premine.")
+        var premineTo: String?
 
         func run() async throws {
             let layout = rootOption.layout
@@ -74,6 +77,15 @@ struct Child: AsyncParsableCommand {
             if let missing = chainSpec.wasmPolicies.map(\.moduleCID).first(where: { modules[$0] == nil }) {
                 throw CtlError("the spec names policy module \(missing); give its file with --policy-module")
             }
+            // A premine is paid only to an account the creator names.
+            if chainSpec.premine > 0 && (premineTo ?? "").isEmpty {
+                throw CtlError("the spec has a premine of \(chainSpec.premine) blocks; name the account it goes to with --premine-to")
+            }
+            do {
+                _ = try NodeRuntime.premine(spec: chainSpec, to: premineTo, on: path.split(separator: "/").map(String.init))
+            } catch {
+                throw CtlError("--premine-to: \(error)")
+            }
             // A chain is created once: its spec fixes its genesis.
             guard !(topology.hostedChains ?? []).contains(path),
                   !FileManager.default.fileExists(atPath: layout.childSpec(for: path).path) else {
@@ -88,6 +100,9 @@ struct Child: AsyncParsableCommand {
                 at: file.deletingLastPathComponent(), withIntermediateDirectories: true
             )
             try encoder.encode(chainSpec).write(to: file, options: .atomic)
+            if let premineTo, chainSpec.premine > 0 {
+                try Data(premineTo.utf8).write(to: layout.premineRecipient(for: path), options: .atomic)
+            }
             if !modules.isEmpty {
                 let directory = layout.policyModules(for: path)
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

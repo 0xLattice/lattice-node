@@ -127,6 +127,21 @@ ABI; creation is refused if a file is one the spec does not name, or a named
 module has no file. The modules are kept beside the spec, and the node stores
 them at start, so it can store and serve the genesis it mines.
 
+A spec with a premine needs the account the genesis pays it to:
+
+```bash
+lattice child create Nexus/Alpha \
+  --root /var/lib/lattice \
+  --spec alpha-spec.json \
+  --premine-to <address>
+```
+
+`premine` counts blocks of the reward schedule; the genesis pays their rewards
+to that account in one unsigned credit, as Nexus's genesis pays its own, and
+genesis validation bounds the credit by the premine. Creation is refused for a
+premine with no account. The account is kept beside the spec and passed to the
+node as `--premine-to <path>=<address>`.
+
 Creation writes one immutable spec and adds the path to `hostedChains`. The
 node builds the genesis candidate from that spec when the parent has an
 executed state it can commit, and ordinary merged mining secures it. There is

@@ -101,7 +101,8 @@ struct HeightIndex: Sendable {
 
 /// One hosted child level as a template job reads it: its executed tip (nil
 /// when it executed no root), its pool, its difficulty anchor, and the spec a
-/// genesis is built from when it has no root yet.
+/// genesis is built from when it has no root yet, with the account that
+/// genesis pays the spec's premine to.
 struct ChildTemplateInput: Sendable {
     let path: ChainPath
     let tipCID: String?
@@ -109,6 +110,7 @@ struct ChildTemplateInput: Sendable {
     let transactions: [Transaction]
     let anchor: DifficultyAnchor?
     let genesisSpec: ChainSpec?
+    let genesisPremineRecipient: String?
     let genesisTarget: UInt256
 }
 
@@ -586,6 +588,30 @@ extension NodeRuntime {
         )
     }
 
+    /// The genesis transaction paying `spec`'s premine to `recipient`, as
+    /// Nexus's genesis pays its own: one unsigned credit, which genesis
+    /// validation bounds by the premine. None without a recipient or a
+    /// premine. Throws for a premine an account action cannot carry or a
+    /// recipient that is not an account, which no genesis could pay; the
+    /// daemon and the CLI call it up front so neither starts that way.
+    public static func premine(spec: ChainSpec, to recipient: String?, on chainPath: ChainPath) throws -> [Transaction] {
+        let amount = spec.premineAmount()
+        guard let recipient, amount > 0 else { return [] }
+        guard let delta = Int64(exactly: amount) else { throw PremineError("a premine of \(amount) is more than one account action carries") }
+        let body = TransactionBody(
+            accountActions: [AccountAction(owner: recipient, delta: delta)],
+            actions: [], depositActions: [], receiptActions: [], withdrawalActions: [],
+            signers: [], nonce: 0, chainPath: chainPath
+        )
+        guard body.stateAtomsAreValid() else { throw PremineError("\(recipient) is not an account") }
+        return [Transaction(signatures: [:], body: try HeaderImpl(node: body))]
+    }
+
+    public struct PremineError: Error, CustomStringConvertible {
+        public let description: String
+        init(_ description: String) { self.description = description }
+    }
+
     /// Merged mining: a candidate block for each hosted direct child of
     /// `parent`, each carrying its own children's, every one committing its
     /// carrier's entering state. A child with an executed tip builds on it;
@@ -631,6 +657,7 @@ extension NodeRuntime {
                 // until it executes.
                 block = try? await BlockBuilder.buildChildGenesis(
                     spec: spec, parentState: entering,
+                    transactions: try premine(spec: spec, to: input.genesisPremineRecipient, on: input.path),
                     timestamp: timestamp, target: input.genesisTarget, fetcher: fetcher
                 )
             } else {
