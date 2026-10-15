@@ -435,9 +435,10 @@ final class LatticeCtlE2ETests: XCTestCase {
         return Data(module)
     }
 
-    /// A child chain whose spec names two WASM policies, all through the CLI:
-    /// created only with every module the spec names, mined by merged mining,
-    /// and a transaction on it that both policies have to accept.
+    /// A child chain whose spec names two WASM policies and a premine, all
+    /// through the CLI: created only with every module the spec names and an
+    /// account for the premine, mined by merged mining with its genesis paying
+    /// that account, and a transaction on it that both policies have to accept.
     func testAChildChainWithAPolicyIsCreatedMergeMinedAndTransactedThroughTheCLI() async throws {
         let alpha = "Nexus/Alpha"
         let scratch = FileManager.default.temporaryDirectory
@@ -455,7 +456,7 @@ final class LatticeCtlE2ETests: XCTestCase {
         let moduleCIDs = try modules.map { try WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: $0)).rawCID }
         let specFile = scratch.appendingPathComponent("alpha-spec.json")
         try JSONEncoder().encode(ChainSpec(
-            maxNumberOfTransactionsPerBlock: 1_000, maxStateGrowth: 1_000_000, premine: 0,
+            maxNumberOfTransactionsPerBlock: 1_000, maxStateGrowth: 1_000_000, premine: 3,
             targetBlockTime: 1_000, initialReward: 100, halvingInterval: 1_000_000, halfLife: 100,
             wasmPolicies: moduleCIDs.map { WasmPolicyRef(moduleCID: $0, scope: .transaction) }
         )).write(to: specFile)
@@ -470,8 +471,13 @@ final class LatticeCtlE2ETests: XCTestCase {
             create + ["--policy-module", otherFile.path], root: host.root, expectFailure: true
         )
         XCTAssertTrue(wrong.contains("do not name"), "a module the spec does not name is refused: \(wrong)")
+        let unpaid = try await runCtl(
+            create + moduleFiles.flatMap { ["--policy-module", $0.path] }, root: host.root, expectFailure: true
+        )
+        XCTAssertTrue(unpaid.contains("--premine-to"), "a premine needs an account to go to: \(unpaid)")
         _ = try await runCtl(
-            create + moduleFiles.flatMap { ["--policy-module", $0.path] }, root: host.root
+            create + moduleFiles.flatMap { ["--policy-module", $0.path] } + ["--premine-to", recipient.address],
+            root: host.root
         )
 
         var topology = try Topology.load(root: host.root)
@@ -487,12 +493,16 @@ final class LatticeCtlE2ETests: XCTestCase {
         try await waitFor("the Alpha miner is funded", seconds: 180) {
             await self.balance(host, miner.address, chain: alpha) >= 10
         }
+        // The genesis paid the premine, 3 blocks of 100, to the named account.
+        try await waitFor("the premine is paid", seconds: 60) {
+            await self.balance(host, recipient.address, chain: alpha) == 300
+        }
         try await submitUntilAccepted("Alpha accepts the transfer", host, [
             "send", "--chain", alpha, "--key", miner.file.path,
             "--to", recipient.address, "--amount", "10",
         ])
         try await waitFor("the Alpha transfer is mined", seconds: 240) {
-            await self.balance(host, recipient.address, chain: alpha) == 10
+            await self.balance(host, recipient.address, chain: alpha) == 310
         }
     }
 

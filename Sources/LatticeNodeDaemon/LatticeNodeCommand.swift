@@ -36,6 +36,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         }
     }
 
+    @Option(name: .customLong("premine-to"), help: "The account a hosted child's genesis pays its spec's premine to, as chain-path=address, e.g. Nexus/Alpha=<address> (repeatable). The chain must be hosted with a spec (--host-chain path=spec.json); without one, its genesis pays no premine.")
+    var premineTo: [String] = []
+
     @Option(name: .customLong("policy-module"), help: "A WASM policy module a hosted child's spec names by CID (repeatable). Stored at start, so the node can store the genesis it mines from that spec.")
     var policyModule: [String] = []
 
@@ -204,6 +207,26 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             }
             childSeedPeers[path, default: []].append(try parsePeerEndpoint(parts[1]))
         }
+        var childPremineRecipients: [[String]: String] = [:]
+        for entry in premineTo {
+            let parts = entry.split(separator: "=", maxSplits: 1).map(String.init)
+            guard parts.count == 2, !parts[1].isEmpty else {
+                throw ValidationError("--premine-to must use chain-path=address")
+            }
+            let path = parts[0].split(separator: "/").map(String.init)
+            guard let spec = hosted.first(where: { $0.path == path })?.spec else {
+                throw ValidationError("--premine-to names \(parts[0]), which is not a hosted chain with a spec")
+            }
+            do {
+                try NodeRuntime.checkPremine(
+                    spec: spec, to: parts[1], on: path,
+                    modules: try policyModule.map { try Data(contentsOf: URL(fileURLWithPath: $0)) }
+                )
+            } catch {
+                throw ValidationError("--premine-to \(entry): \(error)")
+            }
+            childPremineRecipients[path] = parts[1]
+        }
         let configuration = try NodeConfiguration(
             chainPath: address.components,
             storagePath: storage,
@@ -230,6 +253,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             state: state,
             hostedChildren: hosted.map(\.path),
             childSpecs: Dictionary(hosted.compactMap { entry in entry.spec.map { (entry.path, $0) } }) { first, _ in first },
+            childPremineRecipients: childPremineRecipients,
             policyModules: try policyModule.map { try Data(contentsOf: URL(fileURLWithPath: $0)) },
             publicReadURL: publicReadUrl,
             publicSubmit: publicSubmit,

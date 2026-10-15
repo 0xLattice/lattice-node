@@ -182,6 +182,10 @@ public struct NodeConfiguration: Sendable {
     /// The spec a hosted child's genesis is built from while it has no root
     /// (operator choice; a child with none only follows roots others mine).
     public let childSpecs: [[String]: ChainSpec]
+    /// The account a hosted child's genesis pays its spec's premine to
+    /// (operator choice). A genesis built from a spec with no recipient here
+    /// pays nothing.
+    public let childPremineRecipients: [[String]: String]
     /// The WASM policy modules those specs name by CID (operator-supplied
     /// bytes): stored at start, so a genesis that names one can be stored.
     public let policyModules: [Data]
@@ -229,6 +233,7 @@ public struct NodeConfiguration: Sendable {
         state: StateRetention = .all,
         hostedChildren: [[String]] = [],
         childSpecs: [[String]: ChainSpec] = [:],
+        childPremineRecipients: [[String]: String] = [:],
         policyModules: [Data] = [],
         publicReadURL: String? = nil,
         publicSubmit: Bool = false,
@@ -307,7 +312,9 @@ public struct NodeConfiguration: Sendable {
         self.resourcePolicy = resourcePolicy
         self.blockBodies = blockBodies
         self.state = state
-        self.childSpecs = childSpecs.filter { hostedChildren.contains($0.key) }
+        let specs = childSpecs.filter { hostedChildren.contains($0.key) }
+        self.childSpecs = specs
+        self.childPremineRecipients = childPremineRecipients.filter { specs[$0.key] != nil }
         self.hostedChildren = hostedChildren
         self.policyModules = policyModules
         self.publicReadURL = publicReadURL

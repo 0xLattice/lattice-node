@@ -186,6 +186,12 @@ func spawnHost(layout: HostLayout) throws {
     for child in topology.hostedChains ?? [] {
         let spec = layout.childSpec(for: child)
         arguments += ["--host-chain", FileManager.default.fileExists(atPath: spec.path) ? "\(child)=\(spec.path)" : child]
+        // The recipient goes with the spec its genesis is built from.
+        if FileManager.default.fileExists(atPath: spec.path),
+           let recipient = (try? String(contentsOf: layout.premineRecipient(for: child), encoding: .utf8))?
+               .trimmingCharacters(in: .whitespacesAndNewlines), !recipient.isEmpty {
+            arguments += ["--premine-to", "\(child)=\(recipient)"]
+        }
         let modules = (try? manager.contentsOfDirectory(
             at: layout.policyModules(for: child), includingPropertiesForKeys: nil
         )) ?? []

@@ -1395,6 +1395,7 @@ extension NodeRuntime {
                     // A weighed root that has not executed carries nothing
                     // until it executes, rather than a rival genesis.
                     genesisSpec: snapshot.bestHeaderTip.isEmpty ? configuration.childSpecs[child] : nil,
+                    genesisPremineRecipient: configuration.childPremineRecipients[child],
                     genesisTarget: .max
                 )
             }
