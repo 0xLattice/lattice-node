@@ -115,6 +115,37 @@ final class PublicReadRateLimitTests: XCTestCase {
         }
     }
 
+    /// A web page reads this listener cross-origin. When the limiter refuses
+    /// a request the answer must still carry CORS headers, or the browser
+    /// reports a CORS failure and the page cannot tell "slow down" from
+    /// "this node does not serve you". Preflights are answered without
+    /// spending the budget.
+    func testARefusalStillCarriesCORSSoAPageCanSeeIt() async throws {
+        let (service, configuration) = try await makeService("public-read-cors-refusal")
+        let app = makePublicReadApplication(service: service, host: "127.0.0.1", port: 8081)
+        let path = "/api/block/\(configuration.nexusGenesisCID)/children"
+        let origin: HTTPFields = [.origin: "https://stoa.example"]
+        try await app.test(.router) { client in
+            var refused: HTTPResponse.Status?
+            var allowOrigin: String?
+            for _ in 0..<14 {
+                try await client.execute(uri: path, method: .get, headers: origin) { response in
+                    if response.status == .tooManyRequests {
+                        refused = response.status
+                        allowOrigin = response.headers[.accessControlAllowOrigin]
+                    }
+                }
+            }
+            XCTAssertEqual(refused, .tooManyRequests, "the expensive bank runs out")
+            XCTAssertEqual(allowOrigin, "*", "a refusal carries CORS, so a page sees the 429")
+            let preflight: HTTPFields = [.origin: "https://stoa.example", .accessControlRequestMethod: "GET"]
+            try await client.execute(uri: path, method: .options, headers: preflight) { response in
+                XCTAssertNotEqual(response.status, .tooManyRequests, "a preflight is answered, not billed")
+                XCTAssertNotNil(response.headers[.accessControlAllowOrigin])
+            }
+        }
+    }
+
     /// Every route's budget, one-for-one with the nginx `zone=expensive`
     /// locations.
     func testRouteClassificationMatchesTheExpensiveAllowlist() {

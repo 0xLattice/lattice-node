@@ -386,7 +386,6 @@ func makeApplication(
         peers: peers,
         endpoints: endpoints,
         acceptsSubmit: true,
-        cors: false,
         // Loopback reads the live snapshot: `lattice status` and the E2E
         // suites poll this to watch height advance, and the public listener's
         // staleness window is a defence against public load that does not
@@ -439,6 +438,20 @@ func makePublicReadApplication(
     // BasicRequestContext: the peer socket address is the only client identity
     // available here, and BasicRequestContext does not carry one.
     let router = Router(context: PublicReadRequestContext.self)
+    // CORS is scoped to READ methods only. The POST write routes stay off the
+    // allow-list on purpose: they consume application/json, so a cross-origin
+    // browser POST needs a preflight — denying .post here keeps those routes
+    // reachable only by same-host (non-browser) clients. Cross-origin GETs to
+    // the public read routes are "simple" requests and still succeed. An
+    // operator who turned public submit on also allows POST: that route is
+    // meant to be reached cross-origin. Installed OUTSIDE the limiter, so a
+    // refusal still carries CORS (a page sees a 429, not a CORS failure) and
+    // a preflight is answered without spending the budget.
+    router.add(middleware: CORSMiddleware(
+        allowOrigin: .all,
+        allowHeaders: [.contentType],
+        allowMethods: submit != nil ? [.get, .post, .options] : [.get, .options]
+    ))
     // Middleware applies only to routes registered AFTER this call, so the
     // limiter must be installed before the routes it is meant to cover.
     if let limiter = PublicReadRateLimiter(limits: limits) {
@@ -463,7 +476,6 @@ func makePublicReadApplication(
         peers: peers,
         endpoints: endpoints,
         acceptsSubmit: submit != nil,
-        corsAllowsPost: submit != nil,
         healthSnapshot: { await health.value() }
     )
     if let submit {
@@ -495,27 +507,8 @@ private func addPublicReadRoutes<Context: RequestContext>(
     peers: @Sendable @escaping () async -> ExplorerPeersResponse,
     endpoints: @escaping ChainEndpointsLookup,
     acceptsSubmit: Bool,
-    cors: Bool = true,
-    corsAllowsPost: Bool = false,
     healthSnapshot: @Sendable @escaping () async -> NodeStatusResponse
 ) {
-    // CORS is scoped to READ methods only. The POST write routes stay off the
-    // allow-list on purpose: they consume application/json, so a cross-origin
-    // browser POST needs a preflight — denying .post here keeps those routes
-    // reachable only by same-host (non-browser) clients, preserving the
-    // daemon's loopback-only write posture. Cross-origin GETs to the public
-    // read routes are "simple" requests and still succeed. The public
-    // listener of an operator who turned public submit on also allows POST:
-    // that route is meant to be reached cross-origin. The loopback listener
-    // installs no open CORS: its origin policy is LoopbackRPCAuthMiddleware's.
-    if cors {
-        router.add(middleware: CORSMiddleware(
-            allowOrigin: .all,
-            allowHeaders: [.contentType],
-            allowMethods: corsAllowsPost ? [.get, .post, .options] : [.get, .options]
-        ))
-    }
-
     // /health is the public, non-mutating status: readSnapshot() never enters
     // the runtime loop, so a health-check/explorer poll cannot mutate or
     // head-of-line-block consensus/mempool work.
