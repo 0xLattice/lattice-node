@@ -343,11 +343,7 @@ public final class NodeRuntime: Sendable {
             storage: storage,
             ivy: ivy,
             punch: punch,
-            hello: try? ChainHandshake(
-                nexusGenesisCID: configuration.nexusGenesisCID,
-                chainPath: configuration.chainPath,
-                capabilities: configuration.helloCapabilities(relays: relays)
-            ).encode(),
+            relays: relays,
             configuration: configuration,
             outputs: outputs,
             levelReads: publishedLevelReads,
@@ -447,7 +443,8 @@ extension NodeRuntime {
         let punch: PunchConnector
         /// Each session's outgoing sync messages, in order, surviving backpressure.
         let outbox: SessionOutbox
-        let hello: Data?
+        /// Whether this node's overlay relays, as its hello says.
+        let relays: Bool
         var configuration: NodeConfiguration
         var outputs: [ChainPath: LevelOutput]
         /// What RPC and the overlay read of the hosted levels, republished
@@ -577,7 +574,7 @@ extension NodeRuntime {
             storage: NodeStorage,
             ivy: Ivy,
             punch: PunchConnector,
-            hello: Data?,
+            relays: Bool,
             configuration: NodeConfiguration,
             outputs: [ChainPath: LevelOutput],
             levelReads: PublishedValue<[ChainPath: ChainReads]>,
@@ -600,7 +597,7 @@ extension NodeRuntime {
             self.ivy = ivy
             self.punch = punch
             self.outbox = SessionOutbox(ivy: ivy)
-            self.hello = hello
+            self.relays = relays
             self.configuration = configuration
             self.outputs = outputs
             self.levelReads = levelReads
@@ -1086,7 +1083,12 @@ extension NodeRuntime {
                 Timers.deadline(after: helloTimeout, generation: id) { id in
                     inputs.yield(.helloDeadline(peerKey: key, session: id))
                 }
-                if let hello {
+                // Built at each connect, so it names what is hosted now.
+                if let hello = try? ChainHandshake(
+                    nexusGenesisCID: configuration.nexusGenesisCID,
+                    chainPath: configuration.chainPath,
+                    capabilities: configuration.helloCapabilities(relays: relays)
+                ).encode() {
                     await outbox.send(to: peer, topic: OverlayTopic.overlayHello, payload: hello)
                 }
                 if peer.route != .direct {
