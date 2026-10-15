@@ -139,8 +139,10 @@ lattice child create Nexus/Alpha \
 `premine` counts blocks of the reward schedule; the genesis pays their rewards
 to that account in one unsigned credit, as Nexus's genesis pays its own, and
 genesis validation bounds the credit by the premine. Creation is refused for a
-premine with no account. The account is kept beside the spec and passed to the
-node as `--premine-to <path>=<address>`.
+premine with no account, an account that is not an address, or a genesis one of
+the spec's transaction policies refuses. The account is kept beside the spec
+and passed to the node as `--premine-to <path>=<address>`, which the node checks
+the same way at start.
 
 Creation writes one immutable spec and adds the path to `hostedChains`. The
 node builds the genesis candidate from that spec when the parent has an

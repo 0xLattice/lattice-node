@@ -78,11 +78,18 @@ struct Child: AsyncParsableCommand {
                 throw CtlError("the spec names policy module \(missing); give its file with --policy-module")
             }
             // A premine is paid only to an account the creator names.
-            if chainSpec.premine > 0 && (premineTo ?? "").isEmpty {
+            let premineAmount = chainSpec.premineAmount()
+            if premineAmount > 0 && (premineTo ?? "").isEmpty {
                 throw CtlError("the spec has a premine of \(chainSpec.premine) blocks; name the account it goes to with --premine-to")
             }
+            if premineAmount == 0 && premineTo != nil {
+                throw CtlError("--premine-to names an account, but the spec pays no premine")
+            }
             do {
-                _ = try NodeRuntime.premine(spec: chainSpec, to: premineTo, on: path.split(separator: "/").map(String.init))
+                try NodeRuntime.checkPremine(
+                    spec: chainSpec, to: premineTo, on: path.split(separator: "/").map(String.init),
+                    modules: Array(modules.values)
+                )
             } catch {
                 throw CtlError("--premine-to: \(error)")
             }
@@ -99,10 +106,12 @@ struct Child: AsyncParsableCommand {
             try FileManager.default.createDirectory(
                 at: file.deletingLastPathComponent(), withIntermediateDirectories: true
             )
-            try encoder.encode(chainSpec).write(to: file, options: .atomic)
-            if let premineTo, chainSpec.premine > 0 {
+            // The recipient first: the spec marks the chain created, so a spec
+            // never stands without the recipient its genesis pays.
+            if let premineTo {
                 try Data(premineTo.utf8).write(to: layout.premineRecipient(for: path), options: .atomic)
             }
+            try encoder.encode(chainSpec).write(to: file, options: .atomic)
             if !modules.isEmpty {
                 let directory = layout.policyModules(for: path)
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

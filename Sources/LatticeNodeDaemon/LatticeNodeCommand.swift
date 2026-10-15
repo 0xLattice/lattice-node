@@ -218,7 +218,10 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                 throw ValidationError("--premine-to names \(parts[0]), which is not a hosted chain with a spec")
             }
             do {
-                _ = try NodeRuntime.premine(spec: spec, to: parts[1], on: path)
+                try NodeRuntime.checkPremine(
+                    spec: spec, to: parts[1], on: path,
+                    modules: try policyModule.map { try Data(contentsOf: URL(fileURLWithPath: $0)) }
+                )
             } catch {
                 throw ValidationError("--premine-to \(entry): \(error)")
             }

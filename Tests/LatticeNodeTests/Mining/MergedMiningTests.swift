@@ -142,6 +142,55 @@ final class MergedMiningTests: XCTestCase {
         XCTAssertEqual(followed, spec.premineAmount())
     }
 
+    /// A spec whose transaction policy refuses the premine's unsigned credit
+    /// is refused up front, and a node hosting it anyway never offers that
+    /// genesis: mined and then refused, it would leave the chain weighing a
+    /// root that never executes.
+    func testAGenesisItsPolicyRefusesIsNeitherCreatedNorMined() async throws {
+        let refuse = Self.policyModule(verdict: 0), accept = Self.policyModule(verdict: 1)
+        func spec(_ module: Data) throws -> ChainSpec {
+            ChainSpec(
+                maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 21,
+                targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10,
+                wasmPolicies: [WasmPolicyRef(
+                    moduleCID: try WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: module)).rawCID,
+                    scope: .transaction
+                )]
+            )
+        }
+        let artist = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
+        XCTAssertNoThrow(try NodeRuntime.checkPremine(spec: try spec(accept), to: artist, on: Self.alpha, modules: [accept]))
+        XCTAssertThrowsError(try NodeRuntime.checkPremine(spec: try spec(refuse), to: artist, on: Self.alpha, modules: [refuse]))
+        XCTAssertThrowsError(try NodeRuntime.checkPremine(spec: try spec(accept), to: artist, on: Self.alpha, modules: []))
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-premine-refused-\(UUID().uuidString)", isDirectory: true
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let port = NetworkTransportTestPorts.allocate()
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"], storagePath: directory, privateKeyHex: String(repeating: "6c", count: 32),
+            listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
+            hostedChildren: [Self.alpha], childSpecs: [Self.alpha: try spec(refuse)],
+            childPremineRecipients: [Self.alpha: artist], policyModules: [refuse]
+        )
+        let overlay = IvyConfig(
+            signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: [],
+            requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        )
+        let runtime = try await NodeRuntime.start(
+            storage: try await NodeStorage.open(configuration: configuration), configuration: configuration, overlay: overlay
+        )
+        addTeardownBlock { await runtime.stop() }
+        let template = try await runtime.miningTemplate(MiningTemplateRequest())
+        XCTAssertNil(template.block.children.node?.entries["Alpha"], "no template carries the refused genesis")
+        _ = try await runtime.mineBlock()
+        let alpha = await runtime.levelReads[Self.alpha]?.readSnapshot()
+        XCTAssertNil(alpha?.tipCID)
+        XCTAssertNil(alpha?.bestHeaderHeight, "nothing weighed")
+    }
+
     /// A transaction for a hosted child chain reaches a peer that hosts the
     /// same child, just as a Nexus transaction reaches it: the peer learns of
     /// it by announcement and pools it on the level the transaction names.
