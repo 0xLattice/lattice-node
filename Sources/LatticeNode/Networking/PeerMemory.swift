@@ -191,8 +191,8 @@ actor PeerMemory {
         written = loaded
     }
 
-    /// Keep a book for a chain hosted since start: the one remembered for it,
-    /// or a new one.
+    /// Keep a book for a chain hosted since start: the one still on file for
+    /// it (a save since start keeps only the books it held), or a new one.
     func track(_ chain: ChainPath, now: Int64) {
         guard books[chain] == nil else { return }
         let chains = books.keys.sorted { $0.count < $1.count } + [chain]
