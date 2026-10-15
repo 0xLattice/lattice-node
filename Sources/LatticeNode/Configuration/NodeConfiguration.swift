@@ -121,7 +121,7 @@ public struct NodeConfiguration: Sendable {
     /// A hosted child chain's own seeds (operator's list), beside what it
     /// finds through its parent: dialled only while that chain has too few
     /// peers after trying the ones it remembers and its rendezvous.
-    public let childSeedPeers: [[String]: [PeerEndpoint]]
+    public private(set) var childSeedPeers: [[String]: [PeerEndpoint]]
     /// With fewer current peers than this, a hosted chain dials peers it
     /// remembers (operator choice).
     public let peerTarget: Int
@@ -178,17 +178,17 @@ public struct NodeConfiguration: Sendable {
     public let state: StateRetention
     /// The child chains this process hosts as levels under Nexus (operator
     /// choice), parent before child; every parent is Nexus or listed.
-    public let hostedChildren: [[String]]
+    public private(set) var hostedChildren: [[String]]
     /// The spec a hosted child's genesis is built from while it has no root
     /// (operator choice; a child with none only follows roots others mine).
-    public let childSpecs: [[String]: ChainSpec]
+    public private(set) var childSpecs: [[String]: ChainSpec]
     /// The account a hosted child's genesis pays its spec's premine to
     /// (operator choice). A genesis built from a spec with no recipient here
     /// pays nothing.
-    public let childPremineRecipients: [[String]: String]
+    public private(set) var childPremineRecipients: [[String]: String]
     /// The WASM policy modules those specs name by CID (operator-supplied
     /// bytes): stored at start, so a genesis that names one can be stored.
-    public let policyModules: [Data]
+    public private(set) var policyModules: [Data]
     /// The URL at which the public read routes of every level this process
     /// hosts are reachable (operator declaration; never derived). A peer's
     /// read-endpoint request for a hosted level is answered with it, and each
@@ -242,17 +242,7 @@ public struct NodeConfiguration: Sendable {
         guard let address = ChainAddress(chainPath), address.isNexus else {
             throw NodeConfigurationError.invalidChainPath
         }
-        var listed: Set<[String]> = [chainPath]
-        for child in hostedChildren {
-            guard child.count > 1, (try? ChainRuntimeContext(path: child)) != nil,
-                  listed.contains(Array(child.dropLast())),
-                  listed.insert(child).inserted else {
-                throw NodeConfigurationError.invalidChainPath
-            }
-        }
-        guard childSeedPeers.keys.allSatisfy({ $0 != chainPath && listed.contains($0) }) else {
-            throw NodeConfigurationError.invalidChainPath
-        }
+        try Self.checkHosted(hostedChildren, seedPeers: childSeedPeers, under: chainPath)
         guard (try? ChainHandshake(
             nexusGenesisCID: NexusGenesis.expectedBlockHash,
             chainPath: address.components,
@@ -320,6 +310,43 @@ public struct NodeConfiguration: Sendable {
         self.publicReadURL = publicReadURL
         self.publicSubmit = publicSubmit
         self.minRelayFee = minRelayFee
+    }
+
+    /// The same node hosting `hostedChildren` instead, with their specs,
+    /// premine recipients, seeds and policy modules: what a running node is
+    /// told when its operator changes the chains it hosts.
+    public mutating func host(
+        _ hostedChildren: [[String]],
+        childSpecs: [[String]: ChainSpec],
+        childPremineRecipients: [[String]: String],
+        childSeedPeers: [[String]: [PeerEndpoint]],
+        policyModules: [Data]
+    ) throws {
+        try Self.checkHosted(hostedChildren, seedPeers: childSeedPeers, under: chainPath)
+        let specs = childSpecs.filter { hostedChildren.contains($0.key) }
+        self.hostedChildren = hostedChildren
+        self.childSpecs = specs
+        self.childPremineRecipients = childPremineRecipients.filter { specs[$0.key] != nil }
+        self.childSeedPeers = childSeedPeers
+        self.policyModules = policyModules
+    }
+
+    /// Every hosted child under a hosted parent, listed once, parent first;
+    /// seeds only for hosted children.
+    private static func checkHosted(
+        _ hostedChildren: [[String]], seedPeers: [[String]: [PeerEndpoint]], under chainPath: [String]
+    ) throws {
+        var listed: Set<[String]> = [chainPath]
+        for child in hostedChildren {
+            guard child.count > 1, (try? ChainRuntimeContext(path: child)) != nil,
+                  listed.contains(Array(child.dropLast())),
+                  listed.insert(child).inserted else {
+                throw NodeConfigurationError.invalidChainPath
+            }
+        }
+        guard seedPeers.keys.allSatisfy({ $0 != chainPath && listed.contains($0) }) else {
+            throw NodeConfigurationError.invalidChainPath
+        }
     }
 
     /// When an announcement made at `now` (milliseconds) lapses, in seconds.

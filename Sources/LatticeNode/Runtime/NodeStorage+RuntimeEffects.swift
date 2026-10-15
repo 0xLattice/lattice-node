@@ -14,6 +14,23 @@ extension NodeStorage {
             .mapValues { $0.map(\.batch) }
     }
 
+    /// One level's journaled facts, in order.
+    nonisolated func nodeFacts(at path: ChainPath) async throws -> [BlockImportBatch] {
+        try await store.stagedImports(at: path).map(\.batch)
+    }
+
+    /// Policy modules an operator supplies while the node runs, stored as
+    /// at start, so a genesis that names one can be stored.
+    nonisolated func storePolicyModules(_ modules: [Data]) async throws {
+        guard !modules.isEmpty else { return }
+        let storage = NodeImportStorage(storage: broker)
+        for bytes in modules {
+            try await WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: bytes)).store(storer: storage)
+        }
+        try await storage.commit()
+        try await retainHeld(await storage.takeStoredVolumeRoots())
+    }
+
     /// The weigh log id state.db recorded with its first chain fact.
     nonisolated func chainLogID() async throws -> String? {
         try await store.chainLogID()

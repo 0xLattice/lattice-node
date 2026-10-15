@@ -81,7 +81,8 @@ swift run lattice child create Nexus/Payments \
 ```
 
 The CLI writes `specs/Nexus%2FPayments.json`, appends the path to
-`hostedChains`, and restarts the process if it is running. The next mining
+`hostedChains`, and tells the process to host it if it is running, without a
+restart (an older process that cannot be told is restarted). The next mining
 template that can carry the child builds its genesis from the spec and the
 parent's executed state.
 

@@ -73,7 +73,7 @@ swift run lattice child create Nexus/Payments \
 ```
 
 This writes one child spec, appends `Nexus/Payments` to `hostedChains`, and
-restarts a running host. The child genesis is built as a candidate from that
+tells a running host to host it, without a restart. The child genesis is built as a candidate from that
 spec and mined through its parent's child commitment. It needs no parent
 deployment transaction or authorization record.
 

@@ -1,5 +1,6 @@
 import Crypto
 import Foundation
+import Ivy
 import Lattice
 import LatticeNodeCore
 import cashew
@@ -152,6 +153,35 @@ extension NodeRuntime {
 
     public func pinnedVolumes() async -> [String] {
         await storage.operatorPins()
+    }
+
+    /// Host these child chains, and only these, while running: they and
+    /// their specs, premine recipients, seeds and policy modules replace
+    /// what the node was started or last told. A dropped level keeps what it
+    /// journaled. Throws `NodeConfigurationError` for a list that does not
+    /// hold together, before anything changes.
+    public func host(
+        _ hostedChildren: [ChainPath],
+        childSpecs: [ChainPath: ChainSpec] = [:],
+        childPremineRecipients: [ChainPath: String] = [:],
+        childSeedPeers: [ChainPath: [PeerEndpoint]] = [:],
+        policyModules: [Data] = []
+    ) async throws {
+        var next = configuration
+        try next.host(
+            hostedChildren, childSpecs: childSpecs, childPremineRecipients: childPremineRecipients,
+            childSeedPeers: childSeedPeers, policyModules: policyModules
+        )
+        try await withCheckedThrowingContinuation { continuation in
+            if case .terminated = inputs.yield(.host(next, continuation)) {
+                continuation.resume(throwing: NodeRuntimeError.stopped)
+            }
+        }
+    }
+
+    /// The child chains this node hosts now, parent first.
+    public var hostedChildren: [ChainPath] {
+        levelReads.keys.sorted { $0.count != $1.count ? $0.count < $1.count : $0.joined(separator: "/") < $1.joined(separator: "/") }
     }
 
     public func submitTransaction(
