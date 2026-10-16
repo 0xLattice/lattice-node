@@ -76,7 +76,7 @@ extension LatticeNodeCommand {
                 endpoints: { await runtime.chainEndpoints($0) },
                 submit: submit,
                 fetches: publicReadFetches == 0 ? nil : PublicVolumeFetches(limit: publicReadFetches) {
-                    try? await runtime.fetchVolume(
+                    try await runtime.fetchVolume(
                         $0, maximumArchiveBytes: maximumCompleteVolumeArchiveBytes,
                         maximumEntries: maximumCompleteVolumeArchiveEntries
                     )

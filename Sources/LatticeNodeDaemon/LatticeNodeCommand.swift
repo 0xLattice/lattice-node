@@ -633,8 +633,8 @@ private func addPublicReadRoutes<Context: RequestContext>(
         // One this node does not hold, read from peers when the operator
         // allows it (`--public-read-fetches`).
         if archive == nil, let fetches {
-            switch await fetches.volume(cid) {
-            case .volume(let volume): archive = encodeCompleteVolumeArchive(volume)
+            switch await fetches.archive(cid) {
+            case .archive(let read): archive = read
             case .notServed: break
             case .busy: throw HTTPError(.serviceUnavailable, headers: [.retryAfter: "1"], message: "busy")
             }
@@ -1191,6 +1191,8 @@ private func serviceCall<Value: Encodable, Context: RequestContext>(
         throw HTTPError(.serviceUnavailable, message: "shuttingDown")
     } catch NodeRuntimeError.unknownChain {
         throw HTTPError(.notFound, message: "unknownChain")
+    } catch NodeRuntimeError.busy {
+        throw HTTPError(.serviceUnavailable, headers: [.retryAfter: "1"], message: "busy")
     } catch NodeStorageError.missingMaterializedVolume {
         throw HTTPError(.notFound, message: "notHeld")
     } catch let error as ValidationError {

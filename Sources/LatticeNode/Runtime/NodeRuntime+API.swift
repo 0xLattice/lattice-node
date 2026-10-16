@@ -138,14 +138,15 @@ extension NodeRuntime {
 
     /// A Volume read from peers for the operator, checked against its CIDs
     /// and not stored: an application validates it, then pins it if it
-    /// keeps it. Nil when no peer serves it.
+    /// keeps it. Nil when no peer serves it; throws `busy` when this node's
+    /// own content budget had no room to read it.
     public func fetchVolume(_ root: String) async throws -> SerializedVolume? {
         try await fetchVolume(root, maximumArchiveBytes: .max, maximumEntries: .max)
     }
 
     /// `fetchVolume(_:)`, refusing a Volume whose archive is larger than
     /// `maximumArchiveBytes` or has more than `maximumEntries` entries
-    /// before reading it.
+    /// before reading it (nil).
     public func fetchVolume(
         _ root: String, maximumArchiveBytes: Int, maximumEntries: Int
     ) async throws -> SerializedVolume? {
@@ -153,6 +154,7 @@ extension NodeRuntime {
         let answer = await ivy.fetchVolume(
             rootCID: root, maximumArchiveBytes: maximumArchiveBytes, maximumEntries: maximumEntries
         )
+        if answer.failure == .localCapacityUnavailable { throw NodeRuntimeError.busy }
         let volume = SerializedVolume(root: answer.rootCID, entries: answer.entries)
         return volume.root == root && (try? volume.validate()) != nil ? volume : nil
     }

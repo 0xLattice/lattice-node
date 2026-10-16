@@ -105,9 +105,12 @@ entries), capped at 64 MiB. On the loopback port it serves only a Volume the
 node holds. On the public read listener, a Volume the node does not hold is
 read from peers, checked against its CID, served and not kept; readers asking
 for the same Volume share one read, and `--public-read-fetches` (default 4)
-caps how many are read at once. Past that cap the answer is 503 with
-`Retry-After`, not 404; `--public-read-fetches 0` serves only what the node
-holds. Content no node serves is 404. The immutable response is billed to the
+caps how many are read at once. Past that cap, or while the node's own
+in-flight content budget (`--serving-max-in-flight-volume-bytes`, shared with
+its sync) has no room, the answer is 503 with `Retry-After`, not 404. Behind a
+proxy that presents every client as one address, all clients share these
+reads. `--public-read-fetches 0` serves only what the node holds. A Volume no
+peer served within the caps above is 404. The immutable response is billed to the
 expensive public-read budget. Like the other per-level reads, a hosted child is selected
 with `?chainPath=Nexus/Alpha`; omitting it selects Nexus.
 

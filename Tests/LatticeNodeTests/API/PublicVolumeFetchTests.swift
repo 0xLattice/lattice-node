@@ -82,10 +82,12 @@ final class PublicVolumeFetchTests: XCTestCase {
         }
         let app = makePublicReadApplication(service: reader, host: "127.0.0.1", port: 8081, fetches: fetches)
         try await app.test(.router) { client in
-            try await client.execute(uri: "/volumes/\(root)", method: .get) { response in
-                XCTAssertEqual(response.status, .ok)
-                XCTAssertEqual(response.headers[.contentType], "application/vnd.lattice.volume")
-                XCTAssertNotNil(Data(response.body.readableBytesView).range(of: Data(root.utf8)))
+            try await eventually("the reader's public port serves it", within: .seconds(20)) {
+                try await client.execute(uri: "/volumes/\(root)", method: .get) { response in
+                    response.status == .ok
+                        && response.headers[.contentType] == "application/vnd.lattice.volume"
+                        && Data(response.body.readableBytesView).range(of: Data(root.utf8)) != nil
+                }
             }
         }
         let kept = await readerStorage.volume(root)
@@ -116,6 +118,12 @@ final class PublicVolumeFetchTests: XCTestCase {
         }
     }
 
+    /// A read the node had no room for is busy, not absent.
+    func testAReadTheNodeHadNoRoomForIsBusy() async {
+        let fetches = PublicVolumeFetches(limit: 4) { _ in throw NodeRuntimeError.busy }
+        guard case .busy = await fetches.archive("full") else { return XCTFail("no room is busy") }
+    }
+
     /// While the limit's reads are in flight another CID is busy; once one
     /// ends, its place is free again.
     func testALimitPlaceFreesWhenItsReadEnds() async throws {
@@ -131,13 +139,13 @@ final class PublicVolumeFetchTests: XCTestCase {
             if root == volume.rawCID { for await _ in gate.stream { break } }
             return root == volume.rawCID ? serialized : nil
         }
-        let first = Task { await fetches.volume(volume.rawCID) }
+        let first = Task { await fetches.archive(volume.rawCID) }
         try await eventually("the first read started") { await reads.count == 1 }
-        guard case .busy = await fetches.volume("other") else { return XCTFail("another CID past the limit is busy") }
+        guard case .busy = await fetches.archive("other") else { return XCTFail("another CID past the limit is busy") }
         gate.continuation.yield()
-        guard case .volume(let got) = await first.value else { return XCTFail("the reader gets the Volume") }
-        XCTAssertEqual(got.root, volume.rawCID)
-        guard case .notServed = await fetches.volume("other") else { return XCTFail("the place is free again") }
+        guard case .archive(let got) = await first.value else { return XCTFail("the reader gets the Volume") }
+        XCTAssertEqual(got, encodeCompleteVolumeArchive(serialized))
+        guard case .notServed = await fetches.archive("other") else { return XCTFail("the place is free again") }
     }
 }
 
