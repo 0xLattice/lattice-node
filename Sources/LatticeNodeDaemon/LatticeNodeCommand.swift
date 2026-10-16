@@ -101,7 +101,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Listener-wide arrival-rate ceiling for the public read port, in requests per second. Address-agnostic, so it remains correct behind a proxy that collapses every client onto one address. 0 disables it; all three rates 0 is no rate limiting at all.")
     var publicReadMaxRate = PublicReadRateLimits.defaultListenerRate
 
-    @Option(help: "Volumes the public read port reads from peers at once for readers when this node does not hold them. Each is checked against its CID, served, and not kept; readers asking for the same Volume share one read, and past this many the port answers 503 (busy). Together they use at most half of --serving-max-in-flight-volume-bytes, so each is at most that half divided by this many bytes (and 64 MiB); a larger Volume is 404. 0: the port serves only the Volumes this node holds.")
+    @Option(help: "Volumes the public read port reads from peers at once for readers when this node does not hold them. Each is checked against its CID, served, and not kept; readers asking for the same Volume share one read, and past this many the port answers 503 (busy). At most as many run as fit, at 64 MiB each, in half of --serving-max-in-flight-volume-bytes (and at least one), so the node's own sync keeps the other half. 0: the port serves only the Volumes this node holds.")
     var publicReadFetches = 4
 
     @Option(help: "This host's public read URL (absolute https:// or http://, e.g. https://reads.example.org), declared for EVERY level it hosts: peers asking for a hosted level's read endpoint get it, and each hosted child chain is announced so a node hosting its parent can list it at /api/chain/endpoints. Unset: nothing is declared or announced.")

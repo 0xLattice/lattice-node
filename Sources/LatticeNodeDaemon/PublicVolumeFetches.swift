@@ -15,6 +15,16 @@ actor PublicVolumeFetches {
         case busy
     }
 
+    /// How many reads run at once: what the operator asked for, but no
+    /// more than fit at the archive cap in half the in-flight content
+    /// budget, so the node's own sync keeps the other half; at least one.
+    /// A read is never capped below the archive cap: a provider streams a
+    /// whole archive however little of it the reader takes. 0 is none.
+    static func limit(requested: Int, inFlightVolumeBytes: Int) -> Int {
+        guard requested > 0 else { return 0 }
+        return max(1, min(requested, inFlightVolumeBytes / 2 / maximumCompleteVolumeArchiveBytes))
+    }
+
     private let limit: Int
     private let fetch: @Sendable (String) async throws -> SerializedVolume?
     private var inFlight: [String: Task<Answer, Never>] = [:]

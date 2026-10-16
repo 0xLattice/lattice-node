@@ -118,6 +118,18 @@ final class PublicVolumeFetchTests: XCTestCase {
         }
     }
 
+    /// Reads at once: what the operator asked, within half the budget at
+    /// the archive cap, at least one; none when asked for none.
+    func testTheLimitFitsInHalfTheBudget() {
+        let cap = maximumCompleteVolumeArchiveBytes
+        XCTAssertEqual(PublicVolumeFetches.limit(requested: 0, inFlightVolumeBytes: 1 << 40), 0)
+        XCTAssertEqual(PublicVolumeFetches.limit(requested: 4, inFlightVolumeBytes: 2 * cap), 1, "the default budget")
+        XCTAssertEqual(PublicVolumeFetches.limit(requested: 4, inFlightVolumeBytes: 1), 1, "always one")
+        XCTAssertEqual(PublicVolumeFetches.limit(requested: 4, inFlightVolumeBytes: 6 * cap), 3)
+        XCTAssertEqual(PublicVolumeFetches.limit(requested: 4, inFlightVolumeBytes: 100 * cap), 4)
+        XCTAssertEqual(PublicVolumeFetches.limit(requested: .max, inFlightVolumeBytes: .max), Int.max / 2 / cap)
+    }
+
     /// A read the node had no room for is busy, not absent.
     func testAReadTheNodeHadNoRoomForIsBusy() async {
         let fetches = PublicVolumeFetches(limit: 4) { _ in throw NodeRuntimeError.busy }

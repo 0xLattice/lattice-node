@@ -105,12 +105,13 @@ entries), capped at 64 MiB. On the loopback port it serves only a Volume the
 node holds. On the public read listener, a Volume the node does not hold is
 read from peers, checked against its CID, served and not kept; readers asking
 for the same Volume share one read, and `--public-read-fetches` (default 4)
-caps how many are read at once. Together they use at most half of the node's
-in-flight content budget (`--serving-max-in-flight-volume-bytes`), so its own
-sync keeps the other half: each read is at most that half divided by
-`--public-read-fetches` bytes (and 64 MiB), and a larger Volume is 404. Past the
-cap, or while the budget or the node's pending peer requests have no room, the
-answer is 503 with `Retry-After`, not 404. Behind a
+caps how many are read at once. No more run than fit, at the 64 MiB cap
+each, in half of the node's in-flight content budget
+(`--serving-max-in-flight-volume-bytes`), so its own sync keeps the other half;
+at least one always runs. At the default budget (128 MiB) that is one at a
+time; the node prints the number at start. Past the limit, or while the budget
+or the node's pending peer requests have no room, the answer is 503 with
+`Retry-After`, not 404, and a reader should ask again. Behind a
 proxy that presents every client as one address, all clients share these
 reads. `--public-read-fetches 0` serves only what the node holds. A Volume no
 peer served within the caps above is 404. The immutable response is billed to the
