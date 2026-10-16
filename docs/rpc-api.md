@@ -158,7 +158,7 @@ the following page and is absent on the last. A node predating paging
 answers the whole list without `next`.
 
 ```json
-{ "chainPath": ["Nexus", "Alpha"], "directories": ["Beta"], "next": "Beta" }
+{ "chainPath": ["Nexus", "Alpha"], "directories": ["Beta", "Gamma"], "next": "Gamma" }
 ```
 
 ## Child read endpoints
