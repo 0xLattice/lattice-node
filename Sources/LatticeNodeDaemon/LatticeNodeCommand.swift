@@ -101,7 +101,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Listener-wide arrival-rate ceiling for the public read port, in requests per second. Address-agnostic, so it remains correct behind a proxy that collapses every client onto one address. 0 disables it; all three rates 0 is no rate limiting at all.")
     var publicReadMaxRate = PublicReadRateLimits.defaultListenerRate
 
-    @Option(help: "Volumes the public read port reads from peers at once for readers when this node does not hold them. Each is checked against its CID, served, and not kept; readers asking for the same Volume share one read, and past this many the port answers 503 (busy). 0: the port serves only the Volumes this node holds.")
+    @Option(help: "Volumes the public read port reads from peers at once for readers when this node does not hold them. Each is checked against its CID, served, and not kept; readers asking for the same Volume share one read, and past this many the port answers 503 (busy). Together they use at most half of --serving-max-in-flight-volume-bytes, so each is at most that half divided by this many bytes (and 64 MiB); a larger Volume is 404. 0: the port serves only the Volumes this node holds.")
     var publicReadFetches = 4
 
     @Option(help: "This host's public read URL (absolute https:// or http://, e.g. https://reads.example.org), declared for EVERY level it hosts: peers asking for a hosted level's read endpoint get it, and each hosted child chain is announced so a node hosting its parent can list it at /api/chain/endpoints. Unset: nothing is declared or announced.")
@@ -572,6 +572,18 @@ func makePublicReadApplication(
     )
 }
 
+/// A complete Volume archive, immutable by its CID.
+private func volumeArchiveResponse(_ archive: ByteBuffer) -> Response {
+    Response(
+        status: .ok,
+        headers: [
+            .contentType: "application/vnd.lattice.volume",
+            .cacheControl: immutableCacheControl,
+        ],
+        body: ResponseBody(byteBuffer: archive)
+    )
+}
+
 /// Generic over the context so the loopback application keeps
 /// `BasicRequestContext` while the public listener carries a peer address —
 /// one registration function, so the two surfaces cannot drift apart.
@@ -634,7 +646,8 @@ private func addPublicReadRoutes<Context: RequestContext>(
         // allows it (`--public-read-fetches`).
         if archive == nil, let fetches {
             switch await fetches.archive(cid) {
-            case .archive(let read): archive = read
+            case .archive(let read):
+                return volumeArchiveResponse(read)
             case .notServed: break
             case .busy: throw HTTPError(.serviceUnavailable, headers: [.retryAfter: "1"], message: "busy")
             }
@@ -642,14 +655,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
         guard let archive else {
             throw HTTPError(.notFound)
         }
-        return Response(
-            status: .ok,
-            headers: [
-                .contentType: "application/vnd.lattice.volume",
-                .cacheControl: immutableCacheControl,
-            ],
-            body: ResponseBody(byteBuffer: ByteBuffer(bytes: archive))
-        )
+        return volumeArchiveResponse(ByteBuffer(bytes: archive))
     }
     router.get("accounts/:owner") { request, context in
         let service = try byPath(request)

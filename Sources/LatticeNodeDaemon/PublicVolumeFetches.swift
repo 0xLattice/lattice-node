@@ -1,16 +1,16 @@
-import Foundation
 import LatticeNode
+import NIOCore
 import VolumeBroker
 
 /// The public read port's Volumes that this node does not hold: read from
 /// peers, checked against their CIDs, served, and not kept. Readers asking
-/// for one CID share one read and one encoded archive, and at most `limit`
+/// for one CID share one read and one archive buffer, and at most `limit`
 /// CIDs are read at once (the operator's `--public-read-fetches`); past
 /// that, or when the node's own content budget is full, a read is busy,
 /// never reported absent.
 actor PublicVolumeFetches {
     enum Answer: Sendable {
-        case archive(Data)
+        case archive(ByteBuffer)
         case notServed
         case busy
     }
@@ -36,7 +36,7 @@ actor PublicVolumeFetches {
             let fetch = fetch
             task = Task {
                 do {
-                    return try await fetch(root).flatMap(encodeCompleteVolumeArchive).map(Answer.archive) ?? .notServed
+                    return try await fetch(root).flatMap(encodeCompleteVolumeArchive).map { .archive(ByteBuffer(bytes: $0)) } ?? .notServed
                 } catch {
                     // The node's budget was full, or it is stopping.
                     return .busy

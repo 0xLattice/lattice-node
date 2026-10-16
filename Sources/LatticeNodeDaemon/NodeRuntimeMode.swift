@@ -65,6 +65,12 @@ extension LatticeNodeCommand {
         if publicSubmit {
             submit = { @Sendable request in try await runtime.submitPublicTransaction(request) }
         }
+        // Public reads together hold at most half the in-flight content
+        // budget, so the node's own sync always keeps the other half.
+        let publicReadFetchBytes = min(
+            maximumCompleteVolumeArchiveBytes,
+            servingMaxInFlightVolumeBytes / 2 / max(publicReadFetches, 1)
+        )
         let publicReadApp = publicReadPort.map { port in
             makePublicReadApplication(
                 reads: runtime.reads,
@@ -77,7 +83,7 @@ extension LatticeNodeCommand {
                 submit: submit,
                 fetches: publicReadFetches == 0 ? nil : PublicVolumeFetches(limit: publicReadFetches) {
                     try await runtime.fetchVolume(
-                        $0, maximumArchiveBytes: maximumCompleteVolumeArchiveBytes,
+                        $0, maximumArchiveBytes: publicReadFetchBytes,
                         maximumEntries: maximumCompleteVolumeArchiveEntries
                     )
                 }

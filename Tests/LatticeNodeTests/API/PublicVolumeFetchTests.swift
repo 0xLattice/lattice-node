@@ -75,7 +75,7 @@ final class PublicVolumeFetchTests: XCTestCase {
             }
         }
         let fetches = PublicVolumeFetches(limit: 4) {
-            try? await reader.fetchVolume(
+            try await reader.fetchVolume(
                 $0, maximumArchiveBytes: maximumCompleteVolumeArchiveBytes,
                 maximumEntries: maximumCompleteVolumeArchiveEntries
             )
@@ -144,7 +144,7 @@ final class PublicVolumeFetchTests: XCTestCase {
         guard case .busy = await fetches.archive("other") else { return XCTFail("another CID past the limit is busy") }
         gate.continuation.yield()
         guard case .archive(let got) = await first.value else { return XCTFail("the reader gets the Volume") }
-        XCTAssertEqual(got, encodeCompleteVolumeArchive(serialized))
+        XCTAssertEqual(Data(got.readableBytesView), encodeCompleteVolumeArchive(serialized))
         guard case .notServed = await fetches.archive("other") else { return XCTFail("the place is free again") }
     }
 }
