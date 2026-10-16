@@ -65,6 +65,9 @@ extension LatticeNodeCommand {
         if publicSubmit {
             submit = { @Sendable request in try await runtime.submitPublicTransaction(request) }
         }
+        let fetchLimit = PublicVolumeFetches.limit(
+            requested: publicReadFetches, inFlightVolumeBytes: servingMaxInFlightVolumeBytes
+        )
         let publicReadApp = publicReadPort.map { port in
             makePublicReadApplication(
                 reads: runtime.reads,
@@ -74,7 +77,13 @@ extension LatticeNodeCommand {
                 peers: peers,
                 limits: publicReadLimits,
                 endpoints: { await runtime.chainEndpoints($0) },
-                submit: submit
+                submit: submit,
+                fetches: fetchLimit == 0 ? nil : PublicVolumeFetches(limit: fetchLimit) {
+                    try await runtime.fetchVolume(
+                        $0, maximumArchiveBytes: maximumCompleteVolumeArchiveBytes,
+                        maximumEntries: maximumCompleteVolumeArchiveEntries
+                    )
+                }
             )
         }
         print("lattice-node (node runtime)")
@@ -84,6 +93,7 @@ extension LatticeNodeCommand {
         if let publicReadPort {
             print("  public-read: http://0.0.0.0:\(publicReadPort)")
             if publicSubmit { print("  public-submit: POST /transactions on the public read port") }
+            print("  public-read-fetches: \(fetchLimit) at once")
         }
         let result: Result<Void, any Error>
         do {

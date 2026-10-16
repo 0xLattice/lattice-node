@@ -62,6 +62,11 @@ This is intentionally one schema:
   a host and no credentials, query or fragment; it is passed as
   `--public-read-url` and declared for every hosted level (see
   [Listing a chain on an explorer](operations.md#listing-a-chain-on-an-explorer));
+- `publicReadFetches`, when set, is nonnegative and is passed as
+  `--public-read-fetches`: how many Volumes the public listener reads from
+  peers at once for readers when the node does not hold them (see
+  [`GET /volumes/:cid`](rpc-api.md#read-routes)); `0` serves only what the
+  node holds;
 - `publicSubmit`, when true, passes `--public-submit` and requires
   `publicRead`: the public listener also accepts `POST /transactions` (see
   [Running a public submit endpoint](operations.md#running-a-public-submit-endpoint));

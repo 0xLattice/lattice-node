@@ -12,6 +12,8 @@ public enum NodeRuntimeError: Error, Equatable, Sendable {
     case stopped
     /// A request names a chain this node does not host.
     case unknownChain
+    /// This node's content budget is full for now; asking again may work.
+    case busy
 }
 
 /// The production shell around the sans-IO `LatticeNodeCore.NodeCore`.

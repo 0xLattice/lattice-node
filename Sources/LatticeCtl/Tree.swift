@@ -176,6 +176,7 @@ func spawnHost(layout: HostLayout) throws {
     if let rate = topology.publicReadRate { arguments += ["--public-read-rate", String(rate)] }
     if let rate = topology.publicReadExpensiveRate { arguments += ["--public-read-expensive-rate", String(rate)] }
     if let rate = topology.publicReadMaxRate { arguments += ["--public-read-max-rate", String(rate)] }
+    if let fetches = topology.publicReadFetches { arguments += ["--public-read-fetches", String(fetches)] }
     if let url = topology.publicReadURL { arguments += ["--public-read-url", url] }
     arguments += topology.publicSubmissionArguments
     arguments += topology.contentServingArguments

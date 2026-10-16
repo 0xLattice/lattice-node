@@ -123,6 +123,9 @@ final class LatticeCtlTopologyTests: XCTestCase {
         var negativeSubmitRate = topology()
         negativeSubmitRate.publicSubmitRate = -1
         XCTAssertThrowsError(try negativeSubmitRate.validated())
+        var negativeFetches = topology()
+        negativeFetches.publicReadFetches = -1
+        XCTAssertThrowsError(try negativeFetches.validated())
         var submitWithoutPublicRead = topology()
         submitWithoutPublicRead.publicRead = nil
         submitWithoutPublicRead.publicSubmit = true
