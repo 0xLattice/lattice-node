@@ -90,7 +90,7 @@ Mining templates are requested at Nexus and can carry every hosted descendant.
 | `GET /api/chain/info` | Chain metadata | yes |
 | `GET /api/chain/spec` | Active chain spec | yes |
 | `GET /api/chain/genesis` | Selected genesis CID | yes |
-| `GET /api/chain/children?chainPath=P` | The child directories P's executed blocks have committed | yes |
+| `GET /api/chain/children?chainPath=P` | The child directories P's executed blocks have committed, paged | yes |
 | `GET /api/chain/endpoints?chainPath=P/D` | Declared read URLs of a child chain, unverified | yes |
 | `GET /status` | Operator status including template digest | no |
 | `GET /metrics` | Prometheus exposition | no |
@@ -146,14 +146,19 @@ does not host that child chain).
 
 ## Child directories
 
-`GET /api/chain/children?chainPath=Nexus/Alpha` lists, in order, every child
-directory the chain's executed blocks have committed. The node keeps the list
+`GET /api/chain/children?chainPath=Nexus/Alpha` lists, in order, the child
+directories the chain's executed blocks have committed. The node keeps the list
 in memory: built from the blocks it holds when it starts, then grown by every
 block that executes valid. It only grows. A listed child is reached through
 its hosts (`/api/chain/endpoints`).
 
+The list is paged: `limit` (default and cap 200) names, starting after the
+name `after` (any string; omitted, from the first). `next` is the `after` for
+the following page and is absent on the last. A node predating paging
+answers the whole list without `next`.
+
 ```json
-{ "chainPath": ["Nexus", "Alpha"], "directories": ["Beta"] }
+{ "chainPath": ["Nexus", "Alpha"], "directories": ["Beta"], "next": "Beta" }
 ```
 
 ## Child read endpoints

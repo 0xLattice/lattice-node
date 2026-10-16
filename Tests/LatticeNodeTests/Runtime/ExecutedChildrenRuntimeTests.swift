@@ -49,7 +49,7 @@ final class ExecutedChildrenRuntimeTests: XCTestCase {
                 return (await betaReads.readSnapshot().height ?? 0) >= 1
             }
             try await eventually("Alpha lists Beta") {
-                await alphaReads.explorerChainChildren().directories == ["Beta"]
+                await alphaReads.explorerChainChildren(limit: 200).directories == ["Beta"]
             }
             await runtime.stop()
 

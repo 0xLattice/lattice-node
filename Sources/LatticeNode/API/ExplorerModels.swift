@@ -90,11 +90,13 @@ public struct ExplorerBlockChildren: Codable, Sendable, Equatable {
     public let children: [ExplorerChildBlock]
 }
 
-/// `GET /api/chain/children`: the child directories the chain's executed
-/// blocks have committed, in order.
+/// `GET /api/chain/children`: a page of the child directories the chain's
+/// executed blocks have committed, in order. `next` is the `after` for the
+/// following page, absent on the last.
 public struct ExplorerChainChildren: Codable, Sendable, Equatable {
     public let chainPath: [String]
     public let directories: [String]
+    public let next: String?
 }
 
 /// `GET /api/chain/endpoints`: the read URLs declared for a child chain,
