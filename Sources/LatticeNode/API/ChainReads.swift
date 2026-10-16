@@ -398,10 +398,15 @@ public struct ChainReads: Sendable {
         return nil
     }
 
-    /// The child directories this chain's executed blocks have committed,
-    /// in order.
-    public func explorerChainChildren() async -> ExplorerChainChildren {
-        ExplorerChainChildren(chainPath: chainPath, directories: await childDirectories()?.names ?? [])
+    /// Up to `limit` of the child directories this chain's executed blocks
+    /// have committed, after `after`, in order.
+    public func explorerChainChildren(after: String? = nil, limit: Int) async -> ExplorerChainChildren {
+        let page = await childDirectories()?.page(after: after, limit: limit) ?? (names: [], more: false)
+        return ExplorerChainChildren(
+            chainPath: chainPath,
+            directories: page.names,
+            next: page.more ? page.names.last : nil
+        )
     }
 
     public func explorerTransaction(cid: String) async -> ExplorerTransaction? {

@@ -17,11 +17,7 @@ public final class ExecutedChildren: Sendable {
     public func record<S: Sequence<String>>(_ directories: S) {
         sorted.withLock { names in
             for directory in directories {
-                var low = 0, high = names.count
-                while low < high {
-                    let middle = (low + high) / 2
-                    if names[middle] < directory { low = middle + 1 } else { high = middle }
-                }
+                let low = Self.firstIndex(notBelow: directory, in: names)
                 if low == names.count || names[low] != directory { names.insert(directory, at: low) }
             }
         }
@@ -29,4 +25,27 @@ public final class ExecutedChildren: Sendable {
 
     /// Every directory, in order.
     public var names: [String] { sorted.withLock { $0 } }
+
+    /// Up to `limit` directories after `after` (from the first when nil), in
+    /// order, and whether more follow.
+    public func page(after: String?, limit: Int) -> (names: [String], more: Bool) {
+        sorted.withLock { names in
+            var start = 0
+            if let after {
+                start = Self.firstIndex(notBelow: after, in: names)
+                if start < names.count, names[start] == after { start += 1 }
+            }
+            let end = min(names.count, start + max(limit, 0))
+            return (Array(names[start..<end]), end < names.count)
+        }
+    }
+
+    private static func firstIndex(notBelow name: String, in names: [String]) -> Int {
+        var low = 0, high = names.count
+        while low < high {
+            let middle = (low + high) / 2
+            if names[middle] < name { low = middle + 1 } else { high = middle }
+        }
+        return low
+    }
 }

@@ -781,8 +781,10 @@ private func addPublicReadRoutes<Context: RequestContext>(
         guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
             throw HTTPError(.notFound)
         }
+        let limit = try explorerParseLimit(request, defaultValue: 200, cap: 200)
+        let after = request.uri.queryParameters["after"].map(String.init)
         return try jsonCached(
-            await service.explorerChainChildren(),
+            await service.explorerChainChildren(after: after, limit: limit),
             cacheControl: statusCacheControl,
             request: request,
             context: context

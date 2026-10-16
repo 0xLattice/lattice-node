@@ -182,6 +182,22 @@ final class ReadEndpointRuntimeTests: XCTestCase {
                 let body = try JSONDecoder().decode(ExplorerChainChildren.self, from: Data(buffer: response.body))
                 XCTAssertEqual(body.chainPath, Self.alpha)
                 XCTAssertEqual(body.directories, ["Beta"])
+                XCTAssertNil(body.next, "one page holds them all")
+            }
+            for (uri, directories) in [
+                ("/api/chain/children?chainPath=Nexus/Alpha&limit=1", ["Beta"]),
+                ("/api/chain/children?chainPath=Nexus/Alpha&after=Beta", []),
+                ("/api/chain/children?chainPath=Nexus/Alpha&after=A", ["Beta"]),
+            ] {
+                try await client.execute(uri: uri, method: .get) { response in
+                    XCTAssertEqual(response.status, .ok, uri)
+                    let body = try JSONDecoder().decode(ExplorerChainChildren.self, from: Data(buffer: response.body))
+                    XCTAssertEqual(body.directories, directories, uri)
+                    XCTAssertNil(body.next, uri)
+                }
+            }
+            try await client.execute(uri: "/api/chain/children?chainPath=Nexus/Alpha&limit=0", method: .get) { response in
+                XCTAssertEqual(response.status, .badRequest)
             }
             try await client.execute(
                 uri: "/api/block/\(alphaTip)/children?chainPath=Nexus/Alpha", method: .get
