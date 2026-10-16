@@ -641,21 +641,16 @@ private func addPublicReadRoutes<Context: RequestContext>(
         guard let cid = context.parameters.get("cid"), isPlausibleCID(cid) else {
             throw HTTPError(.badRequest)
         }
-        var archive = await service.completeVolumeArchive(rootCID: cid)
+        if let archive = await service.completeVolumeArchive(rootCID: cid) {
+            return volumeArchiveResponse(ByteBuffer(bytes: archive))
+        }
         // One this node does not hold, read from peers when the operator
         // allows it (`--public-read-fetches`).
-        if archive == nil, let fetches {
-            switch await fetches.archive(cid) {
-            case .archive(let read):
-                return volumeArchiveResponse(read)
-            case .notServed: break
-            case .busy: throw HTTPError(.serviceUnavailable, headers: [.retryAfter: "1"], message: "busy")
-            }
+        switch await fetches?.archive(cid) {
+        case .archive(let read): return volumeArchiveResponse(read)
+        case .busy: throw HTTPError(.serviceUnavailable, headers: [.retryAfter: "1"], message: "busy")
+        case .notServed, nil: throw HTTPError(.notFound)
         }
-        guard let archive else {
-            throw HTTPError(.notFound)
-        }
-        return volumeArchiveResponse(ByteBuffer(bytes: archive))
     }
     router.get("accounts/:owner") { request, context in
         let service = try byPath(request)
