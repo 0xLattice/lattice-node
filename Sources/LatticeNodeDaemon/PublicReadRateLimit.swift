@@ -169,8 +169,8 @@ enum PublicReadRouteClass: Sendable, Equatable {
             // search over the chain's post-states.
             self = .expensive
         case 2 where components[0] == "volumes":
-            // A complete Volume can be tens of MiB. The handler is local-only
-            // but serialization and egress remain expensive.
+            // A complete Volume can be tens of MiB, and one this node does
+            // not hold may be read from peers first.
             self = .expensive
         default:
             self = .general

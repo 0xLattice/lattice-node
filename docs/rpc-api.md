@@ -73,7 +73,7 @@ Mining templates are requested at Nexus and can carry every hosted descendant.
 |---|---|---|
 | `GET /health` | Published chain and mempool status | yes |
 | `GET /transactions/:cid` | Content-verified transaction by CID | yes |
-| `GET /volumes/:cid` | Complete locally held Volume as the Ivy binary archive | yes |
+| `GET /volumes/:cid` | Complete Volume as the Ivy binary archive | yes |
 | `GET /accounts/:owner?block=<cid>` | Account balance and next nonce at an accepted block | yes |
 | `GET /api/block/latest` | Latest executed block summary | yes |
 | `GET /api/block/:height-or-cid` | Block detail | yes |
@@ -101,10 +101,14 @@ Block transaction pages accept `offset` and `limit`; limits are capped at
 
 `GET /volumes/:cid` returns `application/vnd.lattice.volume`: Ivy's canonical
 complete-Volume archive (big-endian count and length framing, CID-sorted
-entries), capped at 64 MiB. It serves only a Volume already held locally and
-never turns an unauthenticated HTTP request into a DHT fetch. Missing or
-incomplete content is 404. The immutable response is billed to the expensive
-public-read budget. Like the other per-level reads, a hosted child is selected
+entries), capped at 64 MiB. On the loopback port it serves only a Volume the
+node holds. On the public read listener, a Volume the node does not hold is
+read from peers, checked against its CID, served and not kept; readers asking
+for the same Volume share one read, and `--public-read-fetches` (default 4)
+caps how many are read at once. Past that cap the answer is 503 with
+`Retry-After`, not 404; `--public-read-fetches 0` serves only what the node
+holds. Content no node serves is 404. The immutable response is billed to the
+expensive public-read budget. Like the other per-level reads, a hosted child is selected
 with `?chainPath=Nexus/Alpha`; omitting it selects Nexus.
 
 Both `/api/block/latest` and `/api/block/:height-or-cid` report the block's

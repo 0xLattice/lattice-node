@@ -140,8 +140,19 @@ extension NodeRuntime {
     /// and not stored: an application validates it, then pins it if it
     /// keeps it. Nil when no peer serves it.
     public func fetchVolume(_ root: String) async throws -> SerializedVolume? {
+        try await fetchVolume(root, maximumArchiveBytes: .max, maximumEntries: .max)
+    }
+
+    /// `fetchVolume(_:)`, refusing a Volume whose archive is larger than
+    /// `maximumArchiveBytes` or has more than `maximumEntries` entries
+    /// before reading it.
+    public func fetchVolume(
+        _ root: String, maximumArchiveBytes: Int, maximumEntries: Int
+    ) async throws -> SerializedVolume? {
         guard !maintenance.isCancelled else { throw NodeRuntimeError.stopped }
-        let answer = await ivy.fetchVolume(rootCID: root)
+        let answer = await ivy.fetchVolume(
+            rootCID: root, maximumArchiveBytes: maximumArchiveBytes, maximumEntries: maximumEntries
+        )
         let volume = SerializedVolume(root: answer.rootCID, entries: answer.entries)
         return volume.root == root && (try? volume.validate()) != nil ? volume : nil
     }

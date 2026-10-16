@@ -40,7 +40,7 @@ public struct ChainPeers: Codable, Sendable, Equatable {
 public struct Topology: Codable, Sendable {
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case listen, rpc, webSocket, peers, publicRead, externalAddress
-        case publicReadRate, publicReadExpensiveRate, publicReadMaxRate
+        case publicReadRate, publicReadExpensiveRate, publicReadMaxRate, publicReadFetches
         case publicReadURL, publicSubmit, publicSubmitRate, minRelayFee
         case servingMaxConcurrent, servingMaxInFlightVolumeBytes, blockBodies, state, announceLifetime
         case hostedChains, mine, rpcAllowedOrigins
@@ -76,6 +76,10 @@ public struct Topology: Codable, Sendable {
     /// requests per second. Address-agnostic, so it stays correct behind such
     /// a proxy. Absent = the node's default; `0` disables it.
     public var publicReadMaxRate: Double?
+    /// Volumes the public read listener reads from peers at once for
+    /// readers when the node does not hold them (`--public-read-fetches`).
+    /// Absent = the node's default; `0` = only what the node holds.
+    public var publicReadFetches: Int?
     /// This host's public read URL (the node's `--public-read-url`), declared
     /// for every level it hosts. Absent = none declared.
     public var publicReadURL: String?
@@ -217,6 +221,9 @@ public struct Topology: Codable, Sendable {
         }
         if let publicReadURL, !NodeConfiguration.isValidPublicReadURL(publicReadURL) {
             throw CtlError("publicReadURL must be an absolute http(s) URL with a host and no credentials, query or fragment")
+        }
+        if let publicReadFetches, publicReadFetches < 0 {
+            throw CtlError("publicReadFetches must be nonnegative")
         }
         if publicSubmit == true, publicRead == nil {
             throw CtlError("publicSubmit requires publicRead")

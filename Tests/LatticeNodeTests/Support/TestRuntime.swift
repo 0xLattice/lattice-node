@@ -56,13 +56,15 @@ func makePublicReadApplication(
     port: Int,
     limits: PublicReadRateLimits = .default,
     healthClock: @escaping @Sendable () -> Double = PublicReadRateLimiter.monotonicSeconds,
-    submit: Bool = false
+    submit: Bool = false,
+    fetches: PublicVolumeFetches? = nil
 ) -> Application<RouterResponder<PublicReadRequestContext>> {
     makePublicReadApplication(
         reads: runtime.reads, levelReads: { Array(runtime.levelReads.values) }, host: host, port: port,
         peers: { ExplorerPeersResponse(count: runtime.peerCount, peers: []) },
         limits: limits, healthClock: healthClock, endpoints: { await runtime.chainEndpoints($0) },
-        submit: submit ? { @Sendable request in try await runtime.submitPublicTransaction(request) } : nil
+        submit: submit ? { @Sendable request in try await runtime.submitPublicTransaction(request) } : nil,
+        fetches: fetches
     )
 }
 

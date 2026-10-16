@@ -101,6 +101,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Listener-wide arrival-rate ceiling for the public read port, in requests per second. Address-agnostic, so it remains correct behind a proxy that collapses every client onto one address. 0 disables it; all three rates 0 is no rate limiting at all.")
     var publicReadMaxRate = PublicReadRateLimits.defaultListenerRate
 
+    @Option(help: "Volumes the public read port reads from peers at once for readers when this node does not hold them. Each is checked against its CID, served, and not kept; readers asking for the same Volume share one read, and past this many the port answers 503 (busy). 0: the port serves only the Volumes this node holds.")
+    var publicReadFetches = 4
+
     @Option(help: "This host's public read URL (absolute https:// or http://, e.g. https://reads.example.org), declared for EVERY level it hosts: peers asking for a hosted level's read endpoint get it, and each hosted child chain is announced so a node hosting its parent can list it at /api/chain/endpoints. Unset: nothing is declared or announced.")
     var publicReadUrl: String?
 
@@ -142,6 +145,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         }
         if publicSubmit, publicReadPort == nil {
             throw ValidationError("--public-submit requires --public-read-port")
+        }
+        guard publicReadFetches >= 0 else {
+            throw ValidationError("--public-read-fetches must be nonnegative")
         }
         guard let blockBodies = BlockBodies(rawValue: blockBodies) else {
             throw ValidationError("--block-bodies is all or none")
@@ -497,7 +503,8 @@ func makePublicReadApplication(
     limits: PublicReadRateLimits = .default,
     healthClock: @escaping @Sendable () -> Double = PublicReadRateLimiter.monotonicSeconds,
     endpoints: @escaping ChainEndpointsLookup = { _ in nil },
-    submit: PublicSubmit? = nil
+    submit: PublicSubmit? = nil,
+    fetches: PublicVolumeFetches? = nil
 ) -> Application<RouterResponder<PublicReadRequestContext>> {
     // This listener faces the public internet with nothing in front of it, so
     // it carries its own arrival-rate ceilings. Its context is NOT
@@ -542,6 +549,7 @@ func makePublicReadApplication(
         peers: peers,
         endpoints: endpoints,
         acceptsSubmit: submit != nil,
+        fetches: fetches,
         healthSnapshot: { await health.value() }
     )
     if let submit {
@@ -573,6 +581,7 @@ private func addPublicReadRoutes<Context: RequestContext>(
     peers: @Sendable @escaping () async -> ExplorerPeersResponse,
     endpoints: @escaping ChainEndpointsLookup,
     acceptsSubmit: Bool,
+    fetches: PublicVolumeFetches? = nil,
     healthSnapshot: @Sendable @escaping () async -> NodeStatusResponse
 ) {
     // /health is the public, non-mutating status: readSnapshot() never enters
@@ -620,7 +629,17 @@ private func addPublicReadRoutes<Context: RequestContext>(
         guard let cid = context.parameters.get("cid"), isPlausibleCID(cid) else {
             throw HTTPError(.badRequest)
         }
-        guard let archive = await service.completeVolumeArchive(rootCID: cid) else {
+        var archive = await service.completeVolumeArchive(rootCID: cid)
+        // One this node does not hold, read from peers when the operator
+        // allows it (`--public-read-fetches`).
+        if archive == nil, let fetches {
+            switch await fetches.volume(cid) {
+            case .volume(let volume): archive = encodeCompleteVolumeArchive(volume)
+            case .notServed: break
+            case .busy: throw HTTPError(.serviceUnavailable, headers: [.retryAfter: "1"], message: "busy")
+            }
+        }
+        guard let archive else {
             throw HTTPError(.notFound)
         }
         return Response(

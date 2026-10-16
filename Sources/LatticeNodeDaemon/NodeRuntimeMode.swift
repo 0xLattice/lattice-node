@@ -74,7 +74,13 @@ extension LatticeNodeCommand {
                 peers: peers,
                 limits: publicReadLimits,
                 endpoints: { await runtime.chainEndpoints($0) },
-                submit: submit
+                submit: submit,
+                fetches: publicReadFetches == 0 ? nil : PublicVolumeFetches(limit: publicReadFetches) {
+                    try? await runtime.fetchVolume(
+                        $0, maximumArchiveBytes: maximumCompleteVolumeArchiveBytes,
+                        maximumEntries: maximumCompleteVolumeArchiveEntries
+                    )
+                }
             )
         }
         print("lattice-node (node runtime)")
