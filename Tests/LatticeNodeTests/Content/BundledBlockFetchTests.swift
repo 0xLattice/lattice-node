@@ -349,6 +349,47 @@ final class BundledBlockFetchTests: XCTestCase {
     /// Over a real overlay: a peer whose hello advertised nothing is never
     /// sent a bundle request, and one that advertised bundles but holds none
     /// for the block is asked once; both times the block arrives per Volume.
+    /// A block whose transactions exceed the chain's `maxBlockSize` is
+    /// invalid whatever else it holds: the fetch stops there and returns, so
+    /// its execution runs and decides it, instead of the fetch failing and
+    /// being retried forever. Nothing a peer sent is stored.
+    func testABodyPastTheChainsBlockSizeEndsTheFetchSoItsExecutionCanRun() async throws {
+        let producer = try await storage(keyByte: 0x58)
+        let joiner = try await storage(keyByte: 0x59)
+        let genesisCID = NexusGenesis.expectedBlockHash
+        let genesisData = await producer.content([genesisCID])[genesisCID]
+        let genesis = try XCTUnwrap(Block(data: try XCTUnwrap(genesisData)))
+        let key = CryptoUtils.generateKeyPair()
+        // One body past the 1 MB Nexus limit by itself.
+        let bodyHeader = try HeaderImpl(node: TransactionBody(
+            accountActions: [],
+            actions: [Action(key: "oversized", oldValue: nil, newValue: String(repeating: "x", count: 1_100_000))],
+            depositActions: [], receiptActions: [], withdrawalActions: [],
+            signers: [CryptoUtils.createAddress(from: key.publicKey)], nonce: 0, chainPath: ["Nexus"]
+        ))
+        let oversized = Transaction(
+            signatures: [key.publicKey: try XCTUnwrap(TransactionSigning.sign(
+                bodyHeader: bodyHeader, privateKeyHex: key.privateKey
+            ))],
+            body: bodyHeader
+        )
+        let built = try await BlockBuilder.buildBlockWithTransition(
+            previous: genesis, transactions: [oversized],
+            timestamp: TestBlockClock().next(), nonce: 0, fetcher: producer
+        )
+        // Stored raw, its boundary and its transaction: storing it as a block
+        // would refuse it, as the joiner must.
+        try await VolumeImpl<Transaction>(node: oversized).storeRecursively(storer: producer)
+        try await BlockHeader(node: built.block).storeBlockBoundary(fetcher: producer, storer: producer)
+        let cid = try BlockHeader(node: built.block).rawCID
+
+        let stored = try await joiner.fetchChainBody(cid, remote: remote(producer, requests: Requests()))
+
+        XCTAssertFalse(stored.contains(bodyHeader.rawCID))
+        let held = await joiner.volume(bodyHeader.rawCID)
+        XCTAssertNil(held, "nothing a peer sent is stored before the block executes")
+    }
+
     func testABundleIsAskedOnlyOfAPeerThatAdvertisedItAndTraversalCoversTheRest() async throws {
         let producer = try await storage(keyByte: 0x56)
         let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
