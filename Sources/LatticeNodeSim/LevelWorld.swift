@@ -66,6 +66,9 @@ public struct LevelWorld: Sendable {
     public let invalid: [ChainPath: Set<String>]
     public let zeroWork: LevelHeader?
     public let offSchedule: LevelHeader?
+    /// When the calm tail began (`generate`'s `calmTail`): grinds released
+    /// then or later were mined on the head with no forks. Nil without one.
+    public let calmFrom: Int64?
 
     public var hosted: Set<ChainPath> { Set(paths.dropFirst()) }
 
@@ -95,9 +98,14 @@ public struct LevelWorld: Sendable {
         shareProbability: Double,
         doubleProbability: Double,
         doubles: Int = 1,
-        withholdDelay: Int64
+        withholdDelay: Int64,
+        forwardAnchors: Bool = true,
+        divergentStates: Bool = false,
+        calmTail: Int = 0
     ) async throws -> LevelWorld {
-        var builder = try await Builder(levels: min(max(levels, 2), 3))
+        var builder = try await Builder(
+            levels: min(max(levels, 2), 3), forwardAnchors: forwardAnchors, divergentStates: divergentStates
+        )
         try await builder.run(
             rng: &rng,
             grinds: max(grindCount, 12),
@@ -105,7 +113,8 @@ public struct LevelWorld: Sendable {
             shareProbability: shareProbability,
             doubleProbability: doubleProbability,
             doubles: doubles,
-            withholdDelay: withholdDelay
+            withholdDelay: withholdDelay,
+            calmTail: calmTail
         )
         return builder.world()
     }
@@ -134,6 +143,71 @@ public struct LevelWorld: Sendable {
         (try? BlockHeader(node: block).rawCID) ?? ""
     }
 
+    // MARK: - Parent anchors (Lattice spec §5.3 step 6)
+
+    /// Whether `path`'s world carried its state forward from `from` to `to`,
+    /// over every block of it outside an invalid subtree: some such block
+    /// produced `to` and is, or descends from, one that produced `from`
+    /// (from the genesis pre-state, or between equal states, only that `to`
+    /// was produced). The parent facts of a node that executed the whole
+    /// world.
+    public func advanced(_ path: ChainPath, from: String, to: String) -> Bool {
+        Self.advanced(blocks: blocks[path] ?? [:], invalid: invalid[path] ?? [], from: from, to: to)
+    }
+
+    static func advanced(blocks: [String: SimBlock], invalid: Set<String>, from: String, to: String) -> Bool {
+        func canonical(_ cid: String) -> String { CIDIdentity.canonicalString(cid) ?? cid }
+        func valid(_ cid: String) -> Bool {
+            var current: String? = cid
+            while let hash = current {
+                if invalid.contains(hash) { return false }
+                current = blocks[hash]?.parent
+            }
+            return true
+        }
+        func producers(_ state: String) -> [String] {
+            blocks.values.filter { canonical($0.block.postState.rawCID) == state && valid($0.cid) }.map(\.cid)
+        }
+        let from = canonical(from), to = canonical(to)
+        let later = producers(to)
+        if from == to || from == canonical(LatticeState.emptyHeader.rawCID) { return !later.isEmpty }
+        let earlier = Set(producers(from))
+        return later.contains { block in
+            var current: String? = block
+            while let hash = current {
+                if earlier.contains(hash) { return true }
+                current = blocks[hash]?.parent
+            }
+            return false
+        }
+    }
+
+    /// Every valid child block (outside an invalid subtree) whose parent
+    /// anchor does not move forward from its predecessor's along its parent
+    /// level's world: blocks Lattice refuses for parent continuity whatever
+    /// the parent level executes.
+    public func backwardAnchors() -> [(path: ChainPath, cid: String)] {
+        var found: [(path: ChainPath, cid: String)] = []
+        for path in paths where path.count > 1 {
+            let level = blocks[path] ?? [:]
+            let parentPath = Array(path.dropLast())
+            for (cid, block) in level.sorted(by: { $0.key < $1.key }) {
+                var current: String? = cid
+                var valid = true
+                while let hash = current {
+                    if (invalid[path] ?? []).contains(hash) { valid = false }
+                    current = level[hash]?.parent
+                }
+                guard valid else { continue }
+                let from = block.parent.flatMap { level[$0] }?.block.parentState.rawCID ?? LatticeState.emptyHeader.rawCID
+                let to = block.block.parentState.rawCID
+                if to == LatticeState.emptyHeader.rawCID { continue }
+                if !advanced(parentPath, from: from, to: to) { found.append((path, cid)) }
+            }
+        }
+        return found
+    }
+
     // MARK: - Building
 
     struct Builder {
@@ -158,8 +232,21 @@ public struct LevelWorld: Sendable {
         /// withheld branch).
         var avoided: Set<String> = []
         var nonce: UInt64 = 0
+        /// Honest miners build a child block as the node's template does
+        /// (`NodeRuntime.anchoredTip`): on the chosen block when the
+        /// carrier's entering state advances from its anchor, else on the
+        /// heaviest block whose anchor it advances from, and carry no block
+        /// of that level when none qualifies.
+        let forwardAnchors: Bool
+        /// Every block pays its own reward account, so sibling branches
+        /// produce distinct states; otherwise every block at one height of a
+        /// level produces the same state, whatever its branch.
+        let divergentStates: Bool
+        var calmFrom: Int64?
 
-        init(levels: Int) async throws {
+        init(levels: Int, forwardAnchors: Bool = false, divergentStates: Bool = false) async throws {
+            self.forwardAnchors = forwardAnchors
+            self.divergentStates = divergentStates
             paths = Array([LevelWorld.nexus, LevelWorld.alpha, LevelWorld.beta].prefix(levels))
             // A fixed key, so the world's content is the same on every run
             // where signing is deterministic.
@@ -192,9 +279,24 @@ public struct LevelWorld: Sendable {
         }
 
         func world() -> LevelWorld {
-            LevelWorld(
+            // A non-genesis child block committing no parent state (the
+            // genesis pre-state, which the root's genesis enters) after a
+            // predecessor that commits one drops its anchor back: Lattice
+            // proves it invalid (spec §5.3 step 6), whoever mined it.
+            var invalid = invalid
+            let empty = LatticeState.emptyHeader.rawCID
+            for path in paths where path.count > 1 {
+                let level = blocks[path] ?? [:]
+                for (cid, block) in level where block.block.parentState.rawCID == empty {
+                    if let predecessor = block.parent.flatMap({ level[$0] }), predecessor.block.parentState.rawCID != empty {
+                        invalid[path, default: []].insert(cid)
+                    }
+                }
+            }
+            return LevelWorld(
                 paths: paths, cas: cas, specs: specs, geneses: geneses, rootBootstrap: rootBootstrap,
-                blocks: blocks, grinds: grinds, proofs: proofs, invalid: invalid, zeroWork: zeroWork, offSchedule: offSchedule
+                blocks: blocks, grinds: grinds, proofs: proofs, invalid: invalid, zeroWork: zeroWork, offSchedule: offSchedule,
+                calmFrom: calmFrom
             )
         }
 
@@ -242,7 +344,8 @@ public struct LevelWorld: Sendable {
                 timestamp: timestamp,
                 nonce: nonce,
                 difficultyAnchor: parent.anchor,
-                rewardRecipient: address,
+                rewardRecipient: divergentStates
+                    ? CryptoUtils.createAddress(from: "sim-\(parent.cid)-\(timestamp)-\(nonce)") : address,
                 fetcher: cas
             )
             let block = built.with(
@@ -272,6 +375,45 @@ public struct LevelWorld: Sendable {
                 if !options.isEmpty { choice = options[rng.draw(0...options.count - 1)] }
             }
             return blocks[path]![avoided.contains(choice) ? head : choice]!
+        }
+
+        /// The block a child block of `path` under a carrier entering
+        /// `entering` is built on: `candidate` unless `forwardAnchors` and
+        /// its anchor does not advance to `entering`; then the heaviest block
+        /// of the level's reference whose anchor does (the act-on descent
+        /// over those blocks); nil when none does.
+        func anchored(_ path: ChainPath, _ candidate: SimBlock, entering: String) -> SimBlock? {
+            guard forwardAnchors else { return candidate }
+            let parentPath = Array(path.dropLast())
+            let parentBlocks = blocks[parentPath] ?? [:]
+            let parentInvalid = invalid[parentPath] ?? []
+            func passes(_ cid: String) -> Bool {
+                guard let block = blocks[path]?[cid] else { return false }
+                return LevelWorld.advanced(
+                    blocks: parentBlocks, invalid: parentInvalid,
+                    from: block.block.parentState.rawCID, to: entering
+                )
+            }
+            if passes(candidate.cid) { return candidate }
+            guard let reference = references[path], passes(reference.genesis) else { return nil }
+            let work = reference.subtreeWork()
+            var tip = reference.genesis
+            while true {
+                var selected: String?
+                for child in reference.children[tip] ?? [] where !avoided.contains(child) && passes(child) {
+                    guard let incumbent = selected else {
+                        selected = child
+                        continue
+                    }
+                    let challenger = work[child] ?? .zero, holder = work[incumbent] ?? .zero
+                    if challenger > holder || (challenger == holder && reference.prefers(child, over: incumbent)) {
+                        selected = child
+                    }
+                }
+                guard let next = selected else { break }
+                tip = next
+            }
+            return blocks[path]?[tip]
         }
 
         enum Outcome {
@@ -365,7 +507,8 @@ public struct LevelWorld: Sendable {
             shareProbability: Double,
             doubleProbability: Double,
             doubles: Int,
-            withholdDelay: Int64
+            withholdDelay: Int64,
+            calmTail: Int = 0
         ) async throws {
             let alphaStart = 3
             let betaStart = 5
@@ -374,6 +517,9 @@ public struct LevelWorld: Sendable {
             let lieAt = count / 3
             for index in 1...count {
                 let time = World.genesisTime + Int64(index) * LevelWorld.interval
+                let calm = index > count - calmTail
+                if calm, calmFrom == nil { calmFrom = time }
+                let forkProbability = calm ? 0 : forkProbability
                 let nexusParent = parent(LevelWorld.nexus, rng: &rng, forkProbability: index <= alphaStart ? 0 : forkProbability)
                 var carried: [(path: ChainPath, block: SimBlock)] = []
                 if index >= alphaStart {
@@ -413,37 +559,58 @@ public struct LevelWorld: Sendable {
                 )
                 return [(LevelWorld.alpha, genesis)]
             }
-            let alphaParent = parent(LevelWorld.alpha, rng: &rng, forkProbability: index <= betaStart ? 0 : forkProbability)
+            let chosen = parent(LevelWorld.alpha, rng: &rng, forkProbability: index <= betaStart ? 0 : forkProbability)
+            guard let alphaParent = anchored(LevelWorld.alpha, chosen, entering: nexusParent.block.postState.rawCID) else {
+                return []
+            }
+            func alphaBlock(on alphaParent: SimBlock, carrying betaBlock: SimBlock? = nil) async throws -> SimBlock {
+                try await build(
+                    on: alphaParent,
+                    carrierPrevState: nexusParent.block.postState.rawCID,
+                    children: betaBlock.map { [LevelWorld.beta[2]: $0.block] } ?? [:],
+                    timestamp: time,
+                    nonce: UInt64(index)
+                )
+            }
             var betaBlock: SimBlock?
             if paths.count > 2, index >= betaStart {
                 if geneses[LevelWorld.beta] == nil {
+                    // No child genesis may name the genesis pre-state (an
+                    // empty Alpha genesis's post-state): Beta waits.
+                    guard !forwardAnchors || alphaParent.block.postState.rawCID != LatticeState.emptyHeader.rawCID else {
+                        return try await [(LevelWorld.alpha, alphaBlock(on: alphaParent))]
+                    }
                     betaBlock = try await childGenesis(
                         LevelWorld.beta, parentState: alphaParent.block.postState.rawCID, at: time
                     )
                 } else {
-                    let betaParent = parent(LevelWorld.beta, rng: &rng, forkProbability: forkProbability)
-                    betaBlock = try await build(
-                        on: betaParent, carrierPrevState: alphaParent.block.postState.rawCID,
-                        timestamp: time, nonce: UInt64(index)
-                    )
+                    let chosenBeta = parent(LevelWorld.beta, rng: &rng, forkProbability: forkProbability)
+                    if let betaParent = anchored(LevelWorld.beta, chosenBeta, entering: alphaParent.block.postState.rawCID) {
+                        betaBlock = try await build(
+                            on: betaParent, carrierPrevState: alphaParent.block.postState.rawCID,
+                            timestamp: time, nonce: UInt64(index)
+                        )
+                    }
                 }
             }
-            let alphaBlock = try await build(
-                on: alphaParent,
-                carrierPrevState: nexusParent.block.postState.rawCID,
-                children: betaBlock.map { [LevelWorld.beta[2]: $0.block] } ?? [:],
-                timestamp: time,
-                nonce: UInt64(index)
-            )
-            return [(LevelWorld.alpha, alphaBlock)] + (betaBlock.map { [(LevelWorld.beta, $0)] } ?? [])
+            return [(LevelWorld.alpha, try await alphaBlock(on: alphaParent, carrying: betaBlock))]
+                + (betaBlock.map { [(LevelWorld.beta, $0)] } ?? [])
+        }
+
+        /// The level's head, or with `forwardAnchors` the block an honest
+        /// template builds on under a carrier entering `entering` (the head
+        /// when none qualifies: the adversary's block is then refused).
+        func anchoredHead(_ path: ChainPath, entering: String) -> SimBlock {
+            let head = blocks[path]![references[path]!.head]!
+            return anchored(path, head, entering: entering) ?? head
         }
 
         /// An Alpha block with a forged post-state, and a block on it, each
         /// carried by its own share: both weigh; execution excludes the first.
         mutating func invalidBranch(at time: Int64, rng: inout SplitMix64) async throws {
             let nexusParent = blocks[LevelWorld.nexus]![references[LevelWorld.nexus]!.head]!
-            let alphaParent = blocks[LevelWorld.alpha]![references[LevelWorld.alpha]!.head]!
             let carrierPrev = nexusParent.block.postState.rawCID
+            let alphaParent = anchoredHead(LevelWorld.alpha, entering: carrierPrev)
             let twin = try await build(on: alphaParent, carrierPrevState: carrierPrev, timestamp: time + 200, nonce: 0xBAD)
             let forged = twin.block.with(postState: LatticeStateHeader(rawCID: geneses[LevelWorld.nexus]!.cid))
             let bad = try await store(forged, releaseAt: time + 200, anchor: twin.anchor)
@@ -463,8 +630,8 @@ public struct LevelWorld: Sendable {
         /// once, its proofs only `delay` later.
         mutating func withheldBranch(at time: Int64, delay: Int64) async throws {
             let nexusParent = blocks[LevelWorld.nexus]![references[LevelWorld.nexus]!.head]!
-            var tip = blocks[LevelWorld.alpha]![references[LevelWorld.alpha]!.head]!
             let carrierPrev = nexusParent.block.postState.rawCID
+            var tip = anchoredHead(LevelWorld.alpha, entering: carrierPrev)
             for step in 1...2 {
                 let at = time + 300 + Int64(step)
                 let block = try await build(on: tip, carrierPrevState: carrierPrev, timestamp: at, nonce: 0x5EED)
@@ -481,8 +648,8 @@ public struct LevelWorld: Sendable {
         /// timestamp schedule with a proof that weighs.
         mutating func lies(at time: Int64) async throws {
             let nexusParent = blocks[LevelWorld.nexus]![references[LevelWorld.nexus]!.head]!
-            let alphaParent = blocks[LevelWorld.alpha]![references[LevelWorld.alpha]!.head]!
             let carrierPrev = nexusParent.block.postState.rawCID
+            let alphaParent = anchoredHead(LevelWorld.alpha, entering: carrierPrev)
             let empty = try await build(on: alphaParent, carrierPrevState: carrierPrev, timestamp: time + 500, nonce: 0xF00)
             let fabricated = try await grind(
                 on: nexusParent, carrying: [(LevelWorld.alpha, empty)], at: time + 500, outcome: .zeroWork

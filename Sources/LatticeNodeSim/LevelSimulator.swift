@@ -34,6 +34,17 @@ public struct LevelSimConfig: Sendable {
     public var reconnectDelay: Int64 = 3_000
     public var settle: Int64 = 60_000
     public var replayInterval = 48
+    /// The world's honest miners build child blocks as the node's template
+    /// does, anchors moving only forward (`LevelWorld.Builder.forwardAnchors`).
+    /// Off, they build on the head whatever their carrier, and under parent
+    /// forks some child blocks anchor backward or sideways
+    /// (`LevelWorld.backwardAnchors`): never executed, never excluded.
+    public var forwardAnchors = true
+    /// Every block pays its own reward account, so parent forks produce
+    /// distinct states (`LevelWorld.Builder.divergentStates`).
+    public var divergentStates = false
+    /// The last grinds are mined on the heads with no forks.
+    public var calmTail = 0
 
     public init(seed: UInt64) {
         self.seed = seed
@@ -173,7 +184,10 @@ public struct LevelSimulator {
             forkProbability: config.forkProbability,
             shareProbability: config.shareProbability,
             doubleProbability: config.doubleProbability,
-            withholdDelay: config.withholdDelay
+            withholdDelay: config.withholdDelay,
+            forwardAnchors: config.forwardAnchors,
+            divergentStates: config.divergentStates,
+            calmTail: config.calmTail
         )
         return LevelSimulator(config: config, world: world, rng: rng)
     }
@@ -241,6 +255,7 @@ public struct LevelSimulator {
             cores.mapValues { ($0.core, $0.digests) }, world: world, now: now,
             withheldShown: config.withholder
         )
+        try LevelInvariants.checkForwardAnchors(cores.mapValues(\.core), world: world, honest: config.forwardAnchors)
         return report
     }
 

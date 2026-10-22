@@ -355,4 +355,85 @@ public enum LevelInvariants {
             }
         }
     }
+
+    // MARK: - Forward anchors (Lattice spec §5.3 step 6)
+
+    /// A level's act-on chain, tip first.
+    static func actOnChain(_ core: ChainCore) -> [String] {
+        var chain: [String] = []
+        var cid: String? = core.snapshot.actOnTip.isEmpty ? nil : core.snapshot.actOnTip
+        while let current = cid {
+            chain.append(current)
+            cid = core.parent(of: current)
+        }
+        return chain
+    }
+
+    /// After the quiet point, at every child level of every core:
+    ///
+    /// - (a) no honest child block is refused for parent continuity: with
+    ///   `honest` (the world's miners build as the node's template does) the
+    ///   world holds no valid block whose anchor moves backward or sideways;
+    ///   and every parent fact a core's child level awaits is one its
+    ///   parent's world provides, unless the block is, or descends from, one
+    ///   that anchors backward or sideways (expected never to execute);
+    /// - (b) liveness: every child block the calm tail carried is executed
+    ///   and on the core's act-on chain, whatever the parent reorganized
+    ///   before it;
+    /// - (c) after a calm tail, the act-on chain anchors only on states its
+    ///   parent level's act-on chain produced.
+    public static func checkForwardAnchors(_ cores: [String: NodeCore], world: LevelWorld, honest: Bool) throws {
+        let backward = world.backwardAnchors()
+        if honest, let refused = backward.first {
+            throw Invariants.fail("world", "honest block \(refused.cid) at \(refused.path) anchors backward or sideways")
+        }
+        func refusedForever(_ cid: String, at path: ChainPath) -> Bool {
+            var current: String? = cid
+            while let hash = current {
+                if backward.contains(where: { $0.path == path && $0.cid == hash }) { return true }
+                current = world.blocks[path]?[hash]?.parent
+            }
+            return false
+        }
+        for (name, host) in cores.sorted(by: { $0.key < $1.key }) {
+            for path in world.paths where path.count > 1 {
+                let parentPath = Array(path.dropLast())
+                guard let core = host.levels[path], let parent = host.levels[parentPath] else {
+                    throw Invariants.fail(name, "does not run \(path) and its parent")
+                }
+                for (cid, fact) in core.bodies.awaitingParent {
+                    guard case .parentStateContinuity(_, let from, let to) = fact else { continue }
+                    if !world.advanced(parentPath, from: from, to: to), !refusedForever(cid, at: path) {
+                        throw Invariants.fail(name, "\(cid) at \(path) awaits a parent fact no parent block provides")
+                    }
+                }
+                let chain = actOnChain(core)
+                let onChain = Set(chain)
+                if let calmFrom = world.calmFrom {
+                    for grind in world.grinds where grind.releaseAt >= calmFrom && !grind.withheld {
+                        for carried in grind.mined.carried where carried.path == path {
+                            let cid = LevelWorld.cid(carried.block)
+                            guard core.tree.isExecuted(blockHash: cid), onChain.contains(cid) else {
+                                throw Invariants.fail(
+                                    name, "the calm tail's \(cid) at \(path) is not on the act-on chain "
+                                        + "(executed \(core.tree.isExecuted(blockHash: cid)), awaits \(String(describing: core.bodies.awaitingParent[cid])))"
+                                )
+                            }
+                        }
+                    }
+                }
+                guard world.calmFrom != nil else { continue }
+                let parentBlocks = world.blocks[parentPath] ?? [:]
+                let produced = Set(actOnChain(parent).compactMap { parentBlocks[$0]?.block.postState.rawCID })
+                for cid in chain {
+                    guard let state = world.blocks[path]?[cid]?.block.parentState.rawCID else {
+                        throw Invariants.fail(name, "act-on block \(cid) at \(path) was never mined")
+                    }
+                    if state != LatticeState.emptyHeader.rawCID, !produced.contains(state) {
+                        throw Invariants.fail(name, "act-on block \(cid) at \(path) anchors off its parent's act-on chain")
+                    }
+                }
+            }
+        }
+    }
 }
