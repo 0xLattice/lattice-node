@@ -57,10 +57,14 @@ final class DirectConnectionRuntimeTests: XCTestCase {
         try await eventually("the relayed session is let go") {
             await a.runtime.ivy.session(with: bID) == nil
         }
-        XCTAssertEqual(a.runtime.peerCount, 1)
-        XCTAssertEqual(b.runtime.peerCount, 1)
-        let relayPeers = await relay.runtime.ivy.connectedPeers.count
-        XCTAssertEqual(relayPeers, 2)
+        // Peer counts follow the session teardown asynchronously, so they
+        // are waited for rather than read the moment the session is gone.
+        try await eventually("both keep only the relay") {
+            a.runtime.peerCount == 1 && b.runtime.peerCount == 1
+        }
+        try await eventually("the relay keeps both") {
+            await relay.runtime.ivy.connectedPeers.count == 2
+        }
     }
 
     func testAPeerThatDidNotSayItRelaysIsNotAsked() async throws {
