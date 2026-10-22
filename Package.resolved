@@ -1,13 +1,13 @@
 {
-  "originHash" : "5b68442ed1d6addeca80d2b1faf8001200005aac1513c14c41fd7fd47d7a48a4",
+  "originHash" : "33f857a7a14018a8e8192b40d531e0d9cca1c22303e253b14212888fd944362d",
   "pins" : [
     {
       "identity" : "arraytrie",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/adalinxx/ArrayTrie.git",
       "state" : {
-        "revision" : "2d512cb4fb58696bb79200a699801f92d267dcf9",
-        "version" : "1.0.0"
+        "revision" : "8f8d3aacbd86999fffeebd60a0e89a423a41a8dc",
+        "version" : "1.0.1"
       }
     },
     {
@@ -24,8 +24,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/adalinxx/cashew.git",
       "state" : {
-        "revision" : "5f1120974feb17cfb3878bc2ef43d076dfc05ab8",
-        "version" : "5.0.1"
+        "revision" : "5daec3cdfd3d572d9437daa7a84242f7ae5a96d5",
+        "version" : "5.0.3"
       }
     },
     {
@@ -69,8 +69,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/adalinxx/Lattice.git",
       "state" : {
-        "revision" : "abca0f9335eb210fe99fd6301325d5ae0ef60503",
-        "version" : "46.0.0"
+        "revision" : "7772ba1dd396c067f83dd171315318d408dfcf63",
+        "version" : "48.0.1"
       }
     },
     {
@@ -375,8 +375,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/adalinxx/VolumeBroker.git",
       "state" : {
-        "revision" : "a70436ebf5367057bd6d109f09000812c507feca",
-        "version" : "9.2.1"
+        "revision" : "095c70f757a53c9a57eee6461aa7c58a7e220cae",
+        "version" : "9.2.3"
       }
     },
     {
