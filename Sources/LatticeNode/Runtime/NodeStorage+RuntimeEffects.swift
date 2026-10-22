@@ -176,7 +176,13 @@ extension NodeStorage {
                 // earlier, failed attempt left in memory.
                 let fetcher = CoalescingFetcher(CompositeContentSource([broker, readCache.remembering(session)]))
                 let walked = NodeImportStorage(storage: nil)
-                try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: walked)
+                do {
+                    try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: walked)
+                } catch BlockContentSizeError.exceedsLimit {
+                    // Past the chain's own maxBlockSize the block is invalid,
+                    // and its execution proves it from what was read: run it
+                    // rather than retry a fetch that can never succeed.
+                }
                 return await walked.takeStoredVolumeRoots()
             }.value
         } catch {
