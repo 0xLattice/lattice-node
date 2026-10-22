@@ -1511,6 +1511,8 @@ extension NodeRuntime {
                     // without one is checked against that carrier's state.
                     transactions: level.mining.mempool.contextualTransactions(limit: .max),
                     anchor: executed ? anchor(level.tree, snapshot.actOnTip) : nil,
+                    level: level,
+                    parentTree: core.levels[Array(child.dropLast())]?.tree,
                     // A weighed root that has not executed carries nothing
                     // until it executes, rather than a rival genesis.
                     genesisSpec: snapshot.bestHeaderTip.isEmpty ? configuration.childSpecs[child] : nil,

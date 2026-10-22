@@ -110,6 +110,12 @@ struct ChildTemplateInput: Sendable {
     let bestHeaderTip: String
     let transactions: [Transaction]
     let anchor: DifficultyAnchor?
+    /// The level, for a template that builds below the act-on tip
+    /// (`NodeRuntime.anchoredTip`).
+    let level: ChainCore
+    /// The parent level's tree, whose executed set decides whether a child
+    /// anchor advances; nil when the parent is not hosted here.
+    let parentTree: ChainTree?
     let genesisSpec: ChainSpec?
     let genesisPremineRecipient: String?
     let genesisTarget: UInt256
@@ -722,19 +728,29 @@ extension NodeRuntime {
             )
             let block: Block?
             if let tipCID = input.tipCID {
-                guard let previous = try? await BlockHeader(rawCID: tipCID).resolve(fetcher: fetcher).node,
+                // Building below the act-on tip: the block carries neither
+                // the pool, which is kept on the act-on tip, nor children.
+                guard let tip = await anchoredTip(
+                    from: tipCID, entering: entering.rawCID, level: input.level,
+                    parentTree: input.parentTree, fetcher: fetcher
+                ),
+                      let previous = try? await BlockHeader(rawCID: tip).resolve(fetcher: fetcher).node,
                       let spec = try? await previous.spec.resolve(fetcher: fetcher).node,
                       let time = try? MiningPlan.nextTimestamp(after: previous.timestamp, parentCarrier: carrier)
                 else { continue }
-                let grandchildren = await childCandidates(
+                let below = tip != tipCID
+                let grandchildren = below ? [] : await childCandidates(
                     of: input.path, among: inputs, entering: previous.postState, timestamp: time,
                     request: request, fetcher: fetcher
                 )
+                var tree = input.level.tree
                 block = try? await MiningTemplateAssembly.fit(
                     chainPath: input.path, lifetime: .seconds(30), previous: previous,
-                    pooled: input.transactions, provided: grandchildren, parentCarrier: carrier,
+                    pooled: below ? [] : input.transactions, provided: grandchildren, parentCarrier: carrier,
                     timestamp: time, rewardRecipient: request.childRecipients[input.path],
-                    minimumWork: request.minimumWork, difficultyAnchor: input.anchor, spec: spec, fetcher: fetcher
+                    minimumWork: request.minimumWork,
+                    difficultyAnchor: below ? tree.difficultyAnchor(forBlockHash: tip) : input.anchor,
+                    spec: spec, fetcher: fetcher
                 ).block
             } else if let spec = input.genesisSpec {
                 // A genesis carries no children: a nested genesis commits its
@@ -751,6 +767,25 @@ extension NodeRuntime {
             if let block { candidates.append(DirectChildCandidate(directory: input.path[input.path.count - 1], block: block)) }
         }
         return candidates
+    }
+
+    /// The child tip to build on: `tipCID`, the act-on tip, when its anchor
+    /// advances to `entering` in the parent's executed set (Lattice spec §5.3
+    /// step 6: a child anchor only moves forward along the parent's history).
+    /// After a parent reorganization the act-on tip may be anchored on the
+    /// abandoned branch, and a block on it anchored at the canonical parent
+    /// would be invalid; building on the heaviest tip it can extend instead
+    /// is what moves the child with its parent. `tipCID` when the parent is
+    /// not hosted here; nil when no executed block's anchor advances to
+    /// `entering`, or a block cannot be read.
+    static func anchoredTip(
+        from tipCID: String, entering: String, level: ChainCore, parentTree: ChainTree?, fetcher: any Fetcher
+    ) async -> String? {
+        guard let parentTree else { return tipCID }
+        return await level.actOnTip(from: tipCID) { tip in
+            guard let block = try? await BlockHeader(rawCID: tip).resolve(fetcher: fetcher).node else { return nil }
+            return parentTree.executedSetAdvanced(from: block.parentState.rawCID, to: entering)
+        }
     }
 
     static func disposition(_ preflight: TransactionPreflightDisposition) -> MempoolDisposition {
