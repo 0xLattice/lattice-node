@@ -230,6 +230,16 @@ carry its own child. The template digest includes every hosted level, so a new
 child transaction, child candidate, or child block makes existing miner work
 stale.
 
+A child candidate commits its carrier's entering state as its `parentState`, and
+Lattice requires a child's anchor to move only forward along the parent's
+history (spec §5.3 step 6). After a parent reorganization the child's act-on
+tip may be anchored on the abandoned parent branch, where no candidate on the
+canonical parent can extend it. The template then builds on the heaviest
+executed child tip whose anchor the entering state advances from
+(`NodeRuntime.anchoredTip`), carrying neither the pool, which stays on the
+act-on tip, nor children. Honest work therefore moves to that branch, and the
+child reorganizes with its parent once the branch is heavier.
+
 A nested child's first block can be built only after its parent has executed a
 block of its own. Consensus binds the child genesis to the parent's state. If
 the parent pays no block rewards and otherwise never changes state, it cannot

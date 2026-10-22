@@ -157,6 +157,70 @@ final class ChainCoreBodyTests: XCTestCase {
         return last
     }
 
+    /// Execute `blocks` in order, each body delivered and its connect run.
+    private func execute(_ blocks: [SimBlock], on core: inout ChainCore) async throws {
+        for block in blocks {
+            content.put(block.body)
+            var effects = core.step(.bodyFetched(cid: block.cid), now: Self.now)
+            while let job = jobs(effects).first {
+                effects = core.step(.connected(await run(job)), now: Self.now)
+                try await persist(effects)
+            }
+        }
+    }
+
+    /// chain[0...3] executed, and a heavier executed side branch of three
+    /// from chain[1], which the act-on tip follows.
+    private func forked() async throws -> (core: ChainCore, side: [SimBlock]) {
+        var (core, _) = weighed(Array(chain.prefix(4)), window: 8)
+        try await execute(Array(chain.prefix(4)), on: &core)
+        XCTAssertEqual(core.snapshot.actOnTip, chain[3].cid)
+        let side = try await world.branch(from: chain[1], count: 3)
+        _ = show(&core, side.map { HeaderEntry(block: $0.block, children: $0.children) }, at: Self.now)
+        try await execute(side, on: &core)
+        XCTAssertEqual(core.snapshot.actOnTip, side[2].cid, "fixture: the side branch is heavier")
+        return (core, side)
+    }
+
+    /// The act-on descent leaving blocks out: from the parent of the deepest
+    /// one on the act-on chain, the heaviest executed step not left out.
+    func testTheActOnTipAvoidingBlocksDescendsFromBelowTheDeepest() async throws {
+        let (core, side) = try await forked()
+        XCTAssertEqual(core.actOnTip(avoiding: []), side[2].cid)
+        XCTAssertEqual(core.actOnTip(avoiding: [side[1].cid]), side[0].cid)
+        // Below the deepest, the executed sibling is taken.
+        XCTAssertEqual(core.actOnTip(avoiding: [side[0].cid, side[2].cid]), chain[3].cid)
+        // A block off the act-on chain changes nothing.
+        XCTAssertEqual(core.actOnTip(avoiding: [chain[2].cid]), side[2].cid)
+    }
+
+    /// A child's template tip after a parent reorganization: the heaviest
+    /// executed tip the check accepts, found by avoiding each one it refuses.
+    func testTheTipBuiltOnIsTheHeaviestOneAccepted() async throws {
+        let (core, side) = try await forked()
+        func tip(refusing refused: Set<String>) async -> String? {
+            await core.actOnTip(from: core.snapshot.actOnTip) { !refused.contains($0) }
+        }
+        let accepted = await tip(refusing: [])
+        XCTAssertEqual(accepted, side[2].cid, "the act-on tip when it is accepted")
+        let belowTip = await tip(refusing: [side[2].cid])
+        XCTAssertEqual(belowTip, side[1].cid)
+        // The whole side branch anchored on an abandoned parent branch: the
+        // other executed branch is taken.
+        let otherBranch = await tip(refusing: Set(side.map(\.cid)))
+        XCTAssertEqual(otherBranch, chain[3].cid)
+        let below = await tip(refusing: Set(side.map(\.cid)).union([chain[3].cid, chain[2].cid]))
+        XCTAssertEqual(below, chain[1].cid, "down to the fork")
+        let allButGenesis = Set(side.map(\.cid) + chain.prefix(4).map(\.cid))
+        let genesis = try XCTUnwrap(core.parent(of: chain[0].cid))
+        let atGenesis = await tip(refusing: allButGenesis)
+        XCTAssertEqual(atGenesis, genesis)
+        let none = await tip(refusing: allButGenesis.union([genesis]))
+        XCTAssertNil(none, "nothing to build on")
+        let unreadable = await core.actOnTip(from: side[2].cid) { _ in nil }
+        XCTAssertNil(unreadable)
+    }
+
     func testTheNextWindowOfTheBestChainIsAskedForInParentOrder() {
         var core = ChainCore(tree: world.bootstrap.tree, config: ChainCoreConfig(bodyWindow: 3))
         _ = core.step(.peerReady(peer), now: Self.now)
