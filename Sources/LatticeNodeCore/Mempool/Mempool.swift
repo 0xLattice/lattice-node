@@ -97,6 +97,8 @@ public struct Mempool: Sendable {
         let addedAt: Int64
     }
 
+    /// The nonce slot a transaction occupies: its first signer's, the only
+    /// nonce consensus checks and advances (empty for a signer-less body).
     private struct ConflictKey: Hashable, Sendable {
         let signers: [String]
         let nonce: UInt64
@@ -184,7 +186,7 @@ public struct Mempool: Sendable {
         }
         guard measured.size <= limits.maxBytes else { throw MempoolError.tooLarge }
         let conflictKey = ConflictKey(
-            signers: Array(Set(measured.body.signers)).sorted(),
+            signers: measured.body.signers.first.map { [$0] } ?? [],
             nonce: measured.body.nonce
         )
         let entry = Entry(
@@ -201,8 +203,7 @@ public struct Mempool: Sendable {
         // replace their OWN pending transaction at that nonce only by strictly
         // paying more to the miner (`minerSurplus`, the debit-over-credit
         // excess the block's recipient is credited). That excess is funds the
-        // signer gives up, so the bid cannot be raised for free. A partial
-        // signer overlap at the same nonce is an unresolvable conflict.
+        // signer gives up, so the bid cannot be raised for free.
         let overlapping = Set(conflictKey.signers.compactMap {
             signerNonces[SignerNonce(signer: $0, nonce: conflictKey.nonce)]
         })
@@ -290,12 +291,12 @@ public struct Mempool: Sendable {
     /// Greedy ancestor-package fee-rate selection, as Bitcoin Core's
     /// `addPackageTxs`.
     ///
-    /// Ancestry is the nonce chain: Lattice applies each signer's
-    /// transactions at consecutive nonces, so an entry's parents are the
-    /// pooled entries at `nonce - 1` for each of its signers (a multi-signer
-    /// entry joins chains). An entry is a candidate only if it can execute
+    /// Ancestry is the nonce chain: Lattice applies each first signer's
+    /// transactions at consecutive nonces, so an entry's parent is the
+    /// pooled entry at `nonce - 1` for its first signer (co-signers' nonces
+    /// are not consensus). An entry is a candidate only if it can execute
     /// once its ancestors have: it is ready (or, contextually, unavailable),
-    /// or EVERY one of its signers has its nonce predecessor pooled; and
+    /// or its first signer has its nonce predecessor pooled; and
     /// every ancestor is a candidate. So a nonce-gap entry, and everything
     /// behind it, stays out. An entry with more than `maxPackageAncestors`
     /// ancestors or `maxPackageDescendants` descendants is not a candidate.
