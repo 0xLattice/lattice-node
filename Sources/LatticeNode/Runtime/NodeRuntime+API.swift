@@ -110,6 +110,11 @@ struct ChildTemplateInput: Sendable {
     let bestHeaderTip: String
     let transactions: [Transaction]
     let anchor: DifficultyAnchor?
+    /// The level, for the tip and difficulty anchor of a template that forks
+    /// around a withdrawal (`NodeRuntime.withdrawalForkTip`).
+    let level: ChainCore
+    /// The parent level's recent act-on post-states (`ChainCore.actOnStates`).
+    let parentStates: Set<String>
     let genesisSpec: ChainSpec?
     let genesisPremineRecipient: String?
     let genesisTarget: UInt256
@@ -722,19 +727,29 @@ extension NodeRuntime {
             )
             let block: Block?
             if let tipCID = input.tipCID {
-                guard let previous = try? await BlockHeader(rawCID: tipCID).resolve(fetcher: fetcher).node,
+                // Forking around a withdrawal: the block carries neither the
+                // pool, which is kept on the act-on tip, nor children.
+                let forkTip = await withdrawalForkTip(
+                    from: tipCID, level: input.level, parentStates: input.parentStates, fetcher: fetcher
+                )
+                let forked = forkTip != tipCID
+                guard let forkTip,
+                      let previous = try? await BlockHeader(rawCID: forkTip).resolve(fetcher: fetcher).node,
                       let spec = try? await previous.spec.resolve(fetcher: fetcher).node,
                       let time = try? MiningPlan.nextTimestamp(after: previous.timestamp, parentCarrier: carrier)
                 else { continue }
-                let grandchildren = await childCandidates(
+                let grandchildren = forked ? [] : await childCandidates(
                     of: input.path, among: inputs, entering: previous.postState, timestamp: time,
                     request: request, fetcher: fetcher
                 )
+                var tree = input.level.tree
                 block = try? await MiningTemplateAssembly.fit(
                     chainPath: input.path, lifetime: .seconds(30), previous: previous,
-                    pooled: input.transactions, provided: grandchildren, parentCarrier: carrier,
+                    pooled: forked ? [] : input.transactions, provided: grandchildren, parentCarrier: carrier,
                     timestamp: time, rewardRecipient: request.childRecipients[input.path],
-                    minimumWork: request.minimumWork, difficultyAnchor: input.anchor, spec: spec, fetcher: fetcher
+                    minimumWork: request.minimumWork,
+                    difficultyAnchor: forked ? tree.difficultyAnchor(forBlockHash: forkTip) : input.anchor,
+                    spec: spec, fetcher: fetcher
                 ).block
             } else if let spec = input.genesisSpec {
                 // A genesis carries no children: a nested genesis commits its
@@ -751,6 +766,46 @@ extension NodeRuntime {
             if let block { candidates.append(DirectChildCandidate(directory: input.path[input.path.count - 1], block: block)) }
         }
         return candidates
+    }
+
+    /// How many blocks below a child's tip are checked for a withdrawal to
+    /// fork around. A deeper one stays: forking around it would cost the
+    /// honest branch that many blocks of catching up.
+    static let withdrawalForkWindow = 6
+
+    /// The child tip to build on: `tipCID`, the act-on tip, unless a block
+    /// within `withdrawalForkWindow` of it carries a withdrawal whose
+    /// `parentState` is not in `parentStates`; then the act-on descent
+    /// avoiding every such block (`ChainCore.actOnTip(avoiding:)`), checked
+    /// again. Consensus admits a withdrawal anchored on any state the parent
+    /// executed, on any branch (spec §8.1, "Receipt canonicity"), so a
+    /// receipt only a stale parent block holds would settle it; honest
+    /// miners building around it outweigh it. Nil when a block cannot be
+    /// read.
+    static func withdrawalForkTip(
+        from tipCID: String, level: ChainCore, parentStates: Set<String>, fetcher: any Fetcher
+    ) async -> String? {
+        var avoided: Set<String> = []
+        var tip = tipCID
+        while true {
+            var cid: String? = tip
+            var found: Set<String> = []
+            for _ in 0..<withdrawalForkWindow {
+                guard let block = cid, let parent = level.parent(of: block) else { break }
+                guard let content = try? await BlockHeader(rawCID: block).resolve(fetcher: fetcher).node,
+                      let transactions = try? await MiningTemplateAssembly.blockTransactions(in: content, fetcher: fetcher)
+                else { return nil }
+                if !parentStates.contains(content.parentState.rawCID),
+                   transactions.contains(where: { $0.body.node?.withdrawalActions.isEmpty == false }) {
+                    found.insert(block)
+                }
+                cid = parent
+            }
+            // Each pass avoids at least one more block of a finite window.
+            guard !found.isSubset(of: avoided) else { return tip }
+            avoided.formUnion(found)
+            tip = level.actOnTip(avoiding: avoided)
+        }
     }
 
     static func disposition(_ preflight: TransactionPreflightDisposition) -> MempoolDisposition {

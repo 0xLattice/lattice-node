@@ -230,6 +230,17 @@ carry its own child. The template digest includes every hosted level, so a new
 child transaction, child candidate, or child block makes existing miner work
 stale.
 
+A child candidate extends the child's act-on tip, except around a withdrawal.
+Consensus admits a withdrawal anchored on any parent state the parent executed,
+on any branch, so a receipt that only a stale parent block holds would settle it
+(Lattice spec §8.1, "Receipt canonicity"). When a block within six of the child
+tip carries a withdrawal whose `parentState` is not on the parent's act-on chain
+(its last 1,024 blocks), the candidate is built on the act-on descent that
+avoids that block. It carries no transactions and no children, because the pool
+stays on the act-on tip. Honest miners doing this outweigh the withdrawal, and
+the act-on tip follows by weight. A parent reorg that drops a receipt is
+handled the same way at the next template.
+
 A nested child's first block can be built only after its parent has executed a
 block of its own. Consensus binds the child genesis to the parent's state. If
 the parent pays no block rewards and otherwise never changes state, it cannot

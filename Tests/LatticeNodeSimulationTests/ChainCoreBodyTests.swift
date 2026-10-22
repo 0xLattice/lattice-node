@@ -157,6 +157,42 @@ final class ChainCoreBodyTests: XCTestCase {
         return last
     }
 
+    /// Execute `blocks` in order, each body delivered and its connect run.
+    private func execute(_ blocks: [SimBlock], on core: inout ChainCore) async throws {
+        for block in blocks {
+            content.put(block.body)
+            var effects = core.step(.bodyFetched(cid: block.cid), now: Self.now)
+            while let job = jobs(effects).first {
+                effects = core.step(.connected(await run(job)), now: Self.now)
+                try await persist(effects)
+            }
+        }
+    }
+
+    /// The act-on descent leaving blocks out: from the parent of the deepest
+    /// one on the act-on chain, the heaviest executed step not left out.
+    func testTheActOnTipAvoidingBlocksDescendsFromBelowTheDeepest() async throws {
+        var (core, _) = weighed(Array(chain.prefix(4)), window: 8)
+        try await execute(Array(chain.prefix(4)), on: &core)
+        XCTAssertEqual(core.snapshot.actOnTip, chain[3].cid)
+        let side = try await world.branch(from: chain[1], count: 3)
+        _ = show(&core, side.map { HeaderEntry(block: $0.block, children: $0.children) }, at: Self.now)
+        try await execute(side, on: &core)
+        XCTAssertEqual(core.snapshot.actOnTip, side[2].cid, "fixture: the side branch is heavier")
+
+        XCTAssertEqual(core.actOnTip(avoiding: []), side[2].cid)
+        XCTAssertEqual(core.actOnTip(avoiding: [side[1].cid]), side[0].cid)
+        // Below the deepest, the executed sibling is taken.
+        XCTAssertEqual(core.actOnTip(avoiding: [side[0].cid, side[2].cid]), chain[3].cid)
+        // A block off the act-on chain changes nothing.
+        XCTAssertEqual(core.actOnTip(avoiding: [chain[2].cid]), side[2].cid)
+
+        XCTAssertEqual(
+            core.actOnStates(depth: 2),
+            [side[2].block.postState.rawCID, side[1].block.postState.rawCID]
+        )
+    }
+
     func testTheNextWindowOfTheBestChainIsAskedForInParentOrder() {
         var core = ChainCore(tree: world.bootstrap.tree, config: ChainCoreConfig(bodyWindow: 3))
         _ = core.step(.peerReady(peer), now: Self.now)

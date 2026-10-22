@@ -53,6 +53,45 @@ extension ChainCore {
         Self.actOnTip(of: tree, index: index)
     }
 
+    /// The act-on descent with `avoided` blocks, and all they lead to, left
+    /// out: from the parent of the deepest avoided block on the act-on
+    /// chain, the heaviest executed step at each fork that is not avoided.
+    /// The act-on tip when none of them is on its chain.
+    public func actOnTip(avoiding avoided: Set<String>) -> String {
+        var tip = actOnTip.hash
+        guard let floor = avoided.compactMap({ index.height[$0] }).min() else { return tip }
+        var deepest: String?
+        var cid: String? = tip
+        while let block = cid, let height = index.height[block], height >= floor {
+            if avoided.contains(block) { deepest = block }
+            cid = index.parent[block]
+        }
+        guard let deepest, let base = index.parent[deepest] else { return tip }
+        tip = base
+        while let next = Self.byWeight((index.children[tip] ?? []).filter {
+            tree.isExecuted(blockHash: $0) && !avoided.contains($0)
+        }, in: tree).first {
+            tip = next
+        }
+        return tip
+    }
+
+    /// The post-states of the act-on chain's last `depth` blocks, tip
+    /// included: the parent states a child block's withdrawal may anchor on
+    /// for this node to extend it (`NodeRuntime.withdrawalForkTip`).
+    public func actOnStates(depth: Int) -> Set<String> {
+        var states: Set<String> = []
+        var cid: String? = actOnTip.hash
+        var walked = 0
+        while let block = cid, !block.isEmpty, walked < depth,
+              let state = tree.headerSnapshot(of: block)?.postStateCID {
+            states.insert(state)
+            cid = index.parent[block]
+            walked += 1
+        }
+        return states
+    }
+
     /// The parent of a weighed block: how a reader walks the act-on chain,
     /// which need not be the best header chain.
     public func parent(of cid: String) -> String? {

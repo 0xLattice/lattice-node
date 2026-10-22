@@ -1496,6 +1496,11 @@ extension NodeRuntime {
             return tree.difficultyAnchor(forBlockHash: tip)
         }
 
+        /// How far down the parent's act-on chain a child withdrawal's anchor
+        /// is looked for. One older than this is forked around like a stale
+        /// one, and its withdrawal is mined again on a current anchor.
+        static let parentStateDepth = 1_024
+
         /// Every hosted level below `path`, as a template job reads it.
         func childTemplateInputs(below path: ChainPath) -> [ChildTemplateInput] {
             core.ordered.filter { $0.count > path.count && $0.starts(with: path) }.compactMap { child -> ChildTemplateInput? in
@@ -1511,6 +1516,8 @@ extension NodeRuntime {
                     // without one is checked against that carrier's state.
                     transactions: level.mining.mempool.contextualTransactions(limit: .max),
                     anchor: executed ? anchor(level.tree, snapshot.actOnTip) : nil,
+                    level: level,
+                    parentStates: core.levels[Array(child.dropLast())]?.actOnStates(depth: Self.parentStateDepth) ?? [],
                     // A weighed root that has not executed carries nothing
                     // until it executes, rather than a rival genesis.
                     genesisSpec: snapshot.bestHeaderTip.isEmpty ? configuration.childSpecs[child] : nil,
