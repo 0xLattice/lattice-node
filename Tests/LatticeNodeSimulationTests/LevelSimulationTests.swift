@@ -464,7 +464,7 @@ final class LevelSimulationTests: XCTestCase {
         XCTAssertEqual(try missing(), 0, "proofs never credited")
     }
 
-    /// Node-local finality at a child level (spec §9.11): every header is
+    /// Node-local finality at a child level: every header is
     /// weighed, each attaching at the tip of its time, but a proof arriving
     /// for a block that has since fallen beyond the window is declined. Blocks
     /// inside the window collect every grind; nobody is blamed.

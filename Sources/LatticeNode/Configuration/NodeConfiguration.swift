@@ -204,7 +204,7 @@ public struct NodeConfiguration: Sendable {
     /// cheaper transaction stays valid. 0 admits any fee.
     public let minRelayFee: UInt64
 
-    /// Node-local finality (spec §9.11), per chain: the node declines headers
+    /// Node-local finality, per chain: the node declines headers
     /// and work landing more than a chain's window behind that chain's best
     /// weighed tip, and so does not follow a reorganization deeper than it.
     public let finality: FinalityWindows

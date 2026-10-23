@@ -1165,8 +1165,10 @@ final class ChainCoreSyncTests: XCTestCase {
 
     /// HeaderSync never reads canonicity: the sync sources (the step, serving,
     /// catch-up, the pending queue, the messages) name no best-chain API.
-    /// Only what acts on the best chain may: `ChainSelection.swift` (the snapshot and
-    /// act-on tip), execution and templates.
+    /// Only what acts on the best chain may: `ChainSelection.swift` (the snapshot,
+    /// act-on tip and the operator's finality window), execution and templates.
+    /// The window is the one deliberate exception: a node that sets one
+    /// chooses to decline what lies too far below its best tip.
     func testSyncNeverReadsCanonicity() throws {
         let sources = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -1192,7 +1194,7 @@ final class ChainCoreSyncTests: XCTestCase {
     }
 }
 
-// MARK: - Node-local finality (spec §9.11)
+// MARK: - Node-local finality
 
 extension ChainCoreSyncTests {
     /// A core with a finality window of `blocks` blocks.

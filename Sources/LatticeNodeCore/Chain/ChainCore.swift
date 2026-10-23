@@ -182,7 +182,7 @@ public struct ChainCoreConfig: Sendable {
     public var bodyRetryCap: Int64
     /// The level's mempool and template bounds.
     public var mining = MiningConfig()
-    /// Node-local finality (spec §9.11), per chain, in blocks: a header more
+    /// Node-local finality (docs/operations.md, "Finality window"), per chain, in blocks: a header more
     /// than its chain's window below that chain's best weighed tip, or work
     /// crediting such a block, is declined — never stored, never blamed. The
     /// node then does not follow a reorganization deeper than the window. A
@@ -1156,20 +1156,6 @@ public struct ChainCore: Sendable {
     }
 
     // MARK: - Finality
-
-    /// Whether a block at `height` is more than this chain's finality window
-    /// below its best weighed tip (spec §9.11). The tip's next height never
-    /// is, so a stalled chain can always be extended.
-    func pastFinality(height: UInt64) -> Bool {
-        guard let window = config.finality.window(for: chainPath), !tree.canonicalTip.isEmpty else { return false }
-        let tip = tree.getHighestBlockHeight()
-        return tip > height && tip - height > window
-    }
-
-    /// Whether weighed block `cid` is past the finality window.
-    func pastFinality(_ cid: String) -> Bool {
-        index.height[cid].map(pastFinality(height:)) ?? false
-    }
 
     /// Decline a header beyond the window, and every pending header below it,
     /// which could only attach through it. Never a verdict, never blame.

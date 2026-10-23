@@ -584,8 +584,9 @@ enable it only for diagnosis and rotate or remove it afterwards.
 ### Finality window
 
 `finalityWindow` in `lattice.json` (`--finality-window`, in blocks; absent or 0
-by default) gives the node its own finality at every level it hosts (spec
-§9.11 in Lattice). `finalityWindows` sets chains apart, by chain path, over
+by default) gives the node its own finality at every level it hosts. It is
+node policy, not a consensus rule: nodes with different windows, or none,
+agree on every block's validity. `finalityWindows` sets chains apart, by chain path, over
 that default: `{"Nexus/Alpha": 500}`, or `--finality-window Nexus/Alpha=500`;
 0 turns it off for that chain.
 
