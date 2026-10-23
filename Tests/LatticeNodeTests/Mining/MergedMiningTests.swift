@@ -225,8 +225,9 @@ final class MergedMiningTests: XCTestCase {
             _ = try await runtime.mineBlock()
             return await alpha.readSnapshot().tipCID != nil
         }
-        let tip = await alpha.readSnapshot().tipCID
-        let genesis = try XCTUnwrap(tip)
+        // The genesis itself, not the tip: mining may have gone past it.
+        let root = await alpha.explorerCanonicalBlockCID(atHeight: 0)
+        let genesis = try XCTUnwrap(root)
         let carried = await alpha.explorerBlockTransactions(cid: genesis, offset: 0, limit: 10)
         XCTAssertEqual(carried?.transactions.map(\.signers), [[address], [address]])
         let resolvedBlock = try await BlockHeader(rawCID: genesis).resolve(fetcher: alpha.storage)
