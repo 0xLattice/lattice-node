@@ -124,6 +124,24 @@ public enum ChainEffect: Sendable {
     case mining(MiningEffect)
 }
 
+/// Each chain's finality window in blocks: a chain's own, else the default;
+/// nil is no window.
+public struct FinalityWindows: Sendable, Equatable {
+    /// The window of every chain not named in `byChain`.
+    public var all: UInt64?
+    /// Per chain path; a nil value turns the window off for that chain.
+    public var byChain: [[String]: UInt64?]
+
+    public init(all: UInt64? = nil, byChain: [[String]: UInt64?] = [:]) {
+        self.all = all
+        self.byChain = byChain
+    }
+
+    public func window(for path: [String]) -> UInt64? {
+        byChain[path] ?? all
+    }
+}
+
 public struct ChainCoreConfig: Sendable {
     public var maxHeadersPerPage: Int
     /// A served page stops before this many bytes (always at least one
@@ -164,6 +182,12 @@ public struct ChainCoreConfig: Sendable {
     public var bodyRetryCap: Int64
     /// The level's mempool and template bounds.
     public var mining = MiningConfig()
+    /// Node-local finality (docs/operations.md, "Finality window"), per chain, in blocks: a header more
+    /// than its chain's window below that chain's best weighed tip, or work
+    /// crediting such a block, is declined — never stored, never blamed. The
+    /// node then does not follow a reorganization deeper than the window. A
+    /// chain with no window keeps everything.
+    public var finality = FinalityWindows()
 
     public init(
         maxHeadersPerPage: Int = 2_000,
@@ -674,7 +698,10 @@ public struct ChainCore: Sendable {
     /// Whether a logged object is applied here: a header weighed, a grind
     /// credited.
     mutating func applied(_ entry: LogEntry) -> Bool {
+        // Declined is done: a stream must not stall on what finality refused.
+        if sync.declined.contains(entry.block) { return true }
         guard index.contains(entry.block) else { return false }
+        if entry.kind == .proof, pastFinality(entry.block) { return true }
         return entry.kind == .header || tree.workContribution(id: entry.cid, at: entry.block) != nil
     }
 
@@ -697,7 +724,7 @@ public struct ChainCore: Sendable {
         switch entry.kind {
         case .header:
             return !index.contains(entry.block) && sync.pending.entries[entry.block] == nil
-                && sync.proofs.awaiting[entry.block] == nil
+                && sync.proofs.awaiting[entry.block] == nil && !sync.declined.contains(entry.block)
         case .proof:
             return !applied(entry) && sync.pending.entries[entry.block]?.evidence[entry.cid] == nil
                 && !sync.proofs.verifying.values.contains { $0.cid == entry.block && $0.proof.rootCID == entry.cid }
@@ -841,6 +868,7 @@ public struct ChainCore: Sendable {
             if !isRoot { offer(entry.proofs, cid: cid, from: peer) }
             return cid
         }
+        if sync.declined.contains(cid) { return cid }
         // A root header proves its own work first: one that fails is blamed
         // whatever else is wrong with it (a date too far ahead included).
         if isRoot, ChainTree.rootWork(of: entry.block) == nil {
@@ -856,6 +884,13 @@ public struct ChainCore: Sendable {
         guard entry.block.parent != nil || !isRoot else { return cid }
         let (horizon, overflow) = turn.now.addingReportingOverflow(config.maxFutureDrift)
         if !overflow, entry.block.timestamp > horizon { return cid }
+        // A header carries its height: judged at once, an orphan too. Its
+        // height is verified when it connects.
+        if pastFinality(height: entry.block.height)
+            || entry.block.parent.map({ sync.declined.contains($0.rawCID) }) == true {
+            decline(cid)
+            return cid
+        }
         if let held = sync.pending.entries[cid] {
             announce(cid, by: peer, &turn)
             if let children = entry.children, held.children == nil {
@@ -935,6 +970,11 @@ public struct ChainCore: Sendable {
             return
         }
         if index.contains(parent) {
+            // The tip may have moved on since the header arrived.
+            if pastFinality(height: header.block.height) {
+                decline(cid)
+                return
+            }
             if header.children == nil {
                 if scheduleCheck(header, turn.now, &turn) {
                     want(header, parent: false, &turn)
@@ -1113,6 +1153,20 @@ public struct ChainCore: Sendable {
             dirty(header.blockCID, &turn)
         }
         nextWant(of: peer, parent: false, &turn)
+    }
+
+    // MARK: - Finality
+
+    /// Decline a header beyond the window, and every pending header below it,
+    /// which could only attach through it. Never a verdict, never blame.
+    mutating func decline(_ cid: String) {
+        var stack = [cid]
+        while let next = stack.popLast() {
+            stack += sync.pending.childrenOf[next] ?? []
+            sync.removePending(next)
+            sync.proofs.awaiting[next] = nil
+            sync.declined.insert(next)
+        }
     }
 
     // MARK: - Time

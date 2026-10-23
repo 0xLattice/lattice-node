@@ -2,6 +2,7 @@ import Crypto
 import Foundation
 import Ivy
 import Lattice
+import LatticeNodeCore
 import UInt256
 
 public struct ChainAddress: Hashable, Sendable, CustomStringConvertible {
@@ -203,6 +204,11 @@ public struct NodeConfiguration: Sendable {
     /// cheaper transaction stays valid. 0 admits any fee.
     public let minRelayFee: UInt64
 
+    /// Node-local finality, per chain: the node declines headers
+    /// and work landing more than a chain's window behind that chain's best
+    /// weighed tip, and so does not follow a reorganization deeper than it.
+    public let finality: FinalityWindows
+
     /// Overlay slots kept in reserve for outbound dials so a burst of inbound
     /// connections (from one source, especially behind a proxy where the
     /// per-netgroup cap cannot discriminate) can never exhaust total capacity and
@@ -237,7 +243,8 @@ public struct NodeConfiguration: Sendable {
         policyModules: [Data] = [],
         publicReadURL: String? = nil,
         publicSubmit: Bool = false,
-        minRelayFee: UInt64 = 0
+        minRelayFee: UInt64 = 0,
+        finality: FinalityWindows = FinalityWindows()
     ) throws {
         guard let address = ChainAddress(chainPath), address.isNexus else {
             throw NodeConfigurationError.invalidChainPath
@@ -303,6 +310,7 @@ public struct NodeConfiguration: Sendable {
         self.publicReadURL = publicReadURL
         self.publicSubmit = publicSubmit
         self.minRelayFee = minRelayFee
+        self.finality = finality
     }
 
     /// The same node hosting `hostedChildren` instead, with their specs,

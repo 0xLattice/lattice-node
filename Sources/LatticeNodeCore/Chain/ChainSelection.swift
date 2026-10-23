@@ -3,8 +3,9 @@ import Lattice
 // The only core file that reads canonicity (the best chain). HeaderSync — what is
 // served, what is asked, what is weighed — never does; `ChainCoreSyncTests`
 // checks that the sync files name no canonicity API. Only what acts on the
-// best chain lives here: the published snapshot, the act-on tip, and the
-// mempool's tip.
+// best chain lives here: the published snapshot, the act-on tip, the
+// mempool's tip, and the operator's finality window, the one place sync
+// consults the best chain, and only when a window is set.
 
 /// What readers see: the best header tip and the tip a node acts on — the
 /// heaviest executed tip — with the mining tip epoch (a
@@ -212,5 +213,23 @@ extension ChainTree {
             }
         }
         return (canonicalBlockHash(atHeight: low) ?? canonicalTip, low)
+    }
+}
+
+// MARK: - Finality window
+
+extension ChainCore {
+    /// Whether a block at `height` is more than this chain's finality window
+    /// below its best weighed tip. The tip's next height never
+    /// is, so a stalled chain can always be extended.
+    func pastFinality(height: UInt64) -> Bool {
+        guard let window = config.finality.window(for: chainPath), !tree.canonicalTip.isEmpty else { return false }
+        let tip = tree.getHighestBlockHeight()
+        return tip > height && tip - height > window
+    }
+
+    /// Whether weighed block `cid` is past the finality window.
+    func pastFinality(_ cid: String) -> Bool {
+        index.height[cid].map(pastFinality(height:)) ?? false
     }
 }

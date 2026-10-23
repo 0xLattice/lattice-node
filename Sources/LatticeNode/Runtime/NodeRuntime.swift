@@ -148,6 +148,7 @@ public final class NodeRuntime: Sendable {
         let proofs = try storage.store.savedProofs()
         var coreConfig = coreConfig
         coreConfig.mining.mempool.minRelayFee = configuration.minRelayFee
+        coreConfig.finality = configuration.finality
         let core = try await boot(
             storage: storage, configuration: configuration,
             coreConfig: coreConfig
