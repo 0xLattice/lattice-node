@@ -187,6 +187,10 @@ public struct NodeConfiguration: Sendable {
     /// (operator choice). A genesis built from a spec with no recipient here
     /// pays nothing.
     public private(set) var childPremineRecipients: [[String]: String]
+    /// Transactions a hosted child's genesis carries after its premine
+    /// (operator choice, checked by `NodeRuntime.checkPremine`): state the
+    /// chain starts with, such as names its creator holds.
+    public private(set) var childGenesisTransactions: [[String]: [Transaction]]
     /// The WASM policy modules those specs name by CID (operator-supplied
     /// bytes): stored at start, so a genesis that names one can be stored.
     public private(set) var policyModules: [Data]
@@ -240,6 +244,7 @@ public struct NodeConfiguration: Sendable {
         hostedChildren: [[String]] = [],
         childSpecs: [[String]: ChainSpec] = [:],
         childPremineRecipients: [[String]: String] = [:],
+        childGenesisTransactions: [[String]: [Transaction]] = [:],
         policyModules: [Data] = [],
         publicReadURL: String? = nil,
         publicSubmit: Bool = false,
@@ -305,6 +310,7 @@ public struct NodeConfiguration: Sendable {
         let specs = childSpecs.filter { hostedChildren.contains($0.key) }
         self.childSpecs = specs
         self.childPremineRecipients = childPremineRecipients.filter { specs[$0.key] != nil }
+        self.childGenesisTransactions = childGenesisTransactions.filter { specs[$0.key] != nil }
         self.hostedChildren = hostedChildren
         self.policyModules = policyModules
         self.publicReadURL = publicReadURL
@@ -314,12 +320,14 @@ public struct NodeConfiguration: Sendable {
     }
 
     /// The same node hosting `hostedChildren` instead, with their specs,
-    /// premine recipients, seeds and policy modules: what a running node is
-    /// told when its operator changes the chains it hosts.
+    /// premine recipients, genesis transactions, seeds and policy modules:
+    /// what a running node is told when its operator changes the chains it
+    /// hosts.
     public mutating func host(
         _ hostedChildren: [[String]],
         childSpecs: [[String]: ChainSpec],
         childPremineRecipients: [[String]: String],
+        childGenesisTransactions: [[String]: [Transaction]] = [:],
         childSeedPeers: [[String]: [PeerEndpoint]],
         policyModules: [Data]
     ) throws {
@@ -328,6 +336,7 @@ public struct NodeConfiguration: Sendable {
         self.hostedChildren = hostedChildren
         self.childSpecs = specs
         self.childPremineRecipients = childPremineRecipients.filter { specs[$0.key] != nil }
+        self.childGenesisTransactions = childGenesisTransactions.filter { specs[$0.key] != nil }
         self.childSeedPeers = childSeedPeers
         self.policyModules = policyModules
     }

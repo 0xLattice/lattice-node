@@ -122,7 +122,7 @@ final class HostChainsRuntimeTests: XCTestCase {
             uri: "/hosted-chains", method: .post,
             headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
             body: ByteBuffer(bytes: try JSONEncoder().encode(HostedChainsRequest(
-                hostChain: chains, premineTo: nil, chainPeer: nil, policyModule: nil
+                hostChain: chains, premineTo: nil, genesisTransactions: nil, chainPeer: nil, policyModule: nil
             )))
         ) { XCTAssertEqual($0.status, .ok, String(buffer: $0.body)) }
     }

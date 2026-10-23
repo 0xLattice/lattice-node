@@ -149,6 +149,27 @@ the spec's transaction policies refuses. The account is kept beside the spec
 and passed to the node as `--premine-to <path>=<address>`, which the node checks
 the same way at start.
 
+A chain can also start with state its creator writes, such as names the
+creator holds from the first block, as signed transactions the genesis carries
+after its premine:
+
+```bash
+lattice child create Nexus/Alpha \
+  --root /var/lib/lattice \
+  --spec alpha-spec.json \
+  --genesis-transactions genesis.json
+```
+
+The file is a JSON array of what `POST /transactions` takes. Genesis validation
+does not check signatures, so creation does: each transaction must be signed by
+exactly its signers, be for this chain, carry no coin, deposit, receipt or
+withdrawal actions (a genesis pays only its premine), and pass the spec's
+transaction policies; with the premine they must fit one block. The file is
+kept beside the spec and passed to the node as
+`--genesis-transactions <path>=<file>`, which the node checks the same way at
+start. A signer's later transactions continue from the nonces its genesis
+transactions used.
+
 Creation writes one immutable spec and adds the path to `hostedChains`. The
 node builds the genesis candidate from that spec when the parent has an
 executed state it can commit, and ordinary merged mining secures it. There is

@@ -118,6 +118,7 @@ struct ChildTemplateInput: Sendable {
     let parentTree: ChainTree?
     let genesisSpec: ChainSpec?
     let genesisPremineRecipient: String?
+    let genesisTransactions: [Transaction]
     let genesisTarget: UInt256
 }
 
@@ -175,7 +176,8 @@ extension NodeRuntime {
     }
 
     /// Host these child chains, and only these, while running: they and
-    /// their specs, premine recipients, seeds and policy modules replace
+    /// their specs, premine recipients, genesis transactions, seeds and
+    /// policy modules replace
     /// what the node was started or last told. A dropped level keeps what it
     /// journaled. Throws `NodeConfigurationError` for a list that does not
     /// hold together, before anything changes.
@@ -183,12 +185,14 @@ extension NodeRuntime {
         _ hostedChildren: [ChainPath],
         childSpecs: [ChainPath: ChainSpec] = [:],
         childPremineRecipients: [ChainPath: String] = [:],
+        childGenesisTransactions: [ChainPath: [Transaction]] = [:],
         childSeedPeers: [ChainPath: [PeerEndpoint]] = [:],
         policyModules: [Data] = []
     ) async throws {
         var next = configuration
         try next.host(
             hostedChildren, childSpecs: childSpecs, childPremineRecipients: childPremineRecipients,
+            childGenesisTransactions: childGenesisTransactions,
             childSeedPeers: childSeedPeers, policyModules: policyModules
         )
         try await withCheckedThrowingContinuation { continuation in
@@ -655,15 +659,41 @@ extension NodeRuntime {
         return [Transaction(signatures: [:], body: try HeaderImpl(node: body))]
     }
 
-    /// Whether a genesis paying `recipient` could be valid, checked before a
-    /// chain is created or its host starts: the premine transaction, and
-    /// every transaction policy of the spec run on it with the module bytes
-    /// in hand (`modules`). A genesis a policy refuses would be mined and
-    /// refused, and the chain would never start.
+    /// Whether a genesis paying `recipient` and carrying `transactions` could
+    /// be valid, checked before a chain is created or its host starts: the
+    /// premine transaction and the creator's, and every transaction policy of
+    /// the spec run on each with the module bytes in hand (`modules`). A
+    /// genesis a policy refuses would be mined and refused, and the chain
+    /// would never start.
+    ///
+    /// Genesis validation does not check signatures, so this does: a genesis
+    /// carries only transactions their signers signed, which anyone can check
+    /// against the block. Each is on `chainPath`, with no coin, deposit,
+    /// receipt or withdrawal actions: a genesis pays only its premine.
     public static func checkPremine(
-        spec: ChainSpec, to recipient: String?, on chainPath: ChainPath, modules: [Data]
+        spec: ChainSpec, to recipient: String?, transactions: [Transaction] = [],
+        on chainPath: ChainPath, modules: [Data]
     ) throws {
-        let bodies = try premine(spec: spec, to: recipient, on: chainPath).compactMap(\.body.node)
+        for (index, transaction) in transactions.enumerated() {
+            guard let body = transaction.body.node else {
+                throw PremineError("genesis transaction \(index) carries no body")
+            }
+            guard body.chainPath == chainPath else {
+                throw PremineError("genesis transaction \(index) is for \(body.chainPath.joined(separator: "/")), not \(chainPath.joined(separator: "/"))")
+            }
+            guard transaction.signaturesAreValid(), transaction.signaturesMatchSigners() else {
+                throw PremineError("genesis transaction \(index) is not signed by exactly its signers")
+            }
+            guard body.accountActions.isEmpty, body.depositActions.isEmpty,
+                  body.receiptActions.isEmpty, body.withdrawalActions.isEmpty else {
+                throw PremineError("genesis transaction \(index) moves coins; a genesis pays only its premine")
+            }
+        }
+        let all = try premine(spec: spec, to: recipient, on: chainPath) + transactions
+        guard UInt64(all.count) <= spec.maxNumberOfTransactionsPerBlock else {
+            throw PremineError("a genesis of \(all.count) transactions is more than the spec's \(spec.maxNumberOfTransactionsPerBlock) per block")
+        }
+        let bodies = all.compactMap(\.body.node)
         let byCID = Dictionary(try modules.map {
             (try WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: $0)).rawCID, $0)
         }) { first, _ in first }
@@ -677,7 +707,9 @@ extension NodeRuntime {
                 guard try WasmPolicyEvaluator.evaluate(
                     policy: policy, contextData: context.canonicalData(), moduleBytes: bytes
                 ) else {
-                    throw PremineError("policy \(policy.moduleCID) refuses the genesis paying the premine to \(recipient ?? "")")
+                    throw PremineError(body.signers.isEmpty
+                        ? "policy \(policy.moduleCID) refuses the genesis paying the premine to \(recipient ?? "")"
+                        : "policy \(policy.moduleCID) refuses the genesis transaction signed by \(body.signers.joined(separator: ", "))")
                 }
             }
         }
@@ -688,16 +720,16 @@ extension NodeRuntime {
         init(_ description: String) { self.description = description }
     }
 
-    /// A child's genesis paying its premine, offered only if it is valid: a
-    /// genesis mined and then refused would leave the chain weighing a root
-    /// that never executes.
+    /// A child's genesis paying its premine and carrying its creator's
+    /// `transactions`, offered only if it is valid: a genesis mined and then
+    /// refused would leave the chain weighing a root that never executes.
     static func childGenesis(
-        spec: ChainSpec, premineTo recipient: String?, path: ChainPath,
+        spec: ChainSpec, premineTo recipient: String?, transactions: [Transaction] = [], path: ChainPath,
         parentState: LatticeStateHeader, timestamp: Int64, target: UInt256, fetcher: any Fetcher
     ) async throws -> Block? {
         let block = try await BlockBuilder.buildChildGenesis(
             spec: spec, parentState: parentState,
-            transactions: try premine(spec: spec, to: recipient, on: path),
+            transactions: try premine(spec: spec, to: recipient, on: path) + transactions,
             timestamp: timestamp, target: target, fetcher: fetcher
         )
         let (valid, _) = try await block.validateGenesis(fetcher: fetcher, chainPath: path)
@@ -758,7 +790,8 @@ extension NodeRuntime {
                 // one, which no child genesis may name. Its children wait
                 // until it executes.
                 block = (try? await childGenesis(
-                    spec: spec, premineTo: input.genesisPremineRecipient, path: input.path,
+                    spec: spec, premineTo: input.genesisPremineRecipient,
+                    transactions: input.genesisTransactions, path: input.path,
                     parentState: entering, timestamp: timestamp, target: input.genesisTarget, fetcher: fetcher
                 )) ?? nil
             } else {

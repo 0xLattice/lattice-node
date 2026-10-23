@@ -7,6 +7,7 @@ import LatticeCtlCore
 import LatticeMinerCore
 import LatticeNode
 import XCTest
+import cashew
 
 /// Black-box E2Es for the `lattice` operator CLI: real shipped binaries,
 /// public HTTP, nothing in-process. Proves the CLI can bring up a Nexus
@@ -438,7 +439,8 @@ final class LatticeCtlE2ETests: XCTestCase {
     /// A child chain whose spec names two WASM policies and a premine, all
     /// through the CLI: created only with every module the spec names and an
     /// account for the premine, mined by merged mining with its genesis paying
-    /// that account, and a transaction on it that both policies have to accept.
+    /// that account and carrying its creator's signed claim, and a transaction
+    /// on it that both policies have to accept.
     func testAChildChainWithAPolicyIsCreatedMergeMinedAndTransactedThroughTheCLI() async throws {
         let alpha = "Nexus/Alpha"
         let scratch = FileManager.default.temporaryDirectory
@@ -475,8 +477,31 @@ final class LatticeCtlE2ETests: XCTestCase {
             create + moduleFiles.flatMap { ["--policy-module", $0.path] }, root: host.root, expectFailure: true
         )
         XCTAssertTrue(unpaid.contains("--premine-to"), "a premine needs an account to go to: \(unpaid)")
+        // The creator's own claim rides in the genesis; one whose signature
+        // is not its signer's is refused before the chain is created.
+        let creator = CryptoUtils.generateKeyPair()
+        let claim = try HeaderImpl(node: TransactionBody(
+            accountActions: [], actions: [Action(key: "name/alpha", oldValue: nil, newValue: CryptoUtils.createAddress(from: creator.publicKey))],
+            depositActions: [], receiptActions: [], withdrawalActions: [],
+            signers: [CryptoUtils.createAddress(from: creator.publicKey)], nonce: 0, chainPath: ["Nexus", "Alpha"]
+        ))
+        func genesisFile(_ name: String, signedBy key: (privateKey: String, publicKey: String)) throws -> URL {
+            let file = scratch.appendingPathComponent(name)
+            let signature = try XCTUnwrap(TransactionSigning.sign(bodyHeader: claim, privateKeyHex: key.privateKey))
+            try JSONEncoder().encode([SubmitTransactionRequest(
+                transaction: Transaction(signatures: [key.publicKey: signature], body: claim)
+            )]).write(to: file)
+            return file
+        }
+        let forged = try await runCtl(
+            create + moduleFiles.flatMap { ["--policy-module", $0.path] } + ["--premine-to", recipient.address]
+                + ["--genesis-transactions", try genesisFile("forged.json", signedBy: CryptoUtils.generateKeyPair()).path],
+            root: host.root, expectFailure: true
+        )
+        XCTAssertTrue(forged.contains("not signed by exactly its signers"), "a forged genesis transaction is refused: \(forged)")
         _ = try await runCtl(
-            create + moduleFiles.flatMap { ["--policy-module", $0.path] } + ["--premine-to", recipient.address],
+            create + moduleFiles.flatMap { ["--policy-module", $0.path] } + ["--premine-to", recipient.address]
+                + ["--genesis-transactions", try genesisFile("genesis.json", signedBy: creator).path],
             root: host.root
         )
 
