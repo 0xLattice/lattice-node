@@ -298,6 +298,9 @@ public struct HeaderSync: Sendable {
     var wanting: [WantSlot: Set<String>] = [:]
     /// Held headers from this node's future, by time.
     var held = Heap<(time: Int64, cid: String)> { $0.time != $1.time ? $0.time < $1.time : $0.cid < $1.cid }
+    /// Headers declined as beyond the finality window, so a peer's stream
+    /// treats them as done instead of asking for them again.
+    public internal(set) var declined = DeclinedSet()
     var nextRequestID: UInt64 = 1
     var nextToken: UInt64 = 1
     /// This node's weigh log, which peers stream.
@@ -351,6 +354,36 @@ public struct HeaderSync: Sendable {
         let requests = peers.values.flatMap(\.deadlines)
         let times = requests + [held.first?.time].compactMap { $0 }
         return times.filter { $0 > now && $0 != .max }.min()
+    }
+}
+
+/// The most recent declined CIDs, oldest forgotten first. Forgetting one
+/// costs at most one more fetch, after which it is declined again.
+public struct DeclinedSet: Sendable {
+    public let capacity: Int
+    private var members: Set<String> = []
+    private var order: [String] = []
+    private var start = 0
+
+    public init(capacity: Int = 100_000) {
+        self.capacity = capacity
+    }
+
+    public var count: Int { members.count }
+
+    public func contains(_ cid: String) -> Bool { members.contains(cid) }
+
+    mutating func insert(_ cid: String) {
+        guard members.insert(cid).inserted else { return }
+        order.append(cid)
+        if members.count > capacity {
+            members.remove(order[start])
+            start += 1
+        }
+        if start > capacity {
+            order.removeFirst(start)
+            start = 0
+        }
     }
 }
 

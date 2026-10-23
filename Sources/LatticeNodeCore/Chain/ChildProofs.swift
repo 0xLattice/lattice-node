@@ -240,6 +240,8 @@ extension ChainCore {
     /// caps; otherwise it is dropped without blame and the block is looked
     /// up again later. Checks start in `proofWork`.
     mutating func offer(_ proofs: [ChildBlockProof], cid: String, from source: PeerID?) {
+        // Work crediting a block beyond the finality window is declined.
+        if pastFinality(cid) { return }
         // Grinds not yet credited first, so a header served again with the
         // same proofs offers the ones a cap left out.
         var fresh: [ChildBlockProof] = []
@@ -328,7 +330,9 @@ extension ChainCore {
             return
         }
         if index.contains(cid) {
-            guard case .applied(let update) = tree.addWork(work, to: cid) else { return }
+            // The window may have moved past the block while it was checked.
+            guard !pastFinality(cid),
+                  case .applied(let update) = tree.addWork(work, to: cid) else { return }
             turn.facts += update.batches
             weighed += update.weighed
             turn.indexed.append(StoredProof(childCID: cid, proof: job.proof))

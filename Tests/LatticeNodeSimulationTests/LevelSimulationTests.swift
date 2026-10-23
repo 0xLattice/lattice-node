@@ -464,6 +464,75 @@ final class LevelSimulationTests: XCTestCase {
         XCTAssertEqual(try missing(), 0, "proofs never credited")
     }
 
+    /// Node-local finality at a child level (spec §9.11): every header is
+    /// weighed, each attaching at the tip of its time, but a proof arriving
+    /// for a block that has since fallen beyond the window is declined. Blocks
+    /// inside the window collect every grind; nobody is blamed.
+    func testFinalityDeclinesLateProofsForOldChildBlocks() async throws {
+        var rng = SplitMix64(state: 0x17)
+        let world = try await LevelWorld.generate(
+            rng: &rng, levels: 2, grinds: 12, forkProbability: 0, shareProbability: 0,
+            doubleProbability: 1, doubles: 16, withholdDelay: 1_000
+        )
+        var now = World.genesisTime + 1_000_000
+        var config = ChainCoreConfig()
+        let window: UInt64 = 2
+        let alpha = LevelWorld.alpha
+        // A window on the child chain alone.
+        config.finality = FinalityWindows(byChain: [alpha: window])
+        var host = NodeCore(root: world.rootBootstrap.tree, hosted: world.hosted, config: config)
+        var source = LevelSource(name: "source", config: config)
+        let peer = PeerID(key: "source", session: 1)
+        let served = world.released(alpha, at: now, withheld: false).filter { $0.height > 0 }.map(\.cid)
+        let first = try XCTUnwrap(world.grinds.firstIndex { !$0.mined.carried.isEmpty })
+        var queue: [NodeEvent] = world.grinds.prefix(through: first).map { .mined($0.mined) } + [.peerReady(peer)]
+        for _ in 0..<20 {
+            while !queue.isEmpty {
+                for effect in host.step(queue.removeFirst(), now: now) {
+                    switch effect {
+                    case .level(let path, .send(_, let message)):
+                        for case .send(_, let path, let reply) in source.received(
+                            message, at: path, from: PeerID(key: "node", session: 1), now: now, world: world
+                        ) {
+                            queue.append(.received(peer, path, reply))
+                        }
+                    case .level(let path, .verifyProof(let job)):
+                        let block = try XCTUnwrap(job.block ?? world.blocks[path]?[job.childCID]?.block)
+                        queue.append(.level(path, .proofVerified(job, await job.run(block))))
+                    case .level(let path, .fetchByCID(_, let cid)):
+                        queue.append(.level(path, .childIndexFetched(
+                            peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
+                        )))
+                    case .disconnect(let gone, let reason):
+                        XCTFail("disconnected \(gone) as \(reason)")
+                    default:
+                        break
+                    }
+                }
+            }
+            now += config.headersTimeout
+            queue.append(.tick)
+        }
+        let tree = try XCTUnwrap(host.levels[alpha]).tree
+        let weighed = TreeDigest(tree).blocks
+        let heights = Dictionary(uniqueKeysWithValues: world.released(alpha, at: now, withheld: false).map { ($0.cid, $0.height) })
+        let tip = tree.getHighestBlockHeight()
+        var declined = 0
+        for cid in served {
+            let roots = Set(world.publicProofs(alpha, cid, at: now).map(\.rootCID))
+            let credited = Set(weighed[cid]?.grinds.keys.map { $0 } ?? [])
+            XCTAssertNotNil(weighed[cid], "every header arrives at the tip of its time")
+            let height = try XCTUnwrap(heights[cid])
+            if tip > height, tip - height > window {
+                declined += roots.subtracting(credited).count
+            } else {
+                XCTAssertEqual(credited.intersection(roots), roots, "a block inside the window collects every grind")
+            }
+        }
+        XCTAssertGreaterThan(declined, 0, "late proofs for old blocks are declined")
+        XCTAssertEqual(try XCTUnwrap(host.levels[host.rootPath]).sync.declined.count, 0, "the root has no window")
+    }
+
     // MARK: - Waiting on the parent level
 
     /// Drives one host by hand over a two-level world: weighs root blocks

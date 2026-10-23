@@ -42,7 +42,7 @@ public struct Topology: Codable, Sendable {
         case listen, rpc, webSocket, peers, publicRead, externalAddress
         case publicReadRate, publicReadExpensiveRate, publicReadMaxRate, publicReadFetches
         case publicReadURL, publicSubmit, publicSubmitRate, minRelayFee
-        case servingMaxConcurrent, servingMaxInFlightVolumeBytes, blockBodies, state, announceLifetime
+        case servingMaxConcurrent, servingMaxInFlightVolumeBytes, blockBodies, state, finalityWindow, finalityWindows, announceLifetime
         case hostedChains, mine, rpcAllowedOrigins
     }
     public var listen: UInt16
@@ -100,6 +100,14 @@ public struct Topology: Codable, Sendable {
     public var blockBodies: String?
     /// The state kept (`--state`): `all`, `tip` or `none`. Absent = `all`.
     public var state: String?
+    /// Node-local finality in blocks (`--finality-window`): headers and work
+    /// more than this many blocks below a chain's best tip are declined, and
+    /// the node does not follow a reorganization deeper than this. Absent or
+    /// 0 = keep everything.
+    public var finalityWindow: UInt64?
+    /// Per-chain finality windows in blocks, by chain path, over
+    /// `finalityWindow`; 0 turns it off for that chain.
+    public var finalityWindows: [String: UInt64]?
     /// Seconds each provider announcement lasts (`--announce-lifetime`).
     /// Absent = the node's default.
     public var announceLifetime: UInt64?
@@ -197,6 +205,10 @@ public struct Topology: Codable, Sendable {
         if let state, !["all", "tip", "none"].contains(state) {
             throw CtlError("state is all, tip or none, not \(state)")
         }
+        for path in (finalityWindows ?? [:]).keys
+        where ChainAddress(path.split(separator: "/").map(String.init)) == nil {
+            throw CtlError("finalityWindows names \(path), which is not a chain path")
+        }
         if let announceLifetime, !(1...NodeConfiguration.maximumAnnounceLifetime).contains(announceLifetime) {
             throw CtlError(NodeConfigurationError.invalidAnnounceLifetime.description)
         }
@@ -261,6 +273,10 @@ public struct Topology: Codable, Sendable {
         }
         if let value = blockBodies { arguments += ["--block-bodies", value] }
         if let value = state { arguments += ["--state", value] }
+        if let value = finalityWindow { arguments += ["--finality-window", String(value)] }
+        for (path, value) in (finalityWindows ?? [:]).sorted(by: { $0.key < $1.key }) {
+            arguments += ["--finality-window", "\(path)=\(value)"]
+        }
         if let value = announceLifetime { arguments += ["--announce-lifetime", String(value)] }
         return arguments
     }

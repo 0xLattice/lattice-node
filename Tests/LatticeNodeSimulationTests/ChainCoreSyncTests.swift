@@ -1191,3 +1191,110 @@ final class ChainCoreSyncTests: XCTestCase {
         XCTAssertTrue(core.sync.pending.entries.isEmpty)
     }
 }
+
+// MARK: - Node-local finality (spec §9.11)
+
+extension ChainCoreSyncTests {
+    /// A core with a finality window of `blocks` blocks.
+    private func finalCore(window blocks: UInt64) -> ChainCore {
+        var config = ChainCoreConfig(maxHeadersPerPage: 4, headersTimeout: 1_000, maxInlineChildIndexBytes: 1_024)
+        config.finality = FinalityWindows(all: blocks)
+        return ChainCore(tree: world.bootstrap.tree, config: config, log: WeighLog(id: "test"))
+    }
+
+    /// The free fork from genesis lands far behind the tip: declined, never
+    /// stored and never blamed, while a fork near the tip is weighed.
+    func testFinalityDeclinesTheFreeForkAndWeighsANearTipOne() async throws {
+        var core = finalCore(window: 5)
+        ready(&core, peer)
+        relay(&core, chain.map { entry($0) }, from: peer)
+        let tip = core.tree.canonicalTip
+        let spam = world.spam.compactMap { world.blocks[$0] }
+        let nearTip = try await world.branch(from: chain[27], count: 1)
+        let effects = relay(&core, (spam + nearTip).map { entry($0) }, from: peer)
+        for block in spam { XCTAssertFalse(core.tree.contains(blockHash: block.cid), "declined") }
+        XCTAssertTrue(core.tree.contains(blockHash: nearTip[0].cid), "inside the window")
+        XCTAssertEqual(core.tree.canonicalTip, tip)
+        XCTAssertTrue(disconnects(effects).isEmpty, "declining is never blame")
+        XCTAssertTrue(core.sync.pending.entries.isEmpty, "nothing below a declined header is kept waiting")
+        XCTAssertEqual(core.sync.declined.count, spam.count)
+    }
+
+    /// A declined header counts as done in the peer's stream: the cursor
+    /// passes it and nothing is asked for again.
+    func testDeclinedHeadersNeverStallTheStream() throws {
+        var core = finalCore(window: 5)
+        ready(&core, peer)
+        let spam = world.spam.compactMap { world.blocks[$0] }
+        relay(&core, (chain + spam).map { entry($0) }, from: peer)
+        XCTAssertEqual(core.sync.cursors[peer.key]?.position, UInt64(chain.count + spam.count))
+        XCTAssertTrue(core.sync.peers[peer]?.holes.isEmpty ?? false)
+        for later in [Self.now + 1_000, Self.now + 10_000] {
+            XCTAssertTrue(dataRequests(core.step(.tick, now: later)).isEmpty, "not asked again")
+        }
+    }
+
+    /// An orphan carries its height: one past the window is declined on
+    /// arrival, with no ancestor asked for.
+    func testAnOrphanPastTheWindowIsDroppedWithoutAWalk() async throws {
+        var core = finalCore(window: 5)
+        ready(&core, peer)
+        relay(&core, chain.map { entry($0) }, from: peer)
+        let old = try await world.branch(from: chain[5], count: 3)
+        let effects = relay(&core, [entry(old[2])], from: peer)
+        XCTAssertTrue(parentRequests(effects).isEmpty, "no ancestor walk")
+        XCTAssertTrue(core.sync.declined.contains(old[2].cid))
+        XCTAssertTrue(core.sync.pending.entries.isEmpty)
+    }
+
+    /// The tip's next height is never past the window: a chain that stalled
+    /// long ago is still extended at its tip.
+    func testAStalledTipIsStillExtended() async throws {
+        var core = finalCore(window: 1)
+        ready(&core, peer)
+        relay(&core, chain.map { entry($0) }, from: peer)
+        let late = try await world.branch(from: chain[29], count: 1, interval: 1_000 * World.blockInterval)
+        relay(&core, late.map { entry($0) }, from: peer, at: late[0].block.timestamp)
+        XCTAssertEqual(core.tree.canonicalTip, late[0].cid)
+    }
+
+    /// A window set for another chain, or turned off for this one, leaves
+    /// this chain an archive.
+    func testAnotherChainsWindowDoesNotApply() throws {
+        var config = ChainCoreConfig(maxHeadersPerPage: 4, headersTimeout: 1_000, maxInlineChildIndexBytes: 1_024)
+        let path = world.bootstrap.tree.context?.path ?? []
+        for finality in [
+            FinalityWindows(byChain: [path + ["Other"]: 1]),
+            FinalityWindows(all: 1, byChain: [path: nil]),
+        ] {
+            config.finality = finality
+            var core = ChainCore(tree: world.bootstrap.tree, config: config, log: WeighLog(id: "test"))
+            ready(&core, peer)
+            let spam = world.spam.compactMap { world.blocks[$0] }
+            relay(&core, (chain + spam).map { entry($0) }, from: peer)
+            for block in spam { XCTAssertTrue(core.tree.contains(blockHash: block.cid), "\(finality)") }
+        }
+    }
+
+    /// A fork from a block deeper than the window can never connect, however
+    /// it is extended.
+    func testAForkFromADeepBlockNeverConnects() async throws {
+        var core = finalCore(window: 5)
+        ready(&core, peer)
+        relay(&core, chain.map { entry($0) }, from: peer)
+        let deep = try await world.branch(from: chain[20], count: 12)
+        relay(&core, deep.map { entry($0) }, from: peer)
+        for block in deep { XCTAssertFalse(core.tree.contains(blockHash: block.cid)) }
+        XCTAssertTrue(core.sync.pending.entries.isEmpty)
+    }
+
+    /// With no window every fork is weighed, as an archive node.
+    func testWithoutAWindowTheFreeForkIsWeighed() throws {
+        var core = core()
+        ready(&core, peer)
+        let spam = world.spam.compactMap { world.blocks[$0] }
+        relay(&core, (chain + spam).map { entry($0) }, from: peer)
+        for block in spam { XCTAssertTrue(core.tree.contains(blockHash: block.cid)) }
+        XCTAssertEqual(core.sync.declined.count, 0)
+    }
+}

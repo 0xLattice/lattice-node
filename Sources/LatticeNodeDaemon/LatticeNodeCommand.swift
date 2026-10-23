@@ -116,6 +116,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "The smallest fee (a transaction's balance excess) this node admits to its pool, at every hosted level. Node relay policy, never consensus: blocks carrying cheaper transactions stay valid. Reported as minRelayFee by GET /api/chain/info. 0 admits any fee.")
     var minRelayFee: UInt64 = 0
 
+    @Option(name: .customLong("finality-window"), help: "Node-local finality, in blocks: headers and work more than this many blocks below a chain's best tip are declined — never stored, never blamed. A fork from a block that deep can never connect, which keeps out the blocks an easy schedule makes nearly free: a fork d blocks deep is at most 2^(d / halfLife) cheaper than the tip, so a few half-lives is enough. The cost is this node's own: it will not follow a reorganization deeper than the window, even a heavier one, until its operator intervenes. A bare number sets every hosted chain; chain-path=blocks sets one chain, e.g. Nexus/Alpha=500, and 0 turns it off there (repeatable). Without it, everything is kept. A child chain's window should be at least its parent's: a parent reorganization can reorganize the child.")
+    var finalityWindow: [String] = []
+
     @Option(help: "Self-described publicly reachable host for overlay announcements (NAT/proxy-fronted nodes announce an unreachable observed address otherwise). Host only; the overlay listen port applies.")
     var externalAddress: String?
 
@@ -222,7 +225,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             policyModules: hosted.policyModules,
             publicReadURL: publicReadUrl,
             publicSubmit: publicSubmit,
-            minRelayFee: minRelayFee
+            minRelayFee: minRelayFee,
+            finality: try finalityWindows(finalityWindow)
         )
         let cookieFile = rpcCookieFile.map { URL(fileURLWithPath: $0) }
             ?? storage.appendingPathComponent(".cookie")
@@ -232,6 +236,36 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             publicReadLimits: publicReadLimits,
             processStartTime: processStartTime
         )
+    }
+
+    /// `--finality-window` values: a bare number of blocks for every chain,
+    /// or chain-path=blocks for one; 0 is no window.
+    private func finalityWindows(_ values: [String]) throws -> FinalityWindows {
+        func blocks(_ text: Substring) throws -> UInt64? {
+            guard let blocks = UInt64(text) else {
+                throw ValidationError("--finality-window takes blocks, or chain-path=blocks")
+            }
+            return blocks > 0 ? blocks : nil
+        }
+        var windows = FinalityWindows()
+        var sawDefault = false
+        for value in values {
+            if let split = value.firstIndex(of: "=") {
+                let components = value[..<split].split(separator: "/").map(String.init)
+                guard let address = ChainAddress(components) else {
+                    throw ValidationError("--finality-window: \(value[..<split]) is not a chain path")
+                }
+                guard windows.byChain[address.components] == nil else {
+                    throw ValidationError("--finality-window names \(value[..<split]) twice")
+                }
+                windows.byChain[address.components] = .some(try blocks(value[value.index(after: split)...]))
+            } else {
+                guard !sawDefault else { throw ValidationError("--finality-window has two defaults") }
+                sawDefault = true
+                windows.all = try blocks(value[...])
+            }
+        }
+        return windows
     }
 
     private func storageURL(for address: ChainAddress) throws -> URL {

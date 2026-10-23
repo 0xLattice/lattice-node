@@ -164,6 +164,12 @@ final class LatticeCtlTopologyTests: XCTestCase {
             try load(#"{"listen":4001,"rpc":4003,"announceLifetime":3600}"#).contentServingArguments,
             ["--announce-lifetime", "3600"]
         )
+        XCTAssertEqual(
+            try load(#"{"listen":4001,"rpc":4003,"finalityWindow":240,"finalityWindows":{"Nexus/Beta":0,"Nexus/Alpha":500}}"#)
+                .contentServingArguments,
+            ["--finality-window", "240", "--finality-window", "Nexus/Alpha=500", "--finality-window", "Nexus/Beta=0"]
+        )
+        XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"finalityWindows":{"Alpha":500}}"#))
         XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"announceLifetime":0}"#))
         XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"announceLifetime":86401}"#))
     }
