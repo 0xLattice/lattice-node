@@ -117,10 +117,11 @@ extension NodeStorage {
     }
 
     /// How the operator's own work reads: this store, a block's header
-    /// record, what its earlier reads asked of peers, then peers, whose
-    /// answers are remembered for the next read.
+    /// record, what finished sessions verified, then peers. What the
+    /// session takes from peers is kept for the next read once it ends
+    /// (`readCache.put`).
     nonisolated func ownReads(through peers: any ContentSource) -> CoalescingFetcher {
-        CoalescingFetcher(CompositeContentSource([workSource, readCache, readCache.remembering(peers)]))
+        CoalescingFetcher(CompositeContentSource([workSource, readCache, peers]))
     }
 
     /// Stores a block and pins what was stored: its body is what `fetcher`,
@@ -158,17 +159,39 @@ extension NodeStorage {
     /// whose first attempt failed is fetched one Volume at a time, as it
     /// would be from peers that speak no bundles. `hosts` names the
     /// block's child chain: the bundle is asked first of its current peers.
+    ///
+    /// The session reserves its worst case from the node's budget before it
+    /// starts: the chain's `maxBlockSize` (`maxBlockSize`, when its spec is
+    /// held), at most one session's allowance. `maxBlockSize` counts a
+    /// body's bytes, not what holding them costs this node (each entry's
+    /// CID and heap) nor the state its validation reads, so a body past
+    /// that reservation is fetched once more under the whole allowance,
+    /// after the first reservation is released. Once verified whole, what
+    /// the session fetched is kept for the block's connect.
     nonisolated func fetchChainBody(
-        _ cid: String, remote: IvyRootContentSource, bundle: Bool = true, hosts: ChainHosts? = nil
+        _ cid: String, remote: IvyRootContentSource, bundle: Bool = true, hosts: ChainHosts? = nil,
+        maxBlockSize: Int? = nil
+    ) async throws -> [String] {
+        let allowance = remote.maximumStorageBytes
+        let first = min(maxBlockSize ?? allowance, allowance)
+        do {
+            return try await fetchChainBody(cid, remote: remote, bundle: bundle, hosts: hosts, reserving: first)
+        } catch NodeStorageError.bodyExceedsLocalBudget where first < allowance {
+            return try await fetchChainBody(cid, remote: remote, bundle: bundle, hosts: hosts, reserving: allowance)
+        }
+    }
+
+    private nonisolated func fetchChainBody(
+        _ cid: String, remote: IvyRootContentSource, bundle: Bool, hosts: ChainHosts?, reserving bytes: Int
     ) async throws -> [String] {
         let capture = IvyRootContentSource.AttributionCapture()
         do {
-            return try await remote.withRootTracing(cid, bundle: bundle, hosts: hosts, capture: capture) { session in
+            return try await remote.withRootTracing(
+                cid, bundle: bundle, hosts: hosts, capture: capture, reserving: bytes, priority: .body(cid)
+            ) { session in
                 // Read into memory, never into the store: what a peer sent is
-                // stored once the block's execution has found it valid. The
-                // session reads whole Volumes, so it is asked before what an
-                // earlier, failed attempt left in memory.
-                let fetcher = CoalescingFetcher(CompositeContentSource([broker, readCache.remembering(session)]))
+                // stored once the block's execution has found it valid.
+                let fetcher = CoalescingFetcher(CompositeContentSource([broker, session]))
                 let walked = NodeImportStorage(storage: nil)
                 do {
                     try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: walked)
@@ -177,13 +200,14 @@ extension NodeStorage {
                     // and its execution proves it from what was read: run it
                     // rather than retry a fetch that can never succeed.
                 }
+                await readCache.put(session)
                 return await walked.takeStoredVolumeRoots()
             }.value
         } catch {
             // Content this node's own budget declined is named as that, not
             // as content nobody served.
             guard capture.snapshot()?.byteBudgetExceeded == true else { throw error }
-            throw NodeStorageError.bodyExceedsLocalBudget(bytes: remote.maximumStorageBytes)
+            throw NodeStorageError.bodyExceedsLocalBudget(bytes: bytes)
         }
     }
 
@@ -224,6 +248,7 @@ extension NodeStorage {
             let children = try await storeMinedBlock(
                 header, block, fetcher: ownReads(through: session)
             )
+            await readCache.put(session)
             return children
         }.value
     }
@@ -253,6 +278,7 @@ extension NodeStorage {
             let carried = try await carriedGrinds(
                 of: root, hosted: hosted, fetcher: ownReads(through: session)
             )
+            await readCache.put(session)
             return carried
         }.value
     }

@@ -559,11 +559,11 @@ extension NodeRuntime {
     }
 
     /// The operator's own work reads content the one way: what this store
-    /// holds, then a block's header record, then what its earlier reads
-    /// asked of peers, then peers, each answer checked against its CID by
-    /// the reader. What a read asked for is remembered in memory, never
-    /// written to the store: only the node's own storing of a block does
-    /// that.
+    /// holds, then a block's header record, then what finished sessions
+    /// verified (a body fetched for its connect, earlier reads), then
+    /// peers, each answer checked against its CID by the reader. What the
+    /// read took from peers is kept in memory, never written to the store:
+    /// only the node's own storing of a block does that.
     /// Without an overlay (`remote` nil) the read is from this store.
     static func reading<T: Sendable>(
         _ rootCID: String,
@@ -576,8 +576,18 @@ extension NodeRuntime {
             // Peers serve whole Volumes by their roots. A block's own Volume
             // this store does not hold is read whole first, so what it lists
             // is read from it, not asked of peers one entry at a time.
-            if await !storage.broker.hasVolume(root: rootCID) { _ = await session.volume(rootCID: rootCID) }
-            return await work(storage.ownReads(through: session))
+            // One a finished session verified (the body fetched for this
+            // block) is taken from memory.
+            if await !storage.broker.hasVolume(root: rootCID) {
+                if let held = await storage.readCache.volume(rootCID) {
+                    await session.adopt(held)
+                } else {
+                    _ = await session.volume(rootCID: rootCID)
+                }
+            }
+            let value = await work(storage.ownReads(through: session))
+            await storage.readCache.put(session)
+            return value
         }.value
     }
 

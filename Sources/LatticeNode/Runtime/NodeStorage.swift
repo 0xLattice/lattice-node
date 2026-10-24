@@ -55,7 +55,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// build on blocks through this.
     nonisolated let workFetcher: CoalescingFetcher
     nonisolated let workSource: CompositeContentSource
-    /// What the operator's own reads took from peers, in memory.
+    /// Verified content finished sessions took from peers, in memory.
     nonisolated let readCache: ReadCache
     let retentionScope: String
     let durableMempoolOwner: String
@@ -91,7 +91,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         self.localFetcher = localFetcher
         self.workSource = CompositeContentSource([broker, HeaderRecords(store: store)])
         self.workFetcher = CoalescingFetcher(workSource)
-        self.readCache = ReadCache(maximumBytes: configuration.resourcePolicy.maximumAcquisitionStorageBytes)
+        self.readCache = ReadCache(maximumBytes: configuration.resourcePolicy.maximumCachedContentBytes)
         self.retentionScope = retentionScope
         self.durableMempoolOwner = durableMempoolOwner
         self.liveMempoolOwner = liveMempoolOwner
@@ -352,64 +352,95 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     }
 }
 
-/// Content the operator's own reads took from peers, by CID, in memory: a
-/// template's reads then serve the block mined on it and the next template
-/// without asking again.
+/// Verified content finished sessions took from peers, in memory, whole
+/// Volumes by their roots: a body fetched for a block then serves its
+/// connect, and a template's reads the block mined on it and the next
+/// template, without asking peers again. Only the operator's own reads
+/// consult it, as they read everything: a body's fetch reads only what
+/// it fetches itself.
 ///
-/// Only what a reader asked for is remembered, as the reader got it: a peer
-/// chooses what else it sends with a Volume, and none of that is kept. Each
-/// entry was checked against its CID by the session that fetched it, and
-/// its reader checks it again.
+/// Each Volume was requested by its root and checked against its CIDs by
+/// the session that fetched it, and its reader checks what it reads again.
+/// It is not the Volume store: nothing here is stored until a block's
+/// execution finds it valid.
 ///
-/// It is not the Volume store: the store's Volumes are only the ones this
-/// node derives when it stores a block. Bounded by the operator's budget
-/// for one fetch, each entry charged as a session charges it; an answer
-/// that would pass the bound starts the cache again first.
+/// Bounded in bytes, each entry charged as a session charges it; the
+/// Volumes read least recently go first, and one evicted is fetched again
+/// when it is read.
 actor ReadCache: ContentSource {
-    private var entries: [String: Data] = [:]
+    private struct Held {
+        let volume: SerializedVolume
+        let bytes: Int
+        var lastRead: UInt64
+    }
+
+    private var volumes: [String: Held] = [:]
+    /// The roots of the held Volumes each CID is in.
+    private var roots: [String: Set<String>] = [:]
     private var bytes = 0
+    private var clock: UInt64 = 0
     private let maximumBytes: Int
 
     init(maximumBytes: Int) {
         self.maximumBytes = maximumBytes
     }
 
-    var isEmpty: Bool { entries.isEmpty }
+    var isEmpty: Bool { volumes.isEmpty }
+
+    /// The bytes held now.
+    var heldBytes: Int { bytes }
+
+    /// The whole Volume under `root`, when held.
+    func volume(_ root: String) -> SerializedVolume? {
+        clock += 1
+        volumes[root]?.lastRead = clock
+        return volumes[root]?.volume
+    }
 
     func fetch(_ cids: Set<String>) async -> [String: Data] {
+        clock += 1
         var found: [String: Data] = [:]
-        for cid in cids { found[cid] = entries[cid] }
+        for cid in cids {
+            guard let root = roots[cid]?.first, let data = volumes[root]?.volume.entries[cid] else { continue }
+            found[cid] = data
+            volumes[root]?.lastRead = clock
+        }
         return found
     }
 
-    /// Remembers one answer to a read, whole or not at all.
-    func put(_ answer: [String: Data]) {
-        let new = answer.filter { entries[$0.key] == nil }
-        let charge = new.reduce(0) {
-            $0 + $1.key.utf8.count + $1.value.count + IvyRootContentSource.retainedEntryOverhead
+    /// Keeps these Volumes, each whole or not at all, as the most recently read.
+    func put(_ incoming: [SerializedVolume]) {
+        for volume in incoming {
+            clock += 1
+            if volumes[volume.root] != nil {
+                volumes[volume.root]?.lastRead = clock
+                continue
+            }
+            let charge = volume.entries.reduce(0) {
+                $0 + $1.key.utf8.count + $1.value.count + IvyRootContentSource.retainedEntryOverhead
+            }
+            guard charge <= maximumBytes else { continue }
+            while bytes + charge > maximumBytes,
+                  let oldest = volumes.min(by: { $0.value.lastRead < $1.value.lastRead })?.key {
+                evict(oldest)
+            }
+            volumes[volume.root] = Held(volume: volume, bytes: charge, lastRead: clock)
+            for cid in volume.entries.keys { roots[cid, default: []].insert(volume.root) }
+            bytes += charge
         }
-        guard charge <= maximumBytes else { return }
-        if bytes + charge > maximumBytes {
-            entries.removeAll()
-            bytes = 0
-        }
-        entries.merge(new) { held, _ in held }
-        bytes += charge
     }
 
-    /// `source`, with what it answers remembered here.
-    nonisolated func remembering(_ source: any ContentSource) -> any ContentSource {
-        Remembering(source: source, cache: self)
+    /// Keeps what a finished session verified.
+    func put(_ session: IvyRootContentSource.Session) async {
+        put(await session.verifiedVolumes())
     }
 
-    private struct Remembering: ContentSource {
-        let source: any ContentSource
-        let cache: ReadCache
-
-        func fetch(_ cids: Set<String>) async -> [String: Data] {
-            let answer = await source.fetch(cids)
-            await cache.put(answer.filter { cids.contains($0.key) })
-            return answer
+    private func evict(_ root: String) {
+        guard let held = volumes.removeValue(forKey: root) else { return }
+        for cid in held.volume.entries.keys {
+            roots[cid]?.remove(root)
+            if roots[cid]?.isEmpty == true { roots[cid] = nil }
         }
+        bytes -= held.bytes
     }
 }

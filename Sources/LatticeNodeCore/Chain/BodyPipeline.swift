@@ -62,6 +62,18 @@ extension ChainCore {
         return forks + bestWindow.filter { !forks.contains($0) }
     }
 
+    /// The window's blocks whose parent is executed: the ones this level
+    /// can connect next once their bodies arrive.
+    public var nextToConnect: [String] {
+        bodyWindow.filter { index.parent[$0].map(tree.isExecuted(blockHash:)) ?? true }
+    }
+
+    /// The bytes a body of `cid` may count by its chain's spec, when the
+    /// spec is held.
+    public func maxBlockSize(of cid: String) -> Int? {
+        tree.headerSnapshot(of: cid).flatMap { tree.specs[$0.specCID] }?.maxBlockSize
+    }
+
     /// The best chain's blocks after its executed prefix, up to the count.
     var bestWindow: [String] {
         let prefix = tree.executedPrefix()

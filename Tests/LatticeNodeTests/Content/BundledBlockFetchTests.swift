@@ -713,6 +713,33 @@ final class BundledBlockFetchTests: XCTestCase {
         }
     }
 
+    /// A body fetched once is connected from memory: the connect's read,
+    /// through peers as the runtime's is, asks none of them again.
+    func testConnectingAJustFetchedBodyAsksNoPeerAgain() async throws {
+        let producer = try await storage(keyByte: 0x66)
+        let joiner = try await storage(keyByte: 0x67)
+        let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
+        let requests = Requests()
+        let remote = remote(producer, requests: requests)
+
+        _ = try await joiner.fetchChainBody(cid, remote: remote, maxBlockSize: 1_000_000)
+        let fetchedBundles = await requests.bundles
+        let fetchedVolumes = await requests.volumes
+        XCTAssertEqual(fetchedBundles, [cid])
+        let unstored = await joiner.volume(cid)
+        XCTAssertNil(unstored, "nothing a peer sent is stored before the block is found valid")
+
+        let stored = await NodeRuntime.reading(cid, storage: joiner, remote: remote) { fetcher in
+            (try? await joiner.storeValidBlock(cid, at: ["Nexus"], from: fetcher)) != nil
+        }
+        XCTAssertTrue(stored)
+        let bundles = await requests.bundles
+        let volumes = await requests.volumes
+        XCTAssertEqual(bundles, fetchedBundles)
+        XCTAssertEqual(volumes, fetchedVolumes)
+        XCTAssertEqual(remote.budget.reserved, 0)
+    }
+
     /// What the node holds and what its reads keep in memory: what a block
     /// found valid is stored from.
     private static func held(_ storage: NodeStorage) async -> any Fetcher {

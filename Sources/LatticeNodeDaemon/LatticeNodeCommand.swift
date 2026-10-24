@@ -80,6 +80,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Bytes of Volumes this node reads or sends to peers at once.")
     var servingMaxInFlightVolumeBytes = IvyConfig.defaultMaxInFlightVolumeBytes
 
+    @Option(help: "Bytes of fetched content this node's fetches hold in memory at once, every hosted chain together: each fetch reserves its worst case (its chain's maxBlockSize, at most 67108864) when it starts and releases it when it ends. Past it, fetches wait in line (the node's own work and the blocks each chain can connect next first); nothing asked for is declined for it. A quarter of it more keeps verified content for later reads, least recently read evicted first. At least 67108864, the bytes one block's fetch may hold.")
+    var maxAcquisitionBytes = NodeResourcePolicy.defaultMaximumAcquisitionBytes
+
     @Option(help: "Which block bodies (a block's own Volume and its transactions') this node keeps beyond the ones it needs to operate: all, or none. It always holds the bodies waiting to execute, each chain's tip, and each genesis block. With none, a body is let go of once another block is the tip, and is no longer served; headers, facts and state stay, so what the node weighs and selects does not change. A node that syncs from genesis needs peers that keep all.")
     var blockBodies = "all"
 
@@ -155,6 +158,10 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         guard publicReadFetches >= 0 else {
             throw ValidationError("--public-read-fetches must be nonnegative")
         }
+        let sessionBytes = NodeResourcePolicy.default.maximumAcquisitionStorageBytes
+        guard maxAcquisitionBytes >= sessionBytes else {
+            throw ValidationError("--max-acquisition-bytes must be at least \(sessionBytes), the bytes one block's fetch may hold")
+        }
         guard let blockBodies = BlockBodies(rawValue: blockBodies) else {
             throw ValidationError("--block-bodies is all or none")
         }
@@ -221,6 +228,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             externalAddress: externalAddress,
             peerSearchInterval: peerSearchInterval,
             announceLifetime: announceLifetime,
+            resourcePolicy: NodeResourcePolicy(maximumAcquisitionBytes: maxAcquisitionBytes),
             blockBodies: blockBodies,
             state: state,
             hostedChildren: hosted.children,

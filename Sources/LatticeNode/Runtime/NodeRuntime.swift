@@ -1211,6 +1211,11 @@ extension NodeRuntime {
             }
             await settleBodies()
             await settleState()
+            // The blocks each chain can connect next wait for the content
+            // budget ahead of bodies fetched ahead of them.
+            if remote.budget.waiting > 0 {
+                remote.budget.prioritize(Set(core.levels.values.flatMap(\.nextToConnect)))
+            }
             // What an executed block read goes once the kept state has
             // counted what of it the tip's state holds.
             for key in readsDone { await storage.releaseReads(key.cid, at: key.path) }
@@ -1372,10 +1377,11 @@ extension NodeRuntime {
                 let rendezvous = path == core.rootPath ? nil : ChainHosts(
                     nexusGenesisCID: configuration.nexusGenesisCID, chainPath: path
                 )
+                let maxBlockSize = core.levels[path]?.maxBlockSize(of: cid)
                 bodies[key] = Task {
                     let roots = await NodeRuntime.retryingBody { bundle in
                         try await storage.fetchChainBody(
-                            cid, remote: remote, bundle: bundle, hosts: rendezvous
+                            cid, remote: remote, bundle: bundle, hosts: rendezvous, maxBlockSize: maxBlockSize
                         )
                     } waiting: { error in
                         inputs.yield(.bodyWaiting(
