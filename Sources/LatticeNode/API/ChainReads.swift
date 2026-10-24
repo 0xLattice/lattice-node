@@ -16,11 +16,14 @@ public struct ChainReads: Sendable {
         public let bytes: Int
         /// The pooled transaction CIDs.
         public let cids: [String]
+        /// The pool's next blocks, for fee pricing (`Mempool.projectedBlocks`).
+        public let projected: [ProjectedBlock]
 
-        public init(count: Int, bytes: Int, cids: [String]) {
+        public init(count: Int, bytes: Int, cids: [String], projected: [ProjectedBlock] = []) {
             self.count = count
             self.bytes = bytes
             self.cids = cids
+            self.projected = projected
         }
     }
 
@@ -747,6 +750,20 @@ public struct ChainReads: Sendable {
         )
     }
 
+    /// How many blocks `explorerFees` projects: enough to price a wait of
+    /// about twelve blocks, the longest a projection says much about.
+    public static let projectedFeeBlocks = 12
+
+    /// What fee gets a transaction into each of the pool's next blocks, and
+    /// this node's relay floor. Read from this node's pool alone.
+    public func explorerFees() async -> ExplorerFees {
+        let pool = await mempool(false)
+        return ExplorerFees(
+            minRelayFee: storage.configuration.minRelayFee,
+            blocks: pool.projected.map(ExplorerProjectedBlock.init)
+        )
+    }
+
     public func explorerChainInfo() async -> ExplorerChainInfo {
         let snapshot = await tip()
         return ExplorerChainInfo(
@@ -796,5 +813,15 @@ private actor ProofVolumeCollector: VolumeStorer {
         return unique.sorted { $0.key < $1.key }.map {
             LightClientProof.WitnessNode(cid: $0.key, data: $0.value)
         }
+    }
+}
+
+extension ExplorerProjectedBlock {
+    /// A selected package's fee is funded, so it fits a balance.
+    init(_ block: ProjectedBlock) {
+        self.init(
+            transactionCount: block.transactionCount, bytes: block.bytes,
+            lowestFee: block.lowestFee.uint64Value ?? .max, lowestFeeBytes: block.lowestFeeBytes, full: block.full
+        )
     }
 }

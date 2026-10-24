@@ -992,6 +992,15 @@ private func addPublicReadRoutes<Context: RequestContext>(
             context: context
         )
     }
+    router.get("api/fees") { request, context in
+        let service = try byPath(request)
+        return try jsonCached(
+            await service.explorerFees(),
+            cacheControl: statusCacheControl,
+            request: request,
+            context: context
+        )
+    }
     // A chain's own current peers; with no `chainPath`, Nexus's.
     router.get("api/peers") { request, context in
         let service = try byPath(request)

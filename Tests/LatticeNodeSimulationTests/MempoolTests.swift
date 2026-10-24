@@ -441,6 +441,57 @@ final class MempoolTests: XCTestCase {
         )
     }
 
+    func testProjectionOfARoomyPoolIsOneOpenBlock() throws {
+        var pool = Mempool()
+        XCTAssertEqual(pool.projectedBlocks(count: 12, transactionLimit: 10, maxBytes: 1_000_000), [])
+
+        let cheap = try paying(CryptoUtils.generateKeyPair(), fee: 1, nonce: 0)
+        let rich = try paying(CryptoUtils.generateKeyPair(), fee: 50, nonce: 0)
+        for tx in [cheap, rich] { try pool.submit(tx, spec: testSpec(), addedAt: 0) }
+
+        let blocks = pool.projectedBlocks(count: 12, transactionLimit: 10, maxBytes: 1_000_000)
+        XCTAssertEqual(blocks.count, 1)
+        XCTAssertEqual(blocks[0].transactionCount, 2)
+        XCTAssertEqual(blocks[0].bytes, try size(cheap) + size(rich))
+        XCTAssertEqual(blocks[0].lowestFee.uint64Value, 1, "the cheapest taken sets the block's rate")
+        XCTAssertEqual(blocks[0].lowestFeeBytes, try size(cheap))
+        XCTAssertFalse(blocks[0].full, "nothing waits: the floor makes the next block")
+    }
+
+    func testProjectionFillsBlocksInFeeOrderAndMarksTheFullOnes() throws {
+        var pool = Mempool()
+        let fees: [Int64] = [1, 100, 10]
+        for fee in fees {
+            try pool.submit(try paying(CryptoUtils.generateKeyPair(), fee: fee, nonce: 0), spec: testSpec(), addedAt: 0)
+        }
+
+        let two = pool.projectedBlocks(count: 2, transactionLimit: 1, maxBytes: 1_000_000)
+        XCTAssertEqual(two.map(\.lowestFee.uint64Value), [100, 10])
+        XCTAssertEqual(two.map(\.full), [true, true], "the fee-1 transaction waits behind both")
+
+        let all = pool.projectedBlocks(count: 12, transactionLimit: 1, maxBytes: 1_000_000)
+        XCTAssertEqual(all.map(\.lowestFee.uint64Value), [100, 10, 1])
+        XCTAssertEqual(all.map(\.full), [true, true, false])
+
+        // Bytes bound a block as the count does.
+        let oneEach = try size(paying(CryptoUtils.generateKeyPair(), fee: 1, nonce: 0))
+        XCTAssertEqual(pool.projectedBlocks(count: 12, transactionLimit: 10, maxBytes: oneEach + oneEach / 2).count, 3)
+    }
+
+    func testProjectionPricesAPackageAsAWhole() throws {
+        var pool = Mempool()
+        let key = CryptoUtils.generateKeyPair()
+        let parent = try paying(key, fee: 1, nonce: 0)
+        let child = try paying(key, fee: 1_000, nonce: 1)
+        try pool.submit(parent, spec: testSpec(), addedAt: 0)
+        try pool.submit(child, spec: testSpec(), disposition: .ready, addedAt: 0)
+
+        let blocks = pool.projectedBlocks(count: 12, transactionLimit: 10, maxBytes: 1_000_000)
+        XCTAssertEqual(blocks.count, 1)
+        XCTAssertEqual(blocks[0].lowestFee.uint64Value, 1_001, "the parent rides on its child's fee")
+        XCTAssertEqual(blocks[0].lowestFeeBytes, try size(parent) + size(child))
+    }
+
     func testNonceGapFutureEntriesAreNeverSelected() throws {
         var pool = Mempool()
         let key = CryptoUtils.generateKeyPair()

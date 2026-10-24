@@ -441,6 +441,10 @@ final class NodeRuntimeTests: XCTestCase {
         }
         let listing = await runtime.reads.explorerMempool()
         XCTAssertEqual(listing.transactions, [admitted.transactionCID])
+        // The fee projection is published with the pool: one block with room.
+        let fees = await runtime.reads.explorerFees()
+        XCTAssertEqual(fees.blocks.map(\.transactionCount), [1])
+        XCTAssertEqual(fees.blocks.map(\.full), [false])
         await runtime.stop()
         await producerRuntime.stop()
     }

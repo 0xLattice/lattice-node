@@ -429,6 +429,11 @@ public final class NodeRuntime: Sendable {
         return nil
     }
 
+    /// How often, at most, a changing pool is projected for `/api/fees`
+    /// (milliseconds): fee estimates a second old are as good, and a burst of
+    /// submits does not walk the pool once each.
+    static let projectionInterval: Int64 = 1_000
+
     static func now() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1_000)
     }
@@ -1039,9 +1044,14 @@ extension NodeRuntime {
                     return (fetchWaits[key] ?? connectWaits[key]).map { NodeReadView.Waiting(cid: cid, reason: $0) }
                 }
             }
+            // The fee projection walks the pool, so a busy pool is projected
+            // at most once a `projectionInterval`, and at once on a new tip.
+            let now = NodeRuntime.now()
+            let reproject = view.projectedVersion != pool.version
+                && (view.actOnTip != tip.hash || now - view.projectedAt >= NodeRuntime.projectionInterval)
             guard view.actOnTip != tip.hash || view.poolVersion != pool.version
                     || view.templateDigest != digest || view.peers != peers
-                    || view.waiting != waiting else { return }
+                    || view.waiting != waiting || reproject else { return }
             if view.actOnTip != tip.hash {
                 view.actOnTip = tip.hash
                 // The act-on chain is the tip's ancestry, on the best header
@@ -1057,10 +1067,26 @@ extension NodeRuntime {
                 view.heights.truncate(to: keep)
                 for cid in entered.reversed() { view.heights.append(cid) }
             }
+            if view.poolVersion != pool.version || reproject {
+                // A pool holds nothing before its level has a spec, so a
+                // projection waits only on the pool.
+                let projected = !reproject ? view.mempool.projected : level.mining.spec.map {
+                    pool.projectedBlocks(
+                        count: ChainReads.projectedFeeBlocks,
+                        transactionLimit: Int(clamping: $0.maxNumberOfTransactionsPerBlock),
+                        maxBytes: $0.maxBlockSize
+                    )
+                } ?? []
+                if reproject {
+                    view.projectedVersion = pool.version
+                    view.projectedAt = now
+                }
+                view.mempool = ChainReads.MempoolListing(
+                    count: pool.count, bytes: pool.byteCount, cids: pool.items.prefix(200).map(\.cid),
+                    projected: projected
+                )
+            }
             view.poolVersion = pool.version
-            view.mempool = ChainReads.MempoolListing(
-                count: pool.count, bytes: pool.byteCount, cids: pool.items.prefix(200).map(\.cid)
-            )
             // The root's digest covers every hosted level: a child's tip or
             // pool moving changes the template a miner should fetch.
             view.templateDigest = digest

@@ -289,11 +289,17 @@ final class DaemonHTTPTests: XCTestCase {
             // The bounded read surface is served.
             for uri in [
                 "/health", "/api/chain/info", "/api/chain/spec",
-                "/api/block/latest", "/api/blocks", "/api/peers", "/api/mempool",
+                "/api/block/latest", "/api/blocks", "/api/peers", "/api/mempool", "/api/fees",
             ] {
                 try await client.execute(uri: uri, method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
                     XCTAssertEqual(response.status, .ok, uri)
                 }
+            }
+            try await client.execute(uri: "/api/fees", method: .get) { response in
+                XCTAssertEqual(response.status, .ok)
+                let fees = try JSONDecoder().decode(ExplorerFees.self, from: Data(response.body.readableBytesView))
+                XCTAssertEqual(fees.minRelayFee, configuration.minRelayFee)
+                XCTAssertEqual(fees.blocks, [], "an empty pool: a fee at the floor makes the next block")
             }
             try await client.execute(uri: "/api/deposits?limit=10&chainPath=Nexus", method: .get) { response in
                 XCTAssertEqual(response.status, .ok)

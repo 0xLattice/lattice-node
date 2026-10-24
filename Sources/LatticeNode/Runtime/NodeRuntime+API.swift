@@ -15,6 +15,9 @@ struct NodeReadView: Sendable {
     var heights = HeightIndex()
     var poolVersion: UInt64?
     var mempool = ChainReads.MempoolListing(count: 0, bytes: 0, cids: [])
+    /// The pool version `mempool.projected` was computed from, and when.
+    var projectedVersion: UInt64?
+    var projectedAt: Int64 = 0
     var templateDigest: String?
     var peers = 0
     /// The first block of the body window, when it waits, and why.

@@ -86,6 +86,7 @@ Mining templates are requested at Nexus and can carry every hosted descendant.
 | `GET /api/deposit-state?key=<demander/amount/nonce>` | One deposit key: its locked amount, `0` once withdrawn, or absent; with a state proof | yes |
 | `GET /api/receipt-state?demander=&amount=&nonce=&chainPath=P/D` | The withdrawer a receipt on `P` records for a deposit on `P/D`, with a state proof | yes |
 | `GET /api/mempool` | Bounded mempool listing | yes |
+| `GET /api/fees` | The blocks this node's pool would fill next, for fee pricing | yes |
 | `GET /api/peers?chainPath=P` | The chain's own current peer count: the open sessions that serve it. Without `chainPath`, Nexus's, which is every ready session | yes |
 | `GET /api/chain/info` | Chain metadata | yes |
 | `GET /api/chain/spec` | Active chain spec | yes |
@@ -287,6 +288,35 @@ which the block's recipient is credited. Below it the refusal is
 `belowMinRelayFee`. This is node relay policy, never consensus: a block
 carrying a cheaper transaction stays valid, and other nodes choose their own
 floor. `GET /api/chain/info` reports this node's as `minRelayFee`.
+
+### Fee pricing
+
+`GET /api/fees` projects the next blocks (up to 12) this node's pool would
+fill if nothing else arrived: ready transaction packages in template order
+(fee per byte, a transaction with its signer's earlier pooled nonces), each
+block taking them until one does not fit the chain's transaction count or
+`maxBlockSize`. It is recomputed on each new tip and, while the pool changes,
+at most once a second.
+
+```json
+{
+  "minRelayFee": "1",
+  "blocks": [
+    { "transactionCount": 5000, "bytes": 912000, "lowestFee": "40", "lowestFeeBytes": 380, "full": true },
+    { "transactionCount": 1200, "bytes": 230000, "lowestFee": "1", "lowestFeeBytes": 350, "full": false }
+  ]
+}
+```
+
+A block is `full` when ready transactions were left for a later one. While
+none is full (or `blocks` is empty), a fee at the floor makes the next block.
+To be in the first `k` blocks when block `k` is full, a transaction of `size`
+bytes pays more than `lowestFee * size / lowestFeeBytes` of that block.
+
+This is an estimate from one node's pool, not a promise: miners fill gaps
+with smaller packages, a block's overhead shares `maxBlockSize`, other pools
+differ, and new transactions arrive. Fees above `UInt64` never occur for
+funded packages.
 
 ## Transaction inclusion
 

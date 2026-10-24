@@ -276,6 +276,27 @@ public struct ExplorerMempool: Codable, Sendable, Equatable {
     public let transactions: [String]
 }
 
+/// `GET /api/fees`: the blocks this node's pool would fill next, in order.
+/// A chain with room has one block, not `full`, or none: any fee at the
+/// floor makes the next block. Behind full blocks, a fee buys a place.
+public struct ExplorerFees: Codable, Sendable, Equatable {
+    /// This node's relay floor (policy, never consensus), as in chain info.
+    @DecimalString public var minRelayFee: UInt64
+    public let blocks: [ExplorerProjectedBlock]
+}
+
+public struct ExplorerProjectedBlock: Codable, Sendable, Equatable {
+    public let transactionCount: Int
+    public let bytes: Int
+    /// The block's lowest rate: `lowestFee` over `lowestFeeBytes`. A
+    /// transaction of `size` bytes paying more than
+    /// `lowestFee * size / lowestFeeBytes` would be taken before it.
+    @DecimalString public var lowestFee: UInt64
+    public let lowestFeeBytes: Int
+    /// Whether ready transactions were left for a later block.
+    public let full: Bool
+}
+
 public struct ExplorerChainInfo: Codable, Sendable, Equatable {
     public let genesisHash: String?
     @OptionalDecimalString public var height: UInt64?
