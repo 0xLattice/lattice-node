@@ -22,7 +22,9 @@ final class BundledBlockFetchTests: XCTestCase {
 
     private let server = PeerID(publicKey: String(repeating: "ab", count: 32))
 
-    private func storage(keyByte: UInt8, brokenCache: Bool = false) async throws -> NodeStorage {
+    private func storage(
+        keyByte: UInt8, brokenCache: Bool = false, resourcePolicy: NodeResourcePolicy = .default
+    ) async throws -> NodeStorage {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-bundled-fetch-\(UUID().uuidString)", isDirectory: true
         )
@@ -36,7 +38,8 @@ final class BundledBlockFetchTests: XCTestCase {
         return try await NodeStorage.open(configuration: try NodeConfiguration(
             chainPath: ["Nexus"],
             storagePath: directory,
-            privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32)
+            privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
+            resourcePolicy: resourcePolicy
         ))
     }
 
@@ -738,6 +741,56 @@ final class BundledBlockFetchTests: XCTestCase {
         XCTAssertEqual(bundles, fetchedBundles)
         XCTAssertEqual(volumes, fetchedVolumes)
         XCTAssertEqual(remote.budget.reserved, 0)
+    }
+
+    /// Catching up, a chain's look-ahead fetches more bodies than the read
+    /// cache holds, and they finish in window order, so the body connected
+    /// next is the one read least recently. The cache keeps the bodies
+    /// nearest their chain's next block to connect: once the look-ahead
+    /// has filled it, connecting the next block asks no peer.
+    func testConnectingTheNextBlockAfterALookAheadPastTheCacheAsksNoPeer() async throws {
+        let producer = try await storage(keyByte: 0x6E)
+        let genesisCID = NexusGenesis.expectedBlockHash
+        let genesisData = await producer.content([genesisCID])[genesisCID]
+        var previous = try XCTUnwrap(Block(data: try XCTUnwrap(genesisData)))
+        var window: [String] = []
+        for _ in 0..<5 {
+            previous = try await mined(on: previous, try (0..<20).map { _ in try transaction() }, by: producer)
+            window.append(try BlockHeader(node: previous).rawCID)
+        }
+        // What one body costs the cache.
+        let probe = try await storage(keyByte: 0x6F)
+        _ = try await probe.fetchChainBody(window[0], remote: remote(producer, requests: Requests()))
+        let body = await probe.readCache.heldBytes
+        XCTAssertGreaterThan(body, 0)
+
+        // A cache of two and a half bodies, for a window of five.
+        let cacheBytes = 5 * body / 2
+        let joiner = try await storage(keyByte: 0x70, resourcePolicy: NodeResourcePolicy(
+            maximumAcquisitionStorageBytes: 4 * cacheBytes, maximumAcquisitionBytes: 4 * cacheBytes
+        ))
+        await joiner.readCache.order(bodies: Dictionary(uniqueKeysWithValues: window.enumerated().map { ($1, $0) }))
+        let requests = Requests()
+        let remote = remote(producer, requests: requests)
+        for cid in window {
+            _ = try await joiner.fetchChainBody(cid, remote: remote)
+        }
+        let furthest = await joiner.readCache.volume(window[4])
+        XCTAssertNil(furthest, "the cache holds less than the window")
+        let held = await joiner.readCache.heldBytes
+        XCTAssertLessThanOrEqual(held, cacheBytes)
+        let fetchedBundles = await requests.bundles
+        let fetchedVolumes = await requests.volumes
+
+        let next = window[0]
+        let stored = await NodeRuntime.reading(next, storage: joiner, remote: remote) { fetcher in
+            (try? await joiner.storeValidBlock(next, at: ["Nexus"], from: fetcher)) != nil
+        }
+        XCTAssertTrue(stored)
+        let bundles = await requests.bundles
+        let volumes = await requests.volumes
+        XCTAssertEqual(bundles, fetchedBundles, "the next block's connect asked no peer")
+        XCTAssertEqual(volumes, fetchedVolumes, "the next block's connect asked no peer")
     }
 
     /// A body of many small transactions near its chain's `maxBlockSize`

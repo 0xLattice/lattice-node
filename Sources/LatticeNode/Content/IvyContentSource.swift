@@ -97,6 +97,8 @@ public struct IvyRootContentSource: Sendable {
         private let priority: AcquisitionBudget.Priority
         /// What the session reserved: nothing until it first asks a peer.
         private var reservation: Task<Int?, Never>?
+        /// The session's task was cancelled: it reserves nothing more.
+        private var cancelled = false
         /// The bytes the session may hold: what it reserved, once it has.
         private var maximumStorageBytes = 0
         private let broker = MemoryBroker()
@@ -128,30 +130,46 @@ public struct IvyRootContentSource: Sendable {
         /// Reserves the session's bytes from the budget, once, before its
         /// first request to a peer: a session that reads only what this
         /// node holds never waits on the budget, and one waiting holds
-        /// nothing budgeted. False when the task was cancelled waiting: the
-        /// session then asks no peer.
+        /// nothing budgeted. False when the session was cancelled first
+        /// (`cancel`): the session then asks no peer.
+        ///
+        /// The reservation is the session's, shared by all its callers, and
+        /// only the session's cancellation cancels it: its readers call from
+        /// tasks of their own (a `CoalescingFetcher`'s flush), which that
+        /// cancellation never reaches.
         func reserveBudget() async -> Bool {
-            let task = lock.withLock {
+            let task: Task<Int?, Never>? = lock.withLock {
                 if let reservation { return reservation }
+                guard !cancelled else { return nil }
                 let task = Task { [budget = self.budget, bytes = self.reservingBytes, priority = self.priority] in
                     await budget.reserve(bytes, priority: priority)
                 }
                 reservation = task
                 return task
             }
-            let reserved = await withTaskCancellationHandler {
-                await task.value
-            } onCancel: {
-                task.cancel()
+            guard let reserved = await task?.value else { return false }
+            lock.withLock { maximumStorageBytes = reserved }
+            return true
+        }
+
+        /// The session's task was cancelled: a reservation still waiting
+        /// leaves the line holding nothing, none is made after, and a
+        /// bundle on its way is not waited for. One already granted is
+        /// released when the session ends.
+        func cancel() {
+            let tasks: (Task<Int?, Never>?, Task<AuthenticatedPeer?, Never>?) = lock.withLock {
+                cancelled = true
+                return (reservation, bundle)
             }
-            lock.withLock { maximumStorageBytes = reserved ?? 0 }
-            return reserved != nil
+            tasks.0?.cancel()
+            tasks.1?.cancel()
         }
 
         /// What the session reserved goes back to the budget.
         func releaseBudget() async {
             guard let task = lock.withLock({ reservation }) else { return }
-            // Still waiting only when every caller waiting on it was cancelled.
+            // Still waiting only when a reader the session no longer waits
+            // for (one whose operation ended or threw first) is waiting.
             task.cancel()
             if let reserved = await task.value { budget.release(reserved) }
         }
@@ -386,6 +404,11 @@ public struct IvyRootContentSource: Sendable {
 
         public var attribution: Attribution { context.trace.snapshot() }
 
+        /// The session's task was cancelled (`Context.cancel`).
+        fileprivate func cancel() {
+            context.cancel()
+        }
+
         /// The session is over: a bundle still on its way is not waited
         /// for, and what the session reserved goes back to the budget.
         fileprivate func end() async {
@@ -498,7 +521,8 @@ public struct IvyRootContentSource: Sendable {
     /// much, and releases it all when `operation` ends. A session that
     /// reads only what this node holds reserves nothing. It never reserves
     /// again: a bundle is held within the same reservation. A session
-    /// cancelled while it waits reserves nothing and asks no peer.
+    /// whose task is cancelled while it waits leaves the line at once,
+    /// reserves nothing and asks no peer, whichever task its reads run in.
     public func withRootTracing<T: Sendable>(
         _ rootCID: String,
         bundle: Bool = true,
@@ -525,10 +549,16 @@ public struct IvyRootContentSource: Sendable {
             peerCapabilities: peerCapabilities
         )
         do {
-            if let initialResponse {
-                await session.acceptInitialResponse(initialResponse)
+            // The reads run in tasks of their own (a `CoalescingFetcher`'s
+            // flush): the session's task's cancellation reaches them here.
+            let value = try await withTaskCancellationHandler {
+                if let initialResponse {
+                    await session.acceptInitialResponse(initialResponse)
+                }
+                return try await operation(session)
+            } onCancel: {
+                session.cancel()
             }
-            let value = try await operation(session)
             let attribution = session.attribution
             capture?.record(attribution)
             await session.end()

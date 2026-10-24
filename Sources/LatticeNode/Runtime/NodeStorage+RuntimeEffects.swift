@@ -212,7 +212,7 @@ extension NodeStorage {
                     try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: walked)
                     // The walk reached the end: the Volumes it derived are the
                     // ones storing the block would, and serve its connect.
-                    await readCache.put(walked.takeVolumes())
+                    await readCache.put(walked.takeVolumes(), block: cid)
                 } catch BlockContentSizeError.exceedsLimit {
                     // Past the chain's own maxBlockSize the block is invalid,
                     // and its execution proves it from what was read: run it

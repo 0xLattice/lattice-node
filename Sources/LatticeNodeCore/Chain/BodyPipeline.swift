@@ -68,6 +68,21 @@ extension ChainCore {
         bodyWindow.filter { index.parent[$0].map(tree.isExecuted(blockHash:)) ?? true }
     }
 
+    /// Each window block's distance, in height, from the lowest block
+    /// this level can connect next (`nextToConnect` at 0): the order in
+    /// which their fetched bodies are needed.
+    public var connectDistances: [String: Int] {
+        let window = bodyWindow
+        let next = window.filter { index.parent[$0].map(tree.isExecuted(blockHash:)) ?? true }
+        guard let base = next.compactMap({ index.height[$0] }).min() else { return [:] }
+        var distances: [String: Int] = [:]
+        for cid in window {
+            let height = index.height[cid] ?? base
+            distances[cid] = height > base ? Int(height - base) : 0
+        }
+        return distances
+    }
+
     /// The bytes a body of `cid` may count by its chain's spec, when the
     /// spec is held.
     public func maxBlockSize(of cid: String) -> Int? {

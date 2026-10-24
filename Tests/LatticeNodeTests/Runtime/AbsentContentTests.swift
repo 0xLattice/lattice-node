@@ -357,13 +357,14 @@ final class AbsentContentTests: XCTestCase {
         let charge = { (name: String) in 2 * 100 + 2 * IvyRootContentSource.retainedEntryOverhead + 2 * name.utf8.count + 5 }
         let cache = ReadCache(maximumBytes: 2 * charge("a"))
 
-        await cache.put([volume("a", 7), volume("b", 7)])
+        await cache.put([volume("a", 7)], block: "a")
+        await cache.put([volume("b", 7)], block: "b")
         let both = await cache.fetch(["a", "a-leaf", "b-leaf"])
         XCTAssertEqual(Set(both.keys), ["a", "a-leaf", "b-leaf"])
 
         // "b" was read after "a" above; reading "a" again makes "b" the least recent.
         _ = await cache.fetch(["a"])
-        await cache.put([volume("c", 7)])
+        await cache.put([volume("c", 7)], block: "c")
         let afterThird = await cache.fetch(["a", "b", "c"])
         XCTAssertEqual(Set(afterThird.keys), ["a", "c"])
         let kept = await cache.volume("a")
@@ -372,7 +373,7 @@ final class AbsentContentTests: XCTestCase {
         XCTAssertLessThanOrEqual(held, 2 * charge("a"))
 
         // Put again, a Volume replaces the one held under its root.
-        await cache.put([volume("a", 9)])
+        await cache.put([volume("a", 9)], block: "a")
         let replaced = await cache.volume("a")
         XCTAssertEqual(replaced?.entries, volume("a", 9).entries)
         held = await cache.heldBytes
@@ -380,11 +381,30 @@ final class AbsentContentTests: XCTestCase {
 
         // One larger than the bound is not kept, and evicts nothing.
         let large = SerializedVolume(root: "large", entries: ["large": Data(repeating: 9, count: 4 * charge("a"))])
-        await cache.put([large])
+        await cache.put([large], block: "large")
         let afterLarge = await cache.fetch(["a", "c", "large"])
         XCTAssertEqual(Set(afterLarge.keys), ["a", "c"])
         held = await cache.heldBytes
         XCTAssertLessThanOrEqual(held, 2 * charge("a"))
+
+        // Bodies go furthest from their chain's next block to connect
+        // first, whatever was read last; a block in no window before any.
+        let ordered = ReadCache(maximumBytes: 2 * charge("a"))
+        await ordered.order(bodies: ["a": 0, "b": 1, "c": 2])
+        await ordered.put([volume("a", 7)], block: "a")
+        await ordered.put([volume("b", 7)], block: "b")
+        _ = await ordered.fetch(["a"])
+        await ordered.put([volume("c", 7)], block: "c")
+        let furthestNotKept = await ordered.fetch(["a", "b", "c"])
+        XCTAssertEqual(Set(furthestNotKept.keys), ["a", "b"], "the furthest ahead is not kept over nearer ones")
+        await ordered.order(bodies: ["b": 0, "c": 1])
+        await ordered.put([volume("c", 7)], block: "c")
+        let connectedFirst = await ordered.fetch(["a", "b", "c"])
+        XCTAssertEqual(Set(connectedFirst.keys), ["b", "c"], "a block in no window goes first")
+        await ordered.order(bodies: ["d": 0, "b": 1, "c": 2])
+        await ordered.put([volume("d", 7)], block: "d")
+        let nextKept = await ordered.fetch(["b", "c", "d"])
+        XCTAssertEqual(Set(nextKept.keys), ["b", "d"], "the next to connect evicts the furthest ahead")
 
         // A read keeps only the entries it asked for, and none of them is a
         // Volume: a peer chooses what it sends with one.

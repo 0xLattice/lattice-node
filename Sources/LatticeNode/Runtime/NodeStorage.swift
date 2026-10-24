@@ -366,30 +366,55 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
 /// reader checks it again. It is not the Volume store: nothing here is
 /// stored until a block's execution finds it valid.
 ///
-/// Bounded in bytes, each entry charged as a session charges it; what was
-/// read least recently goes first, and what is evicted is fetched again
-/// when it is read. What is put again replaces what is held.
+/// Bounded in bytes, each entry charged as a session charges it. When room
+/// is needed, what goes first: bodies of blocks in no chain's body window
+/// (connected, or off the best chain), then the entries reads asked for,
+/// then bodies furthest ahead of their chain's next block to connect
+/// (`order(bodies:)`), the least recently read first among equals. What
+/// would go before everything it would have to evict is not kept. What is
+/// evicted is fetched again when it is read: this decides only what is
+/// asked of peers twice. What is put again replaces what is held.
 actor ReadCache: ContentSource {
     private enum Key: Hashable {
-        /// A whole Volume this node derived, by its root.
-        case volume(String)
+        /// A whole Volume a body's fetch derived for its block, by its root.
+        case body(block: String, root: String)
         /// One entry a read asked for, by its CID.
         case entry(String)
+
+        var root: String? {
+            if case .body(_, let root) = self { root } else { nil }
+        }
     }
 
     private struct Held {
         let entries: [String: Data]
         let bytes: Int
+        /// When an entry was last read; a body's is its block's (`Body`).
+        var read: UInt64 = 0
         var older: Key? = nil
         var newer: Key? = nil
     }
 
-    /// Held in recency order, a list linked through `older` and `newer`.
+    /// A block's body: the roots of its Volumes held, and when it was last read.
+    private struct Body {
+        let roots: [String]
+        var read: UInt64
+    }
+
+    /// Which goes first when room is needed: the greater.
+    private typealias Rank = (Int, Int, UInt64)
+
     private var held: [Key: Held] = [:]
+    /// The entries reads asked for, in recency order, a list linked
+    /// through `older` and `newer`.
     private var oldest: Key?
     private var newest: Key?
-    /// The roots of the held whole Volumes each CID is in.
-    private var roots: [String: Set<String>] = [:]
+    private var bodies: [String: Body] = [:]
+    /// The held body Volumes each CID is in.
+    private var containing: [String: Set<Key>] = [:]
+    /// Each window block's distance from its chain's next block to connect.
+    private var distances: [String: Int] = [:]
+    private var clock: UInt64 = 0
     private var bytes = 0
     private let maximumBytes: Int
 
@@ -402,39 +427,60 @@ actor ReadCache: ContentSource {
     /// The bytes held now.
     var heldBytes: Int { bytes }
 
+    /// The window blocks, each by its distance from its chain's next block
+    /// to connect (0 for that block): the order their bodies are needed in.
+    func order(bodies distances: [String: Int]) {
+        self.distances = distances
+    }
+
     /// The whole Volume under `root`, when this node derived it and it is held.
     func volume(_ root: String) -> SerializedVolume? {
-        guard let entries = held[.volume(root)]?.entries else { return nil }
-        touch(.volume(root))
+        guard let key = containing[root]?.first(where: { $0.root == root }),
+              let entries = held[key]?.entries else { return nil }
+        touch(key)
         return SerializedVolume(root: root, entries: entries)
     }
 
     func fetch(_ cids: Set<String>) async -> [String: Data] {
         var found: [String: Data] = [:]
         for cid in cids {
-            let key: Key
-            if held[.entry(cid)] != nil {
-                key = .entry(cid)
-            } else if let root = roots[cid]?.first {
-                key = .volume(root)
-            } else {
-                continue
-            }
-            found[cid] = held[key]?.entries[cid]
+            guard let key = held[.entry(cid)] != nil ? .entry(cid) : containing[cid]?.first,
+                  let data = held[key]?.entries[cid] else { continue }
+            found[cid] = data
             touch(key)
         }
         return found
     }
 
-    /// Keeps the Volumes a body's fetch derived for its block, each whole
-    /// or not at all.
-    func put(_ volumes: [SerializedVolume]) {
-        for volume in volumes { put(volume.entries, as: .volume(volume.root)) }
+    /// Keeps the Volumes a fetch of `block`'s body derived, all or none.
+    func put(_ volumes: [SerializedVolume], block: String) {
+        evict(body: block)
+        var unique: [String: [String: Data]] = [:]
+        for volume in volumes { unique[volume.root] = volume.entries }
+        let charges = unique.mapValues(Self.charge)
+        guard makeRoom(charges.values.reduce(0, +), for: rank(body: block, read: clock + 1)) else { return }
+        clock += 1
+        for (root, entries) in unique {
+            let key = Key.body(block: block, root: root)
+            held[key] = Held(entries: entries, bytes: charges[root] ?? 0)
+            for cid in entries.keys { containing[cid, default: []].insert(key) }
+            bytes += charges[root] ?? 0
+        }
+        bodies[block] = Body(roots: Array(unique.keys), read: clock)
     }
 
     /// Keeps entries a read asked for, each on its own.
     func put(entries: [String: Data]) {
-        for (cid, data) in entries { put([cid: data], as: .entry(cid)) }
+        for (cid, data) in entries {
+            let key = Key.entry(cid)
+            evict(entry: key)
+            let charge = Self.charge([cid: data])
+            guard makeRoom(charge, for: (1, 0, UInt64.max - (clock + 1))) else { continue }
+            clock += 1
+            held[key] = Held(entries: [cid: data], bytes: charge, read: clock)
+            link(key)
+            bytes += charge
+        }
     }
 
     /// `source`, with the entries a read asks of it kept here.
@@ -453,26 +499,50 @@ actor ReadCache: ContentSource {
         }
     }
 
-    private func put(_ entries: [String: Data], as key: Key) {
-        evict(key)
-        let charge = entries.reduce(0) {
+    private static func charge(_ entries: [String: Data]) -> Int {
+        entries.reduce(0) {
             $0 + $1.key.utf8.count + $1.value.count + IvyRootContentSource.retainedEntryOverhead
         }
-        guard charge <= maximumBytes else { return }
-        while bytes + charge > maximumBytes, let oldest { evict(oldest) }
-        held[key] = Held(entries: entries, bytes: charge)
-        link(key)
-        if case .volume(let root) = key {
-            for cid in entries.keys { roots[cid, default: []].insert(root) }
+    }
+
+    /// A body's rank: a block in no window first, then by distance.
+    private func rank(body block: String, read: UInt64) -> Rank {
+        guard let distance = distances[block] else { return (2, 0, UInt64.max - read) }
+        return (0, distance, UInt64.max - read)
+    }
+
+    /// Evicts what goes before `rank` until `charge` fits. False, having
+    /// evicted only what goes before it, when it does not.
+    private func makeRoom(_ charge: Int, for rank: Rank) -> Bool {
+        guard charge <= maximumBytes else { return false }
+        while bytes + charge > maximumBytes {
+            var first: (rank: Rank, body: String?)?
+            for (block, body) in bodies {
+                let candidate = self.rank(body: block, read: body.read)
+                if first.map({ candidate > $0.rank }) ?? true { first = (candidate, block) }
+            }
+            if let oldest, let entry = held[oldest] {
+                let candidate: Rank = (1, 0, UInt64.max - entry.read)
+                if first.map({ candidate > $0.rank }) ?? true { first = (candidate, nil) }
+            }
+            guard let first, first.rank > rank else { return false }
+            if let block = first.body { evict(body: block) } else if let oldest { evict(entry: oldest) }
         }
-        bytes += charge
+        return true
     }
 
     /// Makes `key` the most recently read.
     private func touch(_ key: Key) {
-        guard newest != key else { return }
-        unlink(key)
-        link(key)
+        clock += 1
+        switch key {
+        case .body(let block, _):
+            bodies[block]?.read = clock
+        case .entry:
+            held[key]?.read = clock
+            guard newest != key else { return }
+            unlink(key)
+            link(key)
+        }
     }
 
     /// Puts held `key` at the newest end.
@@ -489,16 +559,23 @@ actor ReadCache: ContentSource {
         if let newer = entry.newer { held[newer]?.older = entry.older } else { newest = entry.older }
     }
 
-    private func evict(_ key: Key) {
+    private func evict(entry key: Key) {
         guard held[key] != nil else { return }
         unlink(key)
         guard let entry = held.removeValue(forKey: key) else { return }
-        if case .volume(let root) = key {
-            for cid in entry.entries.keys {
-                roots[cid]?.remove(root)
-                if roots[cid]?.isEmpty == true { roots[cid] = nil }
-            }
-        }
         bytes -= entry.bytes
+    }
+
+    private func evict(body block: String) {
+        guard let body = bodies.removeValue(forKey: block) else { return }
+        for root in body.roots {
+            let key = Key.body(block: block, root: root)
+            guard let entry = held.removeValue(forKey: key) else { continue }
+            for cid in entry.entries.keys {
+                containing[cid]?.remove(key)
+                if containing[cid]?.isEmpty == true { containing[cid] = nil }
+            }
+            bytes -= entry.bytes
+        }
     }
 }

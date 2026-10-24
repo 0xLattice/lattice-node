@@ -233,6 +233,50 @@ final class AcquisitionBudgetTests: XCTestCase {
         XCTAssertEqual(asked.1, 0)
     }
 
+    /// Every real reader reads through a `CoalescingFetcher`, whose flush
+    /// asks the session from a task of its own. A body fetch cancelled
+    /// while it waits on a full budget (a reorg, a window that moved, a
+    /// stop) still leaves the line at once: it reserves nothing, is never
+    /// granted later, and asks no peer.
+    func testACancelledBodyReadingThroughACoalescingFetcherLeavesTheLineAtOnce() async throws {
+        let item = try content(3)
+        let requests = Requests()
+        let sessionBytes = 16 * 1_024
+        let budget = AcquisitionBudget(capacity: sessionBytes)
+        let source = IvyRootContentSource(
+            maximumStorageBytes: sessionBytes,
+            budget: budget,
+            fetch: { root in
+                await requests.volume()
+                return AttributedVolumeResponse(rootCID: root, entries: [item.cid: item.data], servedBy: nil)
+            },
+            fetchBundle: { _ in
+                await requests.bundle()
+                return []
+            }
+        )
+        let reserved = await budget.reserve(sessionBytes, priority: .ownWork)
+        let blocking = try XCTUnwrap(reserved)
+        let body = Task {
+            await source.withRootTracing(item.cid, priority: .body(item.cid)) { session in
+                try? await CoalescingFetcher(session).fetch(rawCid: item.cid)
+            }
+        }
+        try await eventually("the body waits") { budget.waiting == 1 }
+        body.cancel()
+        try await eventually("the cancelled body leaves the line while the budget is full") { budget.waiting == 0 }
+        let answer = await body.value
+        XCTAssertNil(answer.value)
+        XCTAssertEqual(budget.reserved, blocking, "the cancelled body reserved nothing")
+        budget.release(blocking)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(budget.reserved, 0, "nothing is granted to it later")
+        XCTAssertEqual(budget.waiting, 0)
+        let asked = await (requests.volumes, requests.bundles)
+        XCTAssertEqual(asked.0, 0)
+        XCTAssertEqual(asked.1, 0)
+    }
+
     /// Waiting on the budget is no peer's failure: the attribution a
     /// session reports, which status and backoff read, is the same as for
     /// one that never waited, and the peer is credited the same.

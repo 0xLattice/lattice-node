@@ -545,6 +545,9 @@ extension NodeRuntime {
         /// go of a body when the operator keeps none beyond it.
         var executedThisStep: [BodyKey] = []
         var bodyTips: [ChainPath: String] = [:]
+        /// The window blocks' distances from their chains' next blocks to
+        /// connect, as last given to the read cache.
+        var cachedBodyOrder: [String: Int] = [:]
         /// Each level's tip the kept state was last moved to, and the blocks
         /// executed or found invalid this step, whose reads go after it.
         var stateTips: [ChainPath: String] = [:]
@@ -1217,6 +1220,17 @@ extension NodeRuntime {
             // ordered by the last set, and moves up at the next step.
             if remote.budget.waiting > 0 {
                 remote.budget.prioritize(Set(core.levels.values.flatMap(\.nextToConnect)))
+            }
+            // Fetched bodies stay in memory in the order their connects
+            // need them: the furthest ahead go first when room is needed.
+            if !bodies.isEmpty || !cachedBodyOrder.isEmpty {
+                let order = core.levels.values.reduce(into: [String: Int]()) { order, level in
+                    order.merge(level.connectDistances) { min($0, $1) }
+                }
+                if order != cachedBodyOrder {
+                    cachedBodyOrder = order
+                    await storage.readCache.order(bodies: order)
+                }
             }
             // What an executed block read goes once the kept state has
             // counted what of it the tip's state holds.
