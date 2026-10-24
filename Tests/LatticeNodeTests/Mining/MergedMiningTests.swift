@@ -20,7 +20,7 @@ final class MergedMiningTests: XCTestCase {
                 guard case .work(let work) = fact else { return nil }
                 return work.blockHash
             }
-        return await storage.store.savedProofs(at: path, for: Array(Set(blocks)))
+        return try await storage.store.savedProofs(at: path, for: Array(Set(blocks)))
     }
 
     func testExportedWalletProofVectorsVerify() async throws {

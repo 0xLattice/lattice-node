@@ -182,7 +182,7 @@ final class NodeStoreBootTests: XCTestCase {
         XCTAssertTrue(staged.isEmpty)
         let logID = try await store.chainLogID()
         XCTAssertNil(logID)
-        XCTAssertTrue(store.savedProofs(at: ["Nexus", "Alpha"], for: [alphaProof.childCID]).isEmpty)
+        XCTAssertTrue(try store.savedProofs(at: ["Nexus", "Alpha"], for: [alphaProof.childCID]).isEmpty)
     }
 
     func testAChildProofCommitsWithItsStepAndSurvivesReopen() async throws {
@@ -204,7 +204,6 @@ final class NodeStoreBootTests: XCTestCase {
     func testSavedChildProofsAreReadFromTheStoreAtOnceAndAfterReopen() async throws {
         let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         let alpha: ChainPath = ["Nexus", "Alpha"]
-        func cid(_ seed: String) throws -> String { try HeaderImpl<PublicKey>(node: PublicKey(key: seed)).rawCID }
         let other = try cid("other block")
         let roots = try [cid("root a"), cid("root b")].sorted()
         let (lowRoot, highRoot) = (roots[0], roots[1])
@@ -218,30 +217,30 @@ final class NodeStoreBootTests: XCTestCase {
         // Past one query chunk, with blocks that have no proofs.
         let asked = (0..<600).map { "absent-\($0)" } + [other, alphaProof.childCID]
         let expected = [other: [lowRoot, highRoot], alphaProof.childCID: [alphaProof.proof.rootCID]]
-        XCTAssertEqual(store.savedProofs(at: alpha, for: asked).mapValues { $0.map(\.rootCID) }, expected)
+        XCTAssertEqual(try store.savedProofs(at: alpha, for: asked).mapValues { $0.map(\.rootCID) }, expected)
         let reopened = try self.store(path)
-        XCTAssertEqual(reopened.savedProofs(at: alpha, for: asked).mapValues { $0.map(\.rootCID) }, expected)
-        XCTAssertTrue(reopened.savedProofs(at: ["Nexus", "Beta"], for: asked).isEmpty)
+        XCTAssertEqual(try reopened.savedProofs(at: alpha, for: asked).mapValues { $0.map(\.rootCID) }, expected)
+        XCTAssertTrue(try reopened.savedProofs(at: ["Nexus", "Beta"], for: asked).isEmpty)
     }
 
-    /// A saved-proof row that does not read back as its proof is absent,
-    /// never a failure: the block's good proofs are still served, and the
-    /// network can still supply the missing one.
-    func testACorruptSavedChildProofIsAbsent() throws {
-        try expectBadRowAbsent { _ in Data("not a proof".utf8) }
+    /// A saved-proof row that does not read back as its proof is left out
+    /// and deleted, never a failure: the block's good proofs are still
+    /// served, and a good copy written later is read back.
+    func testACorruptSavedChildProofIsDeletedAndCanBeWrittenAgain() async throws {
+        try await expectBadRowReplaced { _ in Data("not a proof".utf8) }
     }
 
-    func testASavedChildProofThatDoesNotMatchItsIndexIsAbsent() throws {
-        try expectBadRowAbsent { _ in
+    func testASavedChildProofThatDoesNotMatchItsIndexIsDeletedAndCanBeWrittenAgain() async throws {
+        try await expectBadRowReplaced { _ in
             try ChildBlockProof(rootCID: NexusGenesis.expectedBlockHash, directoryPath: ["Alpha"], entries: []).serialize()
         }
     }
 
-    private func expectBadRowAbsent(_ badBytes: (String) throws -> Data) throws {
+    private func expectBadRowReplaced(_ badBytes: (String) throws -> Data) async throws {
         let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         let store = try store(path)
         let database = try NodeSQLite(path: path.path)
-        func cid(_ seed: String) throws -> String { try HeaderImpl<PublicKey>(node: PublicKey(key: seed)).rawCID }
+        let alpha: ChainPath = ["Nexus", "Alpha"]
         let (child, goodRoot, badRoot) = (try cid("child"), NexusGenesis.expectedBlockHash, try cid("bad root"))
         let good = ChildBlockProof(rootCID: goodRoot, directoryPath: ["Alpha"], entries: [])
         for (root, bytes) in [(goodRoot, try good.serialize()), (badRoot, try badBytes(badRoot))] {
@@ -250,7 +249,56 @@ final class NodeStoreBootTests: XCTestCase {
                 params: [.text("Nexus/Alpha"), .text(child), .text(root), .blob(bytes)]
             )
         }
-        let saved = store.savedProofs(at: ["Nexus", "Alpha"], for: [child])
+        let saved = try store.savedProofs(at: alpha, for: [child])
         XCTAssertEqual(saved.mapValues { $0.map(\.rootCID) }, [child: [goodRoot]])
+        try await eventually("the bad row is deleted") {
+            try database.rows(from: "child_proofs", "SELECT root FROM child_proofs").map { try $0.text("root") } == [goodRoot]
+        }
+
+        let fresh = StoredProof(childCID: child, proof: ChildBlockProof(rootCID: badRoot, directoryPath: ["Alpha"], entries: []))
+        try await store.stageNodeFacts([
+            NodeFactBatch(path: alpha, facts: [blockBatch("child")], proofs: [fresh], volumeRoots: [], cursors: [:]),
+        ], logID: "local-log")
+        let rewritten = try store.savedProofs(at: alpha, for: [child])
+        XCTAssertEqual(rewritten.mapValues { $0.map(\.rootCID) }, [child: [goodRoot, badRoot].sorted()])
+    }
+
+    /// A query that fails is a store fault: it throws, never reads as absent.
+    func testASavedProofQueryThatFailsThrows() throws {
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
+        let store = try store(path)
+        _ = try NodeSQLite(path: path.path).execute("DROP TABLE child_proofs")
+        XCTAssertThrowsError(try store.savedProofs(at: ["Nexus", "Alpha"], for: [try cid("child")]))
+    }
+
+    /// A served page reads its proofs in chunks of 16, 32, 64, …: a proof on
+    /// either side of each chunk edge is served with its block, and a root
+    /// chain's page reads none.
+    func testAServedPageReadsEveryProofAcrossChunkEdges() async throws {
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
+        let store = try store(path)
+        let alpha: ChainPath = ["Nexus", "Alpha"]
+        let cids = try (0..<60).map { try cid("block \($0)") }
+        let withProofs = [15, 16, 47, 48]
+        try await store.stageNodeFacts([
+            NodeFactBatch(
+                path: alpha, facts: [blockBatch("child")],
+                proofs: withProofs.map {
+                    StoredProof(childCID: cids[$0], proof: ChildBlockProof(
+                        rootCID: NexusGenesis.expectedBlockHash, directoryPath: ["Alpha"], entries: []
+                    ))
+                },
+                volumeRoots: [], cursors: [:]
+            ),
+        ], logID: "local-log")
+        var page = SavedProofPage(store: store, path: alpha, cids: cids)
+        let served = try cids.indices.filter { try !page.proofs(at: $0).isEmpty }
+        XCTAssertEqual(served, withProofs)
+        var rootPage = SavedProofPage(store: store, path: ["Nexus"], cids: cids)
+        XCTAssertTrue(try cids.indices.allSatisfy { try rootPage.proofs(at: $0).isEmpty })
+    }
+
+    private func cid(_ seed: String) throws -> String {
+        try HeaderImpl<PublicKey>(node: PublicKey(key: seed)).rawCID
     }
 }

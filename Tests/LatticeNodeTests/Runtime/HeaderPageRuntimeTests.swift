@@ -2,6 +2,7 @@ import Foundation
 import Ivy
 import Lattice
 import LatticeNodeCore
+import Synchronization
 import XCTest
 @testable import LatticeNode
 
@@ -17,7 +18,8 @@ final class HeaderPageRuntimeTests: XCTestCase {
 
     private func start(
         keyByte: UInt8, coreConfig: ChainCoreConfig = ChainCoreConfig(), peers: [PeerEndpoint] = [],
-        storagePath: URL? = nil, stopAtTeardown: Bool = true
+        storagePath: URL? = nil, stopAtTeardown: Bool = true,
+        failStop: @escaping @Sendable (any Error) -> Void = { fatalError("node runtime: persist failed: \($0)") }
     ) async throws -> (runtime: NodeRuntime, endpoint: PeerEndpoint) {
         let port = NetworkTransportTestPorts.allocate()
         let configuration = try NodeConfiguration(
@@ -43,7 +45,8 @@ final class HeaderPageRuntimeTests: XCTestCase {
         )
         let storage = try await NodeStorage.open(configuration: configuration)
         let runtime = try await NodeRuntime.start(
-            storage: storage, configuration: configuration, overlay: overlay, coreConfig: coreConfig
+            storage: storage, configuration: configuration, overlay: overlay, coreConfig: coreConfig,
+            failStop: failStop
         )
         if stopAtTeardown { addTeardownBlock { await runtime.stop() } }
         return (runtime, PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port))
@@ -69,6 +72,23 @@ final class HeaderPageRuntimeTests: XCTestCase {
         )
         let host = try await start(keyByte: 0x75, storagePath: hostPath)
         try await followerReaches(tip, from: host.endpoint, key: 0x76)
+    }
+
+    /// A saved-proof query that fails is a store fault: serving a child
+    /// page through it fail-stops the host, never serves the page bare.
+    func testAHostWhoseProofQueryFailsFailStopsWhenServing() async throws {
+        let hostPath = temporaryDirectory()
+        let stopped = Mutex<(any Error)?>(nil)
+        let host = try await start(keyByte: 0x77, storagePath: hostPath) { error in
+            stopped.withLock { $0 = $0 ?? error }
+        }
+        let tip = try await mineAlpha(on: host.runtime)
+        _ = try NodeSQLite(path: hostPath.appendingPathComponent("state.db").path).execute("DROP TABLE child_proofs")
+        _ = try await start(keyByte: 0x78, peers: [host.endpoint])
+        try await eventually("the host fail-stops on the failed proof query") {
+            stopped.withLock { $0 != nil }
+        }
+        XCTAssertGreaterThan(tip, 0)
     }
 
     private func followerSyncs(from serverConfig: ChainCoreConfig, keys: (UInt8, UInt8)) async throws {
