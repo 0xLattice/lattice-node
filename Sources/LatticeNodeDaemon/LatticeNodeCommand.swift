@@ -29,6 +29,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(name: .customLong("premine-to"), help: "The account a hosted child's genesis pays its spec's premine to, as chain-path=address, e.g. Nexus/Alpha=<address> (repeatable). The chain must be hosted with a spec (--host-chain path=spec.json); without one, its genesis pays no premine.")
     var premineTo: [String] = []
 
+    @Option(name: .customLong("genesis-transactions"), help: "Signed transactions a hosted child's genesis carries after its premine, as chain-path=file.json, the file a JSON array of what POST /transactions takes (repeatable, one file per chain). The chain must be hosted with a spec; the transactions must be signed by their signers, move no coins, and pass the spec's policies.")
+    var genesisTransactions: [String] = []
+
     @Option(name: .customLong("policy-module"), help: "A WASM policy module a hosted child's spec names by CID (repeatable). Stored at start, so the node can store the genesis it mines from that spec.")
     var policyModule: [String] = []
 
@@ -193,7 +196,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         let overlayPeers = configuredPeers ?? []
 
         let hosted = try HostedChildren(
-            hostChain: hostChain, premineTo: premineTo, chainPeer: chainPeer, policyModule: policyModule
+            hostChain: hostChain, premineTo: premineTo, genesisTransactions: genesisTransactions,
+            chainPeer: chainPeer, policyModule: policyModule
         )
         let configuration = try NodeConfiguration(
             chainPath: address.components,
@@ -222,6 +226,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             hostedChildren: hosted.children,
             childSpecs: hosted.specs,
             childPremineRecipients: hosted.premineRecipients,
+            childGenesisTransactions: hosted.genesisTransactions,
             policyModules: hosted.policyModules,
             publicReadURL: publicReadUrl,
             publicSubmit: publicSubmit,
@@ -287,18 +292,22 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     }
 }
 
-/// The child chains `--host-chain`, `--premine-to`, `--chain-peer` and
-/// `--policy-module` name: read the same at start and when the operator
-/// changes them on a running node (`POST /hosted-chains`). Each spec file is
-/// read once, so the paths and specs agree.
+/// The child chains `--host-chain`, `--premine-to`, `--genesis-transactions`,
+/// `--chain-peer` and `--policy-module` name: read the same at start and when
+/// the operator changes them on a running node (`POST /hosted-chains`). Each
+/// spec file is read once, so the paths and specs agree.
 struct HostedChildren {
     var children: [[String]] = []
     var specs: [[String]: ChainSpec] = [:]
     var premineRecipients: [[String]: String] = [:]
+    var genesisTransactions: [[String]: [Transaction]] = [:]
     var seedPeers: [[String]: [PeerEndpoint]] = [:]
     var policyModules: [Data] = []
 
-    init(hostChain: [String], premineTo: [String], chainPeer: [String], policyModule: [String]) throws {
+    init(
+        hostChain: [String], premineTo: [String], genesisTransactions genesisFiles: [String] = [],
+        chainPeer: [String], policyModule: [String]
+    ) throws {
         policyModules = try policyModule.map { try Data(contentsOf: URL(fileURLWithPath: $0)) }
         for entry in hostChain {
             let parts = entry.split(separator: "=", maxSplits: 1).map(String.init)
@@ -338,6 +347,31 @@ struct HostedChildren {
                 throw ValidationError("--premine-to \(entry): \(error)")
             }
             premineRecipients[path] = parts[1]
+        }
+        for entry in genesisFiles {
+            let parts = entry.split(separator: "=", maxSplits: 1).map(String.init)
+            guard parts.count == 2, !parts[1].isEmpty else {
+                throw ValidationError("--genesis-transactions must use chain-path=file.json")
+            }
+            let path = parts[0].split(separator: "/").map(String.init)
+            guard let spec = specs[path] else {
+                throw ValidationError("--genesis-transactions names \(parts[0]), which is not a hosted chain with a spec")
+            }
+            guard genesisTransactions[path] == nil else {
+                throw ValidationError("--genesis-transactions names \(parts[0]) twice")
+            }
+            let transactions: [Transaction]
+            do {
+                transactions = try JSONDecoder().decode(
+                    [SubmitTransactionRequest].self, from: Data(contentsOf: URL(fileURLWithPath: parts[1]))
+                ).map(\.transaction)
+                try NodeRuntime.checkPremine(
+                    spec: spec, to: premineRecipients[path], transactions: transactions, on: path, modules: policyModules
+                )
+            } catch {
+                throw ValidationError("--genesis-transactions \(entry): \(error)")
+            }
+            genesisTransactions[path] = transactions
         }
     }
 }
@@ -422,6 +456,7 @@ protocol OperatorWrites: Sendable {
 struct HostedChainsRequest: Codable, Sendable {
     let hostChain: [String]
     let premineTo: [String]?
+    let genesisTransactions: [String]?
     let chainPeer: [String]?
     let policyModule: [String]?
 }
@@ -453,10 +488,12 @@ extension NodeRuntime: OperatorWrites {
     func hostChains(_ request: HostedChainsRequest) async throws {
         let hosted = try HostedChildren(
             hostChain: request.hostChain, premineTo: request.premineTo ?? [],
+            genesisTransactions: request.genesisTransactions ?? [],
             chainPeer: request.chainPeer ?? [], policyModule: request.policyModule ?? []
         )
         try await host(
             hosted.children, childSpecs: hosted.specs, childPremineRecipients: hosted.premineRecipients,
+            childGenesisTransactions: hosted.genesisTransactions,
             childSeedPeers: hosted.seedPeers, policyModules: hosted.policyModules
         )
     }

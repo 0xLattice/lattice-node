@@ -43,6 +43,9 @@ struct Child: AsyncParsableCommand {
         @Option(help: "The account the genesis pays the spec's premine to. Required when the spec has a premine.")
         var premineTo: String?
 
+        @Option(help: "Signed transactions the genesis carries after its premine: a JSON array of what POST /transactions takes, e.g. the names the chain's creator holds from the start. Each must be signed by its signers, move no coins, and pass the spec's policies.")
+        var genesisTransactions: String?
+
         func run() async throws {
             let layout = rootOption.layout
             var topology = try Topology.load(root: layout.root)
@@ -85,13 +88,22 @@ struct Child: AsyncParsableCommand {
             if premineAmount == 0 && premineTo != nil {
                 throw CtlError("--premine-to names an account, but the spec pays no premine")
             }
+            var genesis: (bytes: Data, transactions: [Transaction])?
+            if let genesisTransactions {
+                let bytes = try Data(contentsOf: URL(fileURLWithPath: genesisTransactions))
+                do {
+                    genesis = (bytes, try JSONDecoder().decode([SubmitTransactionRequest].self, from: bytes).map(\.transaction))
+                } catch {
+                    throw CtlError("--genesis-transactions: \(genesisTransactions) is not a JSON array of transactions: \(error)")
+                }
+            }
             do {
                 try NodeRuntime.checkPremine(
-                    spec: chainSpec, to: premineTo, on: path.split(separator: "/").map(String.init),
-                    modules: Array(modules.values)
+                    spec: chainSpec, to: premineTo, transactions: genesis?.transactions ?? [],
+                    on: path.split(separator: "/").map(String.init), modules: Array(modules.values)
                 )
             } catch {
-                throw CtlError("--premine-to: \(error)")
+                throw CtlError(genesis == nil ? "--premine-to: \(error)" : "the genesis: \(error)")
             }
             // A chain is created once: its spec fixes its genesis.
             guard !(topology.hostedChains ?? []).contains(path),
@@ -110,6 +122,9 @@ struct Child: AsyncParsableCommand {
             // never stands without the recipient its genesis pays.
             if let premineTo {
                 try Data(premineTo.utf8).write(to: layout.premineRecipient(for: path), options: .atomic)
+            }
+            if let genesis {
+                try genesis.bytes.write(to: layout.genesisTransactions(for: path), options: .atomic)
             }
             try encoder.encode(chainSpec).write(to: file, options: .atomic)
             if !modules.isEmpty {

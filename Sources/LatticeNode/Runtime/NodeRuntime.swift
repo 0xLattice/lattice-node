@@ -752,6 +752,7 @@ extension NodeRuntime {
                 next.hostedChildren.filter { core.levels[$0] != nil },
                 childSpecs: next.childSpecs,
                 childPremineRecipients: next.childPremineRecipients,
+                childGenesisTransactions: next.childGenesisTransactions,
                 childSeedPeers: next.childSeedPeers.filter { core.levels[$0.key] != nil },
                 policyModules: next.policyModules
             )
@@ -1518,6 +1519,7 @@ extension NodeRuntime {
                     // until it executes, rather than a rival genesis.
                     genesisSpec: snapshot.bestHeaderTip.isEmpty ? configuration.childSpecs[child] : nil,
                     genesisPremineRecipient: configuration.childPremineRecipients[child],
+                    genesisTransactions: configuration.childGenesisTransactions[child] ?? [],
                     genesisTarget: .max
                 )
             }

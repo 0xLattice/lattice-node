@@ -142,6 +142,109 @@ final class MergedMiningTests: XCTestCase {
         XCTAssertEqual(followed, spec.premineAmount())
     }
 
+    /// A transaction for Alpha's genesis, signed by `key` unless `signed` is
+    /// false.
+    private static func genesisTransaction(
+        _ key: (privateKey: String, publicKey: String), actions: [Action], nonce: UInt64,
+        accountActions: [AccountAction] = [], chainPath: [String] = alpha, signed: Bool = true
+    ) throws -> Transaction {
+        let header = try HeaderImpl(node: TransactionBody(
+            accountActions: accountActions, actions: actions, depositActions: [], receiptActions: [],
+            withdrawalActions: [], signers: [CryptoUtils.createAddress(from: key.publicKey)],
+            nonce: nonce, chainPath: chainPath
+        ))
+        guard signed else { return Transaction(signatures: [:], body: header) }
+        return Transaction(
+            signatures: [key.publicKey: try XCTUnwrap(TransactionSigning.sign(bodyHeader: header, privateKeyHex: key.privateKey))],
+            body: header
+        )
+    }
+
+    /// A child genesis carries its creator's signed transactions after its
+    /// premine, so the chain starts with the state they write; one that is
+    /// unsigned, for another chain, moves coins, or that a policy refuses is
+    /// refused before the chain is created.
+    func testAChildGenesisCarriesItsCreatorsSignedTransactions() async throws {
+        let creator = CryptoUtils.generateKeyPair()
+        let address = CryptoUtils.createAddress(from: creator.publicKey)
+        let claims = [
+            try Self.genesisTransaction(creator, actions: [Action(key: "name/alpha", oldValue: nil, newValue: address)], nonce: 0),
+            try Self.genesisTransaction(creator, actions: [Action(key: "name/support", oldValue: nil, newValue: address)], nonce: 1),
+        ]
+        XCTAssertNoThrow(try NodeRuntime.checkPremine(spec: Self.alphaSpec, to: nil, transactions: claims, on: Self.alpha, modules: []))
+        let refused: [String: Transaction] = [
+            "unsigned": try Self.genesisTransaction(creator, actions: [Action(key: "k", oldValue: nil, newValue: "v")], nonce: 2, signed: false),
+            "another chain": try Self.genesisTransaction(creator, actions: [Action(key: "k", oldValue: nil, newValue: "v")], nonce: 2, chainPath: ["Nexus", "Beta"]),
+            "moves coins": try Self.genesisTransaction(creator, actions: [], nonce: 2, accountActions: [AccountAction(owner: address, delta: 5)]),
+        ]
+        for (why, transaction) in refused {
+            XCTAssertThrowsError(try NodeRuntime.checkPremine(spec: Self.alphaSpec, to: nil, transactions: [transaction], on: Self.alpha, modules: []), why)
+        }
+        // A forged signature: another key's, over the creator's body.
+        let other = CryptoUtils.generateKeyPair()
+        let forged = Transaction(
+            signatures: [other.publicKey: try XCTUnwrap(TransactionSigning.sign(bodyHeader: claims[0].body, privateKeyHex: other.privateKey))],
+            body: claims[0].body
+        )
+        XCTAssertThrowsError(try NodeRuntime.checkPremine(spec: Self.alphaSpec, to: nil, transactions: [forged], on: Self.alpha, modules: []), "signed by someone else")
+        let refuse = Self.policyModule(verdict: 0)
+        let refusing = ChainSpec(
+            maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
+            targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10,
+            wasmPolicies: [WasmPolicyRef(moduleCID: try WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: refuse)).rawCID, scope: .transaction)]
+        )
+        XCTAssertThrowsError(try NodeRuntime.checkPremine(spec: refusing, to: nil, transactions: claims, on: Self.alpha, modules: [refuse]), "a policy refuses it")
+        let small = ChainSpec(
+            maxNumberOfTransactionsPerBlock: 1, maxStateGrowth: 100_000, premine: 0,
+            targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
+        )
+        XCTAssertThrowsError(try NodeRuntime.checkPremine(spec: small, to: nil, transactions: claims, on: Self.alpha, modules: []), "more than a block holds")
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-genesis-transactions-\(UUID().uuidString)", isDirectory: true
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let port = NetworkTransportTestPorts.allocate()
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"], storagePath: directory, privateKeyHex: String(repeating: "6e", count: 32),
+            listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
+            hostedChildren: [Self.alpha], childSpecs: [Self.alpha: Self.alphaSpec],
+            childGenesisTransactions: [Self.alpha: claims]
+        )
+        let overlay = IvyConfig(
+            signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: [],
+            requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        )
+        let runtime = try await NodeRuntime.start(
+            storage: try await NodeStorage.open(configuration: configuration), configuration: configuration, overlay: overlay
+        )
+        addTeardownBlock { await runtime.stop() }
+        let alpha = try XCTUnwrap(runtime.levelReads[Self.alpha])
+        try await eventually("Alpha's genesis is mined") {
+            _ = try await runtime.mineBlock()
+            return await alpha.readSnapshot().tipCID != nil
+        }
+        // The genesis itself, not the tip: mining may have gone past it.
+        let root = await alpha.explorerCanonicalBlockCID(atHeight: 0)
+        let genesis = try XCTUnwrap(root)
+        let carried = await alpha.explorerBlockTransactions(cid: genesis, offset: 0, limit: 10)
+        XCTAssertEqual(carried?.transactions.map(\.signers), [[address], [address]])
+        let resolvedBlock = try await BlockHeader(rawCID: genesis).resolve(fetcher: alpha.storage)
+        let block = try XCTUnwrap(resolvedBlock.node)
+        let resolvedState = try await block.postState.resolve(fetcher: alpha.storage)
+        let state = try XCTUnwrap(resolvedState.node)
+        let resolvedGeneral = try await state.generalState.resolve(
+            paths: [["name/alpha"]: .targeted, ["name/support"]: .targeted], fetcher: alpha.storage
+        )
+        let general = try XCTUnwrap(resolvedGeneral.node)
+        XCTAssertEqual(try general.get(key: "name/alpha"), address)
+        XCTAssertEqual(try general.get(key: "name/support"), address)
+        // The creator's next transaction follows its genesis ones.
+        let next = await alpha.account(owner: address, blockCID: genesis)?.nonce
+        XCTAssertEqual(next, 2)
+    }
+
     /// A spec whose transaction policy refuses the premine's unsigned credit
     /// is refused up front, and a node hosting it anyway never offers that
     /// genesis: mined and then refused, it would leave the chain weighing a

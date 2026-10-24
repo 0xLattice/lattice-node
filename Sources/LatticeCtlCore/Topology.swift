@@ -482,6 +482,12 @@ public struct HostLayout: Sendable {
         root.appendingPathComponent("specs").appendingPathComponent(Self.encoded(path) + ".premine-to")
     }
 
+    /// The signed transactions a hosted child's genesis carries after its
+    /// premine, kept beside the spec.
+    public func genesisTransactions(for path: String) -> URL {
+        root.appendingPathComponent("specs").appendingPathComponent(Self.encoded(path) + ".genesis.json")
+    }
+
     /// The WASM policy modules a hosted child's spec names, one file per
     /// module, kept beside the spec.
     public func policyModules(for path: String) -> URL {

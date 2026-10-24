@@ -184,6 +184,7 @@ func spawnHost(layout: HostLayout) throws {
     let hosted = hostedChainsRequest(layout, topology)
     arguments += hosted.hostChain.flatMap { ["--host-chain", $0] }
     arguments += hosted.premineTo.flatMap { ["--premine-to", $0] }
+    arguments += hosted.genesisTransactions.flatMap { ["--genesis-transactions", $0] }
     arguments += hosted.policyModule.flatMap { ["--policy-module", $0] }
     process.arguments = arguments
     let log = layout.logFile(for: hostProcessName)
@@ -204,6 +205,7 @@ func spawnHost(layout: HostLayout) throws {
 struct HostedChainsRequest: Codable {
     var hostChain: [String] = []
     var premineTo: [String] = []
+    var genesisTransactions: [String] = []
     var chainPeer: [String] = []
     var policyModule: [String] = []
 }
@@ -223,6 +225,10 @@ func hostedChainsRequest(_ layout: HostLayout, _ topology: Topology) -> HostedCh
            let recipient = (try? String(contentsOf: layout.premineRecipient(for: child), encoding: .utf8))?
                .trimmingCharacters(in: .whitespacesAndNewlines), !recipient.isEmpty {
             request.premineTo.append("\(child)=\(recipient)")
+        }
+        let genesis = layout.genesisTransactions(for: child)
+        if manager.fileExists(atPath: spec.path), manager.fileExists(atPath: genesis.path) {
+            request.genesisTransactions.append("\(child)=\(genesis.path)")
         }
         let modules = (try? manager.contentsOfDirectory(
             at: layout.policyModules(for: child), includingPropertiesForKeys: nil

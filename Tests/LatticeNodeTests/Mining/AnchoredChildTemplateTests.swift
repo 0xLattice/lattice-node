@@ -146,7 +146,7 @@ final class AnchoredChildTemplateTests: XCTestCase {
             path: Self.alpha, tipCID: tip, bestHeaderTip: host.alpha.snapshot.bestHeaderTip,
             transactions: transactions, anchor: tree.difficultyAnchor(forBlockHash: tip),
             level: host.alpha, parentTree: parentTree,
-            genesisSpec: nil, genesisPremineRecipient: nil, genesisTarget: .max
+            genesisSpec: nil, genesisPremineRecipient: nil, genesisTransactions: [], genesisTarget: .max
         )
     }
 
