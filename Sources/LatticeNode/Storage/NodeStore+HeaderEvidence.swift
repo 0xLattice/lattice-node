@@ -1,5 +1,4 @@
 import Foundation
-import Synchronization
 import Lattice
 import LatticeNodeCore
 import cashew
@@ -86,7 +85,10 @@ extension NodeStore {
                     proofs[saved.child, default: []].append(saved.proof)
                 } else if let rowid = try? row.int("rowid") {
                     bad.append(rowid)
-                    reportBadProof(at: path, (try? row.text("child")) ?? "?", (try? row.text("root")) ?? "?")
+                    SyncTrace.log(
+                        chain: path,
+                        "saved proof unreadable, left out: block=\((try? row.text("child")) ?? "?") root=\((try? row.text("root")) ?? "?")"
+                    )
                 }
             }
         }
@@ -104,36 +106,22 @@ extension NodeStore {
         return (child, proof)
     }
 
-    /// Best effort: delete each row that still does not read back as its
-    /// proof (a good copy may have replaced its bytes since).
+    /// Best effort: delete each row of `path` that still does not read back
+    /// as its proof (a good copy may have replaced its bytes since, and a
+    /// deleted rowid can be reused by another chain's row).
     private func dropBadProofs(_ rowids: [Int64], at path: ChainPath) {
+        let chain = path.joined(separator: "/")
         for rowid in rowids {
             guard let row = try? database.row(
                 from: "child_proofs",
-                "SELECT rowid, child, root, bytes FROM child_proofs WHERE rowid = ?1",
-                params: [.int(rowid)]
+                "SELECT rowid, child, root, bytes FROM child_proofs WHERE rowid = ?1 AND chain = ?2",
+                params: [.int(rowid), .text(chain)]
             ), Self.savedProof(row, at: path) == nil else { continue }
-            _ = try? database.execute("DELETE FROM child_proofs WHERE rowid = ?1", params: [.int(rowid)])
+            _ = try? database.execute(
+                "DELETE FROM child_proofs WHERE rowid = ?1 AND chain = ?2",
+                params: [.int(rowid), .text(chain)]
+            )
         }
-    }
-
-    /// Each bad row is logged once, per store, for as many rows as
-    /// `badProofsReported` remembers; past that, every 1,024th further row
-    /// logs how many more there were.
-    private static let badProofsReported = Mutex<(rows: Set<String>, more: Int)>(([], 0))
-
-    private nonisolated func reportBadProof(at path: ChainPath, _ child: String, _ root: String) {
-        let key = "\(ObjectIdentifier(self))\u{0}\(path)\u{0}\(child)\u{0}\(root)"
-        let line: String? = Self.badProofsReported.withLock { reported in
-            if reported.rows.contains(key) { return nil }
-            if reported.rows.count < 1_024 {
-                reported.rows.insert(key)
-                return "saved proof unreadable, left out and deleted: block=\(child) root=\(root)"
-            }
-            reported.more += 1
-            return reported.more % 1_024 == 0 ? "\(reported.more) more bad saved proof rows" : nil
-        }
-        if let line { SyncTrace.log(chain: path, line) }
     }
 
     nonisolated func header(_ cid: String) -> (block: Block, children: FlatDictionary<BlockHeader>)? {
