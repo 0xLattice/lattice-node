@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Lattice
 import LatticeNodeCore
 import cashew
@@ -57,35 +58,56 @@ extension NodeStore {
 
     /// The saved proofs of `children` at `path`, each block's ordered by
     /// root; a block with none is absent. Read on demand, never held: one
-    /// primary-key range read per chunk of blocks.
-    nonisolated func savedProofs(at path: ChainPath, for children: [String]) throws -> [String: [ChildBlockProof]] {
+    /// primary-key range read per chunk of blocks. A row that does not read
+    /// back as its proof is absent, like an unreadable header: unavailable,
+    /// not invalid, so the network can still supply it.
+    nonisolated func savedProofs(at path: ChainPath, for children: [String]) -> [String: [ChildBlockProof]] {
         var proofs: [String: [ChildBlockProof]] = [:]
+        guard path.count > 1, ChainAddress(path) != nil else { return proofs }
         let chain = path.joined(separator: "/")
         var start = children.startIndex
         while start < children.endIndex {
             let chunk = children[start..<min(start + 500, children.endIndex)]
             start = chunk.endIndex
             let marks = (2...(chunk.count + 1)).map { "?\($0)" }.joined(separator: ", ")
-            for row in try database.rows(
-                from: "child_proofs",
-                "SELECT child, root, bytes FROM child_proofs WHERE chain = ?1 AND child IN (\(marks)) ORDER BY child, root",
-                params: [.text(chain)] + chunk.map { .text($0) }
-            ) {
-                guard let proof = ChildBlockProof.deserialize(try row.blob("bytes")) else {
-                    throw NodeStoreError.corrupt("a saved child proof does not deserialize")
+            let rows: [Row]
+            do {
+                rows = try database.rows(
+                    from: "child_proofs",
+                    "SELECT child, root, bytes FROM child_proofs WHERE chain = ?1 AND child IN (\(marks)) ORDER BY child, root",
+                    params: [.text(chain)] + chunk.map { .text($0) }
+                )
+            } catch {
+                SyncTrace.log(chain: path, "saved proofs unreadable: \(error)")
+                continue
+            }
+            for row in rows {
+                guard let child = try? row.nonEmptyText("child"), let root = try? row.nonEmptyText("root") else {
+                    Self.reportBadProof(path, "?", "?")
+                    continue
                 }
-                let child = try row.nonEmptyText("child")
-                let root = try row.nonEmptyText("root")
-                guard path.count > 1, ChainAddress(path) != nil,
+                guard let proof = (try? row.blob("bytes")).flatMap(ChildBlockProof.deserialize),
                       CIDIdentity.isCanonical(child), CIDIdentity.isCanonical(root),
                       proof.directoryPath == Array(path.dropFirst()),
                       proof.rootCID == root else {
-                    throw NodeStoreError.corrupt("a saved child proof does not match its index")
+                    Self.reportBadProof(path, child, root)
+                    continue
                 }
                 proofs[child, default: []].append(proof)
             }
         }
         return proofs
+    }
+
+    /// Each bad saved-proof row is logged once, for as many rows as
+    /// `badProofsReported` remembers.
+    private static let badProofsReported = Mutex<Set<String>>([])
+
+    private static func reportBadProof(_ path: ChainPath, _ child: String, _ root: String) {
+        let first = badProofsReported.withLock { reported in
+            reported.count < 1_024 && reported.insert("\(path)\u{0}\(child)\u{0}\(root)").inserted
+        }
+        if first { SyncTrace.log(chain: path, "saved proof unreadable, treated as absent: block=\(child) root=\(root)") }
     }
 
     nonisolated func header(_ cid: String) -> (block: Block, children: FlatDictionary<BlockHeader>)? {

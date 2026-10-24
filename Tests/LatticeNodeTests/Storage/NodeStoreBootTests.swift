@@ -182,7 +182,7 @@ final class NodeStoreBootTests: XCTestCase {
         XCTAssertTrue(staged.isEmpty)
         let logID = try await store.chainLogID()
         XCTAssertNil(logID)
-        XCTAssertTrue(try store.savedProofs(at: ["Nexus", "Alpha"], for: [alphaProof.childCID]).isEmpty)
+        XCTAssertTrue(store.savedProofs(at: ["Nexus", "Alpha"], for: [alphaProof.childCID]).isEmpty)
     }
 
     func testAChildProofCommitsWithItsStepAndSurvivesReopen() async throws {
@@ -218,48 +218,39 @@ final class NodeStoreBootTests: XCTestCase {
         // Past one query chunk, with blocks that have no proofs.
         let asked = (0..<600).map { "absent-\($0)" } + [other, alphaProof.childCID]
         let expected = [other: [lowRoot, highRoot], alphaProof.childCID: [alphaProof.proof.rootCID]]
-        XCTAssertEqual(try store.savedProofs(at: alpha, for: asked).mapValues { $0.map(\.rootCID) }, expected)
+        XCTAssertEqual(store.savedProofs(at: alpha, for: asked).mapValues { $0.map(\.rootCID) }, expected)
         let reopened = try self.store(path)
-        XCTAssertEqual(try reopened.savedProofs(at: alpha, for: asked).mapValues { $0.map(\.rootCID) }, expected)
-        XCTAssertTrue(try reopened.savedProofs(at: ["Nexus", "Beta"], for: asked).isEmpty)
+        XCTAssertEqual(reopened.savedProofs(at: alpha, for: asked).mapValues { $0.map(\.rootCID) }, expected)
+        XCTAssertTrue(reopened.savedProofs(at: ["Nexus", "Beta"], for: asked).isEmpty)
     }
 
-    func testCorruptSavedChildProofFailsToLoad() throws {
-        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
-        let store = try store(path)
-        let database = try NodeSQLite(path: path.path)
-        _ = try database.execute(
-            "INSERT INTO child_proofs (chain, child, root, bytes) VALUES (?1, ?2, ?3, ?4)",
-            params: [
-                .text("Nexus/Alpha"), .text("child"), .text("root"),
-                .blob(Data("not a proof".utf8)),
-            ]
-        )
+    /// A saved-proof row that does not read back as its proof is absent,
+    /// never a failure: the block's good proofs are still served, and the
+    /// network can still supply the missing one.
+    func testACorruptSavedChildProofIsAbsent() throws {
+        try expectBadRowAbsent { _ in Data("not a proof".utf8) }
+    }
 
-        XCTAssertThrowsError(try store.savedProofs(at: ["Nexus", "Alpha"], for: ["child"])) { error in
-            guard case NodeStoreError.corrupt = error else { return XCTFail("got \(error)") }
+    func testASavedChildProofThatDoesNotMatchItsIndexIsAbsent() throws {
+        try expectBadRowAbsent { _ in
+            try ChildBlockProof(rootCID: NexusGenesis.expectedBlockHash, directoryPath: ["Alpha"], entries: []).serialize()
         }
     }
 
-    func testSavedChildProofMustMatchItsIndex() throws {
+    private func expectBadRowAbsent(_ badBytes: (String) throws -> Data) throws {
         let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         let store = try store(path)
         let database = try NodeSQLite(path: path.path)
-        let proof = ChildBlockProof(
-            rootCID: NexusGenesis.expectedBlockHash,
-            directoryPath: ["Alpha"],
-            entries: []
-        )
-        _ = try database.execute(
-            "INSERT INTO child_proofs (chain, child, root, bytes) VALUES (?1, ?2, ?3, ?4)",
-            params: [
-                .text("Nexus/Alpha"), .text("child"), .text("wrong-root"),
-                .blob(try proof.serialize()),
-            ]
-        )
-
-        XCTAssertThrowsError(try store.savedProofs(at: ["Nexus", "Alpha"], for: ["child"])) { error in
-            guard case NodeStoreError.corrupt = error else { return XCTFail("got \(error)") }
+        func cid(_ seed: String) throws -> String { try HeaderImpl<PublicKey>(node: PublicKey(key: seed)).rawCID }
+        let (child, goodRoot, badRoot) = (try cid("child"), NexusGenesis.expectedBlockHash, try cid("bad root"))
+        let good = ChildBlockProof(rootCID: goodRoot, directoryPath: ["Alpha"], entries: [])
+        for (root, bytes) in [(goodRoot, try good.serialize()), (badRoot, try badBytes(badRoot))] {
+            _ = try database.execute(
+                "INSERT INTO child_proofs (chain, child, root, bytes) VALUES (?1, ?2, ?3, ?4)",
+                params: [.text("Nexus/Alpha"), .text(child), .text(root), .blob(bytes)]
+            )
         }
+        let saved = store.savedProofs(at: ["Nexus", "Alpha"], for: [child])
+        XCTAssertEqual(saved.mapValues { $0.map(\.rootCID) }, [child: [goodRoot]])
     }
 }

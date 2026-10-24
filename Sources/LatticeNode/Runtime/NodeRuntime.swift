@@ -1297,7 +1297,8 @@ extension NodeRuntime {
                 await outbox.send(to: session.peer, topic: frame.topic, payload: frame.payload)
             case .serveHeaders(let peer, let token, let requestID, let blockCIDs, let hasMore):
                 guard let session = session(peer) else { break }
-                let (storage, outbox, inputs, config, failStop) = (storage, outbox, inputs, core.config, failStop)
+                let (storage, outbox, inputs, config) = (storage, outbox, inputs, core.config)
+                let carriesProofs = path.count > 1
                 spawn {
                     // Built up to a page, or for as long as the serving
                     // budget allows, and no further: the work is the
@@ -1307,18 +1308,18 @@ extension NodeRuntime {
                     var entries: [HeaderEntry] = []
                     var (bytes, cut) = (0, false)
                     // A child header carries its saved proofs, read from the
-                    // store a chunk of the page at a time.
+                    // store just ahead of the page, in chunks growing to 256,
+                    // so a page cut short reads little past its cut. Read
+                    // off the loop, a proof whose staging transaction has
+                    // not committed may show, as headers may: it was
+                    // verified before persist, and the peer verifies it again.
                     var proofs: [String: [ChildBlockProof]] = [:]
+                    var (readTo, chunk) = (0, 16)
                     for (offset, cid) in blockCIDs.enumerated() {
-                        if offset % 256 == 0 {
-                            do {
-                                proofs = try storage.store.savedProofs(
-                                    at: path, for: Array(blockCIDs[offset..<min(offset + 256, blockCIDs.count)])
-                                )
-                            } catch {
-                                failStop(error)
-                                return
-                            }
+                        if carriesProofs, offset == readTo {
+                            readTo = min(offset + chunk, blockCIDs.count)
+                            chunk = min(chunk * 2, 256)
+                            proofs = storage.store.savedProofs(at: path, for: Array(blockCIDs[offset..<readTo]))
                         }
                         guard let stored = await storage.chainHeader(cid) else { continue }
                         let spec = stored.block.parent == nil
@@ -1404,16 +1405,15 @@ extension NodeRuntime {
                 executionJobs.append(NodeRuntime.readJob(blocks, at: path, storage: storage))
                 startJobs()
             case .lookupProofs(let cids):
-                let found: [String: [ChildBlockProof]]
-                do {
-                    found = try storage.store.savedProofs(at: path, for: cids)
-                } catch {
-                    failStop(error)
-                    return false
-                }
-                for cid in cids {
-                    guard let roots = found[cid] else { continue }
-                    inputs.yield(.event(.level(path, .proofsFound(childCID: cid, roots))))
+                // Read off the loop, as a served page is; each block's
+                // proofs come back as an event, in the order asked.
+                let (storage, inputs) = (storage, inputs)
+                spawn {
+                    let found = storage.store.savedProofs(at: path, for: cids)
+                    for cid in cids {
+                        guard let roots = found[cid] else { continue }
+                        inputs.yield(.event(.level(path, .proofsFound(childCID: cid, roots))))
+                    }
                 }
             case .mining(let effect):
                 return await execute(effect, at: path)
