@@ -240,30 +240,19 @@ public struct NodeCore: Sendable {
         logID: String = "",
         cursors: [ChainPath: [String: StreamCursor]] = [:]
     ) throws -> NodeCore {
-        var host = NodeCore(
-            root: restoredRoot.tree,
-            hosted: hosted,
-            pins: pins,
-            config: config,
-            logID: logID,
-            rootLog: restoredRoot.sync.log.entries,
-            rootCursors: cursors[restoredRoot.chainPath] ?? [:]
+        var host = restoring(
+            root: restoredRoot, hosted: hosted, pins: pins, config: config, logID: logID, cursors: cursors
         )
-        // Parent before child: each restores over its restored parent.
         for path in host.ordered where path != host.rootPath {
-            // The restored parent serves this level's runs (the empty one
-            // `init` served is gone).
-            guard host.serve(path), let parent = host.levels[Array(path.dropLast())] else { continue }
-            host.levels[path] = try host.restoreLevel(
-                path, parent: parent, facts: facts[path] ?? [], specs: specs[path] ?? [], cursors: cursors[path] ?? [:]
-            )
+            try host.restoreChild(path, facts: facts[path] ?? [], specs: specs[path] ?? [], cursors: cursors[path] ?? [:])
         }
         return host
     }
 
     /// Rebuild a host over its already restored root level, reading each
     /// hosted child level's facts and specs from `level` only as that level
-    /// is restored, parent before child.
+    /// is restored, parent before child: one level's facts are held at a
+    /// time.
     public static func restore(
         root restoredRoot: ChainCore,
         hosted: Set<ChainPath>,
@@ -272,22 +261,44 @@ public struct NodeCore: Sendable {
         cursors: [ChainPath: [String: StreamCursor]] = [:],
         level: (ChainPath) async throws -> (facts: [BlockImportBatch], specs: [ChainSpec])
     ) async throws -> NodeCore {
-        var host = NodeCore(
+        var host = restoring(root: restoredRoot, hosted: hosted, config: config, logID: logID, cursors: cursors)
+        for path in host.ordered where path != host.rootPath {
+            let (facts, specs) = try await level(path)
+            try host.restoreChild(path, facts: facts, specs: specs, cursors: cursors[path] ?? [:])
+        }
+        return host
+    }
+
+    /// A host over its restored root level, its child levels as `init`
+    /// leaves them until `restoreChild` restores each.
+    private static func restoring(
+        root restoredRoot: ChainCore,
+        hosted: Set<ChainPath>,
+        pins: [ChainPath: String] = [:],
+        config: ChainCoreConfig,
+        logID: String,
+        cursors: [ChainPath: [String: StreamCursor]]
+    ) -> NodeCore {
+        NodeCore(
             root: restoredRoot.tree,
             hosted: hosted,
+            pins: pins,
             config: config,
             logID: logID,
             rootLog: restoredRoot.sync.log.entries,
             rootCursors: cursors[restoredRoot.chainPath] ?? [:]
         )
-        for path in host.ordered where path != host.rootPath {
-            guard host.serve(path), let parent = host.levels[Array(path.dropLast())] else { continue }
-            let (facts, specs) = try await level(path)
-            host.levels[path] = try host.restoreLevel(
-                path, parent: parent, facts: facts, specs: specs, cursors: cursors[path] ?? [:]
-            )
-        }
-        return host
+    }
+
+    /// One child level restored over its restored parent, parent before
+    /// child. `init` runs only the hosted levels whose parent it runs.
+    private mutating func restoreChild(
+        _ path: ChainPath, facts: [BlockImportBatch], specs: [ChainSpec], cursors: [String: StreamCursor]
+    ) throws {
+        // The restored parent serves this level's runs (the empty one
+        // `init` served is gone).
+        guard serve(path), let parent = levels[Array(path.dropLast())] else { return }
+        levels[path] = try restoreLevel(path, parent: parent, facts: facts, specs: specs, cursors: cursors)
     }
 
     /// One child level over its journaled facts and its restored parent.

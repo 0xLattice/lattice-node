@@ -89,6 +89,28 @@ final class NodeStoreBootTests: XCTestCase {
         }
     }
 
+    /// Boot and a hot-hosted start read one level's journal in seq order
+    /// straight off an index: SQLite never sorts (or spills) the level's
+    /// payloads before the first row.
+    func testALevelsJournalIsReadInIndexOrderWithoutASort() async throws {
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
+        let store = try store(path)
+        for (index, level) in [["Nexus"], ["Nexus", "Alpha"], ["Nexus"], ["Nexus", "Alpha"]].enumerated() {
+            try await store.stageChainFacts(
+                [blockBatch("block-\(index)")], volumeRoots: [], logID: "log", at: level
+            )
+        }
+        let database = try NodeSQLite(path: path.path)
+        _ = try database.execute("ANALYZE")
+        let plan = try database.query(
+            "EXPLAIN QUERY PLAN " + NodeStore.levelBatchesSQL, params: [.text("Nexus/Alpha")]
+        ).compactMap { $0["detail"]?.textValue }.joined(separator: "\n")
+        XCTAssertFalse(plan.contains("TEMP B-TREE"), plan)
+        XCTAssertTrue(plan.contains("admission_batches_by_level"), plan)
+        let batches = try await store.importBatches(at: ["Nexus", "Alpha"])
+        XCTAssertEqual(batches, [blockBatch("block-1"), blockBatch("block-3")])
+    }
+
     func testStreamCursorsCommitWithFactsAndSurviveReopen() async throws {
         let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         let initial = try store(path)

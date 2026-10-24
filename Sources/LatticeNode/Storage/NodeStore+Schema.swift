@@ -107,6 +107,11 @@ extension NodeStore {
         try database.execute(
             "CREATE INDEX IF NOT EXISTS accepted_blocks_frontier ON accepted_blocks (chain_path, admission_seq DESC, block_cid DESC) WHERE leaf = 1"
         )
+        // One level's journal in order (boot and a hot-hosted start): read
+        // in index order, never sorted in a temp B-tree first.
+        try database.execute(
+            "CREATE INDEX IF NOT EXISTS admission_batches_by_level ON admission_batches (chain_path, seq)"
+        )
     }
 
     private static func createDataTables(in database: NodeSQLite) throws {

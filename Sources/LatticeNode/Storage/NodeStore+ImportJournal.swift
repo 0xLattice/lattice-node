@@ -49,13 +49,19 @@ extension NodeStore {
         try !database.query("SELECT 1 FROM admission_batches LIMIT 1").isEmpty
     }
 
+    /// Read through `admission_batches_by_level`, in its order. Named: the
+    /// planner otherwise prefers the covering (chain_path, payload) unique
+    /// index and sorts the whole level's payloads before the first row.
+    static let levelBatchesSQL =
+        "SELECT payload FROM admission_batches INDEXED BY admission_batches_by_level WHERE chain_path = ?1 ORDER BY seq ASC"
+
     /// One level's journaled batches, in order, each decoded as its row is
     /// read: the journal is never held as rows, and no other level's batches
     /// are read.
     func importBatches(at chainPath: [String]) throws -> [BlockImportBatch] {
         var batches: [BlockImportBatch] = []
         try database.forEach(
-            "SELECT payload FROM admission_batches WHERE chain_path = ?1 ORDER BY seq ASC",
+            Self.levelBatchesSQL,
             params: [.text(chainPath.joined(separator: "/"))]
         ) { row in
             guard let payload = row.blob(0) else {

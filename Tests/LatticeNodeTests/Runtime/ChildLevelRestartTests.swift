@@ -4,6 +4,7 @@ import LatticeNodeCore
 import UInt256
 import XCTest
 import cashew
+@testable import LatticeBlockTree
 @testable import LatticeNode
 
 /// A hosted child level across a restart: a child genesis weighed by its
@@ -12,7 +13,7 @@ import cashew
 final class ChildLevelRestartTests: XCTestCase {
     private let alpha = ["Nexus", "Alpha"]
 
-    private func configuration() throws -> NodeConfiguration {
+    private func configuration(hosting hosted: [ChainPath]? = nil) throws -> NodeConfiguration {
         let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-child-restart-\(UUID().uuidString)", isDirectory: true
         )
@@ -21,7 +22,7 @@ final class ChildLevelRestartTests: XCTestCase {
             chainPath: ["Nexus"], storagePath: storageDirectory,
             privateKeyHex: String(repeating: "3a", count: 32),
             listenPort: NetworkTransportTestPorts.allocate(), rpcPort: NetworkTransportTestPorts.allocate(),
-            hostedChildren: [alpha]
+            hostedChildren: hosted ?? [alpha]
         )
     }
 
@@ -81,10 +82,40 @@ final class ChildLevelRestartTests: XCTestCase {
     }
 
     /// Boot reads one level's journal at a time; what it restores is what
-    /// replaying the whole journal at once restores.
+    /// replaying the whole journal at once restores. Two hosted children, a
+    /// hosted grandchild under a hosted child, stream cursors, and a
+    /// journaled grandchild whose middle level is not hosted: configuration
+    /// cannot host it, and the restore never asks for its rows even when
+    /// told it is hosted.
     func testAPerLevelBootRestoresWhatTheWholeJournalDoes() async throws {
-        let configuration = try configuration()
-        _ = try await weighChildGenesis(configuration)
+        let beta = ["Nexus", "Beta"]
+        let leaf = ["Nexus", "Alpha", "Leaf"]
+        let orphan = ["Nexus", "Gamma", "Delta"]
+        let configuration = try configuration(hosting: [alpha, beta, leaf])
+        let geneses = try await weighChildGeneses(["Alpha", "Beta"], configuration)
+        let store = try await NodeStorage.open(configuration: configuration).store
+        let storedLogID = try await store.chainLogID()
+        let logID = try XCTUnwrap(storedLogID)
+        try await store.stageNodeFacts([
+            NodeFactBatch(
+                path: ["Nexus"], facts: [], volumeRoots: [],
+                cursors: ["peer-a": StreamCursor(logID: "remote", position: 3)]
+            ),
+            NodeFactBatch(
+                path: alpha, facts: [], volumeRoots: [],
+                cursors: ["peer-a": StreamCursor(logID: "remote", position: 1), "peer-b": StreamCursor(logID: "", position: 0)]
+            ),
+            NodeFactBatch(
+                path: orphan,
+                facts: [BlockImportBatch(facts: [.block(ChainBlockFact(
+                    blockHash: "orphan-genesis", parentBlockHash: nil, blockHeight: 0, postStateCID: "state",
+                    prevStateCID: "previous-state", specCID: "spec", target: "target", nextTarget: "next-target",
+                    timestamp: 0, stateDiff: .empty
+                ))])],
+                volumeRoots: [], cursors: [:]
+            ),
+        ], logID: logID)
+
         let reopened = try await NodeStorage.open(configuration: configuration)
         let restored = try await NodeRuntime.boot(
             storage: reopened, configuration: configuration, coreConfig: .init()
@@ -92,29 +123,56 @@ final class ChildLevelRestartTests: XCTestCase {
 
         let journal = Dictionary(grouping: try await reopened.store.stagedImports(), by: \.chainPath)
             .mapValues { $0.map(\.batch) }
+        XCTAssertNotNil(journal[orphan], "fixture guard: the unrestored level's rows are journaled")
         var specs: [ChainPath: [ChainSpec]] = [:]
-        for case .block(let block) in (journal[alpha] ?? []).flatMap(\.facts) where block.parentBlockHash == nil {
-            let spec = try await reopened.chainGenesisSpec(block.blockHash)
-            specs[alpha, default: []].append(try XCTUnwrap(spec))
+        for path in [alpha, beta] {
+            for case .block(let block) in (journal[path] ?? []).flatMap(\.facts) where block.parentBlockHash == nil {
+                let spec = try await reopened.chainGenesisSpec(block.blockHash)
+                specs[path, default: []].append(try XCTUnwrap(spec))
+            }
         }
-        let cursors = [
-            ["Nexus"]: try await reopened.chainCursors(at: ["Nexus"]),
-            alpha: try await reopened.chainCursors(at: alpha),
-        ]
+        var cursors: [ChainPath: [String: StreamCursor]] = [:]
+        for path in [["Nexus"], alpha, beta, leaf, orphan] {
+            cursors[path] = try await reopened.chainCursors(at: path)
+        }
+        XCTAssertEqual(cursors[alpha]?.count, 2, "fixture guard: cursors are journaled")
         let whole = try NodeCore.restore(
             root: try ChainCore.restore(
                 replaying: journal[["Nexus"]] ?? [], context: try configuration.runtimeContext,
                 specs: [NexusGenesis.spec], cursors: cursors[["Nexus"]] ?? [:]
             ),
-            facts: journal, specs: specs, hosted: [alpha],
-            logID: try await reopened.chainLogID() ?? "", cursors: cursors
+            facts: journal, specs: specs, hosted: [alpha, beta, leaf],
+            logID: logID, cursors: cursors
         )
+
+        // The level-at-a-time restore asks for each restored level once,
+        // parent before child, and never for a level whose parent it does
+        // not run.
+        var asked: [ChainPath] = []
+        let skipping = try await NodeCore.restore(
+            root: try ChainCore.restore(
+                replaying: journal[["Nexus"]] ?? [], context: try configuration.runtimeContext,
+                specs: [NexusGenesis.spec]
+            ),
+            hosted: [alpha, beta, leaf, orphan]
+        ) { path in
+            asked.append(path)
+            return (journal[path] ?? [], specs[path] ?? [])
+        }
+        XCTAssertEqual(asked, [alpha, beta, leaf])
+        XCTAssertNil(skipping.levels[orphan])
+
+        XCTAssertEqual(Set(restored.levels.keys), [["Nexus"], alpha, beta, leaf])
         XCTAssertEqual(Set(restored.levels.keys), Set(whole.levels.keys))
+        XCTAssertTrue(restored.levels[alpha]?.tree.contains(blockHash: geneses[0]) ?? false)
+        XCTAssertTrue(restored.levels[beta]?.tree.contains(blockHash: geneses[1]) ?? false)
+        XCTAssertEqual(restored.levels[alpha]?.sync.cursors.count, 2)
         for (path, level) in whole.levels {
-            XCTAssertEqual(restored.levels[path]?.snapshot, level.snapshot, "level \(path)")
-            XCTAssertEqual(
-                restored.levels[path]?.sync.log.entries.count, level.sync.log.entries.count, "log \(path)"
-            )
+            let mine = try XCTUnwrap(restored.levels[path], "level \(path)")
+            XCTAssertEqual(mine.snapshot, level.snapshot, "snapshot \(path)")
+            XCTAssertEqual(mine.sync.log.id, level.sync.log.id, "log id \(path)")
+            XCTAssertEqual(mine.sync.log.entries, level.sync.log.entries, "log entries \(path)")
+            XCTAssertEqual(mine.sync.cursors, level.sync.cursors, "cursors \(path)")
         }
     }
 
@@ -167,27 +225,37 @@ final class ChildLevelRestartTests: XCTestCase {
     }
 
     private func weighChildGenesis(_ configuration: NodeConfiguration) async throws -> String {
+        try await weighChildGeneses(["Alpha"], configuration)[0]
+    }
+
+    /// One Nexus block carrying a genesis for each of `names` (Nexus
+    /// children), weighed by its proof and persisted as the runtime persists
+    /// it. The genesis CIDs, in `names` order.
+    private func weighChildGeneses(_ names: [String], _ configuration: NodeConfiguration) async throws -> [String] {
         let storage = try await NodeStorage.open(configuration: configuration)
         var host = try await NodeRuntime.boot(
             storage: storage, configuration: configuration, coreConfig: .init()
         )
 
-        // A Nexus block carrying Alpha's genesis, which commits the carrier's
-        // entering state.
+        // A Nexus block carrying each child's genesis, which commits the
+        // carrier's entering state.
         // The storage holds the Nexus genesis content since its first boot.
         let content = storage
         let storer = NodeImportStorage(storage: await storage.broker)
         let nexusGenesis = try await NexusGenesis.create(fetcher: content).block
-        let spec = ChainSpec(
-            maxNumberOfTransactionsPerBlock: 10, maxStateGrowth: 100_000, premine: 0,
-            targetBlockTime: 1_000, initialReward: 1, halvingInterval: 10_000, halfLife: 10
-        )
-        let childGenesis = try await BlockBuilder.buildChildGenesis(
-            spec: spec, parentState: nexusGenesis.postState,
-            timestamp: nexusGenesis.timestamp + 1, target: .max, fetcher: content
-        )
+        var geneses: [String: Block] = [:]
+        for (index, name) in names.enumerated() {
+            let spec = ChainSpec(
+                maxNumberOfTransactionsPerBlock: 10, maxStateGrowth: 100_000, premine: UInt64(index),
+                targetBlockTime: 1_000, initialReward: 1, halvingInterval: 10_000, halfLife: 10
+            )
+            geneses[name] = try await BlockBuilder.buildChildGenesis(
+                spec: spec, parentState: nexusGenesis.postState,
+                timestamp: nexusGenesis.timestamp + 1, target: .max, fetcher: content
+            )
+        }
         var carrier = try await BlockBuilder.buildBlock(
-            previous: nexusGenesis, children: ["Alpha": childGenesis],
+            previous: nexusGenesis, children: geneses,
             timestamp: nexusGenesis.timestamp + 1_000, fetcher: content
         )
         var nonce: UInt64 = 0
@@ -203,25 +271,36 @@ final class ChildLevelRestartTests: XCTestCase {
         }
         try await BlockHeader(node: carrier).storeBlock(fetcher: content, storer: storer)
         try await storer.commit()
-        let proof = try await ChildBlockProof.generate(
-            rootHeader: BlockHeader(node: carrier), childDirectory: "Alpha", fetcher: content
-        )
-        let evidence = try await proof.verifySecuringWork(child: childGenesis, chainPath: alpha).get()
         let rootResolved = try await carrier.children.resolve(fetcher: content).node
-        let childResolved = try await childGenesis.children.resolve(fetcher: content).node
         let rootChildren = try XCTUnwrap(rootResolved)
-        let childChildren = try XCTUnwrap(childResolved)
+        var carried: [MinedGrind.Carried] = []
+        for name in names {
+            let childGenesis = try XCTUnwrap(geneses[name])
+            let path = ["Nexus", name]
+            let proof = try await ChildBlockProof.generate(
+                rootHeader: BlockHeader(node: carrier), childDirectory: name, fetcher: content
+            )
+            let evidence = try await proof.verifySecuringWork(child: childGenesis, chainPath: path).get()
+            let childResolved = try await childGenesis.children.resolve(fetcher: content).node
+            carried.append(.init(
+                path: path, block: childGenesis, children: try XCTUnwrap(childResolved),
+                proof: proof, evidence: evidence
+            ))
+        }
 
         // One grind, persisted as the runtime persists it.
-        let effects = host.step(.mined(MinedGrind(root: carrier, rootChildren: rootChildren, carried: [
-            .init(path: alpha, block: childGenesis, children: childChildren, proof: proof, evidence: evidence),
-        ])), now: carrier.timestamp + 1)
+        let effects = host.step(
+            .mined(MinedGrind(root: carrier, rootChildren: rootChildren, carried: carried)),
+            now: carrier.timestamp + 1
+        )
         for case .persist(let batch) in effects {
             try await storage.persistNodeBatch(batch, logID: host.logID)
         }
-        let genesisCID = try BlockHeader(node: childGenesis).rawCID
-        XCTAssertTrue(host.levels[alpha]?.tree.contains(blockHash: genesisCID) ?? false)
-        XCTAssertFalse(host.levels[alpha]?.tree.isExecuted(blockHash: genesisCID) ?? true)
-        return genesisCID
+        return try names.map { name in
+            let genesisCID = try BlockHeader(node: XCTUnwrap(geneses[name])).rawCID
+            XCTAssertTrue(host.levels[["Nexus", name]]?.tree.contains(blockHash: genesisCID) ?? false)
+            XCTAssertFalse(host.levels[["Nexus", name]]?.tree.isExecuted(blockHash: genesisCID) ?? true)
+            return genesisCID
+        }
     }
 }
