@@ -439,16 +439,7 @@ public struct Mempool: Sendable {
             return lhs == rhs ? 0 : lhs > rhs ? 1 : -1
         }
 
-        /// One entry; only a `.ready` entry's surplus is funding-checked.
-        init(_ entry: Entry) {
-            self.init(members: [entry.cid], fee: entry.disposition == .ready ? entry.minerSurplus : .zero, size: entry.size)
-        }
-
         var tip: String { members.last ?? "" }
-
-        func merged(with later: Chunk) -> Chunk {
-            Chunk(members: members + later.members, fee: fee + later.fee, size: size + later.size)
-        }
     }
 
     /// A selectable run: its counted entries, its best package, and which
@@ -479,18 +470,21 @@ public struct Mempool: Sendable {
     /// entry has the smaller CID, among prefixes not ending at a skipped
     /// entry. Nil when every prefix ends at one.
     private static func bestPrefix(_ rest: [Entry], skipping skipped: Set<String> = []) -> Chunk? {
+        // Sums only while scanning; the best prefix's members are taken once.
         var prefix = Chunk(members: [], fee: .zero, size: 0)
-        var best: Chunk?
-        for entry in rest {
-            prefix = prefix.merged(with: Chunk(entry))
+        var best: (end: Int, fee: WorkSum, size: Int)?
+        for (index, entry) in rest.enumerated() {
+            // Only a `.ready` entry's surplus is funding-checked.
+            let fee = entry.disposition == .ready ? entry.minerSurplus : .zero
+            prefix = Chunk(members: [], fee: prefix.fee + fee, size: prefix.size + entry.size)
             guard !skipped.contains(entry.cid) else { continue }
             if let current = best {
-                let order = prefix.rate(comparedTo: current)
-                guard order > 0 || (order == 0 && entry.cid < current.tip) else { continue }
+                let order = prefix.rate(comparedTo: Chunk(members: [], fee: current.fee, size: current.size))
+                guard order > 0 || (order == 0 && entry.cid < rest[current.end].cid) else { continue }
             }
-            best = prefix
+            best = (index, prefix.fee, prefix.size)
         }
-        return best
+        return best.map { Chunk(members: rest[...$0.end].map(\.cid), fee: $0.fee, size: $0.size) }
     }
 
     /// Bring a chain's runs up to date after the entry at `nonce` arrived,
@@ -579,7 +573,7 @@ public struct Mempool: Sendable {
         }
     }
 
-    /// A max-score binary heap; stale scores are skipped at pop.
+    /// A max-score binary heap of the runs' offers.
     private struct PackageFrontier {
         private var items: [PackageScore]
 
