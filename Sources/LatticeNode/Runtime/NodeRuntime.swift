@@ -1,7 +1,4 @@
 import Foundation
-#if canImport(Glibc)
-import Glibc
-#endif
 import Ivy
 import IvyWebSocket
 import Lattice
@@ -254,16 +251,7 @@ public final class NodeRuntime: Sendable {
             }
             return (facts, specs)
         }
-        releaseFreedMemory()
         return core
-    }
-
-    /// Hands the boot replay's freed heap back to the system: glibc keeps a
-    /// freed peak as resident memory otherwise.
-    private static func releaseFreedMemory() {
-        #if canImport(Glibc)
-        malloc_trim(0)
-        #endif
     }
 
     private init(
