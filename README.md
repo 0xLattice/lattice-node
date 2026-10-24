@@ -3,6 +3,9 @@
 `lattice-node` is the full node for Lattice: a Nexus-rooted tree of
 proof-of-work chains secured by recursive merged mining.
 
+Read the documentation at [lattice.build/docs](https://lattice.build/docs/). This repository's
+pages there are published from its Markdown; edit them here.
+
 One process hosts one selected chain tree. It has one process identity, Ivy
 overlay, content store, fact journal, RPC listener, and public-read listener.
 Each hosted path still has independent consensus state, fork choice, sync,
@@ -158,13 +161,15 @@ lattice up --root /var/lib/lattice
 
 ## Documentation
 
-- [Getting started](docs/getting-started.md)
-- [Architecture](docs/architecture.md)
-- [Protocol and node boundary](docs/protocol.md)
-- [RPC API](docs/rpc-api.md)
-- [Operator CLI](docs/operator-cli.md)
-- [Operations](docs/operations.md)
-- [Deployment](deploy/README.md)
+Published at [lattice.build/docs](https://lattice.build/docs/):
+
+- [Getting started](https://lattice.build/docs/run/getting-started/)
+- [Architecture](https://lattice.build/docs/protocol/node/architecture/)
+- [Protocol and node boundary](https://lattice.build/docs/protocol/node/boundary/)
+- [HTTP API](https://lattice.build/docs/build/http-api/)
+- [Operator CLI](https://lattice.build/docs/run/operator-cli/)
+- [Operations](https://lattice.build/docs/run/operations/)
+- [Deployment](https://lattice.build/docs/run/deployment/)
 
 `Package.swift` and `Package.resolved` are the authority for dependency
 versions.
