@@ -35,6 +35,108 @@ final class MempoolSelectionOracleTests: XCTestCase {
         }
     }
 
+    /// The same rules after every step of random pool changes: submits
+    /// (fresh, replacing, conflicting, evicting under tight limits, with
+    /// co-signers or no signer), reclassifications (including to invalid),
+    /// removals and clears. The model follows what each mutation reports, and
+    /// is checked against the pool's membership before selection is.
+    func testSelectionMatchesTheRulesAcrossPoolChanges() throws {
+        var rng = SplitMix64(state: 0xC4A1)
+        let keys = (0..<6).map { Self.key("stateful", $0) }
+        let signers = keys.map(address)
+        var signerless = 0, cosigned = 0, replaced = 0, evicted = 0, reclassified = 0, removed = 0
+        for round in 0..<60 {
+            let long = round % 3 == 2
+            var pool = Mempool(limits: MempoolLimits(
+                maxCount: long ? Int(rng.next() % 40) + 60 : Int(rng.next() % 30) + 6,
+                maxNonReadyPerSigner: long ? 64 : Int(rng.next() % 6) + 2
+            ))
+            var model: [String: OracleEntry] = [:]
+
+            func submit(_ index: Int, _ bodySigners: [String], nonce: UInt64, _ disposition: MempoolDisposition, step: Int) throws {
+                let fee = Int(rng.next() % 1_000) + (rng.next() % 4 == 0 ? 0 : 1)
+                let extra = Int(rng.next() % 3)
+                var actions = [AccountAction(owner: signers[index], delta: -Int64(fee + extra))]
+                for other in 0..<extra { actions.append(AccountAction(owner: signers[other], delta: 1)) }
+                let body = TransactionBody(
+                    accountActions: actions, actions: [], depositActions: [], receiptActions: [],
+                    withdrawalActions: [], signers: bodySigners, nonce: nonce, chainPath: ["Nexus"]
+                )
+                let transaction = Transaction(signatures: [keys[index].publicKey: "x"], body: try HeaderImpl(node: body))
+                guard let mutation = try? pool.submit(transaction, spec: testSpec(), disposition: disposition, addedAt: Int64(step)),
+                      let inserted = mutation.inserted else { return }
+                for item in mutation.departed { model[item.cid] = nil }
+                replaced += mutation.replaced.count
+                evicted += mutation.evicted.count
+                if bodySigners.isEmpty { signerless += 1 }
+                if bodySigners.count > 1 { cosigned += 1 }
+                let size = try XCTUnwrap(transaction.toData()).count + XCTUnwrap(body.toData()).count
+                model[inserted.cid] = OracleEntry(
+                    cid: inserted.cid, signer: bodySigners.first ?? "\u{0}" + inserted.cid, nonce: nonce,
+                    disposition: disposition, fee: fee, size: size
+                )
+            }
+
+            // A long round starts from one signer's 35-nonce chain: changes
+            // then land inside, at and past a run's 25-entry window.
+            if long {
+                for nonce in 0..<UInt64(35) {
+                    try submit(0, [signers[0]], nonce: nonce, nonce == 0 ? .ready : [.ready, .ready, .future, .unavailable][Int(rng.next() % 4)], step: 0)
+                }
+            }
+            for step in 0..<80 {
+                let roll = rng.next() % 100
+                if roll < 55 {
+                    let index = long && rng.next() % 2 == 0 ? 0 : Int(rng.next() % UInt64(signers.count))
+                    let shape = rng.next() % 20
+                    let bodySigners = shape == 0 ? [] : shape < 4
+                        ? [signers[index], signers[(index + 1) % signers.count]] : [signers[index]]
+                    let disposition: MempoolDisposition = [.ready, .ready, .future, .unavailable][Int(rng.next() % 4)]
+                    try submit(index, bodySigners, nonce: rng.next() % (long ? 40 : 30), disposition, step: step)
+                } else if roll < 80, let cid = model.keys.sorted().randomElement(using: &rng) {
+                    let disposition: MempoolDisposition = [.ready, .future, .unavailable, .invalid][Int(rng.next() % 4)]
+                    let mutation = pool.reclassify(cid, as: disposition)
+                    for item in mutation.removed { model[item.cid] = nil }
+                    if !mutation.reclassified.isEmpty { model[cid]?.disposition = disposition }
+                    reclassified += 1
+                } else if roll < 97 {
+                    let cids = model.keys.sorted().filter { _ in rng.next() % 4 == 0 }
+                    for item in pool.remove(cids).removed { model[item.cid] = nil }
+                    removed += cids.count
+                } else {
+                    for item in pool.clear().removed { model[item.cid] = nil }
+                }
+
+                XCTAssertEqual(pool.count, model.count, "round \(round), step \(step): pool count")
+                for cid in model.keys { XCTAssertTrue(pool.contains(cid), "round \(round), step \(step): \(cid) missing") }
+                for contextual in [false, true] {
+                    let limit = Int(rng.next() % 40) + 1
+                    let maxBytes = rng.next() % 3 == 0 ? Int.max : Int(rng.next() % 6_000) + 200
+                    let chosen = contextual
+                        ? pool.contextualTransactions(limit: limit, maxBytes: maxBytes)
+                        : pool.transactions(limit: limit, maxBytes: maxBytes)
+                    XCTAssertEqual(
+                        try chosen.map(Mempool.cid(of:)),
+                        oracle(Array(model.values), limit: limit, maxBytes: maxBytes, contextual: contextual),
+                        "round \(round), step \(step), contextual \(contextual), limit \(limit), maxBytes \(maxBytes)"
+                    )
+                }
+            }
+        }
+        // Every kind of change was exercised.
+        for (name, count) in [("signer-less", signerless), ("co-signed", cosigned), ("replaced", replaced),
+                              ("evicted", evicted), ("reclassified", reclassified), ("removed", removed)] {
+            XCTAssertGreaterThan(count, 0, name)
+        }
+        print("ORACLE-COVERAGE signerless \(signerless) cosigned \(cosigned) replaced \(replaced) evicted \(evicted) reclassified \(reclassified) removed \(removed)")
+    }
+
+    /// A fixed stand-in key: the pool never checks signatures, and fixed keys
+    /// keep every CID, so a failing seed fails the same way again.
+    private static func key(_ role: String, _ index: Int) -> (privateKey: String, publicKey: String) {
+        ("\(role)-private-\(index)", "\(role)-public-\(index)")
+    }
+
     private struct Generated {
         var pool: Mempool
         var entries: [OracleEntry]
@@ -42,9 +144,11 @@ final class MempoolSelectionOracleTests: XCTestCase {
 
     private struct OracleEntry {
         let cid: String
+        /// The chain: its first signer, or `"\u{0}"` + its CID when it has none.
         let signer: String
         let nonce: UInt64
-        let disposition: MempoolDisposition
+        var disposition: MempoolDisposition
+        /// Its surplus; counted only while it is ready.
         let fee: Int
         let size: Int
     }
@@ -52,9 +156,9 @@ final class MempoolSelectionOracleTests: XCTestCase {
     private func randomPool(_ rng: inout SplitMix64) throws -> Generated {
         var pool = Mempool()
         var entries: [OracleEntry] = []
-        let credited = (0..<4).map { _ in address(CryptoUtils.generateKeyPair()) }
-        for _ in 0..<Int(rng.next() % 10 + 2) {
-            let key = CryptoUtils.generateKeyPair()
+        let credited = (0..<4).map { address(Self.key("credited", $0)) }
+        for signer in 0..<Int(rng.next() % 10 + 2) {
+            let key = Self.key("pool", signer)
             let owner = address(key)
             var nonce = rng.next() % 3
             // Long enough, now and then, to meet the 25-entry limit.
@@ -75,7 +179,7 @@ final class MempoolSelectionOracleTests: XCTestCase {
                 let size = try XCTUnwrap(transaction.toData()).count + XCTUnwrap(body.toData()).count
                 entries.append(OracleEntry(
                     cid: cid, signer: owner, nonce: nonce, disposition: disposition,
-                    fee: disposition == .ready ? fee : 0, size: size
+                    fee: fee, size: size
                 ))
                 nonce += 1
             }
@@ -93,8 +197,10 @@ final class MempoolSelectionOracleTests: XCTestCase {
             }
             runs.append(run)
         }
+        // A signer-less entry past nonce 0 extends nothing, so it can execute.
         runs = runs.filter {
             $0[0].disposition == .ready || (contextual && $0[0].disposition == .unavailable)
+                || ($0[0].signer.hasPrefix("\u{0}") && $0[0].nonce > 0)
         }.map { Array($0.prefix(25)) }
 
         var starts = Array(repeating: 0, count: runs.count)
@@ -107,7 +213,7 @@ final class MempoolSelectionOracleTests: XCTestCase {
             for (index, run) in runs.enumerated() where starts[index] < run.count {
                 var fee = 0, size = 0
                 for end in starts[index]..<run.count {
-                    fee += run[end].fee
+                    fee += run[end].disposition == .ready ? run[end].fee : 0
                     size += run[end].size
                     guard !skipped.contains(run[end].cid) else { continue }
                     if let current = best {
