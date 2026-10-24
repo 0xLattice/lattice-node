@@ -3,8 +3,8 @@
 `lattice-node` is the full node for Lattice: a Nexus-rooted tree of
 proof-of-work chains secured by recursive merged mining.
 
-Read the documentation at [lattice.build/docs](https://lattice.build/docs/). It is published from the
-Markdown in this repository; edit it here.
+Read the documentation at [lattice.build/docs](https://lattice.build/docs/). This repository's
+pages there are published from its Markdown; edit them here.
 
 One process hosts one selected chain tree. It has one process identity, Ivy
 overlay, content store, fact journal, RPC listener, and public-read listener.
