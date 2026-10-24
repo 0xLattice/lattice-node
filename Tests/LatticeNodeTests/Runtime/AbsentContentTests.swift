@@ -343,28 +343,39 @@ final class AbsentContentTests: XCTestCase {
         XCTAssertFalse(retained.contains(absent))
     }
 
-    /// Finished sessions' verified Volumes are kept whole, within the
-    /// bound: the least recently read go first, and one larger than the
-    /// bound is not kept.
-    func testTheReadCacheKeepsRecentVolumesWithinItsBound() async throws {
-        let volume = { (name: String) in
-            SerializedVolume(root: name, entries: [name: Data(repeating: 7, count: 100), name + "-leaf": Data(repeating: 8, count: 100)])
+    /// The read cache keeps whole the Volumes a body's fetch derived, and
+    /// on their own the entries a read asked for (never what else a peer
+    /// sent), within the bound: the least recently read go first, what is
+    /// put again replaces what is held, and one larger than the bound is
+    /// not kept.
+    func testTheReadCacheKeepsRecentContentWithinItsBound() async throws {
+        let volume = { (name: String, byte: UInt8) in
+            SerializedVolume(root: name, entries: [
+                name: Data(repeating: byte, count: 100), name + "-leaf": Data(repeating: byte, count: 100),
+            ])
         }
         let charge = { (name: String) in 2 * 100 + 2 * IvyRootContentSource.retainedEntryOverhead + 2 * name.utf8.count + 5 }
         let cache = ReadCache(maximumBytes: 2 * charge("a"))
 
-        await cache.put([volume("a"), volume("b")])
+        await cache.put([volume("a", 7), volume("b", 7)])
         let both = await cache.fetch(["a", "a-leaf", "b-leaf"])
         XCTAssertEqual(Set(both.keys), ["a", "a-leaf", "b-leaf"])
 
         // "b" was read after "a" above; reading "a" again makes "b" the least recent.
         _ = await cache.fetch(["a"])
-        await cache.put([volume("c")])
+        await cache.put([volume("c", 7)])
         let afterThird = await cache.fetch(["a", "b", "c"])
         XCTAssertEqual(Set(afterThird.keys), ["a", "c"])
         let kept = await cache.volume("a")
-        XCTAssertEqual(kept?.entries, volume("a").entries, "a Volume is kept whole")
+        XCTAssertEqual(kept?.entries, volume("a", 7).entries, "a Volume is kept whole")
         var held = await cache.heldBytes
+        XCTAssertLessThanOrEqual(held, 2 * charge("a"))
+
+        // Put again, a Volume replaces the one held under its root.
+        await cache.put([volume("a", 9)])
+        let replaced = await cache.volume("a")
+        XCTAssertEqual(replaced?.entries, volume("a", 9).entries)
+        held = await cache.heldBytes
         XCTAssertLessThanOrEqual(held, 2 * charge("a"))
 
         // One larger than the bound is not kept, and evicts nothing.
@@ -374,5 +385,20 @@ final class AbsentContentTests: XCTestCase {
         XCTAssertEqual(Set(afterLarge.keys), ["a", "c"])
         held = await cache.heldBytes
         XCTAssertLessThanOrEqual(held, 2 * charge("a"))
+
+        // A read keeps only the entries it asked for, and none of them is a
+        // Volume: a peer chooses what it sends with one.
+        struct Peer: ContentSource {
+            let held: [String: Data]
+            func fetch(_ cids: Set<String>) async -> [String: Data] { held }
+        }
+        let reads = ReadCache(maximumBytes: 2 * charge("a"))
+        let padded = reads.remembering(Peer(held: ["r": Data(repeating: 1, count: 10), "x": Data(repeating: 2, count: 10)]))
+        let answer = await padded.fetch(["r"])
+        XCTAssertEqual(answer.count, 2)
+        let remembered = await reads.fetch(["r", "x"])
+        XCTAssertEqual(Set(remembered.keys), ["r"])
+        let asVolume = await reads.volume("r")
+        XCTAssertNil(asVolume)
     }
 }

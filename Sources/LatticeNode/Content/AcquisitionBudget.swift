@@ -4,11 +4,12 @@ import Foundation
 /// chain together (`--max-acquisition-bytes`): Bitcoin's bound on block
 /// download memory, blocks in flight times the largest block.
 ///
-/// A session reserves its worst case once, when it starts, and gives the
-/// whole reservation back when it ends, however it ends. It never reserves
-/// again while it holds one, so no session waits on the budget holding
-/// any of it, and the reservations held always come back: the waiter first
-/// in line fits once they have (no reservation is larger than the budget).
+/// A session reserves its worst case once, before its first request to a
+/// peer, and gives the whole reservation back when it ends, however it
+/// ends. It never reserves again while it holds one, so no session waits
+/// on the budget holding any of it, and the reservations held always come
+/// back: the waiter first in line fits once they have (no reservation is
+/// larger than the budget).
 ///
 /// Past the bound a session waits; nothing asked for is declined for it.
 /// Waiters are served first in, first out, the node's own work and each
@@ -111,16 +112,6 @@ public final class AcquisitionBudget: @unchecked Sendable {
             precondition(used >= 0)
             return grant()
         })
-    }
-
-    /// Reserves `bytes` for `operation`, released when it returns or
-    /// throws. `operation` gets nil when the task was cancelled waiting.
-    func withReservation<T>(
-        _ bytes: Int, priority: Priority, _ operation: (Int?) async throws -> T
-    ) async rethrows -> T {
-        let reserved = await reserve(bytes, priority: priority)
-        defer { if let reserved { release(reserved) } }
-        return try await operation(reserved)
     }
 
     /// Grants waiters in line while the first fits. Under the lock.

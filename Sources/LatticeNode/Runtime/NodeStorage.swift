@@ -352,95 +352,153 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     }
 }
 
-/// Verified content finished sessions took from peers, in memory, whole
-/// Volumes by their roots: a body fetched for a block then serves its
-/// connect, and a template's reads the block mined on it and the next
-/// template, without asking peers again. Only the operator's own reads
-/// consult it, as they read everything: a body's fetch reads only what
-/// it fetches itself.
+/// Verified content in memory, for reads that would otherwise ask peers
+/// again: the Volumes a body fetch derived for its block, whole, serve
+/// the block's connect; what the operator's own reads asked of peers, the
+/// entries as they asked for them, serves the next read (a template's
+/// reads the block mined on it). Only the operator's own reads consult
+/// it: a body's fetch reads only what it fetches itself.
 ///
-/// Each Volume was requested by its root and checked against its CIDs by
-/// the session that fetched it, and its reader checks what it reads again.
-/// It is not the Volume store: nothing here is stored until a block's
-/// execution finds it valid.
+/// Only the whole Volumes are Volumes this node derived itself, walking a
+/// body it fetched to its end, as storing the block would derive them. A
+/// peer chooses what it sends with a Volume, so nothing a peer sent is
+/// kept as a Volume. Each entry was checked against its CID, and its
+/// reader checks it again. It is not the Volume store: nothing here is
+/// stored until a block's execution finds it valid.
 ///
-/// Bounded in bytes, each entry charged as a session charges it; the
-/// Volumes read least recently go first, and one evicted is fetched again
-/// when it is read.
+/// Bounded in bytes, each entry charged as a session charges it; what was
+/// read least recently goes first, and what is evicted is fetched again
+/// when it is read. What is put again replaces what is held.
 actor ReadCache: ContentSource {
-    private struct Held {
-        let volume: SerializedVolume
-        let bytes: Int
-        var lastRead: UInt64
+    private enum Key: Hashable {
+        /// A whole Volume this node derived, by its root.
+        case volume(String)
+        /// One entry a read asked for, by its CID.
+        case entry(String)
     }
 
-    private var volumes: [String: Held] = [:]
-    /// The roots of the held Volumes each CID is in.
+    private struct Held {
+        let entries: [String: Data]
+        let bytes: Int
+        var older: Key? = nil
+        var newer: Key? = nil
+    }
+
+    /// Held in recency order, a list linked through `older` and `newer`.
+    private var held: [Key: Held] = [:]
+    private var oldest: Key?
+    private var newest: Key?
+    /// The roots of the held whole Volumes each CID is in.
     private var roots: [String: Set<String>] = [:]
     private var bytes = 0
-    private var clock: UInt64 = 0
     private let maximumBytes: Int
 
     init(maximumBytes: Int) {
         self.maximumBytes = maximumBytes
     }
 
-    var isEmpty: Bool { volumes.isEmpty }
+    var isEmpty: Bool { held.isEmpty }
 
     /// The bytes held now.
     var heldBytes: Int { bytes }
 
-    /// The whole Volume under `root`, when held.
+    /// The whole Volume under `root`, when this node derived it and it is held.
     func volume(_ root: String) -> SerializedVolume? {
-        clock += 1
-        volumes[root]?.lastRead = clock
-        return volumes[root]?.volume
+        guard let entries = held[.volume(root)]?.entries else { return nil }
+        touch(.volume(root))
+        return SerializedVolume(root: root, entries: entries)
     }
 
     func fetch(_ cids: Set<String>) async -> [String: Data] {
-        clock += 1
         var found: [String: Data] = [:]
         for cid in cids {
-            guard let root = roots[cid]?.first, let data = volumes[root]?.volume.entries[cid] else { continue }
-            found[cid] = data
-            volumes[root]?.lastRead = clock
+            let key: Key
+            if held[.entry(cid)] != nil {
+                key = .entry(cid)
+            } else if let root = roots[cid]?.first {
+                key = .volume(root)
+            } else {
+                continue
+            }
+            found[cid] = held[key]?.entries[cid]
+            touch(key)
         }
         return found
     }
 
-    /// Keeps these Volumes, each whole or not at all, as the most recently read.
-    func put(_ incoming: [SerializedVolume]) {
-        for volume in incoming {
-            clock += 1
-            if volumes[volume.root] != nil {
-                volumes[volume.root]?.lastRead = clock
-                continue
-            }
-            let charge = volume.entries.reduce(0) {
-                $0 + $1.key.utf8.count + $1.value.count + IvyRootContentSource.retainedEntryOverhead
-            }
-            guard charge <= maximumBytes else { continue }
-            while bytes + charge > maximumBytes,
-                  let oldest = volumes.min(by: { $0.value.lastRead < $1.value.lastRead })?.key {
-                evict(oldest)
-            }
-            volumes[volume.root] = Held(volume: volume, bytes: charge, lastRead: clock)
-            for cid in volume.entries.keys { roots[cid, default: []].insert(volume.root) }
-            bytes += charge
+    /// Keeps the Volumes a body's fetch derived for its block, each whole
+    /// or not at all.
+    func put(_ volumes: [SerializedVolume]) {
+        for volume in volumes { put(volume.entries, as: .volume(volume.root)) }
+    }
+
+    /// Keeps entries a read asked for, each on its own.
+    func put(entries: [String: Data]) {
+        for (cid, data) in entries { put([cid: data], as: .entry(cid)) }
+    }
+
+    /// `source`, with the entries a read asks of it kept here.
+    nonisolated func remembering(_ source: any ContentSource) -> any ContentSource {
+        Remembering(source: source, cache: self)
+    }
+
+    private struct Remembering: ContentSource {
+        let source: any ContentSource
+        let cache: ReadCache
+
+        func fetch(_ cids: Set<String>) async -> [String: Data] {
+            let answer = await source.fetch(cids)
+            await cache.put(entries: answer.filter { cids.contains($0.key) })
+            return answer
         }
     }
 
-    /// Keeps what a finished session verified.
-    func put(_ session: IvyRootContentSource.Session) async {
-        put(await session.verifiedVolumes())
+    private func put(_ entries: [String: Data], as key: Key) {
+        evict(key)
+        let charge = entries.reduce(0) {
+            $0 + $1.key.utf8.count + $1.value.count + IvyRootContentSource.retainedEntryOverhead
+        }
+        guard charge <= maximumBytes else { return }
+        while bytes + charge > maximumBytes, let oldest { evict(oldest) }
+        held[key] = Held(entries: entries, bytes: charge)
+        link(key)
+        if case .volume(let root) = key {
+            for cid in entries.keys { roots[cid, default: []].insert(root) }
+        }
+        bytes += charge
     }
 
-    private func evict(_ root: String) {
-        guard let held = volumes.removeValue(forKey: root) else { return }
-        for cid in held.volume.entries.keys {
-            roots[cid]?.remove(root)
-            if roots[cid]?.isEmpty == true { roots[cid] = nil }
+    /// Makes `key` the most recently read.
+    private func touch(_ key: Key) {
+        guard newest != key else { return }
+        unlink(key)
+        link(key)
+    }
+
+    /// Puts held `key` at the newest end.
+    private func link(_ key: Key) {
+        held[key]?.older = newest
+        held[key]?.newer = nil
+        if let newest { held[newest]?.newer = key } else { oldest = key }
+        newest = key
+    }
+
+    private func unlink(_ key: Key) {
+        guard let entry = held[key] else { return }
+        if let older = entry.older { held[older]?.newer = entry.newer } else { oldest = entry.newer }
+        if let newer = entry.newer { held[newer]?.older = entry.older } else { newest = entry.older }
+    }
+
+    private func evict(_ key: Key) {
+        guard held[key] != nil else { return }
+        unlink(key)
+        guard let entry = held.removeValue(forKey: key) else { return }
+        if case .volume(let root) = key {
+            for cid in entry.entries.keys {
+                roots[cid]?.remove(root)
+                if roots[cid]?.isEmpty == true { roots[cid] = nil }
+            }
         }
-        bytes -= held.bytes
+        bytes -= entry.bytes
     }
 }

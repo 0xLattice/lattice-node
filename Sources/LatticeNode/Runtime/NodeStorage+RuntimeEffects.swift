@@ -117,11 +117,10 @@ extension NodeStorage {
     }
 
     /// How the operator's own work reads: this store, a block's header
-    /// record, what finished sessions verified, then peers. What the
-    /// session takes from peers is kept for the next read once it ends
-    /// (`readCache.put`).
+    /// record, what is in memory (`readCache`), then peers, whose answers
+    /// are kept there for the next read.
     nonisolated func ownReads(through peers: any ContentSource) -> CoalescingFetcher {
-        CoalescingFetcher(CompositeContentSource([workSource, readCache, peers]))
+        CoalescingFetcher(CompositeContentSource([workSource, readCache, readCache.remembering(peers)]))
     }
 
     /// Stores a block and pins what was stored: its body is what `fetcher`,
@@ -160,25 +159,41 @@ extension NodeStorage {
     /// would be from peers that speak no bundles. `hosts` names the
     /// block's child chain: the bundle is asked first of its current peers.
     ///
-    /// The session reserves its worst case from the node's budget before it
-    /// starts: the chain's `maxBlockSize` (`maxBlockSize`, when its spec is
-    /// held), at most one session's allowance. `maxBlockSize` counts a
-    /// body's bytes, not what holding them costs this node (each entry's
-    /// CID and heap) nor the state its validation reads, so a body past
-    /// that reservation is fetched once more under the whole allowance,
-    /// after the first reservation is released. Once verified whole, what
-    /// the session fetched is kept for the block's connect.
+    /// The session reserves from the node's budget when it first asks a
+    /// peer, an estimate of its worst case (`bodyReservation`): the chain's
+    /// `maxBlockSize` (when its spec is held) bounds a body's bytes, not
+    /// what holding them costs this node nor the state its validation
+    /// reads. A body past the estimate is fetched once more under the whole
+    /// allowance, after the first reservation is released. The Volumes the
+    /// walk derives, once it reaches the end of the body, are kept in memory
+    /// for the block's connect.
     nonisolated func fetchChainBody(
         _ cid: String, remote: IvyRootContentSource, bundle: Bool = true, hosts: ChainHosts? = nil,
         maxBlockSize: Int? = nil
     ) async throws -> [String] {
         let allowance = remote.maximumStorageBytes
-        let first = min(maxBlockSize ?? allowance, allowance)
+        let first = Self.bodyReservation(maxBlockSize: maxBlockSize, allowance: allowance)
         do {
             return try await fetchChainBody(cid, remote: remote, bundle: bundle, hosts: hosts, reserving: first)
         } catch NodeStorageError.bodyExceedsLocalBudget where first < allowance {
             return try await fetchChainBody(cid, remote: remote, bundle: bundle, hosts: hosts, reserving: allowance)
         }
+    }
+
+    /// What a body session reserves: four times `maxBlockSize` plus 8 MiB,
+    /// at most `allowance` (the whole allowance when the spec is not held).
+    /// `maxBlockSize` counts the data of the block's own Volume and its
+    /// transactions. Holding an entry costs its CID and
+    /// `retainedEntryOverhead` beside its data, and each transaction adds
+    /// the state its validation reads: a body of minimal transactions at
+    /// 1 MB costs about 3.7 times its size to hold, hence four. The 8 MiB
+    /// is for the rest the walk reads that `maxBlockSize` does not count:
+    /// the header, the spec, policy modules. Only a body past that (one of
+    /// unusually small entries) is fetched a second time.
+    static func bodyReservation(maxBlockSize: Int?, allowance: Int) -> Int {
+        let fixed = 8 * 1_024 * 1_024
+        guard let maxBlockSize, maxBlockSize < (allowance - fixed) / 4 else { return allowance }
+        return 4 * max(maxBlockSize, 0) + fixed
     }
 
     private nonisolated func fetchChainBody(
@@ -192,15 +207,17 @@ extension NodeStorage {
                 // Read into memory, never into the store: what a peer sent is
                 // stored once the block's execution has found it valid.
                 let fetcher = CoalescingFetcher(CompositeContentSource([broker, session]))
-                let walked = NodeImportStorage(storage: nil)
+                let walked = NodeImportStorage(storage: nil, keepsVolumes: true)
                 do {
                     try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: walked)
+                    // The walk reached the end: the Volumes it derived are the
+                    // ones storing the block would, and serve its connect.
+                    await readCache.put(walked.takeVolumes())
                 } catch BlockContentSizeError.exceedsLimit {
                     // Past the chain's own maxBlockSize the block is invalid,
                     // and its execution proves it from what was read: run it
                     // rather than retry a fetch that can never succeed.
                 }
-                await readCache.put(session)
                 return await walked.takeStoredVolumeRoots()
             }.value
         } catch {
@@ -248,7 +265,6 @@ extension NodeStorage {
             let children = try await storeMinedBlock(
                 header, block, fetcher: ownReads(through: session)
             )
-            await readCache.put(session)
             return children
         }.value
     }
@@ -278,7 +294,6 @@ extension NodeStorage {
             let carried = try await carriedGrinds(
                 of: root, hosted: hosted, fetcher: ownReads(through: session)
             )
-            await readCache.put(session)
             return carried
         }.value
     }

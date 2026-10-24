@@ -1212,7 +1212,9 @@ extension NodeRuntime {
             await settleBodies()
             await settleState()
             // The blocks each chain can connect next wait for the content
-            // budget ahead of bodies fetched ahead of them.
+            // budget ahead of bodies fetched ahead of them. Refreshed only
+            // while someone waits: a waiter that arrives between steps is
+            // ordered by the last set, and moves up at the next step.
             if remote.budget.waiting > 0 {
                 remote.budget.prioritize(Set(core.levels.values.flatMap(\.nextToConnect)))
             }

@@ -559,10 +559,10 @@ extension NodeRuntime {
     }
 
     /// The operator's own work reads content the one way: what this store
-    /// holds, then a block's header record, then what finished sessions
-    /// verified (a body fetched for its connect, earlier reads), then
+    /// holds, then a block's header record, then what is in memory (a body
+    /// fetched for its connect, what earlier reads asked of peers), then
     /// peers, each answer checked against its CID by the reader. What the
-    /// read took from peers is kept in memory, never written to the store:
+    /// read asked of peers is kept in memory, never written to the store:
     /// only the node's own storing of a block does that.
     /// Without an overlay (`remote` nil) the read is from this store.
     static func reading<T: Sendable>(
@@ -576,18 +576,13 @@ extension NodeRuntime {
             // Peers serve whole Volumes by their roots. A block's own Volume
             // this store does not hold is read whole first, so what it lists
             // is read from it, not asked of peers one entry at a time.
-            // One a finished session verified (the body fetched for this
-            // block) is taken from memory.
-            if await !storage.broker.hasVolume(root: rootCID) {
-                if let held = await storage.readCache.volume(rootCID) {
-                    await session.adopt(held)
-                } else {
-                    _ = await session.volume(rootCID: rootCID)
-                }
+            // One this node derived fetching the block's body is read from
+            // memory, as is all of that body.
+            if await !storage.broker.hasVolume(root: rootCID),
+               await storage.readCache.volume(rootCID) == nil {
+                _ = await session.volume(rootCID: rootCID)
             }
-            let value = await work(storage.ownReads(through: session))
-            await storage.readCache.put(session)
-            return value
+            return await work(storage.ownReads(through: session))
         }.value
     }
 

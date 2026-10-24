@@ -740,6 +740,103 @@ final class BundledBlockFetchTests: XCTestCase {
         XCTAssertEqual(remote.budget.reserved, 0)
     }
 
+    /// A body of many small transactions near its chain's `maxBlockSize`
+    /// costs more than that to hold (each entry's CID and heap beside its
+    /// bytes), and is still fetched once: its session's reservation covers
+    /// it, so the fetch is not repeated under the whole allowance.
+    func testATypicalBodyNearItsBlockSizeIsFetchedOnce() async throws {
+        let producer = try await storage(keyByte: 0x68)
+        let joiner = try await storage(keyByte: 0x69)
+        let genesisCID = NexusGenesis.expectedBlockHash
+        let genesisData = await producer.content([genesisCID])[genesisCID]
+        let genesis = try XCTUnwrap(Block(data: try XCTUnwrap(genesisData)))
+        let transactions = try (0..<Self.typicalTransactionCount).map { _ in try transaction() }
+        let block = try await mined(on: genesis, transactions, by: producer)
+        let cid = try BlockHeader(node: block).rawCID
+        let size = try await block.logicalContentByteSize(fetcher: producer)
+        let maxBlockSize = NexusGenesis.spec.maxBlockSize
+        XCTAssertLessThanOrEqual(size, maxBlockSize)
+        XCTAssertGreaterThan(size, maxBlockSize * 3 / 4, "near the chain's block size")
+        let requests = Requests()
+
+        _ = try await joiner.fetchChainBody(cid, remote: remote(producer, requests: requests), maxBlockSize: maxBlockSize)
+
+        // What holding it costs, charged as the session charged it.
+        let held = await joiner.readCache.heldBytes
+        XCTAssertGreaterThan(held, maxBlockSize, "a reservation of maxBlockSize alone would not hold it")
+        XCTAssertLessThan(held, 4 * maxBlockSize, "four times maxBlockSize does, without the fixed allowance")
+        let bundles = await requests.bundles
+        let volumes = await requests.volumes
+        XCTAssertEqual(bundles, [cid], "one session, one bundle request")
+        XCTAssertEqual(volumes, [])
+    }
+
+    private static let typicalTransactionCount = 1_500
+
+    /// A body fetch that fails leaves nothing it was sent to stand for the
+    /// block's Volume: a peer's short Volume for the block is not kept, and
+    /// the block's connect asks peers again and completes.
+    func testAShortVolumeFromAPeerDoesNotStandForTheBlock() async throws {
+        let producer = try await storage(keyByte: 0x6A)
+        let joiner = try await storage(keyByte: 0x6B)
+        let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
+        let blockBytes = await producer.content([cid])[cid]
+        let partial = AttributedVolumeResponse(
+            rootCID: cid, entries: [cid: try XCTUnwrap(blockBytes)], servedBy: server
+        )
+        let honest = NodeStorageIvyContentSource(storage: producer)
+        let requests = Requests()
+        let poisoned = IvyRootContentSource(
+            fetch: { root in
+                await requests.volume(root)
+                let entries = await honest.volume(rootCID: root, maxDataBytes: .max)
+                guard !entries.isEmpty else { return .empty }
+                return AttributedVolumeResponse(
+                    rootCID: root,
+                    entries: Dictionary(uniqueKeysWithValues: entries.map { ($0.cid, $0.data) }),
+                    servedBy: nil
+                )
+            },
+            fetchBundle: { _ in [partial] }
+        )
+        do {
+            _ = try await joiner.fetchChainBody(cid, remote: poisoned)
+            XCTFail("a short bundle leaves the walk incomplete")
+        } catch {}
+        let kept = await joiner.readCache.volume(cid)
+        XCTAssertNil(kept)
+
+        let stored = await NodeRuntime.reading(cid, storage: joiner, remote: poisoned) { fetcher in
+            (try? await joiner.storeValidBlock(cid, at: ["Nexus"], from: fetcher)) != nil
+        }
+        XCTAssertTrue(stored)
+        let asked = await requests.volumes
+        XCTAssertTrue(asked.contains(cid), "the connect asked peers for the block's Volume")
+    }
+
+    /// A read of what this node holds asks no peer, so it never waits on
+    /// the content budget, however full.
+    func testAFullyLocalOwnReadNeverWaitsOnTheBudget() async throws {
+        let producer = try await storage(keyByte: 0x6C)
+        let chain = try await transferChain(by: producer)
+        let cid = try BlockHeader(node: chain.transfer).rawCID
+        let requests = Requests()
+        let remote = remote(producer, requests: requests)
+        let blocking = await remote.budget.reserve(remote.budget.capacity, priority: .ownWork)
+        XCTAssertEqual(blocking, remote.budget.capacity)
+
+        let read = await NodeRuntime.reading(cid, storage: producer, remote: remote) { fetcher in
+            await NodeRuntime.transactionIDs(ofBlock: cid, fetcher: fetcher).count
+        }
+
+        XCTAssertEqual(read, chain.transactions.count)
+        XCTAssertEqual(remote.budget.waiting, 0)
+        XCTAssertEqual(remote.budget.reserved, remote.budget.capacity, "only the blocker holds any")
+        let volumes = await requests.volumes
+        XCTAssertEqual(volumes, [])
+        remote.budget.release(remote.budget.capacity)
+    }
+
     /// What the node holds and what its reads keep in memory: what a block
     /// found valid is stored from.
     private static func held(_ storage: NodeStorage) async -> any Fetcher {
