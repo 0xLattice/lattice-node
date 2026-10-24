@@ -3,6 +3,7 @@ import Ivy
 import Lattice
 import LatticeNodeCore
 import XCTest
+import cashew
 @testable import LatticeBlockTree
 @testable import LatticeNode
 
@@ -181,7 +182,7 @@ final class NodeStoreBootTests: XCTestCase {
         XCTAssertTrue(staged.isEmpty)
         let logID = try await store.chainLogID()
         XCTAssertNil(logID)
-        XCTAssertTrue(try store.savedProofs().isEmpty)
+        XCTAssertTrue(try store.savedProofs(at: ["Nexus", "Alpha"], for: [alphaProof.childCID]).isEmpty)
     }
 
     func testAChildProofCommitsWithItsStepAndSurvivesReopen() async throws {
@@ -193,8 +194,34 @@ final class NodeStoreBootTests: XCTestCase {
                 volumeRoots: [], cursors: [:]
             ),
         ], logID: "local-log")
-        let saved = try store(path).savedProofs()
-        XCTAssertNotNil(saved[alpha]?[alphaProof.childCID]?[alphaProof.proof.rootCID])
+        let saved = try store(path).savedProofs(at: alpha, for: [alphaProof.childCID])
+        XCTAssertEqual(saved[alphaProof.childCID]?.map(\.rootCID), [alphaProof.proof.rootCID])
+    }
+
+    /// Saved proofs are read from the store, never held: a proof is served
+    /// by the store that committed it at once, and by the reopened store
+    /// after a restart, each block's ordered by root, across query chunks.
+    func testSavedChildProofsAreReadFromTheStoreAtOnceAndAfterReopen() async throws {
+        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
+        let alpha: ChainPath = ["Nexus", "Alpha"]
+        func cid(_ seed: String) throws -> String { try HeaderImpl<PublicKey>(node: PublicKey(key: seed)).rawCID }
+        let other = try cid("other block")
+        let roots = try [cid("root a"), cid("root b")].sorted()
+        let (lowRoot, highRoot) = (roots[0], roots[1])
+        let proofs = [highRoot, lowRoot].map {
+            StoredProof(childCID: other, proof: ChildBlockProof(rootCID: $0, directoryPath: ["Alpha"], entries: []))
+        } + [alphaProof]
+        let store = try store(path)
+        try await store.stageNodeFacts([
+            NodeFactBatch(path: alpha, facts: [blockBatch("child")], proofs: proofs, volumeRoots: [], cursors: [:]),
+        ], logID: "local-log")
+        // Past one query chunk, with blocks that have no proofs.
+        let asked = (0..<600).map { "absent-\($0)" } + [other, alphaProof.childCID]
+        let expected = [other: [lowRoot, highRoot], alphaProof.childCID: [alphaProof.proof.rootCID]]
+        XCTAssertEqual(try store.savedProofs(at: alpha, for: asked).mapValues { $0.map(\.rootCID) }, expected)
+        let reopened = try self.store(path)
+        XCTAssertEqual(try reopened.savedProofs(at: alpha, for: asked).mapValues { $0.map(\.rootCID) }, expected)
+        XCTAssertTrue(try reopened.savedProofs(at: ["Nexus", "Beta"], for: asked).isEmpty)
     }
 
     func testCorruptSavedChildProofFailsToLoad() throws {
@@ -209,7 +236,7 @@ final class NodeStoreBootTests: XCTestCase {
             ]
         )
 
-        XCTAssertThrowsError(try store.savedProofs()) { error in
+        XCTAssertThrowsError(try store.savedProofs(at: ["Nexus", "Alpha"], for: ["child"])) { error in
             guard case NodeStoreError.corrupt = error else { return XCTFail("got \(error)") }
         }
     }
@@ -231,7 +258,7 @@ final class NodeStoreBootTests: XCTestCase {
             ]
         )
 
-        XCTAssertThrowsError(try store.savedProofs()) { error in
+        XCTAssertThrowsError(try store.savedProofs(at: ["Nexus", "Alpha"], for: ["child"])) { error in
             guard case NodeStoreError.corrupt = error else { return XCTFail("got \(error)") }
         }
     }

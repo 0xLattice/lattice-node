@@ -3,8 +3,6 @@ import Lattice
 import LatticeNodeCore
 import cashew
 
-typealias SavedChildProofs = [ChainPath: [String: [String: ChildBlockProof]]]
-
 /// Weighed header material and credited child proofs. A header can arrive
 /// before its complete boundary Volume, so its node, child index, and proofs
 /// cannot be represented as a complete content Volume yet. They are written in
@@ -57,22 +55,35 @@ extension NodeStore {
         }
     }
 
-    nonisolated func savedProofs() throws -> SavedChildProofs {
-        var proofs: SavedChildProofs = [:]
-        for row in try database.rows(from: "child_proofs", "SELECT chain, child, root, bytes FROM child_proofs") {
-            guard let proof = ChildBlockProof.deserialize(try row.blob("bytes")) else {
-                throw NodeStoreError.corrupt("a saved child proof does not deserialize")
+    /// The saved proofs of `children` at `path`, each block's ordered by
+    /// root; a block with none is absent. Read on demand, never held: one
+    /// primary-key range read per chunk of blocks.
+    nonisolated func savedProofs(at path: ChainPath, for children: [String]) throws -> [String: [ChildBlockProof]] {
+        var proofs: [String: [ChildBlockProof]] = [:]
+        let chain = path.joined(separator: "/")
+        var start = children.startIndex
+        while start < children.endIndex {
+            let chunk = children[start..<min(start + 500, children.endIndex)]
+            start = chunk.endIndex
+            let marks = (2...(chunk.count + 1)).map { "?\($0)" }.joined(separator: ", ")
+            for row in try database.rows(
+                from: "child_proofs",
+                "SELECT child, root, bytes FROM child_proofs WHERE chain = ?1 AND child IN (\(marks)) ORDER BY child, root",
+                params: [.text(chain)] + chunk.map { .text($0) }
+            ) {
+                guard let proof = ChildBlockProof.deserialize(try row.blob("bytes")) else {
+                    throw NodeStoreError.corrupt("a saved child proof does not deserialize")
+                }
+                let child = try row.nonEmptyText("child")
+                let root = try row.nonEmptyText("root")
+                guard path.count > 1, ChainAddress(path) != nil,
+                      CIDIdentity.isCanonical(child), CIDIdentity.isCanonical(root),
+                      proof.directoryPath == Array(path.dropFirst()),
+                      proof.rootCID == root else {
+                    throw NodeStoreError.corrupt("a saved child proof does not match its index")
+                }
+                proofs[child, default: []].append(proof)
             }
-            let path = try row.text("chain").split(separator: "/").map(String.init)
-            let child = try row.nonEmptyText("child")
-            let root = try row.nonEmptyText("root")
-            guard path.count > 1, ChainAddress(path) != nil,
-                  CIDIdentity.isCanonical(child), CIDIdentity.isCanonical(root),
-                  proof.directoryPath == Array(path.dropFirst()),
-                  proof.rootCID == root else {
-                throw NodeStoreError.corrupt("a saved child proof does not match its index")
-            }
-            proofs[path, default: [:]][child, default: [:]][root] = proof
         }
         return proofs
     }
