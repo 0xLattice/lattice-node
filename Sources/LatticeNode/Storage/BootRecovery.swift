@@ -125,15 +125,16 @@ enum BootRecovery {
         return constantRoots
     }
 
-    /// Stage 4: the journal audited and the pins settled. Pins are in the
-    /// store and stay as a start finds them: nothing is rebuilt from the
-    /// journal, and content a fact names and the store lacks is no fault.
-    /// The constants are pinned.
+    /// Stage 4: the leaf flags repaired and the pins settled. The journal's
+    /// derived rows are written in the journal row's own transaction, so
+    /// nothing is re-derived from the journal here. Pins are in the store
+    /// and stay as a start finds them, and content a fact names and the
+    /// store lacks is no fault. The constants are pinned.
     private static func settleRetention(
         _ stores: Stores,
         constantRoots: [String]
     ) async throws {
-        try await stores.store.auditNormalizedIndexes()
+        try await stores.store.repairLeafFlags()
         let broker = stores.broker
         let scopes = RetentionScopes(chain: stores.retentionScope)
         try await broker.mergeRetainedRoots(scope: scopes.chain, roots: constantRoots)
@@ -172,7 +173,7 @@ enum BootRecovery {
         _ stores: Stores,
         configuration: NodeConfiguration
     ) async throws {
-        let seeded = try await !stores.store.stagedImports().isEmpty
+        let seeded = try await stores.store.hasStagedImports()
         if seeded, await stores.broker.hasVolume(root: configuration.nexusGenesisCID) { return }
         let genesis = try await NexusGenesis.create(fetcher: stores.localFetcher)
         guard try NexusGenesis.verifyGenesis(genesis) else {

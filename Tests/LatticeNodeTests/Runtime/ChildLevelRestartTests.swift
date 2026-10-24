@@ -59,6 +59,65 @@ final class ChildLevelRestartTests: XCTestCase {
         XCTAssertTrue(restored.levels[alpha]?.tree.contains(blockHash: genesisCID) ?? false)
     }
 
+    /// Boot reads a level's journal only when it hosts that level: Alpha's
+    /// rows stay in state.db, and a start that no longer hosts Alpha
+    /// restores Nexus alone, exactly as it was.
+    func testABootThatNoLongerHostsAChildDoesNotRestoreIt() async throws {
+        let configuration = try configuration()
+        _ = try await weighChildGenesis(configuration)
+        let unhosted = try NodeConfiguration(
+            chainPath: ["Nexus"], storagePath: configuration.storagePath,
+            privateKeyHex: String(repeating: "3a", count: 32),
+            listenPort: NetworkTransportTestPorts.allocate(), rpcPort: NetworkTransportTestPorts.allocate()
+        )
+        let reopened = try await NodeStorage.open(configuration: unhosted)
+        let alphaRows = try await reopened.store.stagedImports(at: alpha)
+        XCTAssertFalse(alphaRows.isEmpty, "fixture guard: Alpha's journal must still be present")
+        let restored = try await NodeRuntime.boot(
+            storage: reopened, configuration: unhosted, coreConfig: .init()
+        )
+        XCTAssertEqual(Set(restored.levels.keys), [["Nexus"]])
+        XCTAssertEqual(restored.levels[["Nexus"]]?.snapshot.bestHeaderHeight, 1)
+    }
+
+    /// Boot reads one level's journal at a time; what it restores is what
+    /// replaying the whole journal at once restores.
+    func testAPerLevelBootRestoresWhatTheWholeJournalDoes() async throws {
+        let configuration = try configuration()
+        _ = try await weighChildGenesis(configuration)
+        let reopened = try await NodeStorage.open(configuration: configuration)
+        let restored = try await NodeRuntime.boot(
+            storage: reopened, configuration: configuration, coreConfig: .init()
+        )
+
+        let journal = Dictionary(grouping: try await reopened.store.stagedImports(), by: \.chainPath)
+            .mapValues { $0.map(\.batch) }
+        var specs: [ChainPath: [ChainSpec]] = [:]
+        for case .block(let block) in (journal[alpha] ?? []).flatMap(\.facts) where block.parentBlockHash == nil {
+            let spec = try await reopened.chainGenesisSpec(block.blockHash)
+            specs[alpha, default: []].append(try XCTUnwrap(spec))
+        }
+        let cursors = [
+            ["Nexus"]: try await reopened.chainCursors(at: ["Nexus"]),
+            alpha: try await reopened.chainCursors(at: alpha),
+        ]
+        let whole = try NodeCore.restore(
+            root: try ChainCore.restore(
+                replaying: journal[["Nexus"]] ?? [], context: try configuration.runtimeContext,
+                specs: [NexusGenesis.spec], cursors: cursors[["Nexus"]] ?? [:]
+            ),
+            facts: journal, specs: specs, hosted: [alpha],
+            logID: try await reopened.chainLogID() ?? "", cursors: cursors
+        )
+        XCTAssertEqual(Set(restored.levels.keys), Set(whole.levels.keys))
+        for (path, level) in whole.levels {
+            XCTAssertEqual(restored.levels[path]?.snapshot, level.snapshot, "level \(path)")
+            XCTAssertEqual(
+                restored.levels[path]?.sync.log.entries.count, level.sync.log.entries.count, "log \(path)"
+            )
+        }
+    }
+
     /// A credited proof commits with the work fact it produced.
     func testACreditedChildProofIsSavedWithItsWorkFact() async throws {
         let configuration = try configuration()

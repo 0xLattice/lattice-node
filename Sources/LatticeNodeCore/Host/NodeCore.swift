@@ -261,6 +261,35 @@ public struct NodeCore: Sendable {
         return host
     }
 
+    /// Rebuild a host over its already restored root level, reading each
+    /// hosted child level's facts and specs from `level` only as that level
+    /// is restored, parent before child.
+    public static func restore(
+        root restoredRoot: ChainCore,
+        hosted: Set<ChainPath>,
+        config: ChainCoreConfig = ChainCoreConfig(),
+        logID: String = "",
+        cursors: [ChainPath: [String: StreamCursor]] = [:],
+        level: (ChainPath) async throws -> (facts: [BlockImportBatch], specs: [ChainSpec])
+    ) async throws -> NodeCore {
+        var host = NodeCore(
+            root: restoredRoot.tree,
+            hosted: hosted,
+            config: config,
+            logID: logID,
+            rootLog: restoredRoot.sync.log.entries,
+            rootCursors: cursors[restoredRoot.chainPath] ?? [:]
+        )
+        for path in host.ordered where path != host.rootPath {
+            guard host.serve(path), let parent = host.levels[Array(path.dropLast())] else { continue }
+            let (facts, specs) = try await level(path)
+            host.levels[path] = try host.restoreLevel(
+                path, parent: parent, facts: facts, specs: specs, cursors: cursors[path] ?? [:]
+            )
+        }
+        return host
+    }
+
     /// One child level over its journaled facts and its restored parent.
     func restoreLevel(
         _ path: ChainPath, parent: ChainCore,

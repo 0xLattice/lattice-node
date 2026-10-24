@@ -112,6 +112,27 @@ final class NodeSQLite: @unchecked Sendable {
         }
     }
 
+    /// Steps `sql`, handing each row to `body` as it is read: no row is
+    /// collected, so a large result costs one row at a time.
+    func forEach(
+        _ sql: String,
+        params: [NodeSQLiteValue] = [],
+        _ body: (NodeSQLiteStep) throws -> Void
+    ) throws {
+        let statement = try prepare(sql, params: params)
+        defer { sqlite3_finalize(statement) }
+        while true {
+            switch sqlite3_step(statement) {
+            case SQLITE_ROW:
+                try body(NodeSQLiteStep(statement: statement))
+            case SQLITE_DONE:
+                return
+            default:
+                throw NodeSQLiteError.execute(String(cString: sqlite3_errmsg(handle)))
+            }
+        }
+    }
+
     func transaction<T>(_ body: () throws -> T) throws -> T {
         try execute("BEGIN IMMEDIATE")
         do {
@@ -170,5 +191,19 @@ final class NodeSQLite: @unchecked Sendable {
             sqlite3_finalize(statement)
             throw error
         }
+    }
+}
+
+/// The row `NodeSQLite.forEach` is on, read by column index. Valid only
+/// inside the `forEach` body.
+struct NodeSQLiteStep {
+    fileprivate let statement: OpaquePointer
+
+    /// The column's bytes, or nil when it is not a blob.
+    func blob(_ index: Int32) -> Data? {
+        guard sqlite3_column_type(statement, index) == SQLITE_BLOB else { return nil }
+        let count = Int(sqlite3_column_bytes(statement, index))
+        guard let bytes = sqlite3_column_blob(statement, index) else { return Data() }
+        return Data(bytes: bytes, count: count)
     }
 }

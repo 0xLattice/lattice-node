@@ -170,12 +170,4 @@ extension NodeStore {
             "CREATE TABLE IF NOT EXISTS child_proofs (chain TEXT NOT NULL, child TEXT NOT NULL, root TEXT NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (chain, child, root))"
         )
     }
-
-    /// Boot-time audit of every normalized index against the immutable
-    /// admission batches: one audit per table owner, in a fixed order.
-    func auditNormalizedIndexes() throws {
-        let staged = try loadStagedImports()
-        try auditAdmissionFacts(staged: staged)
-        try auditAcceptedBlocks(staged: staged)
-    }
 }

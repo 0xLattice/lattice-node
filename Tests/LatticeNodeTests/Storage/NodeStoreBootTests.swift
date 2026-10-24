@@ -7,8 +7,7 @@ import XCTest
 @testable import LatticeNode
 
 /// The checks boot runs on state.db: a store from another schema, network or
-/// network is refused before any DDL, and the normalized indexes must be
-/// exactly what the journaled batches imply.
+/// network is refused before any DDL.
 final class NodeStoreBootTests: XCTestCase {
     private func store(_ path: URL, genesis: String = NexusGenesis.expectedBlockHash) throws -> NodeStore {
         try NodeStore(databasePath: path, nexusGenesisCID: genesis)
@@ -29,16 +28,6 @@ final class NodeStoreBootTests: XCTestCase {
             childCID: NexusGenesis.expectedBlockHash,
             proof: ChildBlockProof(rootCID: NexusGenesis.expectedBlockHash, directoryPath: ["Alpha"], entries: [])
         )
-    }
-
-    private func expectCorrupt(_ store: NodeStore) async {
-        do {
-            try await store.auditNormalizedIndexes()
-            XCTFail("expected the audit to refuse")
-        } catch NodeStoreError.corrupt {
-        } catch {
-            XCTFail("expected corruption, got \(error)")
-        }
     }
 
     func testAStorageDirectoryCannotBeOpenedByTwoLiveNodes() async throws {
@@ -98,32 +87,6 @@ final class NodeStoreBootTests: XCTestCase {
                 return XCTFail("got \(error)")
             }
         }
-    }
-
-    func testNormalizedIndexAuditRequiresExactBatchDerivedRows() async throws {
-        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
-        let store = try store(path)
-        try await store.stageChainFacts([blockBatch("child")], volumeRoots: [], logID: "log")
-        try await store.auditNormalizedIndexes()
-        _ = try NodeSQLite(path: path.path).execute(
-            "INSERT INTO admission_facts (chain_path, fact_id, payload) VALUES (?1, ?2, ?3)",
-            params: [
-                .text("Nexus"), .blob(Data("extra-id".utf8)),
-                .blob(Data("extra".utf8)),
-            ]
-        )
-        await expectCorrupt(store)
-    }
-
-    func testNormalizedIndexAuditRejectsMissingAcceptedBlockRow() async throws {
-        let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
-        let store = try store(path)
-        try await store.stageChainFacts([blockBatch("accepted")], volumeRoots: [], logID: "log")
-        try await store.auditNormalizedIndexes()
-        _ = try NodeSQLite(path: path.path).execute(
-            "DELETE FROM accepted_blocks WHERE block_cid = ?1", params: [.text("accepted")]
-        )
-        await expectCorrupt(store)
     }
 
     func testStreamCursorsCommitWithFactsAndSurviveReopen() async throws {
@@ -205,22 +168,6 @@ final class NodeStoreBootTests: XCTestCase {
         ], logID: "local-log")
         let saved = try store(path).savedProofs()
         XCTAssertNotNil(saved[alpha]?[alphaProof.childCID]?[alphaProof.proof.rootCID])
-    }
-
-    func testAuditIncludesHostedChildNormalizedIndexes() async throws {
-        let directory = temporaryDirectory(create: true)
-        let path = directory.appendingPathComponent("state.db")
-        let store = try store(path)
-        let alpha = ["Nexus", "Alpha"]
-        try await store.stageChainFacts(
-            [blockBatch("accepted")], volumeRoots: [], logID: "log", at: alpha
-        )
-        let database = try NodeSQLite(path: path.path)
-        _ = try database.execute(
-            "DELETE FROM accepted_blocks WHERE chain_path = ?1 AND block_cid = ?2",
-            params: [.text("Nexus/Alpha"), .text("accepted")]
-        )
-        await expectCorrupt(store)
     }
 
     func testCorruptSavedChildProofFailsToLoad() throws {
