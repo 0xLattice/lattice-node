@@ -112,6 +112,10 @@ public struct Mempool: Sendable {
     public let limits: MempoolLimits
     private var entries: [String: Entry] = [:]
     private var signerNonces: [SignerNonce: String] = [:]
+    /// Each chain's entries by nonce, under `chainKey`.
+    private var chainEntries: [String: [UInt64: String]] = [:]
+    /// Each chain's selectable runs, kept as the pool changes.
+    private var chains: [String: Chain] = [:]
     public private(set) var byteCount = 0
     public private(set) var version: UInt64 = 0
 
@@ -283,168 +287,217 @@ public struct Mempool: Sendable {
     static let maxConsecutiveMisses = 1_000
 
     /// Bitcoin Core's package limits (`-limitancestorcount`,
-    /// `-limitdescendantcount`), each counting the entry itself. They bound
-    /// every package walk, so selection stays linear in the pool.
+    /// `-limitdescendantcount`, both 25), each counting the entry itself. A
+    /// run is a chain, so both cap it at its first 25 entries.
     static let maxPackageAncestors = 25
-    static let maxPackageDescendants = 25
 
-    /// Greedy ancestor-package fee-rate selection, as Bitcoin Core's
-    /// `addPackageTxs`.
+    /// Greedy package fee-rate selection, as Bitcoin Core's `addPackageTxs`,
+    /// over chains.
     ///
     /// Ancestry is the nonce chain: Lattice applies each first signer's
     /// transactions at consecutive nonces, so an entry's parent is the
     /// pooled entry at `nonce - 1` for its first signer (co-signers' nonces
-    /// are not consensus). An entry is a candidate only if it can execute
-    /// once its ancestors have: it is ready (or, contextually, unavailable),
-    /// or its first signer has its nonce predecessor pooled; and
-    /// every ancestor is a candidate. So a nonce-gap entry, and everything
-    /// behind it, stays out. An entry with more than `maxPackageAncestors`
-    /// ancestors or `maxPackageDescendants` descendants is not a candidate.
+    /// are not consensus). Every package is therefore a prefix of what is
+    /// left of a run (see `rerun`); its score is (sum of verified fees) /
+    /// (sum of sizes). Only a `.ready` entry's surplus is funding-checked, so
+    /// only it counts: an unverified entry can never raise its ancestors'
+    /// score.
     ///
-    /// A package is an entry plus its unselected ancestors; its score is
-    /// (sum of verified fees) / (sum of sizes). Only a `.ready` entry's
-    /// surplus is funding-checked, so only it counts: an unverified entry can
-    /// never raise its ancestors' score. The best-scoring package is
-    /// taken whole, parents first; the packages of its descendants are then
-    /// rescored without it. A package that does not fit is skipped. Equal
-    /// rates break by the smaller CID, so the order is deterministic.
+    /// Each run offers its best package (`bestPrefix`) to a heap. The best
+    /// offer is taken whole if it fits, and its run offers the best of what
+    /// is left. One that does not fit is skipped, no package ends at its last
+    /// entry again, and its run offers its next best. Equal rates break by
+    /// the smaller CID of the package's last entry, so the order is
+    /// deterministic. Runs keep their first offer as the pool changes, so the
+    /// work is in the packages taken, not the pool.
     private func selected(limit: Int, maxBytes: Int, includesUnavailable: Bool) -> [Transaction] {
         guard limit > 0, maxBytes > 0 else { return [] }
 
-        func parents(_ entry: Entry) -> [String] {
-            guard entry.conflictKey.nonce > 0 else { return [] }
-            return Array(Set(entry.conflictKey.signers.compactMap {
-                signerNonces[SignerNonce(signer: $0, nonce: entry.conflictKey.nonce - 1)]
-            }))
-        }
-        var parentsOf: [String: [String]] = [:]
-        var childrenOf: [String: [String]] = [:]
-        for entry in entries.values {
-            let found = parents(entry)
-            parentsOf[entry.cid] = found
-            for parent in found { childrenOf[parent, default: []].append(entry.cid) }
-        }
-
-        /// The entries reachable from `cid` (itself included) along `edges`
-        /// inside `within`, counted up to `cap + 1`.
-        func reach(_ cid: String, _ edges: [String: [String]], within: Set<String>, cap: Int) -> Int {
-            var seen: Set<String> = [cid]
-            var stack = [cid]
-            while seen.count <= cap, let next = stack.popLast() {
-                for other in edges[next] ?? [] where within.contains(other) && seen.insert(other).inserted {
-                    stack.append(other)
-                }
-            }
-            return seen.count
-        }
-
-        // Nonces strictly increase along every edge, so ascending nonce is a
-        // topological order.
-        let ordered = entries.values.sorted(by: Self.topological)
-        var executable = Set<String>()
-        for entry in ordered {
-            let roots = entry.disposition == .ready
-                || (includesUnavailable && entry.disposition == .unavailable)
-            let extendsEverySigner = entry.conflictKey.nonce > 0 && entry.conflictKey.signers.allSatisfy {
-                signerNonces[SignerNonce(signer: $0, nonce: entry.conflictKey.nonce - 1)] != nil
-            }
-            if (roots || extendsEverySigner),
-               (parentsOf[entry.cid] ?? []).allSatisfy(executable.contains),
-               reach(entry.cid, parentsOf, within: executable, cap: Self.maxPackageAncestors)
-                   <= Self.maxPackageAncestors {
-                executable.insert(entry.cid)
+        // Each run's counted entries and where what is left of it starts.
+        var runs: [(members: [String], start: Int)] = []
+        var offers: [PackageScore] = []
+        for chain in chains.values {
+            for run in chain.runs.values where includesUnavailable ? run.contextual : run.ready {
+                offers.append(PackageScore(run: runs.count, package: run.first))
+                runs.append((run.members, 0))
             }
         }
-        let tooWide = executable.filter {
-            reach($0, childrenOf, within: executable, cap: Self.maxPackageDescendants) > Self.maxPackageDescendants
-        }
-        var candidates = Set<String>()
-        for entry in ordered where executable.contains(entry.cid) && !tooWide.contains(entry.cid)
-            && (parentsOf[entry.cid] ?? []).allSatisfy(candidates.contains) {
-            candidates.insert(entry.cid)
-        }
-
-        var picked = Set<String>()
-        func package(_ cid: String) -> [Entry] {
-            var seen: Set<String> = [cid]
-            var stack = [cid]
-            while let next = stack.popLast() {
-                for parent in parentsOf[next] ?? [] where !picked.contains(parent) && seen.insert(parent).inserted {
-                    stack.append(parent)
-                }
-            }
-            return seen.compactMap { entries[$0] }.sorted(by: Self.topological)
-        }
-
-        var frontier = PackageFrontier()
-        var generation: [String: Int] = [:]
-        func score(_ cid: String) {
-            let members = package(cid)
-            let next = (generation[cid] ?? 0) + 1
-            generation[cid] = next
-            frontier.push(PackageScore(
-                cid: cid,
-                fee: members.reduce(.zero) { $1.disposition == .ready ? $0 + $1.minerSurplus : $0 },
-                size: members.reduce(0) { $0 + $1.size },
-                generation: next
-            ))
-        }
-        for cid in candidates.sorted() { score(cid) }
+        var frontier = PackageFrontier(offers)
 
         var result: [Transaction] = []
         var bytes = 0
         var skipped = Set<String>()
         var misses = 0
         while result.count < limit, let top = frontier.pop() {
-            guard generation[top.cid] == top.generation,
-                  !picked.contains(top.cid), !skipped.contains(top.cid) else { continue }
-            let members = package(top.cid)
-            guard members.count <= limit - result.count, top.size <= maxBytes - bytes else {
-                skipped.insert(top.cid)
+            let package = top.package
+            if package.members.count <= limit - result.count, package.size <= maxBytes - bytes {
+                misses = 0
+                let members = package.members.compactMap { entries[$0] }
+                result.append(contentsOf: members.map(\.transaction))
+                bytes += package.size
+                runs[top.run].start += members.count
+            } else {
+                skipped.insert(package.tip)
                 misses += 1
                 if misses >= Self.maxConsecutiveMisses { break }
-                continue
             }
-            misses = 0
-            for member in members {
-                picked.insert(member.cid)
-                result.append(member.transaction)
-            }
-            bytes += top.size
-
-            var affected = Set<String>()
-            var stack = members.map(\.cid)
-            while let next = stack.popLast() {
-                for child in childrenOf[next] ?? [] where candidates.contains(child) && affected.insert(child).inserted {
-                    stack.append(child)
-                }
-            }
-            for cid in affected.sorted() where !picked.contains(cid) && !skipped.contains(cid) {
-                score(cid)
+            let rest = runs[top.run].members[runs[top.run].start...].compactMap { entries[$0] }
+            if let next = Self.bestPrefix(rest, skipping: skipped) {
+                frontier.push(PackageScore(run: top.run, package: next))
             }
         }
         return result
     }
 
-    private static func topological(_ lhs: Entry, _ rhs: Entry) -> Bool {
-        lhs.conflictKey.nonce != rhs.conflictKey.nonce
-            ? lhs.conflictKey.nonce < rhs.conflictKey.nonce
-            : lhs.cid < rhs.cid
+    /// Consecutive verified fees and sizes taken together: one entry, or a
+    /// prefix of a run.
+    private struct Chunk: Sendable {
+        var members: [String]
+        var fee: WorkSum
+        var size: Int
+        /// `fee` when it fits 64 bits, as a funded fee always does: rates
+        /// then compare in 128-bit integers, not by `WorkSum` doubling.
+        let fee64: UInt64?
+
+        init(members: [String], fee: WorkSum, size: Int) {
+            self.members = members
+            self.fee = fee
+            self.size = size
+            fee64 = fee.uint64Value
+        }
+
+        /// Whether this pays a higher rate than `other` (positive), the same
+        /// (zero) or a lower one, compared exactly.
+        func rate(comparedTo other: Chunk) -> Int {
+            if let lhsFee = fee64, let rhsFee = other.fee64 {
+                let lhs = lhsFee.multipliedFullWidth(by: UInt64(other.size))
+                let rhs = rhsFee.multipliedFullWidth(by: UInt64(size))
+                return lhs == rhs ? 0 : (lhs.high, lhs.low) > (rhs.high, rhs.low) ? 1 : -1
+            }
+            let lhs = PackageScore.scaled(fee, by: other.size)
+            let rhs = PackageScore.scaled(other.fee, by: size)
+            return lhs == rhs ? 0 : lhs > rhs ? 1 : -1
+        }
+
+        /// One entry; only a `.ready` entry's surplus is funding-checked.
+        init(_ entry: Entry) {
+            self.init(members: [entry.cid], fee: entry.disposition == .ready ? entry.minerSurplus : .zero, size: entry.size)
+        }
+
+        var tip: String { members.last ?? "" }
+
+        func merged(with later: Chunk) -> Chunk {
+            Chunk(members: members + later.members, fee: fee + later.fee, size: size + later.size)
+        }
     }
 
+    /// A selectable run: its counted entries, its best package, and which
+    /// selections take it (`transactions` when its head is ready,
+    /// `contextualTransactions` also when it is unavailable).
+    private struct Run: Sendable {
+        /// Its first `maxPackageAncestors` entries, in nonce order.
+        let members: [String]
+        /// Its best package, before anything is taken or skipped.
+        let first: Chunk
+        let ready: Bool
+        let contextual: Bool
+    }
+
+    /// A chain's selectable runs, by head nonce.
+    private struct Chain: Sendable {
+        var runs: [UInt64: Run] = [:]
+    }
+
+    /// The chain an entry belongs to: its first signer's, or its own when it
+    /// has no signer (then it extends nothing).
+    private static func chainKey(_ entry: Entry) -> String {
+        entry.conflictKey.signers.first ?? "\u{0}" + entry.cid
+    }
+
+    /// The best package of what is left of a run (`rest`, in nonce order):
+    /// the prefix with the highest rate, at equal rates the one whose last
+    /// entry has the smaller CID, among prefixes not ending at a skipped
+    /// entry. Nil when every prefix ends at one.
+    private static func bestPrefix(_ rest: [Entry], skipping skipped: Set<String> = []) -> Chunk? {
+        var prefix = Chunk(members: [], fee: .zero, size: 0)
+        var best: Chunk?
+        for entry in rest {
+            prefix = prefix.merged(with: Chunk(entry))
+            guard !skipped.contains(entry.cid) else { continue }
+            if let current = best {
+                let order = prefix.rate(comparedTo: current)
+                guard order > 0 || (order == 0 && entry.cid < current.tip) else { continue }
+            }
+            best = prefix
+        }
+        return best
+    }
+
+    /// Bring a chain's runs up to date after the entry at `nonce` arrived,
+    /// left or changed class. Only a run's first `maxPackageAncestors`
+    /// entries count, so the change reaches at most the run whose head is
+    /// that close behind it, and the run that starts (or no longer starts)
+    /// right after it: the work is bounded however long the chain.
+    private mutating func touch(_ key: String, at nonce: UInt64) {
+        let present = chainEntries[key] ?? [:]
+        var head: UInt64? = present[nonce] != nil ? nonce
+            : nonce > 0 && present[nonce - 1] != nil ? nonce - 1 : nil
+        var steps = 0
+        while let current = head, current > 0, present[current - 1] != nil, steps < Self.maxPackageAncestors {
+            head = current - 1
+            steps += 1
+        }
+        if let head { rerun(key, head: head) }
+        // A head that left takes its run with it.
+        if head != nonce { rerun(key, head: nonce) }
+        if nonce < .max { rerun(key, head: nonce + 1) }
+        if chains[key]?.runs.isEmpty == true { chains[key] = nil }
+    }
+
+    /// Recompute the run headed at `head`, or drop it when no run starts
+    /// there. A run is consecutive pooled nonces; it is selectable when its
+    /// head can execute without a pooled predecessor: ready (or,
+    /// contextually, unavailable), or signer-less at a nonce past 0.
+    /// Everything behind a nonce gap waits for its own head.
+    private mutating func rerun(_ key: String, head: UInt64) {
+        let present = chainEntries[key] ?? [:]
+        guard let headCID = present[head], let first = entries[headCID],
+              head == 0 || present[head - 1] == nil else {
+            chains[key]?.runs[head] = nil
+            return
+        }
+        var run = [first]
+        while run.count < Self.maxPackageAncestors, let last = run.last, last.conflictKey.nonce < .max,
+              let cid = present[last.conflictKey.nonce + 1], let next = entries[cid] {
+            run.append(next)
+        }
+        let extendsNothing = first.conflictKey.signers.isEmpty && first.conflictKey.nonce > 0
+        let ready = first.disposition == .ready || extendsNothing
+        let contextual = ready || first.disposition == .unavailable
+        guard ready || contextual else {
+            chains[key]?.runs[head] = nil
+            return
+        }
+        guard let first = Self.bestPrefix(run) else {
+            chains[key]?.runs[head] = nil
+            return
+        }
+        chains[key, default: Chain()].runs[head] = Run(
+            members: run.map(\.cid), first: first, ready: ready, contextual: contextual
+        )
+    }
+
+    /// A package on offer: the best prefix of what is left of run `run`.
     private struct PackageScore {
-        let cid: String
-        let fee: WorkSum
-        let size: Int
-        let generation: Int
+        let run: Int
+        let package: Chunk
 
         /// A higher fee rate first, compared exactly: `a.fee / a.size >
         /// b.fee / b.size` as `a.fee * b.size > b.fee * a.size`. Equal rates
-        /// break by the smaller CID.
+        /// break by the smaller CID of the package's last entry.
         func precedes(_ other: PackageScore) -> Bool {
-            let lhs = Self.scaled(fee, by: other.size)
-            let rhs = Self.scaled(other.fee, by: size)
-            return lhs != rhs ? lhs > rhs : cid < other.cid
+            let order = package.rate(comparedTo: other.package)
+            return order != 0 ? order > 0 : package.tip < other.package.tip
         }
 
         /// `value * factor` by doubling: WorkSum has no multiply.
@@ -463,7 +516,13 @@ public struct Mempool: Sendable {
 
     /// A max-score binary heap; stale scores are skipped at pop.
     private struct PackageFrontier {
-        private var items: [PackageScore] = []
+        private var items: [PackageScore]
+
+        /// A heap of `offers`, built in one pass.
+        init(_ offers: [PackageScore] = []) {
+            items = offers
+            for index in stride(from: items.count / 2 - 1, through: 0, by: -1) { siftDown(index) }
+        }
 
         mutating func push(_ score: PackageScore) {
             items.append(score)
@@ -480,18 +539,21 @@ public struct Mempool: Sendable {
             guard let top = items.first else { return nil }
             items[0] = items[items.count - 1]
             items.removeLast()
-            var parent = 0
+            siftDown(0)
+            return top
+        }
+
+        private mutating func siftDown(_ start: Int) {
+            var parent = start
             while true {
                 var best = parent
-                for child in [2 * parent + 1, 2 * parent + 2]
-                where child < items.count && items[child].precedes(items[best]) {
-                    best = child
-                }
-                guard best != parent else { break }
+                let left = 2 * parent + 1, right = left + 1
+                if left < items.count, items[left].precedes(items[best]) { best = left }
+                if right < items.count, items[right].precedes(items[best]) { best = right }
+                guard best != parent else { return }
                 items.swapAt(parent, best)
                 parent = best
             }
-            return top
         }
     }
 
@@ -522,6 +584,7 @@ public struct Mempool: Sendable {
         } else if entry.disposition != disposition {
             mutation.reclassified = [Self.item(entry)]
             entries[cid]?.disposition = disposition
+            touch(Self.chainKey(entry), at: entry.conflictKey.nonce)
             version &+= 1
         }
         return mutation
@@ -555,6 +618,9 @@ public struct Mempool: Sendable {
             signerNonces[SignerNonce(signer: signer, nonce: entry.conflictKey.nonce)] = entry.cid
         }
         byteCount += entry.size
+        let key = Self.chainKey(entry)
+        chainEntries[key, default: [:]][entry.conflictKey.nonce] = entry.cid
+        touch(key, at: entry.conflictKey.nonce)
         version &+= 1
     }
 
@@ -565,6 +631,12 @@ public struct Mempool: Sendable {
             if signerNonces[key] == cid { signerNonces.removeValue(forKey: key) }
         }
         byteCount -= removed.size
+        let key = Self.chainKey(removed)
+        if chainEntries[key]?[removed.conflictKey.nonce] == cid {
+            chainEntries[key]?[removed.conflictKey.nonce] = nil
+            if chainEntries[key]?.isEmpty == true { chainEntries[key] = nil }
+        }
+        touch(key, at: removed.conflictKey.nonce)
         version &+= 1
         return removed
     }
