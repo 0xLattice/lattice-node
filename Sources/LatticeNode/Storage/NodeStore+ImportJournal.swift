@@ -49,27 +49,40 @@ extension NodeStore {
         try !database.query("SELECT 1 FROM admission_batches LIMIT 1").isEmpty
     }
 
-    /// Read through `admission_batches_by_level`, in its order. Named: the
-    /// planner otherwise prefers the covering (chain_path, payload) unique
-    /// index and sorts the whole level's payloads before the first row.
+    /// One page of a level's journal after a seq, through
+    /// `admission_batches_by_level` (named: the planner otherwise prefers the
+    /// covering (chain_path, payload) unique index). Some SQLite versions
+    /// still sort before the first row, so a read is paged: a sort never
+    /// holds more than one page of payloads.
     static let levelBatchesSQL =
-        "SELECT payload FROM admission_batches INDEXED BY admission_batches_by_level WHERE chain_path = ?1 ORDER BY seq ASC"
+        "SELECT seq, payload FROM admission_batches INDEXED BY admission_batches_by_level WHERE chain_path = ?1 AND seq > ?2 ORDER BY seq ASC LIMIT ?3"
+
+    static let levelBatchesPage: Int64 = 512
 
     /// One level's journaled batches, in order, each decoded as its row is
     /// read: the journal is never held as rows, and no other level's batches
     /// are read.
     func importBatches(at chainPath: [String]) throws -> [BlockImportBatch] {
         var batches: [BlockImportBatch] = []
-        try database.forEach(
-            Self.levelBatchesSQL,
-            params: [.text(chainPath.joined(separator: "/"))]
-        ) { row in
-            guard let payload = row.blob(0) else {
-                throw NodeStoreError.malformedRow(table: ImportBatchRow.table, column: "payload")
+        var after: Int64 = 0
+        while true {
+            var read: Int64 = 0
+            try database.forEach(
+                Self.levelBatchesSQL,
+                params: [.text(chainPath.joined(separator: "/")), .int(after), .int(Self.levelBatchesPage)]
+            ) { row in
+                guard let seq = row.int(0) else {
+                    throw NodeStoreError.malformedRow(table: ImportBatchRow.table, column: "seq")
+                }
+                guard let payload = row.blob(1) else {
+                    throw NodeStoreError.malformedRow(table: ImportBatchRow.table, column: "payload")
+                }
+                batches.append(try Self.decode(BlockImportBatch.self, from: payload))
+                after = seq
+                read += 1
             }
-            batches.append(try Self.decode(BlockImportBatch.self, from: payload))
+            if read < Self.levelBatchesPage { return batches }
         }
-        return batches
     }
 
     func loadStagedImports(at chainPath: [String]? = nil) throws -> [StagedImport] {

@@ -89,26 +89,30 @@ final class NodeStoreBootTests: XCTestCase {
         }
     }
 
-    /// Boot and a hot-hosted start read one level's journal in seq order
-    /// straight off an index: SQLite never sorts (or spills) the level's
-    /// payloads before the first row.
-    func testALevelsJournalIsReadInIndexOrderWithoutASort() async throws {
+    /// Boot and a hot-hosted start read one level's journal in seq order,
+    /// in pages through `admission_batches_by_level`: whatever the SQLite
+    /// version's plan, a sort never holds more than one page of payloads.
+    func testALevelsJournalIsReadInPagesInSeqOrder() async throws {
         let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         let store = try store(path)
-        for (index, level) in [["Nexus"], ["Nexus", "Alpha"], ["Nexus"], ["Nexus", "Alpha"]].enumerated() {
+        let alphaRows = Int(NodeStore.levelBatchesPage) + 3
+        var expected: [BlockImportBatch] = []
+        for index in 0..<(2 * alphaRows) {
+            let level = index.isMultiple(of: 2) ? ["Nexus"] : ["Nexus", "Alpha"]
             try await store.stageChainFacts(
                 [blockBatch("block-\(index)")], volumeRoots: [], logID: "log", at: level
             )
+            if level.count == 2 { expected.append(blockBatch("block-\(index)")) }
         }
         let database = try NodeSQLite(path: path.path)
         _ = try database.execute("ANALYZE")
         let plan = try database.query(
-            "EXPLAIN QUERY PLAN " + NodeStore.levelBatchesSQL, params: [.text("Nexus/Alpha")]
+            "EXPLAIN QUERY PLAN " + NodeStore.levelBatchesSQL,
+            params: [.text("Nexus/Alpha"), .int(0), .int(NodeStore.levelBatchesPage)]
         ).compactMap { $0["detail"]?.textValue }.joined(separator: "\n")
-        XCTAssertFalse(plan.contains("TEMP B-TREE"), plan)
         XCTAssertTrue(plan.contains("admission_batches_by_level"), plan)
         let batches = try await store.importBatches(at: ["Nexus", "Alpha"])
-        XCTAssertEqual(batches, [blockBatch("block-1"), blockBatch("block-3")])
+        XCTAssertEqual(batches, expected)
     }
 
     func testStreamCursorsCommitWithFactsAndSurviveReopen() async throws {

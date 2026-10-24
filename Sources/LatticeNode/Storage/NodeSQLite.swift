@@ -206,4 +206,10 @@ struct NodeSQLiteStep {
         guard let bytes = sqlite3_column_blob(statement, index) else { return Data() }
         return Data(bytes: bytes, count: count)
     }
+
+    /// The column as an integer, or nil when it is not one.
+    func int(_ index: Int32) -> Int64? {
+        guard sqlite3_column_type(statement, index) == SQLITE_INTEGER else { return nil }
+        return sqlite3_column_int64(statement, index)
+    }
 }
