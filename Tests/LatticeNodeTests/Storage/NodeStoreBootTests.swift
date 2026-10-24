@@ -111,6 +111,7 @@ final class NodeStoreBootTests: XCTestCase {
             params: [.text("Nexus/Alpha"), .int(0), .int(NodeStore.levelBatchesPage)]
         ).compactMap { $0["detail"]?.textValue }.joined(separator: "\n")
         XCTAssertTrue(plan.contains("admission_batches_by_level"), plan)
+        XCTAssertTrue(plan.contains("seq>?"), plan)
         let batches = try await store.importBatches(at: ["Nexus", "Alpha"])
         XCTAssertEqual(batches, expected)
     }
