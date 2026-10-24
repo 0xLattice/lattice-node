@@ -421,4 +421,126 @@ final class AbsentContentTests: XCTestCase {
         let asVolume = await reads.volume("r")
         XCTAssertNil(asVolume)
     }
+
+    /// Making room keeps what the brute-force scan over every held item
+    /// kept, over a random run of orders, puts and reads; and an entry that
+    /// cannot fit while every held body is in a window is refused without
+    /// looking at the bodies.
+    func testTheReadCacheEvictsAsAFullScanWould() async throws {
+        let overhead = IvyRootContentSource.retainedEntryOverhead
+        let charge = { (entries: [String: Data]) in
+            entries.reduce(0) { $0 + $1.key.utf8.count + $1.value.count + overhead }
+        }
+        typealias Rank = (Int, Int, UInt64)
+        // The eviction rule before running counters: every candidate scanned
+        // for each item evicted.
+        struct Scan {
+            let maximumBytes: Int
+            var clock: UInt64 = 0
+            var distances: [String: Int] = [:]
+            var bodies: [String: (cids: [String: Data], bytes: Int, read: UInt64)] = [:]
+            var entries: [String: (data: Data, bytes: Int, read: UInt64)] = [:]
+            var bytes: Int {
+                bodies.values.reduce(0) { $0 + $1.bytes } + entries.values.reduce(0) { $0 + $1.bytes }
+            }
+            var cids: Set<String> { Set(bodies.values.flatMap(\.cids.keys) + entries.keys) }
+            func rank(body block: String, read: UInt64) -> Rank {
+                guard let distance = distances[block] else { return (2, 0, UInt64.max - read) }
+                return (0, distance, UInt64.max - read)
+            }
+            mutating func makeRoom(_ charge: Int, for rank: Rank) -> Bool {
+                guard charge <= maximumBytes else { return false }
+                while bytes + charge > maximumBytes {
+                    var first: (rank: Rank, body: String?, entry: String?)?
+                    for (block, body) in bodies {
+                        let candidate = self.rank(body: block, read: body.read)
+                        if first.map({ candidate > $0.rank }) ?? true { first = (candidate, block, nil) }
+                    }
+                    for (cid, entry) in entries {
+                        let candidate: Rank = (1, 0, UInt64.max - entry.read)
+                        if first.map({ candidate > $0.rank }) ?? true { first = (candidate, nil, cid) }
+                    }
+                    guard let first, first.rank > rank else { return false }
+                    if let block = first.body { bodies[block] = nil }
+                    if let cid = first.entry { entries[cid] = nil }
+                }
+                return true
+            }
+        }
+        var rng = SystemRandomNumberGenerator()
+        for _ in 0..<20 {
+            let maximumBytes = Int.random(in: 600...2_000, using: &rng)
+            let cache = ReadCache(maximumBytes: maximumBytes)
+            var scan = Scan(maximumBytes: maximumBytes)
+            let blocks = (0..<8).map { "block\($0)" }
+            for step in 0..<300 {
+                switch Int.random(in: 0..<4, using: &rng) {
+                case 0:
+                    var distances: [String: Int] = [:]
+                    for block in blocks where Bool.random(using: &rng) { distances[block] = Int.random(in: 0..<4, using: &rng) }
+                    await cache.order(bodies: distances)
+                    scan.distances = distances
+                case 1:
+                    let block = blocks.randomElement(using: &rng)!
+                    let volumes = (0..<Int.random(in: 1...3, using: &rng)).map { index in
+                        SerializedVolume(root: "\(block)-\(step)-\(index)", entries: [
+                            "\(block)-\(step)-\(index)": Data(repeating: 1, count: Int.random(in: 0...300, using: &rng)),
+                        ])
+                    }
+                    await cache.put(volumes, block: block)
+                    scan.bodies[block] = nil
+                    let all = volumes.reduce(into: [String: Data]()) { $0.merge($1.entries) { $1 } }
+                    if scan.makeRoom(charge(all), for: scan.rank(body: block, read: scan.clock + 1)) {
+                        scan.clock += 1
+                        scan.bodies[block] = (all, charge(all), scan.clock)
+                    }
+                case 2:
+                    var entries: [String: Data] = [:]
+                    for _ in 0..<Int.random(in: 1...3, using: &rng) {
+                        entries["entry\(Int.random(in: 0..<12, using: &rng))"] = Data(repeating: 2, count: Int.random(in: 0...200, using: &rng))
+                    }
+                    await cache.put(entries: entries)
+                    for (cid, data) in entries {
+                        scan.entries[cid] = nil
+                        guard scan.makeRoom(charge([cid: data]), for: (1, 0, UInt64.max - (scan.clock + 1))) else { continue }
+                        scan.clock += 1
+                        scan.entries[cid] = (data, charge([cid: data]), scan.clock)
+                    }
+                default:
+                    let held = Array(scan.cids)
+                    let asked = Set(held.filter { _ in Bool.random(using: &rng) } + ["absent"])
+                    let found = await cache.fetch(asked)
+                    for cid in asked {
+                        if scan.entries[cid] != nil {
+                            scan.clock += 1
+                            scan.entries[cid]?.read = scan.clock
+                        } else if let block = scan.bodies.first(where: { $0.value.cids[cid] != nil })?.key {
+                            scan.clock += 1
+                            scan.bodies[block]?.read = scan.clock
+                        }
+                    }
+                    XCTAssertEqual(Set(found.keys), asked.intersection(held))
+                }
+                let heldCIDs = await cache.heldCIDs
+                let heldBytes = await cache.heldBytes
+                XCTAssertEqual(heldCIDs, scan.cids, "step \(step)")
+                XCTAssertEqual(heldBytes, scan.bytes, "step \(step)")
+                if heldCIDs != scan.cids { return }
+            }
+        }
+
+        // Full of bodies in a window: an entry that cannot fit is refused
+        // without looking at them.
+        let full = ReadCache(maximumBytes: 3 * charge(["b0": Data(count: 100)]))
+        await full.order(bodies: ["b0": 0, "b1": 1, "b2": 2])
+        for block in ["b0", "b1", "b2"] {
+            await full.put([SerializedVolume(root: block, entries: [block: Data(count: 100)])], block: block)
+        }
+        let scansBefore = await full.bodyScans
+        for index in 0..<50 { await full.put(entries: ["e\(index)": Data(count: 10)]) }
+        let scansAfter = await full.bodyScans
+        let fullCIDs = await full.heldCIDs
+        XCTAssertEqual(scansAfter, scansBefore)
+        XCTAssertEqual(fullCIDs, ["b0", "b1", "b2"])
+    }
 }

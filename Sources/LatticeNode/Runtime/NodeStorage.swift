@@ -414,6 +414,9 @@ actor ReadCache: ContentSource {
     private var containing: [String: Set<Key>] = [:]
     /// Each window block's distance from its chain's next block to connect.
     private var distances: [String: Int] = [:]
+    /// How many held bodies are of blocks in no window: the bodies that go
+    /// before a read's entries.
+    private var outsideWindow = 0
     private var clock: UInt64 = 0
     private var bytes = 0
     private let maximumBytes: Int
@@ -427,10 +430,17 @@ actor ReadCache: ContentSource {
     /// The bytes held now.
     var heldBytes: Int { bytes }
 
+    /// The CIDs held now, read or not.
+    var heldCIDs: Set<String> { Set(held.values.flatMap(\.entries.keys)) }
+
+    /// How many times room was made by looking through the held bodies.
+    private(set) var bodyScans = 0
+
     /// The window blocks, each by its distance from its chain's next block
     /// to connect (0 for that block): the order their bodies are needed in.
     func order(bodies distances: [String: Int]) {
         self.distances = distances
+        outsideWindow = bodies.keys.reduce(0) { $0 + (distances[$1] == nil ? 1 : 0) }
     }
 
     /// The whole Volume under `root`, when this node derived it and it is held.
@@ -458,7 +468,8 @@ actor ReadCache: ContentSource {
         var unique: [String: [String: Data]] = [:]
         for volume in volumes { unique[volume.root] = volume.entries }
         let charges = unique.mapValues(Self.charge)
-        guard makeRoom(charges.values.reduce(0, +), for: rank(body: block, read: clock + 1)) else { return }
+        var victims: [(rank: Rank, block: String)]?
+        guard makeRoom(charges.values.reduce(0, +), for: rank(body: block, read: clock + 1), victims: &victims) else { return }
         clock += 1
         for (root, entries) in unique {
             let key = Key.body(block: block, root: root)
@@ -467,15 +478,19 @@ actor ReadCache: ContentSource {
             bytes += charges[root] ?? 0
         }
         bodies[block] = Body(roots: Array(unique.keys), read: clock)
+        if distances[block] == nil { outsideWindow += 1 }
     }
 
     /// Keeps entries a read asked for, each on its own.
     func put(entries: [String: Data]) {
+        // An entry goes before every body in a window and after every other
+        // body, so the bodies it may evict are the same for the whole batch.
+        var victims: [(rank: Rank, block: String)]?
         for (cid, data) in entries {
             let key = Key.entry(cid)
             evict(entry: key)
             let charge = Self.charge([cid: data])
-            guard makeRoom(charge, for: (1, 0, UInt64.max - (clock + 1))) else { continue }
+            guard makeRoom(charge, for: (1, 0, UInt64.max - (clock + 1)), victims: &victims) else { continue }
             clock += 1
             held[key] = Held(entries: [cid: data], bytes: charge, read: clock)
             link(key)
@@ -513,20 +528,34 @@ actor ReadCache: ContentSource {
 
     /// Evicts what goes before `rank` until `charge` fits. False, having
     /// evicted only what goes before it, when it does not.
-    private func makeRoom(_ charge: Int, for rank: Rank) -> Bool {
+    ///
+    /// `victims` are the bodies that go before `rank`, last first, found
+    /// once and kept for the rest of a put. Only a body in a window can go
+    /// after a read's entries, so while every held body is in a window an entry
+    /// looks at no body: refusing it costs nothing while the cache is full
+    /// of bodies the windows need.
+    private func makeRoom(_ charge: Int, for rank: Rank, victims: inout [(rank: Rank, block: String)]?) -> Bool {
         guard charge <= maximumBytes else { return false }
         while bytes + charge > maximumBytes {
-            var first: (rank: Rank, body: String?)?
-            for (block, body) in bodies {
-                let candidate = self.rank(body: block, read: body.read)
-                if first.map({ candidate > $0.rank }) ?? true { first = (candidate, block) }
+            if victims == nil, rank.0 == 0 || outsideWindow > 0 {
+                bodyScans += 1
+                victims = bodies.compactMap { block, body in
+                    let candidate = self.rank(body: block, read: body.read)
+                    return candidate > rank ? (candidate, block) : nil
+                }.sorted { $0.rank < $1.rank }
             }
+            var first: (rank: Rank, body: String?)? = victims?.last.map { ($0.rank, $0.block) }
             if let oldest, let entry = held[oldest] {
                 let candidate: Rank = (1, 0, UInt64.max - entry.read)
                 if first.map({ candidate > $0.rank }) ?? true { first = (candidate, nil) }
             }
             guard let first, first.rank > rank else { return false }
-            if let block = first.body { evict(body: block) } else if let oldest { evict(entry: oldest) }
+            if let block = first.body {
+                victims?.removeLast()
+                evict(body: block)
+            } else if let oldest {
+                evict(entry: oldest)
+            }
         }
         return true
     }
@@ -568,6 +597,7 @@ actor ReadCache: ContentSource {
 
     private func evict(body block: String) {
         guard let body = bodies.removeValue(forKey: block) else { return }
+        if distances[block] == nil { outsideWindow -= 1 }
         for root in body.roots {
             let key = Key.body(block: block, root: root)
             guard let entry = held.removeValue(forKey: key) else { continue }

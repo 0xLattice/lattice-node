@@ -71,6 +71,11 @@ extension ChainCore {
     /// Each window block's distance, in height, from the lowest block
     /// this level can connect next (`nextToConnect` at 0): the order in
     /// which their fetched bodies are needed.
+    ///
+    /// Distance is measured from the level's lowest next-to-connect block,
+    /// fork children included, not per branch: an approximation. A deep
+    /// fork child lowers the base, so this level's blocks look further
+    /// ahead than they are, which can skew the ranking against other chains.
     public var connectDistances: [String: Int] {
         let window = bodyWindow
         let next = window.filter { index.parent[$0].map(tree.isExecuted(blockHash:)) ?? true }
