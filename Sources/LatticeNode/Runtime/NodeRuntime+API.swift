@@ -832,7 +832,7 @@ extension NodeRuntime {
             if let tipCID = input.tipCID {
                 // Building below the act-on tip: the block carries neither
                 // the pool, which is kept on the act-on tip, nor children.
-                guard let tip = await anchoredTip(
+                guard let (tip, anchorBelow) = await anchoredTip(
                     from: tipCID, entering: entering.rawCID, at: input.path, levels: levels, fetcher: fetcher
                 ),
                       let previous = try? await BlockHeader(rawCID: tip).resolve(fetcher: fetcher).node,
@@ -844,15 +844,12 @@ extension NodeRuntime {
                     of: input.path, among: inputs, entering: previous.postState, timestamp: time,
                     request: request, levels: levels, fetcher: fetcher
                 )
-                let anchor = below
-                    ? await levels.read { $0[input.path].flatMap { NodeRuntime.anchor($0.tree, tip) } } ?? nil
-                    : input.anchor
                 block = try? await MiningTemplateAssembly.fit(
                     chainPath: input.path, lifetime: .seconds(30), previous: previous,
                     pooled: below ? [] : input.transactions, provided: grandchildren, parentCarrier: carrier,
                     timestamp: time, rewardRecipient: request.childRecipients[input.path],
                     minimumWork: request.minimumWork,
-                    difficultyAnchor: anchor,
+                    difficultyAnchor: below ? anchorBelow : input.anchor,
                     spec: spec, fetcher: fetcher
                 ).block
             } else if let spec = input.genesisSpec {
@@ -879,23 +876,65 @@ extension NodeRuntime {
     /// After a parent reorganization the act-on tip may be anchored on the
     /// abandoned branch, and a block on it anchored at the canonical parent
     /// would be invalid; building on the heaviest tip it can extend instead
-    /// is what moves the child with its parent. The level at `path` and its
-    /// parent are read live. `tipCID` when the parent is not hosted here; nil
-    /// when no executed block's anchor advances to `entering`, a block cannot
-    /// be read, or the levels no longer can.
+    /// is what moves the child with its parent. With the tip, its difficulty
+    /// anchor when it is below `tipCID`.
+    ///
+    /// The levels are read live, all in one read (`childTip`): the tip is
+    /// what one step's state gives, as a copy of the levels taken at that
+    /// step would. What the walk needs of a block's content, the anchor it
+    /// names, is read off the loop and the read made again: content never
+    /// changes, so only the last read's state decides.
+    ///
+    /// `tipCID` when the parent is not hosted here; nil when no executed
+    /// block's anchor advances to `entering`, a block cannot be read, or the
+    /// levels no longer can.
     static func anchoredTip(
         from tipCID: String, entering: String, at path: ChainPath, levels: LiveLevels, fetcher: any Fetcher
-    ) async -> String? {
-        let parent = Array(path.dropLast())
-        guard let hosted = await levels.read({ $0[parent] != nil }) else { return nil }
-        guard hosted else { return tipCID }
-        return await ChainCore.actOnTip(from: tipCID) { avoided in
-            await levels.read { $0[path]?.actOnTip(avoiding: avoided) } ?? nil
-        } accepting: { tip in
-            guard let block = try? await BlockHeader(rawCID: tip).resolve(fetcher: fetcher).node else { return nil }
-            let from = block.parentState.rawCID
-            return await levels.read { $0[parent]?.tree.executedSetAdvanced(from: from, to: entering) } ?? nil
+    ) async -> (tip: String, anchor: DifficultyAnchor?)? {
+        var anchors: [String: String] = [:]
+        while true {
+            let known = anchors
+            switch await levels.read({
+                childTip(from: tipCID, entering: entering, at: path, levels: $0, anchors: known)
+            }) {
+            case .tip(let tip, let anchor)?:
+                return (tip, anchor)
+            case .needs(let cid)?:
+                guard let block = try? await BlockHeader(rawCID: cid).resolve(fetcher: fetcher).node else { return nil }
+                anchors[cid] = block.parentState.rawCID
+            case .noTip?, nil:
+                return nil
+            }
         }
+    }
+
+    /// `anchoredTip` over one step's `levels`, with the parent states the
+    /// blocks it has read name (`anchors`); `.needs` a block it has not read.
+    static func childTip(
+        from tipCID: String, entering: String, at path: ChainPath,
+        levels: [ChainPath: ChainCore], anchors: [String: String]
+    ) -> ChildTip {
+        guard let level = levels[path] else { return .noTip }
+        guard let parent = levels[Array(path.dropLast())] else { return .tip(tipCID, anchor: nil) }
+        var needs: String?
+        let tip = level.actOnTip(from: tipCID) { tip in
+            guard let from = anchors[tip] else {
+                needs = tip
+                return nil
+            }
+            return parent.tree.executedSetAdvanced(from: from, to: entering)
+        }
+        if let needs { return .needs(needs) }
+        guard let tip else { return .noTip }
+        return .tip(tip, anchor: tip == tipCID ? nil : anchor(level.tree, tip))
+    }
+
+    /// What one read of the levels gives `anchoredTip`.
+    enum ChildTip: Sendable {
+        case tip(String, anchor: DifficultyAnchor?)
+        case noTip
+        /// The parent state a block names, which the walk must know.
+        case needs(String)
     }
 
     static func disposition(_ preflight: TransactionPreflightDisposition) -> MempoolDisposition {

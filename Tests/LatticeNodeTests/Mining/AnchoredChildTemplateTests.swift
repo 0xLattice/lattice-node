@@ -88,6 +88,8 @@ final class AnchoredChildTemplateTests: XCTestCase {
         let rootA1: SimBlock, rootA2: SimBlock
         let b3: SimBlock
         var nextTime: Int64
+        /// The host's levels before Nexus reorganized onto B.
+        let beforeReorg: [ChainPath: ChainCore]
     }
 
     /// A transaction that only spends a fresh signer's first nonce: it
@@ -124,6 +126,7 @@ final class AnchoredChildTemplateTests: XCTestCase {
         await host.feed(Array(builder.grinds.prefix(branchA)))
         XCTAssertEqual(host.node.levels[Self.nexus]?.snapshot.actOnTip, rootA2.cid, "fixture: Nexus follows A first")
         XCTAssertEqual(host.alpha.snapshot.actOnTip, a2.cid, "fixture: Alpha executed a2")
+        let beforeReorg = host.node.levels
         await host.feed(Array(builder.grinds.dropFirst(branchA)))
         XCTAssertEqual(host.node.levels[Self.nexus]?.snapshot.actOnTip, b3.cid, "fixture: Nexus reorganized onto B")
         XCTAssertEqual(host.alpha.snapshot.actOnTip, a2.cid, "fixture: Alpha still acts on a2")
@@ -133,7 +136,7 @@ final class AnchoredChildTemplateTests: XCTestCase {
         )
         return Fixture(
             builder: builder, host: host, n1: n1, a1: a1, a2: a2, rootA1: rootA1, rootA2: rootA2, b3: b3,
-            nextTime: t + 6 * interval
+            nextTime: t + 6 * interval, beforeReorg: beforeReorg
         )
     }
 
@@ -212,7 +215,7 @@ final class AnchoredChildTemplateTests: XCTestCase {
         let tip = await NodeRuntime.anchoredTip(
             from: fixture.a2.cid, entering: entering, at: Self.alpha, levels: levels(host), fetcher: cas
         )
-        XCTAssertEqual(tip, fixture.a1.cid, "the heaviest tip whose anchor advances to B3's state")
+        XCTAssertEqual(tip?.tip, fixture.a1.cid, "the heaviest tip whose anchor advances to B3's state")
 
         let pooled = try Self.nonceSpend(1, on: Self.alpha)
         let good = try await candidate(
@@ -317,9 +320,18 @@ final class AnchoredChildTemplateTests: XCTestCase {
         from tipCID: String, entering: String, level: ChainCore, parentTree: ChainTree?, fetcher: any Fetcher
     ) async -> String? {
         guard let parentTree else { return tipCID }
-        return await level.actOnTip(from: tipCID) { tip in
-            guard let block = try? await BlockHeader(rawCID: tip).resolve(fetcher: fetcher).node else { return nil }
-            return parentTree.executedSetAdvanced(from: block.parentState.rawCID, to: entering)
+        // The anchors of the tip's ancestry (this fixture's Alpha has no
+        // forks), read first: the walk runs at once.
+        var anchors: [String: String] = [:]
+        var cid: String? = tipCID
+        while let current = cid {
+            if let read = try? await BlockHeader(rawCID: current).resolve(fetcher: fetcher).node {
+                anchors[current] = read.parentState.rawCID
+            }
+            cid = level.parent(of: current)
+        }
+        return level.actOnTip(from: tipCID) { tip in
+            anchors[tip].map { parentTree.executedSetAdvanced(from: $0, to: entering) }
         }
     }
 
@@ -328,6 +340,59 @@ final class AnchoredChildTemplateTests: XCTestCase {
         let levels: [ChainPath: ChainCore]
         init(_ levels: [ChainPath: ChainCore]) { self.levels = levels }
         func run(_ read: @Sendable ([ChainPath: ChainCore]?) -> Void) { read(levels) }
+    }
+
+    /// Holds the levels as the runtime's loop does, and moves them to
+    /// `next` between steps, after its `swapAfter`th read.
+    private actor ReorganizingLoop {
+        var levels: [ChainPath: ChainCore]
+        let next: [ChainPath: ChainCore]
+        let swapAfter: Int
+        private(set) var reads = 0
+        init(_ levels: [ChainPath: ChainCore], next: [ChainPath: ChainCore], swapAfter: Int) {
+            (self.levels, self.next, self.swapAfter) = (levels, next, swapAfter)
+        }
+        func run(_ read: @Sendable ([ChainPath: ChainCore]?) -> Void) {
+            read(levels)
+            reads += 1
+            if reads == swapAfter { levels = next }
+        }
+    }
+
+    /// Nexus reorganizes onto B between the loop's steps while a child
+    /// template job reads the levels. Each read is one step's state, so the
+    /// job builds what one state gives: the state of its last read, before
+    /// the reorganization (no Alpha block enters B3's state) or after it
+    /// (a1's), never a mix.
+    func testAReorganizationBetweenStepsGivesOneStatesTemplate() async throws {
+        let fixture = try await fixture()
+        let host = fixture.host
+        let (before, after) = (fixture.beforeReorg, host.node.levels)
+        func built(_ levels: LiveLevels) async throws -> String? {
+            let candidates = await NodeRuntime.childCandidates(
+                of: Self.nexus, among: [input(host)], entering: fixture.b3.block.postState,
+                timestamp: fixture.nextTime, request: TemplateRequest(rewardRecipient: nil), levels: levels, fetcher: host.cas
+            )
+            return try candidates.first.map { try BlockHeader(node: $0.block).rawCID }
+        }
+        let fromBefore = try await built(LiveLevels { $0(before) })
+        let fromAfter = try await built(LiveLevels { $0(after) })
+        XCTAssertNil(fromBefore, "fixture: before the reorganization B3 is not executed")
+        XCTAssertNotNil(fromAfter)
+
+        var crossed = 0
+        for swapAfter in 1...6 {
+            let loop = ReorganizingLoop(before, next: after, swapAfter: swapAfter)
+            let result = try await built(LiveLevels { read in Task { await loop.run(read) } })
+            let reads = await loop.reads
+            if reads > swapAfter {
+                crossed += 1
+                XCTAssertEqual(result, fromAfter, "reorganized after read \(swapAfter) of \(reads)")
+            } else {
+                XCTAssertEqual(result, fromBefore, "all \(reads) reads before the reorganization")
+            }
+        }
+        XCTAssertGreaterThan(crossed, 0, "fixture: some job read across the reorganization")
     }
 
     /// A child template's reads made live, hopping onto the levels' owner,
@@ -351,7 +416,7 @@ final class AnchoredChildTemplateTests: XCTestCase {
                 from: fixture.a2.cid, entering: entering, at: Self.alpha, levels: live, fetcher: host.cas
             )
             XCTAssertEqual(copiedTip, expected)
-            XCTAssertEqual(liveTip, copiedTip)
+            XCTAssertEqual(liveTip?.tip, copiedTip)
             let liveBlock = try await candidate(
                 input(host, transactions: [pooled]), levels: live, entering: carrier, timestamp: fixture.nextTime, cas: host.cas
             )
@@ -370,7 +435,7 @@ final class AnchoredChildTemplateTests: XCTestCase {
             from: fixture.a2.cid, entering: fixture.b3.block.postState.rawCID,
             at: Self.alpha, levels: levels(fixture.host, parentHosted: false), fetcher: fixture.host.cas
         )
-        XCTAssertEqual(tip, fixture.a2.cid)
+        XCTAssertEqual(tip?.tip, fixture.a2.cid)
     }
 
     /// A carrier on A2 (the branch a2 is anchored on): the act-on tip is
@@ -382,7 +447,7 @@ final class AnchoredChildTemplateTests: XCTestCase {
         let tip = await NodeRuntime.anchoredTip(
             from: fixture.a2.cid, entering: entering, at: Self.alpha, levels: levels(host), fetcher: host.cas
         )
-        XCTAssertEqual(tip, fixture.a2.cid)
+        XCTAssertEqual(tip?.tip, fixture.a2.cid)
         let pooled = try Self.nonceSpend(1, on: Self.alpha)
         let block = try await candidate(
             input(host, transactions: [pooled]), levels: levels(host),

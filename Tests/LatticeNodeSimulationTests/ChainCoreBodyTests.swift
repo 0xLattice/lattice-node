@@ -199,7 +199,7 @@ final class ChainCoreBodyTests: XCTestCase {
     func testTheTipBuiltOnIsTheHeaviestOneAccepted() async throws {
         let (core, side) = try await forked()
         func tip(refusing refused: Set<String>) async -> String? {
-            await core.actOnTip(from: core.snapshot.actOnTip) { !refused.contains($0) }
+            core.actOnTip(from: core.snapshot.actOnTip) { !refused.contains($0) }
         }
         let accepted = await tip(refusing: [])
         XCTAssertEqual(accepted, side[2].cid, "the act-on tip when it is accepted")
@@ -217,7 +217,7 @@ final class ChainCoreBodyTests: XCTestCase {
         XCTAssertEqual(atGenesis, genesis)
         let none = await tip(refusing: allButGenesis.union([genesis]))
         XCTAssertNil(none, "nothing to build on")
-        let unreadable = await core.actOnTip(from: side[2].cid) { _ in nil }
+        let unreadable = core.actOnTip(from: side[2].cid) { _ in nil }
         XCTAssertNil(unreadable)
     }
 
