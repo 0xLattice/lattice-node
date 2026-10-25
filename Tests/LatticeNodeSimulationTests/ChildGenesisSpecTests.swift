@@ -52,7 +52,7 @@ final class ChildGenesisSpecTests: XCTestCase {
 
     func testABadSpecNeverBlocksTheGenesis() async throws {
         let world = try await world()
-        var host = NodeCore(root: world.rootBootstrap.tree, hosted: world.hosted)
+        var host = NodeCore(root: world.rootBootstrap.tree.detached(), hosted: world.hosted)
         let liar = PeerID(key: "liar", session: 1)
         let honest = PeerID(key: "honest", session: 1)
         _ = host.step(.peerReady(liar), now: now)
@@ -68,7 +68,7 @@ final class ChildGenesisSpecTests: XCTestCase {
 
     func testADroppedProofCheckFreesItsSlotWithoutBlame() async throws {
         let world = try await world()
-        var host = NodeCore(root: world.rootBootstrap.tree, hosted: world.hosted)
+        var host = NodeCore(root: world.rootBootstrap.tree.detached(), hosted: world.hosted)
         let peer = PeerID(key: "peer", session: 1)
         _ = host.step(.peerReady(peer), now: now)
         let effects = try await announce(

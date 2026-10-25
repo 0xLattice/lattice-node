@@ -293,7 +293,7 @@ public struct Simulator {
         )
         self.coreConfig = coreConfig
         for index in 0..<config.cores {
-            let core = ChainCore(tree: world.bootstrap.tree, config: coreConfig, log: WeighLog(id: "core\(index)"))
+            let core = ChainCore(tree: world.bootstrap.tree.detached(), config: coreConfig, log: WeighLog(id: "core\(index)"))
             cores["core\(index)"] = CoreNode(
                 core: core,
                 store: SimStore(genesis: world.genesis, facts: world.bootstrap.facts),
@@ -450,18 +450,21 @@ public struct Simulator {
             send(.core(.childIndexFetched(PeerID(key: node, session: sessionID), cid: cid, index)),
                  from: node, to: from)
         case .bodyArrived(let cid, let incarnation):
-            guard let held = cores[node], held.incarnation == incarnation,
-                  held.fetching.contains(cid), let block = world.blocks[cid] else { return }
-            held.content.put(block.body)
+            // Only the content is kept: a copy of the node held across the
+            // step would share its tree with the core the step mutates.
+            guard let content = cores[node].flatMap({
+                $0.incarnation == incarnation && $0.fetching.contains(cid) ? $0.content : nil
+            }), let block = world.blocks[cid] else { return }
+            content.put(block.body)
             cores[node]?.fetching.remove(cid)
             cores[node]?.bodies.insert(cid)
             try await step(node, .bodyFetched(cid: cid))
         case .runConnect(let job, let incarnation):
-            guard let held = cores[node], held.incarnation == incarnation else { return }
+            guard let content = cores[node].flatMap({ $0.incarnation == incarnation ? $0.content : nil }) else { return }
             report.connects += 1
             let verdict = await ChainTree.connect(
                 job,
-                fetcher: ContentLayer(own: held.content, providers: cores.filter { $0.key != node }.sorted { $0.key < $1.key }.map(\.value.content)),
+                fetcher: ContentLayer(own: content, providers: cores.filter { $0.key != node }.sorted { $0.key < $1.key }.map(\.value.content)),
                 validationContext: ValidationContext(nowMilliseconds: now)
             )
             try await step(node, .connected(verdict))
@@ -542,7 +545,8 @@ public struct Simulator {
 
     /// One `ChainCore.step`, its effects in order, then the invariants.
     mutating func step(_ name: String, _ event: ChainEvent) async throws {
-        guard var node = cores[name] else { return }
+        // The step mutates the one copy: the node is taken out and put back.
+        guard var node = cores.removeValue(forKey: name) else { return }
         let revision = node.core.tree.currentRevision()
         var effects = node.core.step(event, now: now)
         if faults.publishBeforePersist {

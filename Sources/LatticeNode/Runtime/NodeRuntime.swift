@@ -155,8 +155,11 @@ public final class NodeRuntime: Sendable {
             coreConfig: coreConfig
         )
         let overlay = try overlay ?? OverlayConfiguration(configuration).overlay
+        // What the journal replay below reads of the core, which the runtime
+        // takes over.
+        let (rootPath, levels) = (core.rootPath, Set(core.levels.keys))
         let runtime = NodeRuntime(
-            core: core,
+            core: consume core,
             storage: storage,
             configuration: configuration,
             ivy: Ivy(config: overlay),
@@ -176,8 +179,8 @@ public final class NodeRuntime: Sendable {
         // Boot replay of the local journal, each row with its arrival time,
         // into the pool of the chain it names.
         for item in try await storage.localTransactions() {
-            let path = item.transaction.body.node?.chainPath ?? core.rootPath
-            guard core.levels[path] != nil else { continue }
+            let path = item.transaction.body.node?.chainPath ?? rootPath
+            guard levels.contains(path) else { continue }
             runtime.inputs.yield(.event(.level(path, .mining(.transactionReceived(
                 item.transaction, origin: .restored(addedAt: item.addedAt * 1_000)
             )))))
@@ -236,7 +239,7 @@ public final class NodeRuntime: Sendable {
         // One hosted level's journal read at a time, and only a hosted
         // level's: each is dropped once its level is restored.
         let core = try await NodeCore.restore(
-            root: root, hosted: Set(configuration.hostedChildren), config: coreConfig,
+            root: consume root, hosted: Set(configuration.hostedChildren), config: coreConfig,
             logID: logID, cursors: cursors
         ) { path in
             let facts = try await storage.nodeFacts(at: path)
@@ -253,7 +256,7 @@ public final class NodeRuntime: Sendable {
     }
 
     private init(
-        core: NodeCore,
+        core: consuming NodeCore,
         storage: NodeStorage,
         configuration: NodeConfiguration,
         ivy: Ivy,
@@ -339,8 +342,10 @@ public final class NodeRuntime: Sendable {
         }
         let remote = IvyRootContentSource(ivy: ivy, policy: configuration.resourcePolicy)
         peerCapabilities = remote.peerCapabilities
-        let initial = Loop(
-            core: core,
+        // The loop task takes the only copy of the core: a copy its closure
+        // kept would share every level's tree with the running loop.
+        let initial = Handoff(Loop(
+            core: consume core,
             storage: storage,
             ivy: ivy,
             punch: punch,
@@ -356,9 +361,9 @@ public final class NodeRuntime: Sendable {
             workers: max(1, workers),
             failStop: failStop,
             peerMemory: peerMemory
-        )
+        ))
         loop = Task {
-            var state = initial
+            var state = initial.take()
             // With no bodies kept beyond the working set, a start lets go
             // of the ones a run that kept them left, before any step.
             for (path, level) in state.core.levels { state.bodyTips[path] = level.snapshot.actOnTip }
@@ -1288,9 +1293,9 @@ extension NodeRuntime {
                 case .close:
                     _ = await ivy.disconnectSession(ifCurrent: session.peer)
                 }
-            case .connect(let path, let job, let parentFacts):
+            case .connect(let path, let job):
                 executionJobs.append(NodeRuntime.connectJob(
-                    job, at: path, parentFacts: parentFacts, storage: storage, remote: remote
+                    job, at: path, levels: LiveLevels(inputs: inputs), storage: storage, remote: remote
                 ))
                 startJobs()
             case .wakeAt(let time):
@@ -1594,5 +1599,19 @@ extension NodeRuntime {
             for task in bodies.values { task.cancel() }
             bodies.removeAll()
         }
+    }
+}
+
+/// A value handed to the one closure that takes it, which then holds no
+/// copy of it. Taken once, by that closure alone.
+private final class Handoff<Value>: @unchecked Sendable {
+    private var value: Value?
+
+    init(_ value: consuming Value) {
+        self.value = value
+    }
+
+    func take() -> Value {
+        value.take()!
     }
 }

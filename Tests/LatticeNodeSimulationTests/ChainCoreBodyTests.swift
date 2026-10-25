@@ -28,7 +28,7 @@ final class ChainCoreBodyTests: XCTestCase {
     /// A core that weighed `blocks` from `peer`, its stream read to the end
     /// (so nothing is left in flight), and the fact log it persisted from genesis.
     private func weighed(_ blocks: [SimBlock], window: Int = 4) -> (ChainCore, [BlockImportBatch]) {
-        var core = ChainCore(tree: world.bootstrap.tree, config: ChainCoreConfig(bodyWindow: window))
+        var core = ChainCore(tree: world.bootstrap.tree.detached(), config: ChainCoreConfig(bodyWindow: window))
         let asked = core.step(.peerReady(peer), now: Self.now).compactMap { effect -> UInt64? in
             if case .send(_, .getStream(let id, _, _, _)) = effect { return id }
             return nil
@@ -222,7 +222,7 @@ final class ChainCoreBodyTests: XCTestCase {
     }
 
     func testTheNextWindowOfTheBestChainIsAskedForInParentOrder() {
-        var core = ChainCore(tree: world.bootstrap.tree, config: ChainCoreConfig(bodyWindow: 3))
+        var core = ChainCore(tree: world.bootstrap.tree.detached(), config: ChainCoreConfig(bodyWindow: 3))
         _ = core.step(.peerReady(peer), now: Self.now)
         let effects = show(&core, chain.prefix(6).map { HeaderEntry(block: $0.block, children: $0.children) }, at: Self.now)
         XCTAssertEqual(bodyFetches(effects), chain.prefix(3).map(\.cid))
@@ -280,7 +280,7 @@ final class ChainCoreBodyTests: XCTestCase {
         // branch is the best chain.
         var (core, _) = weighed(Array(chain.prefix(2)) + [invalid, child])
         XCTAssertEqual(core.tree.canonicalTip, child.cid)
-        let before = core.tree
+        let before = core.tree.detached()
         let weightBefore = before.subtreeWeight(forHash: chain[1].cid)?.uint256Value
 
         _ = try await deliver(chain[0].cid, to: &core)
