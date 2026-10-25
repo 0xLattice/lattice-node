@@ -3,6 +3,7 @@ import Foundation
 import Ivy
 import Lattice
 import LatticeNodeCore
+import LatticeNodeSim
 import VolumeBroker
 import XCTest
 import cashew
@@ -343,37 +344,204 @@ final class AbsentContentTests: XCTestCase {
         XCTAssertFalse(retained.contains(absent))
     }
 
-    /// What a read asked of peers is remembered: only what it asked for,
-    /// an answer whole or not at all, and within the bound.
-    func testTheReadCacheRemembersOnlyWhatWasAskedWithinItsBound() async throws {
+    /// The read cache keeps whole the Volumes a body's fetch derived, and
+    /// on their own the entries a read asked for (never what else a peer
+    /// sent), within the bound: the least recently read go first, what is
+    /// put again replaces what is held, and one larger than the bound is
+    /// not kept.
+    func testTheReadCacheKeepsRecentContentWithinItsBound() async throws {
+        let volume = { (name: String, byte: UInt8) in
+            SerializedVolume(root: name, entries: [
+                name: Data(repeating: byte, count: 100), name + "-leaf": Data(repeating: byte, count: 100),
+            ])
+        }
+        let charge = { (name: String) in 2 * 100 + 2 * IvyRootContentSource.retainedEntryOverhead + 2 * name.utf8.count + 5 }
+        let cache = ReadCache(maximumBytes: 2 * charge("a"))
+
+        await cache.put([volume("a", 7)], block: "a")
+        await cache.put([volume("b", 7)], block: "b")
+        let both = await cache.fetch(["a", "a-leaf", "b-leaf"])
+        XCTAssertEqual(Set(both.keys), ["a", "a-leaf", "b-leaf"])
+
+        // "b" was read after "a" above; reading "a" again makes "b" the least recent.
+        _ = await cache.fetch(["a"])
+        await cache.put([volume("c", 7)], block: "c")
+        let afterThird = await cache.fetch(["a", "b", "c"])
+        XCTAssertEqual(Set(afterThird.keys), ["a", "c"])
+        let kept = await cache.volume("a")
+        XCTAssertEqual(kept?.entries, volume("a", 7).entries, "a Volume is kept whole")
+        var held = await cache.heldBytes
+        XCTAssertLessThanOrEqual(held, 2 * charge("a"))
+
+        // Put again, a Volume replaces the one held under its root.
+        await cache.put([volume("a", 9)], block: "a")
+        let replaced = await cache.volume("a")
+        XCTAssertEqual(replaced?.entries, volume("a", 9).entries)
+        held = await cache.heldBytes
+        XCTAssertLessThanOrEqual(held, 2 * charge("a"))
+
+        // One larger than the bound is not kept, and evicts nothing.
+        let large = SerializedVolume(root: "large", entries: ["large": Data(repeating: 9, count: 4 * charge("a"))])
+        await cache.put([large], block: "large")
+        let afterLarge = await cache.fetch(["a", "c", "large"])
+        XCTAssertEqual(Set(afterLarge.keys), ["a", "c"])
+        held = await cache.heldBytes
+        XCTAssertLessThanOrEqual(held, 2 * charge("a"))
+
+        // Bodies go furthest from their chain's next block to connect
+        // first, whatever was read last; a block in no window before any.
+        let ordered = ReadCache(maximumBytes: 2 * charge("a"))
+        await ordered.order(bodies: ["a": 0, "b": 1, "c": 2])
+        await ordered.put([volume("a", 7)], block: "a")
+        await ordered.put([volume("b", 7)], block: "b")
+        _ = await ordered.fetch(["a"])
+        await ordered.put([volume("c", 7)], block: "c")
+        let furthestNotKept = await ordered.fetch(["a", "b", "c"])
+        XCTAssertEqual(Set(furthestNotKept.keys), ["a", "b"], "the furthest ahead is not kept over nearer ones")
+        await ordered.order(bodies: ["b": 0, "c": 1])
+        await ordered.put([volume("c", 7)], block: "c")
+        let connectedFirst = await ordered.fetch(["a", "b", "c"])
+        XCTAssertEqual(Set(connectedFirst.keys), ["b", "c"], "a block in no window goes first")
+        await ordered.order(bodies: ["d": 0, "b": 1, "c": 2])
+        await ordered.put([volume("d", 7)], block: "d")
+        let nextKept = await ordered.fetch(["b", "c", "d"])
+        XCTAssertEqual(Set(nextKept.keys), ["b", "d"], "the next to connect evicts the furthest ahead")
+
+        // A read keeps only the entries it asked for, and none of them is a
+        // Volume: a peer chooses what it sends with one.
         struct Peer: ContentSource {
             let held: [String: Data]
             func fetch(_ cids: Set<String>) async -> [String: Data] { held }
         }
-        let entry = { (name: String) in (name, Data(repeating: 7, count: 100)) }
-        let charge = 1 + 100 + IvyRootContentSource.retainedEntryOverhead
-        let cache = ReadCache(maximumBytes: 2 * charge)
+        let reads = ReadCache(maximumBytes: 2 * charge("a"))
+        let padded = reads.remembering(Peer(held: ["r": Data(repeating: 1, count: 10), "x": Data(repeating: 2, count: 10)]))
+        let answer = await padded.fetch(["r"])
+        XCTAssertEqual(answer.count, 2)
+        let remembered = await reads.fetch(["r", "x"])
+        XCTAssertEqual(Set(remembered.keys), ["r"])
+        let asVolume = await reads.volume("r")
+        XCTAssertNil(asVolume)
+    }
 
-        // A peer answers with more than it was asked for: none of the rest is kept.
-        let padded = cache.remembering(Peer(held: Dictionary(uniqueKeysWithValues: ["a", "x", "y"].map(entry))))
-        let answer = await padded.fetch(["a"])
-        XCTAssertEqual(answer.count, 3)
-        let afterPadding = await cache.fetch(["a", "x", "y"])
-        XCTAssertEqual(Set(afterPadding.keys), ["a"])
+    /// Making room keeps what the brute-force scan over every held item
+    /// kept, over a random run of orders, puts and reads; and an entry that
+    /// cannot fit while every held body is in a window is refused without
+    /// looking at the bodies.
+    func testTheReadCacheEvictsAsAFullScanWould() async throws {
+        let overhead = IvyRootContentSource.retainedEntryOverhead
+        let charge = { (entries: [String: Data]) in
+            entries.reduce(0) { $0 + $1.key.utf8.count + $1.value.count + overhead }
+        }
+        typealias Rank = (Int, Int, UInt64)
+        // The eviction rule before running counters: every candidate scanned
+        // for each item evicted.
+        struct Scan {
+            let maximumBytes: Int
+            var clock: UInt64 = 0
+            var distances: [String: Int] = [:]
+            var bodies: [String: (cids: [String: Data], bytes: Int, read: UInt64)] = [:]
+            var entries: [String: (data: Data, bytes: Int, read: UInt64)] = [:]
+            var bytes: Int {
+                bodies.values.reduce(0) { $0 + $1.bytes } + entries.values.reduce(0) { $0 + $1.bytes }
+            }
+            var cids: Set<String> { Set(bodies.values.flatMap(\.cids.keys) + entries.keys) }
+            func rank(body block: String, read: UInt64) -> Rank {
+                guard let distance = distances[block] else { return (2, 0, UInt64.max - read) }
+                return (0, distance, UInt64.max - read)
+            }
+            mutating func makeRoom(_ charge: Int, for rank: Rank) -> Bool {
+                guard charge <= maximumBytes else { return false }
+                while bytes + charge > maximumBytes {
+                    var first: (rank: Rank, body: String?, entry: String?)?
+                    for (block, body) in bodies {
+                        let candidate = self.rank(body: block, read: body.read)
+                        if first.map({ candidate > $0.rank }) ?? true { first = (candidate, block, nil) }
+                    }
+                    for (cid, entry) in entries {
+                        let candidate: Rank = (1, 0, UInt64.max - entry.read)
+                        if first.map({ candidate > $0.rank }) ?? true { first = (candidate, nil, cid) }
+                    }
+                    guard let first, first.rank > rank else { return false }
+                    if let block = first.body { bodies[block] = nil }
+                    if let cid = first.entry { entries[cid] = nil }
+                }
+                return true
+            }
+        }
+        for seed in UInt64(0)..<20 {
+            var rng = SplitMix64(state: 0xCAC4E + seed)
+            let maximumBytes = Int.random(in: 600...2_000, using: &rng)
+            let cache = ReadCache(maximumBytes: maximumBytes)
+            var scan = Scan(maximumBytes: maximumBytes)
+            let blocks = (0..<8).map { "block\($0)" }
+            for step in 0..<300 {
+                switch Int.random(in: 0..<4, using: &rng) {
+                case 0:
+                    var distances: [String: Int] = [:]
+                    for block in blocks where Bool.random(using: &rng) { distances[block] = Int.random(in: 0..<4, using: &rng) }
+                    await cache.order(bodies: distances)
+                    scan.distances = distances
+                case 1:
+                    let block = blocks.randomElement(using: &rng)!
+                    let volumes = (0..<Int.random(in: 1...3, using: &rng)).map { index in
+                        SerializedVolume(root: "\(block)-\(step)-\(index)", entries: [
+                            "\(block)-\(step)-\(index)": Data(repeating: 1, count: Int.random(in: 0...300, using: &rng)),
+                        ])
+                    }
+                    await cache.put(volumes, block: block)
+                    scan.bodies[block] = nil
+                    let all = volumes.reduce(into: [String: Data]()) { $0.merge($1.entries) { $1 } }
+                    if scan.makeRoom(charge(all), for: scan.rank(body: block, read: scan.clock + 1)) {
+                        scan.clock += 1
+                        scan.bodies[block] = (all, charge(all), scan.clock)
+                    }
+                case 2:
+                    var entries: [String: Data] = [:]
+                    for _ in 0..<Int.random(in: 1...3, using: &rng) {
+                        entries["entry\(Int.random(in: 0..<12, using: &rng))"] = Data(repeating: 2, count: Int.random(in: 0...200, using: &rng))
+                    }
+                    await cache.put(entries: entries)
+                    for (cid, data) in entries {
+                        scan.entries[cid] = nil
+                        guard scan.makeRoom(charge([cid: data]), for: (1, 0, UInt64.max - (scan.clock + 1))) else { continue }
+                        scan.clock += 1
+                        scan.entries[cid] = (data, charge([cid: data]), scan.clock)
+                    }
+                default:
+                    let held = Array(scan.cids)
+                    let asked = Set(held.filter { _ in Bool.random(using: &rng) } + ["absent"])
+                    let found = await cache.fetch(asked)
+                    for cid in asked {
+                        if scan.entries[cid] != nil {
+                            scan.clock += 1
+                            scan.entries[cid]?.read = scan.clock
+                        } else if let block = scan.bodies.first(where: { $0.value.cids[cid] != nil })?.key {
+                            scan.clock += 1
+                            scan.bodies[block]?.read = scan.clock
+                        }
+                    }
+                    XCTAssertEqual(Set(found.keys), asked.intersection(held))
+                }
+                let heldCIDs = await cache.heldCIDs
+                let heldBytes = await cache.heldBytes
+                XCTAssertEqual(heldCIDs, scan.cids, "seed \(seed) step \(step)")
+                XCTAssertEqual(heldBytes, scan.bytes, "seed \(seed) step \(step)")
+                if heldCIDs != scan.cids { return }
+            }
+        }
 
-        // The second answer fits beside the first.
-        await cache.put(Dictionary(uniqueKeysWithValues: ["b"].map(entry)))
-        let both = await cache.fetch(["a", "b"])
-        XCTAssertEqual(Set(both.keys), ["a", "b"])
-
-        // One that would pass the bound starts the cache again, and is kept whole.
-        await cache.put(Dictionary(uniqueKeysWithValues: ["c", "d"].map(entry)))
-        let afterFull = await cache.fetch(["a", "b", "c", "d"])
-        XCTAssertEqual(Set(afterFull.keys), ["c", "d"])
-
-        // One larger than the bound is not kept, and costs nothing held.
-        await cache.put(Dictionary(uniqueKeysWithValues: ["e", "f", "g"].map(entry)))
-        let afterTooLarge = await cache.fetch(["c", "d", "e", "f", "g"])
-        XCTAssertEqual(Set(afterTooLarge.keys), ["c", "d"])
+        // Full of bodies in a window: an entry that cannot fit is refused
+        // without looking at them.
+        let full = ReadCache(maximumBytes: 3 * charge(["b0": Data(count: 100)]))
+        await full.order(bodies: ["b0": 0, "b1": 1, "b2": 2])
+        for block in ["b0", "b1", "b2"] {
+            await full.put([SerializedVolume(root: block, entries: [block: Data(count: 100)])], block: block)
+        }
+        let scansBefore = await full.bodyScans
+        for index in 0..<50 { await full.put(entries: ["e\(index)": Data(count: 10)]) }
+        let scansAfter = await full.bodyScans
+        let fullCIDs = await full.heldCIDs
+        XCTAssertEqual(scansAfter, scansBefore)
+        XCTAssertEqual(fullCIDs, ["b0", "b1", "b2"])
     }
 }

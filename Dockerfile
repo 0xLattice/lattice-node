@@ -36,6 +36,9 @@ RUN useradd -m -s /bin/bash lattice \
     && install -d -o lattice -g lattice /home/lattice/.lattice
 USER lattice
 
+# Two malloc arenas: per-thread arenas hold freed boot peaks as resident memory.
+ENV MALLOC_ARENA_MAX=2
+
 VOLUME /home/lattice/.lattice
 EXPOSE 4001
 EXPOSE 4002/tcp

@@ -107,6 +107,11 @@ extension NodeStore {
         try database.execute(
             "CREATE INDEX IF NOT EXISTS accepted_blocks_frontier ON accepted_blocks (chain_path, admission_seq DESC, block_cid DESC) WHERE leaf = 1"
         )
+        // One level's journal in order (boot and a hot-hosted start): read
+        // in pages by seq range, so any sort is bounded to one page.
+        try database.execute(
+            "CREATE INDEX IF NOT EXISTS admission_batches_by_level ON admission_batches (chain_path, seq)"
+        )
     }
 
     private static func createDataTables(in database: NodeSQLite) throws {
@@ -169,13 +174,5 @@ extension NodeStore {
         try database.execute(
             "CREATE TABLE IF NOT EXISTS child_proofs (chain TEXT NOT NULL, child TEXT NOT NULL, root TEXT NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (chain, child, root))"
         )
-    }
-
-    /// Boot-time audit of every normalized index against the immutable
-    /// admission batches: one audit per table owner, in a fixed order.
-    func auditNormalizedIndexes() throws {
-        let staged = try loadStagedImports()
-        try auditAdmissionFacts(staged: staged)
-        try auditAcceptedBlocks(staged: staged)
     }
 }

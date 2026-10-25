@@ -145,7 +145,6 @@ public final class NodeRuntime: Sendable {
         // persists is validated by the core, so peer input cannot reach it.
         failStop: @escaping @Sendable (any Error) -> Void = { fatalError("node runtime: persist failed: \($0)") }
     ) async throws -> NodeRuntime {
-        let proofs = try storage.store.savedProofs()
         var coreConfig = coreConfig
         coreConfig.mining.mempool.minRelayFee = configuration.minRelayFee
         coreConfig.finality = configuration.finality
@@ -163,9 +162,6 @@ public final class NodeRuntime: Sendable {
             relays: overlay.relayEnabled,
             helloTimeout: overlay.requestTimeout,
             workers: workers,
-            // A store that cannot read its proofs fails the boot: it would
-            // serve child headers without them.
-            proofs: proofs,
             failStop: failStop
         )
         await runtime.ivy.installNodeRuntime(
@@ -222,7 +218,6 @@ public final class NodeRuntime: Sendable {
     ) async throws -> NodeCore {
         guard configuration.address.isNexus else { throw NodeRuntimeError.notNexus }
         let logID = try await storage.chainLogID() ?? UUID().uuidString.lowercased()
-        let facts = try await storage.nodeFacts()
         var cursors: [ChainPath: [String: StreamCursor]] = [:]
         for path in [configuration.chainPath] + configuration.hostedChildren {
             cursors[path] = try await storage.chainCursors(at: path)
@@ -230,27 +225,29 @@ public final class NodeRuntime: Sendable {
         // The context pins the Nexus genesis: a store holding another root
         // fails the restore.
         let root = try ChainCore.restore(
-            replaying: facts[configuration.chainPath] ?? [],
+            replaying: try await storage.nodeFacts(at: configuration.chainPath),
             context: try configuration.runtimeContext,
             specs: [NexusGenesis.spec],
             config: coreConfig,
             cursors: cursors[configuration.chainPath] ?? [:]
         )
-        var specs: [ChainPath: [ChainSpec]] = [:]
-        for path in configuration.hostedChildren {
-            let batches = facts[path] ?? []
-            for case .block(let block) in batches.flatMap(\.facts) where block.parentBlockHash == nil {
+        // One hosted level's journal read at a time, and only a hosted
+        // level's: each is dropped once its level is restored.
+        let core = try await NodeCore.restore(
+            root: root, hosted: Set(configuration.hostedChildren), config: coreConfig,
+            logID: logID, cursors: cursors
+        ) { path in
+            let facts = try await storage.nodeFacts(at: path)
+            var specs: [ChainSpec] = []
+            for case .block(let block) in facts.flatMap(\.facts) where block.parentBlockHash == nil {
                 guard let spec = try await storage.chainGenesisSpec(block.blockHash) else {
                     throw NodeStorageError.missingMaterializedVolume(block.blockHash)
                 }
-                specs[path, default: []].append(spec)
+                specs.append(spec)
             }
+            return (facts, specs)
         }
-        return try NodeCore.restore(
-            root: root,
-            facts: facts, specs: specs, hosted: Set(configuration.hostedChildren), config: coreConfig,
-            logID: logID, cursors: cursors
-        )
+        return core
     }
 
     private init(
@@ -262,7 +259,6 @@ public final class NodeRuntime: Sendable {
         relays: Bool,
         helloTimeout: Duration,
         workers: Int,
-        proofs: SavedChildProofs,
         failStop: @escaping @Sendable (any Error) -> Void
     ) {
         let (stream, inputs) = AsyncStream<Input>.makeStream()
@@ -355,7 +351,6 @@ public final class NodeRuntime: Sendable {
             gate: gate,
             helloTimeout: helloTimeout,
             remote: remote,
-            proofs: proofs,
             workers: max(1, workers),
             failStop: failStop,
             peerMemory: peerMemory
@@ -461,9 +456,6 @@ extension NodeRuntime {
         let workers: Int
         let failStop: @Sendable (any Error) -> Void
         let peerMemory: PeerMemory?
-        /// Each child level's verified proofs, by block and root: what
-        /// `lookupProofs` answers and a served child header carries.
-        var proofs: SavedChildProofs = [:]
 
         /// One overlay session per peer key; the core sees `(key, id)`.
         /// Every change publishes what the open sessions' hellos advertised.
@@ -553,6 +545,9 @@ extension NodeRuntime {
         /// go of a body when the operator keeps none beyond it.
         var executedThisStep: [BodyKey] = []
         var bodyTips: [ChainPath: String] = [:]
+        /// The window blocks' distances from their chains' next blocks to
+        /// connect, as last given to the read cache.
+        var cachedBodyOrder: [String: Int] = [:]
         /// Each level's tip the kept state was last moved to, and the blocks
         /// executed or found invalid this step, whose reads go after it.
         var stateTips: [ChainPath: String] = [:]
@@ -586,13 +581,11 @@ extension NodeRuntime {
             gate: NodeRuntimeInputGate,
             helloTimeout: Duration,
             remote: IvyRootContentSource,
-            proofs: SavedChildProofs,
             workers: Int,
             failStop: @escaping @Sendable (any Error) -> Void,
             peerMemory: PeerMemory?
         ) {
             self.peerMemory = peerMemory
-            self.proofs = proofs
             self.gate = gate
             self.helloTimeout = helloTimeout
             self.core = core
@@ -1221,6 +1214,24 @@ extension NodeRuntime {
             }
             await settleBodies()
             await settleState()
+            // The blocks each chain can connect next wait for the content
+            // budget ahead of bodies fetched ahead of them. Refreshed only
+            // while someone waits: a waiter that arrives between steps is
+            // ordered by the last set, and moves up at the next step.
+            if remote.budget.waiting > 0 {
+                remote.budget.prioritize(Set(core.levels.values.flatMap(\.nextToConnect)))
+            }
+            // Fetched bodies stay in memory in the order their connects
+            // need them: the furthest ahead go first when room is needed.
+            if !bodies.isEmpty || !cachedBodyOrder.isEmpty {
+                let order = core.levels.values.reduce(into: [String: Int]()) { order, level in
+                    order.merge(level.connectDistances) { min($0, $1) }
+                }
+                if order != cachedBodyOrder {
+                    cachedBodyOrder = order
+                    await storage.readCache.order(bodies: order)
+                }
+            }
             // What an executed block read goes once the kept state has
             // counted what of it the tip's state holds.
             for key in readsDone { await storage.releaseReads(key.cid, at: key.path) }
@@ -1258,11 +1269,6 @@ extension NodeRuntime {
                         for case .exclusion(let excluded) in levelBatch.facts.flatMap(\.facts) {
                             await storage.releaseBody(excluded.blockHash, at: path)
                             readsDone.append(BodyKey(path: path, cid: excluded.blockHash))
-                        }
-                    }
-                    for (path, levelBatch) in batch.levels {
-                        for stored in levelBatch.proofs {
-                            proofs[path, default: [:]][stored.childCID, default: [:]][stored.proof.rootCID] = stored.proof
                         }
                     }
                 } catch {
@@ -1312,8 +1318,7 @@ extension NodeRuntime {
                 await outbox.send(to: session.peer, topic: frame.topic, payload: frame.payload)
             case .serveHeaders(let peer, let token, let requestID, let blockCIDs, let hasMore):
                 guard let session = session(peer) else { break }
-                let (storage, outbox, inputs, config) = (storage, outbox, inputs, core.config)
-                let proofs = proofs[path] ?? [:]
+                let (storage, outbox, inputs, config, failStop) = (storage, outbox, inputs, core.config, failStop)
                 spawn {
                     // Built up to a page, or for as long as the serving
                     // budget allows, and no further: the work is the
@@ -1322,13 +1327,25 @@ extension NodeRuntime {
                     let started = ContinuousClock.now
                     var entries: [HeaderEntry] = []
                     var (bytes, cut) = (0, false)
-                    for cid in blockCIDs {
+                    // A child header carries its saved proofs. Read off the
+                    // loop, a proof whose staging transaction has not
+                    // committed may show, as headers may: it was verified
+                    // before persist, and the peer verifies it again.
+                    var saved = SavedProofPage(store: storage.store, path: path, cids: blockCIDs)
+                    for (offset, cid) in blockCIDs.enumerated() {
+                        let proofs: [ChildBlockProof]
+                        do {
+                            proofs = try saved.proofs(at: offset)
+                        } catch {
+                            failStop(error)
+                            return
+                        }
                         guard let stored = await storage.chainHeader(cid) else { continue }
                         let spec = stored.block.parent == nil
                             ? try? await storage.chainGenesisSpec(cid) : nil
                         let entry = config.entry(
                             stored.block, children: stored.children,
-                            proofs: (proofs[cid] ?? [:]).sorted { $0.key < $1.key }.map(\.value), spec: spec ?? nil
+                            proofs: proofs, spec: spec ?? nil
                         )
                         let elapsed = (ContinuousClock.now - started) / .milliseconds(1)
                         guard config.fits(
@@ -1376,10 +1393,11 @@ extension NodeRuntime {
                 let rendezvous = path == core.rootPath ? nil : ChainHosts(
                     nexusGenesisCID: configuration.nexusGenesisCID, chainPath: path
                 )
+                let maxBlockSize = core.levels[path]?.maxBlockSize(of: cid)
                 bodies[key] = Task {
                     let roots = await NodeRuntime.retryingBody { bundle in
                         try await storage.fetchChainBody(
-                            cid, remote: remote, bundle: bundle, hosts: rendezvous
+                            cid, remote: remote, bundle: bundle, hosts: rendezvous, maxBlockSize: maxBlockSize
                         )
                     } waiting: { error in
                         inputs.yield(.bodyWaiting(
@@ -1407,13 +1425,21 @@ extension NodeRuntime {
                 executionJobs.append(NodeRuntime.readJob(blocks, at: path, storage: storage))
                 startJobs()
             case .lookupProofs(let cids):
-                let found = cids.compactMap { cid in
-                    (proofs[path]?[cid]).map { ($0, cid) }
-                }
-                for (roots, cid) in found {
-                    inputs.yield(.event(.level(path, .proofsFound(
-                        childCID: cid, roots.sorted { $0.key < $1.key }.map(\.value)
-                    ))))
+                // Read off the loop, as a served page is; each block's
+                // proofs come back as an event, in the order asked.
+                let (storage, inputs, failStop) = (storage, inputs, failStop)
+                spawn {
+                    let found: [String: [ChildBlockProof]]
+                    do {
+                        found = try storage.store.savedProofs(at: path, for: cids)
+                    } catch {
+                        failStop(error)
+                        return
+                    }
+                    for cid in cids {
+                        guard let roots = found[cid] else { continue }
+                        inputs.yield(.event(.level(path, .proofsFound(childCID: cid, roots))))
+                    }
                 }
             case .mining(let effect):
                 return await execute(effect, at: path)

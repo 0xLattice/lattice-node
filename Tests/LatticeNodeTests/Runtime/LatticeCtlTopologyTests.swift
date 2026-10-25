@@ -179,14 +179,18 @@ final class LatticeCtlTopologyTests: XCTestCase {
             .appendingPathComponent("ctl-serving-limits-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let body = #"{"listen":4001,"rpc":4003,"servingMaxConcurrent":200,"servingMaxInFlightVolumeBytes":536870912}"#
+        let body = #"{"listen":4001,"rpc":4003,"servingMaxConcurrent":200,"servingMaxInFlightVolumeBytes":536870912,"maxAcquisitionBytes":134217728}"#
         try Data(body.utf8).write(to: root.appendingPathComponent(Topology.fileName))
 
         let loaded = try Topology.load(root: root).validated()
         XCTAssertEqual(loaded.contentServingArguments, [
             "--serving-max-concurrent", "200",
             "--serving-max-in-flight-volume-bytes", "536870912",
+            "--max-acquisition-bytes", "134217728",
         ])
+        let zero = #"{"listen":4001,"rpc":4003,"maxAcquisitionBytes":0}"#
+        try Data(zero.utf8).write(to: root.appendingPathComponent(Topology.fileName))
+        XCTAssertThrowsError(try Topology.load(root: root).validated())
 
         let empty = #"{"listen":4001,"rpc":4003}"#
         try Data(empty.utf8).write(to: root.appendingPathComponent(Topology.fileName))

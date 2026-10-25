@@ -21,6 +21,9 @@ RUN chmod +x /usr/local/bin/read-replica-entrypoint \
     && useradd -m -s /bin/bash lattice \
     && install -d -o lattice -g lattice /data
 
+# Two malloc arenas: per-thread arenas hold freed boot peaks as resident memory.
+ENV MALLOC_ARENA_MAX=2
+
 # 8081 = public nginx; 4001 = the node's tree overlay.
 EXPOSE 8081 4001
 ENTRYPOINT ["/usr/local/bin/read-replica-entrypoint"]
