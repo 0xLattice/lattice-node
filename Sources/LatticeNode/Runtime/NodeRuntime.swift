@@ -131,6 +131,8 @@ public final class NodeRuntime: Sendable {
         /// The operator changed the chains this node hosts: the hosted
         /// children of this configuration, and what goes with them.
         case host(NodeConfiguration, CheckedContinuation<Void, any Error>)
+        /// A job's read of the live levels (`LiveLevels`).
+        case read(@Sendable ([ChainPath: ChainCore]?) -> Void)
         case stop
     }
 
@@ -377,6 +379,8 @@ public final class NodeRuntime: Sendable {
                     reply.resume(throwing: NodeRuntimeError.stopped)
                 } else if case .host(_, let reply) = input {
                     reply.resume(throwing: NodeRuntimeError.stopped)
+                } else if case .read(let read) = input {
+                    read(nil)
                 }
             }
             state.cancelAll()
@@ -491,9 +495,6 @@ extension NodeRuntime {
         /// again in a loop. Bounded, oldest out.
         var recentlyFetched = RecentSet(capacity: 4_096)
         var recentlyFetchedTips: [String] = []
-        /// Per level, the chain a tip epoch's jobs read, made once per epoch
-        /// that has a job.
-        var preflightLevels: [ChainPath: (epoch: UInt64, level: ChainLevel)] = [:]
         var views: [ChainPath: NodeReadView] = [:]
         /// Each view's template digest and the tips and pool versions it was
         /// computed from: selection runs only when one of them moves.
@@ -680,6 +681,9 @@ extension NodeRuntime {
                 currentPeers = current
                 refreshView()
                 return true
+            case .read(let read):
+                read(core.levels)
+                return true
             case .host(let next, let reply):
                 do {
                     try await host(next)
@@ -725,7 +729,6 @@ extension NodeRuntime {
                 outputs[path] = nil
                 views[path] = nil
                 digests[path] = nil
-                preflightLevels[path] = nil
                 currentPeers[path] = nil
             }
             // A stopped level's body fetches would retry for good: no
@@ -1236,8 +1239,6 @@ extension NodeRuntime {
             // counted what of it the tip's state holds.
             for key in readsDone { await storage.releaseReads(key.cid, at: key.path) }
             readsDone.removeAll()
-            // A tree copy is kept only for the current epoch's jobs.
-            preflightLevels = preflightLevels.filter { core.levels[$0.key]?.mining.tipEpoch == $0.value.epoch }
             refreshView()
             return true
         }
@@ -1492,36 +1493,22 @@ extension NodeRuntime {
                         inputs.yield(.answer(replyID, .failure(error)))
                     }
                 }
-            case .preflight(let job):
-                guard let level = await epochLevel(at: path, epoch: job.tipEpoch) else { break }
-                miningJobs.append(NodeRuntime.miningJob(effect, at: path, level: level, storage: storage))
+            case .preflight:
+                guard let basis = core.levels[path].flatMap({ NodeRuntime.miningBasis(effect, tree: $0.tree) }) else { break }
+                miningJobs.append(NodeRuntime.miningJob(effect, at: path, basis: basis, storage: storage))
                 startJobs()
-            case .buildTemplate(let job):
-                guard let level = await epochLevel(at: path, epoch: job.tipEpoch) else { break }
+            case .buildTemplate:
+                guard let basis = core.levels[path].flatMap({ NodeRuntime.miningBasis(effect, tree: $0.tree) }) else { break }
                 miningJobs.append(NodeRuntime.miningJob(
-                    effect, at: path, level: level, storage: storage, remote: remote, children: childTemplateInputs(below: path)
+                    effect, at: path, basis: basis, storage: storage, remote: remote,
+                    children: childTemplateInputs(below: path), levels: LiveLevels(inputs: inputs)
                 ))
                 startJobs()
             case .returnTransactions:
-                miningJobs.append(NodeRuntime.miningJob(effect, at: path, level: nil, storage: storage, remote: remote))
+                miningJobs.append(NodeRuntime.miningJob(effect, at: path, basis: nil, storage: storage, remote: remote))
                 startJobs()
             }
             return true
-        }
-
-        /// The chain a tip epoch's jobs read: Lattice's `preflightTransaction`
-        /// and the template's difficulty anchor, over a copy of the level's
-        /// tree made once per epoch.
-        private mutating func epochLevel(at path: ChainPath, epoch: UInt64) async -> ChainLevel? {
-            if let cached = preflightLevels[path], cached.epoch == epoch { return cached.level }
-            guard let tree = core.levels[path]?.tree, let level = NodeRuntime.jobLevel(tree) else { return nil }
-            preflightLevels[path] = (epoch, level)
-            return level
-        }
-
-        private func anchor(_ tree: ChainTree, _ tip: String) -> DifficultyAnchor? {
-            var tree = tree
-            return tree.difficultyAnchor(forBlockHash: tip)
         }
 
         /// Every hosted level below `path`, as a template job reads it.
@@ -1538,9 +1525,7 @@ extension NodeRuntime {
                     // contextual set: a withdrawal preflight could not settle
                     // without one is checked against that carrier's state.
                     transactions: level.mining.mempool.contextualTransactions(limit: .max),
-                    anchor: executed ? anchor(level.tree, snapshot.actOnTip) : nil,
-                    level: level,
-                    parentTree: core.levels[Array(child.dropLast())]?.tree,
+                    anchor: executed ? NodeRuntime.anchor(level.tree, snapshot.actOnTip) : nil,
                     // A weighed root that has not executed carries nothing
                     // until it executes, rather than a rival genesis.
                     genesisSpec: snapshot.bestHeaderTip.isEmpty ? configuration.childSpecs[child] : nil,

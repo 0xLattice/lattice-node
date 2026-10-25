@@ -137,27 +137,31 @@ final class AnchoredChildTemplateTests: XCTestCase {
         )
     }
 
-    private func input(
-        _ host: Host, transactions: [Transaction] = [], parentTree: ChainTree?
-    ) -> ChildTemplateInput {
+    private func input(_ host: Host, transactions: [Transaction] = []) -> ChildTemplateInput {
         var tree = host.alpha.tree
         let tip = host.alpha.snapshot.actOnTip
         return ChildTemplateInput(
             path: Self.alpha, tipCID: tip, bestHeaderTip: host.alpha.snapshot.bestHeaderTip,
             transactions: transactions, anchor: tree.difficultyAnchor(forBlockHash: tip),
-            level: host.alpha, parentTree: parentTree,
             genesisSpec: nil, genesisPremineRecipient: nil, genesisTransactions: [], genesisTarget: .max
         )
+    }
+
+    /// The host's levels as a job reads them live; with Nexus left out
+    /// when the parent is not hosted.
+    private func levels(_ host: Host, parentHosted: Bool = true) -> LiveLevels {
+        let levels = parentHosted ? host.node.levels : host.node.levels.filter { $0.key != Self.nexus }
+        return LiveLevels { $0(levels) }
     }
 
     /// The Alpha candidate the template builds under a carrier entering
     /// `entering`, dated `timestamp`.
     private func candidate(
-        _ input: ChildTemplateInput, entering: SimBlock, timestamp: Int64, cas: SimCAS
+        _ input: ChildTemplateInput, levels: LiveLevels, entering: SimBlock, timestamp: Int64, cas: SimCAS
     ) async throws -> Block {
         let candidates = await NodeRuntime.childCandidates(
             of: Self.nexus, among: [input], entering: entering.block.postState,
-            timestamp: timestamp, request: TemplateRequest(rewardRecipient: nil), fetcher: cas
+            timestamp: timestamp, request: TemplateRequest(rewardRecipient: nil), levels: levels, fetcher: cas
         )
         XCTAssertEqual(candidates.count, 1)
         return try XCTUnwrap(candidates.first?.block)
@@ -206,13 +210,13 @@ final class AnchoredChildTemplateTests: XCTestCase {
         let entering = fixture.b3.block.postState.rawCID
 
         let tip = await NodeRuntime.anchoredTip(
-            from: fixture.a2.cid, entering: entering, level: host.alpha, parentTree: host.nexusTree, fetcher: cas
+            from: fixture.a2.cid, entering: entering, at: Self.alpha, levels: levels(host), fetcher: cas
         )
         XCTAssertEqual(tip, fixture.a1.cid, "the heaviest tip whose anchor advances to B3's state")
 
         let pooled = try Self.nonceSpend(1, on: Self.alpha)
         let good = try await candidate(
-            input(host, transactions: [pooled], parentTree: host.nexusTree),
+            input(host, transactions: [pooled]), levels: levels(host),
             entering: fixture.b3, timestamp: fixture.nextTime, cas: cas
         )
         XCTAssertEqual(good.parent?.rawCID, fixture.a1.cid)
@@ -221,7 +225,7 @@ final class AnchoredChildTemplateTests: XCTestCase {
         XCTAssertEqual(goodCount, 0, "a block below the act-on tip carries no pool transactions")
 
         let naive = try await candidate(
-            input(host, parentTree: nil), entering: fixture.b3, timestamp: fixture.nextTime + 1, cas: cas
+            input(host), levels: levels(host, parentHosted: false), entering: fixture.b3, timestamp: fixture.nextTime + 1, cas: cas
         )
         XCTAssertEqual(naive.parent?.rawCID, fixture.a2.cid, "with no parent tree the act-on tip is built on")
 
@@ -266,7 +270,7 @@ final class AnchoredChildTemplateTests: XCTestCase {
             let nexusTip = try XCTUnwrap(host.node.levels[Self.nexus]?.snapshot.actOnTip)
             let carrier = try XCTUnwrap(fixture.builder.blocks[Self.nexus]?[nexusTip])
             let block = try await candidate(
-                input(host, parentTree: host.nexusTree), entering: carrier,
+                input(host), levels: levels(host), entering: carrier,
                 timestamp: fixture.nextTime + Int64(round) * LevelWorld.interval, cas: host.cas
             )
             let cid = try await carry(block, on: carrier, as: .block, &fixture).cid
@@ -307,12 +311,64 @@ final class AnchoredChildTemplateTests: XCTestCase {
         }
     }
 
+    /// Before live reads a job held a copy of the level and of its parent's
+    /// tree, and chose its tip this way: the oracle the live reads match.
+    private static func copiedAnchoredTip(
+        from tipCID: String, entering: String, level: ChainCore, parentTree: ChainTree?, fetcher: any Fetcher
+    ) async -> String? {
+        guard let parentTree else { return tipCID }
+        return await level.actOnTip(from: tipCID) { tip in
+            guard let block = try? await BlockHeader(rawCID: tip).resolve(fetcher: fetcher).node else { return nil }
+            return parentTree.executedSetAdvanced(from: block.parentState.rawCID, to: entering)
+        }
+    }
+
+    /// Holds the levels as the runtime's loop does: a read hops onto it.
+    private actor Loop {
+        let levels: [ChainPath: ChainCore]
+        init(_ levels: [ChainPath: ChainCore]) { self.levels = levels }
+        func run(_ read: @Sendable ([ChainPath: ChainCore]?) -> Void) { read(levels) }
+    }
+
+    /// A child template's reads made live, hopping onto the levels' owner,
+    /// build what a job holding copies of the levels built: the same tip
+    /// (the old copy-based choice), and byte for byte the same block, below
+    /// the act-on tip after the reorganization and on it with the pool.
+    func testLiveReadsBuildWhatCopiesOfTheLevelsBuilt() async throws {
+        let fixture = try await fixture()
+        let host = fixture.host
+        let loop = Loop(host.node.levels)
+        let live = LiveLevels { read in Task { await loop.run(read) } }
+        let held = host.node.levels
+        let copied = LiveLevels { $0(held) }
+        let pooled = try Self.nonceSpend(1, on: Self.alpha)
+        for (carrier, expected) in [(fixture.b3, fixture.a1.cid), (fixture.rootA2, fixture.a2.cid)] {
+            let entering = carrier.block.postState.rawCID
+            let copiedTip = await Self.copiedAnchoredTip(
+                from: fixture.a2.cid, entering: entering, level: host.alpha, parentTree: host.nexusTree, fetcher: host.cas
+            )
+            let liveTip = await NodeRuntime.anchoredTip(
+                from: fixture.a2.cid, entering: entering, at: Self.alpha, levels: live, fetcher: host.cas
+            )
+            XCTAssertEqual(copiedTip, expected)
+            XCTAssertEqual(liveTip, copiedTip)
+            let liveBlock = try await candidate(
+                input(host, transactions: [pooled]), levels: live, entering: carrier, timestamp: fixture.nextTime, cas: host.cas
+            )
+            let copiedBlock = try await candidate(
+                input(host, transactions: [pooled]), levels: copied, entering: carrier, timestamp: fixture.nextTime, cas: host.cas
+            )
+            XCTAssertEqual(liveBlock.parent?.rawCID, expected)
+            XCTAssertEqual(try BlockHeader(node: liveBlock).rawCID, try BlockHeader(node: copiedBlock).rawCID)
+        }
+    }
+
     /// With no hosted parent the act-on tip is built on unchanged.
     func testWithNoParentTreeTheActOnTipIsBuiltOn() async throws {
         let fixture = try await fixture()
         let tip = await NodeRuntime.anchoredTip(
             from: fixture.a2.cid, entering: fixture.b3.block.postState.rawCID,
-            level: fixture.host.alpha, parentTree: nil, fetcher: fixture.host.cas
+            at: Self.alpha, levels: levels(fixture.host, parentHosted: false), fetcher: fixture.host.cas
         )
         XCTAssertEqual(tip, fixture.a2.cid)
     }
@@ -324,12 +380,12 @@ final class AnchoredChildTemplateTests: XCTestCase {
         let host = fixture.host
         let entering = fixture.rootA2.block.postState.rawCID
         let tip = await NodeRuntime.anchoredTip(
-            from: fixture.a2.cid, entering: entering, level: host.alpha, parentTree: host.nexusTree, fetcher: host.cas
+            from: fixture.a2.cid, entering: entering, at: Self.alpha, levels: levels(host), fetcher: host.cas
         )
         XCTAssertEqual(tip, fixture.a2.cid)
         let pooled = try Self.nonceSpend(1, on: Self.alpha)
         let block = try await candidate(
-            input(host, transactions: [pooled], parentTree: host.nexusTree),
+            input(host, transactions: [pooled]), levels: levels(host),
             entering: fixture.rootA2, timestamp: fixture.nextTime, cas: host.cas
         )
         XCTAssertEqual(block.parent?.rawCID, fixture.a2.cid)

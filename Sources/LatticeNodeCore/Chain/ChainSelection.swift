@@ -81,14 +81,25 @@ extension ChainCore {
     /// avoiding each tip it fails for (`actOnTip(avoiding:)`), checked again.
     /// Nil when it holds for none, or answers nil (the tip cannot be read).
     public func actOnTip(from tipCID: String, accepting accepts: (String) async -> Bool?) async -> String? {
+        await Self.actOnTip(from: tipCID, avoiding: { actOnTip(avoiding: $0) }, accepting: accepts)
+    }
+
+    /// The same walk with the level read through `avoiding`, which answers
+    /// `actOnTip(avoiding:)`, or nil when the level cannot be read: how a
+    /// job off the loop reads the live level rather than a copy of it.
+    public static func actOnTip(
+        from tipCID: String,
+        avoiding: (Set<String>) async -> String?,
+        accepting accepts: (String) async -> Bool?
+    ) async -> String? {
         var avoided: Set<String> = []
         var tip = tipCID
         while true {
             guard let ok = await accepts(tip) else { return nil }
             if ok { return tip }
             // Each pass avoids one more block of a finite tree.
-            guard avoided.insert(tip).inserted else { return nil }
-            tip = actOnTip(avoiding: avoided)
+            guard avoided.insert(tip).inserted, let next = await avoiding(avoided) else { return nil }
+            tip = next
         }
     }
 
