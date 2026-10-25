@@ -3,6 +3,7 @@ import Foundation
 import Ivy
 import Lattice
 import LatticeNodeCore
+import LatticeNodeSim
 import VolumeBroker
 import XCTest
 import cashew
@@ -467,8 +468,8 @@ final class AbsentContentTests: XCTestCase {
                 return true
             }
         }
-        var rng = SystemRandomNumberGenerator()
-        for _ in 0..<20 {
+        for seed in UInt64(0)..<20 {
+            var rng = SplitMix64(state: 0xCAC4E + seed)
             let maximumBytes = Int.random(in: 600...2_000, using: &rng)
             let cache = ReadCache(maximumBytes: maximumBytes)
             var scan = Scan(maximumBytes: maximumBytes)
@@ -523,8 +524,8 @@ final class AbsentContentTests: XCTestCase {
                 }
                 let heldCIDs = await cache.heldCIDs
                 let heldBytes = await cache.heldBytes
-                XCTAssertEqual(heldCIDs, scan.cids, "step \(step)")
-                XCTAssertEqual(heldBytes, scan.bytes, "step \(step)")
+                XCTAssertEqual(heldCIDs, scan.cids, "seed \(seed) step \(step)")
+                XCTAssertEqual(heldBytes, scan.bytes, "seed \(seed) step \(step)")
                 if heldCIDs != scan.cids { return }
             }
         }
