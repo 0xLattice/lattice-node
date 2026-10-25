@@ -28,7 +28,7 @@ final class ChainCoreMiningTests: XCTestCase {
     /// A core that weighed `blocks` from `peer`'s log: a page of their IDs,
     /// then the objects it asks for.
     private func weighed(_ blocks: [SimBlock]) -> ChainCore {
-        var core = ChainCore(tree: world.bootstrap.tree, config: ChainCoreConfig(bodyWindow: 4))
+        var core = ChainCore(tree: world.bootstrap.tree.detached(), config: ChainCoreConfig(bodyWindow: 4))
         let asked = core.step(.peerReady(peer), now: Self.now).compactMap { effect -> UInt64? in
             if case .send(_, .getStream(let id, _, _, _)) = effect { return id }
             return nil
@@ -126,7 +126,7 @@ final class ChainCoreMiningTests: XCTestCase {
 
     func testAMinedRootIsAnsweredOnceItExecutes() async throws {
         let path = world.bootstrap.tree.context!.path
-        var host = NodeCore(root: world.bootstrap.tree, hosted: [])
+        var host = NodeCore(root: world.bootstrap.tree.detached(), hosted: [])
         let grind = MinedGrind(root: chain[0].block, rootChildren: chain[0].children, carried: [])
         let weighed = host.step(.mined(grind, replyID: 3), now: Self.now)
         XCTAssertTrue(weighed.contains { if case .persist = $0 { true } else { false } }, "\(weighed)")
@@ -140,7 +140,7 @@ final class ChainCoreMiningTests: XCTestCase {
         content.put(world.blocks[chain[0].cid]!.body)
         let arrived = host.step(.level(path, .bodyFetched(cid: chain[0].cid)), now: Self.now)
         let job = try XCTUnwrap(arrived.compactMap { effect -> ConnectJob? in
-            if case .connect(_, let job, _) = effect { return job }
+            if case .connect(_, let job) = effect { return job }
             return nil
         }.first)
         let verdict = await ChainTree.connect(

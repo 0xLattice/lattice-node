@@ -45,7 +45,7 @@ final class WithheldBodiesLivenessTests: XCTestCase {
             path = world.bootstrap.tree.context!.path
             known = world.blocks
             for _ in 0..<nodes {
-                var host = NodeCore(root: world.bootstrap.tree, hosted: [], config: ChainCoreConfig(bodyWindow: window))
+                var host = NodeCore(root: world.bootstrap.tree.detached(), hosted: [], config: ChainCoreConfig(bodyWindow: window))
                 _ = host.step(.peerReady(peer), now: now)
                 hosts.append(host)
                 contents.append(SimCAS(world.genesisContent))
@@ -90,7 +90,7 @@ final class WithheldBodiesLivenessTests: XCTestCase {
                         contents[node].put(known[cid]!.body)
                         next = step(node, .level(path, .bodyFetched(cid: cid)))
                     }
-                case .connect(_, let job, _):
+                case .connect(_, let job):
                     connected[node].append(job.blockHash)
                     let verdict = await ChainTree.connect(
                         job, fetcher: contents[node], validationContext: ValidationContext(nowMilliseconds: now)
@@ -382,7 +382,7 @@ final class WithheldBodiesLivenessTests: XCTestCase {
         XCTAssertEqual(net.snapshot(1).actOnTip, theirs.cid)
         try await net.show([theirs], to: 0)
         try await net.show([mine], to: 1)
-        let tree = net.level(0).tree
+        let tree = net.level(0).tree.detached()
         XCTAssertEqual(tree.subtreeWeight(forHash: mine.cid), tree.subtreeWeight(forHash: theirs.cid), "a tie")
         let chosen = forkChoicePrefersBlock(mine.cid, over: theirs.cid) ? mine : theirs
         for node in 0..<2 {
@@ -407,7 +407,7 @@ final class WithheldBodiesLivenessTests: XCTestCase {
         XCTAssertEqual(restored.snapshot.actOnTip, honest.cid)
         XCTAssertEqual(restored.snapshot.bestHeaderTip, branch.last?.cid)
         XCTAssertEqual(restored.mining.tipCID, honest.cid)
-        net.hosts[0] = NodeCore(root: restored.tree, hosted: [], config: ChainCoreConfig(bodyWindow: 8))
+        net.hosts[0] = NodeCore(root: restored.tree.detached(), hosted: [], config: ChainCoreConfig(bodyWindow: 8))
         _ = net.step(0, .peerReady(net.peer))
         let (next, outcome) = try await net.mine(by: 0)
         XCTAssertEqual(next.parent, honest.cid)

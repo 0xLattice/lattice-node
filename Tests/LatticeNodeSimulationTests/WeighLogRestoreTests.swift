@@ -21,7 +21,7 @@ final class WeighLogRestoreTests: XCTestCase {
             rng: &rng, levels: 2, grinds: 60, forkProbability: 0.3, shareProbability: 0.2,
             doubleProbability: 0.3, withholdDelay: 1_000
         )
-        var host = NodeCore(root: world.rootBootstrap.tree, hosted: world.hosted)
+        var host = NodeCore(root: world.rootBootstrap.tree.detached(), hosted: world.hosted)
         var facts: [ChainPath: [BlockImportBatch]] = [LevelWorld.nexus: [world.rootBootstrap.facts]]
         var specs: [ChainPath: [ChainSpec]] = [:]
         for grind in world.grinds {
@@ -48,9 +48,9 @@ final class WeighLogRestoreTests: XCTestCase {
                     persisted(batch)
                 case .level(let path, .fetchBody(let cid)):
                     queue.append(.level(path, .bodyFetched(cid: cid)))
-                case .connect(let path, let job, let parentFacts):
+                case .connect(let path, let job):
                     let verdict = await ChainTree.connect(
-                        job, fetcher: world.cas, parentFacts: parentFacts,
+                        job, fetcher: world.cas, parentFacts: host.parentFacts(for: path),
                         validationContext: ValidationContext(nowMilliseconds: Self.now)
                     )
                     queue.append(.level(path, .connected(verdict)))

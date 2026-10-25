@@ -279,7 +279,7 @@ final class LevelSimulationTests: XCTestCase {
         let now = World.genesisTime + 1_000_000
         let config = ChainCoreConfig()
         let alpha = LevelWorld.alpha
-        var host = NodeCore(root: world.rootBootstrap.tree, hosted: world.hosted, config: config)
+        var host = NodeCore(root: world.rootBootstrap.tree.detached(), hosted: world.hosted, config: config)
         var source = LevelSource(name: "source", config: config)
         let peer = PeerID(key: "source", session: 1)
         // Alpha's genesis comes with the grind that carries it; everything
@@ -346,7 +346,7 @@ final class LevelSimulationTests: XCTestCase {
         let now = World.genesisTime + 1_000_000
         let config = ChainCoreConfig()
         let alpha = LevelWorld.alpha
-        var host = NodeCore(root: world.rootBootstrap.tree, hosted: world.hosted, config: config)
+        var host = NodeCore(root: world.rootBootstrap.tree.detached(), hosted: world.hosted, config: config)
         var source = LevelSource(name: "source", config: config)
         let peer = PeerID(key: "source", session: 1)
         let node = PeerID(key: "node", session: 1)
@@ -410,7 +410,7 @@ final class LevelSimulationTests: XCTestCase {
         var now = World.genesisTime + 1_000_000
         let config = ChainCoreConfig()
         let alpha = LevelWorld.alpha
-        var host = NodeCore(root: world.rootBootstrap.tree, hosted: world.hosted, config: config)
+        var host = NodeCore(root: world.rootBootstrap.tree.detached(), hosted: world.hosted, config: config)
         var source = LevelSource(name: "source", config: config)
         let peer = PeerID(key: "source", session: 1)
         let served = world.released(alpha, at: now, withheld: false).filter { $0.height > 0 }.map(\.cid)
@@ -480,7 +480,7 @@ final class LevelSimulationTests: XCTestCase {
         let alpha = LevelWorld.alpha
         // A window on the child chain alone.
         config.finality = FinalityWindows(byChain: [alpha: window])
-        var host = NodeCore(root: world.rootBootstrap.tree, hosted: world.hosted, config: config)
+        var host = NodeCore(root: world.rootBootstrap.tree.detached(), hosted: world.hosted, config: config)
         var source = LevelSource(name: "source", config: config)
         let peer = PeerID(key: "source", session: 1)
         let served = world.released(alpha, at: now, withheld: false).filter { $0.height > 0 }.map(\.cid)
@@ -553,7 +553,7 @@ final class LevelSimulationTests: XCTestCase {
                 rng: &rng, levels: 2, grinds: 12, forkProbability: 0, shareProbability: 0,
                 doubleProbability: 0, withholdDelay: 1_000
             )
-            host = NodeCore(root: world.rootBootstrap.tree, hosted: world.hosted)
+            host = NodeCore(root: world.rootBootstrap.tree.detached(), hosted: world.hosted)
         }
 
         mutating func step(_ event: NodeEvent) async throws {
@@ -563,13 +563,13 @@ final class LevelSimulationTests: XCTestCase {
                     switch effect {
                     case .level(let path, .fetchBody(let cid)):
                         queue.append(.level(path, .bodyFetched(cid: cid)))
-                    case .connect(let path, let job, _) where holdRoot && path == LevelWorld.nexus:
+                    case .connect(let path, let job) where holdRoot && path == LevelWorld.nexus:
                         connects[job.blockHash, default: 0] += 1
                         heldRoot.append(job)
-                    case .connect(let path, let job, let facts):
+                    case .connect(let path, let job):
                         connects[job.blockHash, default: 0] += 1
                         let verdict = await ChainTree.connect(
-                            job, fetcher: world.cas, parentFacts: facts,
+                            job, fetcher: world.cas, parentFacts: host.parentFacts(for: path),
                             validationContext: ValidationContext(nowMilliseconds: now)
                         )
                         queue.append(.level(path, .connected(verdict)))
@@ -594,7 +594,7 @@ final class LevelSimulationTests: XCTestCase {
         // Alpha's genesis names the post-state of a held root block.
         let first = try XCTUnwrap(grinds[2].mined.carried.first).block
         let firstCID = try BlockHeader(node: first).rawCID
-        var alpha = try XCTUnwrap(harness.host.levels[LevelWorld.alpha])
+        var alpha = try XCTUnwrap(harness.host.levels[LevelWorld.alpha]?.held)
         XCTAssertEqual(Array(alpha.bodies.awaitingParent.keys), [firstCID])
         try LevelInvariants.checkExecutionStop("harness", path: LevelWorld.alpha, host: harness.host, digest: TreeDigest(alpha.tree))
         XCTAssertEqual(alpha.snapshot.actOnHeight, 0)
@@ -610,7 +610,7 @@ final class LevelSimulationTests: XCTestCase {
         }
         let nexus = try XCTUnwrap(harness.host.levels[LevelWorld.nexus]).snapshot
         XCTAssertEqual(nexus.actOnTip, nexus.bestHeaderTip)
-        alpha = try XCTUnwrap(harness.host.levels[LevelWorld.alpha])
+        alpha = try XCTUnwrap(harness.host.levels[LevelWorld.alpha]?.held)
         try LevelInvariants.checkExecutionStop("harness", path: LevelWorld.alpha, host: harness.host, digest: TreeDigest(alpha.tree))
         XCTAssertTrue(alpha.bodies.awaitingParent.isEmpty)
         XCTAssertEqual(harness.connects[firstCID], 2, "parked once, connected again once when its fact arrived")

@@ -204,7 +204,7 @@ public struct LevelSimulator {
         )
         coreConfig.proofs = config.proofs
         for index in 0..<config.cores {
-            let core = NodeCore(root: world.rootBootstrap.tree, hosted: world.hosted, config: coreConfig, logID: "core\(index)")
+            let core = NodeCore(root: world.rootBootstrap.tree.detached(), hosted: world.hosted, config: coreConfig, logID: "core\(index)")
             cores["core\(index)"] = HostNode(
                 core: core,
                 store: HostStore(world: world),
@@ -375,7 +375,8 @@ public struct LevelSimulator {
 
     /// One `NodeCore.step`, its effects in order, then the invariants.
     mutating func step(_ name: String, _ event: NodeEvent) async throws {
-        guard var node = cores[name] else { return }
+        // The step mutates the one copy: the node is taken out and put back.
+        guard var node = cores.removeValue(forKey: name) else { return }
         let effects = node.core.step(event, now: now)
         var persisted = false
         var persists = 0
@@ -395,12 +396,12 @@ public struct LevelSimulator {
                     throw Invariants.fail(name, "disconnected honest peer \(peer) as \(reason)")
                 }
                 schedule(at: now, to: name, .linkDown(name, peer.key, peer.session))
-            case .connect(let path, let job, let facts):
+            case .connect(let path, let job):
                 report.executions += 1
                 let verdict = await ChainTree.connect(
                     job,
                     fetcher: world.cas,
-                    parentFacts: facts,
+                    parentFacts: node.core.parentFacts(for: path),
                     validationContext: ValidationContext(nowMilliseconds: now)
                 )
                 schedule(at: delay(), to: name, .host(.level(path, .connected(verdict))))

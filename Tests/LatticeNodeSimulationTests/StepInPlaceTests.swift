@@ -53,7 +53,7 @@ final class StepInPlaceTests: XCTestCase {
         let world = try await World.generate(rng: &rng, honestBlocks: 100, forkProbability: 0, spamBlocks: 0)
         let path = world.bootstrap.tree.context!.path
         let peer = PeerID(key: "peer", session: 1)
-        var host = NodeCore(root: world.bootstrap.tree, hosted: [])
+        var host = NodeCore(root: world.bootstrap.tree.detached(), hosted: [])
         var counts: [ChainPath: (appends: Int, moves: Int)] = [:]
 
         var asked: UInt64?
@@ -88,7 +88,7 @@ final class StepInPlaceTests: XCTestCase {
             rng: &rng, levels: 2, grinds: 100, forkProbability: 0, shareProbability: 0,
             doubleProbability: 0, withholdDelay: 1_000
         )
-        var host = NodeCore(root: world.rootBootstrap.tree, hosted: world.hosted)
+        var host = NodeCore(root: world.rootBootstrap.tree.detached(), hosted: world.hosted)
         var counts: [ChainPath: (appends: Int, moves: Int)] = [:]
         for grind in world.grinds {
             var queue: [NodeEvent] = [.mined(grind.mined)]
@@ -97,9 +97,9 @@ final class StepInPlaceTests: XCTestCase {
                     switch effect {
                     case .level(let path, .fetchBody(let cid)):
                         queue.append(.level(path, .bodyFetched(cid: cid)))
-                    case .connect(let path, let job, let facts):
+                    case .connect(let path, let job):
                         let verdict = await ChainTree.connect(
-                            job, fetcher: world.cas, parentFacts: facts,
+                            job, fetcher: world.cas, parentFacts: host.parentFacts(for: path),
                             validationContext: ValidationContext(nowMilliseconds: Self.now)
                         )
                         queue.append(.level(path, .connected(verdict)))

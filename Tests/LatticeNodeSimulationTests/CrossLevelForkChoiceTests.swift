@@ -24,8 +24,8 @@ final class CrossLevelForkChoiceTests: XCTestCase {
 
         init(_ world: LevelWorld) {
             self.world = world
-            both = NodeCore(root: world.rootBootstrap.tree, hosted: world.hosted)
-            nexusOnly = NodeCore(root: world.rootBootstrap.tree, hosted: [])
+            both = NodeCore(root: world.rootBootstrap.tree.detached(), hosted: world.hosted)
+            nexusOnly = NodeCore(root: world.rootBootstrap.tree.detached(), hosted: [])
             store = HostStore(world: world)
         }
 
@@ -47,9 +47,9 @@ final class CrossLevelForkChoiceTests: XCTestCase {
                         persist(batch)
                     case .level(let path, .fetchBody(let cid)):
                         queue.append(.level(path, .bodyFetched(cid: cid)))
-                    case .connect(let path, let job, let facts):
+                    case .connect(let path, let job):
                         let verdict = await ChainTree.connect(
-                            job, fetcher: world.cas, parentFacts: facts,
+                            job, fetcher: world.cas, parentFacts: host.parentFacts(for: path),
                             validationContext: ValidationContext(nowMilliseconds: CrossLevelForkChoiceTests.now)
                         )
                         queue.append(.level(path, .connected(verdict)))
@@ -306,7 +306,7 @@ final class CrossLevelForkChoiceTests: XCTestCase {
 
         // Every header and proof weighed and persisted, nothing executed; a
         // node restored from those facts mined none of the blocks.
-        var miner = NodeCore(root: world.rootBootstrap.tree, hosted: world.hosted)
+        var miner = NodeCore(root: world.rootBootstrap.tree.detached(), hosted: world.hosted)
         var store = HostStore(world: world)
         for grind in world.grinds {
             for case .persist(let batch) in miner.step(.mined(grind.mined), now: Self.now) { store.append(batch) }
@@ -332,9 +332,9 @@ final class CrossLevelForkChoiceTests: XCTestCase {
                         break
                     case .level(let path, .fetchBody(let cid)):
                         queue.append(.level(path, .bodyFetched(cid: cid)))
-                    case .connect(let path, let job, let facts):
+                    case .connect(let path, let job):
                         let verdict = await ChainTree.connect(
-                            job, fetcher: world.cas, parentFacts: facts,
+                            job, fetcher: world.cas, parentFacts: node.parentFacts(for: path),
                             validationContext: ValidationContext(nowMilliseconds: Self.now)
                         )
                         queue.append(.level(path, .connected(verdict)))
@@ -346,8 +346,8 @@ final class CrossLevelForkChoiceTests: XCTestCase {
         }
         await drive(.tick)
 
-        var nexus = try XCTUnwrap(node.levels[Self.nexus])
-        var alpha = try XCTUnwrap(node.levels[Self.alpha])
+        var nexus = try XCTUnwrap(node.levels[Self.nexus]?.held)
+        var alpha = try XCTUnwrap(node.levels[Self.alpha]?.held)
         XCTAssertEqual(nexus.snapshot.bestHeaderTip, w3.cid)
         XCTAssertEqual(alpha.snapshot.bestHeaderTip, cw3.cid)
         XCTAssertEqual(nexus.snapshot.actOnTip, n1.cid, "H1's body is late: Nexus waits on N1")
@@ -360,8 +360,8 @@ final class CrossLevelForkChoiceTests: XCTestCase {
         // H1's body arrives: Nexus acts on it, and CW2 is executed and taken.
         late = []
         await drive(.level(Self.nexus, .bodyFetched(cid: h1.cid)))
-        nexus = try XCTUnwrap(node.levels[Self.nexus])
-        alpha = try XCTUnwrap(node.levels[Self.alpha])
+        nexus = try XCTUnwrap(node.levels[Self.nexus]?.held)
+        alpha = try XCTUnwrap(node.levels[Self.alpha]?.held)
         XCTAssertEqual(nexus.snapshot.actOnTip, h1.cid)
         XCTAssertFalse(nexus.tree.isExecuted(blockHash: w1.cid))
         XCTAssertEqual(alpha.snapshot.actOnTip, cw2.cid, "the heavier child is followed once it executes")
@@ -370,8 +370,8 @@ final class CrossLevelForkChoiceTests: XCTestCase {
         // Released: the heavier branch executes at both levels and is followed.
         withheld = []
         for cid in nexus.bodies.requested.sorted() { await drive(.level(Self.nexus, .bodyFetched(cid: cid))) }
-        nexus = try XCTUnwrap(node.levels[Self.nexus])
-        alpha = try XCTUnwrap(node.levels[Self.alpha])
+        nexus = try XCTUnwrap(node.levels[Self.nexus]?.held)
+        alpha = try XCTUnwrap(node.levels[Self.alpha]?.held)
         XCTAssertEqual(nexus.snapshot.actOnTip, w3.cid)
         XCTAssertEqual(alpha.snapshot.actOnTip, cw3.cid)
     }

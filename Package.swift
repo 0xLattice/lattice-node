@@ -26,7 +26,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/adalinxx/Lattice.git",
-            exact: "51.0.0"
+            exact: "52.0.0"
         ),
         .package(
             url: "https://github.com/adalinxx/cashew.git",
