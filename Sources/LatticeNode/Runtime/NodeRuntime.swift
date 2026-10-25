@@ -788,8 +788,10 @@ extension NodeRuntime {
             guard await step(.host(path, facts: facts, specs: specs, cursors: cursors)) else {
                 throw NodeRuntimeError.stopped
             }
-            guard let level = core.levels[path] else { throw NodeRuntimeError.unknownChain }
-            outputs[path] = LevelOutput(published: PublishedValue(level.snapshot), view: PublishedValue())
+            // No copy of the level outlives this check: the steps below
+            // mutate it.
+            guard core.levels[path] != nil else { throw NodeRuntimeError.unknownChain }
+            outputs[path] = LevelOutput(published: PublishedValue(core.levels[path]?.snapshot), view: PublishedValue())
             await peerMemory?.track(path, now: NodeRuntime.now())
             for item in try await storage.localTransactions()
             where item.transaction.body.node?.chainPath == path {

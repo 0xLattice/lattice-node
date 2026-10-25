@@ -17,8 +17,8 @@ final class NodeEffectTraceLabelTests: XCTestCase {
         )
         let now = World.genesisTime + 1_000_000
         var host = NodeCore(root: world.rootBootstrap.tree.detached(), hosted: world.hosted)
-        // (full reflection length, label length) of each child connect.
-        var childConnects: [(reflected: Int, label: Int)] = []
+        // The label length of each child connect.
+        var childConnects: [Int] = []
         for grind in world.grinds {
             var queue: [NodeEvent] = [.mined(grind.mined)]
             while !queue.isEmpty {
@@ -28,7 +28,7 @@ final class NodeEffectTraceLabelTests: XCTestCase {
                         queue.append(.level(path, .bodyFetched(cid: cid)))
                     case .connect(let path, let job):
                         if path.count > 1 {
-                            childConnects.append((String(describing: effect).count, effect.traceLabel.count))
+                            childConnects.append(effect.traceLabel.count)
                         }
                         let verdict = await ChainTree.connect(
                             job, fetcher: world.cas, parentFacts: host.parentFacts(for: path),
@@ -43,8 +43,7 @@ final class NodeEffectTraceLabelTests: XCTestCase {
         }
         let last = try XCTUnwrap(childConnects.last)
         XCTAssertGreaterThan(childConnects.count, 4)
-        // The label does not.
-        XCTAssertEqual(Set(childConnects.map(\.label)).count, 1)
-        XCTAssertLessThan(last.label, 200)
+        XCTAssertEqual(Set(childConnects).count, 1)
+        XCTAssertLessThan(last, 200)
     }
 }
