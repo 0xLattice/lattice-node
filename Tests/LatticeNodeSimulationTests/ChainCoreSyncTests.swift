@@ -271,6 +271,18 @@ final class ChainCoreSyncTests: XCTestCase {
         XCTAssertEqual(served(after).first?.1, [chain[0].cid])
     }
 
+    /// Headers already logged, streamed again by another peer, grow nothing:
+    /// not the log, and no fetch.
+    func testHeadersAlreadyLoggedRedeliveredByAPeerAppendNothing() throws {
+        var core = weighed(Array(chain[0..<4]))
+        let before = core.sync.log.entries
+        ready(&core, other)
+        let effects = relay(&core, chain[0..<4].map { entry($0) }, from: other)
+        XCTAssertEqual(core.sync.cursors[other.key]?.position, 4, "the peer's stream was read")
+        XCTAssertTrue(dataRequests(effects).isEmpty, "held objects are not fetched again")
+        XCTAssertEqual(core.sync.log.entries, before)
+    }
+
     func testStreamingFromAnotherCoreReplicatesItsWholeGraph() async throws {
         let side = try await world.branch(from: chain[4], count: 3)
         var server = weighed(chain + side, pageSize: 5)
