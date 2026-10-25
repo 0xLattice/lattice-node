@@ -78,7 +78,6 @@ public struct TreeDigest: Equatable, Sendable {
     public let excluded: Set<String>
 
     public init(_ tree: ChainTree) {
-        var tree = tree
         let genesis = tree.canonicalBlockHash(atHeight: 0) ?? tree.canonicalTip
         var blocks: [String: Entry] = [:]
         var executed = Set<String>()

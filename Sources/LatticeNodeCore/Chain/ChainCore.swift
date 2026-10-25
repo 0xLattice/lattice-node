@@ -301,7 +301,6 @@ public struct ChainCore: Sendable {
         log: WeighLog = WeighLog(),
         cursors: [String: StreamCursor] = [:]
     ) {
-        var tree = tree
         precondition(tree.context != nil, "the core runs one chain's level")
         var index = WeighedIndex()
         var stack = roots ?? Self.bestRoot(of: tree)
