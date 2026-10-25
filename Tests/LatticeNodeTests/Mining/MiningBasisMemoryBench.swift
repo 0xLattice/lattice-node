@@ -64,7 +64,8 @@ final class MiningBasisMemoryBench: XCTestCase {
         for job in 0..<Self.jobs {
             let tip = Self.cid("b", blocks - 1 + job)
             if copying {
-                held.append(try XCTUnwrap(ChainLevel(tree: live)))
+                // What a job holding the tree held: its own copy of it.
+                held.append(try XCTUnwrap(ChainLevel(tree: live.detached())))
             } else {
                 held.append(MiningBasis(
                     snapshot: live.transactionPreflightTip(at: tip).snapshot, anchor: NodeRuntime.anchor(live, tip)

@@ -382,7 +382,7 @@ final class WithheldBodiesLivenessTests: XCTestCase {
         XCTAssertEqual(net.snapshot(1).actOnTip, theirs.cid)
         try await net.show([theirs], to: 0)
         try await net.show([mine], to: 1)
-        let tree = net.level(0).tree
+        let tree = net.level(0).tree.detached()
         XCTAssertEqual(tree.subtreeWeight(forHash: mine.cid), tree.subtreeWeight(forHash: theirs.cid), "a tie")
         let chosen = forkChoicePrefersBlock(mine.cid, over: theirs.cid) ? mine : theirs
         for node in 0..<2 {
