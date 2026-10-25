@@ -1545,9 +1545,8 @@ extension NodeRuntime {
         /// The worker pool: at most `workers` jobs run; each result posts
         /// back as an event that frees its slot.
         private mutating func startJobs() {
-            while runningJobs < workers, !executionJobs.isEmpty || !miningJobs.isEmpty {
-                let job = executionJobs.isEmpty ? miningJobs.removeFirst() : executionJobs.removeFirst()
-                guard job.isCurrent(in: core) else { continue }
+            while runningJobs < workers,
+                  let job = NodeRuntime.nextJob(execution: &executionJobs, mining: &miningJobs, in: core) {
                 runningJobs += 1
                 nextJob += 1
                 let (inputs, id) = (inputs, nextJob)

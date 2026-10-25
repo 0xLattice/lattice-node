@@ -281,7 +281,7 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
             case .preflight(let job):
                 let basis = try XCTUnwrap(NodeRuntime.miningBasis(effect, tree: tree))
                 let read = await TransactionPreflight.classify(
-                    job.transaction, tipCID: basis.tipCID, snapshot: basis.snapshot, chainPath: root, fetcher: fetcher
+                    job.transaction, tipCID: job.tipCID, snapshot: basis.snapshot, chainPath: root, fetcher: fetcher
                 )
                 let copied = await copy.preflightTransaction(job.transaction, at: job.tipCID, fetcher: fetcher)
                 XCTAssertEqual(read, copied)
@@ -291,7 +291,6 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
                 let copied = await copy.chain.difficultyAnchor(forBlockHash: job.tipCID)
                 XCTAssertNotNil(copied)
                 XCTAssertEqual(basis.anchor, copied)
-                XCTAssertEqual(basis.tipCID, job.tipCID)
                 anchors += 1
             default:
                 break
@@ -301,25 +300,29 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
         XCTAssertEqual(anchors, 1)
     }
 
-    /// A job queued on one tip epoch is discarded at dequeue once the tip
-    /// moves: it runs nothing and posts nothing.
+    /// A job queued on one tip epoch is discarded at the runtime's dequeue
+    /// (`NodeRuntime.nextJob`, what `startJobs` takes from) once the tip
+    /// moves: it is never handed to a worker, and the current job behind it
+    /// is.
     func testAJobWhoseTipEpochMovedIsDiscarded() async throws {
         var harness = try await harness(keyByte: 0x46)
         let clock = TestBlockClock()
         let root = harness.host.rootPath
         let genesis = try await harness.tipBlock()
         try await harness.step(.level(root, .mining(.templateRequested(replyID: 1, TemplateRequest(rewardRecipient: nil)))))
-        let index = try XCTUnwrap(harness.jobs.lastIndex { $0.epoch != nil })
-        let stale = harness.jobs[index]
+        let stale = try XCTUnwrap(harness.jobs.last { $0.epoch != nil })
         XCTAssertTrue(stale.isCurrent(in: harness.host))
 
         try await mine(&harness, on: genesis, timestamp: clock.next())
-        XCTAssertFalse(stale.isCurrent(in: harness.host), "the tip moved")
-        let replies = harness.replies.count
-        let spawned = harness.spawned.count
-        try await harness.runJob(at: index)
-        XCTAssertEqual(harness.replies.count, replies, "a discarded job posts nothing")
-        XCTAssertEqual(harness.spawned.count, spawned)
+        let epoch = harness.mining.tipEpoch
+        XCTAssertNotEqual(stale.epoch, epoch, "the tip moved")
+        let current = NodeRuntime.RuntimeJob(path: root, epoch: epoch) { [] }
+        var execution: [NodeRuntime.RuntimeJob] = []
+        var mining = [stale, current]
+        let next = NodeRuntime.nextJob(execution: &execution, mining: &mining, in: harness.host)
+        XCTAssertEqual(next?.epoch, epoch, "the stale job is skipped for the current one")
+        XCTAssertTrue(mining.isEmpty, "the stale job is dropped")
+        XCTAssertNil(NodeRuntime.nextJob(execution: &execution, mining: &mining, in: harness.host))
     }
 
     /// A job reads the levels on the running loop, and once the loop has

@@ -117,12 +117,11 @@ struct ChildTemplateInput: Sendable {
 }
 
 /// What a mining job reads of its level, taken on the loop when the job is
-/// spawned: the tip it builds on, that tip's snapshot as preflight reads it
+/// spawned: the snapshot of the tip it builds on as preflight reads it
 /// (`ChainTree.transactionPreflightTip`, nil unless executed from genesis),
 /// and, for a template, the tip's difficulty anchor. A job holds no tree:
 /// anything else it reads, it reads live through `LiveLevels`.
 struct MiningBasis: Sendable {
-    let tipCID: String
     let snapshot: TipBlockSnapshot?
     let anchor: DifficultyAnchor?
 }
@@ -459,6 +458,18 @@ extension NodeRuntime {
         }
     }
 
+    /// The next job a free worker runs, execution first. A job whose tip
+    /// epoch moved is dropped here: it runs nothing, posts nothing.
+    static func nextJob(
+        execution: inout [RuntimeJob], mining: inout [RuntimeJob], in core: NodeCore
+    ) -> RuntimeJob? {
+        while !execution.isEmpty || !mining.isEmpty {
+            let job = execution.isEmpty ? mining.removeFirst() : execution.removeFirst()
+            if job.isCurrent(in: core) { return job }
+        }
+        return nil
+    }
+
     /// The basis of a preflight or template job on `tree`, the live level's,
     /// taken when the job is spawned; nil for any other effect, or a tree
     /// made without a context.
@@ -470,9 +481,8 @@ extension NodeRuntime {
         default: return nil
         }
         guard tree.context != nil else { return nil }
-        let preflight = tree.transactionPreflightTip(at: tip)
         return MiningBasis(
-            tipCID: preflight.cid, snapshot: preflight.snapshot, anchor: anchored ? anchor(tree, tip) : nil
+            snapshot: tree.transactionPreflightTip(at: tip).snapshot, anchor: anchored ? anchor(tree, tip) : nil
         )
     }
 
@@ -505,7 +515,7 @@ extension NodeRuntime {
                 // From this store alone: a transaction anyone may submit
                 // does not spend this node's requests to its peers.
                 let result = await TransactionPreflight.classify(
-                    job.transaction, tipCID: basis.tipCID, snapshot: basis.snapshot, chainPath: path, fetcher: fetcher
+                    job.transaction, tipCID: job.tipCID, snapshot: basis.snapshot, chainPath: path, fetcher: fetcher
                 )
                 return [.level(path, .mining(.preflighted(job, disposition(result.disposition))))]
             }

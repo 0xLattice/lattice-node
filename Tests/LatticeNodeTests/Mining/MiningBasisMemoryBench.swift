@@ -66,9 +66,8 @@ final class MiningBasisMemoryBench: XCTestCase {
             if copying {
                 held.append(try XCTUnwrap(ChainLevel(tree: live)))
             } else {
-                let preflight = live.transactionPreflightTip(at: tip)
                 held.append(MiningBasis(
-                    tipCID: preflight.cid, snapshot: preflight.snapshot, anchor: NodeRuntime.anchor(live, tip)
+                    snapshot: live.transactionPreflightTip(at: tip).snapshot, anchor: NodeRuntime.anchor(live, tip)
                 ))
             }
             _ = try live.replay(batches[blocks + job])

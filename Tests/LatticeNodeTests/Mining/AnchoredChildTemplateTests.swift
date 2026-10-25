@@ -88,8 +88,6 @@ final class AnchoredChildTemplateTests: XCTestCase {
         let rootA1: SimBlock, rootA2: SimBlock
         let b3: SimBlock
         var nextTime: Int64
-        /// The host's levels before Nexus reorganized onto B.
-        let beforeReorg: [ChainPath: ChainCore]
     }
 
     /// A transaction that only spends a fresh signer's first nonce: it
@@ -126,7 +124,6 @@ final class AnchoredChildTemplateTests: XCTestCase {
         await host.feed(Array(builder.grinds.prefix(branchA)))
         XCTAssertEqual(host.node.levels[Self.nexus]?.snapshot.actOnTip, rootA2.cid, "fixture: Nexus follows A first")
         XCTAssertEqual(host.alpha.snapshot.actOnTip, a2.cid, "fixture: Alpha executed a2")
-        let beforeReorg = host.node.levels
         await host.feed(Array(builder.grinds.dropFirst(branchA)))
         XCTAssertEqual(host.node.levels[Self.nexus]?.snapshot.actOnTip, b3.cid, "fixture: Nexus reorganized onto B")
         XCTAssertEqual(host.alpha.snapshot.actOnTip, a2.cid, "fixture: Alpha still acts on a2")
@@ -136,7 +133,7 @@ final class AnchoredChildTemplateTests: XCTestCase {
         )
         return Fixture(
             builder: builder, host: host, n1: n1, a1: a1, a2: a2, rootA1: rootA1, rootA2: rootA2, b3: b3,
-            nextTime: t + 6 * interval, beforeReorg: beforeReorg
+            nextTime: t + 6 * interval
         )
     }
 
@@ -344,7 +341,7 @@ final class AnchoredChildTemplateTests: XCTestCase {
 
     /// Holds the levels as the runtime's loop does, and moves them to
     /// `next` between steps, after its `swapAfter`th read.
-    private actor ReorganizingLoop {
+    private actor MovingLoop {
         var levels: [ChainPath: ChainCore]
         let next: [ChainPath: ChainCore]
         let swapAfter: Int
@@ -359,40 +356,52 @@ final class AnchoredChildTemplateTests: XCTestCase {
         }
     }
 
-    /// Nexus reorganizes onto B between the loop's steps while a child
-    /// template job reads the levels. Each read is one step's state, so the
-    /// job builds what one state gives: the state of its last read, before
-    /// the reorganization (no Alpha block enters B3's state) or after it
-    /// (a1's), never a mix.
-    func testAReorganizationBetweenStepsGivesOneStatesTemplate() async throws {
-        let fixture = try await fixture()
-        let host = fixture.host
-        let (before, after) = (fixture.beforeReorg, host.node.levels)
+    /// Alpha moves between the loop's steps while a child template job
+    /// reads the levels: before, the job's tip a2 is refused and a1 is built
+    /// on; after, a block on a1 has executed and is Alpha's act-on tip, so
+    /// it is built on. Each read is one step's state, so the job builds what
+    /// the state of its last read gives, one of the two, never a mix.
+    func testAMoveBetweenStepsGivesOneStatesTemplate() async throws {
+        var fixture = try await fixture()
+        let spawned = fixture.host
+        let before = spawned.node.levels
         func built(_ levels: LiveLevels) async throws -> String? {
             let candidates = await NodeRuntime.childCandidates(
-                of: Self.nexus, among: [input(host)], entering: fixture.b3.block.postState,
-                timestamp: fixture.nextTime, request: TemplateRequest(rewardRecipient: nil), levels: levels, fetcher: host.cas
+                of: Self.nexus, among: [input(spawned)], entering: fixture.b3.block.postState,
+                timestamp: fixture.nextTime, request: TemplateRequest(rewardRecipient: nil), levels: levels,
+                fetcher: spawned.cas
             )
             return try candidates.first.map { try BlockHeader(node: $0.block).rawCID }
         }
         let fromBefore = try await built(LiveLevels { $0(before) })
+
+        let onA1 = try await candidate(
+            input(spawned), levels: LiveLevels { $0(before) }, entering: fixture.b3, timestamp: fixture.nextTime,
+            cas: spawned.cas
+        )
+        let (onA1CID, b4) = try await carry(onA1, on: fixture.b3, as: .block, &fixture)
+        let b5 = try await fixture.builder.grind(on: b4, carrying: [], at: fixture.nextTime + LevelWorld.interval, outcome: .block)
+        await fixture.host.drive(.mined(b5.grind))
+        XCTAssertEqual(fixture.host.alpha.snapshot.actOnTip, onA1CID, "fixture: Alpha moved onto the block on a1")
+        let after = fixture.host.node.levels
         let fromAfter = try await built(LiveLevels { $0(after) })
-        XCTAssertNil(fromBefore, "fixture: before the reorganization B3 is not executed")
+        XCTAssertNotNil(fromBefore)
         XCTAssertNotNil(fromAfter)
+        XCTAssertNotEqual(fromBefore, fromAfter, "fixture: the two states build different blocks")
 
         var crossed = 0
         for swapAfter in 1...6 {
-            let loop = ReorganizingLoop(before, next: after, swapAfter: swapAfter)
+            let loop = MovingLoop(before, next: after, swapAfter: swapAfter)
             let result = try await built(LiveLevels { read in Task { await loop.run(read) } })
             let reads = await loop.reads
             if reads > swapAfter {
                 crossed += 1
-                XCTAssertEqual(result, fromAfter, "reorganized after read \(swapAfter) of \(reads)")
+                XCTAssertEqual(result, fromAfter, "moved after read \(swapAfter) of \(reads)")
             } else {
-                XCTAssertEqual(result, fromBefore, "all \(reads) reads before the reorganization")
+                XCTAssertEqual(result, fromBefore, "all \(reads) reads before the move")
             }
         }
-        XCTAssertGreaterThan(crossed, 0, "fixture: some job read across the reorganization")
+        XCTAssertGreaterThan(crossed, 0, "fixture: some job read across the move")
     }
 
     /// A child template's reads made live, hopping onto the levels' owner,
