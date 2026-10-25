@@ -222,7 +222,6 @@ public final class NodeRuntime: Sendable {
     ) async throws -> NodeCore {
         guard configuration.address.isNexus else { throw NodeRuntimeError.notNexus }
         let logID = try await storage.chainLogID() ?? UUID().uuidString.lowercased()
-        let facts = try await storage.nodeFacts()
         var cursors: [ChainPath: [String: StreamCursor]] = [:]
         for path in [configuration.chainPath] + configuration.hostedChildren {
             cursors[path] = try await storage.chainCursors(at: path)
@@ -230,27 +229,29 @@ public final class NodeRuntime: Sendable {
         // The context pins the Nexus genesis: a store holding another root
         // fails the restore.
         let root = try ChainCore.restore(
-            replaying: facts[configuration.chainPath] ?? [],
+            replaying: try await storage.nodeFacts(at: configuration.chainPath),
             context: try configuration.runtimeContext,
             specs: [NexusGenesis.spec],
             config: coreConfig,
             cursors: cursors[configuration.chainPath] ?? [:]
         )
-        var specs: [ChainPath: [ChainSpec]] = [:]
-        for path in configuration.hostedChildren {
-            let batches = facts[path] ?? []
-            for case .block(let block) in batches.flatMap(\.facts) where block.parentBlockHash == nil {
+        // One hosted level's journal read at a time, and only a hosted
+        // level's: each is dropped once its level is restored.
+        let core = try await NodeCore.restore(
+            root: root, hosted: Set(configuration.hostedChildren), config: coreConfig,
+            logID: logID, cursors: cursors
+        ) { path in
+            let facts = try await storage.nodeFacts(at: path)
+            var specs: [ChainSpec] = []
+            for case .block(let block) in facts.flatMap(\.facts) where block.parentBlockHash == nil {
                 guard let spec = try await storage.chainGenesisSpec(block.blockHash) else {
                     throw NodeStorageError.missingMaterializedVolume(block.blockHash)
                 }
-                specs[path, default: []].append(spec)
+                specs.append(spec)
             }
+            return (facts, specs)
         }
-        return try NodeCore.restore(
-            root: root,
-            facts: facts, specs: specs, hosted: Set(configuration.hostedChildren), config: coreConfig,
-            logID: logID, cursors: cursors
-        )
+        return core
     }
 
     private init(

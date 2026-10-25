@@ -44,6 +44,47 @@ extension NodeStore {
         try loadStagedImports(at: chainPath)
     }
 
+    /// Whether anything is journaled: one row read, not the journal.
+    func hasStagedImports() throws -> Bool {
+        try !database.query("SELECT 1 FROM admission_batches LIMIT 1").isEmpty
+    }
+
+    /// One page of a level's journal after a seq, through
+    /// `admission_batches_by_level` (named: the planner otherwise prefers the
+    /// covering (chain_path, payload) unique index). Some SQLite versions
+    /// still sort before the first row, so a read is paged: a sort never
+    /// holds more than one page of payloads.
+    static let levelBatchesSQL =
+        "SELECT seq, payload FROM admission_batches INDEXED BY admission_batches_by_level WHERE chain_path = ?1 AND seq > ?2 ORDER BY seq ASC LIMIT ?3"
+
+    static let levelBatchesPage: Int64 = 512
+
+    /// One level's journaled batches, in order, each decoded as its row is
+    /// read: the journal is never held as rows, and no other level's batches
+    /// are read.
+    func importBatches(at chainPath: [String]) throws -> [BlockImportBatch] {
+        var batches: [BlockImportBatch] = []
+        var after: Int64 = 0
+        while true {
+            var read: Int64 = 0
+            try database.forEach(
+                Self.levelBatchesSQL,
+                params: [.text(chainPath.joined(separator: "/")), .int(after), .int(Self.levelBatchesPage)]
+            ) { row in
+                guard let seq = row.int(0) else {
+                    throw NodeStoreError.malformedRow(table: ImportBatchRow.table, column: "seq")
+                }
+                guard let payload = row.blob(1) else {
+                    throw NodeStoreError.malformedRow(table: ImportBatchRow.table, column: "payload")
+                }
+                batches.append(try Self.decode(BlockImportBatch.self, from: payload))
+                after = seq
+                read += 1
+            }
+            if read < Self.levelBatchesPage { return batches }
+        }
+    }
+
     func loadStagedImports(at chainPath: [String]? = nil) throws -> [StagedImport] {
         let rows: [ImportBatchRow]
         if let chainPath {
@@ -68,50 +109,6 @@ extension NodeStore {
                 chainPath: components,
                 batch: try Self.decode(BlockImportBatch.self, from: try row.payload),
                 volumeRoots: try Self.decode([String].self, from: try row.volumeRoots)
-            )
-        }
-    }
-
-    private static func normalizedFacts(
-        in batch: BlockImportBatch
-    ) throws -> [Data: Data] {
-        var normalized: [Data: Data] = [:]
-        for fact in batch.facts {
-            let id = try encode(fact.id)
-            let payload = try encode(fact)
-            if let existing = normalized[id], existing != payload {
-                throw NodeStoreError.conflictingImportFact
-            }
-            normalized[id] = payload
-        }
-        return normalized
-    }
-
-    func auditAdmissionFacts(staged: [StagedImport]) throws {
-        var expectedFacts: [String: [Data: Data]] = [:]
-        for admission in staged {
-            let path = admission.chainPath.joined(separator: "/")
-            for (id, payload) in try Self.normalizedFacts(in: admission.batch) {
-                if let existing = expectedFacts[path]?[id], existing != payload {
-                    guard try Self.restatesWeighedBlock(existing, as: payload) else {
-                        throw NodeStoreError.corrupt(
-                            "admission batches disagree about an immutable fact"
-                        )
-                    }
-                }
-                expectedFacts[path, default: [:]][id] = payload
-            }
-        }
-
-        var actualFacts: [String: [Data: Data]] = [:]
-        for row in try database.rows(
-            ImportFactRow.self, "SELECT chain_path, fact_id, payload FROM admission_facts"
-        ) {
-            actualFacts[try row.chainPath, default: [:]][try row.factID] = try row.payload
-        }
-        guard actualFacts == expectedFacts else {
-            throw NodeStoreError.corrupt(
-                "normalized admission facts do not match immutable batches"
             )
         }
     }

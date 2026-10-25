@@ -167,73 +167,11 @@ extension NodeStore {
         }
     }
 
-    func auditAcceptedBlocks(staged: [StagedImport]) throws {
-        var expectedAcceptedBlocks: [String: PersistedAcceptedBlock] = [:]
-        for admission in staged {
-            let chainPath = admission.chainPath.joined(separator: "/")
-            for block in try Self.acceptedBlocks(in: admission.batch) {
-                let key = chainPath + "\u{0}" + block.blockCID
-                if let existing = expectedAcceptedBlocks[key] {
-                    guard existing.parentCID == block.parentCID else {
-                        throw NodeStoreError.corrupt(
-                            "admission batches disagree about an accepted block parent"
-                        )
-                    }
-                } else {
-                    expectedAcceptedBlocks[key] = PersistedAcceptedBlock(
-                        chainPath: chainPath,
-                        blockCID: block.blockCID,
-                        parentCID: block.parentCID,
-                        admissionSequence: admission.sequence
-                    )
-                }
-            }
-        }
-
-        var actualAcceptedBlocks: [String: PersistedAcceptedBlock] = [:]
-        var leafFlags: [String: Bool] = [:]
-        for row in try database.rows(
-            AcceptedBlockRow.self,
-            "SELECT chain_path, block_cid, parent_cid, admission_seq, validated, leaf FROM accepted_blocks"
-        ) {
-            let block = try PersistedAcceptedBlock(row)
-            _ = try row.status
-            let key = block.chainPath + "\u{0}" + block.blockCID
-            actualAcceptedBlocks[key] = block
-            leafFlags[key] = try row.leaf
-        }
-        guard actualAcceptedBlocks == expectedAcceptedBlocks else {
-            throw NodeStoreError.corrupt(
-                "accepted-block index does not match immutable batches"
-            )
-        }
-        var childrenByParent: [String: [String]] = [:]
-        for block in actualAcceptedBlocks.values {
-            if let parentCID = block.parentCID {
-                let parentKey = block.chainPath + "\u{0}" + parentCID
-                childrenByParent[parentKey, default: []].append(block.blockCID)
-            }
-        }
-        // The maintained leaf flag is a derived index over the parent links
-        // verified above, so a disagreeing row is repaired from that truth,
-        // never a wipe: only the disagreeing rows are rewritten.
-        for (key, leaf) in leafFlags.sorted(by: { $0.key < $1.key })
-        where leaf != (childrenByParent[key] == nil) {
-            let parts = key.split(separator: "\u{0}", maxSplits: 1).map(String.init)
-            guard parts.count == 2 else {
-                throw NodeStoreError.corrupt("invalid accepted-block audit key")
-            }
-            SyncTrace.log(
-                chain: parts[0].split(separator: "/").map(String.init),
-                "boot audit: repairing leaf flag block=\(parts[1].prefix(12))"
-            )
-            try database.execute(
-                "UPDATE accepted_blocks SET leaf = ?1 WHERE chain_path = ?2 AND block_cid = ?3",
-                params: [
-                    .int(childrenByParent[key] == nil ? 1 : 0),
-                    .text(parts[0]), .text(parts[1]),
-                ]
-            )
-        }
+    /// The leaf flag is a derived index over the parent links, written in
+    /// the journal's transaction; boot repairs a row that disagrees (an
+    /// edited or damaged store) in one statement, never a wipe.
+    func repairLeafFlags() throws {
+        let leaf = "NOT EXISTS (SELECT 1 FROM accepted_blocks AS child WHERE child.chain_path = accepted_blocks.chain_path AND child.parent_cid = accepted_blocks.block_cid)"
+        try database.execute("UPDATE accepted_blocks SET leaf = \(leaf) WHERE leaf IS NOT \(leaf)")
     }
 }

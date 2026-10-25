@@ -8,15 +8,9 @@ import cashew
 /// Volume broker of an opened `NodeStorage`, used as the effect executor's
 /// persistence and content layer. Nothing here decides anything.
 extension NodeStorage {
-    /// Boot replay: every durable fact batch, grouped by hosted level.
-    nonisolated func nodeFacts() async throws -> [ChainPath: [BlockImportBatch]] {
-        Dictionary(grouping: try await store.stagedImports(), by: \.chainPath)
-            .mapValues { $0.map(\.batch) }
-    }
-
     /// One level's journaled facts, in order.
     nonisolated func nodeFacts(at path: ChainPath) async throws -> [BlockImportBatch] {
-        try await store.stagedImports(at: path).map(\.batch)
+        try await store.importBatches(at: path)
     }
 
     /// Policy modules an operator supplies while the node runs, stored as

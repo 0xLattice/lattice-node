@@ -12,6 +12,8 @@ ExecStop=/usr/local/bin/lattice down --root /var/lib/lattice
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
+# Two malloc arenas: per-thread arenas hold freed boot peaks as resident memory.
+Environment=MALLOC_ARENA_MAX=2
 
 WorkingDirectory=/var/lib/lattice
 StateDirectory=lattice
