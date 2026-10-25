@@ -19,3 +19,5 @@ Sources/LatticeNode/Storage/VolumeBundleCache.swift|final class VolumeBundleCach
 Tests/LatticeNodeTests/Runtime/NodeRuntimeTests.swift|private final class BootstrapHelloDelegate: IvyDelegate, @unchecked Sendable {|Test-only Ivy delegate; its current value is read and written only under its NSLock.
 Tests/LatticeNodeTests/Content/BundledBlockFetchTests.swift|private final class CountingSource: IvyContentSource, @unchecked Sendable {|Test-only content source; its request counters are read and written only under its NSLock.
 Tests/LatticeNodeTests/Content/BundledBlockFetchTests.swift|private final class Connections: IvyDelegate, @unchecked Sendable {|Test-only Ivy delegate; its recorded peers are read and written only under its NSLock.
+Sources/LatticeNode/Content/AcquisitionBudget.swift|public final class AcquisitionBudget: @unchecked Sendable {|All reservation, waiter-queue, and peak state is guarded by AcquisitionBudget's NSLock.
+Sources/LatticeNode/Content/AcquisitionBudget.swift|private final class Waiter: @unchecked Sendable {|A waiter's continuation and cancelled flag are read and written only under AcquisitionBudget's NSLock.
