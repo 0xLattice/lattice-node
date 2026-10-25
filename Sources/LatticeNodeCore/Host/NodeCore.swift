@@ -522,13 +522,13 @@ public struct NodeCore: Sendable {
         var outcome: MinedOutcome? = .childOnly
         if ChainTree.rootWork(of: grind.root) != nil, let cid = try? BlockHeader(node: grind.root).rawCID,
            var core = levels.removeValue(forKey: rootPath) {
-            let held = core.index.contains(cid)
+            let held = core.tree.contains(blockHash: cid)
             if !held, let replyID { core.minedReplies[cid] = replyID }
             let effects = core.weighOwn(grind.root, children: grind.rootChildren, proof: nil, now: turn.now)
             turn.weighed[rootPath, default: []].formUnion(core.weighed)
             if held {
                 outcome = .duplicate
-            } else if core.index.contains(cid) {
+            } else if core.tree.contains(blockHash: cid) {
                 outcome = nil
             } else {
                 core.minedReplies[cid] = nil

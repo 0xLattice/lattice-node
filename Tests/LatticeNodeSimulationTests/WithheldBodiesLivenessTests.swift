@@ -464,7 +464,7 @@ final class WithheldBodiesLivenessTests: XCTestCase {
             )
             try await net.show([block] + sibling, to: 0)
         }
-        XCTAssertEqual(net.level(0).index.leaves.count, chain.count)
+        XCTAssertEqual(TreeDigest(net.level(0).tree).leaves.count, chain.count)
         XCTAssertEqual(net.snapshot(0).actOnTip, world.genesis.cid)
         var served = 0
         while served < net.fetched[0].count {

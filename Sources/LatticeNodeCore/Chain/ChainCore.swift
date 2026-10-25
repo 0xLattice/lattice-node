@@ -270,7 +270,6 @@ public struct ChainCore: Sendable {
     public internal(set) var bodies = BodyPipeline()
     public private(set) var published: ChainSnapshot?
     public let config: ChainCoreConfig
-    public internal(set) var index = WeighedIndex()
     /// The level's mempool and template book, on the act-on tip.
     public internal(set) var mining: MiningState
     /// The transaction CIDs of executed blocks within `bodyWindow` heights of
@@ -302,22 +301,18 @@ public struct ChainCore: Sendable {
         cursors: [String: StreamCursor] = [:]
     ) {
         precondition(tree.context != nil, "the core runs one chain's level")
-        var index = WeighedIndex()
         var stack = roots ?? Self.bestRoot(of: tree)
         while let hash = stack.popLast() {
-            guard let meta = tree.getConsensusBlock(hash: hash) else { continue }
-            index.add(hash, parent: meta.parentBlockHash, height: meta.blockHeight)
-            if tree.isExecuted(blockHash: hash) {
-                executedChildren.record(meta.childCommitments.keys)
+            if tree.isExecuted(blockHash: hash), let committed = tree.recordedChildCommitments(of: hash) {
+                executedChildren.record(committed.keys)
             }
-            stack += meta.childHashes
+            stack += tree.children(of: hash)
         }
         mining = MiningState(
-            tipCID: Self.miningTip(of: tree, index: index), spec: Self.actOnSpec(of: tree), config: config.mining
+            tipCID: Self.miningTip(of: tree), spec: Self.actOnSpec(of: tree), config: config.mining
         )
         self.tree = tree
         self.config = config
-        self.index = index
         self.sync.log = log
         self.sync.cursors = cursors
         self.sync.knownCursors = Set(cursors.keys)
@@ -406,7 +401,7 @@ public struct ChainCore: Sendable {
             connected(verdict, transactions: transactions, &turn)
         case .transactionsRead(let blocks):
             readingTransactions.subtract(blocks.keys)
-            for (cid, transactions) in blocks where index.contains(cid) {
+            for (cid, transactions) in blocks where tree.contains(blockHash: cid) {
                 executedTransactions[cid] = transactions
             }
         case .parentFactsPresent(let blocks):
@@ -606,7 +601,7 @@ public struct ChainCore: Sendable {
             requestID = id
             var seen = Set<String>()
             cids = asked.prefix(config.maxHeadersPerPage)
-                .filter { !isRootGenesis($0) && index.contains($0) && seen.insert($0).inserted }
+                .filter { !isRootGenesis($0) && tree.contains(blockHash: $0) && seen.insert($0).inserted }
         case .stream, .headers:
             return
         }
@@ -621,18 +616,18 @@ public struct ChainCore: Sendable {
     /// Whether `cid` is a root chain's genesis: configured on every node,
     /// so never served.
     func isRootGenesis(_ cid: String) -> Bool {
-        isRoot && index.contains(cid) && index.parent[cid] == nil
+        isRoot && tree.contains(blockHash: cid) && tree.parent(of: cid) == nil
     }
 
     /// The weighed header `cid` and up to `max` of its ancestors (capped by
     /// the page), child to parent, stopping above a root chain's genesis: one
     /// parent step each.
     func ancestors(of cid: String, max: Int) -> [String] {
-        guard !isRootGenesis(cid), index.contains(cid) else { return [] }
+        guard !isRootGenesis(cid), tree.contains(blockHash: cid) else { return [] }
         var cids = [cid]
         var current = cid
         let limit = Swift.min(Swift.max(max, 0), config.maxHeadersPerPage)
-        while cids.count <= limit, let parent = index.parent[current], !isRootGenesis(parent) {
+        while cids.count <= limit, let parent = tree.parent(of: current), !isRootGenesis(parent) {
             cids.append(parent)
             current = parent
         }
@@ -699,7 +694,7 @@ public struct ChainCore: Sendable {
     mutating func applied(_ entry: LogEntry) -> Bool {
         // Declined is done: a stream must not stall on what finality refused.
         if sync.declined.contains(entry.block) { return true }
-        guard index.contains(entry.block) else { return false }
+        guard tree.contains(blockHash: entry.block) else { return false }
         if entry.kind == .proof, pastFinality(entry.block) { return true }
         return entry.kind == .header || tree.workContribution(id: entry.cid, at: entry.block) != nil
     }
@@ -722,7 +717,7 @@ public struct ChainCore: Sendable {
         if inFlight.contains(entry.block) { return false }
         switch entry.kind {
         case .header:
-            return !index.contains(entry.block) && sync.pending.entries[entry.block] == nil
+            return !tree.contains(blockHash: entry.block) && sync.pending.entries[entry.block] == nil
                 && sync.proofs.awaiting[entry.block] == nil && !sync.declined.contains(entry.block)
         case .proof:
             return !applied(entry) && sync.pending.entries[entry.block]?.evidence[entry.cid] == nil
@@ -863,7 +858,7 @@ public struct ChainCore: Sendable {
             disconnect(peer, .proofOfWorkInvalid, &turn)
             return nil
         }
-        if index.contains(cid) {
+        if tree.contains(blockHash: cid) {
             if !isRoot { offer(entry.proofs, cid: cid, from: peer) }
             return cid
         }
@@ -968,7 +963,7 @@ public struct ChainCore: Sendable {
             if header.children == nil { want(header, parent: false, &turn) } else { insert(header, &turn) }
             return
         }
-        if index.contains(parent) {
+        if tree.contains(blockHash: parent) {
             // The tip may have moved on since the header arrived.
             if pastFinality(height: header.block.height) {
                 decline(cid)
@@ -1051,7 +1046,6 @@ public struct ChainCore: Sendable {
             ))
             turn.facts += update.batches
             weighed += update.weighed
-            index.add(cid, parent: header.parent, height: header.block.height)
             creditRemainingProofs(of: header, &turn)
             for child in waiting { dirty(child, &turn) }
         case .duplicate:

@@ -106,6 +106,11 @@ public struct TreeDigest: Equatable, Sendable {
         self.excluded = excluded
     }
 
+    /// Blocks with no held child.
+    public var leaves: Set<String> {
+        Set(blocks.keys).subtracting(blocks.values.compactMap(\.parent))
+    }
+
     /// The heaviest executed tip, walked from genesis: at each block the
     /// heaviest executed child (ties by fork choice's rule), until no child
     /// is executed; empty while the genesis root is not executed.
