@@ -2,6 +2,7 @@ import Foundation
 import Ivy
 import Lattice
 import LatticeNodeCore
+import Synchronization
 import XCTest
 @testable import LatticeNode
 
@@ -16,12 +17,14 @@ final class HeaderPageRuntimeTests: XCTestCase {
     )
 
     private func start(
-        keyByte: UInt8, coreConfig: ChainCoreConfig = ChainCoreConfig(), peers: [PeerEndpoint] = []
+        keyByte: UInt8, coreConfig: ChainCoreConfig = ChainCoreConfig(), peers: [PeerEndpoint] = [],
+        storagePath: URL? = nil, stopAtTeardown: Bool = true,
+        failStop: @escaping @Sendable (any Error) -> Void = { fatalError("node runtime: persist failed: \($0)") }
     ) async throws -> (runtime: NodeRuntime, endpoint: PeerEndpoint) {
         let port = NetworkTransportTestPorts.allocate()
         let configuration = try NodeConfiguration(
             chainPath: ["Nexus"],
-            storagePath: temporaryDirectory(),
+            storagePath: storagePath ?? temporaryDirectory(),
             privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
             listenPort: port,
             rpcPort: NetworkTransportTestPorts.allocate(),
@@ -42,9 +45,10 @@ final class HeaderPageRuntimeTests: XCTestCase {
         )
         let storage = try await NodeStorage.open(configuration: configuration)
         let runtime = try await NodeRuntime.start(
-            storage: storage, configuration: configuration, overlay: overlay, coreConfig: coreConfig
+            storage: storage, configuration: configuration, overlay: overlay, coreConfig: coreConfig,
+            failStop: failStop
         )
-        addTeardownBlock { await runtime.stop() }
+        if stopAtTeardown { addTeardownBlock { await runtime.stop() } }
         return (runtime, PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port))
     }
 
@@ -57,20 +61,58 @@ final class HeaderPageRuntimeTests: XCTestCase {
         try await followerSyncs(from: ChainCoreConfig(servingBudget: -1), keys: (0x73, 0x74))
     }
 
+    /// Child proofs saved before a restart are read from the store: the
+    /// restarted host serves Alpha's headers with them, so a new follower
+    /// still reaches its tip.
+    func testARestartedHostServesTheChildProofsItSavedBefore() async throws {
+        let hostPath = temporaryDirectory()
+        // The first run is stopped and released before the same storage reopens.
+        let tip = try await mineAlpha(
+            on: start(keyByte: 0x75, storagePath: hostPath, stopAtTeardown: false).runtime, stop: true
+        )
+        let host = try await start(keyByte: 0x75, storagePath: hostPath)
+        try await followerReaches(tip, from: host.endpoint, key: 0x76)
+    }
+
+    /// A saved-proof query that fails is a store fault: serving a child
+    /// page through it fail-stops the host, never serves the page bare.
+    func testAHostWhoseProofQueryFailsFailStopsWhenServing() async throws {
+        let hostPath = temporaryDirectory()
+        let stopped = Mutex<(any Error)?>(nil)
+        let host = try await start(keyByte: 0x77, storagePath: hostPath) { error in
+            stopped.withLock { $0 = $0 ?? error }
+        }
+        let tip = try await mineAlpha(on: host.runtime)
+        _ = try NodeSQLite(path: hostPath.appendingPathComponent("state.db").path).execute("DROP TABLE child_proofs")
+        _ = try await start(keyByte: 0x78, peers: [host.endpoint])
+        try await eventually("the host fail-stops on the failed proof query") {
+            stopped.withLock { $0 != nil }
+        }
+        XCTAssertGreaterThan(tip, 0)
+    }
+
     private func followerSyncs(from serverConfig: ChainCoreConfig, keys: (UInt8, UInt8)) async throws {
         let host = try await start(keyByte: keys.0, coreConfig: serverConfig)
-        let hostAlpha = try XCTUnwrap(host.runtime.levelReads[Self.alpha])
+        let tip = try await mineAlpha(on: host.runtime)
+        try await followerReaches(tip, from: host.endpoint, key: keys.1)
+    }
+
+    private func mineAlpha(on host: NodeRuntime, stop: Bool = false) async throws -> UInt64 {
+        let hostAlpha = try XCTUnwrap(host.levelReads[Self.alpha])
         let recipient = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
         try await eventually("the host mines Alpha to height 6") {
-            _ = try await host.runtime.mineBlock(MiningTemplateRequest(recipients: [
+            _ = try await host.mineBlock(MiningTemplateRequest(recipients: [
                 MiningRecipient(chainPath: Self.alpha, address: recipient),
             ]))
             return (await hostAlpha.readSnapshot().height ?? 0) >= 6
         }
         let hostHeight = await hostAlpha.readSnapshot().height
-        let tip = try XCTUnwrap(hostHeight)
+        if stop { await host.stop() }
+        return try XCTUnwrap(hostHeight)
+    }
 
-        let follower = try await start(keyByte: keys.1, peers: [host.endpoint])
+    private func followerReaches(_ tip: UInt64, from host: PeerEndpoint, key: UInt8) async throws {
+        let follower = try await start(keyByte: key, peers: [host])
         let followerAlpha = try XCTUnwrap(follower.runtime.levelReads[Self.alpha])
         try await eventually("the follower reaches the host's Alpha tip") {
             (await followerAlpha.readSnapshot().height ?? 0) >= tip

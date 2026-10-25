@@ -13,6 +13,16 @@ import cashew
 /// advances every chain whose target it meets. Nexus's target is its real,
 /// scheduled one, never the maximum.
 final class MergedMiningTests: XCTestCase {
+    /// The saved proofs of every block `path` credited work to.
+    private static func savedProofs(_ storage: NodeStorage, at path: ChainPath) async throws -> [String: [ChildBlockProof]] {
+        let blocks = try await storage.store.stagedImports(at: path).flatMap(\.batch.facts)
+            .compactMap { fact -> String? in
+                guard case .work(let work) = fact else { return nil }
+                return work.blockHash
+            }
+        return try await storage.store.savedProofs(at: path, for: Array(Set(blocks)))
+    }
+
     func testExportedWalletProofVectorsVerify() async throws {
         let fixtureURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent()
@@ -60,8 +70,8 @@ final class MergedMiningTests: XCTestCase {
         // A restart serves Alpha's headers with their proofs at once, and
         // resumes both chains where they were.
         let reopened = try await NodeStorage.open(configuration: configuration)
-        let storedProofs = try await reopened.store.savedProofs()
-        XCTAssertFalse((storedProofs[Self.alpha] ?? [:]).isEmpty, "Alpha's credited proofs survive the restart")
+        let storedProofs = try await Self.savedProofs(reopened, at: Self.alpha)
+        XCTAssertFalse(storedProofs.isEmpty, "Alpha's credited proofs survive the restart")
         let restarted = try await NodeRuntime.start(storage: reopened, configuration: configuration, overlay: overlay)
         // A block weighed before the stop may execute only now: never lower.
         let resumed = await restarted.levelReads[Self.alpha]?.readSnapshot().height ?? 0
@@ -848,8 +858,8 @@ final class MergedMiningTests: XCTestCase {
         // not enough: Beta must have its exact evidence immediately after a
         // process restart, and the next merged grind must keep advancing it.
         let reopened = try await NodeStorage.open(configuration: configuration)
-        let storedProofs = try await reopened.store.savedProofs()
-        XCTAssertFalse((storedProofs[beta] ?? [:]).isEmpty, "Beta's credited proofs survive the restart")
+        let storedProofs = try await Self.savedProofs(reopened, at: beta)
+        XCTAssertFalse(storedProofs.isEmpty, "Beta's credited proofs survive the restart")
         let restarted = try await NodeRuntime.start(
             storage: reopened, configuration: configuration, overlay: overlay
         )

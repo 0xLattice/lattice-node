@@ -145,7 +145,6 @@ public final class NodeRuntime: Sendable {
         // persists is validated by the core, so peer input cannot reach it.
         failStop: @escaping @Sendable (any Error) -> Void = { fatalError("node runtime: persist failed: \($0)") }
     ) async throws -> NodeRuntime {
-        let proofs = try storage.store.savedProofs()
         var coreConfig = coreConfig
         coreConfig.mining.mempool.minRelayFee = configuration.minRelayFee
         coreConfig.finality = configuration.finality
@@ -163,9 +162,6 @@ public final class NodeRuntime: Sendable {
             relays: overlay.relayEnabled,
             helloTimeout: overlay.requestTimeout,
             workers: workers,
-            // A store that cannot read its proofs fails the boot: it would
-            // serve child headers without them.
-            proofs: proofs,
             failStop: failStop
         )
         await runtime.ivy.installNodeRuntime(
@@ -263,7 +259,6 @@ public final class NodeRuntime: Sendable {
         relays: Bool,
         helloTimeout: Duration,
         workers: Int,
-        proofs: SavedChildProofs,
         failStop: @escaping @Sendable (any Error) -> Void
     ) {
         let (stream, inputs) = AsyncStream<Input>.makeStream()
@@ -356,7 +351,6 @@ public final class NodeRuntime: Sendable {
             gate: gate,
             helloTimeout: helloTimeout,
             remote: remote,
-            proofs: proofs,
             workers: max(1, workers),
             failStop: failStop,
             peerMemory: peerMemory
@@ -462,9 +456,6 @@ extension NodeRuntime {
         let workers: Int
         let failStop: @Sendable (any Error) -> Void
         let peerMemory: PeerMemory?
-        /// Each child level's verified proofs, by block and root: what
-        /// `lookupProofs` answers and a served child header carries.
-        var proofs: SavedChildProofs = [:]
 
         /// One overlay session per peer key; the core sees `(key, id)`.
         /// Every change publishes what the open sessions' hellos advertised.
@@ -587,13 +578,11 @@ extension NodeRuntime {
             gate: NodeRuntimeInputGate,
             helloTimeout: Duration,
             remote: IvyRootContentSource,
-            proofs: SavedChildProofs,
             workers: Int,
             failStop: @escaping @Sendable (any Error) -> Void,
             peerMemory: PeerMemory?
         ) {
             self.peerMemory = peerMemory
-            self.proofs = proofs
             self.gate = gate
             self.helloTimeout = helloTimeout
             self.core = core
@@ -1261,11 +1250,6 @@ extension NodeRuntime {
                             readsDone.append(BodyKey(path: path, cid: excluded.blockHash))
                         }
                     }
-                    for (path, levelBatch) in batch.levels {
-                        for stored in levelBatch.proofs {
-                            proofs[path, default: [:]][stored.childCID, default: [:]][stored.proof.rootCID] = stored.proof
-                        }
-                    }
                 } catch {
                     // Fail-stop: no later effect of this step may run.
                     failStop(error)
@@ -1313,8 +1297,7 @@ extension NodeRuntime {
                 await outbox.send(to: session.peer, topic: frame.topic, payload: frame.payload)
             case .serveHeaders(let peer, let token, let requestID, let blockCIDs, let hasMore):
                 guard let session = session(peer) else { break }
-                let (storage, outbox, inputs, config) = (storage, outbox, inputs, core.config)
-                let proofs = proofs[path] ?? [:]
+                let (storage, outbox, inputs, config, failStop) = (storage, outbox, inputs, core.config, failStop)
                 spawn {
                     // Built up to a page, or for as long as the serving
                     // budget allows, and no further: the work is the
@@ -1323,13 +1306,25 @@ extension NodeRuntime {
                     let started = ContinuousClock.now
                     var entries: [HeaderEntry] = []
                     var (bytes, cut) = (0, false)
-                    for cid in blockCIDs {
+                    // A child header carries its saved proofs. Read off the
+                    // loop, a proof whose staging transaction has not
+                    // committed may show, as headers may: it was verified
+                    // before persist, and the peer verifies it again.
+                    var saved = SavedProofPage(store: storage.store, path: path, cids: blockCIDs)
+                    for (offset, cid) in blockCIDs.enumerated() {
+                        let proofs: [ChildBlockProof]
+                        do {
+                            proofs = try saved.proofs(at: offset)
+                        } catch {
+                            failStop(error)
+                            return
+                        }
                         guard let stored = await storage.chainHeader(cid) else { continue }
                         let spec = stored.block.parent == nil
                             ? try? await storage.chainGenesisSpec(cid) : nil
                         let entry = config.entry(
                             stored.block, children: stored.children,
-                            proofs: (proofs[cid] ?? [:]).sorted { $0.key < $1.key }.map(\.value), spec: spec ?? nil
+                            proofs: proofs, spec: spec ?? nil
                         )
                         let elapsed = (ContinuousClock.now - started) / .milliseconds(1)
                         guard config.fits(
@@ -1408,13 +1403,21 @@ extension NodeRuntime {
                 executionJobs.append(NodeRuntime.readJob(blocks, at: path, storage: storage))
                 startJobs()
             case .lookupProofs(let cids):
-                let found = cids.compactMap { cid in
-                    (proofs[path]?[cid]).map { ($0, cid) }
-                }
-                for (roots, cid) in found {
-                    inputs.yield(.event(.level(path, .proofsFound(
-                        childCID: cid, roots.sorted { $0.key < $1.key }.map(\.value)
-                    ))))
+                // Read off the loop, as a served page is; each block's
+                // proofs come back as an event, in the order asked.
+                let (storage, inputs, failStop) = (storage, inputs, failStop)
+                spawn {
+                    let found: [String: [ChildBlockProof]]
+                    do {
+                        found = try storage.store.savedProofs(at: path, for: cids)
+                    } catch {
+                        failStop(error)
+                        return
+                    }
+                    for cid in cids {
+                        guard let roots = found[cid] else { continue }
+                        inputs.yield(.event(.level(path, .proofsFound(childCID: cid, roots))))
+                    }
                 }
             case .mining(let effect):
                 return await execute(effect, at: path)

@@ -187,8 +187,8 @@ final class ChildLevelRestartTests: XCTestCase {
                 return work.contribution.id
             }
         XCTAssertFalse(work.isEmpty)
-        let proofs = try await reopened.store.savedProofs()[alpha]?[genesisCID] ?? [:]
-        XCTAssertEqual(Set(proofs.keys), Set(work))
+        let proofs = try await reopened.store.savedProofs(at: alpha, for: [genesisCID])[genesisCID] ?? []
+        XCTAssertEqual(Set(proofs.map(\.rootCID)), Set(work))
     }
 
     /// A kill between a write and the fact that names it. Pins are in the
