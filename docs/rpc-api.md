@@ -292,11 +292,13 @@ floor. `GET /api/chain/info` reports this node's as `minRelayFee`.
 ### Fee pricing
 
 `GET /api/fees` projects the next blocks (up to 12) this node's pool would
-fill if nothing else arrived: ready transaction packages in template order
-(fee per byte, a transaction with its signer's earlier pooled nonces), each
-block taking them until one does not fit the chain's transaction count or
-`maxBlockSize`. It is recomputed on each new tip and, while the pool changes,
-at most once a second.
+fill if nothing else arrived, as this node's builder fills them: ready
+transactions in template order (packages by fee per byte, a transaction with
+its signer's earlier pooled nonces), each block taking them until one does
+not fit the chain's transaction count or `maxBlockSize`. A package may
+straddle two blocks; a block's rate is the lowest of the packages it carries
+any of. It is recomputed on each new tip and, while the pool changes, at most
+once a second.
 
 ```json
 {
@@ -313,9 +315,11 @@ none is full (or `blocks` is empty), a fee at the floor makes the next block.
 To be in the first `k` blocks when block `k` is full, a transaction of `size`
 bytes pays more than `lowestFee * size / lowestFeeBytes` of that block.
 
-This is an estimate from one node's pool, not a promise: miners fill gaps
-with smaller packages, a block's overhead shares `maxBlockSize`, other pools
-differ, and new transactions arrive. Fees above `UInt64` never occur for
+This is an estimate from one node's pool, not a promise: a block's overhead
+shares `maxBlockSize`, other miners may fill gaps with smaller packages,
+other pools differ, and new transactions arrive. On a child chain, a
+transaction only the parent's state makes executable is not projected,
+though a template may carry it. Fees above `UInt64` never occur for
 funded packages.
 
 ## Transaction inclusion

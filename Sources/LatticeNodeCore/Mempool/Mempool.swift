@@ -89,11 +89,12 @@ public struct ProjectedBlock: Sendable, Equatable {
     /// Whether ready transactions were left for a later block.
     public let full: Bool
 
-    func adding(count: Int, fee: WorkSum, size: Int) -> ProjectedBlock {
-        let lower = Mempool.lowerRate(fee, size, than: lowestFee, lowestFeeBytes)
+    /// One more transaction of `size` bytes, from a package of rate `fee` over `packageSize`.
+    func adding(_ size: Int, fee: WorkSum, packageSize: Int) -> ProjectedBlock {
+        let lower = Mempool.lowerRate(fee, packageSize, than: lowestFee, lowestFeeBytes)
         return ProjectedBlock(
-            transactionCount: transactionCount + count, bytes: bytes + size,
-            lowestFee: lower ? fee : lowestFee, lowestFeeBytes: lower ? size : lowestFeeBytes, full: full
+            transactionCount: transactionCount + 1, bytes: bytes + size,
+            lowestFee: lower ? fee : lowestFee, lowestFeeBytes: lower ? packageSize : lowestFeeBytes, full: full
         )
     }
 
@@ -307,27 +308,33 @@ public struct Mempool: Sendable {
         selected(limit: limit, maxBytes: maxBytes, includesUnavailable: true)
     }
 
-    /// The next `count` blocks this pool would fill if nothing else arrived:
-    /// the ready packages in template order, each block taking them until
-    /// one does not fit in `transactionLimit` transactions or `maxBytes` of
-    /// transaction size. An estimate for fee pricing, not a template: a
-    /// miner also fills a block's gaps with smaller packages, and the block's
-    /// own overhead shares `maxBytes`. Empty when nothing is ready.
+    /// The next `count` blocks this pool would fill if nothing else arrived,
+    /// as this node's builder fills them: transactions in template order,
+    /// each block taking them until one does not fit in `transactionLimit`
+    /// transactions or `maxBytes` of transaction size, so a package may
+    /// straddle two blocks. A block's rate is the lowest of the packages it
+    /// carries any of. An estimate for fee pricing, not a template: the
+    /// block's own overhead shares `maxBytes`, and other miners may fill
+    /// gaps with smaller packages. Empty when nothing is ready.
     public func projectedBlocks(count: Int, transactionLimit: Int, maxBytes: Int) -> [ProjectedBlock] {
         guard count > 0, transactionLimit > 0, maxBytes > 0 else { return [] }
         var blocks: [ProjectedBlock] = []
         var current: ProjectedBlock?
         _ = selected(limit: .max, maxBytes: .max, includesUnavailable: false) { members, fee, size in
-            if let block = current,
-               members.count <= transactionLimit - block.transactionCount, size <= maxBytes - block.bytes {
-                current = block.adding(count: members.count, fee: fee, size: size)
-                return true
+            for entry in members {
+                if let block = current,
+                   block.transactionCount < transactionLimit, entry.size <= maxBytes - block.bytes {
+                    current = block.adding(entry.size, fee: fee, packageSize: size)
+                    continue
+                }
+                if let block = current {
+                    blocks.append(block.closed())
+                    if blocks.count == count { return false }
+                }
+                // Admission caps a transaction at the block size, so one
+                // always fits an empty block.
+                current = ProjectedBlock(transactionCount: 1, bytes: entry.size, lowestFee: fee, lowestFeeBytes: size, full: false)
             }
-            if let block = current {
-                blocks.append(block.closed())
-                if blocks.count == count { return false }
-            }
-            current = ProjectedBlock(transactionCount: members.count, bytes: size, lowestFee: fee, lowestFeeBytes: size, full: false)
             return true
         }
         if let current, blocks.count < count { blocks.append(current) }

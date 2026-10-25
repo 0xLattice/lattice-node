@@ -383,6 +383,46 @@ final class NodeRuntimeTests: XCTestCase {
     /// Bitcoin's rule on a reorg: every transaction of a block the act-on
     /// chain left is returned, read from its body, even right after a
     /// restart (nothing about it is kept in memory).
+    func testAPoolChangeInsideTheProjectionIntervalIsProjectedWhenItEnds() async throws {
+        let node = try host(keyByte: 0x3F)
+        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let runtime = try await NodeRuntime.start(
+            storage: storage, configuration: node.configuration, overlay: node.overlay
+        )
+        func submit() async throws {
+            let key = CryptoUtils.generateKeyPair()
+            let bodyHeader = try HeaderImpl(node: TransactionBody(
+                accountActions: [], actions: [], depositActions: [],
+                receiptActions: [], withdrawalActions: [],
+                signers: [CryptoUtils.createAddress(from: key.publicKey)],
+                nonce: 0, chainPath: ["Nexus"]
+            ))
+            _ = try await runtime.submitTransaction(SubmitTransactionRequest(transaction: Transaction(
+                signatures: [key.publicKey: try XCTUnwrap(TransactionSigning.sign(
+                    bodyHeader: bodyHeader, privateKeyHex: key.privateKey
+                ))],
+                body: bodyHeader
+            )))
+        }
+        /// Polls the fee projection until it counts `count` transactions.
+        func projects(_ count: Int) async throws -> Bool {
+            let deadline = NodeRuntime.uptime() + 3 * NodeRuntime.projectionInterval
+            while NodeRuntime.uptime() < deadline {
+                if await runtime.reads.explorerFees().blocks.map(\.transactionCount).reduce(0, +) == count { return true }
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            return false
+        }
+        // Each submit lands just after a projection, and nothing follows it.
+        try await submit()
+        let first = try await projects(1)
+        XCTAssertTrue(first)
+        try await submit()
+        let second = try await projects(2)
+        XCTAssertTrue(second, "the last change is projected though no input follows")
+        await runtime.stop()
+    }
+
     func testAReorgRightAfterARestartReturnsTheLeftBlocksTransactions() async throws {
         let node = try host(keyByte: 0x34)
         let storage = try await NodeStorage.open(configuration: node.configuration)

@@ -131,6 +131,8 @@ public final class NodeRuntime: Sendable {
         /// The operator changed the chains this node hosts: the hosted
         /// children of this configuration, and what goes with them.
         case host(NodeConfiguration, CheckedContinuation<Void, any Error>)
+        /// A level's throttled fee projection is due.
+        case reproject(ChainPath)
         case stop
     }
 
@@ -433,6 +435,11 @@ public final class NodeRuntime: Sendable {
         Int64(Date().timeIntervalSince1970 * 1_000)
     }
 
+    /// Milliseconds on a clock that never steps back, for intervals.
+    static func uptime() -> Int64 {
+        Int64(DispatchTime.now().uptimeNanoseconds / 1_000_000)
+    }
+
     /// The most remembered peers one maintenance pass dials for a chain.
     static let rememberedPeerDials = 4
 }
@@ -535,6 +542,8 @@ extension NodeRuntime {
             }
         }
         var wake: (time: Int64, task: Task<Void, Never>)?
+        /// Levels with a `reproject` timer pending.
+        var reprojections: Set<ChainPath> = []
         var bodies: [BodyKey: Task<Void, Never>] = [:]
         /// The Volume roots each fetched body was stored in, until the
         /// validation fact that references them is persisted with them.
@@ -684,6 +693,10 @@ extension NodeRuntime {
             case .currentPeers(let current):
                 currentPeers = current
                 refreshView()
+                return true
+            case .reproject(let path):
+                reprojections.remove(path)
+                refreshView(path)
                 return true
             case .host(let next, let reply):
                 do {
@@ -1039,9 +1052,20 @@ extension NodeRuntime {
             }
             // The fee projection walks the pool, so a busy pool is projected
             // at most once a `projectionInterval`, and at once on a new tip.
-            let now = NodeRuntime.now()
+            // A change inside the interval is projected when it ends, input
+            // or not.
+            let now = NodeRuntime.uptime()
             let reproject = view.projectedVersion != pool.version
                 && (view.actOnTip != tip.hash || now - view.projectedAt >= NodeRuntime.projectionInterval)
+            if view.projectedVersion != pool.version, !reproject, !reprojections.contains(path) {
+                reprojections.insert(path)
+                let inputs = inputs
+                Timers.deadline(
+                    after: .milliseconds(NodeRuntime.projectionInterval - (now - view.projectedAt)), generation: 0
+                ) { _ in
+                    inputs.yield(.reproject(path))
+                }
+            }
             guard view.actOnTip != tip.hash || view.poolVersion != pool.version
                     || view.templateDigest != digest || view.peers != peers
                     || view.waiting != waiting || reproject else { return }
