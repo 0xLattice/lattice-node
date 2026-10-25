@@ -199,7 +199,7 @@ final class ChainCoreBodyTests: XCTestCase {
     func testTheTipBuiltOnIsTheHeaviestOneAccepted() async throws {
         let (core, side) = try await forked()
         func tip(refusing refused: Set<String>) async -> String? {
-            await core.actOnTip(from: core.snapshot.actOnTip) { !refused.contains($0) }
+            core.actOnTip(from: core.snapshot.actOnTip) { !refused.contains($0) }
         }
         let accepted = await tip(refusing: [])
         XCTAssertEqual(accepted, side[2].cid, "the act-on tip when it is accepted")
@@ -217,7 +217,7 @@ final class ChainCoreBodyTests: XCTestCase {
         XCTAssertEqual(atGenesis, genesis)
         let none = await tip(refusing: allButGenesis.union([genesis]))
         XCTAssertNil(none, "nothing to build on")
-        let unreadable = await core.actOnTip(from: side[2].cid) { _ in nil }
+        let unreadable = core.actOnTip(from: side[2].cid) { _ in nil }
         XCTAssertNil(unreadable)
     }
 
@@ -280,7 +280,7 @@ final class ChainCoreBodyTests: XCTestCase {
         // branch is the best chain.
         var (core, _) = weighed(Array(chain.prefix(2)) + [invalid, child])
         XCTAssertEqual(core.tree.canonicalTip, child.cid)
-        var before = core.tree
+        let before = core.tree
         let weightBefore = before.subtreeWeight(forHash: chain[1].cid)?.uint256Value
 
         _ = try await deliver(chain[0].cid, to: &core)
@@ -292,7 +292,7 @@ final class ChainCoreBodyTests: XCTestCase {
         XCTAssertTrue(core.tree.isExcludedRoot(invalid.cid))
         XCTAssertFalse(core.tree.hasExecutedAncestry(blockHash: invalid.cid))
         XCTAssertTrue(core.tree.contains(blockHash: child.cid), "the excluded subtree stays weighed")
-        var after = core.tree
+        let after = core.tree
         XCTAssertEqual(after.subtreeWeight(forHash: chain[1].cid)?.uint256Value, weightBefore, "its work still weighs")
         XCTAssertEqual(core.tree.canonicalTip, chain[1].cid, "validity selects")
         XCTAssertEqual(core.snapshot.actOnTip, chain[1].cid)

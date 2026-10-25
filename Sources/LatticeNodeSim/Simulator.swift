@@ -706,7 +706,7 @@ public struct Simulator {
         }
         node.digest = digest
         report.pendingPeak = max(report.pendingPeak, node.core.sync.pending.bytes)
-        report.peakLeaves = max(report.peakLeaves, node.core.index.leaves.count)
+        report.peakLeaves = max(report.peakLeaves, digest.leaves.count)
         cores[name] = node
     }
 

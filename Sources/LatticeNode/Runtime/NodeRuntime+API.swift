@@ -114,16 +114,53 @@ struct ChildTemplateInput: Sendable {
     let bestHeaderTip: String
     let transactions: [Transaction]
     let anchor: DifficultyAnchor?
-    /// The level, for a template that builds below the act-on tip
-    /// (`NodeRuntime.anchoredTip`).
-    let level: ChainCore
-    /// The parent level's tree, whose executed set decides whether a child
-    /// anchor advances; nil when the parent is not hosted here.
-    let parentTree: ChainTree?
     let genesisSpec: ChainSpec?
     let genesisPremineRecipient: String?
     let genesisTransactions: [Transaction]
     let genesisTarget: UInt256
+}
+
+/// What a mining job reads of its level, taken on the loop when the job is
+/// spawned: the snapshot of the tip it builds on as preflight reads it
+/// (`ChainTree.transactionPreflightTip`, nil unless executed from genesis),
+/// and, for a template, the tip's difficulty anchor. A job holds no tree:
+/// anything else it reads, it reads live through `LiveLevels`.
+struct MiningBasis: Sendable {
+    let snapshot: TipBlockSnapshot?
+    let anchor: DifficultyAnchor?
+}
+
+/// The hosted levels as the loop holds them, read from a job: `read` runs
+/// on the loop between steps, as Bitcoin reads its live block index under
+/// `cs_main`, and is nil once the loop has stopped. A job's tip epoch still
+/// decides whether it runs; what it reads live is safe to read at any step,
+/// because an executed set only grows and an anchor depends only on a
+/// block's ancestry.
+struct LiveLevels: Sendable {
+    /// Runs its argument on the loop, with the levels, or with nil when the
+    /// loop has stopped.
+    let run: @Sendable (_ read: @escaping @Sendable ([ChainPath: ChainCore]?) -> Void) -> Void
+
+    /// Levels no loop holds: every read is nil.
+    static let none = LiveLevels { $0(nil) }
+
+    /// The levels the loop that `inputs` feeds holds.
+    init(inputs: AsyncStream<NodeRuntime.Input>.Continuation) {
+        self.init { read in
+            // A read the stopped loop will never see is answered here.
+            if case .terminated = inputs.yield(.read(read)) { read(nil) }
+        }
+    }
+
+    init(run: @escaping @Sendable (_ read: @escaping @Sendable ([ChainPath: ChainCore]?) -> Void) -> Void) {
+        self.run = run
+    }
+
+    func read<T: Sendable>(_ body: @escaping @Sendable ([ChainPath: ChainCore]) -> T) async -> T? {
+        await withCheckedContinuation { continuation in
+            run { levels in continuation.resume(returning: levels.map(body)) }
+        }
+    }
 }
 
 /// An RPC's answer, from the effect that names its reply ID.
@@ -425,37 +462,73 @@ extension NodeRuntime {
         }
     }
 
-    /// The chain a tip epoch's jobs read: a copy of the level's tree.
-    static func jobLevel(_ tree: ChainTree) -> ChainLevel? { ChainLevel(tree: tree) }
+    /// The next job a free worker runs, execution first. A job whose tip
+    /// epoch moved is dropped here: it runs nothing, posts nothing.
+    static func nextJob(
+        execution: inout [RuntimeJob], mining: inout [RuntimeJob], in core: NodeCore
+    ) -> RuntimeJob? {
+        while !execution.isEmpty || !mining.isEmpty {
+            let job = execution.isEmpty ? mining.removeFirst() : execution.removeFirst()
+            if job.isCurrent(in: core) { return job }
+        }
+        return nil
+    }
+
+    /// The basis of a preflight or template job on `tree`, the live level's,
+    /// taken when the job is spawned; nil for any other effect, or a tree
+    /// made without a context.
+    static func miningBasis(_ effect: MiningEffect, tree: ChainTree) -> MiningBasis? {
+        let (tip, anchored): (String, Bool)
+        switch effect {
+        case .preflight(let job): (tip, anchored) = (job.tipCID, false)
+        case .buildTemplate(let job): (tip, anchored) = (job.tipCID, true)
+        default: return nil
+        }
+        guard tree.context != nil else { return nil }
+        return MiningBasis(
+            snapshot: tree.transactionPreflightTip(at: tip).snapshot, anchor: anchored ? anchor(tree, tip) : nil
+        )
+    }
+
+    /// `tip`'s difficulty anchor, read from `tree`: what the anchor cache
+    /// fills is written to a copy, never to the level's tree.
+    static func anchor(_ tree: ChainTree, _ tip: String) -> DifficultyAnchor? {
+        var tree = tree
+        return tree.difficultyAnchor(forBlockHash: tip)
+    }
 
     /// The worker job for a mining effect that needs one: Lattice preflight
-    /// and the template assembly over the job's epoch `level`, and the read
-    /// of a tip move's blocks, which is tied to no epoch (a returned
-    /// transaction is a candidate on any tip, and its preflight decides).
+    /// and the template assembly on the job's `basis`, child templates
+    /// reading the live `levels`, and the read of a tip move's blocks, which
+    /// is tied to no epoch (a returned transaction is a candidate on any tip,
+    /// and its preflight decides).
     static func miningJob(
         _ effect: MiningEffect,
         at path: ChainPath,
-        level: ChainLevel?,
+        basis: MiningBasis?,
         storage: NodeStorage,
         remote: IvyRootContentSource? = nil,
-        children: [ChildTemplateInput] = []
+        children: [ChildTemplateInput] = [],
+        levels: LiveLevels = .none
     ) -> RuntimeJob {
         let fetcher = storage.workFetcher
         switch effect {
         case .preflight(let job):
             return RuntimeJob(path: path, epoch: job.tipEpoch) {
-                guard let level else { return [] }
+                guard let basis else { return [] }
                 // From this store alone: a transaction anyone may submit
                 // does not spend this node's requests to its peers.
-                let result = await level.preflightTransaction(job.transaction, at: job.tipCID, fetcher: fetcher)
+                let result = await TransactionPreflight.classify(
+                    job.transaction, tipCID: job.tipCID, snapshot: basis.snapshot, chainPath: path, fetcher: fetcher
+                )
                 return [.level(path, .mining(.preflighted(job, disposition(result.disposition))))]
             }
         case .buildTemplate(let job):
             return RuntimeJob(path: path, epoch: job.tipEpoch) {
-                let anchor = await level?.chain.difficultyAnchor(forBlockHash: job.tipCID)
                 let built = await reading(job.tipCID, storage: storage, remote: remote) { fetcher in
                     await buildTemplate(
-                        job, difficultyAnchor: anchor, fetcher: fetcher, chainPath: path, children: children
+                        job, difficultyAnchor: basis?.anchor, fetcher: fetcher, chainPath: path,
+                        children: children, levels: levels
                     )
                 }
                 return [.level(path, .mining(.templateBuilt(job, built)))]
@@ -598,7 +671,8 @@ extension NodeRuntime {
         difficultyAnchor: DifficultyAnchor?,
         fetcher: any Fetcher,
         chainPath: [String],
-        children: [ChildTemplateInput] = []
+        children: [ChildTemplateInput] = [],
+        levels: LiveLevels = .none
     ) async -> TemplateBuild? {
         guard job.request.parentCarrier == nil,
               let previous = try? await BlockHeader(rawCID: job.tipCID).resolve(fetcher: fetcher).node,
@@ -615,7 +689,7 @@ extension NodeRuntime {
         )
         let provided = await childCandidates(
             of: chainPath, among: children, entering: previous.postState, timestamp: timestamp,
-            request: job.request, fetcher: fetcher
+            request: job.request, levels: levels, fetcher: fetcher
         )
         guard let template = try? await MiningTemplateAssembly.fit(
             chainPath: chainPath,
@@ -756,6 +830,7 @@ extension NodeRuntime {
         entering: LatticeStateHeader,
         timestamp: Int64,
         request: TemplateRequest,
+        levels: LiveLevels,
         fetcher: any Fetcher
     ) async -> [DirectChildCandidate] {
         var candidates: [DirectChildCandidate] = []
@@ -771,9 +846,8 @@ extension NodeRuntime {
             if let tipCID = input.tipCID {
                 // Building below the act-on tip: the block carries neither
                 // the pool, which is kept on the act-on tip, nor children.
-                guard let tip = await anchoredTip(
-                    from: tipCID, entering: entering.rawCID, level: input.level,
-                    parentTree: input.parentTree, fetcher: fetcher
+                guard let (tip, anchorBelow) = await anchoredTip(
+                    from: tipCID, entering: entering.rawCID, at: input.path, levels: levels, fetcher: fetcher
                 ),
                       let previous = try? await BlockHeader(rawCID: tip).resolve(fetcher: fetcher).node,
                       let spec = try? await previous.spec.resolve(fetcher: fetcher).node,
@@ -782,15 +856,14 @@ extension NodeRuntime {
                 let below = tip != tipCID
                 let grandchildren = below ? [] : await childCandidates(
                     of: input.path, among: inputs, entering: previous.postState, timestamp: time,
-                    request: request, fetcher: fetcher
+                    request: request, levels: levels, fetcher: fetcher
                 )
-                var tree = input.level.tree
                 block = try? await MiningTemplateAssembly.fit(
                     chainPath: input.path, lifetime: .seconds(30), previous: previous,
                     pooled: below ? [] : input.transactions, provided: grandchildren, parentCarrier: carrier,
                     timestamp: time, rewardRecipient: request.childRecipients[input.path],
                     minimumWork: request.minimumWork,
-                    difficultyAnchor: below ? tree.difficultyAnchor(forBlockHash: tip) : input.anchor,
+                    difficultyAnchor: below ? anchorBelow : input.anchor,
                     spec: spec, fetcher: fetcher
                 ).block
             } else if let spec = input.genesisSpec {
@@ -817,17 +890,65 @@ extension NodeRuntime {
     /// After a parent reorganization the act-on tip may be anchored on the
     /// abandoned branch, and a block on it anchored at the canonical parent
     /// would be invalid; building on the heaviest tip it can extend instead
-    /// is what moves the child with its parent. `tipCID` when the parent is
-    /// not hosted here; nil when no executed block's anchor advances to
-    /// `entering`, or a block cannot be read.
+    /// is what moves the child with its parent. With the tip, its difficulty
+    /// anchor when it is below `tipCID`.
+    ///
+    /// The levels are read live, all in one read (`childTip`): the tip is
+    /// what one step's state gives, as a copy of the levels taken at that
+    /// step would. What the walk needs of a block's content, the anchor it
+    /// names, is read off the loop and the read made again: content never
+    /// changes, so only the last read's state decides.
+    ///
+    /// `tipCID` when the parent is not hosted here; nil when no executed
+    /// block's anchor advances to `entering`, a block cannot be read, or the
+    /// levels no longer can.
     static func anchoredTip(
-        from tipCID: String, entering: String, level: ChainCore, parentTree: ChainTree?, fetcher: any Fetcher
-    ) async -> String? {
-        guard let parentTree else { return tipCID }
-        return await level.actOnTip(from: tipCID) { tip in
-            guard let block = try? await BlockHeader(rawCID: tip).resolve(fetcher: fetcher).node else { return nil }
-            return parentTree.executedSetAdvanced(from: block.parentState.rawCID, to: entering)
+        from tipCID: String, entering: String, at path: ChainPath, levels: LiveLevels, fetcher: any Fetcher
+    ) async -> (tip: String, anchor: DifficultyAnchor?)? {
+        var anchors: [String: String] = [:]
+        while true {
+            let known = anchors
+            switch await levels.read({
+                childTip(from: tipCID, entering: entering, at: path, levels: $0, anchors: known)
+            }) {
+            case .tip(let tip, let anchor)?:
+                return (tip, anchor)
+            case .needs(let cid)?:
+                guard let block = try? await BlockHeader(rawCID: cid).resolve(fetcher: fetcher).node else { return nil }
+                anchors[cid] = block.parentState.rawCID
+            case .noTip?, nil:
+                return nil
+            }
         }
+    }
+
+    /// `anchoredTip` over one step's `levels`, with the parent states the
+    /// blocks it has read name (`anchors`); `.needs` a block it has not read.
+    static func childTip(
+        from tipCID: String, entering: String, at path: ChainPath,
+        levels: [ChainPath: ChainCore], anchors: [String: String]
+    ) -> ChildTip {
+        guard let level = levels[path] else { return .noTip }
+        guard let parent = levels[Array(path.dropLast())] else { return .tip(tipCID, anchor: nil) }
+        var needs: String?
+        let tip = level.actOnTip(from: tipCID) { tip in
+            guard let from = anchors[tip] else {
+                needs = tip
+                return nil
+            }
+            return parent.tree.executedSetAdvanced(from: from, to: entering)
+        }
+        if let needs { return .needs(needs) }
+        guard let tip else { return .noTip }
+        return .tip(tip, anchor: tip == tipCID ? nil : anchor(level.tree, tip))
+    }
+
+    /// What one read of the levels gives `anchoredTip`.
+    enum ChildTip: Sendable {
+        case tip(String, anchor: DifficultyAnchor?)
+        case noTip
+        /// The parent state a block names, which the walk must know.
+        case needs(String)
     }
 
     static func disposition(_ preflight: TransactionPreflightDisposition) -> MempoolDisposition {

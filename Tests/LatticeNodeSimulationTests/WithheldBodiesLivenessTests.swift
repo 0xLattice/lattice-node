@@ -175,7 +175,7 @@ final class WithheldBodiesLivenessTests: XCTestCase {
         /// A withheld block weighs what it weighed and has no verdict.
         func assertUnjudged(_ blocks: [SimBlock], weight: UInt256?) {
             for node in hosts.indices {
-                var tree = level(node).tree
+                let tree = level(node).tree
                 XCTAssertEqual(tree.subtreeWeight(forHash: blocks[0].cid)?.uint256Value, weight)
                 for block in blocks {
                     XCTAssertFalse(tree.isExcludedRoot(block.cid), "a body not held is never an exclusion")
@@ -205,7 +205,7 @@ final class WithheldBodiesLivenessTests: XCTestCase {
             XCTAssertEqual(net.snapshot(node).bestHeaderTip, branch.last?.cid)
             XCTAssertEqual(net.snapshot(node).actOnTip, base.cid)
         }
-        var tree = net.level(0).tree
+        let tree = net.level(0).tree
         return (net, base, branch, tree.subtreeWeight(forHash: branch[0].cid)?.uint256Value)
     }
 
@@ -382,7 +382,7 @@ final class WithheldBodiesLivenessTests: XCTestCase {
         XCTAssertEqual(net.snapshot(1).actOnTip, theirs.cid)
         try await net.show([theirs], to: 0)
         try await net.show([mine], to: 1)
-        var tree = net.level(0).tree
+        let tree = net.level(0).tree
         XCTAssertEqual(tree.subtreeWeight(forHash: mine.cid), tree.subtreeWeight(forHash: theirs.cid), "a tie")
         let chosen = forkChoicePrefersBlock(mine.cid, over: theirs.cid) ? mine : theirs
         for node in 0..<2 {
@@ -464,7 +464,7 @@ final class WithheldBodiesLivenessTests: XCTestCase {
             )
             try await net.show([block] + sibling, to: 0)
         }
-        XCTAssertEqual(net.level(0).index.leaves.count, chain.count)
+        XCTAssertEqual(TreeDigest(net.level(0).tree).leaves.count, chain.count)
         XCTAssertEqual(net.snapshot(0).actOnTip, world.genesis.cid)
         var served = 0
         while served < net.fetched[0].count {

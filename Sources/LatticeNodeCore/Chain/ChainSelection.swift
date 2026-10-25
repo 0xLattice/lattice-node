@@ -27,64 +27,34 @@ extension ChainCore {
     }
 
     /// The mempool's starting tip: the act-on tip.
-    static func miningTip(of tree: ChainTree, index: WeighedIndex) -> String {
-        actOnTip(of: tree, index: index).hash
+    static func miningTip(of tree: ChainTree) -> String {
+        tree.heaviestExecutedTip()
     }
 
-    /// The tip a node acts on: the heaviest executed tip. From genesis, at
-    /// each fork the heaviest child (its whole header subtree, fork choice's
-    /// own measure and tie-break) that is executed is the step taken; the
-    /// descent stops where no child is executed. A block with no verdict —
-    /// its body not held, or not yet run — is never stepped into and never
-    /// marked: it weighs, and is taken once it executes.
-    ///
-    /// Up to the executed prefix of the best header chain this is fork
-    /// choice's own descent (its heaviest child there is executed), so the
-    /// walk starts from that prefix.
-    static func actOnTip(of tree: ChainTree, index: WeighedIndex) -> (hash: String, height: UInt64) {
-        var tip = tree.executedPrefix()
-        guard !tip.hash.isEmpty else { return tip }
-        while let next = byWeight((index.children[tip.hash] ?? []).filter(tree.isExecuted(blockHash:)), in: tree).first {
-            tip = (next, tip.height + 1)
-        }
-        return tip
-    }
-
+    /// The tip a node acts on: the heaviest executed tip
+    /// (`ChainTree.heaviestExecutedTip`). A block with no verdict — its body
+    /// not held, or not yet run — is never stepped into: it weighs, and is
+    /// taken once it executes.
     var actOnTip: (hash: String, height: UInt64) {
-        Self.actOnTip(of: tree, index: index)
+        let tip = tree.heaviestExecutedTip()
+        return (tip, tree.height(of: tip) ?? 0)
     }
 
     /// The act-on descent with `avoided` blocks, and all they lead to, left
-    /// out: from the parent of the deepest avoided block on the act-on
-    /// chain, the heaviest executed step at each fork that is not avoided.
-    /// The act-on tip when none of them is on its chain.
+    /// out (`ChainTree.heaviestExecutedTip(avoiding:)`).
     public func actOnTip(avoiding avoided: Set<String>) -> String {
-        var tip = actOnTip.hash
-        guard let floor = avoided.compactMap({ index.height[$0] }).min() else { return tip }
-        var deepest: String?
-        var cid: String? = tip
-        while let block = cid, let height = index.height[block], height >= floor {
-            if avoided.contains(block) { deepest = block }
-            cid = index.parent[block]
-        }
-        guard let deepest, let base = index.parent[deepest] else { return tip }
-        tip = base
-        while let next = Self.byWeight((index.children[tip] ?? []).filter {
-            tree.isExecuted(blockHash: $0) && !avoided.contains($0)
-        }, in: tree).first {
-            tip = next
-        }
-        return tip
+        tree.heaviestExecutedTip(avoiding: avoided)
     }
 
     /// `tipCID` when `accepts` holds for it; otherwise the act-on descent
     /// avoiding each tip it fails for (`actOnTip(avoiding:)`), checked again.
     /// Nil when it holds for none, or answers nil (the tip cannot be read).
-    public func actOnTip(from tipCID: String, accepting accepts: (String) async -> Bool?) async -> String? {
+    /// It runs at once, so the walk sees one state of the level.
+    public func actOnTip(from tipCID: String, accepting accepts: (String) -> Bool?) -> String? {
         var avoided: Set<String> = []
         var tip = tipCID
         while true {
-            guard let ok = await accepts(tip) else { return nil }
+            guard let ok = accepts(tip) else { return nil }
             if ok { return tip }
             // Each pass avoids one more block of a finite tree.
             guard avoided.insert(tip).inserted else { return nil }
@@ -95,7 +65,7 @@ extension ChainCore {
     /// The parent of a weighed block: how a reader walks the act-on chain,
     /// which need not be the best header chain.
     public func parent(of cid: String) -> String? {
-        index.parent[cid]
+        tree.parent(of: cid)
     }
 
     /// Sibling blocks heaviest first by fork choice's subtree work, ties by
@@ -147,14 +117,14 @@ extension ChainCore {
         var entered: [String] = []
         var left: [String] = []
         var (old, new) = (mining.tipCID, tip.hash)
-        while old != new, let oldHeight = index.height[old], let newHeight = index.height[new] {
+        while old != new, let oldHeight = tree.height(of: old), let newHeight = tree.height(of: new) {
             if oldHeight >= newHeight {
                 left.append(old)
-                guard let parent = index.parent[old] else { break }
+                guard let parent = tree.parent(of: old) else { break }
                 old = parent
             } else {
                 entered.append(new)
-                guard let parent = index.parent[new] else { break }
+                guard let parent = tree.parent(of: new) else { break }
                 new = parent
             }
         }
@@ -175,7 +145,7 @@ extension ChainCore {
         )
         let window = UInt64(max(config.bodyWindow, 0))
         executedTransactions = executedTransactions.filter {
-            (index.height[$0.key] ?? 0) + window >= tip.height
+            (tree.height(of: $0.key) ?? 0) + window >= tip.height
         }
     }
 
@@ -185,7 +155,7 @@ extension ChainCore {
         guard !minedReplies.isEmpty else { return }
         let stepped = forkChildren
         for (cid, replyID) in minedReplies.sorted(by: { $0.key < $1.key })
-        where index.contains(cid) && !tree.isCanonical(hash: cid) && !stepped.contains(cid) {
+        where tree.contains(blockHash: cid) && !tree.isCanonical(hash: cid) && !stepped.contains(cid) {
             minedReplies[cid] = nil
             turn.effects.append(.workSubmitted(replyID: replyID, .side))
         }
@@ -230,6 +200,6 @@ extension ChainCore {
 
     /// Whether weighed block `cid` is past the finality window.
     func pastFinality(_ cid: String) -> Bool {
-        index.height[cid].map(pastFinality(height:)) ?? false
+        tree.height(of: cid).map(pastFinality(height:)) ?? false
     }
 }
