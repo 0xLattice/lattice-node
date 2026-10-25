@@ -6,9 +6,10 @@ import XCTest
 
 /// Safety net: what boot does with one damaged row in each table it reads.
 ///
-/// "Boot" is `NodeStorage.open`: `NodeStore.init` (node_metadata), then the
-/// journal audit (admission_batches, admission_facts, accepted_blocks) and
-/// the local mempool (local_mempool_transactions).
+/// "Boot" is `NodeStorage.open`: `NodeStore.init` (node_metadata), the leaf
+/// flag repair (accepted_blocks.leaf) and the local mempool
+/// (local_mempool_transactions); then `NodeRuntime.boot`, which replays each
+/// hosted level's journal (admission_batches.payload).
 ///
 /// Every case starts from one valid fixture (Nexus, two mined blocks), damages
 /// exactly one row through SQL, reopens, and records what boot did. The
@@ -19,8 +20,11 @@ import XCTest
 /// - A column that cannot be read as its table declares it: refused with
 ///   `NodeStoreError.malformedRow(table:column:)` naming exactly the damaged
 ///   table and column.
-/// - Semantic damage the row layer cannot see (undecodable batches, facts
-///   that disagree with their batch): refused with `NodeStoreError.corrupt`.
+/// - An undecodable batch: refused with `NodeStoreError.corrupt`.
+/// - A row boot does not read: opened. The journal's derived rows
+///   (admission_facts, accepted_blocks) and its volume roots are written in
+///   the batch's own transaction, so boot does not re-derive them; the read
+///   that reads a damaged row refuses it then.
 /// - accepted_blocks.leaf disagreeing with the parent links: repaired at boot.
 /// - A Volume a fact names gone from volumes.db: opened. Content is fetched
 ///   when read; its absence is no damage.
@@ -68,6 +72,10 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             description: "malformed JSON in the newest batch",
             sql: ["UPDATE admission_batches SET payload = X'00' WHERE seq = (SELECT MAX(seq) FROM admission_batches)"]
         ),
+    ]
+
+    /// Opened: boot does not read these rows.
+    private static let unread: [Damage] = [
         Damage(
             table: "admission_batches", column: "volume_roots",
             description: "malformed JSON in the newest batch",
@@ -78,11 +86,6 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             description: "one fact's bytes no longer match its batch",
             sql: ["UPDATE admission_facts SET payload = X'00' WHERE fact_id = (SELECT MIN(fact_id) FROM admission_facts)"]
         ),
-    ]
-
-    /// Refused with `NodeStoreError.malformedRow(table:column:)` naming the
-    /// damaged table and column.
-    private static let refusedAsMalformedRow: [Damage] = [
         Damage(
             table: "accepted_blocks", column: "parent_cid",
             description: "empty parent CID on a non-genesis block",
@@ -98,6 +101,11 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             description: "tier 7 (neither weighed, eager nor walk-validated)",
             sql: ["UPDATE accepted_blocks SET validated = 7 WHERE block_cid = (SELECT MIN(block_cid) FROM accepted_blocks WHERE parent_cid IS NOT NULL)"]
         ),
+    ]
+
+    /// Refused with `NodeStoreError.malformedRow(table:column:)` naming the
+    /// damaged table and column.
+    private static let refusedAsMalformedRow: [Damage] = [
         Damage(
             table: "local_mempool_transactions", column: "transaction_cid",
             description: "inserted malformed CID text",
@@ -123,6 +131,10 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         try await assertBoot(Self.refusedAsMalformedRow) { damage in
             .malformedRow(table: damage.table, column: damage.column)
         }
+    }
+
+    func testBootOpensAStoreWhoseUnreadRowsAreDamaged() async throws {
+        try await assertBoot(Self.unread, observes: .opened)
     }
 
     func testBootRefusesDamagedMetadataWithWipeRequired() async throws {
@@ -214,7 +226,9 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
 
     private func observeBoot(at root: URL) async -> Observed {
         do {
-            _ = try await NodeStorage.open(configuration: try configuration(root))
+            let configuration = try configuration(root)
+            let storage = try await NodeStorage.open(configuration: configuration)
+            _ = try await NodeRuntime.boot(storage: storage, configuration: configuration, coreConfig: .init())
             return .opened
         } catch NodeStoreError.corrupt {
             return .corrupt

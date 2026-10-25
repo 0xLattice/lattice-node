@@ -92,7 +92,15 @@ public struct IvyRootContentSource: Sendable {
     private final class Context: @unchecked Sendable {
         let rootCID: String
         let trace = Trace()
-        private let maximumStorageBytes: Int
+        private let budget: AcquisitionBudget
+        private let reservingBytes: Int
+        private let priority: AcquisitionBudget.Priority
+        /// What the session reserved: nothing until it first asks a peer.
+        private var reservation: Task<Int?, Never>?
+        /// The session's task was cancelled: it reserves nothing more.
+        private var cancelled = false
+        /// The bytes the session may hold: what it reserved, once it has.
+        private var maximumStorageBytes = 0
         private let broker = MemoryBroker()
         private let lock = NSLock()
         private var attemptedRoots = Set<String>()
@@ -103,9 +111,14 @@ public struct IvyRootContentSource: Sendable {
         private var accountedMembers = Set<String>()
         private var storageByteCount = 0
 
-        init(rootCID: String, maximumStorageBytes: Int) {
+        init(
+            rootCID: String, budget: AcquisitionBudget, reserving bytes: Int,
+            priority: AcquisitionBudget.Priority
+        ) {
             self.rootCID = rootCID
-            self.maximumStorageBytes = maximumStorageBytes
+            self.budget = budget
+            reservingBytes = bytes
+            self.priority = priority
         }
 
         func cached(_ cids: Set<String>) async -> [String: Data] {
@@ -113,6 +126,53 @@ public struct IvyRootContentSource: Sendable {
         }
 
         var accountedBytes: Int { lock.withLock { storageByteCount } }
+
+        /// Reserves the session's bytes from the budget, once, before its
+        /// first request to a peer: a session that reads only what this
+        /// node holds never waits on the budget, and one waiting holds
+        /// nothing budgeted. False when the session was cancelled first
+        /// (`cancel`): the session then asks no peer.
+        ///
+        /// The reservation is the session's, shared by all its callers, and
+        /// only the session's cancellation cancels it: its readers call from
+        /// tasks of their own (a `CoalescingFetcher`'s flush), which that
+        /// cancellation never reaches.
+        func reserveBudget() async -> Bool {
+            let task: Task<Int?, Never>? = lock.withLock {
+                if let reservation { return reservation }
+                guard !cancelled else { return nil }
+                let task = Task { [budget = self.budget, bytes = self.reservingBytes, priority = self.priority] in
+                    await budget.reserve(bytes, priority: priority)
+                }
+                reservation = task
+                return task
+            }
+            guard let reserved = await task?.value else { return false }
+            lock.withLock { maximumStorageBytes = reserved }
+            return true
+        }
+
+        /// The session's task was cancelled: a reservation still waiting
+        /// leaves the line holding nothing, none is made after, and a
+        /// bundle on its way is not waited for. One already granted is
+        /// released when the session ends.
+        func cancel() {
+            let tasks: (Task<Int?, Never>?, Task<AuthenticatedPeer?, Never>?) = lock.withLock {
+                cancelled = true
+                return (reservation, bundle)
+            }
+            tasks.0?.cancel()
+            tasks.1?.cancel()
+        }
+
+        /// What the session reserved goes back to the budget.
+        func releaseBudget() async {
+            guard let task = lock.withLock({ reservation }) else { return }
+            // Still waiting only when a reader the session no longer waits
+            // for (one whose operation ended or threw first) is waiting.
+            task.cancel()
+            if let reserved = await task.value { budget.release(reserved) }
+        }
 
         func reserve(rootCID: String) -> Bool {
             lock.withLock { attemptedRoots.insert(rootCID).inserted }
@@ -245,7 +305,11 @@ public struct IvyRootContentSource: Sendable {
     private let report: @Sendable (String, PeerID) async -> Void
     /// What the connected peers' hellos said they speak: who a bundle is asked of.
     let peerCapabilities = PeerCapabilities()
+    /// The most bytes one session may hold: what a session reserves when
+    /// nothing smaller bounds its content.
     let maximumStorageBytes: Int
+    /// The node's one budget every session reserves from.
+    let budget: AcquisitionBudget
 
     public final class Session: ContentSource {
         private let fetchVolume: @Sendable (String) async -> AttributedVolumeResponse
@@ -257,7 +321,9 @@ public struct IvyRootContentSource: Sendable {
 
         fileprivate init(
             rootCID: String,
-            maximumStorageBytes: Int,
+            budget: AcquisitionBudget,
+            reserving bytes: Int,
+            priority: AcquisitionBudget.Priority,
             fetch: @escaping @Sendable (String) async -> AttributedVolumeResponse,
             fetchBundle: @escaping BundleFetch,
             credit: @escaping @Sendable (PeerID, Int) async -> Void,
@@ -269,12 +335,13 @@ public struct IvyRootContentSource: Sendable {
             self.credit = credit
             self.report = report
             self.peerCapabilities = peerCapabilities
-            context = Context(rootCID: rootCID, maximumStorageBytes: maximumStorageBytes)
+            context = Context(rootCID: rootCID, budget: budget, reserving: bytes, priority: priority)
         }
 
         fileprivate func acceptInitialResponse(
             _ response: AttributedVolumeResponse
         ) async {
+            guard await context.reserveBudget() else { return context.trace.markIncomplete() }
             let volume = SerializedVolume(
                 root: response.rootCID,
                 entries: response.entries
@@ -294,7 +361,10 @@ public struct IvyRootContentSource: Sendable {
                 return [:]
             }
             let cached = await context.cached(cids)
-            for rootCID in cids.subtracting(cached.keys).sorted() {
+            let missing = cids.subtracting(cached.keys)
+            // Cancelled before its reservation: nothing is asked of peers.
+            let reserved = missing.isEmpty ? false : await context.reserveBudget()
+            for rootCID in missing.sorted() where reserved {
                 guard context.reserve(rootCID: rootCID) else { continue }
                 // A Volume that does not verify, bundled or requested, reports
                 // the peer that sent it, and the Volume is then requested
@@ -334,7 +404,17 @@ public struct IvyRootContentSource: Sendable {
 
         public var attribution: Attribution { context.trace.snapshot() }
 
-        fileprivate func cancelBundle() { context.cancelBundle() }
+        /// The session's task was cancelled (`Context.cancel`).
+        fileprivate func cancel() {
+            context.cancel()
+        }
+
+        /// The session is over: a bundle still on its way is not waited
+        /// for, and what the session reserved goes back to the budget.
+        fileprivate func end() async {
+            context.cancelBundle()
+            await context.releaseBudget()
+        }
 
         /// What the entries this session holds are charged against its budget.
         var accountedBytes: Int { context.accountedBytes }
@@ -361,6 +441,7 @@ public struct IvyRootContentSource: Sendable {
         credit = Self.tallyCredit(ivy)
         report = Self.tallyReport(ivy)
         maximumStorageBytes = policy.maximumAcquisitionStorageBytes
+        budget = AcquisitionBudget(capacity: policy.maximumAcquisitionBytes)
         // A Volume is taken at whatever size the wire carries and measured
         // here once verified: the size a peer declares is its claim, and a
         // declared size past the budget would say nothing about the block.
@@ -409,6 +490,7 @@ public struct IvyRootContentSource: Sendable {
 
     init(
         maximumStorageBytes: Int = Self.defaultPolicy.maximumAcquisitionStorageBytes,
+        budget: AcquisitionBudget? = nil,
         fetch: @escaping @Sendable (String) async -> AttributedVolumeResponse,
         fetchBundle: @escaping @Sendable (String) async -> [AttributedVolumeResponse] = { _ in [] },
         credit: @escaping @Sendable (PeerID, Int) async -> Void = { _, _ in },
@@ -417,6 +499,9 @@ public struct IvyRootContentSource: Sendable {
         self.credit = credit
         self.report = report
         self.maximumStorageBytes = maximumStorageBytes
+        self.budget = budget ?? AcquisitionBudget(
+            capacity: max(maximumStorageBytes, Self.defaultPolicy.maximumAcquisitionBytes)
+        )
         self.fetch = fetch
         self.fetchBundle = { rootCID, _ in (await fetchBundle(rootCID), nil) }
     }
@@ -429,12 +514,23 @@ public struct IvyRootContentSource: Sendable {
         return result.value
     }
 
+    /// Runs `operation` over a session for `rootCID`. The session reserves
+    /// `reserving` bytes (at most `maximumStorageBytes`, which is also the
+    /// default) from the node's budget when it first asks a peer, waiting
+    /// in line at `priority` while they do not fit, holds at most that
+    /// much, and releases it all when `operation` ends. A session that
+    /// reads only what this node holds reserves nothing. It never reserves
+    /// again: a bundle is held within the same reservation. A session
+    /// whose task is cancelled while it waits leaves the line at once,
+    /// reserves nothing and asks no peer, whichever task its reads run in.
     public func withRootTracing<T: Sendable>(
         _ rootCID: String,
         bundle: Bool = true,
         hosts: ChainHosts? = nil,
         initialResponse: AttributedVolumeResponse? = nil,
         capture: AttributionCapture? = nil,
+        reserving bytes: Int? = nil,
+        priority: AcquisitionBudget.Priority = .ownWork,
         operation: @Sendable (Session) async throws -> T
     ) async rethrows -> (value: T, attribution: Attribution) {
         let fetchBundle = fetchBundle
@@ -443,24 +539,33 @@ public struct IvyRootContentSource: Sendable {
         }
         let session = Session(
             rootCID: rootCID,
-            maximumStorageBytes: maximumStorageBytes,
+            budget: budget,
+            reserving: min(max(bytes ?? maximumStorageBytes, 1), maximumStorageBytes),
+            priority: priority,
             fetch: fetch,
             fetchBundle: bundled,
             credit: credit,
             report: report,
             peerCapabilities: peerCapabilities
         )
-        defer { session.cancelBundle() }
-        if let initialResponse {
-            await session.acceptInitialResponse(initialResponse)
-        }
         do {
-            let value = try await operation(session)
+            // The reads run in tasks of their own (a `CoalescingFetcher`'s
+            // flush): the session's task's cancellation reaches them here.
+            let value = try await withTaskCancellationHandler {
+                if let initialResponse {
+                    await session.acceptInitialResponse(initialResponse)
+                }
+                return try await operation(session)
+            } onCancel: {
+                session.cancel()
+            }
             let attribution = session.attribution
             capture?.record(attribution)
+            await session.end()
             return (value, attribution)
         } catch {
             capture?.record(session.attribution)
+            await session.end()
             throw error
         }
     }
