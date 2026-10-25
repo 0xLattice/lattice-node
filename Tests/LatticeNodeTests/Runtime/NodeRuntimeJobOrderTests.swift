@@ -19,6 +19,8 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
         var replies: [MiningEffect] = []
         /// Every `readTransactions` the core asked.
         var reads: [[String]] = []
+        /// Every mining effect queued as a job.
+        var spawned: [MiningEffect] = []
 
         var mining: MiningState { host.levels[host.rootPath]!.mining }
         var actOnTip: String { host.levels[host.rootPath]!.snapshot.actOnTip }
@@ -54,9 +56,10 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
                     case .level(let path, .mining(let mining)):
                         switch mining {
                         case .preflight, .buildTemplate, .returnTransactions:
+                            spawned.append(mining)
                             jobs.append(NodeRuntime.miningJob(
                                 mining, at: path,
-                                level: NodeRuntime.jobLevel(host.levels[path]!.tree),
+                                basis: NodeRuntime.miningBasis(mining, tree: host.levels[path]!.tree),
                                 storage: storage
                             ))
                         case .poolChanged:
@@ -114,13 +117,13 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
         )
     }
 
-    private func transaction() throws -> Transaction {
+    private func transaction(nonce: UInt64 = 0) throws -> Transaction {
         let key = CryptoUtils.generateKeyPair()
         let bodyHeader = try HeaderImpl(node: TransactionBody(
             accountActions: [], actions: [], depositActions: [],
             receiptActions: [], withdrawalActions: [],
             signers: [CryptoUtils.createAddress(from: key.publicKey)],
-            nonce: 0, chainPath: ["Nexus"]
+            nonce: nonce, chainPath: ["Nexus"]
         ))
         return Transaction(
             signatures: [key.publicKey: try XCTUnwrap(TransactionSigning.sign(
@@ -247,5 +250,103 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
             try await harness.runJobs()
             XCTAssertFalse(harness.mining.mempool.contains(cid), "window \(window)")
         }
+    }
+
+    /// A job's basis, read from the live tree when it is spawned, gives what
+    /// the per-epoch copy of the tree it replaces gave: the same preflight
+    /// verdict, and the same difficulty anchor for the template.
+    func testAJobsBasisReadsWhatACopyOfTheTreeRead() async throws {
+        var harness = try await harness(keyByte: 0x45)
+        let clock = TestBlockClock()
+        let root = harness.host.rootPath
+        var tip = try await harness.tipBlock()
+        for _ in 0..<3 { tip = try await mine(&harness, on: tip, timestamp: clock.next()) }
+        try await harness.runJobs()
+        harness.spawned = []
+        let ready = try transaction()
+        // Nonce 1 is ahead of the signer's next nonce.
+        let future = try transaction(nonce: 1)
+        for (replyID, tx) in [ready, future].enumerated() {
+            try await harness.step(.level(root, .mining(.transactionReceived(tx, origin: .local(replyID: UInt64(replyID))))))
+        }
+        try await harness.step(.level(root, .mining(.templateRequested(replyID: 9, TemplateRequest(rewardRecipient: nil)))))
+
+        let tree = harness.host.levels[root]!.tree
+        let copy = try XCTUnwrap(ChainLevel(tree: tree))
+        let fetcher = harness.storage.workFetcher
+        var dispositions: [TransactionPreflightDisposition] = []
+        var anchors = 0
+        for effect in harness.spawned {
+            switch effect {
+            case .preflight(let job):
+                let basis = try XCTUnwrap(NodeRuntime.miningBasis(effect, tree: tree))
+                let read = await TransactionPreflight.classify(
+                    job.transaction, tipCID: job.tipCID, snapshot: basis.snapshot, chainPath: root, fetcher: fetcher
+                )
+                let copied = await copy.preflightTransaction(job.transaction, at: job.tipCID, fetcher: fetcher)
+                XCTAssertEqual(read, copied)
+                dispositions.append(read.disposition)
+            case .buildTemplate(let job):
+                let basis = try XCTUnwrap(NodeRuntime.miningBasis(effect, tree: tree))
+                let copied = await copy.chain.difficultyAnchor(forBlockHash: job.tipCID)
+                XCTAssertNotNil(copied)
+                XCTAssertEqual(basis.anchor, copied)
+                anchors += 1
+            default:
+                break
+            }
+        }
+        XCTAssertEqual(Set(dispositions), [.ready, .future])
+        XCTAssertEqual(anchors, 1)
+    }
+
+    /// A job queued on one tip epoch is discarded at the runtime's dequeue
+    /// (`NodeRuntime.nextJob`, what `startJobs` takes from) once the tip
+    /// moves: it is never handed to a worker, and the current job behind it
+    /// is.
+    func testAJobWhoseTipEpochMovedIsDiscarded() async throws {
+        var harness = try await harness(keyByte: 0x46)
+        let clock = TestBlockClock()
+        let root = harness.host.rootPath
+        let genesis = try await harness.tipBlock()
+        try await harness.step(.level(root, .mining(.templateRequested(replyID: 1, TemplateRequest(rewardRecipient: nil)))))
+        let stale = try XCTUnwrap(harness.jobs.last { $0.epoch != nil })
+        XCTAssertTrue(stale.isCurrent(in: harness.host))
+
+        try await mine(&harness, on: genesis, timestamp: clock.next())
+        let epoch = harness.mining.tipEpoch
+        XCTAssertNotEqual(stale.epoch, epoch, "the tip moved")
+        let current = NodeRuntime.RuntimeJob(path: root, epoch: epoch) { [] }
+        var execution: [NodeRuntime.RuntimeJob] = []
+        var mining = [stale, current]
+        let next = NodeRuntime.nextJob(execution: &execution, mining: &mining, in: harness.host)
+        XCTAssertEqual(next?.epoch, epoch, "the stale job is skipped for the current one")
+        XCTAssertTrue(mining.isEmpty, "the stale job is dropped")
+        XCTAssertNil(NodeRuntime.nextJob(execution: &execution, mining: &mining, in: harness.host))
+    }
+
+    /// A job reads the levels on the running loop, and once the loop has
+    /// stopped every read is nil rather than a wait that never ends.
+    func testAJobReadsTheLiveLevelsUntilTheLoopStops() async throws {
+        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-core-job-order-\(UUID().uuidString)", isDirectory: true
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: storageDirectory,
+            privateKeyHex: String(repeating: "47", count: 32),
+            listenPort: NetworkTransportTestPorts.allocate(),
+            rpcPort: NetworkTransportTestPorts.allocate()
+        )
+        let runtime = try await NodeRuntime.start(
+            storage: try await NodeStorage.open(configuration: configuration), configuration: configuration
+        )
+        let levels = LiveLevels(inputs: runtime.inputs)
+        let tip = await levels.read { $0[["Nexus"]]?.snapshot.actOnTip }
+        XCTAssertEqual(tip, runtime.published.value?.actOnTip)
+        await runtime.stop()
+        let afterStop = await levels.read { $0.count }
+        XCTAssertNil(afterStop)
     }
 }

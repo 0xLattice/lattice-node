@@ -80,11 +80,12 @@ extension ChainCore {
     /// `tipCID` when `accepts` holds for it; otherwise the act-on descent
     /// avoiding each tip it fails for (`actOnTip(avoiding:)`), checked again.
     /// Nil when it holds for none, or answers nil (the tip cannot be read).
-    public func actOnTip(from tipCID: String, accepting accepts: (String) async -> Bool?) async -> String? {
+    /// It runs at once, so the walk sees one state of the level.
+    public func actOnTip(from tipCID: String, accepting accepts: (String) -> Bool?) -> String? {
         var avoided: Set<String> = []
         var tip = tipCID
         while true {
-            guard let ok = await accepts(tip) else { return nil }
+            guard let ok = accepts(tip) else { return nil }
             if ok { return tip }
             // Each pass avoids one more block of a finite tree.
             guard avoided.insert(tip).inserted else { return nil }
