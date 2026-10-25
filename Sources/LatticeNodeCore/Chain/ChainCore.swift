@@ -303,10 +303,11 @@ public struct ChainCore: Sendable {
         precondition(tree.context != nil, "the core runs one chain's level")
         var stack = roots ?? Self.bestRoot(of: tree)
         while let hash = stack.popLast() {
-            if tree.isExecuted(blockHash: hash), let committed = tree.recordedChildCommitments(of: hash) {
-                executedChildren.record(committed.keys)
+            guard let meta = tree.getConsensusBlock(hash: hash) else { continue }
+            if tree.isExecuted(blockHash: hash) {
+                executedChildren.record(meta.childCommitments.keys)
             }
-            stack += tree.children(of: hash)
+            stack += meta.childHashes
         }
         mining = MiningState(
             tipCID: Self.miningTip(of: tree), spec: Self.actOnSpec(of: tree), config: config.mining
