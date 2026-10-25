@@ -149,7 +149,7 @@ final class AnchoredChildTemplateTests: XCTestCase {
     }
 
     private func input(_ host: Host, transactions: [Transaction] = []) -> ChildTemplateInput {
-        var tree = host.alpha.tree
+        let tree = host.alpha.tree
         let tip = host.alpha.snapshot.actOnTip
         return ChildTemplateInput(
             path: Self.alpha, tipCID: tip, bestHeaderTip: host.alpha.snapshot.bestHeaderTip,
