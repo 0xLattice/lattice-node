@@ -97,19 +97,28 @@ actor NodeStore {
 /// Collects the Volumes one admission materializes and records their
 /// canonical boundaries. Nothing is in the broker until `commit`, which
 /// publishes them all in one transaction: all of an admission's content is
-/// durable, or none of it. Without a broker the walk keeps only the roots.
+/// durable, or none of it. Without a broker the walk keeps only the roots,
+/// and the Volumes too when `keepsVolumes` (`takeVolumes`).
 actor NodeImportStorage: VolumeStorer {
     private let storage: (any VolumeBroker)?
+    private let keepsVolumes: Bool
     private var pending: [SerializedVolume] = []
     private var roots = Set<String>()
 
-    init(storage: (any VolumeBroker)?) {
+    init(storage: (any VolumeBroker)?, keepsVolumes: Bool = false) {
         self.storage = storage
+        self.keepsVolumes = keepsVolumes
     }
 
     func store(volume: SerializedVolume) {
-        if storage != nil { pending.append(volume) }
+        if storage != nil || keepsVolumes { pending.append(volume) }
         roots.insert(volume.root)
+    }
+
+    /// The Volumes the walk derived, without a broker to commit them to.
+    func takeVolumes() -> [SerializedVolume] {
+        defer { pending.removeAll() }
+        return pending
     }
 
     func commit() async throws {

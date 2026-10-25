@@ -62,6 +62,38 @@ extension ChainCore {
         return forks + bestWindow.filter { !forks.contains($0) }
     }
 
+    /// The window's blocks whose parent is executed: the ones this level
+    /// can connect next once their bodies arrive.
+    public var nextToConnect: [String] {
+        bodyWindow.filter { index.parent[$0].map(tree.isExecuted(blockHash:)) ?? true }
+    }
+
+    /// Each window block's distance, in height, from the lowest block
+    /// this level can connect next (`nextToConnect` at 0): the order in
+    /// which their fetched bodies are needed.
+    ///
+    /// Distance is measured from the level's lowest next-to-connect block,
+    /// fork children included, not per branch: an approximation. A deep
+    /// fork child lowers the base, so this level's blocks look further
+    /// ahead than they are, which can skew the ranking against other chains.
+    public var connectDistances: [String: Int] {
+        let window = bodyWindow
+        let next = window.filter { index.parent[$0].map(tree.isExecuted(blockHash:)) ?? true }
+        guard let base = next.compactMap({ index.height[$0] }).min() else { return [:] }
+        var distances: [String: Int] = [:]
+        for cid in window {
+            let height = index.height[cid] ?? base
+            distances[cid] = height > base ? Int(height - base) : 0
+        }
+        return distances
+    }
+
+    /// The bytes a body of `cid` may count by its chain's spec, when the
+    /// spec is held.
+    public func maxBlockSize(of cid: String) -> Int? {
+        tree.headerSnapshot(of: cid).flatMap { tree.specs[$0.specCID] }?.maxBlockSize
+    }
+
     /// The best chain's blocks after its executed prefix, up to the count.
     var bestWindow: [String] {
         let prefix = tree.executedPrefix()
