@@ -280,7 +280,7 @@ final class ChainCoreBodyTests: XCTestCase {
         // branch is the best chain.
         var (core, _) = weighed(Array(chain.prefix(2)) + [invalid, child])
         XCTAssertEqual(core.tree.canonicalTip, child.cid)
-        var before = core.tree
+        let before = core.tree
         let weightBefore = before.subtreeWeight(forHash: chain[1].cid)?.uint256Value
 
         _ = try await deliver(chain[0].cid, to: &core)
@@ -292,7 +292,7 @@ final class ChainCoreBodyTests: XCTestCase {
         XCTAssertTrue(core.tree.isExcludedRoot(invalid.cid))
         XCTAssertFalse(core.tree.hasExecutedAncestry(blockHash: invalid.cid))
         XCTAssertTrue(core.tree.contains(blockHash: child.cid), "the excluded subtree stays weighed")
-        var after = core.tree
+        let after = core.tree
         XCTAssertEqual(after.subtreeWeight(forHash: chain[1].cid)?.uint256Value, weightBefore, "its work still weighs")
         XCTAssertEqual(core.tree.canonicalTip, chain[1].cid, "validity selects")
         XCTAssertEqual(core.snapshot.actOnTip, chain[1].cid)

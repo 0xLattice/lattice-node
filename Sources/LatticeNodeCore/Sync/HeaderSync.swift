@@ -259,28 +259,6 @@ public struct PendingQueue: Sendable {
     }
 }
 
-/// The weighed graph as sync reads it, maintained as headers are weighed:
-/// every header and its parent.
-public struct WeighedIndex: Sendable {
-    var parent: [String: String] = [:]
-    var height: [String: UInt64] = [:]
-    var children: [String: [String]] = [:]
-    /// Leaves: headers with no weighed child.
-    public internal(set) var leaves: Set<String> = []
-
-    mutating func add(_ cid: String, parent: String?, height: UInt64) {
-        guard self.height.updateValue(height, forKey: cid) == nil else { return }
-        if let parent {
-            self.parent[cid] = parent
-            children[parent, default: []].append(cid)
-            leaves.remove(parent)
-        }
-        leaves.insert(cid)
-    }
-
-    func contains(_ cid: String) -> Bool { height[cid] != nil }
-}
-
 /// Header sync for one level: which peers are asked for what, and the
 /// headers not yet weighed. Every per-peer map is keyed by a live `PeerID`,
 /// and dropping a peer clears it at once.

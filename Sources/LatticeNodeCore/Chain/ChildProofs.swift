@@ -268,19 +268,19 @@ extension ChainCore {
     mutating func skipped(_ cid: String) {
         if sync.proofs.awaiting[cid] != nil {
             sync.proofs.awaiting[cid]?.lookedUp = false
-        } else if sync.pending.entries[cid] != nil || index.contains(cid) {
+        } else if sync.pending.entries[cid] != nil || tree.contains(blockHash: cid) {
             sync.proofs.relookup.insert(cid)
         }
     }
 
     mutating func credits(_ grind: String, at cid: String) -> Bool {
         sync.pending.entries[cid]?.evidence[grind] != nil
-            || (index.contains(cid) && tree.workContribution(id: grind, at: cid) != nil)
+            || (tree.contains(blockHash: cid) && tree.workContribution(id: grind, at: cid) != nil)
     }
 
     /// The evidence index's proofs for a block.
     mutating func proofsFound(_ proofs: [ChildBlockProof], for cid: String, _ turn: inout Turn) {
-        guard sync.proofs.awaiting[cid] != nil || sync.pending.entries[cid] != nil || index.contains(cid) else { return }
+        guard sync.proofs.awaiting[cid] != nil || sync.pending.entries[cid] != nil || tree.contains(blockHash: cid) else { return }
         offer(proofs, cid: cid, from: nil)
     }
 
@@ -288,7 +288,7 @@ extension ChainCore {
         for cid in Set(cids).sorted() {
             if sync.proofs.awaiting[cid] != nil {
                 sync.proofs.awaiting[cid]?.lookedUp = false
-            } else if sync.pending.entries[cid] != nil || index.contains(cid) {
+            } else if sync.pending.entries[cid] != nil || tree.contains(blockHash: cid) {
                 sync.proofs.relookup.insert(cid)
             } else {
                 sync.proofs.want(cid, proofConfig)
@@ -329,7 +329,7 @@ extension ChainCore {
             }
             return
         }
-        if index.contains(cid) {
+        if tree.contains(blockHash: cid) {
             // The window may have moved past the block while it was checked.
             guard !pastFinality(cid),
                   case .applied(let update) = tree.addWork(work, to: cid) else { return }
@@ -382,7 +382,7 @@ extension ChainCore {
         var kept: [QueuedChildProof] = []
         for proof in sync.proofs.queued {
             let known = sync.proofs.awaiting[proof.cid] != nil || sync.pending.entries[proof.cid] != nil
-                || index.contains(proof.cid)
+                || tree.contains(blockHash: proof.cid)
             guard known, !credits(proof.proof.rootCID, at: proof.cid) else {
                 sync.proofs.charge(proof, -1)
                 continue
@@ -468,7 +468,7 @@ extension ChainCore {
         weighed = []
         guard let cid = try? BlockHeader(node: block).rawCID else { return [] }
         let context = ValidationContext(nowMilliseconds: now)
-        let held = index.contains(cid)
+        let held = tree.contains(blockHash: cid)
         let admission: ChainTreeAdmission
         if isRoot {
             admission = tree.insertRootHeader(block, childIndex: children, validationContext: context)
@@ -495,7 +495,6 @@ extension ChainCore {
             turn.headers.append(StoredHeader(
                 blockCID: cid, block: block, children: children, spec: block.parent == nil ? block.spec.node : nil
             ))
-            index.add(cid, parent: block.parent?.rawCID, height: block.height)
             for child in waiting { dirty(child, &turn) }
         }
         turn.facts += update.batches

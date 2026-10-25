@@ -65,7 +65,7 @@ extension ChainCore {
     /// The window's blocks whose parent is executed: the ones this level
     /// can connect next once their bodies arrive.
     public var nextToConnect: [String] {
-        bodyWindow.filter { index.parent[$0].map(tree.isExecuted(blockHash:)) ?? true }
+        bodyWindow.filter { tree.parent(of: $0).map(tree.isExecuted(blockHash:)) ?? true }
     }
 
     /// Each window block's distance, in height, from the lowest block
@@ -78,11 +78,11 @@ extension ChainCore {
     /// ahead than they are, which can skew the ranking against other chains.
     public var connectDistances: [String: Int] {
         let window = bodyWindow
-        let next = window.filter { index.parent[$0].map(tree.isExecuted(blockHash:)) ?? true }
-        guard let base = next.compactMap({ index.height[$0] }).min() else { return [:] }
+        let next = window.filter { tree.parent(of: $0).map(tree.isExecuted(blockHash:)) ?? true }
+        guard let base = next.compactMap({ tree.height(of: $0) }).min() else { return [:] }
         var distances: [String: Int] = [:]
         for cid in window {
-            let height = index.height[cid] ?? base
+            let height = tree.height(of: cid) ?? base
             distances[cid] = height > base ? Int(height - base) : 0
         }
         return distances
@@ -116,7 +116,7 @@ extension ChainCore {
         var wanted: [String] = []
         var fork = tree.executedPrefix().hash
         while !fork.isEmpty {
-            let children = Self.byWeight((index.children[fork] ?? []).filter {
+            let children = Self.byWeight(tree.children(of: fork).filter {
                 tree.isExecuted(blockHash: $0) || !tree.isExcludedRoot($0)
             }, in: tree)
             wanted += children.prefix { !tree.isExecuted(blockHash: $0) }
@@ -217,7 +217,7 @@ extension ChainCore {
         }
         guard bodies.connecting == nil, let next = window.first(where: {
             bodies.arrived.contains($0) && bodies.awaitingParent[$0] == nil
-                && index.parent[$0].map(tree.hasExecutedAncestry(blockHash:)) ?? true
+                && tree.parent(of: $0).map(tree.hasExecutedAncestry(blockHash:)) ?? true
         }), let job = tree.connectJob(for: next) else { return }
         bodies.connecting = next
         turn.effects.append(.connect(job))
