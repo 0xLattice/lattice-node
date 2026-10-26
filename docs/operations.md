@@ -571,7 +571,7 @@ judged again when it next arrives.
 A fork `d` blocks deep is at most `2^(d / halfLife)` cheaper than the chain's
 current difficulty, so a window of a few half-lives keeps out every nearly
 free block — the siblings under genesis and the forks from old blocks. Nexus's
-half-life is 120 blocks: a window of 240 caps a fork's discount at 4×.
+half-life is 120 blocks: a window of 240 caps a fork's discount at about 4×.
 
 The cost is this node's alone: it does not follow a reorganization deeper
 than the window, even a heavier one. A node partitioned or offline for longer
@@ -583,7 +583,7 @@ Guidance:
 - Leave it off on miners, backbones, and nodes that explorers read.
 - A leaf or wallet node that wants bounded storage should use at least 240 on
   Nexus: 240 blocks is two half-lives (120 blocks each) at a 1 h block time,
-  about 10 days, and a fork 240 deep costs at most 4× less than the tip. Choose a window far longer than
+  about 10 days, and a fork 240 deep costs at most about 4× less than the tip. Choose a window far longer than
   any outage you expect.
 - Give each child chain a window at least as long as its parent's: a parent
   reorganization can reorganize the child.
