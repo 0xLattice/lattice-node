@@ -320,12 +320,14 @@ none is full (or `blocks` is empty), a fee at the floor makes the next block.
 To be in the first `k` blocks when block `k` is full, a transaction of `size`
 bytes pays more than `lowestFee * size / lowestFeeBytes` of that block.
 
-This is an estimate from one node's pool, not a promise: a block's overhead
-shares `maxBlockSize`, other miners may fill gaps with smaller packages,
-other pools differ, and new transactions arrive. On a child chain, a
-transaction only the parent's state makes executable is not projected,
-though a template may carry it. Fees above `UInt64` never occur for
-funded packages.
+This is an estimate from one node's pool, not a promise: only transaction
+bytes are counted, while a block's own structure (which grows with its
+transaction count) shares `maxBlockSize`, so a block of many small
+transactions holds fewer than projected; other miners may fill gaps with
+smaller packages, other pools differ, and new transactions arrive. On a child
+chain, a transaction only the parent's state makes executable is not
+projected, though a template may carry it. Fees above `UInt64` never occur
+for funded packages.
 
 ## Transaction inclusion
 

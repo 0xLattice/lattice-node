@@ -314,8 +314,9 @@ public struct Mempool: Sendable {
     /// transactions or `maxBytes` of transaction size, so a package may
     /// straddle two blocks. A block's rate is the lowest of the packages it
     /// carries any of. An estimate for fee pricing, not a template: the
-    /// block's own overhead shares `maxBytes`, and other miners may fill
-    /// gaps with smaller packages. Empty when nothing is ready.
+    /// block's own structure, which grows with its transaction count, shares
+    /// `maxBytes`, and other miners may fill gaps with smaller packages.
+    /// Empty when nothing is ready.
     public func projectedBlocks(count: Int, transactionLimit: Int, maxBytes: Int) -> [ProjectedBlock] {
         guard count > 0, transactionLimit > 0, maxBytes > 0 else { return [] }
         var blocks: [ProjectedBlock] = []
