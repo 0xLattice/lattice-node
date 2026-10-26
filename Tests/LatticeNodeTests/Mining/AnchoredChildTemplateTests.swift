@@ -170,9 +170,18 @@ final class AnchoredChildTemplateTests: XCTestCase {
     private func candidate(
         _ input: ChildTemplateInput, levels: LiveLevels, entering: SimBlock, timestamp: Int64, cas: SimCAS
     ) async throws -> Block {
+        var refused: [PolicyRefusal] = []
+        return try await candidate(input, levels: levels, entering: entering, timestamp: timestamp, cas: cas, refused: &refused)
+    }
+
+    private func candidate(
+        _ input: ChildTemplateInput, levels: LiveLevels, entering: SimBlock, timestamp: Int64, cas: SimCAS,
+        refused: inout [PolicyRefusal]
+    ) async throws -> Block {
         let candidates = await NodeRuntime.childCandidates(
             of: Self.nexus, among: [input], entering: entering.block.postState,
-            timestamp: timestamp, request: TemplateRequest(rewardRecipient: nil), levels: levels, fetcher: cas
+            timestamp: timestamp, request: TemplateRequest(rewardRecipient: nil), levels: levels, fetcher: cas,
+            refused: &refused
         )
         XCTAssertEqual(candidates.count, 1)
         return try XCTUnwrap(candidates.first?.block)
@@ -384,10 +393,11 @@ final class AnchoredChildTemplateTests: XCTestCase {
         let spawned = fixture.host.held
         let before = spawned.node.levels
         func built(_ levels: LiveLevels) async throws -> String? {
+            var refused: [PolicyRefusal] = []
             let candidates = await NodeRuntime.childCandidates(
                 of: Self.nexus, among: [input(spawned)], entering: fixture.b3.block.postState,
                 timestamp: fixture.nextTime, request: TemplateRequest(rewardRecipient: nil), levels: levels,
-                fetcher: spawned.cas
+                fetcher: spawned.cas, refused: &refused
             )
             return try candidates.first.map { try BlockHeader(node: $0.block).rawCID }
         }
@@ -468,7 +478,8 @@ final class AnchoredChildTemplateTests: XCTestCase {
     /// The pool's verdicts were taken at another height, so a child template
     /// judges what it carries by the child's policies, at its own height,
     /// as the root template does: a transaction they refuse is left out, not
-    /// mined into a block every validator rejects.
+    /// mined into a block every validator rejects, and named for Alpha's
+    /// pool to drop.
     func testAChildTemplateCarriesOnlyWhatItsPoliciesAccept() async throws {
         for (verdict, carried) in [(UInt8(0), 0), (1, 1)] {
             var builder = try await LevelWorld.Builder(levels: 2)
@@ -493,12 +504,17 @@ final class AnchoredChildTemplateTests: XCTestCase {
             await host.feed(builder.grinds)
             XCTAssertEqual(host.alpha.snapshot.actOnTip, g.cid, "fixture: Alpha executed its genesis")
 
+            let spend = try Self.nonceSpend(1, on: Self.alpha)
+            var refused: [PolicyRefusal] = []
             let block = try await candidate(
-                input(host, transactions: [try Self.nonceSpend(1, on: Self.alpha)]), levels: levels(host),
-                entering: n1, timestamp: t + 2 * interval, cas: host.cas
+                input(host, transactions: [spend]), levels: levels(host),
+                entering: n1, timestamp: t + 2 * interval, cas: host.cas, refused: &refused
             )
             let count = try await transactionCount(block, host.cas)
             XCTAssertEqual(count, carried, "policy verdict \(verdict)")
+            XCTAssertEqual(
+                refused, carried == 0 ? [PolicyRefusal(path: Self.alpha, tipCID: g.cid, cids: [try Mempool.cid(of: spend)])] : []
+            )
         }
     }
 

@@ -194,45 +194,30 @@ final class MiningStateTests: XCTestCase {
         XCTAssertEqual(jobs[try Mempool.cid(of: arriving)], true, "an admission still waiting is judged")
     }
 
-    func testEveryIntervalATipMoveJudgesTheReadyPoolByItsPoliciesAgain() throws {
-        var mining = MiningState(tipCID: "A", spec: testSpec(), config: MiningConfig(policyRecheckInterval: 3))
-        let ready = try transfer(nonce: 0)
-        let cid = try Mempool.cid(of: ready)
-        guard case .preflight(let job)? = mining.step(.transactionReceived(ready, origin: .local(replyID: 1)), now: 0).first
-        else { return XCTFail() }
-        _ = mining.step(.preflighted(job, .ready), now: 0)
-
-        var judged: [Bool] = []
-        for (move, tip) in ["B", "C", "D", "E", "F", "G"].enumerated() {
-            let effects = mining.step(.tipMoved(TipMove(tipCID: tip)), now: Int64(move + 1))
-            guard let job = effects.lazy.compactMap({ if case .preflight(let job) = $0, job.cid == cid { job } else { nil } }).first
-            else { return XCTFail("move \(move): \(effects)") }
-            judged.append(job.checksPolicies)
-            _ = mining.step(.preflighted(job, .ready), now: Int64(move + 1))
+    /// A tip move never judges the pool by its policies; a template does,
+    /// at the height that would carry each, and what it refuses on the
+    /// current tip leaves. A refusal on a tip since left is stale.
+    func testWhatATemplatesPoliciesRefuseOnTheTipLeavesThePool() throws {
+        var mining = MiningState(tipCID: "A", spec: testSpec())
+        var cids: [String] = []
+        for _ in 0..<2 {
+            let key = CryptoUtils.generateKeyPair()
+            let tx = try signed(key, [AccountAction(owner: address(key), delta: -1)], nonce: 0)
+            guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 1)), now: 0).first
+            else { return XCTFail() }
+            _ = mining.step(.preflighted(job, .ready), now: 0)
+            cids.append(job.cid)
         }
-        XCTAssertEqual(judged, [false, false, true, false, false, true])
-    }
-
-    /// One this node still cannot judge after `policyRecheckInterval`
-    /// moves leaves: a withdrawal whose receipt a reorg took never holds its
-    /// signers' claims for good.
-    func testAPooledTransactionUnjudgedForAnIntervalLeaves() throws {
-        var mining = MiningState(tipCID: "A", spec: testSpec(), config: MiningConfig(policyRecheckInterval: 3))
-        let tx = try transfer(nonce: 0)
-        let cid = try Mempool.cid(of: tx)
-        guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 1)), now: 0).first
-        else { return XCTFail() }
-        _ = mining.step(.preflighted(job, .ready), now: 0)
-        var counts: [Int] = []
-        for (move, (tip, verdict)) in [("B", MempoolDisposition.unavailable), ("C", .ready), ("D", .unavailable),
-                                        ("E", .unavailable), ("F", .unavailable)].enumerated() {
-            let effects = mining.step(.tipMoved(TipMove(tipCID: tip)), now: Int64(move + 1))
-            guard let job = effects.lazy.compactMap({ if case .preflight(let job) = $0, job.cid == cid { job } else { nil } }).first
-            else { return XCTFail("move \(move): \(effects)") }
-            _ = mining.step(.preflighted(job, verdict), now: Int64(move + 1))
-            counts.append(mining.mempool.count)
+        let moved = mining.step(.tipMoved(TipMove(tipCID: "B")), now: 1)
+        for case .preflight(let job) in moved {
+            XCTAssertFalse(job.checksPolicies)
+            _ = mining.step(.preflighted(job, .ready), now: 1)
         }
-        XCTAssertEqual(counts, [1, 1, 1, 1, 0], "a ready verdict starts the count again")
+        _ = mining.step(.policyRefused(tipCID: "A", cids: [cids[0]]), now: 1)
+        XCTAssertEqual(mining.mempool.count, 2, "refused on a tip since left")
+        let effects = mining.step(.policyRefused(tipCID: "B", cids: [cids[0]]), now: 1)
+        XCTAssertEqual(mining.mempool.items.map(\.cid), [cids[1]])
+        XCTAssertTrue(effects.contains { if case .poolChanged(let delta) = $0 { delta.removed == [cids[0]] } else { false } })
     }
 
     func testATipMoveRemovesConfirmedRevalidatesThePoolAndReadmitsReturned() throws {
@@ -404,9 +389,12 @@ final class MiningStateTests: XCTestCase {
     /// A pooled transaction that no longer executes on the tip leaves; one
     /// this node cannot judge now stays, so a gap in its own evidence never
     /// flushes the pool.
-    func testATipMoveDropsWhatNoLongerExecutesAndKeepsWhatItCannotJudge() throws {
+    /// The pool holds only what is ready on the tip. One ahead, one that no
+    /// longer executes, and one this node can no longer judge (a withdrawal
+    /// whose receipt a reorg took) all leave, freeing their signers.
+    func testATipMoveKeepsOnlyWhatIsStillReady() throws {
         var mining = MiningState(tipCID: "A", spec: testSpec())
-        let keys = (0..<3).map { _ in CryptoUtils.generateKeyPair() }
+        let keys = (0..<4).map { _ in CryptoUtils.generateKeyPair() }
         let txs = try keys.map { try signed($0, [AccountAction(owner: address($0), delta: -2)], nonce: 0) }
         for tx in txs {
             guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 1)), now: 0).first
@@ -418,10 +406,10 @@ final class MiningStateTests: XCTestCase {
             if case .preflight(let job) = $0 { (job.cid, job) } else { nil }
         })
         let cids = try txs.map(Mempool.cid(of:))
-        for (cid, verdict) in zip(cids, [MempoolDisposition.future, .invalid, .unavailable]) {
+        for (cid, verdict) in zip(cids, [MempoolDisposition.future, .invalid, .unavailable, .ready]) {
             _ = mining.step(.preflighted(try XCTUnwrap(jobs[cid]), verdict), now: 2)
         }
-        XCTAssertEqual(mining.mempool.items.map(\.cid), [cids[2]])
+        XCTAssertEqual(mining.mempool.items.map(\.cid), [cids[3]])
     }
 
     func testOnlyADeterministicCheckFailureRemovesARestoredJournalRow() throws {

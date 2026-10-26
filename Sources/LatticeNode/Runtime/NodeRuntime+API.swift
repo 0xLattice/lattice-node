@@ -108,6 +108,14 @@ struct HeightIndex: Sendable {
 /// when it executed no root), its pool, its difficulty anchor, and the spec a
 /// genesis is built from when it has no root yet, with the account that
 /// genesis pays the spec's premine to.
+/// Pooled transactions a template's policy check refused on `tipCID` of
+/// `path`, for that level's pool to drop.
+struct PolicyRefusal: Sendable, Equatable {
+    let path: ChainPath
+    let tipCID: String
+    let cids: [String]
+}
+
 struct ChildTemplateInput: Sendable {
     let path: ChainPath
     let tipCID: String?
@@ -553,13 +561,16 @@ extension NodeRuntime {
             }
         case .buildTemplate(let job):
             return RuntimeJob(path: path, epoch: job.tipEpoch) {
-                let built = await reading(job.tipCID, storage: storage, remote: remote) { fetcher in
-                    await buildTemplate(
+                let (built, refused) = await reading(job.tipCID, storage: storage, remote: remote) { fetcher in
+                    var refused: [PolicyRefusal] = []
+                    let built = await buildTemplate(
                         job, difficultyAnchor: basis?.anchor, fetcher: fetcher, chainPath: path,
-                        children: children, levels: levels
+                        children: children, levels: levels, refused: &refused
                     )
+                    return (built, refused)
                 }
-                return [.level(path, .mining(.templateBuilt(job, built)))]
+                return refused.map { .level($0.path, .mining(.policyRefused(tipCID: $0.tipCID, cids: $0.cids))) }
+                    + [.level(path, .mining(.templateBuilt(job, built)))]
             }
         case .returnTransactions(let left, let carried):
             return RuntimeJob(path: path, epoch: nil) {
@@ -694,21 +705,23 @@ extension NodeRuntime {
 
     /// `MiningEffect.buildTemplate`: today's assembly (the bisecting fit, the
     /// policy filter, the minimum-work search target) on the job's tip.
-    /// Nil when no block can be built there.
+    /// Nil when no block can be built there. What the policy filter refused,
+    /// root and children, is added to `refused`.
     static func buildTemplate(
         _ job: TemplateJob,
         difficultyAnchor: DifficultyAnchor?,
         fetcher: any Fetcher,
         chainPath: [String],
         children: [ChildTemplateInput] = [],
-        levels: LiveLevels = .none
+        levels: LiveLevels = .none,
+        refused: inout [PolicyRefusal]
     ) async -> TemplateBuild? {
         guard job.request.parentCarrier == nil,
               let previous = try? await BlockHeader(rawCID: job.tipCID).resolve(fetcher: fetcher).node,
               let spec = try? await previous.spec.resolve(fetcher: fetcher).node,
               let timestamp = try? MiningPlan.nextTimestamp(after: previous.timestamp, parentCarrier: nil)
         else { return nil }
-        let pooled = await MiningPlan.policyAcceptedTransactions(
+        let (pooled, refusedHere) = await MiningPlan.policyAcceptedTransactions(
             job.transactions,
             chainPath: chainPath,
             previous: previous,
@@ -716,9 +729,10 @@ extension NodeRuntime {
             spec: spec,
             fetcher: fetcher
         )
+        if !refusedHere.isEmpty { refused.append(PolicyRefusal(path: chainPath, tipCID: job.tipCID, cids: refusedHere)) }
         let provided = await childCandidates(
             of: chainPath, among: children, entering: previous.postState, timestamp: timestamp,
-            request: job.request, levels: levels, fetcher: fetcher
+            request: job.request, levels: levels, fetcher: fetcher, refused: &refused
         )
         guard let template = try? await MiningTemplateAssembly.fit(
             chainPath: chainPath,
@@ -860,7 +874,8 @@ extension NodeRuntime {
         timestamp: Int64,
         request: TemplateRequest,
         levels: LiveLevels,
-        fetcher: any Fetcher
+        fetcher: any Fetcher,
+        refused: inout [PolicyRefusal]
     ) async -> [DirectChildCandidate] {
         var candidates: [DirectChildCandidate] = []
         for input in inputs where input.path.dropLast().elementsEqual(parent) {
@@ -885,12 +900,13 @@ extension NodeRuntime {
                 let below = tip != tipCID
                 let grandchildren = below ? [] : await childCandidates(
                     of: input.path, among: inputs, entering: previous.postState, timestamp: time,
-                    request: request, levels: levels, fetcher: fetcher
+                    request: request, levels: levels, fetcher: fetcher, refused: &refused
                 )
-                let pooled = below ? [] : await MiningPlan.policyAcceptedTransactions(
+                let (pooled, refusedHere) = below ? ([], []) : await MiningPlan.policyAcceptedTransactions(
                     input.transactions, chainPath: input.path, previous: previous, timestamp: time,
                     spec: spec, fetcher: fetcher
                 )
+                if !refusedHere.isEmpty { refused.append(PolicyRefusal(path: input.path, tipCID: tipCID, cids: refusedHere)) }
                 block = try? await MiningTemplateAssembly.fit(
                     chainPath: input.path, lifetime: .seconds(30), previous: previous,
                     pooled: pooled, provided: grandchildren, parentCarrier: carrier,

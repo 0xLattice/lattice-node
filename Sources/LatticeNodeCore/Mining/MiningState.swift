@@ -54,11 +54,11 @@ public struct TipMove: Sendable {
 /// stale. The move already issued the job again, so a backlog never runs
 /// more than one tip's worth of preflights.
 ///
-/// `checksPolicies` is false only for a pooled transaction (every one was
-/// ready), between `MiningConfig.policyRecheckInterval` moves: the chain's
-/// policies accepted it then, and every template, root or child, judges it
-/// by them again at the height that would carry it. So most tip moves cost
-/// the pool its state checks, not a policy evaluation per pooled transaction.
+/// `checksPolicies` is false for a pooled transaction: the chain's policies
+/// accepted it on admission, and every template, root or child, judges it
+/// by them again at the height that would carry it, removing one they
+/// refuse (`MiningEvent.policyRefused`). So a tip move costs the pool its
+/// state checks, never a policy evaluation per pooled transaction.
 public struct PreflightJob: Sendable {
     public let cid: String
     public let transaction: Transaction
@@ -153,6 +153,10 @@ public enum MiningEvent: Sendable {
     case templateRequested(replyID: UInt64, TemplateRequest)
     /// nil: the job could not build a block on its tip.
     case templateBuilt(TemplateJob, TemplateBuild?)
+    /// A template judged these pooled transactions by the chain's policies
+    /// at the height that would carry them on `tipCID`, and they refused
+    /// them. Applied only while `tipCID` is still the tip.
+    case policyRefused(tipCID: String, cids: [String])
     case submitWork(replyID: UInt64, workID: String, nonce: UInt64)
 }
 
@@ -209,12 +213,6 @@ public struct MiningConfig: Sendable {
     public var maxReissues: Int
     /// Template requests waiting on a build.
     public var maxWaitingTemplateRequests: Int
-    /// Every this many tip moves, the pool's ready transactions are judged
-    /// by the chain's policies again; between, a tip move checks only their
-    /// state. A policy that reads the height or time can refuse what it once
-    /// accepted: templates never carry it, and this bounds how long it stays
-    /// pooled. At least 1 (every move).
-    public var policyRecheckInterval: UInt64
     public var mempool: MempoolLimits
     public var templateLifetime: Int64
     public var templateCapacity: Int
@@ -226,12 +224,10 @@ public struct MiningConfig: Sendable {
         maxPendingSubmitted: Int = 256,
         maxReissues: Int = 3,
         maxWaitingTemplateRequests: Int = 64,
-        policyRecheckInterval: UInt64 = 16,
         mempool: MempoolLimits = MempoolLimits(),
         templateLifetime: Int64 = 30_000,
         templateCapacity: Int = 16
     ) {
-        self.policyRecheckInterval = max(1, policyRecheckInterval)
         self.maxPendingPeerAdmissions = maxPendingPeerAdmissions
         self.maxPendingPerPeer = maxPendingPerPeer
         self.maxPendingReturned = maxPendingReturned
@@ -292,9 +288,6 @@ public struct MiningState: Sendable {
     private var admissions: [String: Admission] = [:]
     /// Transactions with a preflight outstanding on the current tip epoch.
     private var preflighting: Set<String> = []
-    /// Pooled transactions this node could not judge, by consecutive tip
-    /// moves; one that stays so for `policyRecheckInterval` moves leaves.
-    private var unjudged: [String: UInt64] = [:]
     /// Pooled transactions in the local journal.
     public private(set) var journaled: Set<String> = []
     private var builds: [UInt64: (job: TemplateJob, replies: [Waiting])] = [:]
@@ -335,6 +328,8 @@ public struct MiningState: Sendable {
             requestTemplate(request, waiting: [Waiting(replyID: replyID)], &turn)
         case .templateBuilt(let job, let build):
             built(job, build, now: now, &turn)
+        case .policyRefused(let refusedOn, let cids):
+            if refusedOn == tipCID { departed(mempool.remove(cids), &turn) }
         case .submitWork(let replyID, let workID, let nonce):
             do {
                 let block = try templates.submission(workID: workID, nonce: nonce, now: now)
@@ -488,22 +483,10 @@ public struct MiningState: Sendable {
             return
         }
         // The pool holds only what executes on the tip: a pooled transaction
-        // that no longer does leaves (one ahead after a reorg is the sender's
-        // to send again). One this node cannot judge now (state, a module, a
-        // receipt a reorg took) stays a while, so a passing gap in this
-        // node's own evidence never flushes the pool; templates check each
-        // again. One still unjudged after `policyRecheckInterval` moves
-        // leaves, freeing what it claims.
-        switch disposition {
-        case .ready:
-            unjudged[job.cid] = nil
-        case .unavailable:
-            let moves = (unjudged[job.cid] ?? 0) + 1
-            unjudged[job.cid] = moves
-            if moves >= config.policyRecheckInterval { departed(mempool.remove([job.cid]), &turn) }
-        case .future, .invalid:
-            departed(mempool.remove([job.cid]), &turn)
-        }
+        // that no longer does, or that this node can no longer judge (a
+        // receipt or deposit a reorg took), leaves, freeing what it claims.
+        // One ahead or unjudged is its sender's to send again.
+        if disposition != .ready { departed(mempool.remove([job.cid]), &turn) }
     }
 
     private mutating func admit(
@@ -611,7 +594,6 @@ public struct MiningState: Sendable {
 
     private mutating func departed(_ mutation: MempoolMutation, _ turn: inout Turn) {
         for item in mutation.departed {
-            unjudged[item.cid] = nil
             journaled.remove(item.cid)
             turn.delta.added.removeAll { $0.cid == item.cid }
             turn.delta.journaled.removeAll { $0.cid == item.cid }
@@ -675,9 +657,8 @@ public struct MiningState: Sendable {
         // still out will be dropped, and each is issued again here. The
         // move confirmed first, so no verdict refuses what it carries.
         preflighting.removeAll()
-        let rejudges = tipEpoch % config.policyRecheckInterval == 0
         for item in mempool.items {
-            preflight(item.cid, item.transaction, checksPolicies: rejudges, &turn)
+            preflight(item.cid, item.transaction, checksPolicies: false, &turn)
         }
         for (cid, admission) in admissions.sorted(by: { $0.key < $1.key }) {
             preflight(cid, admission.transaction, &turn)

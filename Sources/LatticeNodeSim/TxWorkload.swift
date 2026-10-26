@@ -737,6 +737,8 @@ public struct TxWorkload {
             "template? \(replyID)"
         case .templateBuilt(let job, let build):
             "built \(job.id) \(build?.workID ?? "-")"
+        case .policyRefused(let tipCID, let cids):
+            "policy refused \(tipCID) \(cids)"
         case .submitWork(let replyID, let workID, let nonce):
             "work \(replyID) \(workID) \(nonce)"
         }

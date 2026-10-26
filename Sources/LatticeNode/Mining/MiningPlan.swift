@@ -1,6 +1,7 @@
 import Foundation
 import Lattice
 import UInt256
+import LatticeNodeCore
 import cashew
 
 /// The miner-facing plan and template checks the node runtime's RPC applies.
@@ -100,10 +101,11 @@ enum MiningPlan {
 
     /// Policies may read the carrying block's height and timestamp, which a
     /// pool verdict (taken against the tip, at its own time) did not see. Offer
-    /// only transactions the policies accept for THIS template; a skipped one
-    /// stays pooled until it passes or the pool's periodic policy re-check
-    /// (`MiningConfig.policyRecheckInterval`) evicts it. Root and child
+    /// only transactions the policies accept for THIS template. Root and child
     /// templates alike: the pool's own verdicts are not taken at this height.
+    /// `refused` names those a policy refused outright, for the pool to drop;
+    /// one this node could not judge (a body or module it lacks) is in
+    /// neither.
     static func policyAcceptedTransactions(
         _ transactions: [Transaction],
         chainPath: [String],
@@ -111,24 +113,29 @@ enum MiningPlan {
         timestamp: Int64,
         spec: ChainSpec,
         fetcher: any Fetcher
-    ) async -> [Transaction] {
-        guard !spec.wasmPolicies.isEmpty else { return transactions }
+    ) async -> (accepted: [Transaction], refused: [String]) {
+        guard !spec.wasmPolicies.isEmpty else { return (transactions, []) }
         let (height, overflow) = previous.height.addingReportingOverflow(1)
-        guard !overflow else { return [] }
+        guard !overflow else { return ([], []) }
         var accepted: [Transaction] = []
+        var refused: [String] = []
         for transaction in transactions {
             guard let body = try? await transaction.body.resolve(fetcher: fetcher).node,
-                  (try? await TransactionBody.batchVerifyPolicies(
+                  let verdict = try? await TransactionBody.batchVerifyPolicies(
                       bodies: [body],
                       spec: spec,
                       chainPath: chainPath,
                       height: height,
                       timestamp: timestamp,
                       fetcher: fetcher
-                  )) == true else { continue }
-            accepted.append(transaction)
+                  ) else { continue }
+            if verdict {
+                accepted.append(transaction)
+            } else if let cid = try? Mempool.cid(of: transaction) {
+                refused.append(cid)
+            }
         }
-        return accepted
+        return (accepted, refused)
     }
 
     static func nextTimestamp(
