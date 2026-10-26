@@ -127,52 +127,29 @@ struct MiningBasis: Sendable {
 }
 
 /// What a child block's connect reads of its parent level: whether the
-/// parent's executed set carried its state along the one link the block
-/// names (Lattice spec §5.3 step 6), from its predecessor's `parentState`
-/// (a genesis: the genesis pre-state) to its own. The job reads the link
-/// off the block's content, then the answer in one read of the live levels
-/// (`LiveLevels`), so it holds no copy of the parent's tree, which the
-/// parent keeps mutating. An executed set only grows, so a later read only
-/// answers more. Any other link it is asked it does not hold: the block
-/// then awaits that fact (`BodyPipeline.awaitingParent`), never valid on it.
+/// parent's executed set carried its state along the link Lattice asks
+/// (Lattice spec §5.3 step 6), answered in one read of the live levels
+/// (`LiveLevels`), so the job holds no copy of the parent's tree, which the
+/// parent keeps mutating. The answer is the parent's executed set at the step
+/// the read runs; a block that waits is asked again when the parent advances
+/// (`wakeAnswered`). A parent the loop does not hold, or a stopped loop,
+/// answers false: the block then awaits that fact
+/// (`BodyPipeline.awaitingParent`), never valid on it.
 struct ParentContinuity: ParentChainFacts {
-    let link: ParentStateContinuityLink
-    let holds: Bool
+    let levels: LiveLevels
 
-    func hasContinuity(_ asked: ParentStateContinuityLink) -> Bool {
-        holds && asked == link
-    }
-
-    /// Nil at a root level, or when the block or its predecessor cannot be
-    /// read (the connect then has no verdict either).
-    static func read(
-        of blockHash: String, at path: ChainPath, levels: LiveLevels, fetcher: any Fetcher
-    ) async -> ParentContinuity? {
-        guard path.count > 1,
-              let block = try? await BlockHeader(rawCID: blockHash).resolve(fetcher: fetcher).node
-        else { return nil }
-        var from = LatticeState.emptyHeader.rawCID
-        if let predecessor = block.parent {
-            guard let node = try? await predecessor.resolve(fetcher: fetcher).node else { return nil }
-            from = node.parentState.rawCID
-        }
-        let parent = Array(path.dropLast())
-        let link = ParentStateContinuityLink(
-            parentPath: parent, fromStateCID: from, toStateCID: block.parentState.rawCID
-        )
-        let holds = await levels.read {
-            $0[parent]?.tree.executedSetAdvanced(from: link.fromStateCID, to: link.toStateCID) ?? false
-        }
-        return ParentContinuity(link: link, holds: holds ?? false)
+    func hasContinuity(_ link: ParentStateContinuityLink) async -> Bool {
+        await levels.read {
+            $0[link.parentPath]?.tree.executedSetAdvanced(from: link.fromStateCID, to: link.toStateCID) ?? false
+        } ?? false
     }
 }
 
 /// The hosted levels as the loop holds them, read from a job: `read` runs
 /// on the loop between steps, as Bitcoin reads its live block index under
 /// `cs_main`, and is nil once the loop has stopped. A job's tip epoch still
-/// decides whether it runs; what it reads live is safe to read at any step,
-/// because an executed set only grows and an anchor depends only on a
-/// block's ancestry.
+/// decides whether it runs; what it reads live is the answer at the step the
+/// read runs, and an anchor depends only on a block's ancestry.
 struct LiveLevels: Sendable {
     /// Runs its argument on the loop, with the levels, or with nil when the
     /// loop has stopped.
@@ -641,13 +618,10 @@ extension NodeRuntime {
     ) -> RuntimeJob {
         RuntimeJob(path: path, epoch: nil) {
             await reading(job.blockHash, storage: storage, remote: remote) { fetcher in
-                let parentFacts = await ParentContinuity.read(
-                    of: job.blockHash, at: path, levels: levels, fetcher: fetcher
-                )
                 let verdict = await ChainTree.connect(
                     job,
                     fetcher: fetcher,
-                    parentFacts: parentFacts,
+                    parentFacts: ParentContinuity(levels: levels),
                     validationContext: ValidationContext(nowMilliseconds: now())
                 )
                 let valid = verdict.retryFailure == nil && !verdict.provesInvalid
