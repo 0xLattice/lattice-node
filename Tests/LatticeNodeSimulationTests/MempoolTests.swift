@@ -117,13 +117,39 @@ final class MempoolTests: XCTestCase {
         }
         try pool.submit(try underFreshSigner(fee: 10), spec: testSpec(), addedAt: 0)
         XCTAssertThrowsError(try pool.submit(try underFreshSigner(fee: 50), spec: testSpec(), addedAt: 0)) {
-            XCTAssertEqual($0 as? MempoolError, .conflictingNonce, "it claims less than the first did: no replacement")
+            XCTAssertEqual($0 as? MempoolError, .conflictingNonce, "another first signer's: no replacement")
         }
         // The funded key's own transaction shares its claim too.
         XCTAssertThrowsError(try pool.submit(try paying(funded, fee: 50, nonce: 0), spec: testSpec(), addedAt: 0)) {
             XCTAssertEqual($0 as? MempoolError, .conflictingNonce)
         }
         XCTAssertEqual(pool.count, 1)
+    }
+
+    /// Two senders writing one state key never share the pool: one of them
+    /// could not be mined. A sender's own replacement may write other keys.
+    func testAStateKeyIsWrittenByOnePooledTransaction() throws {
+        func write(_ key: (privateKey: String, publicKey: String), _ stateKey: String, fee: Int64) throws -> Transaction {
+            let body = TransactionBody(
+                accountActions: [AccountAction(owner: address(key), delta: -fee)],
+                actions: [Action(key: stateKey, oldValue: nil, newValue: address(key))],
+                depositActions: [], receiptActions: [], withdrawalActions: [],
+                signers: [address(key)], nonce: 0, chainPath: ["Nexus"]
+            )
+            return Transaction(signatures: [key.publicKey: "x"], body: try HeaderImpl(node: body))
+        }
+        var pool = Mempool()
+        let alice = CryptoUtils.generateKeyPair()
+        try pool.submit(try write(alice, "name/ada", fee: 1), spec: testSpec(), addedAt: 0)
+        XCTAssertThrowsError(try pool.submit(
+            try write(CryptoUtils.generateKeyPair(), "name/ada", fee: 100), spec: testSpec(), addedAt: 0
+        )) {
+            XCTAssertEqual($0 as? MempoolError, .conflictingNonce)
+        }
+        let changed = try write(alice, "name/lin", fee: 2)
+        XCTAssertEqual(try pool.submit(changed, spec: testSpec(), addedAt: 0).replaced.count, 1)
+        try pool.submit(try write(CryptoUtils.generateKeyPair(), "name/ada", fee: 1), spec: testSpec(), addedAt: 0)
+        XCTAssertEqual(pool.count, 2, "the key it gave up is free")
     }
 
     /// One transaction sharing claims with two pooled ones replaces neither.

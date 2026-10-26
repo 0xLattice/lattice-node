@@ -121,12 +121,13 @@ public struct ProjectedBlock: Sendable, Equatable {
 /// tip as it stands, with its funds checked. None waits on another, so a
 /// template takes them by fee rate alone.
 ///
-/// Each transaction claims its signers, and the deposits and receipts its
-/// actions name, and no two pooled transactions share a claim. Every
-/// pooled transaction therefore executes alongside every other, and a
-/// funded account backs at most one: it cannot pay the same fee under many
-/// first signers. A transaction is replaced only by one that claims the
-/// same and pays `replacementIncrement` more. `version` moves on every
+/// Each transaction claims its signers, the state keys its actions write,
+/// and the deposits and receipts it names, and no two pooled transactions
+/// share a claim. Every pooled transaction therefore executes alongside
+/// every other, and a funded account backs at most one: it cannot pay the
+/// same fee under many first signers, nor race itself to one key. A
+/// transaction is replaced only by its first signer's own, paying
+/// `replacementIncrement` more. `version` moves on every
 /// change, so a job built from the pool names the pool it read.
 public struct Mempool: Sendable {
     /// Bound parse work by wire capacity (a 16-bit length), not an invented
@@ -168,10 +169,11 @@ public struct Mempool: Sendable {
         try VolumeImpl<Transaction>(node: transaction).rawCID
     }
 
-    /// What a transaction claims: each signer, and each deposit and receipt
-    /// its actions create or spend.
+    /// What a transaction claims: each signer, each state key it writes, and
+    /// each deposit and receipt it creates or spends.
     static func claims(of body: TransactionBody) -> Set<String> {
         var claims = Set(body.signers.map { "signer:" + $0 })
+        for action in body.actions { claims.insert("action:" + action.key) }
         for deposit in body.depositActions { claims.insert("deposit:" + DepositKey(depositAction: deposit).description) }
         for withdrawal in body.withdrawalActions {
             claims.insert("deposit:" + DepositKey(withdrawalAction: withdrawal).description)
@@ -256,16 +258,18 @@ public struct Mempool: Sendable {
         )
 
         // Replace-by-fee: one pooled transaction sharing a claim, replaced
-        // by one that claims everything it did (so nothing it held is left
-        // to a third) and pays the increment more. The fee is funds the
-        // sender gives up when either is mined, so bids cannot be raised
-        // for free.
+        // by its first signer's own (both are ready, so at the same nonce),
+        // paying the increment more. A transaction that only shares a key,
+        // deposit or receipt with another sender's is refused, never a bid
+        // on it. The fee is funds the sender gives up when either is mined,
+        // so bids cannot be raised for free.
         let overlapping = Set(entry.claims.compactMap { claimants[$0] })
         let replaced: Entry?
         if overlapping.isEmpty {
             replaced = nil
         } else if overlapping.count == 1, let overlap = overlapping.first, let existing = entries[overlap],
-                  existing.claims.isSubset(of: entry.claims) {
+                  let signer = measured.body.signers.first,
+                  existing.transaction.body.node?.signers.first == signer {
             guard entry.fee >= existing.fee + WorkSum(UInt256(limits.replacementIncrement)) else {
                 throw MempoolError.feeTooLow
             }

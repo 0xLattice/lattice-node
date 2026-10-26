@@ -292,6 +292,9 @@ public struct MiningState: Sendable {
     private var admissions: [String: Admission] = [:]
     /// Transactions with a preflight outstanding on the current tip epoch.
     private var preflighting: Set<String> = []
+    /// Pooled transactions this node could not judge, by consecutive tip
+    /// moves; one that stays so for `policyRecheckInterval` moves leaves.
+    private var unjudged: [String: UInt64] = [:]
     /// Pooled transactions in the local journal.
     public private(set) var journaled: Set<String> = []
     private var builds: [UInt64: (job: TemplateJob, replies: [Waiting])] = [:]
@@ -487,11 +490,17 @@ public struct MiningState: Sendable {
         // The pool holds only what executes on the tip: a pooled transaction
         // that no longer does leaves (one ahead after a reorg is the sender's
         // to send again). One this node cannot judge now (state, a module, a
-        // receipt it lacks) stays as it was, so a gap in this node's own
-        // evidence never flushes the pool; templates check each again.
+        // receipt a reorg took) stays a while, so a passing gap in this
+        // node's own evidence never flushes the pool; templates check each
+        // again. One still unjudged after `policyRecheckInterval` moves
+        // leaves, freeing what it claims.
         switch disposition {
-        case .ready, .unavailable:
-            break
+        case .ready:
+            unjudged[job.cid] = nil
+        case .unavailable:
+            let moves = (unjudged[job.cid] ?? 0) + 1
+            unjudged[job.cid] = moves
+            if moves >= config.policyRecheckInterval { departed(mempool.remove([job.cid]), &turn) }
         case .future, .invalid:
             departed(mempool.remove([job.cid]), &turn)
         }
@@ -602,6 +611,7 @@ public struct MiningState: Sendable {
 
     private mutating func departed(_ mutation: MempoolMutation, _ turn: inout Turn) {
         for item in mutation.departed {
+            unjudged[item.cid] = nil
             journaled.remove(item.cid)
             turn.delta.added.removeAll { $0.cid == item.cid }
             turn.delta.journaled.removeAll { $0.cid == item.cid }

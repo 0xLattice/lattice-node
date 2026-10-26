@@ -213,6 +213,28 @@ final class MiningStateTests: XCTestCase {
         XCTAssertEqual(judged, [false, false, true, false, false, true])
     }
 
+    /// One this node still cannot judge after `policyRecheckInterval`
+    /// moves leaves: a withdrawal whose receipt a reorg took never holds its
+    /// signers' claims for good.
+    func testAPooledTransactionUnjudgedForAnIntervalLeaves() throws {
+        var mining = MiningState(tipCID: "A", spec: testSpec(), config: MiningConfig(policyRecheckInterval: 3))
+        let tx = try transfer(nonce: 0)
+        let cid = try Mempool.cid(of: tx)
+        guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 1)), now: 0).first
+        else { return XCTFail() }
+        _ = mining.step(.preflighted(job, .ready), now: 0)
+        var counts: [Int] = []
+        for (move, (tip, verdict)) in [("B", MempoolDisposition.unavailable), ("C", .ready), ("D", .unavailable),
+                                        ("E", .unavailable), ("F", .unavailable)].enumerated() {
+            let effects = mining.step(.tipMoved(TipMove(tipCID: tip)), now: Int64(move + 1))
+            guard let job = effects.lazy.compactMap({ if case .preflight(let job) = $0, job.cid == cid { job } else { nil } }).first
+            else { return XCTFail("move \(move): \(effects)") }
+            _ = mining.step(.preflighted(job, verdict), now: Int64(move + 1))
+            counts.append(mining.mempool.count)
+        }
+        XCTAssertEqual(counts, [1, 1, 1, 1, 0], "a ready verdict starts the count again")
+    }
+
     func testATipMoveRemovesConfirmedRevalidatesThePoolAndReadmitsReturned() throws {
         var mining = MiningState(tipCID: "A", spec: testSpec())
         let keptKey = CryptoUtils.generateKeyPair()
