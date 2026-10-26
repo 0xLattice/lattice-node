@@ -71,6 +71,8 @@ public struct TreeDigest: Equatable, Sendable {
     }
 
     public let genesis: String
+    /// Every held genesis root, sorted.
+    public let roots: [String]
     public let canonicalTip: String
     public let canonicalPath: [String]
     public let blocks: [String: Entry]
@@ -82,7 +84,8 @@ public struct TreeDigest: Equatable, Sendable {
         var blocks: [String: Entry] = [:]
         var executed = Set<String>()
         var excluded = Set<String>()
-        var pending = [genesis]
+        let roots = tree.genesisRoots.sorted()
+        var pending = roots
         while let hash = pending.popLast() {
             guard let meta = tree.getConsensusBlock(hash: hash) else { continue }
             blocks[hash] = Entry(
@@ -99,6 +102,7 @@ public struct TreeDigest: Equatable, Sendable {
         }
         let tipHeight = blocks[tree.canonicalTip]?.height ?? 0
         self.genesis = genesis
+        self.roots = roots
         self.canonicalTip = tree.canonicalTip
         self.canonicalPath = (0...tipHeight).compactMap { tree.canonicalBlockHash(atHeight: $0) }
         self.blocks = blocks
@@ -111,20 +115,22 @@ public struct TreeDigest: Equatable, Sendable {
         Set(blocks.keys).subtracting(blocks.values.compactMap(\.parent))
     }
 
-    /// The heaviest executed tip, walked from genesis: at each block the
-    /// heaviest executed child (ties by fork choice's rule), until no child
-    /// is executed; empty while the genesis root is not executed.
+    /// The heaviest executed tip, walked from the genesis fork: the
+    /// heaviest executed root, then at each block the heaviest executed
+    /// child (ties by fork choice's rule), until no child is executed;
+    /// empty while no root is executed. A root is executed only if it is not
+    /// excluded.
     public var actOnTip: String {
-        guard executed.contains(genesis) else { return "" }
+        func lighter(_ a: String, _ b: String) -> Bool {
+            let (workA, workB) = (blocks[a]?.subtreeWork ?? .zero, blocks[b]?.subtreeWork ?? .zero)
+            return workA != workB ? workA < workB : forkChoicePrefersBlock(b, over: a)
+        }
+        guard var tip = roots.filter(executed.contains).max(by: lighter) else { return "" }
         var children: [String: [String]] = [:]
         for (cid, entry) in blocks where executed.contains(cid) {
             if let parent = entry.parent { children[parent, default: []].append(cid) }
         }
-        var tip = genesis
-        while let next = children[tip]?.max(by: { a, b in
-            let (workA, workB) = (blocks[a]?.subtreeWork ?? .zero, blocks[b]?.subtreeWork ?? .zero)
-            return workA != workB ? workA < workB : forkChoicePrefersBlock(b, over: a)
-        }) {
+        while let next = children[tip]?.max(by: lighter) {
             tip = next
         }
         return tip
