@@ -380,6 +380,62 @@ final class NodeRuntimeTests: XCTestCase {
         }
     }
 
+    /// The pool admits nothing a block cannot carry: its largest transaction
+    /// is mined, and the transaction behind it after.
+    func testTheLargestTransactionThePoolAdmitsIsMined() async throws {
+        let node = try host(keyByte: 0x30)
+        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let runtime = try await NodeRuntime.start(
+            storage: storage, configuration: node.configuration, overlay: node.overlay
+        )
+        func transaction(storing length: Int) throws -> Transaction {
+            let key = CryptoUtils.generateKeyPair()
+            let bodyHeader = try HeaderImpl(node: TransactionBody(
+                accountActions: [],
+                actions: length > 0 ? [Action(key: "k", oldValue: nil, newValue: String(repeating: "a", count: length))] : [],
+                depositActions: [], receiptActions: [], withdrawalActions: [],
+                signers: [CryptoUtils.createAddress(from: key.publicKey)],
+                nonce: 0, chainPath: ["Nexus"]
+            ))
+            return Transaction(
+                signatures: [key.publicKey: try XCTUnwrap(TransactionSigning.sign(
+                    bodyHeader: bodyHeader, privateKeyHex: key.privateKey
+                ))],
+                body: bodyHeader
+            )
+        }
+        func size(_ transaction: Transaction) throws -> Int {
+            try XCTUnwrap(transaction.toData()).count + XCTUnwrap(transaction.body.node?.toData()).count
+        }
+        let room = Mempool.transactionRoom(NexusGenesis.spec)
+        var length = room - 1_000
+        var largest = try transaction(storing: length)
+        for _ in 0..<8 where try size(largest) != room {
+            length += room - (try size(largest))
+            largest = try transaction(storing: length)
+        }
+        XCTAssertEqual(try size(largest), room)
+        do {
+            _ = try await runtime.submitTransaction(SubmitTransactionRequest(transaction: try transaction(storing: length + 1)))
+            XCTFail("a transaction past the room was admitted")
+        } catch {}
+        _ = try await runtime.submitTransaction(SubmitTransactionRequest(transaction: largest))
+        _ = try await runtime.submitTransaction(SubmitTransactionRequest(transaction: try transaction(storing: 0)))
+
+        var carried = 0
+        for _ in 0..<3 where carried < 2 {
+            let template = try await runtime.miningTemplate(MiningTemplateRequest())
+            var nonce: UInt64 = 0
+            while Self.block(template.block, nonce: nonce).proofOfWorkHash() > template.searchTarget { nonce += 1 }
+            carried += try await MiningTemplateAssembly.blockTransactions(
+                in: Self.block(template.block, nonce: nonce), fetcher: storage
+            ).count
+            _ = try await runtime.submitWork(SubmitWorkRequest(workID: template.workID, nonce: nonce))
+        }
+        XCTAssertEqual(carried, 2, "both are mined: neither is stuck at the head of the template")
+        await runtime.stop()
+    }
+
     func testAPoolChangeInsideTheProjectionIntervalIsProjectedWhenItEnds() async throws {
         let node = try host(keyByte: 0x3F)
         let storage = try await NodeStorage.open(configuration: node.configuration)

@@ -61,6 +61,20 @@ final class MempoolTests: XCTestCase {
         XCTAssertEqual(pool.count, 1)
     }
 
+    func testATransactionMustLeaveRoomForTheBlockAroundIt() throws {
+        let spec = testSpec()
+        let room = Mempool.transactionRoom(spec)
+        XCTAssertLessThan(room, spec.maxBlockSize)
+        // The allowance is the same on any chain.
+        XCTAssertEqual(Mempool.transactionRoom(testSpec(maxBlockSize: 4_000)), 4_000 - (spec.maxBlockSize - room))
+        var pool = Mempool()
+        XCTAssertNoThrow(try pool.submit(try storing(size: room), spec: spec, addedAt: 0))
+        XCTAssertThrowsError(try pool.submit(try storing(size: room + 1), spec: spec, addedAt: 0)) {
+            XCTAssertEqual($0 as? MempoolError, .tooLarge)
+        }
+        XCTAssertEqual(pool.count, 1)
+    }
+
     func testValueCreatingTransactionIsNeverPooled() throws {
         let key = CryptoUtils.generateKeyPair()
         let minting = try signed(key, [AccountAction(owner: address(key), delta: 5)], nonce: 0)
@@ -662,6 +676,38 @@ final class MempoolTests: XCTestCase {
 
 func address(_ key: (privateKey: String, publicKey: String)) -> String {
     CryptoUtils.createAddress(from: key.publicKey)
+}
+
+/// A fee-0 transaction of exactly `size` bytes (envelope plus body), its
+/// bulk one stored value.
+func storing(size target: Int) throws -> Transaction {
+    let key = CryptoUtils.generateKeyPair()
+    func make(_ length: Int) throws -> Transaction {
+        let body = TransactionBody(
+            accountActions: [], actions: [Action(key: "k", oldValue: nil, newValue: String(repeating: "a", count: length))],
+            depositActions: [], receiptActions: [], withdrawalActions: [],
+            signers: [address(key)], nonce: 0, chainPath: ["Nexus"]
+        )
+        let header = try HeaderImpl(node: body)
+        return Transaction(
+            signatures: [key.publicKey: try XCTUnwrap(TransactionSigning.sign(bodyHeader: header, privateKeyHex: key.privateKey))],
+            body: header
+        )
+    }
+    func size(_ transaction: Transaction) throws -> Int {
+        try XCTUnwrap(transaction.toData()).count + XCTUnwrap(transaction.body.node?.toData()).count
+    }
+    var length = 0
+    for _ in 0..<8 {
+        let transaction = try make(length)
+        let measured = try size(transaction)
+        if measured == target { return transaction }
+        length += target - measured
+        guard length >= 0 else { break }
+    }
+    struct NoSuchSize: Error {}
+    XCTFail("no transaction of exactly \(target) bytes")
+    throw NoSuchSize()
 }
 
 func signed(
