@@ -5,6 +5,14 @@
 > [architecture](../architecture.md) and [protocol](../protocol.md) for the
 > implemented bounded header stream and local evidence index. This record is
 > retained only as rationale for future operator-controlled pruning work.
+>
+> **Shipped node-local finality** is the opt-in `--finality-window` (see
+> [Node-local finality](../operations.md#node-local-finality)). It *declines*
+> headers and work more than the window below a chain's best tip (a seen set),
+> rather than evicting weighed state, so with a window set a node's head can
+> differ from an archive node's below the window. That is the operator's
+> choice; the default is off. The "never declined" and "identical head" rules
+> below describe the default configuration. Lattice has no protocol finality.
 
 ## Problem
 

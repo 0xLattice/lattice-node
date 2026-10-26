@@ -1261,6 +1261,30 @@ extension ChainCoreSyncTests {
         XCTAssertTrue(core.sync.pending.entries.isEmpty)
     }
 
+    /// A block declined just past the window is taken once the best tip
+    /// moves to a heavier branch of lower height (ASERT: fewer, harder
+    /// blocks), which brings it inside the window.
+    func testADeclineIsForgottenWhenTheTipMovesDown() async throws {
+        var core = finalCore(window: 9)
+        ready(&core, peer)
+        relay(&core, chain.map { entry($0) }, from: peer)
+        let tipHeight = try XCTUnwrap(chain.last?.block.height)
+        let edge = try await world.branch(from: chain[18], count: 1)[0]
+        XCTAssertEqual(tipHeight - edge.block.height, 10, "one past the window")
+        relay(&core, [entry(edge)], from: peer)
+        XCTAssertTrue(core.sync.declined.contains(edge.cid))
+        // Blocks dated just after their parents carry harder targets: eight
+        // of them outweigh the ten honest blocks they fork beside.
+        let heavier = try await world.branch(from: chain[19], count: 8, interval: 1)
+        relay(&core, heavier.map { entry($0) }, from: peer)
+        XCTAssertEqual(core.tree.canonicalTip, heavier.last?.cid, "the lower, heavier branch is best")
+        XCTAssertLessThan(try XCTUnwrap(heavier.last?.block.height), tipHeight)
+        XCTAssertFalse(core.sync.declined.contains(edge.cid))
+        ready(&core, other)
+        relay(&core, [entry(edge)], from: other)
+        XCTAssertTrue(core.tree.contains(blockHash: edge.cid), "inside the window now")
+    }
+
     /// The tip's next height is never past the window: a chain that stalled
     /// long ago is still extended at its tip.
     func testAStalledTipIsStillExtended() async throws {

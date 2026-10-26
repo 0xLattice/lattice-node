@@ -754,7 +754,8 @@ public struct ChainReads: Sendable {
             height: snapshot.height,
             tipCID: snapshot.tipCID,
             chain: chainPath,
-            minRelayFee: storage.configuration.minRelayFee
+            minRelayFee: storage.configuration.minRelayFee,
+            finalityWindow: storage.configuration.finality.window(for: chainPath)
         )
     }
 
