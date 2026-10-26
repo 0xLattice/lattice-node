@@ -178,14 +178,14 @@ final class MiningStateTests: XCTestCase {
     func testATipMoveRechecksAReadyTransactionWithoutItsPolicies() throws {
         var mining = MiningState(tipCID: "A", spec: testSpec())
         let ready = try transfer(nonce: 0)
-        let future = try transfer(nonce: 1)
+        let future = try transfer(nonce: 2)
         for (tx, verdict) in [(ready, MempoolDisposition.ready), (future, .future)] {
             guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 1)), now: 0).first
             else { return XCTFail() }
             XCTAssertTrue(job.checksPolicies, "an arrival is judged by the policies")
             _ = mining.step(.preflighted(job, verdict), now: 0)
         }
-        let arriving = try transfer(nonce: 2)
+        let arriving = try transfer(nonce: 1)
         _ = mining.step(.transactionReceived(arriving, origin: .local(replyID: 2)), now: 1)
 
         let moved = mining.step(.tipMoved(TipMove(tipCID: "B")), now: 2)
@@ -216,69 +216,13 @@ final class MiningStateTests: XCTestCase {
         XCTAssertEqual(judged, [false, false, true, false, false, true])
     }
 
-    /// A future is kept only when it follows a transaction this node holds,
-    /// pooled or awaiting its verdict: one with a gap before it is free to
-    /// send (its fee is never funding-checked), and no wallet sends one.
-    func testAFutureWithAGapBeforeItIsRefused() throws {
-        var mining = MiningState(tipCID: "A", spec: testSpec())
-        let gapped = try transfer(nonce: 5)
-        guard case .preflight(let job)? = mining.step(.transactionReceived(gapped, origin: .submitted(replyID: 1)), now: 0).first
-        else { return XCTFail() }
-        let refused = mining.step(.preflighted(job, .future), now: 1)
-        XCTAssertTrue(refused.contains { if case .transactionRefused(1, .nonceGap) = $0 { true } else { false } }, "\(refused)")
-        XCTAssertEqual(mining.mempool.count, 0)
-        XCTAssertEqual(mining.pendingSubmitted, 0)
-    }
-
-    /// Verdicts arrive in any order: a wallet's next transaction, judged
-    /// before the one it follows, is kept while that one awaits its own.
-    func testAFutureFollowingATransactionAwaitingItsVerdictIsKept() throws {
-        var mining = MiningState(tipCID: "A", spec: testSpec())
-        let first = try transfer(nonce: 0)
-        let next = try transfer(nonce: 1)
-        guard case .preflight(let firstJob)? = mining.step(.transactionReceived(first, origin: .submitted(replyID: 1)), now: 0).first,
-              case .preflight(let nextJob)? = mining.step(.transactionReceived(next, origin: .submitted(replyID: 2)), now: 0).first
-        else { return XCTFail() }
-        let kept = mining.step(.preflighted(nextJob, .future), now: 1)
-        XCTAssertTrue(kept.contains { if case .transactionAdmitted(2, _, 1, _) = $0 { true } else { false } }, "\(kept)")
-        _ = mining.step(.preflighted(firstJob, .ready), now: 1)
-        XCTAssertEqual(mining.mempool.count, 2)
-
-        // The next one, behind a pooled future, follows it in turn.
-        let third = try transfer(nonce: 2)
-        guard case .preflight(let thirdJob)? = mining.step(.transactionReceived(third, origin: .submitted(replyID: 3)), now: 2).first
-        else { return XCTFail() }
-        _ = mining.step(.preflighted(thirdJob, .future), now: 2)
-        XCTAssertEqual(mining.mempool.count, 3)
-    }
-
-    /// A pooled future whose predecessor left (refused after it was kept, or
-    /// evicted) leaves at its next verdict, on the next tip move.
-    func testAPooledFutureLeavesWhenWhatItFollowedIsGone() throws {
-        var mining = MiningState(tipCID: "A", spec: testSpec())
-        let first = try transfer(nonce: 0)
-        let next = try transfer(nonce: 1)
-        guard case .preflight(let firstJob)? = mining.step(.transactionReceived(first, origin: .submitted(replyID: 1)), now: 0).first,
-              case .preflight(let nextJob)? = mining.step(.transactionReceived(next, origin: .submitted(replyID: 2)), now: 0).first
-        else { return XCTFail() }
-        _ = mining.step(.preflighted(nextJob, .future), now: 1)
-        _ = mining.step(.preflighted(firstJob, .invalid), now: 1)
-        XCTAssertEqual(mining.mempool.count, 1, "kept while its predecessor was judged")
-
-        let moved = mining.step(.tipMoved(TipMove(tipCID: "B")), now: 2)
-        guard let job = moved.lazy.compactMap({ if case .preflight(let job) = $0 { job } else { nil } }).first
-        else { return XCTFail("\(moved)") }
-        _ = mining.step(.preflighted(job, .future), now: 2)
-        XCTAssertEqual(mining.mempool.count, 0)
-    }
-
     func testATipMoveRemovesConfirmedRevalidatesThePoolAndReadmitsReturned() throws {
         var mining = MiningState(tipCID: "A", spec: testSpec())
         let kept = try transfer(nonce: 1)
         let confirmed = try transfer(nonce: 0)
         let returnedKey = CryptoUtils.generateKeyPair()
         let returned = try signed(returnedKey, [AccountAction(owner: address(returnedKey), delta: -1)], nonce: 0)
-        for tx in [confirmed, kept] {
+        for tx in [kept, confirmed] {
             guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 9)), now: 0).first
             else { return XCTFail() }
             _ = mining.step(.preflighted(job, tx.body.node?.nonce == 0 ? .ready : .future), now: 0)

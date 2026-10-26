@@ -16,10 +16,6 @@ public enum MempoolError: Error, Sendable, Equatable {
     case feeTooLow
     /// The fee is under this node's `MempoolLimits.minRelayFee`.
     case belowMinRelayFee
-    /// A future transaction whose first signer's previous nonce this node
-    /// neither pools nor is checking: it extends nothing a block could carry
-    /// first.
-    case nonceGap
     /// Retriable: the executed tip moved more than `maxReissues` times while
     /// the submit waited for its verdict (the actor's
     /// `templateContextChanged`).
@@ -158,10 +154,6 @@ public struct Mempool: Sendable {
     public func contains(_ cid: String) -> Bool { entries[cid] != nil }
 
     public func item(_ cid: String) -> MempoolItem? { entries[cid].map(Self.item) }
-
-    /// Whether the pool holds a transaction whose first signer is `signer`
-    /// at `nonce`.
-    public func holds(signer: String, nonce: UInt64) -> Bool { chainEntries[signer]?[nonce] != nil }
 
     public var items: [MempoolItem] {
         entries.values.sorted { $0.cid < $1.cid }.map(Self.item)

@@ -282,22 +282,6 @@ public struct MiningState: Sendable {
         var reissues = 0
     }
 
-    private struct NonceSlot: Hashable {
-        let signer: String
-        let nonce: UInt64
-
-        init(signer: String, nonce: UInt64) {
-            self.signer = signer
-            self.nonce = nonce
-        }
-
-        init?(_ transaction: Transaction) {
-            guard let body = transaction.body.node, let signer = body.signers.first else { return nil }
-            self.signer = signer
-            nonce = body.nonce
-        }
-    }
-
     /// A template request waiting on a build, and the tip moves it has waited
     /// through.
     private struct Waiting {
@@ -307,9 +291,6 @@ public struct MiningState: Sendable {
 
     /// Transactions awaiting a verdict before admission.
     private var admissions: [String: Admission] = [:]
-    /// The admissions' first-signer nonce slots, so a future transaction can
-    /// follow one still awaiting its verdict.
-    private var admittingNonces: [NonceSlot: Int] = [:]
     /// Transactions with a preflight outstanding on the current tip epoch.
     private var preflighting: Set<String> = []
     /// Pooled transactions in the local journal.
@@ -472,32 +453,12 @@ public struct MiningState: Sendable {
     private mutating func open(_ cid: String, _ admission: Admission) {
         admissions[cid] = admission
         count(admission.slot, 1)
-        if let slot = NonceSlot(admission.transaction) { admittingNonces[slot, default: 0] += 1 }
     }
 
     private mutating func close(_ cid: String) -> Admission? {
         guard let admission = admissions.removeValue(forKey: cid) else { return nil }
         count(admission.slot, -1)
-        if let slot = NonceSlot(admission.transaction) {
-            let remaining = (admittingNonces[slot] ?? 1) - 1
-            admittingNonces[slot] = remaining == 0 ? nil : remaining
-        }
         return admission
-    }
-
-    /// Whether a future transaction follows one this node holds: its first
-    /// signer's previous nonce is pooled or awaiting its verdict. Only such a
-    /// future is kept (geth instead admits gaps and bounds them with a
-    /// balance check, a pool-wide queue cap and an expiry). A future's fee is
-    /// not funding-checked, so a gapped one is free to send; one that follows
-    /// a held transaction hangs off a ready one whose funds were checked. A
-    /// wallet sends its nonces in order, so it never sends a gap; a future
-    /// that arrives before its predecessor is refused and must be sent again.
-    private func followsHeld(_ transaction: Transaction) -> Bool {
-        guard let slot = NonceSlot(transaction), slot.nonce > 0 else { return false }
-        let previous = slot.nonce - 1
-        return mempool.holds(signer: slot.signer, nonce: previous)
-            || admittingNonces[NonceSlot(signer: slot.signer, nonce: previous)] != nil
     }
 
     private mutating func preflight(
@@ -520,17 +481,10 @@ public struct MiningState: Sendable {
         // job on the new tip.
         guard job.tipEpoch == tipEpoch else { return }
         preflighting.remove(job.cid)
-        // A future with a gap before it is refused, or leaves the pool when
-        // what it followed has gone (`followsHeld`).
-        let gapped = disposition == .future && !followsHeld(job.transaction)
         if let admission = close(job.cid) {
-            if gapped {
-                refuse(admission.origins, cid: job.cid, .nonceGap, verdict: false, &turn)
-                return
-            }
             admit(admission, cid: job.cid, disposition, now: now, &turn)
         } else {
-            let mutation = mempool.reclassify(job.cid, as: gapped ? .invalid : disposition)
+            let mutation = mempool.reclassify(job.cid, as: disposition)
             departed(mutation, &turn)
         }
     }
