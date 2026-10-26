@@ -126,14 +126,17 @@ public struct WeighLog: Sendable {
     public func contains(_ entry: LogEntry, in tree: ChainTree) -> Bool {
         if unhandled.contains(entry) { return true }
         switch entry.kind {
-        case .header: return tree.handle(of: entry.block).map(headers.contains) ?? false
+        // Only `.header(_:)` is logged: one naming another block never was.
+        case .header: return entry.cid == entry.block && tree.handle(of: entry.block).map(headers.contains) ?? false
         case .proof: return tree.grindHandle(of: entry.cid, at: entry.block).map(proofs.contains) ?? false
         }
     }
 
-    /// Log `entry` unless it is logged, after `tree` took it.
+    /// Log `entry` unless it is logged, after `tree` took it. A header is
+    /// `.header(_:)`: its bit is its block's, so its cid must be that block.
     @discardableResult
     mutating func append(_ entry: LogEntry, in tree: ChainTree) -> Bool {
+        precondition(entry.kind == .proof || entry.cid == entry.block, "a header entry names its own block")
         guard !unhandled.contains(entry) else { return false }
         let inserted = switch entry.kind {
         case .header: tree.handle(of: entry.block).map { headers.insert($0) }
