@@ -130,8 +130,9 @@ struct MiningBasis: Sendable {
 /// parent's executed set carried its state along the link Lattice asks
 /// (Lattice spec §5.3 step 6), answered in one read of the live levels
 /// (`LiveLevels`), so the job holds no copy of the parent's tree, which the
-/// parent keeps mutating. An executed set only grows, so a later read only
-/// answers more. A parent the loop does not hold, or a stopped loop,
+/// parent keeps mutating. The answer is the parent's executed set at the step
+/// the read runs; a block that waits is asked again when the parent advances
+/// (`wakeAnswered`). A parent the loop does not hold, or a stopped loop,
 /// answers false: the block then awaits that fact
 /// (`BodyPipeline.awaitingParent`), never valid on it.
 struct ParentContinuity: ParentChainFacts {
@@ -147,9 +148,8 @@ struct ParentContinuity: ParentChainFacts {
 /// The hosted levels as the loop holds them, read from a job: `read` runs
 /// on the loop between steps, as Bitcoin reads its live block index under
 /// `cs_main`, and is nil once the loop has stopped. A job's tip epoch still
-/// decides whether it runs; what it reads live is safe to read at any step,
-/// because an executed set only grows and an anchor depends only on a
-/// block's ancestry.
+/// decides whether it runs; what it reads live is the answer at the step the
+/// read runs, and an anchor depends only on a block's ancestry.
 struct LiveLevels: Sendable {
     /// Runs its argument on the loop, with the levels, or with nil when the
     /// loop has stopped.
