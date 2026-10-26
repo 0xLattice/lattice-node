@@ -130,12 +130,30 @@ struct MiningBasis: Sendable {
     let anchor: DifficultyAnchor?
 }
 
+/// What a child block's connect reads of its parent level: whether the
+/// parent's executed set carried its state along the link Lattice asks
+/// (Lattice spec §5.3 step 6), answered in one read of the live levels
+/// (`LiveLevels`), so the job holds no copy of the parent's tree, which the
+/// parent keeps mutating. The answer is the parent's executed set at the step
+/// the read runs; a block that waits is asked again when the parent advances
+/// (`wakeAnswered`). A parent the loop does not hold, or a stopped loop,
+/// answers false: the block then awaits that fact
+/// (`BodyPipeline.awaitingParent`), never valid on it.
+struct ParentContinuity: ParentChainFacts {
+    let levels: LiveLevels
+
+    func hasContinuity(_ link: ParentStateContinuityLink) async -> Bool {
+        await levels.read {
+            $0[link.parentPath]?.tree.executedSetAdvanced(from: link.fromStateCID, to: link.toStateCID) ?? false
+        } ?? false
+    }
+}
+
 /// The hosted levels as the loop holds them, read from a job: `read` runs
 /// on the loop between steps, as Bitcoin reads its live block index under
 /// `cs_main`, and is nil once the loop has stopped. A job's tip epoch still
-/// decides whether it runs; what it reads live is safe to read at any step,
-/// because an executed set only grows and an anchor depends only on a
-/// block's ancestry.
+/// decides whether it runs; what it reads live is the answer at the step the
+/// read runs, and an anchor depends only on a block's ancestry.
 struct LiveLevels: Sendable {
     /// Runs its argument on the loop, with the levels, or with nil when the
     /// loop has stopped.
@@ -490,11 +508,9 @@ extension NodeRuntime {
         )
     }
 
-    /// `tip`'s difficulty anchor, read from `tree`: what the anchor cache
-    /// fills is written to a copy, never to the level's tree.
+    /// `tip`'s difficulty anchor, read from `tree`.
     static func anchor(_ tree: ChainTree, _ tip: String) -> DifficultyAnchor? {
-        var tree = tree
-        return tree.difficultyAnchor(forBlockHash: tip)
+        tree.difficultyAnchor(forBlockHash: tip)
     }
 
     /// The worker job for a mining effect that needs one: Lattice preflight
@@ -595,11 +611,12 @@ extension NodeRuntime {
     /// A level's connect job: `ChainTree.connect`, and for a valid block the
     /// IDs of the transactions it carries, read from the body it executed.
     /// Execution is the node's own work: what this store lacks is read from
-    /// peers.
+    /// peers. A child level's parent fact is read from the live parent level
+    /// (`ParentContinuity`).
     static func connectJob(
         _ job: ConnectJob,
         at path: ChainPath,
-        parentFacts: ParentLevelFacts?,
+        levels: LiveLevels,
         storage: NodeStorage,
         remote: IvyRootContentSource? = nil
     ) -> RuntimeJob {
@@ -608,7 +625,7 @@ extension NodeRuntime {
                 let verdict = await ChainTree.connect(
                     job,
                     fetcher: fetcher,
-                    parentFacts: parentFacts,
+                    parentFacts: ParentContinuity(levels: levels),
                     validationContext: ValidationContext(nowMilliseconds: now())
                 )
                 let valid = verdict.retryFailure == nil && !verdict.provesInvalid

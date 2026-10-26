@@ -22,7 +22,7 @@ final class ChainCoreSyncTests: XCTestCase {
 
     private func core(pageSize: Int = 4, pendingBudget: Int = 1 << 20, maxChildIndexBytes: Int = 1 << 20) -> ChainCore {
         ChainCore(
-            tree: world.bootstrap.tree,
+            tree: world.bootstrap.tree.detached(),
             config: ChainCoreConfig(
                 maxHeadersPerPage: pageSize,
                 headersTimeout: 1_000,
@@ -186,7 +186,7 @@ final class ChainCoreSyncTests: XCTestCase {
         XCTAssertEqual(core.sync.peers[peer]?.stream?.deadline, Self.now + 1_000)
         guard case .wakeAt(let wake) = effects.last else { return XCTFail("\(effects)") }
         XCTAssertEqual(wake, Self.now + 1_000)
-        var resumed = ChainCore(tree: world.bootstrap.tree, cursors: [peer.key: StreamCursor(logID: "L", position: 7)])
+        var resumed = ChainCore(tree: world.bootstrap.tree.detached(), cursors: [peer.key: StreamCursor(logID: "L", position: 7)])
         let again = try XCTUnwrap(requests(resumed.step(.peerReady(peer), now: Self.now)).first)
         XCTAssertEqual(again.logID, "L")
         XCTAssertEqual(again.after, 7, "resumed from the shell's cursor")
@@ -808,7 +808,7 @@ final class ChainCoreSyncTests: XCTestCase {
     /// Until the store keeps cursors, only those it handed back outlive
     /// their session.
     func testOnlyHandedBackCursorsOutliveTheirSession() throws {
-        var core = ChainCore(tree: world.bootstrap.tree, cursors: ["kept": StreamCursor(logID: "K", position: 3)])
+        var core = ChainCore(tree: world.bootstrap.tree.detached(), cursors: ["kept": StreamCursor(logID: "K", position: 3)])
         let kept = PeerID(key: "kept", session: 1)
         for peer in [kept, peer] {
             let request = try XCTUnwrap(requests(core.step(.peerReady(peer), now: Self.now)).first)
@@ -839,7 +839,7 @@ final class ChainCoreSyncTests: XCTestCase {
     /// fetched again.
     func testDuplicatesAcrossPeersCostIDsNotObjects() throws {
         var first = weighed(Array(chain[0..<12]))
-        var second = ChainCore(tree: world.bootstrap.tree, config: first.config, log: WeighLog(id: "second"))
+        var second = ChainCore(tree: world.bootstrap.tree.detached(), config: first.config, log: WeighLog(id: "second"))
         ready(&second, peer)
         relay(&second, chain[0..<12].reversed().map { entry($0) }, from: peer)
         var client = keeping(core())
@@ -854,13 +854,13 @@ final class ChainCoreSyncTests: XCTestCase {
 
     /// A peer whose log reset (a new log id) is read from 0 again.
     func testAPeerLogResetFallsBackToZero() throws {
-        var server = ChainCore(tree: world.bootstrap.tree, config: core().config, log: WeighLog(id: "S1"))
+        var server = ChainCore(tree: world.bootstrap.tree.detached(), config: core().config, log: WeighLog(id: "S1"))
         ready(&server, peer)
         relay(&server, chain[0..<10].map { entry($0) }, from: peer)
         var client = keeping(core())
         try link(&server, &client, session: 1)
         XCTAssertEqual(client.sync.cursors["server"], StreamCursor(logID: "S1", position: 10))
-        var reset = ChainCore(tree: world.bootstrap.tree, config: core().config, log: WeighLog(id: "S2"))
+        var reset = ChainCore(tree: world.bootstrap.tree.detached(), config: core().config, log: WeighLog(id: "S2"))
         ready(&reset, peer)
         relay(&reset, chain[0..<3].map { entry($0) }, from: peer)
         try link(&reset, &client, session: 2)
@@ -1057,14 +1057,14 @@ final class ChainCoreSyncTests: XCTestCase {
     private func partitioned() async throws -> (server: ChainCore, client: ChainCore, side: [SimBlock]) {
         let side = try await world.branch(from: chain[9], count: 12)
         let config = ChainCoreConfig(maxHeadersPerPage: 4)
-        var server = ChainCore(tree: world.bootstrap.tree, config: config, log: WeighLog(id: "S"))
+        var server = ChainCore(tree: world.bootstrap.tree.detached(), config: config, log: WeighLog(id: "S"))
         ready(&server, peer)
         relay(&server, (chain + side).map { entry($0) }, from: peer)
         XCTAssertEqual(server.tree.canonicalTip, chain.last?.cid)
         // Weigh order is a topological order: past chain[20]'s position the
         // log holds nothing of chain[...19].
         let position = try XCTUnwrap(server.sync.log.entries.firstIndex(of: .header(chain[20].cid)))
-        var client = ChainCore(tree: world.bootstrap.tree, config: config, cursors: ["server": StreamCursor(logID: "S", position: UInt64(position))])
+        var client = ChainCore(tree: world.bootstrap.tree.detached(), config: config, cursors: ["server": StreamCursor(logID: "S", position: UInt64(position))])
         ready(&client, peer)
         relay(&client, (Array(chain[0...9]) + side).map { entry($0) }, from: peer)
         XCTAssertEqual(client.tree.canonicalTip, side.last?.cid)
@@ -1148,7 +1148,7 @@ final class ChainCoreSyncTests: XCTestCase {
     func testACraftedRequestCostsAPageAndStaysInTheServingSlot() async throws {
         let side = try await world.branch(from: chain[0], count: 25)
         let pageSize = 4
-        var server = ChainCore(tree: world.bootstrap.tree, config: ChainCoreConfig(maxHeadersPerPage: pageSize))
+        var server = ChainCore(tree: world.bootstrap.tree.detached(), config: ChainCoreConfig(maxHeadersPerPage: pageSize))
         ready(&server, peer)
         relay(&server, (chain + side).map { entry($0) }, from: peer)
         _ = server.step(.peerReady(other), now: Self.now)
@@ -1213,7 +1213,7 @@ extension ChainCoreSyncTests {
     private func finalCore(window blocks: UInt64) -> ChainCore {
         var config = ChainCoreConfig(maxHeadersPerPage: 4, headersTimeout: 1_000, maxInlineChildIndexBytes: 1_024)
         config.finality = FinalityWindows(all: blocks)
-        return ChainCore(tree: world.bootstrap.tree, config: config, log: WeighLog(id: "test"))
+        return ChainCore(tree: world.bootstrap.tree.detached(), config: config, log: WeighLog(id: "test"))
     }
 
     /// The free fork from genesis lands far behind the tip: declined, never
@@ -1261,6 +1261,30 @@ extension ChainCoreSyncTests {
         XCTAssertTrue(core.sync.pending.entries.isEmpty)
     }
 
+    /// A block declined just past the window is taken once the best tip
+    /// moves to a heavier branch of lower height (ASERT: fewer, harder
+    /// blocks), which brings it inside the window.
+    func testADeclineIsForgottenWhenTheTipMovesDown() async throws {
+        var core = finalCore(window: 9)
+        ready(&core, peer)
+        relay(&core, chain.map { entry($0) }, from: peer)
+        let tipHeight = try XCTUnwrap(chain.last?.block.height)
+        let edge = try await world.branch(from: chain[18], count: 1)[0]
+        XCTAssertEqual(tipHeight - edge.block.height, 10, "one past the window")
+        relay(&core, [entry(edge)], from: peer)
+        XCTAssertTrue(core.sync.declined.contains(edge.cid))
+        // Blocks dated just after their parents carry harder targets: eight
+        // of them outweigh the ten honest blocks they fork beside.
+        let heavier = try await world.branch(from: chain[19], count: 8, interval: 1)
+        relay(&core, heavier.map { entry($0) }, from: peer)
+        XCTAssertEqual(core.tree.canonicalTip, heavier.last?.cid, "the lower, heavier branch is best")
+        XCTAssertLessThan(try XCTUnwrap(heavier.last?.block.height), tipHeight)
+        XCTAssertFalse(core.sync.declined.contains(edge.cid))
+        ready(&core, other)
+        relay(&core, [entry(edge)], from: other)
+        XCTAssertTrue(core.tree.contains(blockHash: edge.cid), "inside the window now")
+    }
+
     /// The tip's next height is never past the window: a chain that stalled
     /// long ago is still extended at its tip.
     func testAStalledTipIsStillExtended() async throws {
@@ -1282,7 +1306,7 @@ extension ChainCoreSyncTests {
             FinalityWindows(all: 1, byChain: [path: nil]),
         ] {
             config.finality = finality
-            var core = ChainCore(tree: world.bootstrap.tree, config: config, log: WeighLog(id: "test"))
+            var core = ChainCore(tree: world.bootstrap.tree.detached(), config: config, log: WeighLog(id: "test"))
             ready(&core, peer)
             let spam = world.spam.compactMap { world.blocks[$0] }
             relay(&core, (chain + spam).map { entry($0) }, from: peer)

@@ -7,6 +7,14 @@
 > accepts. An operator may evict weighed subgraphs it considers irrelevant;
 > that is an operator policy of reachability GC, never a rule of sync or
 > consensus. The work-before-keeping gate below remains a design study only.
+>
+> **Shipped node-local finality** is the opt-in `--finality-window` (see
+> [Node-local finality](../operations.md#node-local-finality)). It *declines*
+> headers and work more than the window below a chain's best tip (a seen set),
+> rather than evicting weighed state, so with a window set a node's head can
+> differ from an archive node's below the window. That is the operator's
+> choice; the default is off. The "never declined" and "identical head" rules
+> below describe the default configuration. Lattice has no protocol finality.
 
 ## Model
 

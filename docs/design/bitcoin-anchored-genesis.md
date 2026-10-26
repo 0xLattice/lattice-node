@@ -28,7 +28,7 @@ The payload is the genesis CID's raw bytes (`01` = CIDv1, `71` = dag-cbor,
 Two earlier Bitcoin transactions, in blocks 954137 and 960894, commit earlier Nexus
 genesis values that were replaced before this one. They are not this network.
 
-## The genesis is final
+## The genesis is fixed
 
 The committed CID is derived from the genesis spec, the premine owner, and the
 genesis timestamp. Changing any of them changes the CID and leaves this anchor

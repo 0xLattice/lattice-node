@@ -217,7 +217,7 @@ final class ConsensusEdgeSimulationTests: XCTestCase {
         let invalid = try XCTUnwrap(world.blocks[world.invalidBody])
         let child = try XCTUnwrap(world.blocks[world.invalidBodyChild])
 
-        var core = ChainCore(tree: world.bootstrap.tree, config: ChainCoreConfig(bodyWindow: 4))
+        var core = ChainCore(tree: world.bootstrap.tree.detached(), config: ChainCoreConfig(bodyWindow: 4))
         _ = core.step(.peerReady(peer), now: Self.now)
         var all = show(&core, Array(chain.prefix(3)) + [invalid, child])
         for block in chain.prefix(2) { all += try await deliver(block.cid, world, content, to: &core) }

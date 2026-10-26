@@ -310,6 +310,10 @@ public struct ExplorerChainInfo: Codable, Sendable, Equatable {
     /// pool (node policy, never consensus; 0 admits any fee). Other nodes may
     /// set their own.
     @OptionalDecimalString public var minRelayFee: UInt64?
+    /// The operator's node-local finality window for this chain, in blocks
+    /// (`--finality-window`; node policy, never consensus). Absent when off,
+    /// the default.
+    @OptionalDecimalString public var finalityWindow: UInt64? = nil
 }
 
 public struct ExplorerChainSpec: Codable, Sendable, Equatable {

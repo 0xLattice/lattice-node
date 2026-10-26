@@ -1,5 +1,5 @@
 import Lattice
-import LatticeNodeCore
+@testable import LatticeNodeCore
 @testable import LatticeNodeSim
 import UInt256
 import XCTest
@@ -31,7 +31,7 @@ final class AnchoredChildTemplateTests: XCTestCase {
         var retries: [String: BlockImportError] = [:]
 
         init(_ world: LevelWorld) {
-            node = NodeCore(root: world.rootBootstrap.tree, hosted: world.hosted)
+            node = NodeCore(root: world.rootBootstrap.tree.detached(), hosted: world.hosted)
             cas = world.cas
         }
 
@@ -46,9 +46,9 @@ final class AnchoredChildTemplateTests: XCTestCase {
                         } else {
                             queue.append(.level(path, .bodyFetched(cid: cid)))
                         }
-                    case .connect(let path, let job, let facts):
+                    case .connect(let path, let job):
                         let verdict = await ChainTree.connect(
-                            job, fetcher: cas, parentFacts: facts,
+                            job, fetcher: cas, parentFacts: node.parentFacts(for: path),
                             validationContext: ValidationContext(nowMilliseconds: AnchoredChildTemplateTests.now)
                         )
                         if let failure = verdict.retryFailure { retries[verdict.blockHash] = failure }
@@ -78,6 +78,17 @@ final class AnchoredChildTemplateTests: XCTestCase {
 
         var alpha: ChainCore { node.levels[AnchoredChildTemplateTests.alpha]! }
         var nexusTree: ChainTree { node.levels[AnchoredChildTemplateTests.nexus]!.tree }
+
+        /// A copy to hold while this host steps on: its own trees.
+        var held: Host {
+            var copy = self
+            copy.node.levels = node.levels.mapValues { level in
+                var level = level
+                level.tree = level.tree.detached()
+                return level
+            }
+            return copy
+        }
     }
 
     private struct Fixture {
@@ -138,7 +149,7 @@ final class AnchoredChildTemplateTests: XCTestCase {
     }
 
     private func input(_ host: Host, transactions: [Transaction] = []) -> ChildTemplateInput {
-        var tree = host.alpha.tree
+        let tree = host.alpha.tree
         let tip = host.alpha.snapshot.actOnTip
         return ChildTemplateInput(
             path: Self.alpha, tipCID: tip, bestHeaderTip: host.alpha.snapshot.bestHeaderTip,
@@ -204,7 +215,7 @@ final class AnchoredChildTemplateTests: XCTestCase {
     /// predecessor's anchor, and never executes.
     func testTheTemplateBuildsBelowAnActOnTipAnchoredOnTheAbandonedBranch() async throws {
         var fixture = try await fixture()
-        let host = fixture.host
+        let host = fixture.host.held
         let cas = host.cas
         let interval = LevelWorld.interval
         let entering = fixture.b3.block.postState.rawCID
@@ -266,13 +277,19 @@ final class AnchoredChildTemplateTests: XCTestCase {
         var fixture = try await fixture()
         var built: [(cid: String, parent: String?)] = []
         for round in 0..<4 {
-            let host = fixture.host
-            let nexusTip = try XCTUnwrap(host.node.levels[Self.nexus]?.snapshot.actOnTip)
-            let carrier = try XCTUnwrap(fixture.builder.blocks[Self.nexus]?[nexusTip])
-            let block = try await candidate(
-                input(host), levels: levels(host), entering: carrier,
-                timestamp: fixture.nextTime + Int64(round) * LevelWorld.interval, cas: host.cas
-            )
+            let carrier: SimBlock
+            let block: Block
+            do {
+                // The template reads the host's state; no copy outlives it
+                // into the carrying step.
+                let host = fixture.host
+                let nexusTip = try XCTUnwrap(host.node.levels[Self.nexus]?.snapshot.actOnTip)
+                carrier = try XCTUnwrap(fixture.builder.blocks[Self.nexus]?[nexusTip])
+                block = try await candidate(
+                    input(host), levels: levels(host), entering: carrier,
+                    timestamp: fixture.nextTime + Int64(round) * LevelWorld.interval, cas: host.cas
+                )
+            }
             let cid = try await carry(block, on: carrier, as: .block, &fixture).cid
             built.append((cid, block.parent?.rawCID))
             XCTAssertTrue(fixture.host.alpha.tree.isExecuted(blockHash: cid), "round \(round): the honest block executes")
@@ -363,7 +380,8 @@ final class AnchoredChildTemplateTests: XCTestCase {
     /// the state of its last read gives, one of the two, never a mix.
     func testAMoveBetweenStepsGivesOneStatesTemplate() async throws {
         var fixture = try await fixture()
-        let spawned = fixture.host
+        // Held while the host steps on: its own trees.
+        let spawned = fixture.host.held
         let before = spawned.node.levels
         func built(_ levels: LiveLevels) async throws -> String? {
             let candidates = await NodeRuntime.childCandidates(

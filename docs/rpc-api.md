@@ -43,7 +43,7 @@ an optional `-` then a nonzero digit then digits (`^(?:0|-?[1-9][0-9]*)$`).
 A JSON number, a leading `+` or zero, `-0`, or an out-of-range value is
 refused (400). These are heights, revisions, timestamps, block nonces,
 balances, account and transaction nonces, deltas, deposit/receipt/withdrawal
-nonces and amounts, `rewardCredited`, `minRelayFee`, and the chain spec's
+nonces and amounts, `rewardCredited`, `minRelayFee`, `finalityWindow`, and the chain spec's
 64-bit fields. Small counts and sizes (`transactionCount`, `mempoolCount`,
 `mempoolBytes`, `count`, `version`, `maxBlockSize`, offsets) stay JSON
 numbers. Targets are hex strings. An absent optional field is omitted, never
@@ -288,6 +288,11 @@ which the block's recipient is credited. Below it the refusal is
 `belowMinRelayFee`. This is node relay policy, never consensus: a block
 carrying a cheaper transaction stays valid, and other nodes choose their own
 floor. `GET /api/chain/info` reports this node's as `minRelayFee`.
+
+`GET /api/chain/info` also reports the chain's
+[node-local finality](operations.md#node-local-finality) window, in blocks,
+as `finalityWindow`: the operator's `--finality-window` for that chain. It is
+node policy, never consensus, and is absent when off (the default).
 
 ### Fee pricing
 

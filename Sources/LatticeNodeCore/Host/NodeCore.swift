@@ -86,23 +86,22 @@ public enum NodeEffect: Sendable {
     case persist(NodeBatch)
     /// Every level effect but `connect`.
     case level(ChainPath, ChainEffect)
-    /// Run `ChainTree.connect` on a level's job, reading `parentFacts` for a
-    /// child level, and report the verdict as `.level(path, .connected)`.
-    case connect(ChainPath, ConnectJob, parentFacts: ParentLevelFacts?)
+    /// Run `ChainTree.connect` on a level's job, reading a child level's
+    /// parent facts from the parent level as it is when the job reads them
+    /// (never a copy of its tree, which the parent keeps mutating), and
+    /// report the verdict as `.level(path, .connected)`.
+    case connect(ChainPath, ConnectJob)
     case disconnect(PeerID, DisconnectReason)
     case wakeAt(Int64)
 }
 
 extension NodeEffect {
     /// A diagnostic label whose cost is bounded by the effect's own fields.
-    /// A child connect's parent facts are the parent level's whole tree, so
-    /// reflecting them costs O(parent chain) per child block: they are
-    /// named, never described.
     public var traceLabel: String {
-        guard case .connect(let path, let job, let parentFacts) = self else {
+        guard case .connect(let path, let job) = self else {
             return String(describing: self)
         }
-        return "connect(\(path), blockHash: \(job.blockHash), parentFacts: \(parentFacts == nil ? "nil" : "parent tree"))"
+        return "connect(\(path), blockHash: \(job.blockHash))"
     }
 }
 
@@ -168,9 +167,12 @@ public struct NodeCore: Sendable {
     public let pins: [ChainPath: String]
 
     /// A host over its root tree, running every hosted child level whose
-    /// parent level it runs, each empty.
+    /// parent level it runs, each empty. The host owns the root tree: a
+    /// caller that keeps its own copy must pass `detached()` (the host
+    /// mutates the tree it runs, and a tree mutated while another copy is
+    /// held is copied whole).
     public init(
-        root: ChainTree,
+        root: consuming ChainTree,
         hosted: Set<ChainPath>,
         pins: [ChainPath: String] = [:],
         config: ChainCoreConfig = ChainCoreConfig(),
@@ -178,7 +180,7 @@ public struct NodeCore: Sendable {
         rootLog: [LogEntry] = [],
         rootCursors: [String: StreamCursor] = [:]
     ) {
-        var core = ChainCore(tree: root, config: config)
+        var core = ChainCore(tree: consume root, config: config)
         rootPath = core.chainPath
         core = ChainCore(
             tree: core.tree, config: config,
@@ -188,7 +190,7 @@ public struct NodeCore: Sendable {
         self.pins = pins
         self.config = config
         self.logID = logID
-        levels[rootPath] = core
+        levels[rootPath] = consume core
         for path in hosted.sorted(by: Self.order) {
             guard let context = try? ChainRuntimeContext(path: path), serve(path) else { continue }
             levels[path] = ChainCore(
@@ -223,15 +225,16 @@ public struct NodeCore: Sendable {
             specs: [record.spec]
         )
         return try restore(
-            root: restoredRoot, facts: facts, specs: specs, hosted: hosted, pins: pins,
+            root: consume restoredRoot, facts: facts, specs: specs, hosted: hosted, pins: pins,
             config: config, logID: logID, cursors: cursors
         )
     }
 
     /// Rebuild a host over its already restored root level: each hosted
-    /// child level, parent before child, over its facts and specs.
+    /// child level, parent before child, over its facts and specs. The host
+    /// takes the root level over: the caller hands over its only reference.
     public static func restore(
-        root restoredRoot: ChainCore,
+        root restoredRoot: consuming ChainCore,
         facts: [ChainPath: [BlockImportBatch]],
         specs: [ChainPath: [ChainSpec]] = [:],
         hosted: Set<ChainPath>,
@@ -241,7 +244,7 @@ public struct NodeCore: Sendable {
         cursors: [ChainPath: [String: StreamCursor]] = [:]
     ) throws -> NodeCore {
         var host = restoring(
-            root: restoredRoot, hosted: hosted, pins: pins, config: config, logID: logID, cursors: cursors
+            root: consume restoredRoot, hosted: hosted, pins: pins, config: config, logID: logID, cursors: cursors
         )
         for path in host.ordered where path != host.rootPath {
             try host.restoreChild(path, facts: facts[path] ?? [], specs: specs[path] ?? [], cursors: cursors[path] ?? [:])
@@ -252,16 +255,17 @@ public struct NodeCore: Sendable {
     /// Rebuild a host over its already restored root level, reading each
     /// hosted child level's facts and specs from `level` only as that level
     /// is restored, parent before child: one level's facts are held at a
-    /// time.
+    /// time. The host takes the root level over: the caller hands over its
+    /// only reference.
     public static func restore(
-        root restoredRoot: ChainCore,
+        root restoredRoot: consuming ChainCore,
         hosted: Set<ChainPath>,
         config: ChainCoreConfig = ChainCoreConfig(),
         logID: String = "",
         cursors: [ChainPath: [String: StreamCursor]] = [:],
         level: (ChainPath) async throws -> (facts: [BlockImportBatch], specs: [ChainSpec])
     ) async throws -> NodeCore {
-        var host = restoring(root: restoredRoot, hosted: hosted, config: config, logID: logID, cursors: cursors)
+        var host = restoring(root: consume restoredRoot, hosted: hosted, config: config, logID: logID, cursors: cursors)
         for path in host.ordered where path != host.rootPath {
             let (facts, specs) = try await level(path)
             try host.restoreChild(path, facts: facts, specs: specs, cursors: cursors[path] ?? [:])
@@ -272,21 +276,26 @@ public struct NodeCore: Sendable {
     /// A host over its restored root level, its child levels as `init`
     /// leaves them until `restoreChild` restores each.
     private static func restoring(
-        root restoredRoot: ChainCore,
+        root restoredRoot: consuming ChainCore,
         hosted: Set<ChainPath>,
         pins: [ChainPath: String] = [:],
         config: ChainCoreConfig,
         logID: String,
         cursors: [ChainPath: [String: StreamCursor]]
     ) -> NodeCore {
-        NodeCore(
-            root: restoredRoot.tree,
+        let rootLog = restoredRoot.sync.log.entries
+        let rootCursors = cursors[restoredRoot.chainPath] ?? [:]
+        // The tree is handed over alone: the level that held it ends here.
+        let tree = restoredRoot.tree
+        _ = consume restoredRoot
+        return NodeCore(
+            root: consume tree,
             hosted: hosted,
             pins: pins,
             config: config,
             logID: logID,
-            rootLog: restoredRoot.sync.log.entries,
-            rootCursors: cursors[restoredRoot.chainPath] ?? [:]
+            rootLog: rootLog,
+            rootCursors: rootCursors
         )
     }
 
@@ -325,7 +334,8 @@ public struct NodeCore: Sendable {
     public var ordered: [ChainPath] { levels.keys.sorted(by: Self.order) }
 
     /// What a child level's execution reads of its parent: the parent's
-    /// executed set on any branch. A parent level executes its best chain
+    /// executed set on any branch. Read within one step and never held: the
+    /// parent level keeps mutating its tree. A parent level executes its best chain
     /// and the blocks its act-on tip would step into (decision 21): a child
     /// block naming a state it never executed waits, unvalidated, until it
     /// does.
@@ -441,7 +451,7 @@ public struct NodeCore: Sendable {
             case .wakeAt(let time):
                 turn.wake = min(turn.wake ?? time, time)
             case .connect(let job):
-                turn.effects.append(.connect(path, job, parentFacts: parentFacts(for: path)))
+                turn.effects.append(.connect(path, job))
             default:
                 turn.effects.append(.level(path, effect))
             }

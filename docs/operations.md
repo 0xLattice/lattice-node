@@ -547,6 +547,50 @@ Startup fails closed when:
 Do not repair or combine database files by hand. Restore one matched snapshot
 or perform the documented wipe.
 
+## Node-local finality
+
+This is an operator setting. Lattice has no protocol finality, and the
+default is off.
+
+`finalityWindow` in `lattice.json` (`--finality-window`, in blocks; absent or 0
+by default) gives the node its own finality at every level it hosts. It is
+node policy, not a consensus rule: nodes with different windows, or none,
+agree on every block's validity. `finalityWindows` sets chains apart, by chain path, over
+that default: `{"Nexus/Alpha": 500}`, or `--finality-window Nexus/Alpha=500`;
+0 turns it off for that chain.
+
+A header more than the window below a chain's best tip, by height, is
+declined: not stored, not weighed, never blamed, and not asked for again. So
+is new work crediting such a block. A header carries its own height, so an
+orphan is judged on arrival, and a fork from a block deeper than the window
+can never connect. The tip's next height is never past the window, so a chain
+that stalled can always be extended. When the best tip moves to a lower
+height, the window moves down with it: what was declined is forgotten and
+judged again when it next arrives.
+
+A fork `d` blocks deep is at most `2^(d / halfLife)` cheaper than the chain's
+current difficulty, so a window of a few half-lives keeps out every nearly
+free block — the siblings under genesis and the forks from old blocks. Nexus's
+half-life is 120 blocks: a window of 240 caps a fork's discount at about 4×.
+
+The cost is this node's alone: it does not follow a reorganization deeper
+than the window, even a heavier one. A node partitioned or offline for longer
+than its window stays on its side until its operator intervenes, and a miner
+in that state mines the losing side.
+
+Guidance:
+
+- Leave it off on miners, backbones, and nodes that explorers read.
+- A leaf or wallet node that wants bounded storage should use at least 240 on
+  Nexus: 240 blocks is two half-lives (120 blocks each) at a 1 h block time,
+  about 10 days, and a fork 240 deep costs at most about 4× less than the tip. Choose a window far longer than
+  any outage you expect.
+- Give each child chain a window at least as long as its parent's: a parent
+  reorganization can reorganize the child.
+
+`GET /api/chain/info` reports a chain's effective window as `finalityWindow`
+(absent when off).
+
 ## Upgrades and flag days
 
 There are no migrations, compatibility readers, or mixed-version operation.
@@ -579,36 +623,6 @@ prefix. The trace includes absolute chain paths and can grow without bound;
 enable it only for diagnosis and rotate or remove it afterwards.
 
 ## Common failures
-
-
-### Finality window
-
-`finalityWindow` in `lattice.json` (`--finality-window`, in blocks; absent or 0
-by default) gives the node its own finality at every level it hosts. It is
-node policy, not a consensus rule: nodes with different windows, or none,
-agree on every block's validity. `finalityWindows` sets chains apart, by chain path, over
-that default: `{"Nexus/Alpha": 500}`, or `--finality-window Nexus/Alpha=500`;
-0 turns it off for that chain.
-
-A header more than the window below a chain's best tip, by height, is
-declined: not stored, not weighed, never blamed, and not asked for again. So
-is new work crediting such a block. A header carries its own height, so an
-orphan is judged on arrival, and a fork from a block deeper than the window
-can never connect. The tip's next height is never past the window, so a chain
-that stalled can always be extended.
-
-A fork `d` blocks deep is at most `2^(d / halfLife)` cheaper than the chain's
-current difficulty, so a window of a few half-lives keeps out every nearly
-free block — the siblings under genesis and the forks from old blocks. Nexus's
-half-life is 120 blocks: a window of 240 caps a fork's discount at 4×.
-
-The cost is this node's alone: it does not follow a reorganization deeper
-than the window, even a heavier one. A node partitioned or offline for longer
-than its window stays on its side until its operator intervenes, and a miner
-in that state mines the losing side. Choose a window far longer than any
-outage you expect, or leave it off on miners and backbones. Give a child
-chain a window at least as long as its parent's: a parent reorganization can
-reorganize the child.
 
 ### `wipe required`
 
