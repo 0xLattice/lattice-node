@@ -694,13 +694,10 @@ func storing(size target: Int) throws -> Transaction {
             body: header
         )
     }
-    func size(_ transaction: Transaction) throws -> Int {
-        try XCTUnwrap(transaction.toData()).count + XCTUnwrap(transaction.body.node?.toData()).count
-    }
     var length = 0
     for _ in 0..<8 {
         let transaction = try make(length)
-        let measured = try size(transaction)
+        let measured = try XCTUnwrap(transaction.toData()).count + XCTUnwrap(transaction.body.node?.toData()).count
         if measured == target { return transaction }
         length += target - measured
         guard length >= 0 else { break }
