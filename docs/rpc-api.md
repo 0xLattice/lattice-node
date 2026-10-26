@@ -86,6 +86,7 @@ Mining templates are requested at Nexus and can carry every hosted descendant.
 | `GET /api/deposit-state?key=<demander/amount/nonce>` | One deposit key: its locked amount, `0` once withdrawn, or absent; with a state proof | yes |
 | `GET /api/receipt-state?demander=&amount=&nonce=&chainPath=P/D` | The withdrawer a receipt on `P` records for a deposit on `P/D`, with a state proof | yes |
 | `GET /api/mempool` | Bounded mempool listing | yes |
+| `GET /api/fees` | The blocks this node's pool would fill next, for fee pricing | yes |
 | `GET /api/peers?chainPath=P` | The chain's own current peer count: the open sessions that serve it. Without `chainPath`, Nexus's, which is every ready session | yes |
 | `GET /api/chain/info` | Chain metadata | yes |
 | `GET /api/chain/spec` | Active chain spec | yes |
@@ -292,6 +293,41 @@ floor. `GET /api/chain/info` reports this node's as `minRelayFee`.
 [node-local finality](operations.md#node-local-finality) window, in blocks,
 as `finalityWindow`: the operator's `--finality-window` for that chain. It is
 node policy, never consensus, and is absent when off (the default).
+
+### Fee pricing
+
+`GET /api/fees` projects the next blocks (up to 12) this node's pool would
+fill if nothing else arrived, as this node's builder fills them: ready
+transactions in template order (packages by fee per byte, a transaction with
+its signer's earlier pooled nonces), each block taking them until one does
+not fit the chain's transaction count or `maxBlockSize`. A package may
+straddle two blocks; a block's rate is the lowest of the packages it carries
+any of. It is recomputed on each new tip and, while the pool changes, at most
+once a second.
+
+```json
+{
+  "minRelayFee": "1",
+  "blocks": [
+    { "transactionCount": 5000, "bytes": 912000, "lowestFee": "40", "lowestFeeBytes": 380, "full": true },
+    { "transactionCount": 1200, "bytes": 230000, "lowestFee": "1", "lowestFeeBytes": 350, "full": false }
+  ]
+}
+```
+
+A block is `full` when ready transactions were left for a later one. While
+none is full (or `blocks` is empty), a fee at the floor makes the next block.
+To be in the first `k` blocks when block `k` is full, a transaction of `size`
+bytes pays more than `lowestFee * size / lowestFeeBytes` of that block.
+
+This is an estimate from one node's pool, not a promise: only transaction
+bytes are counted, while a block's own structure (which grows with its
+transaction count) shares `maxBlockSize`, so a block of many small
+transactions holds fewer than projected; other miners may fill gaps with
+smaller packages, other pools differ, and new transactions arrive. On a child
+chain, a transaction only the parent's state makes executable is not
+projected, though a template may carry it. Fees above `UInt64` never occur
+for funded packages.
 
 ## Transaction inclusion
 

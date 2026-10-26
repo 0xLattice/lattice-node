@@ -77,6 +77,32 @@ public struct MempoolLimits: Sendable, Equatable {
     }
 }
 
+/// One block of `Mempool.projectedBlocks`.
+public struct ProjectedBlock: Sendable, Equatable {
+    public let transactionCount: Int
+    /// Transaction size it carries (envelope plus body, as the pool measures).
+    public let bytes: Int
+    /// Its lowest-rate package: the verified fee over its size in bytes. A
+    /// transaction paying a higher rate would have been taken before it.
+    public let lowestFee: WorkSum
+    public let lowestFeeBytes: Int
+    /// Whether ready transactions were left for a later block.
+    public let full: Bool
+
+    /// One more transaction of `size` bytes, from a package of rate `fee` over `packageSize`.
+    func adding(_ size: Int, fee: WorkSum, packageSize: Int) -> ProjectedBlock {
+        let lower = Mempool.lowerRate(fee, packageSize, than: lowestFee, lowestFeeBytes)
+        return ProjectedBlock(
+            transactionCount: transactionCount + 1, bytes: bytes + size,
+            lowestFee: lower ? fee : lowestFee, lowestFeeBytes: lower ? packageSize : lowestFeeBytes, full: full
+        )
+    }
+
+    func closed() -> ProjectedBlock {
+        ProjectedBlock(transactionCount: transactionCount, bytes: bytes, lowestFee: lowestFee, lowestFeeBytes: lowestFeeBytes, full: true)
+    }
+}
+
 /// The transaction pool of one level as a value: no IO, no awaits. The same
 /// admission, replacement and eviction rules as the shell's `TransactionPool`
 /// actor, over transactions whose content is already resolved; templates
@@ -282,6 +308,40 @@ public struct Mempool: Sendable {
         selected(limit: limit, maxBytes: maxBytes, includesUnavailable: true)
     }
 
+    /// The next `count` blocks this pool would fill if nothing else arrived,
+    /// as this node's builder fills them: transactions in template order,
+    /// each block taking them until one does not fit in `transactionLimit`
+    /// transactions or `maxBytes` of transaction size, so a package may
+    /// straddle two blocks. A block's rate is the lowest of the packages it
+    /// carries any of. An estimate for fee pricing, not a template: the
+    /// block's own structure, which grows with its transaction count, shares
+    /// `maxBytes`, and other miners may fill gaps with smaller packages.
+    /// Empty when nothing is ready.
+    public func projectedBlocks(count: Int, transactionLimit: Int, maxBytes: Int) -> [ProjectedBlock] {
+        guard count > 0, transactionLimit > 0, maxBytes > 0 else { return [] }
+        var blocks: [ProjectedBlock] = []
+        var current: ProjectedBlock?
+        _ = selected(limit: .max, maxBytes: .max, includesUnavailable: false) { members, fee, size in
+            for entry in members {
+                if let block = current,
+                   block.transactionCount < transactionLimit, entry.size <= maxBytes - block.bytes {
+                    current = block.adding(entry.size, fee: fee, packageSize: size)
+                    continue
+                }
+                if let block = current {
+                    blocks.append(block.closed())
+                    if blocks.count == count { return false }
+                }
+                // Admission caps a transaction at the block size, so one
+                // always fits an empty block.
+                current = ProjectedBlock(transactionCount: 1, bytes: entry.size, lowestFee: fee, lowestFeeBytes: size, full: false)
+            }
+            return true
+        }
+        if let current, blocks.count < count { blocks.append(current) }
+        return blocks
+    }
+
     /// Packages that fail to fit, in a row, before selection gives up on a
     /// nearly full template (Bitcoin Core's `MAX_CONSECUTIVE_FAILURES`).
     static let maxConsecutiveMisses = 1_000
@@ -309,8 +369,15 @@ public struct Mempool: Sendable {
     /// entry again, and its run offers its next best. Equal rates break by
     /// the smaller CID of the package's last entry, so the order is
     /// deterministic. Runs keep their first offer as the pool changes, so the
-    /// work is in the packages taken, not the pool.
-    private func selected(limit: Int, maxBytes: Int, includesUnavailable: Bool) -> [Transaction] {
+    /// work is in the packages taken, not the pool. `visit`, when given,
+    /// sees each package as it is taken (its members, fee and size) and ends
+    /// selection by returning false.
+    private func selected(
+        limit: Int,
+        maxBytes: Int,
+        includesUnavailable: Bool,
+        visit: ((_ members: [Entry], _ fee: WorkSum, _ size: Int) -> Bool)? = nil
+    ) -> [Transaction] {
         guard limit > 0, maxBytes > 0 else { return [] }
 
         // Each run's counted entries and where what is left of it starts.
@@ -335,6 +402,7 @@ public struct Mempool: Sendable {
                 let members = package.members.compactMap { entries[$0] }
                 result.append(contentsOf: members.map(\.transaction))
                 bytes += package.size
+                if let visit, !visit(members, package.fee, package.size) { break }
                 runs[top.run].start += members.count
             } else {
                 skipped.insert(package.tip)
@@ -479,6 +547,11 @@ public struct Mempool: Sendable {
         chains[key, default: Chain()].runs[head] = Run(
             members: run.map(\.cid), first: first, ready: ready, contextual: contextual
         )
+    }
+
+    /// Whether `fee` over `size` is a lower rate than `otherFee` over `otherSize`, exactly.
+    static func lowerRate(_ fee: WorkSum, _ size: Int, than otherFee: WorkSum, _ otherSize: Int) -> Bool {
+        Chunk(members: [], fee: fee, size: size).rate(comparedTo: Chunk(members: [], fee: otherFee, size: otherSize)) < 0
     }
 
     /// A package on offer: the best prefix of what is left of run `run`.
