@@ -725,6 +725,41 @@ final class NodeRuntimeTests: XCTestCase {
         await runtime.stop()
     }
 
+    /// `GET /api/chain/info` reports each chain's effective finality window,
+    /// as a decimal string, and omits it when off (the default).
+    func testChainInfoReportsTheEffectiveFinalityWindow() async throws {
+        func info(_ finality: FinalityWindows, chainPath: [String]) async throws -> [String: Any] {
+            let configuration = try NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: temporaryDirectory(prefix: "lattice-finality-info"),
+                privateKeyHex: String(repeating: "39", count: 32),
+                finality: finality
+            )
+            let storage = try await NodeStorage.open(configuration: configuration)
+            let reads = ChainReads(
+                storage: storage,
+                chainPath: chainPath,
+                tip: { ChainStatus(
+                    phase: .active, chainPath: chainPath, nexusGenesisCID: configuration.nexusGenesisCID,
+                    tipCID: nil, height: nil, revision: nil
+                ) },
+                canonicalCID: { _ in nil },
+                mempool: { _ in ChainReads.MempoolListing(count: 0, bytes: 0, cids: []) }
+            )
+            let data = try JSONEncoder().encode(await reads.explorerChainInfo())
+            return try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        }
+        let child = ["Nexus", "Alpha"]
+        let off = try await info(FinalityWindows(), chainPath: ["Nexus"])
+        XCTAssertNil(off["finalityWindow"], "absent by default")
+        XCTAssertEqual(off["minRelayFee"] as? String, "0")
+        let windows = FinalityWindows(all: 240, byChain: [child: nil])
+        let nexus = try await info(windows, chainPath: ["Nexus"])
+        XCTAssertEqual(nexus["finalityWindow"] as? String, "240")
+        let alpha = try await info(windows, chainPath: child)
+        XCTAssertNil(alpha["finalityWindow"], "turned off for this chain")
+    }
+
     private static func block(_ block: Block, nonce: UInt64) -> Block {
         Block(
             version: block.version,
