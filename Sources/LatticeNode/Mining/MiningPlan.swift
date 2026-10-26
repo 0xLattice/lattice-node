@@ -101,10 +101,9 @@ enum MiningPlan {
     /// Policies may read the carrying block's height and timestamp, which a
     /// pool verdict (taken against the tip, at its own time) did not see. Offer
     /// only transactions the policies accept for THIS template; a skipped one
-    /// stays pooled until it passes or a tip change evicts it.
-    ///
-    /// In pool order, and no more than a block can carry: a template judges a
-    /// block's worth of transactions, not the whole pool.
+    /// stays pooled until it passes or the pool's periodic policy re-check
+    /// (`MiningConfig.policyRecheckInterval`) evicts it. Root and child
+    /// templates alike: the pool's own verdicts are not taken at this height.
     static func policyAcceptedTransactions(
         _ transactions: [Transaction],
         chainPath: [String],
@@ -118,7 +117,6 @@ enum MiningPlan {
         guard !overflow else { return [] }
         var accepted: [Transaction] = []
         for transaction in transactions {
-            guard UInt64(accepted.count) < spec.maxNumberOfTransactionsPerBlock else { break }
             guard let body = try? await transaction.body.resolve(fetcher: fetcher).node,
                   (try? await TransactionBody.batchVerifyPolicies(
                       bodies: [body],

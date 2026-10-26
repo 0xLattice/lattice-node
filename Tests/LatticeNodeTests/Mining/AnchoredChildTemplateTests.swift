@@ -465,6 +465,62 @@ final class AnchoredChildTemplateTests: XCTestCase {
         XCTAssertEqual(tip?.tip, fixture.a2.cid)
     }
 
+    /// The pool's verdicts were taken at another height, so a child template
+    /// judges what it carries by the child's policies, at its own height,
+    /// as the root template does: a transaction they refuse is left out, not
+    /// mined into a block every validator rejects.
+    func testAChildTemplateCarriesOnlyWhatItsPoliciesAccept() async throws {
+        for (verdict, carried) in [(UInt8(0), 0), (1, 1)] {
+            var builder = try await LevelWorld.Builder(levels: 2)
+            let module = WasmPolicyModule(bytes: Self.policyModule(verdict: verdict))
+            let header = try WasmPolicyModuleHeader(node: module)
+            try await header.storeRecursively(storer: builder.cas as any VolumeStorer)
+            let base = LevelWorld.specFor(Self.alpha)
+            builder.specs[Self.alpha] = ChainSpec(
+                maxNumberOfTransactionsPerBlock: base.maxNumberOfTransactionsPerBlock,
+                maxStateGrowth: base.maxStateGrowth, premine: base.premine,
+                targetBlockTime: base.targetBlockTime, initialReward: base.initialReward,
+                halvingInterval: base.halvingInterval, halfLife: base.halfLife,
+                wasmPolicies: [WasmPolicyRef(moduleCID: header.rawCID, scope: .transaction)]
+            )
+            let t = World.genesisTime
+            let interval = LevelWorld.interval
+            let genesis = try XCTUnwrap(builder.geneses[Self.nexus])
+            let n0 = try await builder.grind(on: genesis, carrying: [], at: t + interval / 2, outcome: .block).root
+            let g = try await builder.childGenesis(Self.alpha, parentState: n0.block.postState.rawCID, at: t + interval)
+            let n1 = try await builder.grind(on: n0, carrying: [(Self.alpha, g)], at: t + interval, outcome: .block).root
+            var host = Host(builder.world())
+            await host.feed(builder.grinds)
+            XCTAssertEqual(host.alpha.snapshot.actOnTip, g.cid, "fixture: Alpha executed its genesis")
+
+            let block = try await candidate(
+                input(host, transactions: [try Self.nonceSpend(1, on: Self.alpha)]), levels: levels(host),
+                entering: n1, timestamp: t + 2 * interval, cas: host.cas
+            )
+            let count = try await transactionCount(block, host.cas)
+            XCTAssertEqual(count, carried, "policy verdict \(verdict)")
+        }
+    }
+
+    /// A WASM policy module that gives `verdict` for every transaction.
+    private static func policyModule(verdict: UInt8) -> Data {
+        func section(_ id: UInt8, _ body: [UInt8]) -> [UInt8] { [id, UInt8(body.count)] + body }
+        func export(_ name: String, kind: UInt8, index: UInt8) -> [UInt8] {
+            [UInt8(name.utf8.count)] + Array(name.utf8) + [kind, index]
+        }
+        var exports: [UInt8] = [0x03]
+        exports += export("memory", kind: 2, index: 0)
+        exports += export("lattice_alloc", kind: 0, index: 0)
+        exports += export("lattice_validate_transaction", kind: 0, index: 1)
+        var module: [UInt8] = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]
+        module += section(1, [0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f])
+        module += section(3, [0x02, 0x00, 0x01])
+        module += section(5, [0x01, 0x00, 0x01])
+        module += section(7, exports)
+        module += section(10, [0x02, 0x05, 0x00, 0x41, 0x80, 0x08, 0x0b, 0x04, 0x00, 0x41, verdict, 0x0b])
+        return Data(module)
+    }
+
     /// A carrier on A2 (the branch a2 is anchored on): the act-on tip is
     /// accepted, and the template carries the pool.
     func testAnActOnTipWhoseAnchorAdvancesIsBuiltOnWithThePool() async throws {

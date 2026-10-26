@@ -876,9 +876,13 @@ extension NodeRuntime {
                     of: input.path, among: inputs, entering: previous.postState, timestamp: time,
                     request: request, levels: levels, fetcher: fetcher
                 )
+                let pooled = below ? [] : await MiningPlan.policyAcceptedTransactions(
+                    input.transactions, chainPath: input.path, previous: previous, timestamp: time,
+                    spec: spec, fetcher: fetcher
+                )
                 block = try? await MiningTemplateAssembly.fit(
                     chainPath: input.path, lifetime: .seconds(30), previous: previous,
-                    pooled: below ? [] : input.transactions, provided: grandchildren, parentCarrier: carrier,
+                    pooled: pooled, provided: grandchildren, parentCarrier: carrier,
                     timestamp: time, rewardRecipient: request.childRecipients[input.path],
                     minimumWork: request.minimumWork,
                     difficultyAnchor: below ? anchorBelow : input.anchor,

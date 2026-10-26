@@ -55,9 +55,10 @@ public struct TipMove: Sendable {
 /// more than one tip's worth of preflights.
 ///
 /// `checksPolicies` is false only for a transaction the pool already holds
-/// as ready: the chain's policies accepted it then, and a template judges it
-/// by them again at the height that would carry it. So a tip move costs the
-/// pool its state checks, not a policy evaluation per pooled transaction.
+/// as ready, between `MiningConfig.policyRecheckInterval` moves: the chain's
+/// policies accepted it then, and every template, root or child, judges it
+/// by them again at the height that would carry it. So most tip moves cost
+/// the pool its state checks, not a policy evaluation per pooled transaction.
 public struct PreflightJob: Sendable {
     public let cid: String
     public let transaction: Transaction
@@ -209,6 +210,12 @@ public struct MiningConfig: Sendable {
     public var maxReissues: Int
     /// Template requests waiting on a build.
     public var maxWaitingTemplateRequests: Int
+    /// Every this many tip moves, the pool's ready transactions are judged
+    /// by the chain's policies again; between, a tip move checks only their
+    /// state. A policy that reads the height or time can refuse what it once
+    /// accepted: templates never carry it, and this bounds how long it stays
+    /// pooled. At least 1 (every move).
+    public var policyRecheckInterval: UInt64
     public var mempool: MempoolLimits
     public var templateLifetime: Int64
     public var templateCapacity: Int
@@ -220,10 +227,12 @@ public struct MiningConfig: Sendable {
         maxPendingSubmitted: Int = 256,
         maxReissues: Int = 3,
         maxWaitingTemplateRequests: Int = 64,
+        policyRecheckInterval: UInt64 = 16,
         mempool: MempoolLimits = MempoolLimits(),
         templateLifetime: Int64 = 30_000,
         templateCapacity: Int = 16
     ) {
+        self.policyRecheckInterval = max(1, policyRecheckInterval)
         self.maxPendingPeerAdmissions = maxPendingPeerAdmissions
         self.maxPendingPerPeer = maxPendingPerPeer
         self.maxPendingReturned = maxPendingReturned
@@ -273,6 +282,22 @@ public struct MiningState: Sendable {
         var reissues = 0
     }
 
+    private struct NonceSlot: Hashable {
+        let signer: String
+        let nonce: UInt64
+
+        init(signer: String, nonce: UInt64) {
+            self.signer = signer
+            self.nonce = nonce
+        }
+
+        init?(_ transaction: Transaction) {
+            guard let body = transaction.body.node, let signer = body.signers.first else { return nil }
+            self.signer = signer
+            nonce = body.nonce
+        }
+    }
+
     /// A template request waiting on a build, and the tip moves it has waited
     /// through.
     private struct Waiting {
@@ -282,6 +307,9 @@ public struct MiningState: Sendable {
 
     /// Transactions awaiting a verdict before admission.
     private var admissions: [String: Admission] = [:]
+    /// The admissions' first-signer nonce slots, so a future transaction can
+    /// follow one still awaiting its verdict.
+    private var admittingNonces: [NonceSlot: Int] = [:]
     /// Transactions with a preflight outstanding on the current tip epoch.
     private var preflighting: Set<String> = []
     /// Pooled transactions in the local journal.
@@ -444,12 +472,32 @@ public struct MiningState: Sendable {
     private mutating func open(_ cid: String, _ admission: Admission) {
         admissions[cid] = admission
         count(admission.slot, 1)
+        if let slot = NonceSlot(admission.transaction) { admittingNonces[slot, default: 0] += 1 }
     }
 
     private mutating func close(_ cid: String) -> Admission? {
         guard let admission = admissions.removeValue(forKey: cid) else { return nil }
         count(admission.slot, -1)
+        if let slot = NonceSlot(admission.transaction) {
+            let remaining = (admittingNonces[slot] ?? 1) - 1
+            admittingNonces[slot] = remaining == 0 ? nil : remaining
+        }
         return admission
+    }
+
+    /// Whether a future transaction follows one this node holds: its first
+    /// signer's previous nonce is pooled or awaiting its verdict. Only such a
+    /// future is kept (geth instead admits gaps and bounds them with a
+    /// balance check, a pool-wide queue cap and an expiry). A future's fee is
+    /// not funding-checked, so a gapped one is free to send; one that follows
+    /// a held transaction hangs off a ready one whose funds were checked. A
+    /// wallet sends its nonces in order, so it never sends a gap; a future
+    /// that arrives before its predecessor is refused and must be sent again.
+    private func followsHeld(_ transaction: Transaction) -> Bool {
+        guard let slot = NonceSlot(transaction), slot.nonce > 0 else { return false }
+        let previous = slot.nonce - 1
+        return mempool.holds(signer: slot.signer, nonce: previous)
+            || admittingNonces[NonceSlot(signer: slot.signer, nonce: previous)] != nil
     }
 
     private mutating func preflight(
@@ -472,10 +520,17 @@ public struct MiningState: Sendable {
         // job on the new tip.
         guard job.tipEpoch == tipEpoch else { return }
         preflighting.remove(job.cid)
+        // A future with a gap before it is refused, or leaves the pool when
+        // what it followed has gone (`followsHeld`).
+        let gapped = disposition == .future && !followsHeld(job.transaction)
         if let admission = close(job.cid) {
+            if gapped {
+                refuse(admission.origins, cid: job.cid, .nonceGap, verdict: false, &turn)
+                return
+            }
             admit(admission, cid: job.cid, disposition, now: now, &turn)
         } else {
-            let mutation = mempool.reclassify(job.cid, as: disposition)
+            let mutation = mempool.reclassify(job.cid, as: gapped ? .invalid : disposition)
             departed(mutation, &turn)
         }
     }
@@ -638,8 +693,9 @@ public struct MiningState: Sendable {
         // still out will be dropped, and each is issued again here. The
         // move confirmed first, so no verdict refuses what it carries.
         preflighting.removeAll()
+        let rejudges = tipEpoch % config.policyRecheckInterval == 0
         for item in mempool.items {
-            preflight(item.cid, item.transaction, checksPolicies: item.disposition != .ready, &turn)
+            preflight(item.cid, item.transaction, checksPolicies: rejudges || item.disposition != .ready, &turn)
         }
         for (cid, admission) in admissions.sorted(by: { $0.key < $1.key }) {
             preflight(cid, admission.transaction, &turn)
