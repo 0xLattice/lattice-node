@@ -22,6 +22,10 @@ let package = Package(
             name: "lattice",
             targets: ["LatticeCtl"]
         ),
+        .executable(
+            name: "lattice-sponsor",
+            targets: ["LatticeSponsor"]
+        ),
     ],
     dependencies: [
         .package(
@@ -155,6 +159,26 @@ let package = Package(
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]),
+        .target(
+            name: "LatticeSponsorCore",
+            dependencies: [
+                "LatticeMinerCore",
+                .product(name: "Lattice", package: "lattice"),
+                .product(name: "UInt256", package: "UInt256"),
+            ]),
+        .executableTarget(
+            name: "LatticeSponsor",
+            dependencies: [
+                "LatticeNode",
+                "LatticeMinerCore",
+                "LatticeMiningCoordinator",
+                "LatticeSponsorCore",
+                .product(name: "Lattice", package: "lattice"),
+                .product(name: "cashew", package: "cashew"),
+                .product(name: "UInt256", package: "UInt256"),
+                .product(name: "Hummingbird", package: "hummingbird"),
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ]),
         .executableTarget(
             name: "LatticeMiner",
             dependencies: [
@@ -215,6 +239,15 @@ let package = Package(
             dependencies: [
                 "LatticeMinerCore",
                 .product(name: "Lattice", package: "lattice"),
+            ]),
+        .testTarget(
+            name: "LatticeSponsorCoreTests",
+            dependencies: [
+                "LatticeSponsorCore",
+                "LatticeMinerCore",
+                .product(name: "Lattice", package: "lattice"),
+                .product(name: "cashew", package: "cashew"),
+                .product(name: "UInt256", package: "UInt256"),
             ]),
         .testTarget(
             name: "LatticeMiningCoordinatorTests",

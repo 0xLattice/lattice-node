@@ -19,6 +19,8 @@ public struct WorkTemplate: Sendable {
     public let expiresAt: Int64
     /// What the build read (its tip and pool): see `TemplateBuild.digest`.
     public let digest: String
+    /// See `TemplateBuild.chains`.
+    public let chains: [TemplateChain]
 
     public init(
         workID: String,
@@ -28,7 +30,8 @@ public struct WorkTemplate: Sendable {
         tipCID: String,
         poolVersion: UInt64,
         expiresAt: Int64,
-        digest: String = ""
+        digest: String = "",
+        chains: [TemplateChain] = []
     ) {
         self.workID = workID
         self.block = block
@@ -38,6 +41,7 @@ public struct WorkTemplate: Sendable {
         self.poolVersion = poolVersion
         self.expiresAt = expiresAt
         self.digest = digest
+        self.chains = chains
     }
 }
 

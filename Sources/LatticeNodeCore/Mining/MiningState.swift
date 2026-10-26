@@ -120,6 +120,20 @@ public struct TemplateJob: Sendable {
     public let request: TemplateRequest
 }
 
+/// One block a template commits: its chain, its committed target and its
+/// height.
+public struct TemplateChain: Sendable, Equatable {
+    public let chainPath: [String]
+    public let target: UInt256
+    public let height: UInt64
+
+    public init(chainPath: [String], target: UInt256, height: UInt64) {
+        self.chainPath = chainPath
+        self.target = target
+        self.height = height
+    }
+}
+
 /// What a template job assembled.
 public struct TemplateBuild: Sendable {
     public let workID: String
@@ -129,13 +143,19 @@ public struct TemplateBuild: Sendable {
     /// What the template was built from (its tip and pool), for a miner to
     /// compare with the node's current digest.
     public let digest: String
+    /// Every block a nonce for it commits, the root first.
+    public let chains: [TemplateChain]
 
-    public init(workID: String, block: Block, searchTarget: UInt256, targets: [UInt256], digest: String = "") {
+    public init(
+        workID: String, block: Block, searchTarget: UInt256, targets: [UInt256], digest: String = "",
+        chains: [TemplateChain] = []
+    ) {
         self.workID = workID
         self.block = block
         self.searchTarget = searchTarget
         self.targets = targets
         self.digest = digest
+        self.chains = chains
     }
 }
 
@@ -724,7 +744,8 @@ public struct MiningState: Sendable {
             tipCID: job.tipCID,
             poolVersion: job.poolVersion,
             expiresAt: now + templates.lifetime,
-            digest: build.digest
+            digest: build.digest,
+            chains: build.chains
         ), now: now)
         for entry in waiting.replies {
             turn.replies.append(.templateIssued(replyID: entry.replyID, issued))
