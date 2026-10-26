@@ -290,7 +290,7 @@ actor Sponsor {
                 / SponsorLedger.unit
             return ShareResponse(credit: units > UInt256(UInt64.max) ? .max : UInt64(units.words[0]))
         }
-        return (credited, ledger.block(assignment: assignment, nonce: nonce, hash: hash))
+        return (credited, ledger.block(assignment: assignment, nonce: nonce, hash: hash, now: now()))
     }
 
     func sponsor(client: String, draft: TransactionBody) throws -> SponsorResponse {

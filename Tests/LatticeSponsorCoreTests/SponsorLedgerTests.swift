@@ -97,9 +97,10 @@ final class SponsorLedgerTests: XCTestCase {
     func testAShareClearingTheSubmitTargetIsABlock() throws {
         var ledger = ledger()
         let a = try ledger.assign(client: "a", on: nexus, now: 0)
-        XCTAssertNil(ledger.block(assignment: a.id, nonce: 1, hash: target(205)))
-        XCTAssertEqual(ledger.block(assignment: a.id, nonce: 2, hash: target(203)), "w1", "a Market block is a block")
-        XCTAssertNil(ledger.block(assignment: a.id, nonce: 2, hash: target(203)), "a replay is never resubmitted")
+        XCTAssertNil(ledger.block(assignment: a.id, nonce: 1, hash: target(205), now: 1))
+        XCTAssertEqual(ledger.block(assignment: a.id, nonce: 2, hash: target(203), now: 1), "w1", "a Market block is a block")
+        XCTAssertNil(ledger.block(assignment: a.id, nonce: 2, hash: target(203), now: 1), "a replay is never resubmitted")
+        XCTAssertNil(ledger.block(assignment: a.id, nonce: 3, hash: target(203), now: 30_000), "the work has expired")
     }
 
     /// A share refused credit is still the sponsor's block when it clears the
@@ -111,7 +112,7 @@ final class SponsorLedgerTests: XCTestCase {
         XCTAssertThrowsError(try ledger.credit(assignment: a.id, nonce: 0, hash: target(203), now: 1)) {
             XCTAssertEqual($0 as? SponsorRefusal, .expired)
         }
-        XCTAssertEqual(ledger.block(assignment: a.id, nonce: 0, hash: target(203)), "w1")
+        XCTAssertEqual(ledger.block(assignment: a.id, nonce: 0, hash: target(203), now: 1), "w1")
     }
 
     func testAShareIsWorthItsChanceOfTheChainsBlockTimesItsReward() {

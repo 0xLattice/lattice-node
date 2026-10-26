@@ -259,9 +259,9 @@ public struct SponsorLedger: Sendable {
     /// credit: a share the client is not credited for (its chain sold out or
     /// moved on) can still be the sponsor's block on another chain, and the
     /// node judges it.
-    public mutating func block(assignment id: String, nonce: UInt64, hash: UInt256) -> String? {
+    public mutating func block(assignment id: String, nonce: UInt64, hash: UInt256, now: Int64) -> String? {
         guard let assignment = assignments[id], let template = templates[assignment.workID],
-              hash <= template.submitTarget,
+              now < template.expiresAt, hash <= template.submitTarget,
               submitted.insert(ShareKey(workID: template.workID, nonce: nonce)).inserted else { return nil }
         return template.workID
     }
