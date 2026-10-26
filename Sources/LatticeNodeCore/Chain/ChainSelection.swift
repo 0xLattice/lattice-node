@@ -21,11 +21,6 @@ public struct ChainSnapshot: Sendable, Equatable {
 }
 
 extension ChainCore {
-    /// The best chain's genesis root, if any.
-    static func bestRoot(of tree: ChainTree) -> [String] {
-        tree.canonicalBlockHash(atHeight: 0).map { [$0] } ?? []
-    }
-
     /// The mempool's starting tip: the act-on tip.
     static func miningTip(of tree: ChainTree) -> String {
         tree.heaviestExecutedTip()
@@ -79,11 +74,10 @@ extension ChainCore {
     }
 
     /// The spec of the act-on tip's genesis root: what the mempool measures
-    /// transactions by. Nil while no root is executed.
+    /// transactions by. Every block carries its parent's spec (spec §5.1),
+    /// so it is the act-on tip's own. Nil while no root is executed.
     static func actOnSpec(of tree: ChainTree) -> ChainSpec? {
-        tree.canonicalBlockHash(atHeight: 0)
-            .flatMap { tree.isExecuted(blockHash: $0) ? tree.headerSnapshot(of: $0)?.specCID : nil }
-            .flatMap { tree.specs[$0] }
+        tree.headerSnapshot(of: tree.heaviestExecutedTip()).flatMap { tree.specs[$0.specCID] }
     }
 
     public var snapshot: ChainSnapshot {

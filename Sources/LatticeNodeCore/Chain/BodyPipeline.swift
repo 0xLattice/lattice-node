@@ -108,21 +108,24 @@ extension ChainCore {
     /// The unexecuted blocks the act-on descent would step into once
     /// executed, heaviest first: every child of the act-on tip, and at each
     /// fork above it the children heavier than the executed one it took.
+    /// The genesis roots are a fork like any other: while the best chain's
+    /// root is not executed, the walk starts there.
     /// The cost: at a fork, each child that arrives heavier than those
     /// executed before it is executed too, so of three or more arriving
     /// lightest first more than one is stale. A stale sibling's descendants
     /// are never fetched unless it becomes the tip.
     var forkChildren: [String] {
         var wanted: [String] = []
-        var fork = tree.executedPrefix().hash
-        while !fork.isEmpty {
-            let children = Self.byWeight(tree.children(of: fork).filter {
+        let prefix = tree.executedPrefix().hash
+        var candidates = prefix.isEmpty ? tree.genesisRoots : tree.children(of: prefix)
+        while true {
+            let children = Self.byWeight(candidates.filter {
                 tree.isExecuted(blockHash: $0) || !tree.isExcludedRoot($0)
             }, in: tree)
             wanted += children.prefix { !tree.isExecuted(blockHash: $0) }
-            fork = children.first(where: tree.isExecuted(blockHash:)) ?? ""
+            guard let fork = children.first(where: tree.isExecuted(blockHash:)) else { return wanted }
+            candidates = tree.children(of: fork)
         }
-        return wanted
     }
 
     /// The content layer has the body of `cid` locally. Only a body the
