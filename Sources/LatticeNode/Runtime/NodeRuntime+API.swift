@@ -326,7 +326,8 @@ extension NodeRuntime {
             targets: template.targets,
             chainPath: chainPath,
             expiresInMilliseconds: UInt64(remaining),
-            templateDigest: template.digest
+            templateDigest: template.digest,
+            chains: template.chains.map(TemplateChainBlock.init)
         )
     }
 
@@ -737,6 +738,9 @@ extension NodeRuntime {
                         $0.transactions.compactMap { try? Mempool.cid(of: $0) }
                     )
                 }
+            ),
+            chains: await MiningTemplateAssembly.committedChains(
+                root: template.block, chainPath: chainPath, fetcher: fetcher
             )
         )
     }

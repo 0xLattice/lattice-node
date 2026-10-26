@@ -1,5 +1,6 @@
 import Foundation
 import Lattice
+import LatticeNodeCore
 import UInt256
 
 public struct SubmitTransactionRequest: Codable, Sendable {
@@ -138,6 +139,9 @@ public struct MiningTemplateResponse: Codable, Sendable {
     /// A miner compares this with the status route's digest to learn its work
     /// is stale.
     public let templateDigest: String
+    /// Every block a nonce for this work commits, the root first. Absent
+    /// from older nodes.
+    public let chains: [TemplateChainBlock]?
 
     init(
         workID: String,
@@ -146,7 +150,8 @@ public struct MiningTemplateResponse: Codable, Sendable {
         targets: [UInt256],
         chainPath: [String],
         expiresInMilliseconds: UInt64,
-        templateDigest: String
+        templateDigest: String,
+        chains: [TemplateChainBlock]
     ) {
         self.workID = workID
         self.block = block
@@ -155,6 +160,7 @@ public struct MiningTemplateResponse: Codable, Sendable {
         self.chainPath = chainPath
         self.expiresInMilliseconds = expiresInMilliseconds
         self.templateDigest = templateDigest
+        self.chains = chains
     }
 
     init(
@@ -168,9 +174,35 @@ public struct MiningTemplateResponse: Codable, Sendable {
         searchTarget = template.searchTarget
         targets = template.targets
         chainPath = template.chainPath
+        chains = []
         expiresInMilliseconds = min(
             maximumLifetimeMilliseconds,
             template.remainingLifetimeMilliseconds
+        )
+    }
+}
+
+/// One block a template commits: its chain, its committed target, its
+/// height, and the address it pays (nil burns its reward). The work is
+/// searched to the template's `searchTarget`, which no taken hash exceeds,
+/// so a hash makes this block only when it clears both.
+public struct TemplateChainBlock: Codable, Sendable, Equatable {
+    public let chainPath: [String]
+    public let target: UInt256
+    @DecimalString public var height: UInt64
+    public let rewardRecipient: String?
+
+    public init(chainPath: [String], target: UInt256, height: UInt64, rewardRecipient: String?) {
+        self.chainPath = chainPath
+        self.target = target
+        self.height = height
+        self.rewardRecipient = rewardRecipient
+    }
+
+    init(_ chain: TemplateChain) {
+        self.init(
+            chainPath: chain.chainPath, target: chain.target, height: chain.height,
+            rewardRecipient: chain.rewardRecipient
         )
     }
 }

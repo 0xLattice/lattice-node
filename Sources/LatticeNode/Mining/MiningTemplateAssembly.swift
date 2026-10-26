@@ -2,6 +2,7 @@ import Crypto
 import Foundation
 import Ivy
 import Lattice
+import LatticeNodeCore
 import UInt256
 import cashew
 
@@ -285,6 +286,32 @@ enum MiningTemplateAssembly {
             thresholds: scheduling.thresholds
         )
         return template
+    }
+
+    /// Every block a nonce for `root` commits: the root and each block its
+    /// child indexes carry, at any depth, with its committed target, height
+    /// and recipient. A child whose content cannot be read here is left out,
+    /// so a reader never counts on a block the work may not carry. The
+    /// committed target is not what the work is searched to: no hash above
+    /// the template's search target is taken.
+    static func committedChains(
+        root: Block,
+        chainPath: [String],
+        fetcher: any Fetcher
+    ) async -> [TemplateChain] {
+        var chains: [TemplateChain] = []
+        var frontier: [(block: Block, path: [String])] = [(root, chainPath)]
+        while let (block, path) = frontier.popLast() {
+            chains.append(TemplateChain(
+                chainPath: path, target: block.target, height: block.height, rewardRecipient: block.rewardRecipient
+            ))
+            guard let children = try? await block.children.resolve(fetcher: fetcher).node else { continue }
+            for (directory, child) in children.entries.sorted(by: { $0.key > $1.key }) {
+                guard let node = try? await child.resolve(fetcher: fetcher).node else { continue }
+                frontier.append((node, path + [directory]))
+            }
+        }
+        return chains
     }
 
     /// Blocks never differ by the miner's filter, so the block CID alone would
