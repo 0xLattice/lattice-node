@@ -291,7 +291,7 @@ public struct ChainCore: Sendable {
 
     /// A core over a bootstrapped, restored or empty tree, with its weigh
     /// log and the per-peer stream cursors the shell persisted. `roots` are
-    /// the tree's genesis roots (default: its best chain's). A node whose
+    /// the tree's genesis roots (default: all it holds). A node whose
     /// store resets passes a new log id.
     public init(
         tree: ChainTree,
@@ -301,7 +301,7 @@ public struct ChainCore: Sendable {
         cursors: [String: StreamCursor] = [:]
     ) {
         precondition(tree.context != nil, "the core runs one chain's level")
-        var stack = roots ?? Self.bestRoot(of: tree)
+        var stack = roots ?? tree.genesisRoots
         while let hash = stack.popLast() {
             guard let meta = tree.getConsensusBlock(hash: hash) else { continue }
             if tree.isExecuted(blockHash: hash) {
