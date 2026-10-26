@@ -85,14 +85,6 @@ public struct ShareAssignment: Sendable, Equatable {
     public let expiresAt: Int64
 }
 
-public struct ShareCredit: Sendable, Equatable {
-    /// The client's credit on the assignment's chain after this share, in
-    /// units scaled by 2^64.
-    public let credit: UInt256
-    /// The template to submit the nonce to as a block, when it clears one.
-    public let blockWorkID: String?
-}
-
 public enum SponsorRefusal: Error, Sendable, Equatable {
     case unknownAssignment
     /// The template expired, or the chain has moved past the block it
@@ -101,7 +93,9 @@ public enum SponsorRefusal: Error, Sendable, Equatable {
     case outsideRange
     case duplicateShare
     case missesShareTarget
-    /// Too many live assignments; retry once some expire.
+    /// No work can be handed out right now (too many live assignments, or
+    /// a live template still carries the chain higher after a reorg);
+    /// retry shortly.
     case busy
     /// Credit backed by the chain's block at this height has reached its
     /// reward; retry once the chain moves on.
@@ -231,8 +225,8 @@ public struct SponsorLedger: Sendable {
         nonce: UInt64,
         hash: UInt256,
         now: Int64
-    ) throws -> ShareCredit {
-        guard let assignment = assignments[id], let template = templates[assignment.workID] else {
+    ) throws -> UInt256 {
+        guard let assignment = assignments[id], templates[assignment.workID] != nil else {
             throw SponsorRefusal.unknownAssignment
         }
         guard now < assignment.expiresAt,
@@ -255,10 +249,17 @@ public struct SponsorLedger: Sendable {
         let (sum, overflow) = (credits[key]?.value ?? .zero).addingReportingOverflow(value)
         let credit = overflow ? UInt256.max : sum
         credits[key] = (credit, now)
-        return ShareCredit(
-            credit: credit,
-            blockWorkID: hash <= template.submitTarget ? template.workID : nil
-        )
+        return credit
+    }
+
+    /// The template to submit `hash` to as a block, when it clears the
+    /// template's submit target. Decided apart from credit: a share the
+    /// client is not credited for (its chain sold out or moved on) can still
+    /// be the sponsor's block on another chain, and the node judges it.
+    public func block(assignment id: String, hash: UInt256) -> String? {
+        guard let assignment = assignments[id], let template = templates[assignment.workID],
+              hash <= template.submitTarget else { return nil }
+        return template.workID
     }
 
     /// The highest height of `chainPath`'s block in any live template. An

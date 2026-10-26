@@ -100,8 +100,9 @@ struct LatticeSponsorCommand: AsyncParsableCommand {
                     let request = try MiningTemplateRequestBody.make(
                         recipients: chains.map { "\($0)=\(signer.address)" }, minimumWork: []
                     )
+                    let fetchedAt = now()
                     if let template = try await rpc.template(request) {
-                        await sponsor.install(template)
+                        await sponsor.install(template, fetchedAt: fetchedAt)
                     }
                 } catch {
                     print("template fetch failed: \(error)")
@@ -123,9 +124,7 @@ struct LatticeSponsorCommand: AsyncParsableCommand {
         }
         router.post("shares") { request, context in
             let input = try await request.decode(as: ShareRequest.self, context: context)
-            let (response, block) = try await refusing {
-                try await sponsor.share(assignment: input.assignment, nonce: input.nonce)
-            }
+            let (response, block) = await sponsor.share(assignment: input.assignment, nonce: input.nonce)
             if let block {
                 do {
                     let submitted = try await templates.submit(workId: block, nonce: input.nonce)
@@ -134,7 +133,7 @@ struct LatticeSponsorCommand: AsyncParsableCommand {
                     print("block submit failed: \(error)")
                 }
             }
-            return response
+            return try await refusing { try response.get() }
         }
         router.post("sponsor") { request, context in
             let input = try await request.decode(as: SponsorRequest.self, context: context)
@@ -225,7 +224,7 @@ actor Sponsor {
     /// Take `template` as the newest work, priced on every chain whose block
     /// it carries pays this sponsor. A chain whose spec or fee cannot be read
     /// is left unpriced.
-    func install(_ template: MiningTemplateResponse) async {
+    func install(_ template: MiningTemplateResponse, fetchedAt: Int64) async {
         var prices: [[String]: ChainPrice] = [:]
         for chain in template.chains ?? [] where chain.rewardRecipient == key.address {
             if specs[chain.chainPath] == nil {
@@ -250,7 +249,9 @@ actor Sponsor {
                 .map { String(format: "%02x", $0) }.joined(),
             prices: prices,
             submitTarget: template.searchTarget,
-            expiresAt: now() + Int64(clamping: template.expiresInMilliseconds)
+            // From the fetch, not after the reads above: a slow read must
+            // not outlive the node's own expiry.
+            expiresAt: fetchedAt + Int64(clamping: template.expiresInMilliseconds)
         ), now: now())
     }
 
@@ -276,19 +277,21 @@ actor Sponsor {
     }
 
     /// The share's credit, and the work ID to submit the nonce to as a block.
-    func share(assignment: String, nonce: UInt64) throws -> (ShareResponse, String?) {
+    /// Credit a share, and name the template it is a block of, if any,
+    /// whether or not it was credited.
+    func share(assignment: String, nonce: UInt64) -> (Result<ShareResponse, any Error>, String?) {
         guard let held = ledger.assignment(assignment), let prefix = Data(hex: held.prefixHex) else {
-            throw SponsorRefusal.unknownAssignment
+            return (.failure(SponsorRefusal.unknownAssignment), nil)
         }
         let hash = ProofOfWork.hash(
             midstate: ProofOfWork.midstate(prefixBytes: ContiguousArray(prefix)), nonce: nonce
         )
-        let credited = try ledger.credit(assignment: assignment, nonce: nonce, hash: hash, now: now())
-        let units = credited.credit / SponsorLedger.unit
-        return (
-            ShareResponse(credit: units > UInt256(UInt64.max) ? .max : UInt64(units.words[0])),
-            credited.blockWorkID
-        )
+        let credited = Result { () throws -> ShareResponse in
+            let units = try ledger.credit(assignment: assignment, nonce: nonce, hash: hash, now: now())
+                / SponsorLedger.unit
+            return ShareResponse(credit: units > UInt256(UInt64.max) ? .max : UInt64(units.words[0]))
+        }
+        return (credited, ledger.block(assignment: assignment, hash: hash))
     }
 
     func sponsor(client: String, draft: TransactionBody) throws -> SponsorResponse {
@@ -328,9 +331,6 @@ actor Sponsor {
         return fee
     }
 
-    private func now() -> Int64 {
-        Int64(Date().timeIntervalSince1970 * 1000)
-    }
 
     /// A random identifier and its MAC under `tokenKey`, in hex.
     private func issueToken() -> String {
@@ -355,6 +355,11 @@ actor Sponsor {
 }
 
 /// A refusal as the client's 4xx; anything else propagates.
+/// Milliseconds since the epoch.
+private func now() -> Int64 {
+    Int64(Date().timeIntervalSince1970 * 1000)
+}
+
 func refusing<Value: Sendable>(_ body: () async throws -> Value) async throws -> Value {
     do {
         return try await body()
