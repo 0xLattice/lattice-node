@@ -53,12 +53,18 @@ public struct TipMove: Sendable {
 /// move, so a tip that moves away and back (A, B, A) still makes the job
 /// stale. The move already issued the job again, so a backlog never runs
 /// more than one tip's worth of preflights.
+///
+/// `checksPolicies` is false only for a transaction the pool already holds
+/// as ready: the chain's policies accepted it then, and a template judges it
+/// by them again at the height that would carry it. So a tip move costs the
+/// pool its state checks, not a policy evaluation per pooled transaction.
 public struct PreflightJob: Sendable {
     public let cid: String
     public let transaction: Transaction
     public let tipCID: String
     public let tipEpoch: UInt64
     public let poolVersion: UInt64
+    public let checksPolicies: Bool
 }
 
 /// The parent level's provisional carrier a child candidate builds under:
@@ -446,11 +452,13 @@ public struct MiningState: Sendable {
         return admission
     }
 
-    private mutating func preflight(_ cid: String, _ transaction: Transaction, _ turn: inout Turn) {
+    private mutating func preflight(
+        _ cid: String, _ transaction: Transaction, checksPolicies: Bool = true, _ turn: inout Turn
+    ) {
         guard preflighting.insert(cid).inserted else { return }
         turn.jobs.append(.preflight(PreflightJob(
             cid: cid, transaction: transaction, tipCID: tipCID, tipEpoch: tipEpoch,
-            poolVersion: mempool.version
+            poolVersion: mempool.version, checksPolicies: checksPolicies
         )))
     }
 
@@ -631,7 +639,7 @@ public struct MiningState: Sendable {
         // move confirmed first, so no verdict refuses what it carries.
         preflighting.removeAll()
         for item in mempool.items {
-            preflight(item.cid, item.transaction, &turn)
+            preflight(item.cid, item.transaction, checksPolicies: item.disposition != .ready, &turn)
         }
         for (cid, admission) in admissions.sorted(by: { $0.key < $1.key }) {
             preflight(cid, admission.transaction, &turn)

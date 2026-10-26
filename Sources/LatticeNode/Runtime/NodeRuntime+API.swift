@@ -535,7 +535,8 @@ extension NodeRuntime {
                 // From this store alone: a transaction anyone may submit
                 // does not spend this node's requests to its peers.
                 let result = await TransactionPreflight.classify(
-                    job.transaction, tipCID: job.tipCID, snapshot: basis.snapshot, chainPath: path, fetcher: fetcher
+                    job.transaction, tipCID: job.tipCID, snapshot: basis.snapshot, chainPath: path, fetcher: fetcher,
+                    checksPolicies: job.checksPolicies
                 )
                 return [.level(path, .mining(.preflighted(job, disposition(result.disposition))))]
             }

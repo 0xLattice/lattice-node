@@ -175,6 +175,28 @@ final class MiningStateTests: XCTestCase {
         XCTAssertEqual(mining.outstandingPreflights, 0)
     }
 
+    func testATipMoveRechecksAReadyTransactionWithoutItsPolicies() throws {
+        var mining = MiningState(tipCID: "A", spec: testSpec())
+        let ready = try transfer(nonce: 0)
+        let future = try transfer(nonce: 2)
+        for (tx, verdict) in [(ready, MempoolDisposition.ready), (future, .future)] {
+            guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 1)), now: 0).first
+            else { return XCTFail() }
+            XCTAssertTrue(job.checksPolicies, "an arrival is judged by the policies")
+            _ = mining.step(.preflighted(job, verdict), now: 0)
+        }
+        let arriving = try transfer(nonce: 1)
+        _ = mining.step(.transactionReceived(arriving, origin: .local(replyID: 2)), now: 1)
+
+        let moved = mining.step(.tipMoved(TipMove(tipCID: "B")), now: 2)
+        let jobs = Dictionary(uniqueKeysWithValues: moved.compactMap {
+            if case .preflight(let job) = $0 { (job.cid, job.checksPolicies) } else { nil }
+        })
+        XCTAssertEqual(jobs[try Mempool.cid(of: ready)], false, "a ready one passed them already")
+        XCTAssertEqual(jobs[try Mempool.cid(of: future)], true, "a future one has not been judged yet")
+        XCTAssertEqual(jobs[try Mempool.cid(of: arriving)], true, "an admission still waiting is judged")
+    }
+
     func testATipMoveRemovesConfirmedRevalidatesThePoolAndReadmitsReturned() throws {
         var mining = MiningState(tipCID: "A", spec: testSpec())
         let kept = try transfer(nonce: 1)
