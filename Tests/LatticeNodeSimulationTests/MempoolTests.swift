@@ -695,7 +695,9 @@ func storing(size target: Int) throws -> Transaction {
         )
     }
     func size(_ transaction: Transaction) throws -> Int {
-        try XCTUnwrap(transaction.toData()).count + XCTUnwrap(transaction.body.node?.toData()).count
+        let envelope = try XCTUnwrap(transaction.toData())
+        let body = try XCTUnwrap(transaction.body.node?.toData())
+        return envelope.count + body.count
     }
     var length = 0
     for _ in 0..<8 {
