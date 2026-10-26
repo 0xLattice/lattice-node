@@ -206,6 +206,33 @@ final class SponsorLedgerTests: XCTestCase {
         }
     }
 
+    /// A refresh that leaves the chain out (the node omitted its block, or a
+    /// read failed) neither resets a height's backing nor hides that the
+    /// chain moved past it.
+    func testAChainMissingFromOneRefreshKeepsItsHeightsBackingAndStaleness() throws {
+        var ledger = ledger()
+        let a = try ledger.assign(client: "a", on: market, now: 0)
+        for nonce in 0..<16 {
+            _ = try ledger.credit(assignment: a.id, nonce: UInt64(nonce), hash: UInt256(1), now: 1)
+        }
+        ledger.install(template(workID: "w2", marketReward: nil), now: 2)
+        XCTAssertThrowsError(try ledger.credit(assignment: a.id, nonce: 16, hash: UInt256(1), now: 2)) {
+            XCTAssertEqual($0 as? SponsorRefusal, .soldOut, "the height's reward is still spent")
+        }
+        ledger.install(template(workID: "w3", marketHeight: 7), now: 3)
+        XCTAssertThrowsError(try ledger.assign(client: "b", on: market, now: 3)) {
+            XCTAssertEqual($0 as? SponsorRefusal, .soldOut)
+        }
+
+        var moved = self.ledger()
+        let b = try moved.assign(client: "b", on: market, now: 0)
+        moved.install(template(workID: "w2", marketHeight: 8), now: 1)
+        moved.install(template(workID: "w3", marketReward: nil), now: 2)
+        XCTAssertThrowsError(try moved.credit(assignment: b.id, nonce: 0, hash: UInt256(1), now: 2)) {
+            XCTAssertEqual($0 as? SponsorRefusal, .expired, "a live template still shows the chain at 8")
+        }
+    }
+
     func testSponsoredBodyAddsOnlyTheFeeAndCoSigns() throws {
         let client = CryptoUtils.generateKeyPair()
         let sponsorKey = CryptoUtils.generateKeyPair()

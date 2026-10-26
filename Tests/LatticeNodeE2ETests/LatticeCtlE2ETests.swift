@@ -417,10 +417,7 @@ final class LatticeCtlE2ETests: XCTestCase {
         sponsorProcess.standardOutput = FileHandle.nullDevice
         sponsorProcess.standardError = FileHandle.nullDevice
         try sponsorProcess.run()
-        defer {
-            sponsorProcess.terminate()
-            sponsorProcess.waitUntilExit()
-        }
+        defer { stop(sponsorProcess) }
         let sponsor = "http://127.0.0.1:\(port)"
         struct NewWork: Encodable { let chain: String }
         var work: [String: Any] = [:]
@@ -491,6 +488,19 @@ final class LatticeCtlE2ETests: XCTestCase {
             }
             return transaction.blockHeight != nil
         }
+    }
+
+    /// Stop and reap `process`, bounded. `waitUntilExit` on a child whose
+    /// output nobody reads was seen to miss its exit and hang the teardown.
+    private func stop(_ process: Process) {
+        process.terminate()
+        let deadline = ContinuousClock.now + .seconds(10)
+        while ContinuousClock.now < deadline {
+            // Reaped here, or already by Foundation (-1, ECHILD).
+            if waitpid(process.processIdentifier, nil, WNOHANG) != 0 { return }
+            usleep(50_000)
+        }
+        kill(process.processIdentifier, SIGKILL)
     }
 
     private func postJSON<Body: Encodable>(

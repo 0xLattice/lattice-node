@@ -233,7 +233,7 @@ public struct SponsorLedger: Sendable {
             throw SponsorRefusal.unknownAssignment
         }
         guard now < assignment.expiresAt,
-              (latest?.prices[assignment.chainPath]?.height ?? assignment.height) <= assignment.height else {
+              (liveHeight(of: assignment.chainPath) ?? assignment.height) <= assignment.height else {
             throw SponsorRefusal.expired
         }
         guard nonce >= assignment.startNonce, nonce - assignment.startNonce < assignment.count else {
@@ -256,6 +256,13 @@ public struct SponsorLedger: Sendable {
             credit: credit,
             blockWorkID: hash <= template.submitTarget ? template.workID : nil
         )
+    }
+
+    /// The highest height of `chainPath`'s block in any live template. An
+    /// assignment's own template is live while it is, so one refresh that
+    /// leaves the chain out cannot hide that it moved on.
+    private func liveHeight(of chainPath: [String]) -> UInt64? {
+        templates.values.compactMap { $0.prices[chainPath]?.height }.max()
     }
 
     public func assignment(_ id: String) -> ShareAssignment? {
@@ -288,12 +295,6 @@ public struct SponsorLedger: Sendable {
         return remainder == .zero ? quotient : quotient + UInt256(1)
     }
 
-    /// Whether `client`'s credit on `chainPath` covers `fee`: a check before
-    /// the sponsor spends a node read on the request. `commit` decides.
-    public func covers(client: String, fee: UInt64, on chainPath: [String]) -> Bool {
-        credit(of: client, on: chainPath) >= UInt256(fee) * Self.unit
-    }
-
     /// Spend `fee` of `client`'s credit on `chainPath` and hold the fee
     /// against the sponsor's `balance` there until `holdUntil`: a signed fee
     /// not yet mined does not show in the balance. The caller signs only
@@ -324,8 +325,10 @@ public struct SponsorLedger: Sendable {
             assignments = assignments.filter { !gone.contains($0.value.workID) }
             shares = shares.filter { !gone.contains($0.workID) }
         }
-        let heights = latest?.prices ?? [:]
-        sold = sold.filter { key, _ in heights[key.chainPath].map { key.height >= $0.height } ?? false }
+        // A height's backing is dropped only once a live template carries the
+        // chain higher: a chain missing from every live template keeps it, so
+        // the same height cannot back its reward twice.
+        sold = sold.filter { key, _ in liveHeight(of: key.chainPath).map { key.height >= $0 } ?? true }
         credits = credits.filter { now - $0.value.lastShare < creditLifetime && $0.value.value > .zero }
         commitments.removeAll { now >= $0.until }
     }

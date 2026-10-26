@@ -15,6 +15,12 @@
 //
 // A client can withhold the shares that are blocks, as against any pool;
 // nothing here detects it. The float is the operator's bound on that loss.
+// A signed fee is held against the float for a few of its chain's blocks,
+// but a client may submit its body later than that; the sponsor never pays
+// more than one fee per signature, so the cost is another client's
+// sponsored transaction failing on an empty float. A chain's reward schedule
+// is read once, so a chain re-hosted under the same path with a new genesis
+// needs a restart.
 //
 // It runs beside a node and reaches it only over the loopback RPC, like the
 // miner. Its key holds the fee float and nothing else: a co-signature lends
@@ -203,8 +209,10 @@ actor Sponsor {
     private let tokenKey: SymmetricKey
     /// Each chain's reward schedule, read once.
     private var specs: [[String]: ChainSpec] = [:]
-    /// Each chain's fee, read at every refresh so a request reads nothing.
+    /// Each chain's fee and the sponsor's balance there, read at every
+    /// refresh so a request reads nothing from the node.
     private var fees: [[String]: UInt64] = [:]
+    private var balances: [[String]: UInt64] = [:]
 
     init(ledger: SponsorLedger, rpc: SponsorRPC, key: SponsorKey, minimumFee: UInt64, tokenKey: SymmetricKey) {
         self.ledger = ledger
@@ -224,8 +232,10 @@ actor Sponsor {
                 specs[chain.chainPath] = try? await rpc.spec(chain.chainPath)
             }
             guard let spec = specs[chain.chainPath],
-                  let floor = try? await rpc.relayFloor(on: chain.chainPath) else { continue }
+                  let floor = try? await rpc.relayFloor(on: chain.chainPath),
+                  let balance = try? await rpc.balance(of: key.address, on: chain.chainPath) else { continue }
             fees[chain.chainPath] = max(minimumFee, floor)
+            balances[chain.chainPath] = balance
             prices[chain.chainPath] = ChainPrice(
                 // The node takes no hash above the search target.
                 target: min(chain.target, template.searchTarget),
@@ -281,16 +291,13 @@ actor Sponsor {
         )
     }
 
-    func sponsor(client: String, draft: TransactionBody) async throws -> SponsorResponse {
+    func sponsor(client: String, draft: TransactionBody) throws -> SponsorResponse {
         let chainPath = draft.chainPath
         let fee = try currentFee(chainPath)
         let body = try sponsoredBody(
             draft: draft, sponsor: key.address, fee: fee, chainPath: chainPath
         )
-        guard ledger.covers(client: client, fee: fee, on: chainPath) else {
-            throw SponsorRefusal.insufficientCredit
-        }
-        let balance = try await rpc.balance(of: key.address, on: chainPath)
+        let balance = balances[chainPath] ?? 0
         // A signed fee shows in the balance only once mined; hold it for a
         // few of the chain's blocks.
         let blockTime = Int64(clamping: specs[chainPath]?.targetBlockTime ?? 0)
