@@ -95,6 +95,7 @@ final class GenesisForkActOnTests: XCTestCase {
         XCTAssertFalse(alpha.tree.isExecuted(blockHash: g2.cid))
         XCTAssertEqual(alpha.snapshot.actOnTip, chain[1].cid, "the act-on tip stays under the executed root")
         XCTAssertNotNil(alpha.mining.spec, "the mempool keeps the act-on tip's spec")
+        XCTAssertNotNil(ChainCore(tree: alpha.tree.detached()).mining.spec, "a restarted core has the act-on tip's spec")
 
         let asked = try await feed(Array(chainGrinds.suffix(2)), to: &host, world: world, withheld: g2.cid)
         alpha = try XCTUnwrap(host.levels[Self.alpha]).held
