@@ -6,9 +6,15 @@
 // fee.
 //
 // The template pays the sponsor on Nexus and every hosted chain, so each
-// share earns on all of them at once. A client's credit is work, spent on one
-// chain's fee at that chain's price: its chance of clearing that chain's
-// block in the template, times that block's reward.
+// share earns the sponsor on all of them at once. The client earns on the one
+// chain it names: each share is credited when it is accepted, at its own
+// template's price there (its chance of clearing that chain's block, times
+// that block's reward), and a fee is paid from that chain's credit. Credit
+// backed by one block height stops at its reward: only one block per height
+// can win.
+//
+// A client can withhold the shares that are blocks, as against any pool;
+// nothing here detects it. The float is the operator's bound on that loss.
 //
 // It runs beside a node and reaches it only over the loopback RPC, like the
 // miner. Its key holds the fee float and nothing else: a co-signature lends
@@ -16,11 +22,12 @@
 // reach. Credit is held in memory; a restart forfeits unspent shares.
 //
 // Routes (JSON, 64-bit integers as decimal strings, targets and work as hex):
-//   POST /work     {client?}               → a nonce range of the template
-//   POST /shares   {assignment, nonce}     → the client's credit
+//   POST /work     {client?, chain?}       → a nonce range of the template
+//   POST /shares   {assignment, nonce}     → the client's credit on its chain
 //   POST /sponsor  {client, transaction}   → the co-signed transaction
 
 import ArgumentParser
+import Crypto
 import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
@@ -73,7 +80,8 @@ struct LatticeSponsorCommand: AsyncParsableCommand {
             ledger: SponsorLedger(shareTarget: minimumWorkTarget(work)),
             rpc: rpc,
             key: signer,
-            minimumFee: fee
+            minimumFee: fee,
+            tokenKey: SymmetricKey(size: .bits256)
         )
         let templates = HTTPMiningCoordinatorNodeClient(
             apiBaseURL: base, cookieFile: URL(fileURLWithPath: cookieFile)
@@ -87,7 +95,7 @@ struct LatticeSponsorCommand: AsyncParsableCommand {
                         recipients: chains.map { "\($0)=\(signer.address)" }, minimumWork: []
                     )
                     if let template = try await rpc.template(request) {
-                        try await sponsor.install(template)
+                        await sponsor.install(template)
                     }
                 } catch {
                     print("template fetch failed: \(error)")
@@ -139,8 +147,8 @@ struct LatticeSponsorCommand: AsyncParsableCommand {
 
 struct WorkRequest: Decodable {
     let client: String?
-    /// The chain to quote the fee on (default Nexus). Credit is not tied to
-    /// it: it buys a fee on any chain.
+    /// The chain the shares are credited on and the fee is quoted on
+    /// (default Nexus).
     let chain: String?
 
     var chainPath: [String] {
@@ -168,8 +176,8 @@ struct ShareRequest: Decodable {
 }
 
 struct ShareResponse: ResponseEncodable {
-    /// The client's credit, in work (hex).
-    let credit: String
+    /// The client's credit on the assignment's chain, in whole units.
+    @DecimalString var credit: UInt64
 }
 
 struct SponsorRequest: Decodable {
@@ -190,28 +198,42 @@ actor Sponsor {
     private let rpc: SponsorRPC
     private let key: SponsorKey
     private let minimumFee: UInt64
+    /// Signs the client tokens this sponsor issues, so a client cannot name
+    /// (and so spend) a token it was not given.
+    private let tokenKey: SymmetricKey
     /// Each chain's reward schedule, read once.
     private var specs: [[String]: ChainSpec] = [:]
+    /// Each chain's fee, read at every refresh so a request reads nothing.
+    private var fees: [[String]: UInt64] = [:]
 
-    init(ledger: SponsorLedger, rpc: SponsorRPC, key: SponsorKey, minimumFee: UInt64) {
+    init(ledger: SponsorLedger, rpc: SponsorRPC, key: SponsorKey, minimumFee: UInt64, tokenKey: SymmetricKey) {
         self.ledger = ledger
         self.rpc = rpc
         self.key = key
         self.minimumFee = minimumFee
+        self.tokenKey = tokenKey
     }
 
     /// Take `template` as the newest work, priced on every chain whose block
-    /// it carries. Its search target is the easiest hash the node takes as a
-    /// block.
-    func install(_ template: MiningTemplateResponse) async throws {
+    /// it carries pays this sponsor. A chain whose spec or fee cannot be read
+    /// is left unpriced.
+    func install(_ template: MiningTemplateResponse) async {
         var prices: [[String]: ChainPrice] = [:]
-        for chain in template.chains {
+        for chain in template.chains ?? [] where chain.rewardRecipient == key.address {
             if specs[chain.chainPath] == nil {
-                specs[chain.chainPath] = try await rpc.spec(chain.chainPath)
+                specs[chain.chainPath] = try? await rpc.spec(chain.chainPath)
             }
-            guard let spec = specs[chain.chainPath] else { continue }
-            prices[chain.chainPath] = ChainPrice(target: chain.target, reward: spec.rewardAtBlock(chain.height))
+            guard let spec = specs[chain.chainPath],
+                  let floor = try? await rpc.relayFloor(on: chain.chainPath) else { continue }
+            fees[chain.chainPath] = max(minimumFee, floor)
+            prices[chain.chainPath] = ChainPrice(
+                // The node takes no hash above the search target.
+                target: min(chain.target, template.searchTarget),
+                height: chain.height,
+                reward: spec.rewardAtBlock(chain.height)
+            )
         }
+        if template.chains == nil { print("the node reports no template chains; upgrade it") }
         ledger.install(SponsorTemplate(
             workID: template.workID,
             prefixHex: ProofOfWork.proofOfWorkHashPrefixBytes(template.block)
@@ -219,13 +241,16 @@ actor Sponsor {
             prices: prices,
             submitTarget: template.searchTarget,
             expiresAt: now() + Int64(clamping: template.expiresInMilliseconds)
-        ))
+        ), now: now())
     }
 
-    func work(client: String?, chainPath: [String]) async throws -> WorkResponse {
-        let fee = try await currentFee(chainPath)
-        let client = client ?? Self.token()
-        let assignment = try ledger.assign(client: client, now: now())
+    func work(client: String?, chainPath: [String]) throws -> WorkResponse {
+        let fee = try currentFee(chainPath)
+        let client = try client.map { token in
+            guard isIssued(token) else { throw SponsorRefusal.draft("unknown client token") }
+            return token
+        } ?? issueToken()
+        let assignment = try ledger.assign(client: client, on: chainPath, now: now())
         let shares = ledger.sharesFor(fee: fee, on: chainPath) ?? .max
         return WorkResponse(
             client: client,
@@ -249,17 +274,30 @@ actor Sponsor {
             midstate: ProofOfWork.midstate(prefixBytes: ContiguousArray(prefix)), nonce: nonce
         )
         let credited = try ledger.credit(assignment: assignment, nonce: nonce, hash: hash, now: now())
-        return (ShareResponse(credit: credited.credit.toHexString()), credited.blockWorkID)
+        let units = credited.credit / SponsorLedger.unit
+        return (
+            ShareResponse(credit: units > UInt256(UInt64.max) ? .max : UInt64(units.words[0])),
+            credited.blockWorkID
+        )
     }
 
     func sponsor(client: String, draft: TransactionBody) async throws -> SponsorResponse {
         let chainPath = draft.chainPath
-        let fee = try await currentFee(chainPath)
+        let fee = try currentFee(chainPath)
         let body = try sponsoredBody(
             draft: draft, sponsor: key.address, fee: fee, chainPath: chainPath
         )
+        guard ledger.covers(client: client, fee: fee, on: chainPath) else {
+            throw SponsorRefusal.insufficientCredit
+        }
         let balance = try await rpc.balance(of: key.address, on: chainPath)
-        try ledger.commit(client: client, fee: fee, on: chainPath, balance: balance, now: now())
+        // A signed fee shows in the balance only once mined; hold it for a
+        // few of the chain's blocks.
+        let blockTime = Int64(clamping: specs[chainPath]?.targetBlockTime ?? 0)
+        let hold = max(600_000, blockTime.multipliedReportingOverflow(by: 3).partialValue)
+        try ledger.commit(
+            client: client, fee: fee, on: chainPath, balance: balance, holdUntil: now() + hold, now: now()
+        )
         let header = try HeaderImpl(node: body)
         guard let signature = TransactionSigning.sign(bodyHeader: header, privateKeyHex: key.privateKey) else {
             throw HTTPError(.internalServerError, message: "signing failed")
@@ -270,9 +308,10 @@ actor Sponsor {
         )
     }
 
-    private func currentFee(_ chainPath: [String]) async throws -> UInt64 {
-        guard ledger.latest?.prices[chainPath] != nil else { throw SponsorRefusal.unpriceable }
-        let fee = max(minimumFee, try await rpc.relayFloor(on: chainPath))
+    private func currentFee(_ chainPath: [String]) throws -> UInt64 {
+        guard ledger.latest?.prices[chainPath] != nil, let fee = fees[chainPath] else {
+            throw SponsorRefusal.unpriceable
+        }
         guard fee > 0 else {
             throw HTTPError(.conflict, message: "the node admits zero-fee transactions; no sponsor needed")
         }
@@ -283,8 +322,25 @@ actor Sponsor {
         Int64(Date().timeIntervalSince1970 * 1000)
     }
 
-    private static func token() -> String {
-        (0..<4).map { _ in String(format: "%08x", UInt32.random(in: .min ... .max)) }.joined()
+    /// A random identifier and its MAC under `tokenKey`, in hex.
+    private func issueToken() -> String {
+        let identifier = (0..<16).map { _ in UInt8.random(in: .min ... .max) }
+        return Self.hex(identifier) + Self.hex(Array(mac(identifier)))
+    }
+
+    private func isIssued(_ token: String) -> Bool {
+        guard token.count == 64, let bytes = Data(hex: token) else { return false }
+        return HMAC<SHA256>.isValidAuthenticationCode(
+            Array(bytes.suffix(32)), authenticating: Array(bytes.prefix(16)), using: tokenKey
+        )
+    }
+
+    private func mac(_ identifier: [UInt8]) -> HashedAuthenticationCode<SHA256> {
+        HMAC<SHA256>.authenticationCode(for: identifier, using: tokenKey)
+    }
+
+    private static func hex(_ bytes: [UInt8]) -> String {
+        bytes.map { String(format: "%02x", $0) }.joined()
     }
 }
 
@@ -294,7 +350,7 @@ func refusing<Value: Sendable>(_ body: () async throws -> Value) async throws ->
         return try await body()
     } catch let refusal as SponsorRefusal {
         let status: HTTPResponse.Status = switch refusal {
-        case .busy, .unpriceable, .insufficientFloat: .serviceUnavailable
+        case .busy, .unpriceable, .insufficientFloat, .soldOut: .serviceUnavailable
         case .insufficientCredit: .init(code: 402, reasonPhrase: "Payment Required")
         default: .badRequest
         }

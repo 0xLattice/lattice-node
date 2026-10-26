@@ -120,17 +120,19 @@ public struct TemplateJob: Sendable {
     public let request: TemplateRequest
 }
 
-/// One block a template commits: its chain, its committed target and its
-/// height.
+/// One block a template commits: its chain, its committed target, its
+/// height and who it pays.
 public struct TemplateChain: Sendable, Equatable {
     public let chainPath: [String]
     public let target: UInt256
     public let height: UInt64
+    public let rewardRecipient: String?
 
-    public init(chainPath: [String], target: UInt256, height: UInt64) {
+    public init(chainPath: [String], target: UInt256, height: UInt64, rewardRecipient: String?) {
         self.chainPath = chainPath
         self.target = target
         self.height = height
+        self.rewardRecipient = rewardRecipient
     }
 }
 

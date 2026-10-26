@@ -139,8 +139,9 @@ public struct MiningTemplateResponse: Codable, Sendable {
     /// A miner compares this with the status route's digest to learn its work
     /// is stale.
     public let templateDigest: String
-    /// Every block a nonce for this work commits, the root first.
-    public let chains: [TemplateChainBlock]
+    /// Every block a nonce for this work commits, the root first. Absent
+    /// from older nodes.
+    public let chains: [TemplateChainBlock]?
 
     init(
         workID: String,
@@ -181,22 +182,28 @@ public struct MiningTemplateResponse: Codable, Sendable {
     }
 }
 
-/// One block a template commits: its chain, and the target a hash must
-/// clear to make it (its committed target, not a miner's search threshold).
-/// A share's worth on that chain is its chance of clearing `target`.
+/// One block a template commits: its chain, its committed target, its
+/// height, and the address it pays (nil burns its reward). The work is
+/// searched to the template's `searchTarget`, which no taken hash exceeds,
+/// so a hash makes this block only when it clears both.
 public struct TemplateChainBlock: Codable, Sendable, Equatable {
     public let chainPath: [String]
     public let target: UInt256
     @DecimalString public var height: UInt64
+    public let rewardRecipient: String?
 
-    public init(chainPath: [String], target: UInt256, height: UInt64) {
+    public init(chainPath: [String], target: UInt256, height: UInt64, rewardRecipient: String?) {
         self.chainPath = chainPath
         self.target = target
         self.height = height
+        self.rewardRecipient = rewardRecipient
     }
 
     init(_ chain: TemplateChain) {
-        self.init(chainPath: chain.chainPath, target: chain.target, height: chain.height)
+        self.init(
+            chainPath: chain.chainPath, target: chain.target, height: chain.height,
+            rewardRecipient: chain.rewardRecipient
+        )
     }
 }
 
