@@ -183,9 +183,10 @@ public struct Mempool: Sendable {
         }
         guard let body = transaction.body.node else { throw MempoolError.unresolved }
         guard let bodyData = body.toData() else { throw MempoolError.unresolved }
-        guard bodyData.count <= spec.maxBlockSize,
+        let room = Self.transactionRoom(spec)
+        guard bodyData.count <= room,
               let envelopeData = transaction.toData(),
-              envelopeData.count <= spec.maxBlockSize,
+              envelopeData.count <= room,
               body.signers.count <= limits.maxSignatures else {
             throw MempoolError.tooLarge
         }
@@ -197,9 +198,24 @@ public struct Mempool: Sendable {
             throw MempoolError.belowMinRelayFee
         }
         let (size, overflow) = envelopeData.count.addingReportingOverflow(bodyData.count)
-        guard !overflow, size <= spec.maxBlockSize else { throw MempoolError.tooLarge }
+        guard !overflow, size <= room else { throw MempoolError.tooLarge }
         return (try Self.cid(of: transaction), body, size, surplus)
     }
+
+    /// The most bytes a transaction may have: what is left of `maxBlockSize`
+    /// in a block carrying only it. The block's own fields and transaction
+    /// trie count toward the limit, so a transaction of `maxBlockSize` bytes
+    /// could never be mined, and the builder, which takes the template's
+    /// longest prefix that fits, would stop at it.
+    public static func transactionRoom(_ spec: ChainSpec) -> Int {
+        spec.maxBlockSize - blockAllowance
+    }
+
+    /// A block's content besides its transactions, with room to spare: an
+    /// empty Nexus block measures 766 bytes (about 1,000 with its height,
+    /// timestamp and nonce at their largest), and a transaction adds about
+    /// 180 to the trie.
+    static let blockAllowance = 2_048
 
     @discardableResult
     public mutating func submit(

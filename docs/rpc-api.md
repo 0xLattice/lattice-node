@@ -280,7 +280,10 @@ Response:
 ```
 
 The body is content-bound and the signature, nonce, funding, fee, and path are
-validated before admission. An unhosted path returns 404.
+validated before admission. An unhosted path returns 404. A transaction must
+fit in a block by itself: past `maxBlockSize` less 2048 bytes for the block's
+own content, the refusal is `tooLarge` (so a chain whose `maxBlockSize` is
+2048 or less admits nothing).
 
 The node's pool admits only transactions paying at least the operator's
 `--min-relay-fee` (default 0): the fee is the transaction's balance excess,
