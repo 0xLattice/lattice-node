@@ -1,6 +1,6 @@
 import UInt256
 
-/// A small, independent GHOST: descend from genesis to the child whose
+/// A small, independent GHOST: from the genesis fork, descend to the child whose
 /// subtree carries the most work, ties to the smaller CID, never into an
 /// excluded root. Subtree work counts every block (excluded ones too — work
 /// weighs, validity selects) and each grind once, at its strongest.

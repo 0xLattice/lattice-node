@@ -50,21 +50,24 @@ final class GenesisForkActOnTests: XCTestCase {
         return (builder.world(), [n0.grind, n1.grind], chain, chainGrinds, g2, g2Grinds)
     }
 
-    /// Step `grinds` into `host` to quiescence, serving every body but
-    /// `withheld`'s. Returns the bodies asked for.
+    /// Step `grinds` into `host` to quiescence, after handing it the bodies
+    /// in `deliver`, serving every body asked for but `withheld`'s. Returns
+    /// the bodies asked for.
     @discardableResult
     private func feed(
-        _ grinds: [MinedGrind], to host: inout NodeCore, world: LevelWorld, withheld: String
+        _ grinds: [MinedGrind], to host: inout NodeCore, world: LevelWorld, withheld: Set<String>,
+        deliver: [String] = []
     ) async throws -> [String] {
         var asked: [String] = []
-        for grind in grinds {
-            var queue: [NodeEvent] = [.mined(grind)]
+        let events = deliver.map { NodeEvent.level(Self.alpha, .bodyFetched(cid: $0)) } + grinds.map { NodeEvent.mined($0) }
+        for event in events {
+            var queue: [NodeEvent] = [event]
             while !queue.isEmpty {
                 for effect in host.step(queue.removeFirst(), now: Self.now) {
                     switch effect {
                     case .level(let path, .fetchBody(let cid)):
                         asked.append(cid)
-                        if cid != withheld { queue.append(.level(path, .bodyFetched(cid: cid))) }
+                        if !withheld.contains(cid) { queue.append(.level(path, .bodyFetched(cid: cid))) }
                     case .connect(let path, let job):
                         let verdict = await ChainTree.connect(
                             job, fetcher: world.cas, parentFacts: host.parentFacts(for: path),
@@ -84,10 +87,10 @@ final class GenesisForkActOnTests: XCTestCase {
         let (world, base, chain, chainGrinds, g2, g2Grinds) = try await world()
         var host = NodeCore(root: world.rootBootstrap.tree.detached(), hosted: world.hosted)
 
-        try await feed(base + chainGrinds.prefix(2), to: &host, world: world, withheld: g2.cid)
+        try await feed(base + chainGrinds.prefix(2), to: &host, world: world, withheld: [g2.cid])
         XCTAssertEqual(try XCTUnwrap(host.levels[Self.alpha]).snapshot.actOnTip, chain[1].cid, "fixture: G1's blocks execute")
 
-        let askedForG2 = try await feed(g2Grinds, to: &host, world: world, withheld: g2.cid)
+        let askedForG2 = try await feed(g2Grinds, to: &host, world: world, withheld: [g2.cid])
         var alpha = try XCTUnwrap(host.levels[Self.alpha]).held
         XCTAssertEqual(Set(alpha.tree.genesisRoots).count, 2, "Alpha holds two genesis roots")
         XCTAssertEqual(alpha.snapshot.bestHeaderTip, g2.cid, "fixture: G2 outweighs G1's subtree")
@@ -97,10 +100,18 @@ final class GenesisForkActOnTests: XCTestCase {
         XCTAssertNotNil(alpha.mining.spec, "the mempool keeps the act-on tip's spec")
         XCTAssertNotNil(ChainCore(tree: alpha.tree.detached()).mining.spec, "a restarted core has the act-on tip's spec")
 
-        let asked = try await feed(Array(chainGrinds.suffix(2)), to: &host, world: world, withheld: g2.cid)
+        // G1's next block, its body not yet here: next to connect on its own
+        // branch, however far above the withheld root it is.
+        let askedForNext = try await feed([Array(chainGrinds)[2]], to: &host, world: world, withheld: [g2.cid, chain[2].cid])
+        alpha = try XCTUnwrap(host.levels[Self.alpha]).held
+        XCTAssertEqual(alpha.connectDistances[chain[2].cid], 0, "G1's next body ranks as next to connect")
+
+        let asked = try await feed(
+            [Array(chainGrinds)[3]], to: &host, world: world, withheld: [g2.cid], deliver: [chain[2].cid]
+        )
         alpha = try XCTUnwrap(host.levels[Self.alpha]).held
         XCTAssertEqual(alpha.snapshot.bestHeaderTip, g2.cid, "G2 stays the best header tip")
-        XCTAssertTrue(asked.contains(chain[2].cid) && asked.contains(chain[3].cid), "bodies under G1 are asked for")
+        XCTAssertTrue(askedForNext.contains(chain[2].cid) && asked.contains(chain[3].cid), "bodies under G1 are asked for")
         XCTAssertTrue(alpha.tree.isExecuted(blockHash: chain[3].cid), "G1's new blocks execute")
         XCTAssertEqual(alpha.snapshot.actOnTip, chain[3].cid, "the act-on tip advances along G1")
         XCTAssertEqual(alpha.mining.tipCID, chain[3].cid, "templates build on it")
@@ -114,6 +125,5 @@ final class GenesisForkActOnTests: XCTestCase {
         for (hash, entry) in digest.blocks {
             XCTAssertEqual(entry.subtreeWork, work[hash], "the reference weighs \(hash) under its own root")
         }
-        XCTAssertEqual(alpha.connectDistances[g2.cid], 0, "the withheld root is next to connect on its own branch")
     }
 }

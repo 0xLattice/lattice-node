@@ -99,7 +99,7 @@ extension Invariants {
         var cursor: String? = digest.actOnTip
         while let cid = cursor, actOn.insert(cid).inserted { cursor = digest.blocks[cid]?.parent }
         if let stray = bodies.requested.union(bodies.arrived).first(where: {
-            !lookAhead.contains($0) && !digest.roots.contains($0)
+            !lookAhead.contains($0) && !(digest.roots.contains($0) && !digest.excluded.contains($0))
                 && !(digest.blocks[$0]?.parent.map(actOn.contains) ?? false)
         }) {
             throw fail(node, "body \(stray) is neither in the look-ahead, a root, nor a child of the act-on path")
