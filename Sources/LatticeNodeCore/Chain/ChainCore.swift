@@ -367,7 +367,7 @@ public struct ChainCore: Sendable {
             tree: tree,
             roots: roots,
             config: config,
-            log: WeighLog(id: logID, entries: logEntries(of: facts, isRoot: context.isRoot)),
+            log: WeighLog(id: logID, entries: logEntries(of: facts, isRoot: context.isRoot), in: tree),
             cursors: cursors
         )
     }
@@ -471,7 +471,7 @@ public struct ChainCore: Sendable {
         // The weigh log follows the fact log: a header precedes its proofs,
         // a parent its children.
         let start = sync.log.count
-        for entry in Self.logEntries(of: turn.facts, isRoot: isRoot) { sync.log.append(entry) }
+        for entry in Self.logEntries(of: turn.facts, isRoot: isRoot) { sync.log.append(entry, in: tree) }
         // At most a page is pushed; `hasMore` has the peer pull the rest.
         let appended = sync.log.page(after: start, limit: config.maxHeadersPerPage, bytes: config.maxPageBytes)
         if !turn.facts.isEmpty || !turn.indexed.isEmpty || !turn.cursors.isEmpty {

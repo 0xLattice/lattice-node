@@ -184,7 +184,7 @@ public struct NodeCore: Sendable {
         rootPath = core.chainPath
         core = ChainCore(
             tree: core.tree, config: config,
-            log: WeighLog(id: Self.logID(logID, rootPath), entries: rootLog), cursors: rootCursors
+            log: WeighLog(id: Self.logID(logID, rootPath), entries: rootLog, in: core.tree), cursors: rootCursors
         )
         self.hosted = hosted
         self.pins = pins
