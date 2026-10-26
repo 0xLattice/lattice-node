@@ -128,6 +128,8 @@ public struct SponsorLedger: Sendable {
     private var nextStart: [String: UInt64] = [:]
     private var assignments: [String: ShareAssignment] = [:]
     private var shares: Set<ShareKey> = []
+    /// Nonces already handed to the node as blocks, so a replay never is.
+    private var submitted: Set<ShareKey> = []
     private var credits: [CreditKey: (value: UInt256, lastShare: Int64)] = [:]
     private var sold: [BlockKey: UInt256] = [:]
     private var commitments: [(chainPath: [String], fee: UInt64, until: Int64)] = []
@@ -252,13 +254,15 @@ public struct SponsorLedger: Sendable {
         return credit
     }
 
-    /// The template to submit `hash` to as a block, when it clears the
-    /// template's submit target. Decided apart from credit: a share the
-    /// client is not credited for (its chain sold out or moved on) can still
-    /// be the sponsor's block on another chain, and the node judges it.
-    public func block(assignment id: String, hash: UInt256) -> String? {
+    /// The template to submit `nonce` to as a block, when its `hash` clears
+    /// the template's submit target, once per nonce. Decided apart from
+    /// credit: a share the client is not credited for (its chain sold out or
+    /// moved on) can still be the sponsor's block on another chain, and the
+    /// node judges it.
+    public mutating func block(assignment id: String, nonce: UInt64, hash: UInt256) -> String? {
         guard let assignment = assignments[id], let template = templates[assignment.workID],
-              hash <= template.submitTarget else { return nil }
+              hash <= template.submitTarget,
+              submitted.insert(ShareKey(workID: template.workID, nonce: nonce)).inserted else { return nil }
         return template.workID
     }
 
@@ -328,6 +332,7 @@ public struct SponsorLedger: Sendable {
             }
             assignments = assignments.filter { !gone.contains($0.value.workID) }
             shares = shares.filter { !gone.contains($0.workID) }
+            submitted = submitted.filter { !gone.contains($0.workID) }
         }
         // A height's backing is dropped only once a live template carries the
         // chain higher: a chain missing from every live template keeps it, so

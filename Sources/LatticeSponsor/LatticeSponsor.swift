@@ -276,7 +276,6 @@ actor Sponsor {
         )
     }
 
-    /// The share's credit, and the work ID to submit the nonce to as a block.
     /// Credit a share, and name the template it is a block of, if any,
     /// whether or not it was credited.
     func share(assignment: String, nonce: UInt64) -> (Result<ShareResponse, any Error>, String?) {
@@ -291,7 +290,7 @@ actor Sponsor {
                 / SponsorLedger.unit
             return ShareResponse(credit: units > UInt256(UInt64.max) ? .max : UInt64(units.words[0]))
         }
-        return (credited, ledger.block(assignment: assignment, hash: hash))
+        return (credited, ledger.block(assignment: assignment, nonce: nonce, hash: hash))
     }
 
     func sponsor(client: String, draft: TransactionBody) throws -> SponsorResponse {
@@ -354,12 +353,12 @@ actor Sponsor {
     }
 }
 
-/// A refusal as the client's 4xx; anything else propagates.
 /// Milliseconds since the epoch.
 private func now() -> Int64 {
     Int64(Date().timeIntervalSince1970 * 1000)
 }
 
+/// A refusal as the client's 4xx; anything else propagates.
 func refusing<Value: Sendable>(_ body: () async throws -> Value) async throws -> Value {
     do {
         return try await body()
