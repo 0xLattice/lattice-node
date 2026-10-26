@@ -100,7 +100,7 @@ public enum LevelInvariants {
         }
 
         // Hierarchical GHOST over those grinds; validity selects.
-        var reference = GhostReference(genesis: digest.genesis)
+        var reference = GhostReference(roots: digest.roots.isEmpty ? [digest.genesis] : digest.roots)
         reference.excluded = digest.excluded
         for (hash, entry) in digest.blocks.sorted(by: { $0.key < $1.key }) {
             reference.add(hash, parent: entry.parent, grinds: entry.grinds)

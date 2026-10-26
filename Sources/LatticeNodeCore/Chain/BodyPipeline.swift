@@ -68,22 +68,28 @@ extension ChainCore {
         bodyWindow.filter { tree.parent(of: $0).map(tree.isExecuted(blockHash:)) ?? true }
     }
 
-    /// Each window block's distance, in height, from the lowest block
-    /// this level can connect next (`nextToConnect` at 0): the order in
-    /// which their fetched bodies are needed.
-    ///
-    /// Distance is measured from the level's lowest next-to-connect block,
-    /// fork children included, not per branch: an approximation. A deep
-    /// fork child lowers the base, so this level's blocks look further
-    /// ahead than they are, which can skew the ranking against other chains.
+    /// Each window block's distance, in height, from the block on its own
+    /// branch this level can connect next (`nextToConnect` at 0): the order
+    /// in which their fetched bodies are needed. Per branch, so a fork or a
+    /// root whose body is withheld does not push the blocks this level can
+    /// use behind ones it cannot.
     public var connectDistances: [String: Int] {
         let window = bodyWindow
-        let next = window.filter { tree.parent(of: $0).map(tree.isExecuted(blockHash:)) ?? true }
-        guard let base = next.compactMap({ tree.height(of: $0) }).min() else { return [:] }
+        let inWindow = Set(window)
+        // The window block a block's run of unexecuted window ancestors starts at.
+        var base: [String: String] = [:]
+        func start(of cid: String) -> String {
+            if let known = base[cid] { return known }
+            let parent = tree.parent(of: cid)
+            let found = parent.flatMap { inWindow.contains($0) && !tree.isExecuted(blockHash: $0) ? start(of: $0) : nil } ?? cid
+            base[cid] = found
+            return found
+        }
         var distances: [String: Int] = [:]
         for cid in window {
-            let height = tree.height(of: cid) ?? base
-            distances[cid] = height > base ? Int(height - base) : 0
+            let height = tree.height(of: cid) ?? 0
+            let from = tree.height(of: start(of: cid)) ?? height
+            distances[cid] = height > from ? Int(height - from) : 0
         }
         return distances
     }
@@ -108,21 +114,24 @@ extension ChainCore {
     /// The unexecuted blocks the act-on descent would step into once
     /// executed, heaviest first: every child of the act-on tip, and at each
     /// fork above it the children heavier than the executed one it took.
+    /// The genesis roots are a fork like any other: while the best chain's
+    /// root is not executed, the walk starts there.
     /// The cost: at a fork, each child that arrives heavier than those
     /// executed before it is executed too, so of three or more arriving
     /// lightest first more than one is stale. A stale sibling's descendants
     /// are never fetched unless it becomes the tip.
     var forkChildren: [String] {
         var wanted: [String] = []
-        var fork = tree.executedPrefix().hash
-        while !fork.isEmpty {
-            let children = Self.byWeight(tree.children(of: fork).filter {
+        let prefix = tree.executedPrefix().hash
+        var candidates = prefix.isEmpty ? tree.genesisRoots : tree.children(of: prefix)
+        while true {
+            let children = Self.byWeight(candidates.filter {
                 tree.isExecuted(blockHash: $0) || !tree.isExcludedRoot($0)
             }, in: tree)
             wanted += children.prefix { !tree.isExecuted(blockHash: $0) }
-            fork = children.first(where: tree.isExecuted(blockHash:)) ?? ""
+            guard let fork = children.first(where: tree.isExecuted(blockHash:)) else { return wanted }
+            candidates = tree.children(of: fork)
         }
-        return wanted
     }
 
     /// The content layer has the body of `cid` locally. Only a body the
