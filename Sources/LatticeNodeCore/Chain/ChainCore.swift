@@ -348,12 +348,15 @@ public struct ChainCore: Sendable {
     /// an empty tree. A child level passes its restored `parent`, serving
     /// its directory, so its attributed runs are derived.
     ///
-    /// The revision floor is the number of durable batches. Each batch the
-    /// store holds is distinct and takes at most one revision, so no revision
-    /// exposed before the restart exceeds it. Replay alone can count fewer:
-    /// its sort can apply a batch that re-states a grind's final quantity
-    /// before the work batches that raised it, which then replay as
-    /// duplicates (§12.5.11).
+    /// The revision floor is the number of durable batches. On a root level
+    /// each batch the store holds is distinct and takes at most one revision,
+    /// so no revision exposed before the restart exceeds it. Replay alone can
+    /// count fewer: its sort can apply a batch that re-states a grind's final
+    /// quantity before the work batches that raised it, which then replay as
+    /// duplicates (§12.5.11). A child level also takes a revision for each
+    /// raised attributed run (`applyParentRun`), which no durable row
+    /// records and restore re-derives once, so there the floor can still
+    /// fall short. The node exposes no revision to clients.
     public static func restore(
         replaying facts: [BlockImportBatch],
         context: ChainRuntimeContext,
