@@ -102,4 +102,14 @@ final class WeighLogRestoreTests: XCTestCase {
         }
         XCTAssertEqual(host.levels.mapValues(\.sync.log.entries), before)
     }
+
+    /// An entry the tree has no handle for (a durable fact a restore
+    /// discards) is still logged once.
+    func testAnEntryTheTreeDoesNotHoldIsLoggedOnce() throws {
+        let tree = ChainTree.empty(context: try ChainRuntimeContext(path: LevelWorld.nexus + ["Child"]))
+        let header = LogEntry.header("a"), proof = LogEntry.proof("g", of: "a")
+        let log = WeighLog(id: "log", entries: [header, proof, header, proof], in: tree)
+        XCTAssertEqual(log.entries, [header, proof])
+        XCTAssertTrue(log.contains(proof, in: tree))
+    }
 }

@@ -97,23 +97,52 @@ public struct LogEntry: Sendable, Hashable {
 /// whose store resets starts a new log with a new id. The shell persists the
 /// entries with the facts (`ChainBatch.log`) and hands them back at
 /// restore.
+///
+/// Each object is logged once, known by a bit at its handle in the level's
+/// tree: a header at its block's (`ChainTree.handle(of:)`), a proof at its
+/// grind's (`grindHandle(of:at:)`, one grind, one block). Handles name the
+/// same object for the tree's lifetime, and the tree only grows, so a bit
+/// answers exactly as the entry itself would. An entry the tree has no
+/// handle for (a durable fact a restore discards) is kept by value.
 public struct WeighLog: Sendable {
     public let id: String
     public private(set) var entries: [LogEntry] = []
-    private var held: Set<LogEntry> = []
+    private var headers = HandleBits()
+    private var proofs = HandleBits()
+    private var unhandled: Set<LogEntry> = []
 
-    public init(id: String = "", entries: [LogEntry] = []) {
+    public init(id: String = "") {
         self.id = id
-        for entry in entries { append(entry) }
+    }
+
+    /// The log of `entries`, each once, over the tree that took them.
+    public init(id: String, entries: [LogEntry], in tree: ChainTree) {
+        self.id = id
+        for entry in entries { append(entry, in: tree) }
     }
 
     public var count: UInt64 { UInt64(entries.count) }
 
-    public func contains(_ entry: LogEntry) -> Bool { held.contains(entry) }
+    public func contains(_ entry: LogEntry, in tree: ChainTree) -> Bool {
+        if unhandled.contains(entry) { return true }
+        switch entry.kind {
+        // Only `.header(_:)` is logged: one naming another block never was.
+        case .header: return entry.cid == entry.block && tree.handle(of: entry.block).map(headers.contains) ?? false
+        case .proof: return tree.grindHandle(of: entry.cid, at: entry.block).map(proofs.contains) ?? false
+        }
+    }
 
+    /// Log `entry` unless it is logged, after `tree` took it. A header is
+    /// `.header(_:)`: its bit is its block's, so its cid must be that block.
     @discardableResult
-    mutating func append(_ entry: LogEntry) -> Bool {
-        guard held.insert(entry).inserted else { return false }
+    mutating func append(_ entry: LogEntry, in tree: ChainTree) -> Bool {
+        precondition(entry.kind == .proof || entry.cid == entry.block, "a header entry names its own block")
+        guard !unhandled.contains(entry) else { return false }
+        let inserted = switch entry.kind {
+        case .header: tree.handle(of: entry.block).map { headers.insert($0) }
+        case .proof: tree.grindHandle(of: entry.cid, at: entry.block).map { proofs.insert($0) }
+        }
+        guard inserted ?? unhandled.insert(entry).inserted else { return false }
         entries.append(entry)
         return true
     }
@@ -133,6 +162,24 @@ public struct WeighLog: Sendable {
             next += 1
         }
         return (page, next < entries.count)
+    }
+}
+
+/// A set of tree handles, one bit each.
+private struct HandleBits: Sendable {
+    private var words: [UInt64] = []
+
+    func contains(_ handle: UInt32) -> Bool {
+        let word = Int(handle >> 6)
+        return word < words.count && words[word] & 1 << (handle & 63) != 0
+    }
+
+    mutating func insert(_ handle: UInt32) -> Bool {
+        let word = Int(handle >> 6), bit: UInt64 = 1 << (handle & 63)
+        if word >= words.count { words += repeatElement(0, count: word + 1 - words.count) }
+        guard words[word] & bit == 0 else { return false }
+        words[word] |= bit
+        return true
     }
 }
 
