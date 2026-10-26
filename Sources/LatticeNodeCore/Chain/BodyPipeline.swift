@@ -68,22 +68,28 @@ extension ChainCore {
         bodyWindow.filter { tree.parent(of: $0).map(tree.isExecuted(blockHash:)) ?? true }
     }
 
-    /// Each window block's distance, in height, from the lowest block
-    /// this level can connect next (`nextToConnect` at 0): the order in
-    /// which their fetched bodies are needed.
-    ///
-    /// Distance is measured from the level's lowest next-to-connect block,
-    /// fork children included, not per branch: an approximation. A deep
-    /// fork child lowers the base, so this level's blocks look further
-    /// ahead than they are, which can skew the ranking against other chains.
+    /// Each window block's distance, in height, from the block on its own
+    /// branch this level can connect next (`nextToConnect` at 0): the order
+    /// in which their fetched bodies are needed. Per branch, so a fork or a
+    /// root whose body is withheld does not push the blocks this level can
+    /// use behind ones it cannot.
     public var connectDistances: [String: Int] {
         let window = bodyWindow
-        let next = window.filter { tree.parent(of: $0).map(tree.isExecuted(blockHash:)) ?? true }
-        guard let base = next.compactMap({ tree.height(of: $0) }).min() else { return [:] }
+        let inWindow = Set(window)
+        // The window block a block's run of unexecuted window ancestors starts at.
+        var base: [String: String] = [:]
+        func start(of cid: String) -> String {
+            if let known = base[cid] { return known }
+            let parent = tree.parent(of: cid)
+            let found = parent.flatMap { inWindow.contains($0) && !tree.isExecuted(blockHash: $0) ? start(of: $0) : nil } ?? cid
+            base[cid] = found
+            return found
+        }
         var distances: [String: Int] = [:]
         for cid in window {
-            let height = tree.height(of: cid) ?? base
-            distances[cid] = height > base ? Int(height - base) : 0
+            let height = tree.height(of: cid) ?? 0
+            let from = tree.height(of: start(of: cid)) ?? height
+            distances[cid] = height > from ? Int(height - from) : 0
         }
         return distances
     }

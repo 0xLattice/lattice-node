@@ -6,6 +6,8 @@ import UInt256
 /// weighs, validity selects) and each grind once, at its strongest.
 public struct GhostReference: Sendable {
     public let genesis: String
+    /// The genesis roots: the genesis fork, taken like any other.
+    public let roots: [String]
     private(set) var children: [String: [String]] = [:]
     private(set) var grinds: [String: [String: UInt256]] = [:]
     public var excluded: Set<String> = []
@@ -13,7 +15,13 @@ public struct GhostReference: Sendable {
     public var flipTieBreak = false
 
     public init(genesis: String) {
-        self.genesis = genesis
+        self.init(roots: [genesis])
+    }
+
+    /// A chain holding several genesis roots (a child chain); `genesis` is the first.
+    public init(roots: [String]) {
+        genesis = roots.first ?? ""
+        self.roots = roots.isEmpty ? [""] : roots
     }
 
     public mutating func add(_ block: String, parent: String?, work: UInt256) {
@@ -39,18 +47,16 @@ public struct GhostReference: Sendable {
             totals[block] = merged.values.reduce(UInt256.zero, +)
             return merged
         }
-        _ = visit(genesis)
+        for root in roots { _ = visit(root) }
         return totals
     }
 
     /// The selected tip and the path to it.
     public func descent() -> (head: String, path: [String]) {
         let work = subtreeWork()
-        var path = [genesis]
-        var current = genesis
-        while true {
+        func select(among candidates: [String]) -> String? {
             var selected: String?
-            for child in children[current] ?? [] where !excluded.contains(child) {
+            for child in candidates where !excluded.contains(child) {
                 guard let incumbent = selected else {
                     selected = child
                     continue
@@ -62,10 +68,15 @@ public struct GhostReference: Sendable {
                     selected = child
                 }
             }
-            guard let next = selected else { return (current, path) }
+            return selected
+        }
+        var current = select(among: roots) ?? genesis
+        var path = [current]
+        while let next = select(among: children[current] ?? []) {
             path.append(next)
             current = next
         }
+        return (current, path)
     }
 
     public var head: String { descent().head }

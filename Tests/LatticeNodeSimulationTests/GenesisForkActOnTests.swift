@@ -104,6 +104,16 @@ final class GenesisForkActOnTests: XCTestCase {
         XCTAssertTrue(alpha.tree.isExecuted(blockHash: chain[3].cid), "G1's new blocks execute")
         XCTAssertEqual(alpha.snapshot.actOnTip, chain[3].cid, "the act-on tip advances along G1")
         XCTAssertEqual(alpha.mining.tipCID, chain[3].cid, "templates build on it")
-        XCTAssertEqual(TreeDigest(alpha.tree).actOnTip, chain[3].cid, "the simulator's act-on tip agrees")
+        let digest = TreeDigest(alpha.tree)
+        XCTAssertEqual(digest.actOnTip, chain[3].cid, "the simulator's act-on tip agrees")
+        var reference = GhostReference(roots: digest.roots)
+        reference.excluded = digest.excluded
+        for (hash, entry) in digest.blocks { reference.add(hash, parent: entry.parent, grinds: entry.grinds) }
+        XCTAssertEqual(reference.head, g2.cid, "the GHOST reference descends from the genesis fork")
+        let work = reference.subtreeWork()
+        for (hash, entry) in digest.blocks {
+            XCTAssertEqual(entry.subtreeWork, work[hash], "the reference weighs \(hash) under its own root")
+        }
+        XCTAssertEqual(alpha.connectDistances[g2.cid], 0, "the withheld root is next to connect on its own branch")
     }
 }
