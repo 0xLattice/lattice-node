@@ -233,6 +233,19 @@ final class SponsorLedgerTests: XCTestCase {
         }
     }
 
+    /// After a reorg to a lower height, no range is handed out that a live
+    /// template's higher height would refuse.
+    func testNoWorkIsAssignedBelowALiveTemplatesHeight() throws {
+        var ledger = ledger()
+        ledger.install(template(workID: "w0", marketHeight: 8), now: 0)
+        ledger.install(template(workID: "w2", marketHeight: 7), now: 1)
+        XCTAssertThrowsError(try ledger.assign(client: "a", on: market, now: 1)) {
+            XCTAssertEqual($0 as? SponsorRefusal, .busy)
+        }
+        ledger.install(template(workID: "w3", marketHeight: 7, expiresAt: 60_000), now: 30_000)
+        XCTAssertNoThrow(try ledger.assign(client: "a", on: market, now: 30_000), "once the higher template expires")
+    }
+
     func testSponsoredBodyAddsOnlyTheFeeAndCoSigns() throws {
         let client = CryptoUtils.generateKeyPair()
         let sponsorKey = CryptoUtils.generateKeyPair()

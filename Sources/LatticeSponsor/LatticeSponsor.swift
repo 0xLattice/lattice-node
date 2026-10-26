@@ -316,7 +316,10 @@ actor Sponsor {
     }
 
     private func currentFee(_ chainPath: [String]) throws -> UInt64 {
-        guard ledger.latest?.prices[chainPath] != nil, let fee = fees[chainPath] else {
+        // An expired template means refresh has stopped, and the balance
+        // read with it may no longer show fees already mined.
+        guard let latest = ledger.latest, now() < latest.expiresAt,
+              latest.prices[chainPath] != nil, let fee = fees[chainPath] else {
             throw SponsorRefusal.unpriceable
         }
         guard fee > 0 else {

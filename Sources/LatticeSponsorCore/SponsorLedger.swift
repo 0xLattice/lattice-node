@@ -188,6 +188,9 @@ public struct SponsorLedger: Sendable {
               let value = Self.shareValue(shareTarget: shareTarget, at: price), value > .zero else {
             throw SponsorRefusal.unpriceable
         }
+        // After a reorg to a lower height, a live template still shows the
+        // chain higher; work here could not earn until it expires.
+        guard (liveHeight(of: chainPath) ?? price.height) <= price.height else { throw SponsorRefusal.busy }
         let blockValue = UInt256(price.reward) * Self.unit
         guard sold[BlockKey(chainPath: chainPath, height: price.height)] ?? .zero < blockValue else {
             throw SponsorRefusal.soldOut
