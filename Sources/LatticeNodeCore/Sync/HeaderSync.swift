@@ -336,7 +336,8 @@ public struct HeaderSync: Sendable {
 }
 
 /// The most recent declined CIDs, oldest forgotten first. Forgetting one
-/// costs at most one more fetch, after which it is declined again.
+/// costs at most one more fetch, after which it is declined again. Cleared
+/// when the best tip's height falls (`ChainCore.finish`).
 public struct DeclinedSet: Sendable {
     public let capacity: Int
     private var members: Set<String> = []

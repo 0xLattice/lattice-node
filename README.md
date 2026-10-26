@@ -143,7 +143,7 @@ Its timestamp is the real launch time (Unix milliseconds) in
 `Sources/LatticeNode/Configuration/NexusGenesis.swift`. The full constants are
 documented in [docs/protocol.md](docs/protocol.md).
 
-The genesis is final: its CID is committed in a Bitcoin transaction. See
+The genesis is fixed: its CID is committed in a Bitcoin transaction. See
 [docs/design/bitcoin-anchored-genesis.md](docs/design/bitcoin-anchored-genesis.md).
 
 ## Storage compatibility

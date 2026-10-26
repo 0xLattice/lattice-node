@@ -182,7 +182,7 @@ public struct ChainCoreConfig: Sendable {
     public var bodyRetryCap: Int64
     /// The level's mempool and template bounds.
     public var mining = MiningConfig()
-    /// Node-local finality (docs/operations.md, "Finality window"), per chain, in blocks: a header more
+    /// Node-local finality (docs/operations.md, "Node-local finality"), per chain, in blocks: a header more
     /// than its chain's window below that chain's best weighed tip, or work
     /// crediting such a block, is declined — never stored, never blamed. The
     /// node then does not follow a reorganization deeper than the window. A
@@ -481,6 +481,11 @@ public struct ChainCore: Sendable {
             )))
         }
         let current = snapshot
+        // A best tip that moved down moved the finality window with it: what
+        // was declined just past the old window may be inside the new one.
+        if let published, current.bestHeaderHeight < published.bestHeaderHeight {
+            sync.declined = DeclinedSet(capacity: sync.declined.capacity)
+        }
         if current != published {
             published = current
             effects.append(.publish(current))

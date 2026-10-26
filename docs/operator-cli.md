@@ -55,6 +55,12 @@ This is intentionally one schema:
   `--block-bodies` (see "What a node keeps" in `operations.md`);
 - `state`, when set, is `all`, `tip` or `none` and is passed as `--state` (same
   section);
+- `finalityWindow`, when set, is a number of blocks and is passed as
+  `--finality-window N` for every hosted chain; absent or 0 is off (see
+  [Node-local finality](operations.md#node-local-finality));
+- `finalityWindows`, when set, maps a chain path to blocks
+  (`{"Nexus/Alpha": 500}`) over that default and is passed as
+  `--finality-window path=N`; 0 turns it off for that chain;
 - `announceLifetime`, when set, is 1 to 86400 and is passed as
   `--announce-lifetime` (see
   "Discovery and peer health" in `operations.md`);
