@@ -54,8 +54,8 @@ public struct TipMove: Sendable {
 /// stale. The move already issued the job again, so a backlog never runs
 /// more than one tip's worth of preflights.
 ///
-/// `checksPolicies` is false only for a transaction the pool already holds
-/// as ready, between `MiningConfig.policyRecheckInterval` moves: the chain's
+/// `checksPolicies` is false only for a pooled transaction (every one was
+/// ready), between `MiningConfig.policyRecheckInterval` moves: the chain's
 /// policies accepted it then, and every template, root or child, judges it
 /// by them again at the height that would carry it. So most tip moves cost
 /// the pool its state checks, not a policy evaluation per pooled transaction.
@@ -110,9 +110,8 @@ public struct TemplateRequest: Sendable, Equatable {
 
 /// Assemble a candidate on the executed tip `tipCID` from `transactions`, in
 /// this order, read from the pool at `poolVersion`. With a parent carrier the
-/// transactions are the pool's contextual set (unavailable entries included),
-/// and the job preflights each against the carrier's `prevState`, as the
-/// shell's assembler does today.
+/// job preflights each against the carrier's `prevState`, as the shell's
+/// assembler does today.
 ///
 /// Job contract: as for `PreflightJob`, an executor MUST skip the job iff
 /// `tipEpoch` differs from `MiningState.tipEpoch` read at dequeue, and the core
@@ -483,9 +482,18 @@ public struct MiningState: Sendable {
         preflighting.remove(job.cid)
         if let admission = close(job.cid) {
             admit(admission, cid: job.cid, disposition, now: now, &turn)
-        } else {
-            let mutation = mempool.reclassify(job.cid, as: disposition)
-            departed(mutation, &turn)
+            return
+        }
+        // The pool holds only what executes on the tip: a pooled transaction
+        // that no longer does leaves (one ahead after a reorg is the sender's
+        // to send again). One this node cannot judge now (state, a module, a
+        // receipt it lacks) stays as it was, so a gap in this node's own
+        // evidence never flushes the pool; templates check each again.
+        switch disposition {
+        case .ready, .unavailable:
+            break
+        case .future, .invalid:
+            departed(mempool.remove([job.cid]), &turn)
         }
     }
 
@@ -500,12 +508,23 @@ public struct MiningState: Sendable {
             if case .restored(let addedAt) = origin { return addedAt }
             return nil
         }.first
+        // Only what executes on the tip now is pooled. A nonce ahead, or
+        // evidence this node lacks, is a retry for the sender, not a verdict.
+        let refusal: MempoolError? = switch disposition {
+        case .ready: nil
+        case .future: .nonceAhead
+        case .unavailable: .unavailable
+        case .invalid: .invalidState
+        }
+        if let refusal {
+            refuse(admission.origins, cid: cid, refusal, verdict: disposition == .invalid, &turn)
+            return
+        }
         do {
             guard let spec else { throw MempoolError.unresolved }
             let mutation = try mempool.submit(
                 admission.transaction,
                 spec: spec,
-                disposition: disposition,
                 addedAt: restoredAt ?? now
             )
             departed(mutation, &turn)
@@ -515,8 +534,7 @@ public struct MiningState: Sendable {
         } catch {
             // Only the verdict makes a refusal final for a journal row; a
             // capacity or conflict refusal leaves the row for the next boot.
-            refuse(admission.origins, cid: cid, error as? MempoolError ?? .invalidState,
-                   verdict: disposition == .invalid, &turn)
+            refuse(admission.origins, cid: cid, error as? MempoolError ?? .invalidState, verdict: false, &turn)
         }
     }
 
@@ -649,7 +667,7 @@ public struct MiningState: Sendable {
         preflighting.removeAll()
         let rejudges = tipEpoch % config.policyRecheckInterval == 0
         for item in mempool.items {
-            preflight(item.cid, item.transaction, checksPolicies: rejudges || item.disposition != .ready, &turn)
+            preflight(item.cid, item.transaction, checksPolicies: rejudges, &turn)
         }
         for (cid, admission) in admissions.sorted(by: { $0.key < $1.key }) {
             preflight(cid, admission.transaction, &turn)
@@ -715,9 +733,7 @@ public struct MiningState: Sendable {
             tipCID: tipCID,
             tipEpoch: tipEpoch,
             poolVersion: mempool.version,
-            transactions: request.parentCarrier == nil
-                ? mempool.transactions(limit: .max)
-                : mempool.contextualTransactions(limit: .max),
+            transactions: mempool.transactions(limit: .max),
             request: request
         )
         nextJobID += 1

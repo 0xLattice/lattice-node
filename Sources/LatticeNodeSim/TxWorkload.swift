@@ -31,7 +31,7 @@ public struct TxWorkloadConfig: Sendable {
     public var floodSize = 8
     public var minJobDelay: Int64 = 1
     public var maxJobDelay: Int64 = 400
-    public var mempool = MempoolLimits(maxCount: 24, maxNonReadyPerSigner: 4)
+    public var mempool = MempoolLimits(maxCount: 24)
     public var pending = MiningConfig(maxPendingPeerAdmissions: 16, maxPendingPerPeer: 4, maxPendingReturned: 8)
     /// Simulated time after the last submission before the run stops.
     public var settle: Int64 = 30_000
@@ -62,10 +62,7 @@ public struct TxWorkloadConfig: Sendable {
             maxPendingReturned: rng.draw(1...12)
         )
         config.maxJobDelay = rng.draw(Int64(20)...1_500)
-        config.mempool = MempoolLimits(
-            maxCount: rng.draw(8...64),
-            maxNonReadyPerSigner: rng.draw(1...8)
-        )
+        config.mempool = MempoolLimits(maxCount: rng.draw(8...64))
         return config
     }
 }
@@ -709,11 +706,11 @@ public struct TxWorkload {
                 case .submit, .requestTemplate, .reorg, .flood: break
                 }
             }
-            guard mining.mempool.items.contains(where: { $0.disposition == .ready }) else { break }
+            guard mining.mempool.count > 0 else { break }
             try await step(.templateRequested(replyID: reply(), TemplateRequest(rewardRecipient: recipient())))
         }
         guard owed.isEmpty else { throw fail("\(owed.count) replies never given") }
-        if let ready = mining.mempool.items.first(where: { $0.disposition == .ready }) {
+        if let ready = mining.mempool.items.first {
             throw fail("ready transaction \(ready.cid) never mined")
         }
     }

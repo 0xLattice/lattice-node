@@ -260,20 +260,20 @@ struct TxOptions: ParsableArguments {
 }
 
 /// The nonce to sign with when the operator did not name one: the chain's
-/// next expected nonce for the key, advanced past anything that key already
-/// has waiting in the pool.
+/// next expected nonce for the key, once nothing of the key's waits in the
+/// pool.
 ///
-/// The committed tip alone is not enough. Two invocations before a block is
-/// mined would both read the same next nonce, and the pool replaces one
-/// `(signer, nonce)` with whichever bids the higher real fee — so the earlier
-/// transfer would be dropped while both commands printed `submitted` and
-/// exited 0. Paying nobody must not look like success.
+/// The pool holds one transaction per key, and only one that executes on
+/// the tip: a second signed past a pending one is refused (`nonceAhead`),
+/// and one at the same nonce would replace it. So a key with a transaction
+/// pending is refused here, rather than printing `submitted` for a transfer
+/// that pays nobody; run the command again once it is mined.
 func nextNonce(rpc: NodeRPC, address: String, chain: String = "Nexus") async throws -> UInt64 {
     let committed = try await committedNextNonce(rpc: rpc, address: address, chain: chain)
-    guard let pending = try await highestPendingNonce(
-        rpc: rpc, signer: address, chain: chain
-    ) else { return committed }
-    return max(committed, pending &+ 1)
+    if let pending = try await highestPendingNonce(rpc: rpc, signer: address, chain: chain) {
+        throw CtlError("\(address) has a transaction pending at nonce \(pending); try again once it is mined")
+    }
+    return committed
 }
 
 /// The chain's own view of the key's next nonce, as of its tip.

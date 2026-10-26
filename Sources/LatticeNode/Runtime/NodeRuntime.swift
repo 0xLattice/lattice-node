@@ -1551,7 +1551,9 @@ extension NodeRuntime {
                     }
                 }
             case .preflight:
-                guard let basis = core.levels[path].flatMap({ NodeRuntime.miningBasis(effect, tree: $0.tree) }) else { break }
+                guard let basis = core.levels[path].flatMap({
+                    NodeRuntime.miningBasis(effect, tree: $0.tree, parent: core.levels[Array(path.dropLast())])
+                }) else { break }
                 miningJobs.append(NodeRuntime.miningJob(effect, at: path, basis: basis, storage: storage))
                 startJobs()
             case .buildTemplate:
@@ -1578,10 +1580,8 @@ extension NodeRuntime {
                     path: child,
                     tipCID: executed ? snapshot.actOnTip : nil,
                     bestHeaderTip: snapshot.bestHeaderTip,
-                    // Every child block here has a carrier, so the pool's
-                    // contextual set: a withdrawal preflight could not settle
-                    // without one is checked against that carrier's state.
-                    transactions: level.mining.mempool.contextualTransactions(limit: .max),
+                    // Each is checked again against the carrier's state.
+                    transactions: level.mining.mempool.transactions(limit: .max),
                     anchor: executed ? NodeRuntime.anchor(level.tree, snapshot.actOnTip) : nil,
                     // A weighed root that has not executed carries nothing
                     // until it executes, rather than a rival genesis.

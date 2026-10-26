@@ -178,14 +178,12 @@ final class MiningStateTests: XCTestCase {
     func testATipMoveRechecksAReadyTransactionWithoutItsPolicies() throws {
         var mining = MiningState(tipCID: "A", spec: testSpec())
         let ready = try transfer(nonce: 0)
-        let future = try transfer(nonce: 2)
-        for (tx, verdict) in [(ready, MempoolDisposition.ready), (future, .future)] {
-            guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 1)), now: 0).first
-            else { return XCTFail() }
-            XCTAssertTrue(job.checksPolicies, "an arrival is judged by the policies")
-            _ = mining.step(.preflighted(job, verdict), now: 0)
-        }
-        let arriving = try transfer(nonce: 1)
+        guard case .preflight(let job)? = mining.step(.transactionReceived(ready, origin: .local(replyID: 1)), now: 0).first
+        else { return XCTFail() }
+        XCTAssertTrue(job.checksPolicies, "an arrival is judged by the policies")
+        _ = mining.step(.preflighted(job, .ready), now: 0)
+        let arrivingKey = CryptoUtils.generateKeyPair()
+        let arriving = try signed(arrivingKey, [AccountAction(owner: address(arrivingKey), delta: -2)], nonce: 0)
         _ = mining.step(.transactionReceived(arriving, origin: .local(replyID: 2)), now: 1)
 
         let moved = mining.step(.tipMoved(TipMove(tipCID: "B")), now: 2)
@@ -193,7 +191,6 @@ final class MiningStateTests: XCTestCase {
             if case .preflight(let job) = $0 { (job.cid, job.checksPolicies) } else { nil }
         })
         XCTAssertEqual(jobs[try Mempool.cid(of: ready)], false, "a ready one passed them already")
-        XCTAssertEqual(jobs[try Mempool.cid(of: future)], true, "a future one is judged every move")
         XCTAssertEqual(jobs[try Mempool.cid(of: arriving)], true, "an admission still waiting is judged")
     }
 
@@ -218,14 +215,15 @@ final class MiningStateTests: XCTestCase {
 
     func testATipMoveRemovesConfirmedRevalidatesThePoolAndReadmitsReturned() throws {
         var mining = MiningState(tipCID: "A", spec: testSpec())
-        let kept = try transfer(nonce: 1)
+        let keptKey = CryptoUtils.generateKeyPair()
+        let kept = try signed(keptKey, [AccountAction(owner: address(keptKey), delta: -2)], nonce: 0)
         let confirmed = try transfer(nonce: 0)
         let returnedKey = CryptoUtils.generateKeyPair()
         let returned = try signed(returnedKey, [AccountAction(owner: address(returnedKey), delta: -1)], nonce: 0)
         for tx in [kept, confirmed] {
             guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 9)), now: 0).first
             else { return XCTFail() }
-            _ = mining.step(.preflighted(job, tx.body.node?.nonce == 0 ? .ready : .future), now: 0)
+            _ = mining.step(.preflighted(job, .ready), now: 0)
         }
 
         let effects = mining.step(.tipMoved(TipMove(
@@ -348,26 +346,60 @@ final class MiningStateTests: XCTestCase {
         XCTAssertTrue(mining.step(.preflighted(job, .ready), now: 2).isEmpty)
     }
 
-    func testAChildCandidateRequestSelectsTheContextualPool() async throws {
+    /// A child template, under a carrier, takes the same pool: everything
+    /// in it executes on the tip, and the job checks each against the
+    /// carrier's state again.
+    func testAChildCandidateRequestSelectsThePool() async throws {
         var mining = MiningState(tipCID: "A", spec: testSpec())
         let tx = try transfer(nonce: 0)
         guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 1)), now: 0).first
         else { return XCTFail() }
-        // A withdrawal waiting on its parent receipt classifies unavailable.
-        _ = mining.step(.preflighted(job, .unavailable), now: 0)
-
-        guard case .buildTemplate(let plain)? = mining.step(
-            .templateRequested(replyID: 2, TemplateRequest(rewardRecipient: nil)), now: 0
-        ).first else { return XCTFail() }
-        XCTAssertTrue(plain.transactions.isEmpty)
+        _ = mining.step(.preflighted(job, .ready), now: 0)
 
         let carrier = try await candidateBlock()
         let context = ParentCarrier(cid: try BlockHeader(node: carrier).rawCID, block: carrier)
         guard case .buildTemplate(let contextual)? = mining.step(
             .templateRequested(replyID: 3, TemplateRequest(rewardRecipient: nil, parentCarrier: context)), now: 0
-        ).first else { return XCTFail("another carrier is another plan") }
+        ).first else { return XCTFail() }
         XCTAssertEqual(contextual.transactions.map(\.body.rawCID), [tx.body.rawCID])
         XCTAssertEqual(contextual.request.parentCarrier?.cid, context.cid)
+    }
+
+    /// Only what executes on the tip is pooled: a nonce ahead or evidence
+    /// this node lacks is a retry for the sender, never held.
+    func testOnlyAReadyTransactionIsPooled() throws {
+        for (verdict, refusal) in [(MempoolDisposition.future, MempoolError.nonceAhead), (.unavailable, .unavailable)] {
+            var mining = MiningState(tipCID: "A", spec: testSpec())
+            let tx = try transfer(nonce: 1)
+            guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .submitted(replyID: 1)), now: 0).first
+            else { return XCTFail() }
+            let refused = mining.step(.preflighted(job, verdict), now: 1)
+            XCTAssertTrue(refused.contains { if case .transactionRefused(1, refusal) = $0 { true } else { false } }, "\(refused)")
+            XCTAssertEqual(mining.mempool.count, 0)
+        }
+    }
+
+    /// A pooled transaction that no longer executes on the tip leaves; one
+    /// this node cannot judge now stays, so a gap in its own evidence never
+    /// flushes the pool.
+    func testATipMoveDropsWhatNoLongerExecutesAndKeepsWhatItCannotJudge() throws {
+        var mining = MiningState(tipCID: "A", spec: testSpec())
+        let keys = (0..<3).map { _ in CryptoUtils.generateKeyPair() }
+        let txs = try keys.map { try signed($0, [AccountAction(owner: address($0), delta: -2)], nonce: 0) }
+        for tx in txs {
+            guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 1)), now: 0).first
+            else { return XCTFail() }
+            _ = mining.step(.preflighted(job, .ready), now: 0)
+        }
+        let moved = mining.step(.tipMoved(TipMove(tipCID: "B")), now: 1)
+        let jobs = Dictionary(uniqueKeysWithValues: moved.compactMap {
+            if case .preflight(let job) = $0 { (job.cid, job) } else { nil }
+        })
+        let cids = try txs.map(Mempool.cid(of:))
+        for (cid, verdict) in zip(cids, [MempoolDisposition.future, .invalid, .unavailable]) {
+            _ = mining.step(.preflighted(try XCTUnwrap(jobs[cid]), verdict), now: 2)
+        }
+        XCTAssertEqual(mining.mempool.items.map(\.cid), [cids[2]])
     }
 
     func testOnlyADeterministicCheckFailureRemovesARestoredJournalRow() throws {

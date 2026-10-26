@@ -128,6 +128,10 @@ struct ChildTemplateInput: Sendable {
 struct MiningBasis: Sendable {
     let snapshot: TipBlockSnapshot?
     let anchor: DifficultyAnchor?
+    /// For a child level's preflight: the hosted parent's executed post-state,
+    /// which a withdrawal's receipt is proven in. Nil at the root, or when
+    /// the parent is not hosted or has not executed.
+    var parentState: LatticeStateHeader? = nil
 }
 
 /// What a child block's connect reads of its parent level: whether the
@@ -495,7 +499,7 @@ extension NodeRuntime {
     /// The basis of a preflight or template job on `tree`, the live level's,
     /// taken when the job is spawned; nil for any other effect, or a tree
     /// made without a context.
-    static func miningBasis(_ effect: MiningEffect, tree: ChainTree) -> MiningBasis? {
+    static func miningBasis(_ effect: MiningEffect, tree: ChainTree, parent: ChainCore? = nil) -> MiningBasis? {
         let (tip, anchored): (String, Bool)
         switch effect {
         case .preflight(let job): (tip, anchored) = (job.tipCID, false)
@@ -503,8 +507,13 @@ extension NodeRuntime {
         default: return nil
         }
         guard tree.context != nil else { return nil }
+        let parentState = anchored ? nil : parent.flatMap { parent in
+            parent.tree.transactionPreflightTip(at: parent.snapshot.actOnTip).snapshot
+                .map { LatticeStateHeader(rawCID: $0.postStateCID) }
+        }
         return MiningBasis(
-            snapshot: tree.transactionPreflightTip(at: tip).snapshot, anchor: anchored ? anchor(tree, tip) : nil
+            snapshot: tree.transactionPreflightTip(at: tip).snapshot, anchor: anchored ? anchor(tree, tip) : nil,
+            parentState: parentState
         )
     }
 
@@ -533,10 +542,12 @@ extension NodeRuntime {
             return RuntimeJob(path: path, epoch: job.tipEpoch) {
                 guard let basis else { return [] }
                 // From this store alone: a transaction anyone may submit
-                // does not spend this node's requests to its peers.
+                // does not spend this node's requests to its peers. A child
+                // withdrawal is proven against the parent's executed state,
+                // so it is ready, invalid or a retry, never held unchecked.
                 let result = await TransactionPreflight.classify(
-                    job.transaction, tipCID: job.tipCID, snapshot: basis.snapshot, chainPath: path, fetcher: fetcher,
-                    checksPolicies: job.checksPolicies
+                    job.transaction, tipCID: job.tipCID, snapshot: basis.snapshot, chainPath: path,
+                    parentState: basis.parentState, fetcher: fetcher, checksPolicies: job.checksPolicies
                 )
                 return [.level(path, .mining(.preflighted(job, disposition(result.disposition))))]
             }
@@ -993,7 +1004,7 @@ extension NodeRuntime {
             tip: tip,
             transactions: mempool.transactions(limit: .max).compactMap { try? Mempool.cid(of: $0) },
             levels: levels.map {
-                ($0.actOn, $0.best, $0.pool.contextualTransactions(limit: .max).compactMap { try? Mempool.cid(of: $0) })
+                ($0.actOn, $0.best, $0.pool.transactions(limit: .max).compactMap { try? Mempool.cid(of: $0) })
             }
         )
     }
