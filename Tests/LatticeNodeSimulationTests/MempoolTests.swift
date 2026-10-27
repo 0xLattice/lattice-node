@@ -473,6 +473,23 @@ final class MempoolTests: XCTestCase {
         )
     }
 
+    /// What a template is handed fits the block it builds: each transaction
+    /// is charged its share of the block around it, so one that fits by its
+    /// own bytes alone but not with the trie it adds is skipped, and the
+    /// builder never has to cut the list short.
+    func testTheNextBlockChargesEachTransactionItsPlaceInTheBlock() throws {
+        let spec = testSpec(maxBlockSize: 20_000)
+        var pool = Mempool(limits: MempoolLimits(minRelayFee: 0))
+        let small = try (0..<8).map { _ in try paying(CryptoUtils.generateKeyPair(), fee: 1_000, nonce: 0) }
+        for tx in small { try pool.submit(tx, spec: spec, addedAt: 0) }
+        let used = try small.reduce(0) { $0 + (try size($1)) }
+        let big = try storing(size: Mempool.transactionRoom(spec) - used - 100)
+        try pool.submit(big, spec: spec, addedAt: 0)
+        XCTAssertEqual(pool.transactions(limit: .max, maxBytes: Mempool.transactionRoom(spec)).count, 9,
+                       "by their own bytes alone, all fit")
+        XCTAssertEqual(Set(try pool.nextBlock(spec).map(Mempool.cid(of:))), Set(try small.map(Mempool.cid(of:))))
+    }
+
     /// Selection gives up after 1,000 transactions in a row fail to fit, as
     /// Bitcoin Core does: a small one behind 1,000 large, better-paying ones
     /// is left out, and behind 999 it is taken.

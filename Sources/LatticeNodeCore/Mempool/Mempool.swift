@@ -251,6 +251,13 @@ public struct Mempool: Sendable {
     /// 180 to the trie.
     static let blockAllowance = 2_048
 
+    /// What each transaction adds to its block beyond its own bytes (about
+    /// 180 in the transaction trie), with room to spare. `nextBlock` charges
+    /// it, so what a template is handed always fits the block: the builder
+    /// keeps only the longest prefix that fits, and one transaction over the
+    /// line would cost the template everything behind it.
+    static let transactionAllowance = 256
+
     /// Pool a transaction preflight found ready. `balances` holds, for each
     /// account it debits, the balance preflight read on the tip; one
     /// missing counts as empty.
@@ -354,7 +361,16 @@ public struct Mempool: Sendable {
     /// spec's transaction count and `transactionRoom`. A template judges
     /// these by its policies, never the whole pool.
     public func nextBlock(_ spec: ChainSpec) -> [Transaction] {
-        transactions(limit: Int(clamping: spec.maxNumberOfTransactionsPerBlock), maxBytes: Self.transactionRoom(spec))
+        var result: [Transaction] = []
+        _ = selected(
+            limit: Int(clamping: spec.maxNumberOfTransactionsPerBlock),
+            maxBytes: Self.transactionRoom(spec),
+            overhead: Self.transactionAllowance
+        ) { entry in
+            result.append(entry.transaction)
+            return true
+        }
+        return result
     }
 
     /// The next `count` blocks this pool would fill if nothing else arrived,
@@ -400,21 +416,22 @@ public struct Mempool: Sendable {
         }
     }
 
-    private func selected(limit: Int, maxBytes: Int, _ take: (Entry) -> Bool) -> Int {
+    private func selected(limit: Int, maxBytes: Int, overhead: Int = 0, _ take: (Entry) -> Bool) -> Int {
         guard limit > 0, maxBytes > 0 else { return 0 }
         var taken = 0
         var bytes = 0
         var misses = 0
         for entry in ordered {
             guard taken < limit else { break }
-            guard entry.size <= maxBytes - bytes else {
+            let charged = entry.size + overhead
+            guard charged <= maxBytes - bytes else {
                 misses += 1
                 if misses >= Self.maxConsecutiveMisses { break }
                 continue
             }
             misses = 0
             taken += 1
-            bytes += entry.size
+            bytes += charged
             if !take(entry) { break }
         }
         return taken
