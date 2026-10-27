@@ -163,6 +163,9 @@ public struct NodeCore: Sendable {
     public let logID: String
     public internal(set) var levels: [ChainPath: ChainCore] = [:]
     public internal(set) var peers: Set<PeerID> = []
+    /// The levels the last step ran: only these can have changed. A level
+    /// the step did not run keeps its tree, bodies, pool and snapshot.
+    public private(set) var touched: Set<ChainPath> = []
     /// Operator overrides: the one genesis a child chain admits.
     public let pins: [ChainPath: String]
 
@@ -356,6 +359,8 @@ public struct NodeCore: Sendable {
         /// What each level's admissions weighed this step
         /// (`ChainTreeUpdate.weighed`), forwarded to run attribution.
         var weighed: [ChainPath: Set<String>] = [:]
+        /// Every level the step ran (`NodeCore.touched`).
+        var touched: Set<ChainPath> = []
     }
 
     public mutating func step(_ event: NodeEvent, now: Int64) -> [NodeEffect] {
@@ -384,9 +389,11 @@ public struct NodeCore: Sendable {
             host(path, facts: facts, specs: specs, cursors: cursors, &turn)
         case .unhost(let path):
             unhost(path)
+            turn.touched.insert(rootPath)
         }
         dropDisconnected(&turn)
         attributeRuns(&turn)
+        touched = turn.touched
         return emit(turn)
     }
 
@@ -410,6 +417,7 @@ public struct NodeCore: Sendable {
     /// in proportion to the chain, not to its event.
     mutating func run(_ path: ChainPath, _ event: ChainEvent, _ turn: inout Turn) {
         guard var core = levels.removeValue(forKey: path) else { return }
+        turn.touched.insert(path)
         let effects = core.step(event, now: turn.now)
         turn.weighed[path, default: []].formUnion(core.weighed)
         levels[path] = consume core
@@ -505,6 +513,7 @@ public struct NodeCore: Sendable {
         else { return }
         hosted.insert(path)
         levels[path] = level
+        turn.touched.formUnion([path, Array(path.dropLast())])
         for peer in peers.sorted() { run(path, .peerReady(peer), &turn) }
     }
 
@@ -532,6 +541,7 @@ public struct NodeCore: Sendable {
         var outcome: MinedOutcome? = .childOnly
         if ChainTree.rootWork(of: grind.root) != nil, let cid = try? BlockHeader(node: grind.root).rawCID,
            var core = levels.removeValue(forKey: rootPath) {
+            turn.touched.insert(rootPath)
             let held = core.tree.contains(blockHash: cid)
             if !held, let replyID { core.minedReplies[cid] = replyID }
             let effects = core.weighOwn(grind.root, children: grind.rootChildren, proof: nil, now: turn.now)
@@ -549,6 +559,7 @@ public struct NodeCore: Sendable {
         }
         for carried in grind.carried.sorted(by: { Self.order($0.path, $1.path) }) {
             guard var core = levels.removeValue(forKey: carried.path) else { continue }
+            turn.touched.insert(carried.path)
             let effects = core.weighOwn(
                 carried.block, children: carried.children,
                 proof: (carried.proof, carried.evidence), now: turn.now
@@ -591,6 +602,7 @@ public struct NodeCore: Sendable {
                 from: parentCore.tree, parentBlocks: parentBlocks, held: held, now: turn.now
             )
             levels[path] = consume core
+            turn.touched.insert(path)
             raised[path] = Set(result.raised)
             absorb(result.effects, at: path, &turn)
         }

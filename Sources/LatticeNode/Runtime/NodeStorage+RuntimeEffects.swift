@@ -202,7 +202,9 @@ extension NodeStorage {
         let capture = IvyRootContentSource.AttributionCapture()
         do {
             return try await remote.withRootTracing(
-                cid, bundle: bundle, hosts: hosts, capture: capture, reserving: bytes, priority: .body(cid)
+                cid, bundle: bundle, hosts: hosts, capture: capture, reserving: bytes, priority: .body(
+                    cid, depth: hosts.map { $0.path.count - 1 } ?? 0
+                )
             ) { session in
                 // Read into memory, never into the store: what a peer sent is
                 // stored once the block's execution has found it valid.

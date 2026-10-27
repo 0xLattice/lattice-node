@@ -568,6 +568,10 @@ extension NodeRuntime {
         /// The window blocks' distances from their chains' next blocks to
         /// connect, as last given to the read cache.
         var cachedBodyOrder: [String: Int] = [:]
+        /// Each level's next blocks to connect and window distances, as of
+        /// the last step that ran it (`NodeCore.touched`): a level no step
+        /// ran has the same tree, so the same window.
+        var windows: [ChainPath: (next: [String], distances: [String: Int])] = [:]
         /// Each level's tip the kept state was last moved to, and the blocks
         /// executed or found invalid this step, whose reads go after it.
         var stateTips: [ChainPath: String] = [:]
@@ -666,11 +670,16 @@ extension NodeRuntime {
                 }
                 return true
             case .network(let network):
-                defer { refreshView() }
                 let result = await receive(network)
                 switch network {
                 case .hello, .sync, .transactionAvailable: await gate.release()
                 case .connected, .disconnected: break
+                }
+                // Peers are in every level's view; a message's step
+                // refreshed the levels it ran.
+                switch network {
+                case .connected, .disconnected, .hello: refreshView()
+                case .sync, .transactionAvailable: break
                 }
                 return result
             case .request(let path, let event, let reply):
@@ -1016,6 +1025,13 @@ extension NodeRuntime {
             for path in core.levels.keys { refreshView(path) }
         }
 
+        /// The views of `paths` and of the root, whose template digest
+        /// names every level's tip and pool.
+        mutating func refreshView(_ paths: Set<ChainPath>) {
+            guard !paths.isEmpty else { return }
+            for path in paths.union([core.rootPath]) { refreshView(path) }
+        }
+
         /// One level's read view: its act-on chain by height, pool listing
         /// and template digest.
         mutating func refreshView(_ path: ChainPath) {
@@ -1274,18 +1290,22 @@ extension NodeRuntime {
             }
             await settleBodies()
             await settleState()
+            for path in windows.keys where core.levels[path] == nil { windows[path] = nil }
+            for (path, level) in core.levels where core.touched.contains(path) || windows[path] == nil {
+                windows[path] = (level.nextToConnect, level.connectDistances)
+            }
             // The blocks each chain can connect next wait for the content
             // budget ahead of bodies fetched ahead of them. Refreshed only
             // while someone waits: a waiter that arrives between steps is
             // ordered by the last set, and moves up at the next step.
             if remote.budget.waiting > 0 {
-                remote.budget.prioritize(Set(core.levels.values.flatMap(\.nextToConnect)))
+                remote.budget.prioritize(Set(windows.values.flatMap(\.next)))
             }
             // Fetched bodies stay in memory in the order their connects
             // need them: the furthest ahead go first when room is needed.
             if !bodies.isEmpty || !cachedBodyOrder.isEmpty {
-                let order = core.levels.values.reduce(into: [String: Int]()) { order, level in
-                    order.merge(level.connectDistances) { min($0, $1) }
+                let order = windows.values.reduce(into: [String: Int]()) { order, window in
+                    order.merge(window.distances) { min($0, $1) }
                 }
                 if order != cachedBodyOrder {
                     cachedBodyOrder = order
@@ -1296,7 +1316,7 @@ extension NodeRuntime {
             // counted what of it the tip's state holds.
             for key in readsDone { await storage.releaseReads(key.cid, at: key.path) }
             readsDone.removeAll()
-            refreshView()
+            refreshView(core.touched)
             return true
         }
 
@@ -1369,7 +1389,7 @@ extension NodeRuntime {
                 // The host merges these into its own effects.
                 break
             case .publish(let snapshot):
-                refreshView()
+                refreshView([path])
                 outputs[path]?.published.publish(snapshot)
             case .send(let peer, let message):
                 guard let session = session(peer), let frame = try? ChainSyncWire.encode(message, at: path) else { break }

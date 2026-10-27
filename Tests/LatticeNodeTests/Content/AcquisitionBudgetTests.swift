@@ -170,6 +170,36 @@ final class AcquisitionBudgetTests: XCTestCase {
         XCTAssertEqual(budget.reserved, 0)
     }
 
+    /// A chain's fetches never wait behind its descendants': the root's
+    /// look-ahead goes ahead of a child's next block, which goes ahead of a
+    /// grandchild's, however they arrived; at one depth the next block goes
+    /// first.
+    func testShallowerChainsAreServedBeforeDeeperOnes() async throws {
+        let budget = AcquisitionBudget(capacity: 10)
+        let held = await budget.reserve(10, priority: .ownWork)
+        XCTAssertEqual(held, 10)
+        let order = Order()
+        func waiter(_ name: String, _ priority: AcquisitionBudget.Priority) async throws -> Task<Int?, Never> {
+            try await enqueue(budget, 10, priority) { reserved in
+                await order.append(name)
+                if let reserved { budget.release(reserved) }
+            }
+        }
+        let tasks = [
+            try await waiter("grandchild-next", .body("g", depth: 2)),
+            try await waiter("child-ahead", .body("c1", depth: 1)),
+            try await waiter("child-next", .body("c2", depth: 1)),
+            try await waiter("root-ahead", .body("r", depth: 0)),
+            try await waiter("own", .ownWork),
+        ]
+        budget.prioritize(["g", "c2"])
+        budget.release(10)
+        for task in tasks { _ = await task.value }
+        let granted = await order.granted
+        XCTAssertEqual(granted, ["own", "root-ahead", "child-next", "child-ahead", "grandchild-next"])
+        XCTAssertEqual(budget.reserved, 0)
+    }
+
     /// A waiter cancelled in line leaves it, holding nothing; one cancelled
     /// before it was in line is never in it. A session cancelled while it
     /// waits asks no peer.
