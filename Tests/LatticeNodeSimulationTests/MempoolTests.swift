@@ -276,17 +276,18 @@ final class MempoolTests: XCTestCase {
             )
             return Transaction(signatures: [key.publicKey: "x"], body: try HeaderImpl(node: body))
         }
-        let spec = testSpec(maxTransactions: 1)
-        var pool = Mempool()
         let pin = try write(CryptoUtils.generateKeyPair(), fee: 500, padding: 20_000)
+        let filler = try paying(CryptoUtils.generateKeyPair(), fee: 100, nonce: 0)
+        // Bytes bind: a block holds the pin alone, so the filler, at a higher
+        // rate, keeps it out of the next.
+        let spec = try blocks(holding: size(pin) + Self.place)
+        var pool = Mempool()
         try pool.submit(pin, spec: spec, addedAt: 0)
-        try pool.submit(try paying(CryptoUtils.generateKeyPair(), fee: 100, nonce: 0), spec: spec, addedAt: 0)
-        XCTAssertThrowsError(try pool.submit(try write(CryptoUtils.generateKeyPair(), fee: 100), spec: spec, addedAt: 0)) {
-            XCTAssertEqual($0 as? MempoolError, .feeTooLow, "the next block would pay no more")
-        }
+        try pool.submit(filler, spec: spec, addedAt: 0)
+        XCTAssertEqual(try pool.nextBlock(spec).map(Mempool.cid(of:)), [try Mempool.cid(of: filler)])
         let bid = try write(CryptoUtils.generateKeyPair(), fee: 150)
         XCTAssertEqual(try pool.submit(bid, spec: spec, addedAt: 0).replaced.map(\.cid), [try Mempool.cid(of: pin)])
-        XCTAssertEqual(try pool.nextBlock(spec).map(Mempool.cid(of:)), [try Mempool.cid(of: bid)])
+        XCTAssertTrue(try pool.nextBlock(spec).map(Mempool.cid(of:)).contains(try Mempool.cid(of: bid)))
     }
 
     /// A bid that would not reach the next block displaces nothing, even when
@@ -528,6 +529,24 @@ final class MempoolTests: XCTestCase {
     private func blocks(holding bytes: Int, count: UInt64 = 100) -> ChainSpec {
         let allowance = testSpec().maxBlockSize - Mempool.transactionRoom(testSpec())
         return testSpec(maxBlockSize: bytes + allowance - Self.place, maxTransactions: count)
+    }
+
+    /// A transaction's weight is the most of the block it takes of any
+    /// limit, in bytes: where growth or count binds before size, a
+    /// transaction pays its rate over that share.
+    func testWeightIsTheLargestShareOfAnyLimit() {
+        let room = testSpec().maxBlockSize - Mempool.blockAllowance
+        let reward = testSpec().maxStateGrowth - Mempool.growthRoom(testSpec())
+        // Size binds: bytes.
+        let roomy = testSpec(maxTransactions: UInt64(room), maxStateGrowth: reward + room)
+        XCTAssertEqual(Mempool.weight(size: 300, growth: 300, spec: roomy), 300)
+        // Growth binds at a tenth of the bytes: its growth, times ten.
+        let tight = testSpec(maxTransactions: UInt64(room), maxStateGrowth: reward + room / 10)
+        XCTAssertEqual(Mempool.weight(size: 300, growth: 0, spec: tight), 300)
+        XCTAssertGreaterThanOrEqual(Mempool.weight(size: 300, growth: 100, spec: tight), 1_000)
+        XCTAssertLessThanOrEqual(Mempool.weight(size: 300, growth: 100, spec: tight), 1_001)
+        // Count binds: a transaction's share of it.
+        XCTAssertEqual(Mempool.weight(size: 300, growth: 0, spec: testSpec(maxTransactions: 10)), room / 10)
     }
 
     /// The next block charges each transaction its state growth, at most,

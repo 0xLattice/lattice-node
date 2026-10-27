@@ -317,26 +317,35 @@ node policy, never consensus, and is absent when off (the default).
 
 `GET /api/fees` projects the next blocks (up to 12) this node's pool would
 fill if nothing else arrived, as this node's builder fills them: pooled
-transactions by fee per byte, each block taking them up to the chain's
-transaction count and `maxBlockSize` (each charged its place in the block),
-skipping one that does not fit for a smaller one behind it. A block's rate is
-the lowest it carries. It is recomputed on each new tip and, while the pool
+transactions by fee per weight, each block taking them up to the chain's
+transaction count, `maxBlockSize` (each charged its place in the block) and
+`maxStateGrowth` (each charged its state growth at most), skipping one that
+does not fit for a smaller one behind it. A block's rate is the lowest it
+carries.
+
+A transaction's weight is the most of a block it takes of any limit, in the
+block's bytes: the largest of its size, its state growth (Lattice's
+`stateGrowthCeiling`) times `blockRoom / growthRoom` rounded up, and
+`blockRoom / maxTransactions`. Where neither growth nor count binds before
+size, as on Nexus, weight is size; `weight` gives the three for this chain. It is recomputed on each new tip and, while the pool
 changes, at most once a second.
 
 ```json
 {
   "minRelayFee": "1",
   "blocks": [
-    { "transactionCount": 5000, "bytes": 912000, "lowestFee": "40", "lowestFeeBytes": 380, "full": true },
-    { "transactionCount": 1200, "bytes": 230000, "lowestFee": "1", "lowestFeeBytes": 350, "full": false }
-  ]
+    { "transactionCount": 5000, "bytes": 912000, "lowestFee": "40", "lowestFeeBytes": 380, "lowestFeeWeight": 380, "full": true },
+    { "transactionCount": 1200, "bytes": 230000, "lowestFee": "1", "lowestFeeBytes": 350, "lowestFeeWeight": 350, "full": false }
+  ],
+  "weight": { "blockRoom": 998208, "growthRoom": 2999872, "maxTransactions": 5000 }
 }
 ```
 
 A block is `full` when ready transactions were left for a later one. While
 none is full (or `blocks` is empty), a fee at the floor makes the next block.
-To be in the first `k` blocks when block `k` is full, a transaction of `size`
-bytes pays more than `lowestFee * size / lowestFeeBytes` of that block.
+To be in the first `k` blocks when block `k` is full, a transaction of weight
+`w` pays more than `lowestFee * w / lowestFeeWeight` of that block. Older nodes
+omit `weight` and `lowestFeeWeight`; their rates are per byte.
 
 This is an estimate from one node's pool, not a promise: other miners fill
 their blocks otherwise, other pools differ, and new transactions arrive. Fees

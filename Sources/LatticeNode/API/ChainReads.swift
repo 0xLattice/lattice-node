@@ -758,9 +758,21 @@ public struct ChainReads: Sendable {
     /// this node's relay floor. Read from this node's pool alone.
     public func explorerFees() async -> ExplorerFees {
         let pool = await mempool(false)
+        let spec: ChainSpec?
+        if let tip = await tip().tipCID, let block = await blockNode(cid: tip) {
+            spec = try? await block.spec.resolve(fetcher: storage).node
+        } else {
+            spec = nil
+        }
         return ExplorerFees(
             minRelayFee: storage.configuration.minRelayFee,
-            blocks: pool.projected.map(ExplorerProjectedBlock.init)
+            blocks: pool.projected.map(ExplorerProjectedBlock.init),
+            weight: spec.map {
+                ExplorerWeight(
+                    blockRoom: $0.maxBlockSize - Mempool.blockAllowance, growthRoom: Mempool.growthRoom($0),
+                    maxTransactions: Int(clamping: $0.maxNumberOfTransactionsPerBlock)
+                )
+            }
         )
     }
 
@@ -822,7 +834,8 @@ extension ExplorerProjectedBlock {
     init(_ block: ProjectedBlock) {
         self.init(
             transactionCount: block.transactionCount, bytes: block.bytes,
-            lowestFee: block.lowestFee.uint64Value ?? .max, lowestFeeBytes: block.lowestFeeBytes, full: block.full
+            lowestFee: block.lowestFee.uint64Value ?? .max, lowestFeeBytes: block.lowestFeeBytes,
+            lowestFeeWeight: block.lowestFeeWeight, full: block.full
         )
     }
 }

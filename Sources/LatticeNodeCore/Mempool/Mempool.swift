@@ -97,10 +97,12 @@ public struct ProjectedBlock: Sendable, Equatable {
     public let transactionCount: Int
     /// Transaction size it carries (envelope plus body, as the pool measures).
     public let bytes: Int
-    /// Its lowest-rate transaction: the verified fee over its size in bytes.
-    /// A transaction paying a higher rate would have been taken before it.
+    /// Its lowest-rate transaction: the verified fee over its weight
+    /// (`Mempool.weight`). A transaction paying a higher rate would have
+    /// been taken before it.
     public let lowestFee: WorkSum
     public let lowestFeeBytes: Int
+    public let lowestFeeWeight: Int
     /// Whether ready transactions were left for a later block.
     public let full: Bool
 }
@@ -108,7 +110,8 @@ public struct ProjectedBlock: Sendable, Equatable {
 /// The transaction pool of one level as a value: no IO, no awaits. It holds
 /// only transactions Lattice's preflight found ready: each executes on the
 /// tip as it stands, with its funds checked. None waits on another, so a
-/// template takes them by fee rate alone.
+/// template takes them by fee rate alone: fee per weight, the share of the
+/// block a transaction takes of whichever limit it uses most.
 ///
 /// Two rules keep every pooled transaction executable alongside every other:
 /// - What only one transaction can ever use is claimed once: the first
@@ -132,6 +135,8 @@ public struct Mempool: Sendable {
         /// Its share of the block's state growth, at most: Lattice's
         /// ceiling from the body alone, never below 0.
         let growth: Int
+        /// What its fee rate is over (`Mempool.weight`).
+        let weight: Int
         let claims: Set<String>
         let debits: [String: UInt64]
         let fee: WorkSum
@@ -230,6 +235,27 @@ public struct Mempool: Sendable {
         spec.maxStateGrowth - rewardAllowance
     }
 
+    /// What a transaction's fee rate is over: the most of the block it takes
+    /// of any limit, in the block's bytes. Its own bytes; its state growth
+    /// as that share of `growthRoom` in bytes; and one transaction's share
+    /// of the count, in bytes. Where neither growth nor count binds before
+    /// size (Nexus), it is the bytes. Like Bitcoin's sigop-adjusted size.
+    public static func weight(size: Int, growth: Int, spec: ChainSpec) -> Int {
+        let room = spec.maxBlockSize - blockAllowance
+        guard room > 0 else { return max(1, size) }
+        var weight = max(1, size)
+        if growth > 0, growth <= growthRoom(spec) {
+            // growth * room / growthRoom, rounded up; at most room.
+            let product = UInt64(growth).multipliedFullWidth(by: UInt64(room))
+            let (quotient, remainder) = UInt64(growthRoom(spec)).dividingFullWidth(product)
+            weight = max(weight, Int(quotient) + (remainder > 0 ? 1 : 0))
+        }
+        if spec.maxNumberOfTransactionsPerBlock > 0 {
+            weight = max(weight, room / Int(clamping: spec.maxNumberOfTransactionsPerBlock))
+        }
+        return weight
+    }
+
     /// What a block's coinbase may add to its state growth: a new balance
     /// for its recipient, whose name (a canonical address is about 60
     /// bytes) and value fit this. A longer name only makes the builder
@@ -247,7 +273,7 @@ public struct Mempool: Sendable {
     /// A block's content besides its transactions, with room to spare: an
     /// empty Nexus block measures 766 bytes, about 1,000 with its height,
     /// timestamp and nonce at their largest.
-    static let blockAllowance = 1_792
+    public static let blockAllowance = 1_792
 
     /// What each transaction adds to its block beyond its own bytes, with
     /// room to spare: about 180 in the transaction trie.
@@ -274,6 +300,7 @@ public struct Mempool: Sendable {
             transaction: transaction,
             size: measured.size,
             growth: measured.growth,
+            weight: Self.weight(size: measured.size, growth: measured.growth, spec: spec),
             claims: Self.claims(of: measured.body),
             debits: measured.debits,
             fee: measured.surplus,
@@ -357,7 +384,7 @@ public struct Mempool: Sendable {
             guard let lowest = taken.last else { break }
             blocks.append(ProjectedBlock(
                 transactionCount: taken.count, bytes: taken.reduce(0) { $0 + $1.size },
-                lowestFee: lowest.fee, lowestFeeBytes: lowest.size, full: !left.isEmpty
+                lowestFee: lowest.fee, lowestFeeBytes: lowest.size, lowestFeeWeight: lowest.weight, full: !left.isEmpty
             ))
             rest = left
         }
@@ -416,10 +443,10 @@ public struct Mempool: Sendable {
     }
 
     /// Whether `lhs` pays a higher fee rate than `rhs` (positive), the same
-    /// (zero) or a lower one, compared exactly: `lhs.fee * rhs.size` against
-    /// `rhs.fee * lhs.size`.
+    /// (zero) or a lower one, compared exactly: `lhs.fee * rhs.weight`
+    /// against `rhs.fee * lhs.weight`.
     private static func rate(_ lhs: Entry, comparedTo rhs: Entry) -> Int {
-        Self.rate(lhs.fee, lhs.size, comparedTo: rhs.fee, rhs.size)
+        Self.rate(lhs.fee, lhs.weight, comparedTo: rhs.fee, rhs.weight)
     }
 
     private static func rate(_ fee: WorkSum, _ size: Int, comparedTo otherFee: WorkSum, _ otherSize: Int) -> Int {

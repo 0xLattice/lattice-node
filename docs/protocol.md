@@ -299,7 +299,9 @@ retriable refusal, never held. Its rules:
   each charged its growth at most); what a template's policies refuse
   leaves.
 
-There is no time-based expiry; capacity evicts the lowest fee rate.
+There is no time-based expiry; capacity evicts the lowest fee rate. A fee
+rate is fee per weight: the most of a block a transaction takes of its bytes,
+state growth or count, in bytes (`rpc-api.md`, fee pricing).
 Transactions confirmed on the new chain leave the pool;
 ordinary transactions from removed blocks are reinserted when still valid.
 Locally submitted transaction roots survive restart and are revalidated before
