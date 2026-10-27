@@ -17,10 +17,13 @@ struct NodeMetadataRow: NodeStoreRecord {
 }
 
 extension NodeStore {
+    /// Epoch 47: block facts record the block's `parentState`, which an
+    /// attributed run checks before crediting a child block (§9.10). Older
+    /// child-chain facts lack it and would read as the empty state.
     /// Epoch 46: weighed header material and credited child proofs live in
     /// this store, written with their facts. Older stores must be wiped; Nexus
     /// deterministically recreates the configured exact genesis.
-    static let currentSchemaEpoch: Int64 = 46
+    static let currentSchemaEpoch: Int64 = 47
 
     static func validateMetadata(
         in database: NodeSQLite,
