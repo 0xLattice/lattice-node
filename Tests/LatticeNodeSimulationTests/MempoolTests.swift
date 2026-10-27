@@ -162,8 +162,9 @@ final class MempoolTests: XCTestCase {
         try pool.submit(again, spec: testSpec(), addedAt: 0, balances: [address(sponsor): 5])
     }
 
-    /// A transaction's debit is its net take from each account, as Lattice
-    /// applies one owner's deltas together; a credit is no debit.
+    /// A transaction's debit is its net take from each account, as
+    /// consensus nets it: account actions and the receipts it pays (the
+    /// withdrawer pays the demander). A credit is no debit.
     func testADebitIsTheNetTakeFromEachAccount() throws {
         let body = TransactionBody(
             accountActions: [
@@ -171,10 +172,31 @@ final class MempoolTests: XCTestCase {
                 AccountAction(owner: "b", delta: -3), AccountAction(owner: "b", delta: 3),
                 AccountAction(owner: "c", delta: 6),
             ],
-            actions: [], depositActions: [], receiptActions: [], withdrawalActions: [],
+            actions: [], depositActions: [],
+            receiptActions: [ReceiptAction(withdrawer: "b", nonce: 1, demander: "c", amountDemanded: 7, directory: "Child")],
+            withdrawalActions: [],
             signers: ["a"], nonce: 0, chainPath: ["Nexus"]
         )
-        XCTAssertEqual(Mempool.debits(of: body), ["a": 6])
+        XCTAssertEqual(Mempool.debits(of: body), ["a": 6, "b": 7])
+    }
+
+    /// A receipt's payment draws on the withdrawer's budget like any debit:
+    /// one balance cannot back many receipts that each spend all of it.
+    func testAReceiptDrawsOnTheWithdrawersBudget() throws {
+        var pool = Mempool()
+        let withdrawer = CryptoUtils.generateKeyPair()
+        func receipt(nonce: UInt128) throws -> Transaction {
+            try SimTransactions.signed(keys: [CryptoUtils.generateKeyPair(), withdrawer], accountActions: [
+                AccountAction(owner: address(withdrawer), delta: -5),
+            ], receiptActions: [ReceiptAction(
+                withdrawer: address(withdrawer), nonce: nonce, demander: "seller", amountDemanded: 15, directory: "Child"
+            )], nonce: 0, chainPath: ["Nexus"])
+        }
+        let balance = [address(withdrawer): UInt64(30)]
+        try pool.submit(try receipt(nonce: 1), spec: testSpec(), addedAt: 0, balances: balance)
+        XCTAssertThrowsError(try pool.submit(try receipt(nonce: 2), spec: testSpec(), addedAt: 0, balances: balance)) {
+            XCTAssertEqual($0 as? MempoolError, .insufficientFunds, "20 and 20 more is over 30")
+        }
     }
 
     /// Two senders writing one state key never share the pool: one of them

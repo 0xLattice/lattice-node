@@ -153,11 +153,9 @@ public struct Mempool: Sendable {
     private var entries: [String: Entry] = [:]
     /// Each claim's pooled transaction.
     private var claimants: [String: String] = [:]
-    /// Each account's debits across the pool, and its balance on the tip
-    /// as the latest verdict read it; both only for accounts pooled
+    /// Each account's debits across the pool, for accounts pooled
     /// transactions debit.
     private var committed: [String: UInt64] = [:]
-    private var balances: [String: UInt64] = [:]
     public private(set) var byteCount = 0
     public private(set) var version: UInt64 = 0
 
@@ -194,17 +192,11 @@ public struct Mempool: Sendable {
         return claims
     }
 
-    /// What a transaction takes from each account: its net debit there, as
-    /// Lattice applies one owner's deltas together. Nil when a sum
-    /// overflows.
+    /// What a transaction takes from each account, as consensus nets it:
+    /// its account actions and the receipts it pays (`netOutflows`). Nil
+    /// when consensus would refuse the sums.
     public static func debits(of body: TransactionBody) -> [String: UInt64]? {
-        var net: [String: Int64] = [:]
-        for action in body.accountActions {
-            let (sum, overflow) = net[action.owner, default: 0].addingReportingOverflow(action.delta)
-            guard !overflow else { return nil }
-            net[action.owner] = sum
-        }
-        return net.compactMapValues { $0 < 0 ? $0.magnitude : nil }
+        try? body.netOutflows()
     }
 
     /// The size checks that need no state, run before a transaction costs a
@@ -340,7 +332,6 @@ public struct Mempool: Sendable {
             mutation.replaced = [Self.item(removed)]
         }
         mutation.evicted = evictions.compactMap { removeEntry($0).map(Self.item) }
-        for account in entry.debits.keys { self.balances[account] = balances[account, default: 0] }
         insert(entry)
         mutation.inserted = Self.item(entry)
         return mutation
@@ -481,9 +472,7 @@ public struct Mempool: Sendable {
     @discardableResult
     public mutating func rebalance(_ balances: [String: UInt64]) -> MempoolMutation {
         var mutation = MempoolMutation()
-        for (account, balance) in balances.sorted(by: { $0.key < $1.key }) where committed[account] != nil {
-            self.balances[account] = balance
-            guard committed[account, default: 0] > balance else { continue }
+        for (account, balance) in balances.sorted(by: { $0.key < $1.key }) where committed[account, default: 0] > balance {
             let debiting = entries.values.filter { $0.debits[account] != nil }.sorted { Self.retention($0, $1) < 0 }
             for entry in debiting where committed[account, default: 0] > balance {
                 if let removed = removeEntry(entry.cid) { mutation.evicted.append(Self.item(removed)) }
@@ -515,12 +504,7 @@ public struct Mempool: Sendable {
         for claim in removed.claims where claimants[claim] == cid { claimants.removeValue(forKey: claim) }
         for (account, debit) in removed.debits {
             let left = committed[account, default: 0] - debit
-            if left == 0 {
-                committed.removeValue(forKey: account)
-                balances.removeValue(forKey: account)
-            } else {
-                committed[account] = left
-            }
+            committed[account] = left == 0 ? nil : left
         }
         byteCount -= removed.size
         version &+= 1

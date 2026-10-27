@@ -278,7 +278,7 @@ final class MiningStateTests: XCTestCase {
         XCTAssertTrue(admitted.contains { if case .announceTransaction = $0 { true } else { false } },
                       "a returned transaction is announced again")
         let keptJob = try XCTUnwrap(jobs.first { $0.cid == (try? Mempool.cid(of: kept)) })
-        let dropped = mining.step(.preflighted(keptJob, .invalid), now: 7)
+        let dropped = mining.step(.preflighted(keptJob, .invalid, balances: [:]), now: 7)
         guard case .poolChanged(let removal)? = dropped.first else { return XCTFail("\(dropped)") }
         XCTAssertEqual(removal.removed, [try Mempool.cid(of: kept)])
         XCTAssertTrue(mining.journaled.isEmpty)
@@ -293,7 +293,7 @@ final class MiningStateTests: XCTestCase {
         // A second arrival joins the first's pending verdict: one job.
         let joined = mining.step(.transactionReceived(tx, origin: .local(replyID: 4)), now: 0)
         XCTAssertTrue(joined.isEmpty)
-        let answered = mining.step(.preflighted(job, .invalid), now: 1)
+        let answered = mining.step(.preflighted(job, .invalid, balances: [:]), now: 1)
         guard case .transactionRefused(4, .invalidState)? = answered.first, answered.count == 1 else {
             return XCTFail("only the local submit is answered: \(answered)")
         }
@@ -304,7 +304,7 @@ final class MiningStateTests: XCTestCase {
             .transactionReceived(restored, origin: .restored(addedAt: 1)), now: 0
         ).first else { return XCTFail() }
 
-        let refused = mining.step(.preflighted(restoredJob, .invalid), now: 1)
+        let refused = mining.step(.preflighted(restoredJob, .invalid, balances: [:]), now: 1)
         guard case .poolChanged(let delta)? = refused.first else { return XCTFail("\(refused)") }
         XCTAssertEqual(delta.removed, [try Mempool.cid(of: restored)], "the journal row goes with the refusal")
     }

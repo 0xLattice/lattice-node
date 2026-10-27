@@ -172,7 +172,7 @@ public enum MiningEvent: Sendable {
     case transactionReceived(Transaction, origin: TransactionOrigin)
     /// `balances`: for a ready verdict, each account the transaction debits
     /// and its balance on the job's tip (`Mempool.debits(of:)`).
-    case preflighted(PreflightJob, MempoolDisposition, balances: [String: UInt64] = [:])
+    case preflighted(PreflightJob, MempoolDisposition, balances: [String: UInt64])
     case tipMoved(TipMove)
     case templateRequested(replyID: UInt64, TemplateRequest)
     /// nil: the job could not build a block on its tip.

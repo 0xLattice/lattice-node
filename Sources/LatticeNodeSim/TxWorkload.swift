@@ -805,6 +805,7 @@ public enum SimTransactions {
     public static func signed(
         keys: [(privateKey: String, publicKey: String)],
         accountActions: [AccountAction],
+        receiptActions: [ReceiptAction] = [],
         nonce: UInt64,
         chainPath: [String] = [DEFAULT_ROOT_DIRECTORY]
     ) throws -> Transaction {
@@ -812,7 +813,7 @@ public enum SimTransactions {
             accountActions: accountActions,
             actions: [],
             depositActions: [],
-                        receiptActions: [],
+            receiptActions: receiptActions,
             withdrawalActions: [],
             signers: keys.map { CryptoUtils.createAddress(from: $0.publicKey) },
             nonce: nonce,
