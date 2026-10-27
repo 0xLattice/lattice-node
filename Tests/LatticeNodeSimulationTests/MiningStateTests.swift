@@ -27,7 +27,7 @@ final class MiningStateTests: XCTestCase {
         XCTAssertEqual(job.cid, cid)
         XCTAssertEqual(mining.mempool.count, 0, "nothing is pooled before its verdict")
 
-        let second = mining.step(.preflighted(job, .ready), now: 20)
+        let second = mining.step(.preflighted(job, .ready, balances: funded(job)), now: 20)
         guard case .poolChanged(let delta)? = second.first else {
             return XCTFail("the durable delta leads the step: \(second)")
         }
@@ -46,7 +46,7 @@ final class MiningStateTests: XCTestCase {
         guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .submitted(replyID: 1)), now: 0).first
         else { return XCTFail() }
         XCTAssertEqual(mining.pendingSubmitted, 1)
-        let admitted = mining.step(.preflighted(job, .ready), now: 1)
+        let admitted = mining.step(.preflighted(job, .ready, balances: funded(job)), now: 1)
         guard case .poolChanged(let delta)? = admitted.first else { return XCTFail("\(admitted)") }
         XCTAssertEqual(delta.added.map(\.cid), [cid])
         XCTAssertTrue(delta.journaled.isEmpty, "a public submit is volatile")
@@ -82,12 +82,12 @@ final class MiningStateTests: XCTestCase {
         let local = try transfer(nonce: 0, debit: 2)
         guard case .preflight(let localJob)? = mining.step(.transactionReceived(local, origin: .local(replyID: 1)), now: 0).first
         else { return XCTFail() }
-        _ = mining.step(.preflighted(localJob, .ready), now: 0)
+        _ = mining.step(.preflighted(localJob, .ready, balances: funded(localJob)), now: 0)
         let cheapKey = CryptoUtils.generateKeyPair()
         let cheap = try signed(cheapKey, [AccountAction(owner: address(cheapKey), delta: -1)], nonce: 0)
         guard case .preflight(let cheapJob)? = mining.step(.transactionReceived(cheap, origin: .submitted(replyID: 2)), now: 0).first
         else { return XCTFail() }
-        let refused = mining.step(.preflighted(cheapJob, .ready), now: 1)
+        let refused = mining.step(.preflighted(cheapJob, .ready, balances: funded(cheapJob)), now: 1)
         XCTAssertTrue(refused.contains { if case .transactionRefused(2, .full) = $0 { true } else { false } }, "\(refused)")
         XCTAssertTrue(mining.mempool.contains(try Mempool.cid(of: local)), "the local entry stays")
         // A better fee rate evicts by the ordinary rule, whatever its source.
@@ -95,7 +95,7 @@ final class MiningStateTests: XCTestCase {
         let rich = try signed(richKey, [AccountAction(owner: address(richKey), delta: -50)], nonce: 0)
         guard case .preflight(let richJob)? = mining.step(.transactionReceived(rich, origin: .submitted(replyID: 3)), now: 2).first
         else { return XCTFail() }
-        let evicting = mining.step(.preflighted(richJob, .ready), now: 3)
+        let evicting = mining.step(.preflighted(richJob, .ready, balances: funded(richJob)), now: 3)
         XCTAssertTrue(evicting.contains { if case .transactionAdmitted(3, _, _, _) = $0 { true } else { false } }, "\(evicting)")
         XCTAssertFalse(mining.mempool.contains(try Mempool.cid(of: local)))
     }
@@ -144,7 +144,7 @@ final class MiningStateTests: XCTestCase {
         guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .peer(peer)), now: 0).first else {
             return XCTFail()
         }
-        let admitted = mining.step(.preflighted(job, .ready), now: 1)
+        let admitted = mining.step(.preflighted(job, .ready, balances: funded(job)), now: 1)
         XCTAssertTrue(admitted.contains { if case .announceTransaction(cid) = $0 { true } else { false } })
         XCTAssertFalse(admitted.contains { if case .transactionAdmitted = $0 { true } else { false } },
                        "a peer is never answered")
@@ -165,11 +165,11 @@ final class MiningStateTests: XCTestCase {
         XCTAssertEqual(current.tipCID, "B")
         XCTAssertEqual(mining.outstandingPreflights, 1, "only the job on the current tip is tracked")
 
-        XCTAssertTrue(mining.step(.preflighted(stale, .ready), now: 2).isEmpty)
+        XCTAssertTrue(mining.step(.preflighted(stale, .ready, balances: funded(stale)), now: 2).isEmpty)
         XCTAssertEqual(mining.mempool.count, 0, "a stale verdict is never applied")
         XCTAssertEqual(mining.pendingAdmissions, 1)
 
-        _ = mining.step(.preflighted(current, .ready), now: 3)
+        _ = mining.step(.preflighted(current, .ready, balances: funded(current)), now: 3)
         XCTAssertEqual(mining.mempool.count, 1)
         XCTAssertEqual(mining.pendingAdmissions, 0)
         XCTAssertEqual(mining.outstandingPreflights, 0)
@@ -181,7 +181,7 @@ final class MiningStateTests: XCTestCase {
         guard case .preflight(let job)? = mining.step(.transactionReceived(ready, origin: .local(replyID: 1)), now: 0).first
         else { return XCTFail() }
         XCTAssertTrue(job.checksPolicies, "an arrival is judged by the policies")
-        _ = mining.step(.preflighted(job, .ready), now: 0)
+        _ = mining.step(.preflighted(job, .ready, balances: funded(job)), now: 0)
         let arrivingKey = CryptoUtils.generateKeyPair()
         let arriving = try signed(arrivingKey, [AccountAction(owner: address(arrivingKey), delta: -2)], nonce: 0)
         _ = mining.step(.transactionReceived(arriving, origin: .local(replyID: 2)), now: 1)
@@ -205,19 +205,48 @@ final class MiningStateTests: XCTestCase {
             let tx = try signed(key, [AccountAction(owner: address(key), delta: -1)], nonce: 0)
             guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 1)), now: 0).first
             else { return XCTFail() }
-            _ = mining.step(.preflighted(job, .ready), now: 0)
+            _ = mining.step(.preflighted(job, .ready, balances: funded(job)), now: 0)
             cids.append(job.cid)
         }
         let moved = mining.step(.tipMoved(TipMove(tipCID: "B")), now: 1)
         for case .preflight(let job) in moved {
             XCTAssertFalse(job.checksPolicies)
-            _ = mining.step(.preflighted(job, .ready), now: 1)
+            _ = mining.step(.preflighted(job, .ready, balances: funded(job)), now: 1)
         }
         _ = mining.step(.policyRefused(tipCID: "A", cids: [cids[0]]), now: 1)
         XCTAssertEqual(mining.mempool.count, 2, "refused on a tip since left")
         let effects = mining.step(.policyRefused(tipCID: "B", cids: [cids[0]]), now: 1)
         XCTAssertEqual(mining.mempool.items.map(\.cid), [cids[1]])
         XCTAssertTrue(effects.contains { if case .poolChanged(let delta) = $0 { delta.removed == [cids[0]] } else { false } })
+    }
+
+    /// A fee sponsor's clients are pooled while its balance on the tip
+    /// pays them, refused (to retry) past it, and shed lowest-paying first
+    /// when a tip move reads less.
+    func testASponsorBacksItsClientsUpToItsBalance() throws {
+        var mining = MiningState(tipCID: "A", spec: testSpec())
+        let sponsor = CryptoUtils.generateKeyPair()
+        var cids: [String] = []
+        var refusals: [MempoolError] = []
+        for (reply, fee) in [Int64(10), 30, 20].enumerated() {
+            let tx = try SimTransactions.signed(keys: [CryptoUtils.generateKeyPair(), sponsor], accountActions: [
+                AccountAction(owner: address(sponsor), delta: -fee),
+            ], nonce: 0, chainPath: ["Nexus"])
+            guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .local(replyID: UInt64(reply))), now: 0).first
+            else { return XCTFail() }
+            for case .transactionRefused(_, let error) in mining.step(
+                .preflighted(job, .ready, balances: [address(sponsor): 45]), now: 0
+            ) { refusals.append(error) }
+            cids.append(job.cid)
+        }
+        XCTAssertEqual(refusals, [.insufficientFunds], "10 and 30 fit 45; 20 more does not")
+        XCTAssertEqual(Set(mining.mempool.items.map(\.cid)), [cids[0], cids[1]])
+
+        let moved = mining.step(.tipMoved(TipMove(tipCID: "B")), now: 1)
+        for case .preflight(let job) in moved {
+            _ = mining.step(.preflighted(job, .ready, balances: [address(sponsor): 35]), now: 1)
+        }
+        XCTAssertEqual(mining.mempool.items.map(\.cid), [cids[1]], "35 pays the 30, not the 10 as well")
     }
 
     func testATipMoveRemovesConfirmedRevalidatesThePoolAndReadmitsReturned() throws {
@@ -230,7 +259,7 @@ final class MiningStateTests: XCTestCase {
         for tx in [kept, confirmed] {
             guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 9)), now: 0).first
             else { return XCTFail() }
-            _ = mining.step(.preflighted(job, .ready), now: 0)
+            _ = mining.step(.preflighted(job, .ready, balances: funded(job)), now: 0)
         }
 
         let effects = mining.step(.tipMoved(TipMove(
@@ -245,7 +274,7 @@ final class MiningStateTests: XCTestCase {
         XCTAssertTrue(jobs.allSatisfy { $0.tipCID == "B" })
 
         let returnedJob = try XCTUnwrap(jobs.first { $0.cid == (try? Mempool.cid(of: returned)) })
-        let admitted = mining.step(.preflighted(returnedJob, .ready), now: 6)
+        let admitted = mining.step(.preflighted(returnedJob, .ready, balances: funded(returnedJob)), now: 6)
         XCTAssertTrue(admitted.contains { if case .announceTransaction = $0 { true } else { false } },
                       "a returned transaction is announced again")
         let keptJob = try XCTUnwrap(jobs.first { $0.cid == (try? Mempool.cid(of: kept)) })
@@ -297,9 +326,9 @@ final class MiningStateTests: XCTestCase {
         let local = mining.step(.transactionReceived(try transfer(nonce: 1), origin: .local(replyID: 3)), now: 0)
         guard case .preflight? = local.first else { return XCTFail("no pending cap: \(local)") }
 
-        _ = mining.step(.preflighted(jobs[0], .ready), now: 1)
+        _ = mining.step(.preflighted(jobs[0], .ready, balances: funded(jobs[0])), now: 1)
         // The pool is full and the second pays less: a capacity refusal, not a verdict.
-        let full = mining.step(.preflighted(jobs[1], .ready), now: 1)
+        let full = mining.step(.preflighted(jobs[1], .ready, balances: funded(jobs[1])), now: 1)
         XCTAssertFalse(full.contains { if case .poolChanged(let delta) = $0 { !delta.removed.isEmpty } else { false } },
                        "a capacity refusal never removes a journal row: \(full)")
     }
@@ -350,7 +379,7 @@ final class MiningStateTests: XCTestCase {
         XCTAssertFalse(moved.contains { if case .transactionRefused = $0 { true } else { false } })
         XCTAssertFalse(moved.contains { if case .preflight = $0 { true } else { false } }, "nothing left to classify")
         XCTAssertEqual(mining.pendingAdmissions, 0)
-        XCTAssertTrue(mining.step(.preflighted(job, .ready), now: 2).isEmpty)
+        XCTAssertTrue(mining.step(.preflighted(job, .ready, balances: funded(job)), now: 2).isEmpty)
     }
 
     /// A child template, under a carrier, takes the same pool: everything
@@ -361,7 +390,7 @@ final class MiningStateTests: XCTestCase {
         let tx = try transfer(nonce: 0)
         guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 1)), now: 0).first
         else { return XCTFail() }
-        _ = mining.step(.preflighted(job, .ready), now: 0)
+        _ = mining.step(.preflighted(job, .ready, balances: funded(job)), now: 0)
 
         let carrier = try await candidateBlock()
         let context = ParentCarrier(cid: try BlockHeader(node: carrier).rawCID, block: carrier)
@@ -380,7 +409,7 @@ final class MiningStateTests: XCTestCase {
             let tx = try transfer(nonce: 1)
             guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .submitted(replyID: 1)), now: 0).first
             else { return XCTFail() }
-            let refused = mining.step(.preflighted(job, verdict), now: 1)
+            let refused = mining.step(.preflighted(job, verdict, balances: funded(job)), now: 1)
             XCTAssertTrue(refused.contains { if case .transactionRefused(1, refusal) = $0 { true } else { false } }, "\(refused)")
             XCTAssertEqual(mining.mempool.count, 0)
         }
@@ -399,7 +428,7 @@ final class MiningStateTests: XCTestCase {
         for tx in txs {
             guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 1)), now: 0).first
             else { return XCTFail() }
-            _ = mining.step(.preflighted(job, .ready), now: 0)
+            _ = mining.step(.preflighted(job, .ready, balances: funded(job)), now: 0)
         }
         let moved = mining.step(.tipMoved(TipMove(tipCID: "B")), now: 1)
         let jobs = Dictionary(uniqueKeysWithValues: moved.compactMap {
@@ -407,7 +436,7 @@ final class MiningStateTests: XCTestCase {
         })
         let cids = try txs.map(Mempool.cid(of:))
         for (cid, verdict) in zip(cids, [MempoolDisposition.future, .invalid, .unavailable, .ready]) {
-            _ = mining.step(.preflighted(try XCTUnwrap(jobs[cid]), verdict), now: 2)
+            _ = mining.step(.preflighted(try XCTUnwrap(jobs[cid]), verdict, balances: funded(try XCTUnwrap(jobs[cid]))), now: 2)
         }
         XCTAssertEqual(mining.mempool.items.map(\.cid), [cids[3]])
     }
@@ -454,7 +483,7 @@ final class MiningStateTests: XCTestCase {
         let fresh = back.compactMap { if case .preflight(let job) = $0 { job } else { nil } }
         XCTAssertEqual(fresh.map(\.tipEpoch), [mining.tipEpoch])
 
-        XCTAssertTrue(mining.step(.preflighted(old, .ready), now: 3).isEmpty, "A, B, A: the old verdict is stale")
+        XCTAssertTrue(mining.step(.preflighted(old, .ready, balances: funded(old)), now: 3).isEmpty, "A, B, A: the old verdict is stale")
         XCTAssertEqual(mining.mempool.count, 0)
         let block = try await candidateBlock()
         let build = TemplateBuild(workID: "w", block: block, searchTarget: block.target, targets: [block.target])

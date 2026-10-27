@@ -170,7 +170,9 @@ public struct TemplateBuild: Sendable {
 public enum MiningEvent: Sendable {
     /// A transaction whose content the shell has resolved.
     case transactionReceived(Transaction, origin: TransactionOrigin)
-    case preflighted(PreflightJob, MempoolDisposition)
+    /// `balances`: for a ready verdict, each account the transaction debits
+    /// and its balance on the job's tip (`Mempool.debits(of:)`).
+    case preflighted(PreflightJob, MempoolDisposition, balances: [String: UInt64] = [:])
     case tipMoved(TipMove)
     case templateRequested(replyID: UInt64, TemplateRequest)
     /// nil: the job could not build a block on its tip.
@@ -342,8 +344,8 @@ public struct MiningState: Sendable {
         switch event {
         case .transactionReceived(let transaction, let origin):
             receive(transaction, origin: origin, now: now, &turn)
-        case .preflighted(let job, let disposition):
-            preflighted(job, disposition, now: now, &turn)
+        case .preflighted(let job, let disposition, let balances):
+            preflighted(job, disposition, balances: balances, now: now, &turn)
         case .tipMoved(let move):
             tipMoved(move, &turn)
         case .templateRequested(let replyID, let request):
@@ -493,6 +495,7 @@ public struct MiningState: Sendable {
     private mutating func preflighted(
         _ job: PreflightJob,
         _ disposition: MempoolDisposition,
+        balances: [String: UInt64],
         now: Int64,
         _ turn: inout Turn
     ) {
@@ -501,20 +504,27 @@ public struct MiningState: Sendable {
         guard job.tipEpoch == tipEpoch else { return }
         preflighting.remove(job.cid)
         if let admission = close(job.cid) {
-            admit(admission, cid: job.cid, disposition, now: now, &turn)
+            admit(admission, cid: job.cid, disposition, balances: balances, now: now, &turn)
             return
         }
         // The pool holds only what executes on the tip: a pooled transaction
         // that no longer does, or that this node can no longer judge (a
         // receipt or deposit a reorg took), leaves, freeing what it claims.
-        // One ahead or unjudged is its sender's to send again.
-        if disposition != .ready { departed(mempool.remove([job.cid]), &turn) }
+        // One ahead or unjudged is its sender's to send again. One still
+        // ready brings its accounts' balances on the new tip: an account
+        // that can no longer pay all it backs sheds the lowest-paying.
+        if disposition == .ready {
+            departed(mempool.rebalance(balances), &turn)
+        } else {
+            departed(mempool.remove([job.cid]), &turn)
+        }
     }
 
     private mutating func admit(
         _ admission: Admission,
         cid: String,
         _ disposition: MempoolDisposition,
+        balances: [String: UInt64],
         now: Int64,
         _ turn: inout Turn
     ) {
@@ -539,7 +549,8 @@ public struct MiningState: Sendable {
             let mutation = try mempool.submit(
                 admission.transaction,
                 spec: spec,
-                addedAt: restoredAt ?? now
+                addedAt: restoredAt ?? now,
+                balances: balances
             )
             departed(mutation, &turn)
             if let inserted = mutation.inserted { turn.delta.added.append(inserted) }

@@ -101,7 +101,7 @@ final class ChainCoreMiningTests: XCTestCase {
             }
         }
         // The verdict on the old tip changes nothing.
-        XCTAssertTrue(mining(core.step(.mining(.preflighted(preflight, .ready)), now: Self.now)).isEmpty)
+        XCTAssertTrue(mining(core.step(.mining(.preflighted(preflight, .ready, balances: funded(preflight))), now: Self.now)).isEmpty)
         XCTAssertEqual(core.mining.mempool.count, 0)
     }
 

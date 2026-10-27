@@ -12,9 +12,13 @@ public enum MempoolError: Error, Sendable, Equatable {
     case tooLarge
     case full
     case invalidState
-    /// It shares a signer, a deposit or a receipt with more than one pooled
-    /// transaction, or with one it does not replace.
+    /// It shares its first signer's nonce, a state key, a deposit or a
+    /// receipt with more than one pooled transaction, or with one it does not
+    /// replace.
     case conflictingNonce
+    /// An account it debits cannot also pay what pooled transactions
+    /// already debit it. Retriable once those are mined.
+    case insufficientFunds
     /// A replacement that does not pay `MempoolLimits.replacementIncrement`
     /// more than the transaction it replaces.
     case feeTooLow
@@ -121,14 +125,15 @@ public struct ProjectedBlock: Sendable, Equatable {
 /// tip as it stands, with its funds checked. None waits on another, so a
 /// template takes them by fee rate alone.
 ///
-/// Each transaction claims its signers, the state keys its actions write,
-/// and the deposits and receipts it names, and no two pooled transactions
-/// share a claim. Every pooled transaction therefore executes alongside
-/// every other, and a funded account backs at most one: it cannot pay the
-/// same fee under many first signers, nor race itself to one key. A
-/// transaction is replaced only by its first signer's own, paying
-/// `replacementIncrement` more. `version` moves on every
-/// change, so a job built from the pool names the pool it read.
+/// Two rules keep every pooled transaction executable alongside every other:
+/// - What only one transaction can ever use is claimed once: the first
+///   signer's nonce, each state key written, each deposit and receipt.
+/// - Money is budgeted: an account's debits across the pool never exceed
+///   its balance on the tip, as preflight read it. An account backs as many
+///   transactions as it can pay, and no more.
+/// A transaction is replaced only by its first signer's own, paying
+/// `replacementIncrement` more. `version` moves on every change, so a job
+/// built from the pool names the pool it read.
 public struct Mempool: Sendable {
     /// Bound parse work by wire capacity (a 16-bit length), not an invented
     /// cap: the signature's crypto verification is the authoritative check.
@@ -139,6 +144,7 @@ public struct Mempool: Sendable {
         let transaction: Transaction
         let size: Int
         let claims: Set<String>
+        let debits: [String: UInt64]
         let fee: WorkSum
         let addedAt: Int64
     }
@@ -147,6 +153,11 @@ public struct Mempool: Sendable {
     private var entries: [String: Entry] = [:]
     /// Each claim's pooled transaction.
     private var claimants: [String: String] = [:]
+    /// Each account's debits across the pool, and its balance on the tip
+    /// as the latest verdict read it; both only for accounts pooled
+    /// transactions debit.
+    private var committed: [String: UInt64] = [:]
+    private var balances: [String: UInt64] = [:]
     public private(set) var byteCount = 0
     public private(set) var version: UInt64 = 0
 
@@ -169,10 +180,11 @@ public struct Mempool: Sendable {
         try VolumeImpl<Transaction>(node: transaction).rawCID
     }
 
-    /// What a transaction claims: each signer, each state key it writes, and
-    /// each deposit and receipt it creates or spends.
+    /// What a transaction claims: its first signer's nonce, each state key
+    /// it writes, and each deposit and receipt it creates or spends. Other
+    /// signers' funds are budgeted, not claimed (`debits(of:)`).
     static func claims(of body: TransactionBody) -> Set<String> {
-        var claims = Set(body.signers.map { "signer:" + $0 })
+        var claims = Set(body.signers.prefix(1).map { "signer:" + $0 })
         for action in body.actions { claims.insert("action:" + action.key) }
         for deposit in body.depositActions { claims.insert("deposit:" + DepositKey(depositAction: deposit).description) }
         for withdrawal in body.withdrawalActions {
@@ -180,6 +192,19 @@ public struct Mempool: Sendable {
         }
         for receipt in body.receiptActions { claims.insert("receipt:" + ReceiptKey(receiptAction: receipt).description) }
         return claims
+    }
+
+    /// What a transaction takes from each account: its net debit there, as
+    /// Lattice applies one owner's deltas together. Nil when a sum
+    /// overflows.
+    public static func debits(of body: TransactionBody) -> [String: UInt64]? {
+        var net: [String: Int64] = [:]
+        for action in body.accountActions {
+            let (sum, overflow) = net[action.owner, default: 0].addingReportingOverflow(action.delta)
+            guard !overflow else { return nil }
+            net[action.owner] = sum
+        }
+        return net.compactMapValues { $0 < 0 ? $0.magnitude : nil }
     }
 
     /// The size checks that need no state, run before a transaction costs a
@@ -191,7 +216,7 @@ public struct Mempool: Sendable {
     private func measure(
         _ transaction: Transaction,
         spec: ChainSpec
-    ) throws -> (cid: String, body: TransactionBody, size: Int, surplus: WorkSum) {
+    ) throws -> (cid: String, body: TransactionBody, size: Int, surplus: WorkSum, debits: [String: UInt64]) {
         guard transaction.signatures.count <= limits.maxSignatures,
               transaction.signatures.allSatisfy({ key, signature in
                   key.utf8.count <= Self.maximumSignatureFieldBytes
@@ -211,13 +236,13 @@ public struct Mempool: Sendable {
         // A transaction that creates value (credits and deposits over debits
         // and withdrawals) breaks the fee rule in any block, so it is never
         // pooled: a template carrying it would be invalid.
-        guard let surplus = body.minerSurplus() else { throw MempoolError.invalidState }
+        guard let surplus = body.minerSurplus(), let debits = Self.debits(of: body) else { throw MempoolError.invalidState }
         guard surplus >= WorkSum(UInt256(limits.minRelayFee)) else {
             throw MempoolError.belowMinRelayFee
         }
         let (size, overflow) = envelopeData.count.addingReportingOverflow(bodyData.count)
         guard !overflow, size <= room else { throw MempoolError.tooLarge }
-        return (try Self.cid(of: transaction), body, size, surplus)
+        return (try Self.cid(of: transaction), body, size, surplus, debits)
     }
 
     /// The most bytes a transaction may have: what is left of `maxBlockSize`
@@ -235,12 +260,15 @@ public struct Mempool: Sendable {
     /// 180 to the trie.
     static let blockAllowance = 2_048
 
-    /// Pool a transaction preflight found ready.
+    /// Pool a transaction preflight found ready. `balances` holds, for each
+    /// account it debits, the balance preflight read on the tip; one
+    /// missing counts as empty.
     @discardableResult
     public mutating func submit(
         _ transaction: Transaction,
         spec: ChainSpec,
-        addedAt: Int64
+        addedAt: Int64,
+        balances: [String: UInt64]
     ) throws -> MempoolMutation {
         let measured = try measure(transaction, spec: spec)
         let cid = measured.cid
@@ -253,6 +281,7 @@ public struct Mempool: Sendable {
             transaction: transaction,
             size: measured.size,
             claims: Self.claims(of: measured.body),
+            debits: measured.debits,
             fee: measured.surplus,
             addedAt: addedAt
         )
@@ -276,6 +305,14 @@ public struct Mempool: Sendable {
             replaced = existing
         } else {
             throw MempoolError.conflictingNonce
+        }
+
+        // Every account it debits pays this as well as what the pool
+        // already debits it (less what it replaces).
+        for (account, debit) in entry.debits {
+            let held = committed[account, default: 0] - (replaced?.debits[account] ?? 0)
+            let (total, overflow) = held.addingReportingOverflow(debit)
+            guard !overflow, total <= balances[account, default: 0] else { throw MempoolError.insufficientFunds }
         }
 
         var prospectiveCount = entries.count - (replaced == nil ? 0 : 1)
@@ -303,6 +340,7 @@ public struct Mempool: Sendable {
             mutation.replaced = [Self.item(removed)]
         }
         mutation.evicted = evictions.compactMap { removeEntry($0).map(Self.item) }
+        for account in entry.debits.keys { self.balances[account] = balances[account, default: 0] }
         insert(entry)
         mutation.inserted = Self.item(entry)
         return mutation
@@ -437,6 +475,23 @@ public struct Mempool: Sendable {
         return mutation
     }
 
+    /// A verdict on the tip read these balances: an account whose pooled
+    /// debits no longer fit sheds its lowest-paying transactions until the
+    /// rest do.
+    @discardableResult
+    public mutating func rebalance(_ balances: [String: UInt64]) -> MempoolMutation {
+        var mutation = MempoolMutation()
+        for (account, balance) in balances.sorted(by: { $0.key < $1.key }) where committed[account] != nil {
+            self.balances[account] = balance
+            guard committed[account, default: 0] > balance else { continue }
+            let debiting = entries.values.filter { $0.debits[account] != nil }.sorted { Self.retention($0, $1) < 0 }
+            for entry in debiting where committed[account, default: 0] > balance {
+                if let removed = removeEntry(entry.cid) { mutation.evicted.append(Self.item(removed)) }
+            }
+        }
+        return mutation
+    }
+
     @discardableResult
     public mutating func clear() -> MempoolMutation {
         remove(entries.keys.sorted())
@@ -450,6 +505,7 @@ public struct Mempool: Sendable {
         precondition(entries[entry.cid] == nil)
         entries[entry.cid] = entry
         for claim in entry.claims { claimants[claim] = entry.cid }
+        for (account, debit) in entry.debits { committed[account, default: 0] += debit }
         byteCount += entry.size
         version &+= 1
     }
@@ -457,6 +513,15 @@ public struct Mempool: Sendable {
     private mutating func removeEntry(_ cid: String) -> Entry? {
         guard let removed = entries.removeValue(forKey: cid) else { return nil }
         for claim in removed.claims where claimants[claim] == cid { claimants.removeValue(forKey: claim) }
+        for (account, debit) in removed.debits {
+            let left = committed[account, default: 0] - debit
+            if left == 0 {
+                committed.removeValue(forKey: account)
+                balances.removeValue(forKey: account)
+            } else {
+                committed[account] = left
+            }
+        }
         byteCount -= removed.size
         version &+= 1
         return removed

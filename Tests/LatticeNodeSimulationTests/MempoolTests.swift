@@ -103,27 +103,78 @@ final class MempoolTests: XCTestCase {
         XCTAssertEqual(pool.transactions(limit: 1).first?.body.rawCID, high.body.rawCID)
     }
 
-    /// A transaction claims every signer, not just the first: a funded
-    /// co-signer backs one pooled transaction, so it cannot pay the same fee
-    /// under many fresh first signers.
-    func testEverySignerBacksOnePooledTransaction() throws {
+    /// A co-signer (a fee sponsor) backs as many pooled transactions as its
+    /// balance pays, under any first signers, and no more.
+    func testACoSignerBacksAsManyTransactionsAsItsBalancePays() throws {
         var pool = Mempool()
-        let funded = CryptoUtils.generateKeyPair()
-        func underFreshSigner(fee: Int64) throws -> Transaction {
-            let fresh = CryptoUtils.generateKeyPair()
-            return try SimTransactions.signed(keys: [fresh, funded], accountActions: [
-                AccountAction(owner: address(funded), delta: -fee),
+        let sponsor = CryptoUtils.generateKeyPair()
+        func sponsored(fee: Int64, client: (privateKey: String, publicKey: String) = CryptoUtils.generateKeyPair()) throws -> Transaction {
+            try SimTransactions.signed(keys: [client, sponsor], accountActions: [
+                AccountAction(owner: address(sponsor), delta: -fee),
             ], nonce: 0, chainPath: ["Nexus"])
         }
-        try pool.submit(try underFreshSigner(fee: 10), spec: testSpec(), addedAt: 0)
-        XCTAssertThrowsError(try pool.submit(try underFreshSigner(fee: 50), spec: testSpec(), addedAt: 0)) {
-            XCTAssertEqual($0 as? MempoolError, .conflictingNonce, "another first signer's: no replacement")
+        let balance = [address(sponsor): UInt64(25)]
+        let client = CryptoUtils.generateKeyPair()
+        try pool.submit(try sponsored(fee: 10, client: client), spec: testSpec(), addedAt: 0, balances: balance)
+        try pool.submit(try sponsored(fee: 10), spec: testSpec(), addedAt: 0, balances: balance)
+        XCTAssertThrowsError(try pool.submit(try sponsored(fee: 10), spec: testSpec(), addedAt: 0, balances: balance)) {
+            XCTAssertEqual($0 as? MempoolError, .insufficientFunds, "25 pays two fees of 10, not three")
         }
-        // The funded key's own transaction shares its claim too.
-        XCTAssertThrowsError(try pool.submit(try paying(funded, fee: 50, nonce: 0), spec: testSpec(), addedAt: 0)) {
-            XCTAssertEqual($0 as? MempoolError, .conflictingNonce)
+        // Its own transaction draws on the same balance.
+        XCTAssertThrowsError(try pool.submit(try paying(sponsor, fee: 6, nonce: 0), spec: testSpec(), addedAt: 0, balances: balance)) {
+            XCTAssertEqual($0 as? MempoolError, .insufficientFunds)
         }
-        XCTAssertEqual(pool.count, 1)
+        try pool.submit(try paying(sponsor, fee: 5, nonce: 0), spec: testSpec(), addedAt: 0, balances: balance)
+        XCTAssertEqual(pool.count, 3)
+
+        // A replacement's debit stands in for the one it replaces.
+        XCTAssertThrowsError(try pool.submit(try sponsored(fee: 11, client: client), spec: testSpec(), addedAt: 0, balances: balance)) {
+            XCTAssertEqual($0 as? MempoolError, .insufficientFunds, "10 + 5 + 11 is over 25")
+        }
+        XCTAssertEqual(try pool.submit(
+            try sponsored(fee: 11, client: client), spec: testSpec(), addedAt: 0, balances: [address(sponsor): 26]
+        ).replaced.count, 1)
+    }
+
+    /// When a verdict reads less on an account than the pool debits it,
+    /// its lowest-paying transactions leave until the rest fit.
+    func testAnAccountThatCanPayLessShedsItsLowestPaying() throws {
+        var pool = Mempool()
+        let sponsor = CryptoUtils.generateKeyPair()
+        var cids: [String] = []
+        for fee in [Int64(30), 10, 20] {
+            let tx = try SimTransactions.signed(keys: [CryptoUtils.generateKeyPair(), sponsor], accountActions: [
+                AccountAction(owner: address(sponsor), delta: -fee),
+            ], nonce: 0, chainPath: ["Nexus"])
+            try pool.submit(tx, spec: testSpec(), addedAt: 0, balances: [address(sponsor): 60])
+            cids.append(try Mempool.cid(of: tx))
+        }
+        XCTAssertTrue(pool.rebalance([address(sponsor): 60]).departed.isEmpty)
+        XCTAssertTrue(pool.rebalance(["someone else": 0]).departed.isEmpty, "an account the pool does not debit")
+        let shed = pool.rebalance([address(sponsor): 50])
+        XCTAssertEqual(shed.evicted.map(\.cid), [cids[1]])
+        XCTAssertEqual(Set(pool.items.map(\.cid)), [cids[0], cids[2]])
+        XCTAssertEqual(pool.rebalance([address(sponsor): 0]).evicted.count, 2)
+        // Nothing debits it now: the budget starts over.
+        let again = try SimTransactions.signed(keys: [CryptoUtils.generateKeyPair(), sponsor], accountActions: [
+            AccountAction(owner: address(sponsor), delta: -5),
+        ], nonce: 0, chainPath: ["Nexus"])
+        try pool.submit(again, spec: testSpec(), addedAt: 0, balances: [address(sponsor): 5])
+    }
+
+    /// A transaction's debit is its net take from each account, as Lattice
+    /// applies one owner's deltas together; a credit is no debit.
+    func testADebitIsTheNetTakeFromEachAccount() throws {
+        let body = TransactionBody(
+            accountActions: [
+                AccountAction(owner: "a", delta: -10), AccountAction(owner: "a", delta: 4),
+                AccountAction(owner: "b", delta: -3), AccountAction(owner: "b", delta: 3),
+                AccountAction(owner: "c", delta: 6),
+            ],
+            actions: [], depositActions: [], receiptActions: [], withdrawalActions: [],
+            signers: ["a"], nonce: 0, chainPath: ["Nexus"]
+        )
+        XCTAssertEqual(Mempool.debits(of: body), ["a": 6])
     }
 
     /// Two senders writing one state key never share the pool: one of them
@@ -157,11 +208,19 @@ final class MempoolTests: XCTestCase {
         var pool = Mempool()
         let first = CryptoUtils.generateKeyPair()
         let second = CryptoUtils.generateKeyPair()
+        func body(_ key: (privateKey: String, publicKey: String), fee: Int64, writing: [Action]) throws -> Transaction {
+            let body = TransactionBody(
+                accountActions: [AccountAction(owner: address(key), delta: -fee)],
+                actions: writing, depositActions: [], receiptActions: [], withdrawalActions: [],
+                signers: [address(key)], nonce: 0, chainPath: ["Nexus"]
+            )
+            return Transaction(signatures: [key.publicKey: "x"], body: try HeaderImpl(node: body))
+        }
+        let write = Action(key: "name/ada", oldValue: nil, newValue: "x")
         try pool.submit(try paying(first, fee: 1, nonce: 0), spec: testSpec(), addedAt: 0)
-        try pool.submit(try paying(second, fee: 1, nonce: 0), spec: testSpec(), addedAt: 0)
-        let joint = try SimTransactions.signed(keys: [first, second], accountActions: [
-            AccountAction(owner: address(first), delta: -100),
-        ], nonce: 0, chainPath: ["Nexus"])
+        try pool.submit(try body(second, fee: 1, writing: [write]), spec: testSpec(), addedAt: 0)
+        // The first's nonce and the second's key.
+        let joint = try body(first, fee: 100, writing: [write])
         XCTAssertThrowsError(try pool.submit(joint, spec: testSpec(), addedAt: 0)) {
             XCTAssertEqual($0 as? MempoolError, .conflictingNonce)
         }

@@ -558,7 +558,21 @@ extension NodeRuntime {
                     job.transaction, tipCID: job.tipCID, snapshot: basis.snapshot, chainPath: path,
                     parentState: basis.parentState, fetcher: fetcher, checksPolicies: job.checksPolicies
                 )
-                return [.level(path, .mining(.preflighted(job, disposition(result.disposition))))]
+                // A ready transaction brings the balances it was funded from,
+                // read from the same tip state, for the pool's budget.
+                var verdict = disposition(result.disposition)
+                var balances: [String: UInt64] = [:]
+                if verdict == .ready {
+                    if let body = job.transaction.body.node,
+                       let snapshot = basis.snapshot,
+                       let state = try? await LatticeStateHeader(rawCID: snapshot.postStateCID).resolve(fetcher: fetcher).node,
+                       let read = await Mempool.balances(debitedBy: body, on: state, fetcher: fetcher) {
+                        balances = read
+                    } else {
+                        verdict = .unavailable
+                    }
+                }
+                return [.level(path, .mining(.preflighted(job, verdict, balances: balances)))]
             }
         case .buildTemplate(let job):
             return RuntimeJob(path: path, epoch: job.tipEpoch) {

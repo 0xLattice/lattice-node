@@ -444,7 +444,7 @@ public struct TxWorkload {
         report.steps += 1
         mix(Self.describe(event))
         switch event {
-        case .preflighted(let job, _):
+        case .preflighted(let job, _, _):
             runningPreflights.remove("\(job.tipEpoch)/" + job.cid)
         case .transactionReceived:
             arrivalsOnTip += 1
@@ -526,8 +526,8 @@ public struct TxWorkload {
         guard preflightsOnTip <= poolAtMove + arrivalsOnTip else {
             throw fail("\(preflightsOnTip) preflights in tip epoch \(job.tipEpoch): more than one tip's worth")
         }
-        let verdict = try await classify(job)
-        schedule(at: now + delay(), .event(.preflighted(job, verdict)))
+        let (verdict, balances) = try await classify(job)
+        schedule(at: now + delay(), .event(.preflighted(job, verdict, balances: balances)))
     }
 
     mutating func run(_ job: TemplateJob) async throws {
@@ -559,18 +559,18 @@ public struct TxWorkload {
     /// makes against the tip's post-state. Signature and policy checks are
     /// package-internal to Lattice and are not run: every workload
     /// transaction is correctly signed.
-    func classify(_ job: PreflightJob) async throws -> MempoolDisposition {
+    func classify(_ job: PreflightJob) async throws -> (MempoolDisposition, [String: UInt64]) {
         guard let body = job.transaction.body.node, body.minerSurplus() != nil,
-              body.chainPath == [DEFAULT_ROOT_DIRECTORY] else { return .invalid }
+              body.chainPath == [DEFAULT_ROOT_DIRECTORY] else { return (.invalid, [:]) }
         guard let tipBlock = blocks[job.tipCID]?.sim.block,
-              let state = try await tipBlock.postState.resolve(fetcher: cas).node else { return .unavailable }
+              let state = try await tipBlock.postState.resolve(fetcher: cas).node else { return (.unavailable, [:]) }
         var future = false
         for signer in Set(body.signers).sorted() {
             let expected = try await state.accountState.nextExpectedNonce(for: signer, fetcher: cas)
-            if body.nonce < expected { return .invalid }
+            if body.nonce < expected { return (.invalid, [:]) }
             if body.nonce > expected { future = true }
         }
-        if future { return .future }
+        if future { return (.future, [:]) }
         do {
             _ = try await state.proveAndUpdateState(
                 allAccountActions: body.accountActions,
@@ -581,9 +581,12 @@ public struct TxWorkload {
                 transactionBodies: [body],
                 fetcher: cas
             )
-            return .ready
+            guard let balances = await Mempool.balances(debitedBy: body, on: state, fetcher: cas) else {
+                return (.unavailable, [:])
+            }
+            return (.ready, balances)
         } catch {
-            return .invalid
+            return (.invalid, [:])
         }
     }
 
@@ -729,7 +732,7 @@ public struct TxWorkload {
         switch event {
         case .transactionReceived(let transaction, let origin):
             "tx \((try? Mempool.cid(of: transaction)) ?? "?") \(origin)"
-        case .preflighted(let job, let verdict):
+        case .preflighted(let job, let verdict, _):
             "verdict \(job.cid) \(job.tipCID) \(verdict)"
         case .tipMoved(let move):
             "tip \(move.tipCID)"
