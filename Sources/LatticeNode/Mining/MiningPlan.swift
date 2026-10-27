@@ -103,9 +103,10 @@ enum MiningPlan {
     /// pool verdict (taken against the tip, at its own time) did not see. Offer
     /// only transactions the policies accept for THIS template. Root and child
     /// templates alike: the pool's own verdicts are not taken at this height.
-    /// `refused` names those a policy refused outright, for the pool to drop;
-    /// one this node could not judge (a body or module it lacks) is in
-    /// neither. `transactions` is what the next block can carry
+    /// `refused` names those the policies did not accept, for the pool to
+    /// drop: a refusal, or an evaluation that failed on the input (a trap).
+    /// Only one this node could not judge (a body or module it lacks) is in
+    /// neither: left in, it would hold its place in every template. `transactions` is what the next block can carry
     /// (`Mempool.nextBlock`), so policies run on one block's worth, never
     /// the whole pool.
     static func policyAcceptedTransactions(
@@ -122,15 +123,22 @@ enum MiningPlan {
         var accepted: [Transaction] = []
         var refused: [String] = []
         for transaction in transactions {
-            guard let body = try? await transaction.body.resolve(fetcher: fetcher).node,
-                  let verdict = try? await TransactionBody.batchVerifyPolicies(
-                      bodies: [body],
-                      spec: spec,
-                      chainPath: chainPath,
-                      height: height,
-                      timestamp: timestamp,
-                      fetcher: fetcher
-                  ) else { continue }
+            guard let body = try? await transaction.body.resolve(fetcher: fetcher).node else { continue }
+            let verdict: Bool
+            do {
+                verdict = try await TransactionBody.batchVerifyPolicies(
+                    bodies: [body],
+                    spec: spec,
+                    chainPath: chainPath,
+                    height: height,
+                    timestamp: timestamp,
+                    fetcher: fetcher
+                )
+            } catch WasmPolicyError.missingModule {
+                continue
+            } catch {
+                verdict = false
+            }
             if verdict {
                 accepted.append(transaction)
             } else if let cid = try? Mempool.cid(of: transaction) {

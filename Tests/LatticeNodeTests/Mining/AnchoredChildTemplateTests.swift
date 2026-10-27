@@ -479,9 +479,10 @@ final class AnchoredChildTemplateTests: XCTestCase {
     /// judges what it carries by the child's policies, at its own height,
     /// as the root template does: a transaction they refuse is left out, not
     /// mined into a block every validator rejects, and named for Alpha's
-    /// pool to drop.
+    /// pool to drop. A policy that traps on a transaction refuses it: left
+    /// in, it would hold its place in every template.
     func testAChildTemplateCarriesOnlyWhatItsPoliciesAccept() async throws {
-        for (verdict, carried) in [(UInt8(0), 0), (1, 2)] {
+        for (verdict, carried) in [(UInt8?.some(0), 0), (1, 2), (nil, 0)] {
             var builder = try await LevelWorld.Builder(levels: 2)
             let module = WasmPolicyModule(bytes: Self.policyModule(verdict: verdict))
             let header = try WasmPolicyModuleHeader(node: module)
@@ -511,15 +512,16 @@ final class AnchoredChildTemplateTests: XCTestCase {
                 entering: n1, timestamp: t + 2 * interval, cas: host.cas, refused: &refused
             )
             let count = try await transactionCount(block, host.cas)
-            XCTAssertEqual(count, carried, "policy verdict \(verdict)")
+            XCTAssertEqual(count, carried, "policy verdict \(String(describing: verdict))")
             XCTAssertEqual(
                 refused, carried == 0 ? [PolicyRefusal(path: Self.alpha, tipCID: g.cid, cids: try spends.map(Mempool.cid(of:)))] : []
             )
         }
     }
 
-    /// A WASM policy module that gives `verdict` for every transaction.
-    private static func policyModule(verdict: UInt8) -> Data {
+    /// A WASM policy module that gives `verdict` for every transaction, or
+    /// traps (`unreachable`) without one.
+    private static func policyModule(verdict: UInt8?) -> Data {
         func section(_ id: UInt8, _ body: [UInt8]) -> [UInt8] { [id, UInt8(body.count)] + body }
         func export(_ name: String, kind: UInt8, index: UInt8) -> [UInt8] {
             [UInt8(name.utf8.count)] + Array(name.utf8) + [kind, index]
@@ -533,7 +535,8 @@ final class AnchoredChildTemplateTests: XCTestCase {
         module += section(3, [0x02, 0x00, 0x01])
         module += section(5, [0x01, 0x00, 0x01])
         module += section(7, exports)
-        module += section(10, [0x02, 0x05, 0x00, 0x41, 0x80, 0x08, 0x0b, 0x04, 0x00, 0x41, verdict, 0x0b])
+        let validate: [UInt8] = verdict.map { [0x04, 0x00, 0x41, $0, 0x0b] } ?? [0x03, 0x00, 0x00, 0x0b]
+        module += section(10, [0x02, 0x05, 0x00, 0x41, 0x80, 0x08, 0x0b] + validate)
         return Data(module)
     }
 

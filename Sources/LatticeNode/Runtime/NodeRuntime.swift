@@ -1098,11 +1098,7 @@ extension NodeRuntime {
                 // A pool holds nothing before its level has a spec, so a
                 // projection waits only on the pool.
                 let projected = !reproject ? view.mempool.projected : level.mining.spec.map {
-                    pool.projectedBlocks(
-                        count: ChainReads.projectedFeeBlocks,
-                        transactionLimit: Int(clamping: $0.maxNumberOfTransactionsPerBlock),
-                        maxBytes: $0.maxBlockSize
-                    )
+                    pool.projectedBlocks(count: ChainReads.projectedFeeBlocks, spec: $0)
                 } ?? []
                 if reproject {
                     view.projectedVersion = pool.version

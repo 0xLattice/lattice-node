@@ -282,15 +282,29 @@ Response:
 The body is content-bound and the signature, nonce, funding, fee, and path are
 validated before admission. An unhosted path returns 404. A transaction must
 fit in a block by itself: past `maxBlockSize` less 2048 bytes for the block's
-own content, the refusal is `tooLarge` (so a chain whose `maxBlockSize` is
+own content and its place in it, the refusal is `tooLarge` (so a chain whose `maxBlockSize` is
 2048 or less admits nothing).
 
 The node's pool admits only transactions paying at least the operator's
-`--min-relay-fee` (default 0): the fee is the transaction's balance excess,
+`--min-relay-fee` (default 1): the fee is the transaction's balance excess,
 which the block's recipient is credited. Below it the refusal is
 `belowMinRelayFee`. This is node relay policy, never consensus: a block
 carrying a cheaper transaction stays valid, and other nodes choose their own
 floor. `GET /api/chain/info` reports this node's as `minRelayFee`.
+
+A refusal names its reason. The retriable ones say to send the same
+transaction again later; the rest say to change it.
+
+| Reason | Meaning | Retry as is |
+|---|---|---|
+| `nonceAhead` | an earlier transaction from its first signer is not mined yet | yes, once it is |
+| `unavailable` | this node cannot judge it yet (state, a policy module, a withdrawal's receipt) | yes |
+| `insufficientFunds` | an account it debits cannot also pay what pooled transactions debit it, and it does not outbid them | yes, once those are mined |
+| `full` | the pool is full of transactions paying a higher rate (429) | yes |
+| `contextChanged` | the tip moved too often while it waited (503) | yes |
+| `feeTooLow` | it shares a nonce, state key, deposit or receipt with pooled transactions and does not pay all their fees plus the relay floor | no: raise the fee |
+| `belowMinRelayFee` | its fee is under this node's floor | no: raise the fee |
+| `tooLarge`, `invalidState` | it can never be pooled | no |
 
 `GET /api/chain/info` also reports the chain's
 [node-local finality](operations.md#node-local-finality) window, in blocks,
@@ -300,13 +314,12 @@ node policy, never consensus, and is absent when off (the default).
 ### Fee pricing
 
 `GET /api/fees` projects the next blocks (up to 12) this node's pool would
-fill if nothing else arrived, as this node's builder fills them: ready
-transactions in template order (packages by fee per byte, a transaction with
-its signer's earlier pooled nonces), each block taking them until one does
-not fit the chain's transaction count or `maxBlockSize`. A package may
-straddle two blocks; a block's rate is the lowest of the packages it carries
-any of. It is recomputed on each new tip and, while the pool changes, at most
-once a second.
+fill if nothing else arrived, as this node's builder fills them: pooled
+transactions by fee per byte, each block taking them up to the chain's
+transaction count and `maxBlockSize` (each charged its place in the block),
+skipping one that does not fit for a smaller one behind it. A block's rate is
+the lowest it carries. It is recomputed on each new tip and, while the pool
+changes, at most once a second.
 
 ```json
 {
@@ -323,14 +336,9 @@ none is full (or `blocks` is empty), a fee at the floor makes the next block.
 To be in the first `k` blocks when block `k` is full, a transaction of `size`
 bytes pays more than `lowestFee * size / lowestFeeBytes` of that block.
 
-This is an estimate from one node's pool, not a promise: only transaction
-bytes are counted, while a block's own structure (which grows with its
-transaction count) shares `maxBlockSize`, so a block of many small
-transactions holds fewer than projected; other miners may fill gaps with
-smaller packages, other pools differ, and new transactions arrive. On a child
-chain, a transaction only the parent's state makes executable is not
-projected, though a template may carry it. Fees above `UInt64` never occur
-for funded packages.
+This is an estimate from one node's pool, not a promise: other miners fill
+their blocks otherwise, other pools differ, and new transactions arrive. Fees
+above `UInt64` never occur for pooled transactions, which are funded.
 
 ## Transaction inclusion
 

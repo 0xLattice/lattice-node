@@ -97,25 +97,12 @@ public struct ProjectedBlock: Sendable, Equatable {
     public let transactionCount: Int
     /// Transaction size it carries (envelope plus body, as the pool measures).
     public let bytes: Int
-    /// Its lowest-rate package: the verified fee over its size in bytes. A
-    /// transaction paying a higher rate would have been taken before it.
+    /// Its lowest-rate transaction: the verified fee over its size in bytes.
+    /// A transaction paying a higher rate would have been taken before it.
     public let lowestFee: WorkSum
     public let lowestFeeBytes: Int
     /// Whether ready transactions were left for a later block.
     public let full: Bool
-
-    /// One more transaction of `size` bytes, from a package of rate `fee` over `packageSize`.
-    func adding(_ size: Int, fee: WorkSum, packageSize: Int) -> ProjectedBlock {
-        let lower = Mempool.lowerRate(fee, packageSize, than: lowestFee, lowestFeeBytes)
-        return ProjectedBlock(
-            transactionCount: transactionCount + 1, bytes: bytes + size,
-            lowestFee: lower ? fee : lowestFee, lowestFeeBytes: lower ? packageSize : lowestFeeBytes, full: full
-        )
-    }
-
-    func closed() -> ProjectedBlock {
-        ProjectedBlock(transactionCount: transactionCount, bytes: bytes, lowestFee: lowestFee, lowestFeeBytes: lowestFeeBytes, full: true)
-    }
 }
 
 /// The transaction pool of one level as a value: no IO, no awaits. It holds
@@ -236,26 +223,21 @@ public struct Mempool: Sendable {
         return (try Self.cid(of: transaction), body, size, surplus, debits)
     }
 
-    /// The most bytes a transaction may have: what is left of `maxBlockSize`
-    /// in a block carrying only it. The block's own fields and transaction
-    /// trie count toward the limit, so a transaction of `maxBlockSize` bytes
-    /// could never be mined, and the builder, which takes the template's
-    /// longest prefix that fits, would stop at it.
+    /// The most bytes a transaction may have: what a block carrying only it
+    /// leaves of `maxBlockSize`. The block's own fields and transaction trie
+    /// count toward the limit, so a transaction of `maxBlockSize` bytes
+    /// could never be mined.
     public static func transactionRoom(_ spec: ChainSpec) -> Int {
-        spec.maxBlockSize - blockAllowance
+        spec.maxBlockSize - blockAllowance - transactionAllowance
     }
 
     /// A block's content besides its transactions, with room to spare: an
-    /// empty Nexus block measures 766 bytes (about 1,000 with its height,
-    /// timestamp and nonce at their largest), and a transaction adds about
-    /// 180 to the trie.
-    static let blockAllowance = 2_048
+    /// empty Nexus block measures 766 bytes, about 1,000 with its height,
+    /// timestamp and nonce at their largest.
+    static let blockAllowance = 1_792
 
-    /// What each transaction adds to its block beyond its own bytes (about
-    /// 180 in the transaction trie), with room to spare. `nextBlock` charges
-    /// it, so what a template is handed always fits the block: the builder
-    /// keeps only the longest prefix that fits, and one transaction over the
-    /// line would cost the template everything behind it.
+    /// What each transaction adds to its block beyond its own bytes, with
+    /// room to spare: about 180 in the transaction trie.
     static let transactionAllowance = 256
 
     /// Pool a transaction preflight found ready. `balances` holds, for each
@@ -343,70 +325,71 @@ public struct Mempool: Sendable {
         return mutation
     }
 
-    /// Pooled transactions in template order (the higher fee rate first,
-    /// then the smaller CID), up to `limit` transactions and `maxBytes` of
-    /// transaction size. One that does not fit is skipped for a smaller one
-    /// behind it.
-    public func transactions(limit: Int, maxBytes: Int = .max) -> [Transaction] {
-        var result: [Transaction] = []
-        _ = selected(limit: limit, maxBytes: maxBytes) { entry in
-            result.append(entry.transaction)
-            return true
-        }
-        return result
+    /// Pooled transactions in template order: the higher fee rate first, then
+    /// the smaller CID.
+    public func transactions(limit: Int) -> [Transaction] {
+        ordered.prefix(max(0, limit)).map(\.transaction)
     }
 
-    /// What the next block can carry: pooled transactions in template order,
-    /// skipping one that does not fit for a smaller one behind it, up to the
-    /// spec's transaction count and `transactionRoom`. A template judges
-    /// these by its policies, never the whole pool.
+    /// What the next block can carry: what a template is handed, so its
+    /// policies judge one block's worth, never the whole pool.
     public func nextBlock(_ spec: ChainSpec) -> [Transaction] {
-        var result: [Transaction] = []
-        _ = selected(
-            limit: Int(clamping: spec.maxNumberOfTransactionsPerBlock),
-            maxBytes: Self.transactionRoom(spec),
-            overhead: Self.transactionAllowance
-        ) { entry in
-            result.append(entry.transaction)
-            return true
-        }
-        return result
+        Self.fill(spec, ordered).taken.map(\.transaction)
     }
 
     /// The next `count` blocks this pool would fill if nothing else arrived,
-    /// as this node's builder fills them: transactions in template order,
-    /// each block taking them until one does not fit in `transactionLimit`
-    /// transactions or `maxBytes` of transaction size. A block's rate is the
-    /// lowest it carries. An estimate for fee pricing, not a template: the
-    /// block's own structure, which grows with its transaction count, shares
-    /// `maxBytes`, and other miners may fill gaps with smaller transactions.
-    /// Empty when the pool is.
-    public func projectedBlocks(count: Int, transactionLimit: Int, maxBytes: Int) -> [ProjectedBlock] {
-        guard count > 0, transactionLimit > 0, maxBytes > 0 else { return [] }
+    /// each filled as `nextBlock` fills the first. An estimate for fee
+    /// pricing: other miners may fill theirs otherwise. Empty when the pool
+    /// is.
+    public func projectedBlocks(count: Int, spec: ChainSpec) -> [ProjectedBlock] {
         var blocks: [ProjectedBlock] = []
-        var current: ProjectedBlock?
-        for entry in ordered {
-            if let block = current, block.transactionCount < transactionLimit, entry.size <= maxBytes - block.bytes {
-                current = block.adding(entry.size, fee: entry.fee, packageSize: entry.size)
-                continue
-            }
-            if let block = current {
-                blocks.append(block.closed())
-                if blocks.count == count { return blocks }
-            }
-            // Admission caps a transaction at the block size, so one always
-            // fits an empty block.
-            current = ProjectedBlock(
-                transactionCount: 1, bytes: entry.size, lowestFee: entry.fee, lowestFeeBytes: entry.size, full: false
-            )
+        var rest = ordered
+        while blocks.count < count {
+            let (taken, left) = Self.fill(spec, rest)
+            // In template order, so the last taken pays the lowest rate.
+            guard let lowest = taken.last else { break }
+            blocks.append(ProjectedBlock(
+                transactionCount: taken.count, bytes: taken.reduce(0) { $0 + $1.size },
+                lowestFee: lowest.fee, lowestFeeBytes: lowest.size, full: !left.isEmpty
+            ))
+            rest = left
         }
-        if let current, blocks.count < count { blocks.append(current) }
         return blocks
     }
 
-    /// Transactions that fail to fit, in a row, before selection gives up on
-    /// a nearly full template (Bitcoin Core's `MAX_CONSECUTIVE_FAILURES`).
+    /// Transactions that fail to fit, in a row, before a fill gives up on a
+    /// nearly full block (Bitcoin Core's `MAX_CONSECUTIVE_FAILURES`).
     static let maxConsecutiveMisses = 1_000
+
+    /// One block's fill from `entries`, in their order: each is charged its
+    /// bytes and its place in the block (`transactionAllowance`) against
+    /// what the block's own content leaves, up to the spec's transaction
+    /// count. One that does not fit is skipped for a smaller one behind it,
+    /// so what is taken always fits the block, and the builder, which keeps
+    /// the longest prefix that fits, never cuts it short.
+    private static func fill(_ spec: ChainSpec, _ entries: [Entry]) -> (taken: [Entry], rest: [Entry]) {
+        let limit = Int(clamping: spec.maxNumberOfTransactionsPerBlock)
+        var room = spec.maxBlockSize - blockAllowance
+        var taken: [Entry] = []
+        var rest: [Entry] = []
+        var misses = 0
+        for (index, entry) in entries.enumerated() {
+            guard taken.count < limit, misses < maxConsecutiveMisses else {
+                rest += entries[index...]
+                break
+            }
+            let charged = entry.size + transactionAllowance
+            if charged <= room {
+                taken.append(entry)
+                room -= charged
+                misses = 0
+            } else {
+                rest.append(entry)
+                misses += 1
+            }
+        }
+        return (taken, rest)
+    }
 
     /// Every entry, the higher fee rate first, then the smaller CID.
     private var ordered: [Entry] {
@@ -466,11 +449,6 @@ public struct Mempool: Sendable {
             if remaining > 0 { addend = addend + addend }
         }
         return result
-    }
-
-    /// Whether `fee` over `size` is a lower rate than `otherFee` over `otherSize`, exactly.
-    static func lowerRate(_ fee: WorkSum, _ size: Int, than otherFee: WorkSum, _ otherSize: Int) -> Bool {
-        rate(fee, size, comparedTo: otherFee, otherSize) < 0
     }
 
     /// Eviction priority when the pool is full: the higher fee rate, then

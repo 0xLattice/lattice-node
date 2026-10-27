@@ -277,7 +277,10 @@ struct TxOptions: ParsableArguments {
 func nextNonce(rpc: NodeRPC, address: String, chain: String = "Nexus") async throws -> UInt64 {
     let committed = try await committedNextNonce(rpc: rpc, address: address, chain: chain)
     if let pending = try await highestPendingNonce(rpc: rpc, signer: address, chain: chain) {
-        throw CtlError("\(address) has a transaction pending at nonce \(pending); try again once it is mined")
+        throw CtlError(
+            "\(address) has a transaction pending at nonce \(pending); try again once it is mined, "
+                + "or replace it with --nonce \(pending) and a higher --fee"
+        )
     }
     return committed
 }

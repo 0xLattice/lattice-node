@@ -457,8 +457,18 @@ final class MempoolTests: XCTestCase {
         try XCTUnwrap(transaction.toData()).count + XCTUnwrap(transaction.body.node?.toData()).count
     }
 
-    /// The template takes the higher fee rate first; one that does not fit
-    /// is skipped for a smaller one behind it.
+    /// What a block charges each transaction beyond its own bytes.
+    private static let place = 256
+
+    /// A chain whose blocks hold `count` transactions charging `bytes` in
+    /// all: their own bytes and `place` each.
+    private func blocks(holding bytes: Int, count: UInt64 = 100) -> ChainSpec {
+        let allowance = testSpec().maxBlockSize - Mempool.transactionRoom(testSpec())
+        return testSpec(maxBlockSize: bytes + allowance - Self.place, maxTransactions: count)
+    }
+
+    /// The next block takes the higher fee rate first; one that does not
+    /// fit is skipped for a smaller one behind it.
     func testATransactionThatDoesNotFitIsSkippedForOneThatDoes() throws {
         var pool = Mempool(limits: MempoolLimits(minRelayFee: 0))
         let big = try storing(size: 2_000)
@@ -466,11 +476,8 @@ final class MempoolTests: XCTestCase {
         let rich = try paying(CryptoUtils.generateKeyPair(), fee: 1_000, nonce: 0)
         for tx in [big, small, rich] { try pool.submit(tx, spec: testSpec(), addedAt: 0) }
         XCTAssertEqual(try pool.transactions(limit: 1).map(Mempool.cid(of:)), [try Mempool.cid(of: rich)])
-        let room = try size(rich) + size(small)
-        XCTAssertEqual(
-            try pool.transactions(limit: .max, maxBytes: room).map(Mempool.cid(of:)),
-            try [rich, small].map(Mempool.cid(of:))
-        )
+        let spec = try blocks(holding: size(rich) + size(small) + 2 * Self.place)
+        XCTAssertEqual(try pool.nextBlock(spec).map(Mempool.cid(of:)), try [rich, small].map(Mempool.cid(of:)))
     }
 
     /// What a template is handed fits the block it builds: each transaction
@@ -485,12 +492,17 @@ final class MempoolTests: XCTestCase {
         let used = try small.reduce(0) { $0 + (try size($1)) }
         let big = try storing(size: Mempool.transactionRoom(spec) - used - 100)
         try pool.submit(big, spec: spec, addedAt: 0)
-        XCTAssertEqual(pool.transactions(limit: .max, maxBytes: Mempool.transactionRoom(spec)).count, 9,
-                       "by their own bytes alone, all fit")
-        XCTAssertEqual(Set(try pool.nextBlock(spec).map(Mempool.cid(of:))), Set(try small.map(Mempool.cid(of:))))
+        XCTAssertEqual(Set(try pool.nextBlock(spec).map(Mempool.cid(of:))), Set(try small.map(Mempool.cid(of:))),
+                       "by their own bytes alone, all nine fit")
+
+        // The largest transaction admitted fits a block carrying only it.
+        var alone = Mempool(limits: MempoolLimits(minRelayFee: 0))
+        let largest = try storing(size: Mempool.transactionRoom(spec))
+        try alone.submit(largest, spec: spec, addedAt: 0)
+        XCTAssertEqual(alone.nextBlock(spec).count, 1)
     }
 
-    /// Selection gives up after 1,000 transactions in a row fail to fit, as
+    /// A fill gives up after 1,000 transactions in a row fail to fit, as
     /// Bitcoin Core does: a small one behind 1,000 large, better-paying ones
     /// is left out, and behind 999 it is taken.
     func testSelectionStopsAfterAThousandMissesInARow() throws {
@@ -513,7 +525,7 @@ final class MempoolTests: XCTestCase {
                 if isSmall { small = (cid, try size(transaction)) }
             }
             let (cid, smallSize) = try XCTUnwrap(small)
-            let chosen = try pool.transactions(limit: .max, maxBytes: smallSize).map(Mempool.cid(of:))
+            let chosen = try pool.nextBlock(blocks(holding: smallSize + Self.place)).map(Mempool.cid(of:))
             XCTAssertEqual(chosen, large < 1_000 ? [cid] : [], "\(large) large")
         }
     }
@@ -525,13 +537,13 @@ final class MempoolTests: XCTestCase {
 
     func testProjectionOfARoomyPoolIsOneOpenBlock() throws {
         var pool = Mempool()
-        XCTAssertEqual(pool.projectedBlocks(count: 12, transactionLimit: 10, maxBytes: 1_000_000), [])
+        XCTAssertEqual(pool.projectedBlocks(count: 12, spec: testSpec(maxTransactions: 10)), [])
 
         let cheap = try paying(CryptoUtils.generateKeyPair(), fee: 1, nonce: 0)
         let rich = try paying(CryptoUtils.generateKeyPair(), fee: 50, nonce: 0)
         for tx in [cheap, rich] { try pool.submit(tx, spec: testSpec(), addedAt: 0) }
 
-        let blocks = pool.projectedBlocks(count: 12, transactionLimit: 10, maxBytes: 1_000_000)
+        let blocks = pool.projectedBlocks(count: 12, spec: testSpec(maxTransactions: 10))
         XCTAssertEqual(blocks.count, 1)
         XCTAssertEqual(blocks[0].transactionCount, 2)
         XCTAssertEqual(blocks[0].bytes, try size(cheap) + size(rich))
@@ -547,17 +559,17 @@ final class MempoolTests: XCTestCase {
             try pool.submit(try paying(CryptoUtils.generateKeyPair(), fee: fee, nonce: 0), spec: testSpec(), addedAt: 0)
         }
 
-        let two = pool.projectedBlocks(count: 2, transactionLimit: 1, maxBytes: 1_000_000)
+        let two = pool.projectedBlocks(count: 2, spec: testSpec(maxTransactions: 1))
         XCTAssertEqual(two.map(\.lowestFee.uint64Value), [100, 10])
         XCTAssertEqual(two.map(\.full), [true, true], "the fee-1 transaction waits behind both")
 
-        let all = pool.projectedBlocks(count: 12, transactionLimit: 1, maxBytes: 1_000_000)
+        let all = pool.projectedBlocks(count: 12, spec: testSpec(maxTransactions: 1))
         XCTAssertEqual(all.map(\.lowestFee.uint64Value), [100, 10, 1])
         XCTAssertEqual(all.map(\.full), [true, true, false])
 
-        // Bytes bound a block as the count does.
-        let oneEach = try size(paying(CryptoUtils.generateKeyPair(), fee: 1, nonce: 0))
-        XCTAssertEqual(pool.projectedBlocks(count: 12, transactionLimit: 10, maxBytes: oneEach + oneEach / 2).count, 3)
+        // Bytes bound a block as the count does, each charged its place in it.
+        let oneEach = try size(paying(CryptoUtils.generateKeyPair(), fee: 1, nonce: 0)) + Self.place
+        XCTAssertEqual(pool.projectedBlocks(count: 12, spec: blocks(holding: oneEach + oneEach / 2, count: 10)).count, 3)
     }
 
 }
@@ -626,9 +638,9 @@ private func transactionBody(
     )
 }
 
-func testSpec(maxBlockSize: Int = 1_000_000) -> ChainSpec {
+func testSpec(maxBlockSize: Int = 1_000_000, maxTransactions: UInt64 = 100) -> ChainSpec {
     ChainSpec(
-        maxNumberOfTransactionsPerBlock: 100,
+        maxNumberOfTransactionsPerBlock: maxTransactions,
         maxStateGrowth: 100_000,
         maxBlockSize: maxBlockSize,
         premine: 0,
