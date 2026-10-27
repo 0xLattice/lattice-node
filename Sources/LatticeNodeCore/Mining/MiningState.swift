@@ -312,6 +312,10 @@ public struct MiningState: Sendable {
     private var admissions: [String: Admission] = [:]
     /// Transactions with a preflight outstanding on the current tip epoch.
     private var preflighting: Set<String> = []
+    /// What the next block can carry: what a template is handed, and what
+    /// the status digest names.
+    public var nextBlock: [Transaction] { spec.map(mempool.nextBlock) ?? [] }
+
     /// Pooled transactions in the local journal.
     public private(set) var journaled: Set<String> = []
     private var builds: [UInt64: (job: TemplateJob, replies: [Waiting])] = [:]
@@ -400,7 +404,7 @@ public struct MiningState: Sendable {
         }
         let cid: String
         do {
-            guard let spec else { throw MempoolError.unresolved }
+            guard let spec else { throw MempoolError.unavailable }
             cid = try mempool.check(transaction, spec: spec)
         } catch {
             refuse([origin], cid: try? Mempool.cid(of: transaction), error as? MempoolError ?? .unresolved, &turn)
@@ -555,7 +559,7 @@ public struct MiningState: Sendable {
             return
         }
         do {
-            guard let spec else { throw MempoolError.unresolved }
+            guard let spec else { throw MempoolError.unavailable }
             let mutation = try mempool.submit(
                 admission.transaction,
                 spec: spec,
@@ -765,7 +769,7 @@ public struct MiningState: Sendable {
             tipCID: tipCID,
             tipEpoch: tipEpoch,
             poolVersion: mempool.version,
-            transactions: spec.map(mempool.nextBlock) ?? [],
+            transactions: nextBlock,
             request: request
         )
         nextJobID += 1

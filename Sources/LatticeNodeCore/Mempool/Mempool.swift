@@ -168,7 +168,7 @@ public struct Mempool: Sendable {
     /// it writes, and each deposit and receipt it creates or spends. Other
     /// signers' funds are budgeted, not claimed (`debits(of:)`).
     static func claims(of body: TransactionBody) -> Set<String> {
-        var claims = Set(body.signers.prefix(1).map { "signer:" + $0 })
+        var claims = Set(body.signers.prefix(1).map { "nonce:\($0):\(body.nonce)" })
         for action in body.actions { claims.insert("action:" + action.key) }
         for deposit in body.depositActions { claims.insert("deposit:" + DepositKey(depositAction: deposit).description) }
         for withdrawal in body.withdrawalActions {
@@ -202,15 +202,10 @@ public struct Mempool: Sendable {
               }) else {
             throw MempoolError.tooLarge
         }
-        guard let body = transaction.body.node else { throw MempoolError.unresolved }
-        guard let bodyData = body.toData() else { throw MempoolError.unresolved }
-        let room = Self.transactionRoom(spec)
-        guard bodyData.count <= room,
-              let envelopeData = transaction.toData(),
-              envelopeData.count <= room,
-              body.signers.count <= limits.maxSignatures else {
-            throw MempoolError.tooLarge
-        }
+        guard let body = transaction.body.node,
+              let bodyData = body.toData(),
+              let envelopeData = transaction.toData() else { throw MempoolError.unresolved }
+        guard body.signers.count <= limits.maxSignatures else { throw MempoolError.tooLarge }
         // A transaction that creates value (credits and deposits over debits
         // and withdrawals) breaks the fee rule in any block, so it is never
         // pooled: a template carrying it would be invalid.
@@ -219,7 +214,7 @@ public struct Mempool: Sendable {
             throw MempoolError.belowMinRelayFee
         }
         let (size, overflow) = envelopeData.count.addingReportingOverflow(bodyData.count)
-        guard !overflow, size <= room else { throw MempoolError.tooLarge }
+        guard !overflow, size <= Self.transactionRoom(spec) else { throw MempoolError.tooLarge }
         return (try Self.cid(of: transaction), body, size, surplus, debits)
     }
 
@@ -278,17 +273,10 @@ public struct Mempool: Sendable {
         }
         let claimsConflict = !displaced.isEmpty
         for (account, debit) in entry.debits.sorted(by: { $0.key < $1.key }) {
-            let balance = balances[account, default: 0]
-            guard debit <= balance else { throw MempoolError.insufficientFunds }
-            var held = committed[account, default: 0] - displaced.values.reduce(0) { $0 + ($1.debits[account] ?? 0) }
-            guard held > balance || debit > balance - held else { continue }
-            let debiting = entries.values
-                .filter { $0.debits[account] != nil && displaced[$0.cid] == nil }
-                .sorted { Self.retention($0, $1) < 0 }
-            for existing in debiting where held > balance || debit > balance - held {
-                displaced[existing.cid] = existing
-                held -= existing.debits[account] ?? 0
+            guard let shed = shed(account, toFit: debit, in: balances[account, default: 0], besides: displaced) else {
+                throw MempoolError.insufficientFunds
             }
+            for existing in shed { displaced[existing.cid] = existing }
         }
         if !displaced.isEmpty {
             let owed = displaced.values.reduce(WorkSum(UInt256(limits.replacementIncrement))) { $0 + $1.fee }
@@ -323,12 +311,6 @@ public struct Mempool: Sendable {
         insert(entry)
         mutation.inserted = Self.item(entry)
         return mutation
-    }
-
-    /// Pooled transactions in template order: the higher fee rate first, then
-    /// the smaller CID.
-    public func transactions(limit: Int) -> [Transaction] {
-        ordered.prefix(max(0, limit)).map(\.transaction)
     }
 
     /// What the next block can carry: what a template is handed, so its
@@ -399,27 +381,6 @@ public struct Mempool: Sendable {
         }
     }
 
-    private func selected(limit: Int, maxBytes: Int, overhead: Int = 0, _ take: (Entry) -> Bool) -> Int {
-        guard limit > 0, maxBytes > 0 else { return 0 }
-        var taken = 0
-        var bytes = 0
-        var misses = 0
-        for entry in ordered {
-            guard taken < limit else { break }
-            let charged = entry.size + overhead
-            guard charged <= maxBytes - bytes else {
-                misses += 1
-                if misses >= Self.maxConsecutiveMisses { break }
-                continue
-            }
-            misses = 0
-            taken += 1
-            bytes += charged
-            if !take(entry) { break }
-        }
-        return taken
-    }
-
     /// Whether `lhs` pays a higher fee rate than `rhs` (positive), the same
     /// (zero) or a lower one, compared exactly: `lhs.fee * rhs.size` against
     /// `rhs.fee * lhs.size`.
@@ -474,13 +435,31 @@ public struct Mempool: Sendable {
     @discardableResult
     public mutating func rebalance(_ balances: [String: UInt64]) -> MempoolMutation {
         var mutation = MempoolMutation()
-        for (account, balance) in balances.sorted(by: { $0.key < $1.key }) where committed[account, default: 0] > balance {
-            let debiting = entries.values.filter { $0.debits[account] != nil }.sorted { Self.retention($0, $1) < 0 }
-            for entry in debiting where committed[account, default: 0] > balance {
+        for (account, balance) in balances.sorted(by: { $0.key < $1.key }) {
+            for entry in shed(account, toFit: 0, in: balance, besides: [:]) ?? [] {
                 if let removed = removeEntry(entry.cid) { mutation.evicted.append(Self.item(removed)) }
             }
         }
         return mutation
+    }
+
+    /// `account`'s lowest-paying pooled transactions, besides those already
+    /// `gone`, that must go for its pooled debits and `debit` more to fit
+    /// `balance`: none when they fit already, nil when even all would not.
+    private func shed(_ account: String, toFit debit: UInt64, in balance: UInt64, besides gone: [String: Entry]) -> [Entry]? {
+        var held = committed[account, default: 0] - gone.values.reduce(0) { $0 + ($1.debits[account] ?? 0) }
+        func fits() -> Bool { held <= balance && debit <= balance - held }
+        guard !fits() else { return [] }
+        var shed: [Entry] = []
+        let debiting = entries.values
+            .filter { $0.debits[account] != nil && gone[$0.cid] == nil }
+            .sorted { Self.retention($0, $1) < 0 }
+        for entry in debiting {
+            shed.append(entry)
+            held -= entry.debits[account] ?? 0
+            if fits() { return shed }
+        }
+        return nil
     }
 
     @discardableResult

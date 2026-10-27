@@ -100,11 +100,22 @@ final class MempoolTests: XCTestCase {
 
         XCTAssertEqual(replacement.replaced.map(\.cid), [try Mempool.cid(of: low)])
         XCTAssertEqual(pool.count, 1)
-        XCTAssertEqual(pool.transactions(limit: 1).first?.body.rawCID, high.body.rawCID)
+        XCTAssertEqual(pool.nextBlock(testSpec()).first?.body.rawCID, high.body.rawCID)
     }
 
     /// A co-signer (a fee sponsor) backs as many pooled transactions as its
     /// balance pays, under any first signers, and no more.
+    /// The claim is a signer's nonce, not the signer: a pooled transaction
+    /// whose nonce the tip has since used never blocks the signer's next,
+    /// which needs no higher fee.
+    func testAStaleNonceNeverBlocksTheSignersNext() throws {
+        var pool = Mempool()
+        let key = CryptoUtils.generateKeyPair()
+        try pool.submit(try paying(key, fee: 50, nonce: 0), spec: testSpec(), addedAt: 0)
+        try pool.submit(try paying(key, fee: 1, nonce: 1), spec: testSpec(), addedAt: 0)
+        XCTAssertEqual(pool.count, 2)
+    }
+
     func testACoSignerBacksAsManyTransactionsAsItsBalancePays() throws {
         var pool = Mempool()
         let sponsor = CryptoUtils.generateKeyPair()
@@ -327,7 +338,7 @@ final class MempoolTests: XCTestCase {
             XCTAssertEqual($0 as? MempoolError, .full)
         }
         XCTAssertEqual(pool.count, 1)
-        XCTAssertEqual(pool.transactions(limit: 1).first?.body.rawCID, incumbent.body.rawCID)
+        XCTAssertEqual(pool.nextBlock(testSpec()).first?.body.rawCID, incumbent.body.rawCID)
     }
 
     /// `minRelayFee` is node admission policy on the real fee (the balance
@@ -412,7 +423,7 @@ final class MempoolTests: XCTestCase {
         let cheap = try submit(minerFee: 1)
         let rich = try submit(minerFee: 100)
         let mid = try submit(minerFee: 20)
-        XCTAssertEqual(try pool.transactions(limit: .max).map(Mempool.cid(of:)), [rich, mid, cheap])
+        XCTAssertEqual(try pool.nextBlock(testSpec()).map(Mempool.cid(of:)), [rich, mid, cheap])
     }
 
     func testAReplacementPaysTheRelayFloorMore() throws {
@@ -475,7 +486,7 @@ final class MempoolTests: XCTestCase {
         let small = try paying(CryptoUtils.generateKeyPair(), fee: 1, nonce: 0)
         let rich = try paying(CryptoUtils.generateKeyPair(), fee: 1_000, nonce: 0)
         for tx in [big, small, rich] { try pool.submit(tx, spec: testSpec(), addedAt: 0) }
-        XCTAssertEqual(try pool.transactions(limit: 1).map(Mempool.cid(of:)), [try Mempool.cid(of: rich)])
+        XCTAssertEqual(try pool.nextBlock(testSpec(maxTransactions: 1)).map(Mempool.cid(of:)), [try Mempool.cid(of: rich)])
         let spec = try blocks(holding: size(rich) + size(small) + 2 * Self.place)
         XCTAssertEqual(try pool.nextBlock(spec).map(Mempool.cid(of:)), try [rich, small].map(Mempool.cid(of:)))
     }

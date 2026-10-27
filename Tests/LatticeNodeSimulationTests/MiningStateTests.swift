@@ -267,6 +267,8 @@ final class MiningStateTests: XCTestCase {
         let effects = mining.step(.templateRequested(replyID: 2, TemplateRequest(rewardRecipient: nil)), now: 0)
         guard case .buildTemplate(let job)? = effects.first else { return XCTFail("\(effects)") }
         XCTAssertEqual(try job.transactions.map(Mempool.cid(of:)), [cids[3], cids[2]])
+        XCTAssertEqual(try mining.nextBlock.map(Mempool.cid(of:)), [cids[3], cids[2]],
+                       "status's digest names what the template carries")
     }
 
     /// A restored row for a level that has not executed waits for its first

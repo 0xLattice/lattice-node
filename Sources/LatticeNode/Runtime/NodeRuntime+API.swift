@@ -769,15 +769,8 @@ extension NodeRuntime {
             searchTarget: template.searchTarget,
             targets: template.targets,
             digest: templateDigest(
-                tip: job.tipCID,
-                transactions: job.transactions.compactMap { try? Mempool.cid(of: $0) },
-                levels: children.map {
-                    (
-                        $0.tipCID ?? "",
-                        $0.bestHeaderTip,
-                        $0.transactions.compactMap { try? Mempool.cid(of: $0) }
-                    )
-                }
+                tip: job.tipCID, carrying: job.transactions,
+                levels: children.map { ($0.tipCID ?? "", $0.bestHeaderTip, $0.transactions) }
             ),
             chains: await MiningTemplateAssembly.committedChains(
                 root: template.block, chainPath: chainPath, fetcher: fetcher
@@ -1031,15 +1024,15 @@ extension NodeRuntime {
     /// best header, and transaction set a template job reads. Status serves
     /// the current value, so it reads the same selections a build does: the
     /// root's ready set, and each carried child's contextual set.
+    /// The digest of the template a build on `tip` carrying these would
+    /// give: status names it, so a miner sees its template go stale.
     static func templateDigest(
-        tip: String, mempool: Mempool, levels: [(actOn: String, best: String, pool: Mempool)] = []
+        tip: String, carrying: [Transaction], levels: [(actOn: String, best: String, carrying: [Transaction])] = []
     ) -> String {
         templateDigest(
             tip: tip,
-            transactions: mempool.transactions(limit: .max).compactMap { try? Mempool.cid(of: $0) },
-            levels: levels.map {
-                ($0.actOn, $0.best, $0.pool.transactions(limit: .max).compactMap { try? Mempool.cid(of: $0) })
-            }
+            transactions: carrying.compactMap { try? Mempool.cid(of: $0) },
+            levels: levels.map { ($0.actOn, $0.best, $0.carrying.compactMap { try? Mempool.cid(of: $0) }) }
         )
     }
 
