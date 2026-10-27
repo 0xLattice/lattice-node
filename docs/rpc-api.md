@@ -414,8 +414,8 @@ The response contains:
 - `templateDigest` — fingerprint of the complete hosted tree's template
   inputs.
 
-A new transaction or candidate at any hosted level changes the digest, even if
-the Nexus tip did not move.
+A change to what the next block at any hosted level would carry, or a new
+candidate, changes the digest, even if the Nexus tip did not move.
 
 ## Submit mining work
 

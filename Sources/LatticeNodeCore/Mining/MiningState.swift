@@ -526,7 +526,7 @@ public struct MiningState: Sendable {
         // receipt or deposit a reorg took), leaves, freeing what it claims.
         // One ahead or unjudged is its sender's to send again. One still
         // ready brings its accounts' balances on the new tip: an account
-        // that can no longer pay all it backs sheds the lowest-paying.
+        // that can no longer pay all it backs sheds the lowest fee rate first.
         if disposition == .ready {
             departed(mempool.rebalance(balances), &turn)
         } else {

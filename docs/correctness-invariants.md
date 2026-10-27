@@ -107,7 +107,7 @@ set, GHOST, continuity) are the architecture doc's and are checked by
 - **NODE-MEMPOOL-001.b** — A pool entry already on the executed chain is
   removed. Enforced by `TxWorkload.checkInvariants` ("pool holds …, already
   on the executed chain").
-- **NODE-MEMPOOL-001.c** — The pool holds one transaction per signer nonce
+- **NODE-MEMPOOL-001.c** — The pool holds one transaction per first signer's nonce
   and stays within its limits. Enforced by `TxWorkload.checkInvariants`.
 - **NODE-MEMPOOL-001.d** — The local journal is the pool's local set, and a
   pool change is durable before any later effect. Enforced by

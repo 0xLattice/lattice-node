@@ -1020,12 +1020,9 @@ extension NodeRuntime {
         }
     }
 
-    /// The template digest over the root and every hosted child: each tip,
-    /// best header, and transaction set a template job reads. Status serves
-    /// the current value, so it reads the same selections a build does: the
-    /// root's ready set, and each carried child's contextual set.
-    /// The digest of the template a build on `tip` carrying these would
-    /// give: status names it, so a miner sees its template go stale.
+    /// The digest of the template a build on `tip` carrying these (each
+    /// level's `nextBlock`) would give: status names it, so a miner sees its
+    /// template go stale.
     static func templateDigest(
         tip: String, carrying: [Transaction], levels: [(actOn: String, best: String, carrying: [Transaction])] = []
     ) -> String {

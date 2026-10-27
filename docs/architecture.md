@@ -226,9 +226,9 @@ content-verified reads from `NodeStorage`. Each hosted child has its own
 
 Every hosted child has its own `ChainCore`. A parent template may carry the
 latest candidate from each direct child, and that candidate may recursively
-carry its own child. The template digest includes every hosted level, so a new
-child transaction, child candidate, or child block makes existing miner work
-stale.
+carry its own child. The template digest includes every hosted level, so a
+change to what a child's next block would carry, a new child candidate, or a
+child block makes existing miner work stale.
 
 A child candidate commits its carrier's entering state as its `parentState`, and
 Lattice requires a child's anchor to move only forward along the parent's

@@ -103,8 +103,6 @@ final class MempoolTests: XCTestCase {
         XCTAssertEqual(pool.nextBlock(testSpec()).first?.body.rawCID, high.body.rawCID)
     }
 
-    /// A co-signer (a fee sponsor) backs as many pooled transactions as its
-    /// balance pays, under any first signers, and no more.
     /// The claim is a signer's nonce, not the signer: a pooled transaction
     /// whose nonce the tip has since used never blocks the signer's next,
     /// which needs no higher fee.
@@ -116,6 +114,8 @@ final class MempoolTests: XCTestCase {
         XCTAssertEqual(pool.count, 2)
     }
 
+    /// A co-signer (a fee sponsor) backs as many pooled transactions as its
+    /// balance pays, under any first signers, and no more.
     func testACoSignerBacksAsManyTransactionsAsItsBalancePays() throws {
         var pool = Mempool()
         let sponsor = CryptoUtils.generateKeyPair()

@@ -263,10 +263,10 @@ public struct Mempool: Sendable {
 
         // Conflicts go to the higher fee. It displaces every pooled
         // transaction sharing a claim with it, and, for each account it
-        // debits, that account's lowest-paying transactions until its own
-        // debit fits the balance. It must pay what they all pay plus the
-        // increment: every displacement costs the sender in the fee that is
-        // finally mined, so bids cannot be raised for free.
+        // debits, that account's transactions paying the lowest fee rate
+        // until its own debit fits the balance. It must pay what they all
+        // pay plus the increment: every displacement costs the sender in the
+        // fee that is finally mined, so bids cannot be raised for free.
         var displaced: [String: Entry] = [:]
         for claim in entry.claims {
             if let holder = claimants[claim], let existing = entries[holder] { displaced[holder] = existing }
@@ -347,8 +347,10 @@ public struct Mempool: Sendable {
     /// bytes and its place in the block (`transactionAllowance`) against
     /// what the block's own content leaves, up to the spec's transaction
     /// count. One that does not fit is skipped for a smaller one behind it,
-    /// so what is taken always fits the block, and the builder, which keeps
-    /// the longest prefix that fits, never cuts it short.
+    /// so what is taken fits the block's bytes and count, and the builder,
+    /// which keeps the longest prefix that fits, does not cut it short for
+    /// them. State growth is not charged: on a chain whose `maxStateGrowth`
+    /// binds before its size, the builder may carry less.
     private static func fill(_ spec: ChainSpec, _ entries: [Entry]) -> (taken: [Entry], rest: [Entry]) {
         let limit = Int(clamping: spec.maxNumberOfTransactionsPerBlock)
         var room = spec.maxBlockSize - blockAllowance
@@ -430,8 +432,8 @@ public struct Mempool: Sendable {
     }
 
     /// A verdict on the tip read these balances: an account whose pooled
-    /// debits no longer fit sheds its lowest-paying transactions until the
-    /// rest do.
+    /// debits no longer fit sheds its transactions paying the lowest fee
+    /// rate until the rest do.
     @discardableResult
     public mutating func rebalance(_ balances: [String: UInt64]) -> MempoolMutation {
         var mutation = MempoolMutation()
@@ -443,9 +445,10 @@ public struct Mempool: Sendable {
         return mutation
     }
 
-    /// `account`'s lowest-paying pooled transactions, besides those already
-    /// `gone`, that must go for its pooled debits and `debit` more to fit
-    /// `balance`: none when they fit already, nil when even all would not.
+    /// `account`'s pooled transactions, lowest fee rate first and besides
+    /// those already `gone`, that must go for its pooled debits and `debit`
+    /// more to fit `balance`: none when they fit already, nil when even all
+    /// would not.
     private func shed(_ account: String, toFit debit: UInt64, in balance: UInt64, besides gone: [String: Entry]) -> [Entry]? {
         var held = committed[account, default: 0] - gone.values.reduce(0) { $0 + ($1.debits[account] ?? 0) }
         func fits() -> Bool { held <= balance && debit <= balance - held }

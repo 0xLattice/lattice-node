@@ -676,7 +676,7 @@ public struct TxWorkload {
         var slots: Set<String> = []
         for item in mining.mempool.items {
             guard let body = item.transaction.body.node else { throw fail("pooled content unresolved") }
-            for signer in body.signers where !slots.insert("\(signer)/\(body.nonce)").inserted {
+            for signer in body.signers.prefix(1) where !slots.insert("\(signer)/\(body.nonce)").inserted {
                 throw fail("two pooled transactions hold \(signer)'s nonce \(body.nonce)")
             }
         }
