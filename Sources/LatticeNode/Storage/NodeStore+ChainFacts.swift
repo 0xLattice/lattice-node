@@ -218,6 +218,7 @@ extension NodeStore {
             blockHeight: executed.blockHeight,
             postStateCID: executed.postStateCID,
             prevStateCID: executed.prevStateCID,
+            parentStateCID: executed.parentStateCID,
             specCID: executed.specCID,
             target: executed.target,
             nextTarget: executed.nextTarget,
