@@ -278,7 +278,7 @@ node's observable behaviour against it; it does not restate it.
    alone, it weighs excluded subtrees and never descends into them.
 
    Sources: Lattice spec §9.2, §9.4, §9.9 and §12.5 (items 4–6, 10); Lattice
-   [consensus-fork-choice](https://github.com/adalinxx/Lattice/blob/43.1.0/docs/consensus-fork-choice.md);
+   [consensus-fork-choice](https://github.com/0xLattice/Lattice/blob/43.1.0/docs/consensus-fork-choice.md);
    the properties in [proof-derived child work](proof-derived-work.md).
 2. **One grind is counted once per location.**
    - A verified observation of a root whose root hash clears the terminal
@@ -552,7 +552,7 @@ because boundary-focused testing needed the same things:
   which fails or parks a chosen store, merge, advance or batch pin.
 - **Precedent for seeded runs.** Lattice's `LatticeSim` drives the real
   `ChainState` fork choice from a seed and requires "the same trace
-  byte-for-byte" ([consensus simulator](https://github.com/adalinxx/Lattice/blob/43.1.0/docs/consensus-simulator.md)).
+  byte-for-byte" ([consensus simulator](https://github.com/0xLattice/Lattice/blob/43.1.0/docs/consensus-simulator.md)).
   The wire fuzzers use a portable seeded generator rather than the system one.
 
 ### Where no seam exists

@@ -68,8 +68,8 @@ shasum -a 256 -c ${bundle_name}.tar.gz.sha256
 For tagged GitHub releases, also verify the signed GitHub artifact attestation:
 
 \`\`\`sh
-gh attestation verify ${bundle_name}.tar.gz --repo adalinxx/lattice-node
-gh attestation verify ${bundle_name}.tar.gz --repo adalinxx/lattice-node --predicate-type https://spdx.dev/Document/v2.3
+gh attestation verify ${bundle_name}.tar.gz --repo 0xLattice/lattice-node
+gh attestation verify ${bundle_name}.tar.gz --repo 0xLattice/lattice-node --predicate-type https://spdx.dev/Document/v2.3
 \`\`\`
 EOF
 
@@ -84,7 +84,7 @@ printf '%s  %s\n' "$archive_sha256" "$archive_name" > "$checksum"
 jq -n \
     --arg version "$version" \
     --arg platform "$platform" \
-    --arg documentNamespace "https://github.com/adalinxx/lattice-node/releases/${version}/${platform}/sbom" \
+    --arg documentNamespace "https://github.com/0xLattice/lattice-node/releases/${version}/${platform}/sbom" \
     --slurpfile resolved Package.resolved '
 {
   spdxVersion: "SPDX-2.3",
@@ -100,7 +100,7 @@ jq -n \
     {
       name: "lattice-node",
       SPDXID: "SPDXRef-Package-lattice-node",
-      downloadLocation: "https://github.com/adalinxx/lattice-node",
+      downloadLocation: "https://github.com/0xLattice/lattice-node",
       filesAnalyzed: false,
       versionInfo: $version,
       supplier: "Person: adalinxx"

@@ -33,7 +33,7 @@ The detailed implementation map is in [docs/architecture.md](docs/architecture.m
 ## Build and start
 
 ```bash
-git clone https://github.com/adalinxx/lattice-node.git
+git clone https://github.com/0xLattice/lattice-node.git
 cd lattice-node
 swift build
 

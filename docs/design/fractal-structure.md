@@ -1,8 +1,8 @@
 # Recursive commitments, independent levels
 
 The canonical consensus rationale lives in Lattice's
-[philosophy](https://github.com/adalinxx/Lattice/blob/43.1.0/docs/philosophy.md)
-and [foundational architecture](https://github.com/adalinxx/Lattice/blob/43.1.0/docs/foundational-architecture.md).
+[philosophy](https://github.com/0xLattice/Lattice/blob/43.1.0/docs/philosophy.md)
+and [foundational architecture](https://github.com/0xLattice/Lattice/blob/43.1.0/docs/foundational-architecture.md).
 This page records the node consequence.
 
 The hierarchy is recursive data hosted by one tree runtime. A mined Nexus root

@@ -29,27 +29,27 @@ let package = Package(
     ],
     dependencies: [
         .package(
-            url: "https://github.com/adalinxx/Lattice.git",
+            url: "https://github.com/0xLattice/Lattice.git",
             exact: "54.2.1"
         ),
         .package(
-            url: "https://github.com/adalinxx/cashew.git",
+            url: "https://github.com/0xLattice/cashew.git",
             exact: "5.0.3"
         ),
         .package(
-            url: "https://github.com/adalinxx/Ivy2.git",
+            url: "https://github.com/0xLattice/Ivy2.git",
             exact: "2.3.0"
         ),
         .package(
-            url: "https://github.com/adalinxx/Tally.git",
+            url: "https://github.com/0xLattice/Tally.git",
             exact: "3.1.1"
         ),
         .package(
-            url: "https://github.com/adalinxx/VolumeBroker.git",
+            url: "https://github.com/0xLattice/VolumeBroker.git",
             exact: "9.2.3"
         ),
         // Lattice's own UInt256, declared for the core's and simulator's direct imports.
-        .package(url: "https://github.com/adalinxx/UInt256.git", from: "1.1.0"),
+        .package(url: "https://github.com/0xLattice/UInt256.git", from: "1.1.0"),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),

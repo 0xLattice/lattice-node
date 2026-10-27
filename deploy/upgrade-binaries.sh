@@ -23,7 +23,7 @@ if ! printf '%s\n' "$DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
     echo "image reference must be an immutable sha256 digest" >&2
     exit 2
 fi
-IMAGE="ghcr.io/adalinxx/lattice-node@${DIGEST}"
+IMAGE="ghcr.io/0xlattice/lattice-node@${DIGEST}"
 BIN_DIR="${BIN_DIR:-/usr/local/bin}"
 BINARIES="lattice-node lattice lattice-mining-coordinator lattice-miner"
 

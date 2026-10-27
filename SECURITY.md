@@ -4,7 +4,7 @@ Do not publish an unpatched vulnerability in an issue, discussion, chat room, or
 
 ## Reporting
 
-Use [GitHub's private vulnerability report](https://github.com/adalinxx/lattice-node/security/advisories/new) for vulnerabilities affecting the node, consensus, networking, wallet interoperability, public APIs, or hosted network infrastructure. Private vulnerability reporting is enabled on the repository; GitHub may require you to sign in before opening the report form.
+Use [GitHub's private vulnerability report](https://github.com/0xLattice/lattice-node/security/advisories/new) for vulnerabilities affecting the node, consensus, networking, wallet interoperability, public APIs, or hosted network infrastructure. Private vulnerability reporting is enabled on the repository; GitHub may require you to sign in before opening the report form.
 
 Include, when possible:
 

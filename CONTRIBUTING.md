@@ -5,8 +5,8 @@ Lattice welcomes code, documentation, testing, operational experience, and caref
 ## Start here
 
 - Read the documentation in [`docs/`](./docs/).
-- Use [GitHub Discussions](https://github.com/adalinxx/lattice-node/discussions) for questions and design exploration.
-- Use [issues](https://github.com/adalinxx/lattice-node/issues) for reproducible bugs and scoped work.
+- Use [GitHub Discussions](https://github.com/0xLattice/lattice-node/discussions) for questions and design exploration.
+- Use [issues](https://github.com/0xLattice/lattice-node/issues) for reproducible bugs and scoped work.
 - Report vulnerabilities through the private process in [SECURITY.md](./SECURITY.md), never through a public issue.
 
 Before opening a large implementation, describe the problem and proposed boundary in a discussion or issue. Small correctness fixes and documentation improvements can go directly to a pull request.
