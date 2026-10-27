@@ -236,8 +236,8 @@ final class MempoolTests: XCTestCase {
     }
 
     /// Two senders writing one state key never share the pool: one of them
-    /// could not be mined. The key goes to the higher fee, so a cheap write
-    /// cannot hold it against a better offer.
+    /// could not be mined. Uncongested, the key goes to the higher fee, so a
+    /// cheap write cannot hold it against a better offer.
     func testAStateKeyGoesToTheHigherFee() throws {
         func write(_ key: (privateKey: String, publicKey: String), _ stateKey: String, fee: Int64) throws -> Transaction {
             let body = TransactionBody(
@@ -287,6 +287,31 @@ final class MempoolTests: XCTestCase {
         let bid = try write(CryptoUtils.generateKeyPair(), fee: 150)
         XCTAssertEqual(try pool.submit(bid, spec: spec, addedAt: 0).replaced.map(\.cid), [try Mempool.cid(of: pin)])
         XCTAssertEqual(try pool.nextBlock(spec).map(Mempool.cid(of:)), [try Mempool.cid(of: bid)])
+    }
+
+    /// A bid that would not reach the next block displaces nothing, even when
+    /// taking its conflict out lets a larger, richer transaction in.
+    func testABidOutsideTheNextBlockDisplacesNothing() throws {
+        func write(_ name: String, fee: Int64, padding: Int = 0) throws -> Transaction {
+            let key = CryptoUtils.generateKeyPair()
+            let body = TransactionBody(
+                accountActions: [AccountAction(owner: address(key), delta: -fee)],
+                actions: [Action(key: name, oldValue: nil, newValue: String(repeating: "x", count: padding + 1))],
+                depositActions: [], receiptActions: [], withdrawalActions: [],
+                signers: [address(key)], nonce: 0, chainPath: ["Nexus"]
+            )
+            return Transaction(signatures: [key.publicKey: "x"], body: try HeaderImpl(node: body))
+        }
+        let rich = try write("name/x", fee: 100_000, padding: 2_000)
+        let honest = try write("name/ada", fee: 50)
+        let behind = try write("name/d", fee: 200, padding: 2_000)
+        let spec = try blocks(holding: size(rich) + size(behind) + 2 * Self.place)
+        var pool = Mempool()
+        for tx in [rich, honest, behind] { try pool.submit(tx, spec: spec, addedAt: 0) }
+        XCTAssertEqual(try pool.nextBlock(spec).map(Mempool.cid(of:)), [try Mempool.cid(of: rich), try Mempool.cid(of: honest)])
+        XCTAssertThrowsError(try pool.submit(try write("name/ada", fee: 1), spec: spec, addedAt: 0)) {
+            XCTAssertEqual($0 as? MempoolError, .feeTooLow, "out of the next block, though removing the honest write lets a richer one in")
+        }
     }
 
     /// One transaction sharing claims with two pooled ones displaces both

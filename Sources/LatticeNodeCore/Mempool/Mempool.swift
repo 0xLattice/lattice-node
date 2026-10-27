@@ -265,9 +265,10 @@ public struct Mempool: Sendable {
         // transaction sharing a claim with it, and, for each account it
         // debits, that account's transactions paying the lowest fee rate
         // until its own debit fits the balance. It is admitted only if the
-        // next block, filled as a miner fills it, then pays the increment
-        // more: a bid that would not reach the next block holds nothing
-        // against one that would, and bids cannot be raised for free.
+        // next block, filled as a miner fills it, then carries it and pays
+        // the increment more: a bid that would not reach the next block
+        // displaces nothing, and bids cannot be raised for free. What it
+        // displaces may sit anywhere in the pool, its own fee aside.
         var displaced: [String: Entry] = [:]
         for claim in entry.claims {
             if let holder = claimants[claim], let existing = entries[holder] { displaced[holder] = existing }
@@ -283,8 +284,9 @@ public struct Mempool: Sendable {
             let before = ordered
             var after = before.filter { displaced[$0.cid] == nil }
             after.insert(entry, at: after.firstIndex { Self.inOrder(entry, $0) } ?? after.count)
-            let owed = Self.fees(Self.fill(spec, before).taken) + WorkSum(UInt256(limits.replacementIncrement))
-            guard Self.fees(Self.fill(spec, after).taken) >= owed else {
+            let next = Self.fill(spec, after).taken
+            let required = Self.fees(Self.fill(spec, before).taken) + WorkSum(UInt256(limits.replacementIncrement))
+            guard next.contains(where: { $0.cid == cid }), Self.fees(next) >= required else {
                 throw claimsConflict ? MempoolError.feeTooLow : MempoolError.insufficientFunds
             }
         }

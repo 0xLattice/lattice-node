@@ -299,10 +299,10 @@ transaction again later; the rest say to change it.
 |---|---|---|
 | `nonceAhead` | an earlier transaction from its first signer is not mined yet | yes, once it is |
 | `unavailable` | this node cannot judge it yet (state, a policy module, a withdrawal's receipt) | yes |
-| `insufficientFunds` | an account it debits cannot also pay what pooled transactions debit it, and it does not outbid them | yes, once those are mined |
+| `insufficientFunds` | an account it debits cannot also pay what pooled transactions debit it, and displacing them would not put it in the next block and make that block pay the relay floor more | yes, once those are mined |
 | `full` | the pool is full of transactions paying a higher rate (429) | yes |
 | `contextChanged` | the tip moved too often while it waited (503) | yes |
-| `feeTooLow` | it shares a nonce, state key, deposit or receipt with pooled transactions, and displacing them would not make the next block pay the relay floor more (uncongested: all their fees plus the floor) | no: raise the fee |
+| `feeTooLow` | it shares a nonce, state key, deposit or receipt with pooled transactions, and displacing them would not put it in the next block and make that block pay the relay floor more (uncongested: all their fees plus the floor) | no: raise the fee |
 | `belowMinRelayFee` | its fee is under this node's floor | no: raise the fee |
 | `tooLarge`, `invalidState` | it can never be pooled | no |
 
