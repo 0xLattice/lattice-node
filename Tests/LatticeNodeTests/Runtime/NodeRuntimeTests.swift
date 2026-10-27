@@ -541,6 +541,14 @@ final class NodeRuntimeTests: XCTestCase {
         let fees = await runtime.reads.explorerFees()
         XCTAssertEqual(fees.blocks.map(\.transactionCount), [1])
         XCTAssertEqual(fees.blocks.map(\.full), [false])
+        // Its rate is per weight, and the weight's terms are served. A plain
+        // transfer's growth never binds on this chain, so its weight is its
+        // bytes and place in the block, or its share of the count.
+        let weight = try XCTUnwrap(fees.weight)
+        XCTAssertGreaterThan(weight.growthRoom, 0)
+        XCTAssertEqual(fees.blocks.first?.lowestFeeWeight, fees.blocks.first.map { block in
+            max(block.lowestFeeBytes + weight.transactionAllowance, weight.blockRoom / weight.maxTransactions)
+        })
         await runtime.stop()
         await producerRuntime.stop()
     }

@@ -31,7 +31,7 @@ public struct TxWorkloadConfig: Sendable {
     public var floodSize = 8
     public var minJobDelay: Int64 = 1
     public var maxJobDelay: Int64 = 400
-    public var mempool = MempoolLimits(maxCount: 24, maxNonReadyPerSigner: 4)
+    public var mempool = MempoolLimits(maxCount: 24)
     public var pending = MiningConfig(maxPendingPeerAdmissions: 16, maxPendingPerPeer: 4, maxPendingReturned: 8)
     /// Simulated time after the last submission before the run stops.
     public var settle: Int64 = 30_000
@@ -62,10 +62,7 @@ public struct TxWorkloadConfig: Sendable {
             maxPendingReturned: rng.draw(1...12)
         )
         config.maxJobDelay = rng.draw(Int64(20)...1_500)
-        config.mempool = MempoolLimits(
-            maxCount: rng.draw(8...64),
-            maxNonReadyPerSigner: rng.draw(1...8)
-        )
+        config.mempool = MempoolLimits(maxCount: rng.draw(8...64))
         return config
     }
 }
@@ -447,7 +444,7 @@ public struct TxWorkload {
         report.steps += 1
         mix(Self.describe(event))
         switch event {
-        case .preflighted(let job, _):
+        case .preflighted(let job, _, _):
             runningPreflights.remove("\(job.tipEpoch)/" + job.cid)
         case .transactionReceived:
             arrivalsOnTip += 1
@@ -529,8 +526,8 @@ public struct TxWorkload {
         guard preflightsOnTip <= poolAtMove + arrivalsOnTip else {
             throw fail("\(preflightsOnTip) preflights in tip epoch \(job.tipEpoch): more than one tip's worth")
         }
-        let verdict = try await classify(job)
-        schedule(at: now + delay(), .event(.preflighted(job, verdict)))
+        let (verdict, balances) = try await classify(job)
+        schedule(at: now + delay(), .event(.preflighted(job, verdict, balances: balances)))
     }
 
     mutating func run(_ job: TemplateJob) async throws {
@@ -562,18 +559,18 @@ public struct TxWorkload {
     /// makes against the tip's post-state. Signature and policy checks are
     /// package-internal to Lattice and are not run: every workload
     /// transaction is correctly signed.
-    func classify(_ job: PreflightJob) async throws -> MempoolDisposition {
+    func classify(_ job: PreflightJob) async throws -> (MempoolDisposition, [String: UInt64]) {
         guard let body = job.transaction.body.node, body.minerSurplus() != nil,
-              body.chainPath == [DEFAULT_ROOT_DIRECTORY] else { return .invalid }
+              body.chainPath == [DEFAULT_ROOT_DIRECTORY] else { return (.invalid, [:]) }
         guard let tipBlock = blocks[job.tipCID]?.sim.block,
-              let state = try await tipBlock.postState.resolve(fetcher: cas).node else { return .unavailable }
+              let state = try await tipBlock.postState.resolve(fetcher: cas).node else { return (.unavailable, [:]) }
         var future = false
         for signer in Set(body.signers).sorted() {
             let expected = try await state.accountState.nextExpectedNonce(for: signer, fetcher: cas)
-            if body.nonce < expected { return .invalid }
+            if body.nonce < expected { return (.invalid, [:]) }
             if body.nonce > expected { future = true }
         }
-        if future { return .future }
+        if future { return (.future, [:]) }
         do {
             _ = try await state.proveAndUpdateState(
                 allAccountActions: body.accountActions,
@@ -584,9 +581,12 @@ public struct TxWorkload {
                 transactionBodies: [body],
                 fetcher: cas
             )
-            return .ready
+            guard let balances = await Mempool.balances(debitedBy: body, on: state, fetcher: cas) else {
+                return (.unavailable, [:])
+            }
+            return (.ready, balances)
         } catch {
-            return .invalid
+            return (.invalid, [:])
         }
     }
 
@@ -676,7 +676,7 @@ public struct TxWorkload {
         var slots: Set<String> = []
         for item in mining.mempool.items {
             guard let body = item.transaction.body.node else { throw fail("pooled content unresolved") }
-            for signer in body.signers where !slots.insert("\(signer)/\(body.nonce)").inserted {
+            for signer in body.signers.prefix(1) where !slots.insert("\(signer)/\(body.nonce)").inserted {
                 throw fail("two pooled transactions hold \(signer)'s nonce \(body.nonce)")
             }
         }
@@ -709,11 +709,11 @@ public struct TxWorkload {
                 case .submit, .requestTemplate, .reorg, .flood: break
                 }
             }
-            guard mining.mempool.items.contains(where: { $0.disposition == .ready }) else { break }
+            guard mining.mempool.count > 0 else { break }
             try await step(.templateRequested(replyID: reply(), TemplateRequest(rewardRecipient: recipient())))
         }
         guard owed.isEmpty else { throw fail("\(owed.count) replies never given") }
-        if let ready = mining.mempool.items.first(where: { $0.disposition == .ready }) {
+        if let ready = mining.mempool.items.first {
             throw fail("ready transaction \(ready.cid) never mined")
         }
     }
@@ -732,7 +732,7 @@ public struct TxWorkload {
         switch event {
         case .transactionReceived(let transaction, let origin):
             "tx \((try? Mempool.cid(of: transaction)) ?? "?") \(origin)"
-        case .preflighted(let job, let verdict):
+        case .preflighted(let job, let verdict, _):
             "verdict \(job.cid) \(job.tipCID) \(verdict)"
         case .tipMoved(let move):
             "tip \(move.tipCID)"
@@ -740,6 +740,8 @@ public struct TxWorkload {
             "template? \(replyID)"
         case .templateBuilt(let job, let build):
             "built \(job.id) \(build?.workID ?? "-")"
+        case .policyRefused(let tipCID, let cids):
+            "policy refused \(tipCID) \(cids)"
         case .submitWork(let replyID, let workID, let nonce):
             "work \(replyID) \(workID) \(nonce)"
         }
@@ -803,6 +805,7 @@ public enum SimTransactions {
     public static func signed(
         keys: [(privateKey: String, publicKey: String)],
         accountActions: [AccountAction],
+        receiptActions: [ReceiptAction] = [],
         nonce: UInt64,
         chainPath: [String] = [DEFAULT_ROOT_DIRECTORY]
     ) throws -> Transaction {
@@ -810,7 +813,7 @@ public enum SimTransactions {
             accountActions: accountActions,
             actions: [],
             depositActions: [],
-                        receiptActions: [],
+            receiptActions: receiptActions,
             withdrawalActions: [],
             signers: keys.map { CryptoUtils.createAddress(from: $0.publicKey) },
             nonce: nonce,

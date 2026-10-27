@@ -283,16 +283,31 @@ public struct ExplorerFees: Codable, Sendable, Equatable {
     /// This node's relay floor (policy, never consensus), as in chain info.
     @DecimalString public var minRelayFee: UInt64
     public let blocks: [ExplorerProjectedBlock]
+    /// What a transaction's weight is measured against. Absent from older
+    /// nodes, whose rates are per byte.
+    public var weight: ExplorerWeight?
+}
+
+/// A transaction's weight (`FeeWeight`) is the largest of its bytes plus
+/// `transactionAllowance`, its state growth (Lattice's ceiling) times
+/// `blockRoom / growthRoom` rounded up, and `blockRoom / maxTransactions`.
+public struct ExplorerWeight: Codable, Sendable, Equatable {
+    public let blockRoom: Int
+    public let growthRoom: Int
+    public let maxTransactions: Int
+    public let transactionAllowance: Int
 }
 
 public struct ExplorerProjectedBlock: Codable, Sendable, Equatable {
     public let transactionCount: Int
     public let bytes: Int
-    /// The block's lowest rate: `lowestFee` over `lowestFeeBytes`. A
-    /// transaction of `size` bytes paying more than
-    /// `lowestFee * size / lowestFeeBytes` would be taken before it.
+    /// The block's lowest rate: `lowestFee` over `lowestFeeWeight`. A
+    /// transaction of weight `w` paying more than
+    /// `lowestFee * w / lowestFeeWeight` would be taken before it.
     @DecimalString public var lowestFee: UInt64
     public let lowestFeeBytes: Int
+    /// Absent from older nodes, whose weight is `lowestFeeBytes`.
+    public var lowestFeeWeight: Int?
     /// Whether ready transactions were left for a later block.
     public let full: Bool
 }

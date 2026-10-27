@@ -119,8 +119,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Listener-wide arrival-rate ceiling for public POST /transactions, in requests per second, separate from the read budgets; each client is also held to --public-read-expensive-rate. 0 disables it.")
     var publicSubmitRate = PublicReadRateLimits.defaultSubmitRate
 
-    @Option(help: "The smallest fee (a transaction's balance excess) this node admits to its pool, at every hosted level. Node relay policy, never consensus: blocks carrying cheaper transactions stay valid. Reported as minRelayFee by GET /api/chain/info. 0 admits any fee.")
-    var minRelayFee: UInt64 = 0
+    @Option(help: "The smallest fee (a transaction's balance excess) this node admits to its pool, at every hosted level. Node relay policy, never consensus: blocks carrying cheaper transactions stay valid. Reported as minRelayFee by GET /api/chain/info. 0 admits any fee, and pool space is then free to hold.")
+    var minRelayFee: UInt64 = 1
 
     @Option(name: .customLong("finality-window"), help: "Node-local finality, in blocks: headers and work more than this many blocks below a chain's best tip are declined — never stored, never blamed. A fork from a block that deep can never connect, which keeps out the blocks an easy schedule makes nearly free: a fork d blocks deep is at most 2^(d / halfLife) cheaper than the tip, so a few half-lives is enough. The cost is this node's own: it will not follow a reorganization deeper than the window, even a heavier one, until its operator intervenes. A bare number sets every hosted chain; chain-path=blocks sets one chain, e.g. Nexus/Alpha=500, and 0 turns it off there (repeatable). Without it, everything is kept. A child chain's window should be at least its parent's: a parent reorganization can reorganize the child.")
     var finalityWindow: [String] = []

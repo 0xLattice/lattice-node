@@ -12,17 +12,31 @@ public enum MempoolError: Error, Sendable, Equatable {
     case tooLarge
     case full
     case invalidState
-    case conflictingNonce
+    /// An account it debits cannot also pay what pooled transactions
+    /// already debit it, and it does not outbid them. Retriable once those
+    /// are mined.
+    case insufficientFunds
+    /// It shares its first signer's nonce, a state key, a deposit or a
+    /// receipt with pooled transactions, and displacing them would not make
+    /// the next block pay `MempoolLimits.replacementIncrement` more.
     case feeTooLow
     /// The fee is under this node's `MempoolLimits.minRelayFee`.
     case belowMinRelayFee
+    /// Its nonce is ahead of the chain's: an earlier transaction from its
+    /// first signer is not mined yet. Retriable once it is. The pool holds
+    /// only transactions that can execute now.
+    case nonceAhead
+    /// This node cannot judge it now (state, a policy module, or a
+    /// withdrawal's receipt it does not hold yet). Retriable.
+    case unavailable
     /// Retriable: the executed tip moved more than `maxReissues` times while
     /// the submit waited for its verdict (the actor's
     /// `templateContextChanged`).
     case contextChanged
 }
 
-/// Lattice's classification of a transaction against one executed tip.
+/// Lattice's classification of a transaction against one executed tip. Only
+/// `.ready` is pooled.
 public enum MempoolDisposition: Sendable, Equatable {
     case ready
     case future
@@ -33,7 +47,6 @@ public enum MempoolDisposition: Sendable, Equatable {
 public struct MempoolItem: Sendable {
     public let cid: String
     public let transaction: Transaction
-    public let disposition: MempoolDisposition
     /// Milliseconds since the epoch.
     public let addedAt: Int64
 }
@@ -46,7 +59,6 @@ public struct MempoolMutation: Sendable {
     public var replaced: [MempoolItem] = []
     public var evicted: [MempoolItem] = []
     public var removed: [MempoolItem] = []
-    public var reclassified: [MempoolItem] = []
 
     /// Every entry that left the pool.
     public var departed: [MempoolItem] { replaced + evicted + removed }
@@ -56,25 +68,28 @@ public struct MempoolLimits: Sendable, Equatable {
     public var maxCount: Int
     public var maxBytes: Int
     public var maxSignatures: Int
-    public var maxNonReadyPerSigner: Int
     /// The smallest fee (`minerSurplus`) admitted. Node relay policy, never
-    /// consensus; 0 admits any fee.
+    /// consensus. 0 admits any fee, and pool space is then free to hold.
     public var minRelayFee: UInt64
 
     public init(
         maxCount: Int = 10_000,
         maxBytes: Int = 64 * 1024 * 1024,
         maxSignatures: Int = 64,
-        maxNonReadyPerSigner: Int = 64,
         minRelayFee: UInt64 = 0
     ) {
-        precondition(maxCount > 0 && maxBytes > 0 && maxSignatures > 0 && maxNonReadyPerSigner > 0)
+        precondition(maxCount > 0 && maxBytes > 0 && maxSignatures > 0)
         self.maxCount = maxCount
         self.maxBytes = maxBytes
         self.maxSignatures = maxSignatures
-        self.maxNonReadyPerSigner = maxNonReadyPerSigner
         self.minRelayFee = minRelayFee
     }
+
+    /// How much more the next block must pay once a newcomer displaces what
+    /// it conflicts with: the relay floor, and at least 1 (BIP125 rule 4).
+    /// Each displacement raises what the miner takes next by at least this
+    /// much, so churning the pool is bounded by the senders' balances.
+    public var replacementIncrement: UInt64 { max(1, minRelayFee) }
 }
 
 /// One block of `Mempool.projectedBlocks`.
@@ -82,32 +97,78 @@ public struct ProjectedBlock: Sendable, Equatable {
     public let transactionCount: Int
     /// Transaction size it carries (envelope plus body, as the pool measures).
     public let bytes: Int
-    /// Its lowest-rate package: the verified fee over its size in bytes. A
-    /// transaction paying a higher rate would have been taken before it.
+    /// Its lowest-rate transaction: the verified fee over its weight
+    /// (`FeeWeight`). A transaction paying a higher rate would have been
+    /// taken before it.
     public let lowestFee: WorkSum
+    /// That transaction's size.
     public let lowestFeeBytes: Int
+    /// That transaction's weight.
+    public let lowestFeeWeight: Int
     /// Whether ready transactions were left for a later block.
     public let full: Bool
+}
 
-    /// One more transaction of `size` bytes, from a package of rate `fee` over `packageSize`.
-    func adding(_ size: Int, fee: WorkSum, packageSize: Int) -> ProjectedBlock {
-        let lower = Mempool.lowerRate(fee, packageSize, than: lowestFee, lowestFeeBytes)
-        return ProjectedBlock(
-            transactionCount: transactionCount + 1, bytes: bytes + size,
-            lowestFee: lower ? fee : lowestFee, lowestFeeBytes: lower ? packageSize : lowestFeeBytes, full: full
-        )
+/// What a chain's fee rates are over: a transaction's weight, the most of a
+/// block it takes of any limit, in the block's bytes. The largest of its
+/// bytes and its place in the block; its state growth as that share of
+/// `growthRoom`, rounded up; and one transaction's share of the count.
+/// Where neither growth nor count binds before size (Nexus), it is the
+/// bytes a block charges it. Like Bitcoin's sigop-adjusted size. `/api/fees`
+/// serves these, so a wallet weighs its own transaction as the pool does.
+public struct FeeWeight: Sendable, Equatable {
+    /// The block's bytes for transactions (`maxBlockSize` less its own).
+    public let blockRoom: Int
+    /// The state growth for transactions (`Mempool.growthRoom`).
+    public let growthRoom: Int
+    /// The transaction count, at most `blockRoom` (beyond it, no share).
+    public let maxTransactions: Int
+    /// What a block charges each transaction beyond its bytes.
+    public let transactionAllowance: Int
+
+    public init(_ spec: ChainSpec) {
+        blockRoom = spec.maxBlockSize - Mempool.blockAllowance
+        growthRoom = Mempool.growthRoom(spec)
+        maxTransactions = Int(clamping: min(spec.maxNumberOfTransactionsPerBlock, UInt64(max(0, blockRoom))))
+        transactionAllowance = Mempool.transactionAllowance
     }
 
-    func closed() -> ProjectedBlock {
-        ProjectedBlock(transactionCount: transactionCount, bytes: bytes, lowestFee: lowestFee, lowestFeeBytes: lowestFeeBytes, full: true)
+    /// The weight of a transaction of `size` bytes adding at most `growth`
+    /// state; one past `growthRoom` takes the whole block.
+    public func of(size: Int, growth: Int) -> Int {
+        var weight = max(1, size + transactionAllowance)
+        guard blockRoom > 0 else { return weight }
+        if growth > 0 {
+            if growthRoom <= 0 || growth >= growthRoom {
+                weight = max(weight, blockRoom)
+            } else {
+                // growth * blockRoom / growthRoom, rounded up.
+                let product = UInt64(growth).multipliedFullWidth(by: UInt64(blockRoom))
+                let (quotient, remainder) = UInt64(growthRoom).dividingFullWidth(product)
+                weight = max(weight, Int(quotient) + (remainder > 0 ? 1 : 0))
+            }
+        }
+        if maxTransactions > 0 { weight = max(weight, blockRoom / maxTransactions) }
+        return weight
     }
 }
 
-/// The transaction pool of one level as a value: no IO, no awaits. The same
-/// admission, replacement and eviction rules as the shell's `TransactionPool`
-/// actor, over transactions whose content is already resolved; templates
-/// select by ancestor-package fee rate. `version` moves on every change, so a job built from the pool
-/// names the pool it read.
+/// The transaction pool of one level as a value: no IO, no awaits. It holds
+/// only transactions Lattice's preflight found ready: each executes on the
+/// tip as it stands, with its funds checked. None waits on another, so a
+/// template takes them by fee rate alone: fee per weight, the share of the
+/// block a transaction takes of whichever limit it uses most.
+///
+/// Two rules keep every pooled transaction executable alongside every other:
+/// - What only one transaction can ever use is claimed once: the first
+///   signer's nonce, each state key written, each deposit and receipt.
+/// - Money is budgeted: an account's debits across the pool never exceed
+///   its balance on the tip, as preflight read it. An account backs as many
+///   transactions as it can pay, and no more.
+/// A conflict, over a claim or an account's balance, goes to what pays the
+/// miner more: a newcomer displaces what it conflicts with when the next
+/// block then pays `replacementIncrement` more. `version` moves on every change, so a
+/// job built from the pool names the pool it read.
 public struct Mempool: Sendable {
     /// Bound parse work by wire capacity (a 16-bit length), not an invented
     /// cap: the signature's crypto verification is the authoritative check.
@@ -117,31 +178,24 @@ public struct Mempool: Sendable {
         let cid: String
         let transaction: Transaction
         let size: Int
-        let conflictKey: ConflictKey
-        let minerSurplus: WorkSum
-        var disposition: MempoolDisposition
+        /// Its share of the block's state growth, at most: Lattice's
+        /// ceiling from the body alone, never below 0.
+        let growth: Int
+        /// What its fee rate is over (`FeeWeight`).
+        let weight: Int
+        let claims: Set<String>
+        let debits: [String: UInt64]
+        let fee: WorkSum
         let addedAt: Int64
-    }
-
-    /// The nonce slot a transaction occupies: its first signer's, the only
-    /// nonce consensus checks and advances (empty for a signer-less body).
-    private struct ConflictKey: Hashable, Sendable {
-        let signers: [String]
-        let nonce: UInt64
-    }
-
-    private struct SignerNonce: Hashable, Sendable {
-        let signer: String
-        let nonce: UInt64
     }
 
     public let limits: MempoolLimits
     private var entries: [String: Entry] = [:]
-    private var signerNonces: [SignerNonce: String] = [:]
-    /// Each chain's entries by nonce, under `chainKey`.
-    private var chainEntries: [String: [UInt64: String]] = [:]
-    /// Each chain's selectable runs, kept as the pool changes.
-    private var chains: [String: Chain] = [:]
+    /// Each claim's pooled transaction.
+    private var claimants: [String: String] = [:]
+    /// Each account's debits across the pool, for accounts pooled
+    /// transactions debit.
+    private var committed: [String: UInt64] = [:]
     public private(set) var byteCount = 0
     public private(set) var version: UInt64 = 0
 
@@ -164,6 +218,27 @@ public struct Mempool: Sendable {
         try VolumeImpl<Transaction>(node: transaction).rawCID
     }
 
+    /// What a transaction claims: its first signer's nonce, each state key
+    /// it writes, and each deposit and receipt it creates or spends. Other
+    /// signers' funds are budgeted, not claimed (`debits(of:)`).
+    static func claims(of body: TransactionBody) -> Set<String> {
+        var claims = Set(body.signers.prefix(1).map { "nonce:\($0):\(body.nonce)" })
+        for action in body.actions { claims.insert("action:" + action.key) }
+        for deposit in body.depositActions { claims.insert("deposit:" + DepositKey(depositAction: deposit).description) }
+        for withdrawal in body.withdrawalActions {
+            claims.insert("deposit:" + DepositKey(withdrawalAction: withdrawal).description)
+        }
+        for receipt in body.receiptActions { claims.insert("receipt:" + ReceiptKey(receiptAction: receipt).description) }
+        return claims
+    }
+
+    /// What a transaction takes from each account, as consensus nets it:
+    /// its account actions and the receipts it pays (`netOutflows`). Nil
+    /// when consensus would refuse the sums.
+    public static func debits(of body: TransactionBody) -> [String: UInt64]? {
+        try? body.netOutflows()
+    }
+
     /// The size checks that need no state, run before a transaction costs a
     /// preflight job. `submit` runs them again.
     public func check(_ transaction: Transaction, spec: ChainSpec) throws -> String {
@@ -173,7 +248,7 @@ public struct Mempool: Sendable {
     private func measure(
         _ transaction: Transaction,
         spec: ChainSpec
-    ) throws -> (cid: String, body: TransactionBody, size: Int, surplus: WorkSum) {
+    ) throws -> (cid: String, body: TransactionBody, size: Int, growth: Int, surplus: WorkSum, debits: [String: UInt64]) {
         guard transaction.signatures.count <= limits.maxSignatures,
               transaction.signatures.allSatisfy({ key, signature in
                   key.utf8.count <= Self.maximumSignatureFieldBytes
@@ -181,113 +256,122 @@ public struct Mempool: Sendable {
               }) else {
             throw MempoolError.tooLarge
         }
-        guard let body = transaction.body.node else { throw MempoolError.unresolved }
-        guard let bodyData = body.toData() else { throw MempoolError.unresolved }
-        let room = Self.transactionRoom(spec)
-        guard bodyData.count <= room,
-              let envelopeData = transaction.toData(),
-              envelopeData.count <= room,
-              body.signers.count <= limits.maxSignatures else {
-            throw MempoolError.tooLarge
-        }
+        guard let body = transaction.body.node,
+              let bodyData = body.toData(),
+              let envelopeData = transaction.toData() else { throw MempoolError.unresolved }
+        guard body.signers.count <= limits.maxSignatures else { throw MempoolError.tooLarge }
         // A transaction that creates value (credits and deposits over debits
         // and withdrawals) breaks the fee rule in any block, so it is never
         // pooled: a template carrying it would be invalid.
-        guard let surplus = body.minerSurplus() else { throw MempoolError.invalidState }
+        guard let surplus = body.minerSurplus(), let debits = Self.debits(of: body) else { throw MempoolError.invalidState }
         guard surplus >= WorkSum(UInt256(limits.minRelayFee)) else {
             throw MempoolError.belowMinRelayFee
         }
         let (size, overflow) = envelopeData.count.addingReportingOverflow(bodyData.count)
-        guard !overflow, size <= room else { throw MempoolError.tooLarge }
-        return (try Self.cid(of: transaction), body, size, surplus)
+        guard !overflow, size <= Self.transactionRoom(spec) else { throw MempoolError.tooLarge }
+        // The ceiling reads every action, which must be well formed first.
+        guard body.actions.allSatisfy({ $0.verify() }),
+              let ceiling = try? TransactionBody.stateGrowthCeiling(of: [body]) else { throw MempoolError.invalidState }
+        let growth = max(0, ceiling)
+        guard growth <= Self.growthRoom(spec) else { throw MempoolError.tooLarge }
+        return (try Self.cid(of: transaction), body, size, growth, surplus, debits)
     }
 
-    /// The most bytes a transaction may have: what is left of `maxBlockSize`
-    /// in a block carrying only it. The block's own fields and transaction
-    /// trie count toward the limit, so a transaction of `maxBlockSize` bytes
-    /// could never be mined, and the builder, which takes the template's
-    /// longest prefix that fits, would stop at it.
+    /// The most state growth a block's transactions may add: `maxStateGrowth`
+    /// less what its coinbase may (`rewardAllowance`).
+    public static func growthRoom(_ spec: ChainSpec) -> Int {
+        spec.maxStateGrowth - rewardAllowance
+    }
+
+
+    /// What a block's coinbase may add to its state growth: a new balance
+    /// for its recipient, whose name (a canonical address is about 60
+    /// bytes) and value fit this. A longer name only makes the builder
+    /// bisect.
+    static let rewardAllowance = 128
+
+    /// The most bytes a transaction may have: what a block carrying only it
+    /// leaves of `maxBlockSize`. The block's own fields and transaction trie
+    /// count toward the limit, so a transaction of `maxBlockSize` bytes
+    /// could never be mined.
     public static func transactionRoom(_ spec: ChainSpec) -> Int {
-        spec.maxBlockSize - blockAllowance
+        spec.maxBlockSize - blockAllowance - transactionAllowance
     }
 
     /// A block's content besides its transactions, with room to spare: an
-    /// empty Nexus block measures 766 bytes (about 1,000 with its height,
-    /// timestamp and nonce at their largest), and a transaction adds about
-    /// 180 to the trie.
-    static let blockAllowance = 2_048
+    /// empty Nexus block measures 766 bytes, about 1,000 with its height,
+    /// timestamp and nonce at their largest.
+    public static let blockAllowance = 1_792
 
+    /// What each transaction adds to its block beyond its own bytes, with
+    /// room to spare: about 180 in the transaction trie.
+    public static let transactionAllowance = 256
+
+    /// Pool a transaction preflight found ready. `balances` holds, for each
+    /// account it debits, the balance preflight read on the tip; one
+    /// missing counts as empty.
     @discardableResult
     public mutating func submit(
         _ transaction: Transaction,
         spec: ChainSpec,
-        disposition: MempoolDisposition = .ready,
-        addedAt: Int64
+        addedAt: Int64,
+        balances: [String: UInt64]
     ) throws -> MempoolMutation {
-        guard disposition != .invalid else { throw MempoolError.invalidState }
         let measured = try measure(transaction, spec: spec)
         let cid = measured.cid
         if entries[cid] != nil {
             return MempoolMutation(transactionCID: cid)
         }
         guard measured.size <= limits.maxBytes else { throw MempoolError.tooLarge }
-        let conflictKey = ConflictKey(
-            signers: measured.body.signers.first.map { [$0] } ?? [],
-            nonce: measured.body.nonce
-        )
         let entry = Entry(
             cid: cid,
             transaction: transaction,
             size: measured.size,
-            conflictKey: conflictKey,
-            minerSurplus: measured.surplus,
-            disposition: disposition,
+            growth: measured.growth,
+            weight: FeeWeight(spec).of(size: measured.size, growth: measured.growth),
+            claims: Self.claims(of: measured.body),
+            debits: measured.debits,
+            fee: measured.surplus,
             addedAt: addedAt
         )
 
-        // Replace-by-fee on an exact (signers, nonce) match: a signer may
-        // replace their OWN pending transaction at that nonce only by strictly
-        // paying more to the miner (`minerSurplus`, the debit-over-credit
-        // excess the block's recipient is credited). That excess is funds the
-        // signer gives up, so the bid cannot be raised for free.
-        let overlapping = Set(conflictKey.signers.compactMap {
-            signerNonces[SignerNonce(signer: $0, nonce: conflictKey.nonce)]
-        })
-        let replacedCID: String?
-        if overlapping.isEmpty {
-            replacedCID = nil
-        } else if overlapping.count == 1, let overlap = overlapping.first,
-                  let existing = entries[overlap], existing.conflictKey == conflictKey {
-            // Compared regardless of disposition: a non-ready entry's excess is
-            // not yet funding-checked, so this permits monotonic self-churn on
-            // that one slot, bounded by `maxNonReadyPerSigner` and never mineable.
-            guard entry.minerSurplus > existing.minerSurplus else { throw MempoolError.feeTooLow }
-            replacedCID = overlap
-        } else {
-            throw MempoolError.conflictingNonce
+        // Conflicts go to what pays the miner more. It displaces every pooled
+        // transaction sharing a claim with it, and, for each account it
+        // debits, that account's transactions paying the lowest fee rate
+        // until its own debit fits the balance. It is admitted only if the
+        // next block, filled as a miner fills it, then carries it and pays
+        // the increment more: a bid that would not reach the next block
+        // displaces nothing, and bids cannot be raised for free. What it
+        // displaces may sit anywhere in the pool, its own fee aside.
+        var displaced: [String: Entry] = [:]
+        for claim in entry.claims {
+            if let holder = claimants[claim], let existing = entries[holder] { displaced[holder] = existing }
         }
-        if disposition != .ready {
-            var queuedBySigner: [String: Int] = [:]
-            for existing in entries.values
-            where existing.cid != replacedCID && existing.disposition != .ready {
-                for signer in existing.conflictKey.signers {
-                    queuedBySigner[signer, default: 0] += 1
-                }
+        let claimsConflict = !displaced.isEmpty
+        for (account, debit) in entry.debits.sorted(by: { $0.key < $1.key }) {
+            guard let shed = shed(account, toFit: debit, in: balances[account, default: 0], besides: displaced) else {
+                throw MempoolError.insufficientFunds
             }
-            guard conflictKey.signers.allSatisfy({
-                queuedBySigner[$0, default: 0] < limits.maxNonReadyPerSigner
-            }) else {
-                throw MempoolError.full
+            for existing in shed { displaced[existing.cid] = existing }
+        }
+        if !displaced.isEmpty {
+            let before = ordered
+            var after = before.filter { displaced[$0.cid] == nil }
+            after.insert(entry, at: after.firstIndex { Self.inOrder(entry, $0) } ?? after.count)
+            let next = Self.fill(spec, after).taken
+            let required = Self.fees(Self.fill(spec, before).taken) + WorkSum(UInt256(limits.replacementIncrement))
+            guard next.contains(where: { $0.cid == cid }), Self.fees(next) >= required else {
+                throw claimsConflict ? MempoolError.feeTooLow : MempoolError.insufficientFunds
             }
         }
 
-        var prospectiveCount = entries.count - (replacedCID == nil ? 0 : 1)
-        var prospectiveBytes = byteCount - (replacedCID.flatMap { entries[$0]?.size } ?? 0)
+        var prospectiveCount = entries.count - displaced.count
+        var prospectiveBytes = byteCount - displaced.values.reduce(0) { $0 + $1.size }
         var evictions: [String] = []
         // Sorted only when full: admission stays linear in the pool.
         let full = prospectiveCount >= limits.maxCount || entry.size > limits.maxBytes - prospectiveBytes
         let candidates = !full ? [] : entries.values
-            .filter { $0.cid != replacedCID }
+            .filter { displaced[$0.cid] == nil }
             .sorted { Self.retention($0, $1) < 0 }
         for candidate in candidates
         where prospectiveCount >= limits.maxCount || entry.size > limits.maxBytes - prospectiveBytes {
@@ -302,375 +386,129 @@ public struct Mempool: Sendable {
         }
 
         var mutation = MempoolMutation(transactionCID: cid)
-        if let replacedCID, let replaced = removeEntry(replacedCID) {
-            mutation.replaced = [Self.item(replaced)]
-        }
+        mutation.replaced = displaced.keys.sorted().compactMap { removeEntry($0).map(Self.item) }
         mutation.evicted = evictions.compactMap { removeEntry($0).map(Self.item) }
         insert(entry)
         mutation.inserted = Self.item(entry)
         return mutation
     }
 
-    /// Ready entries, and the future entries that extend them, in template
-    /// order, up to `limit` transactions and `maxBytes` of transaction size.
-    public func transactions(limit: Int, maxBytes: Int = .max) -> [Transaction] {
-        selected(limit: limit, maxBytes: maxBytes, includesUnavailable: false)
-    }
-
-    /// Candidate parent state can make a child withdrawal executable, so
-    /// unavailable entries may root packages too; the builder preflights them
-    /// against that context.
-    public func contextualTransactions(limit: Int, maxBytes: Int = .max) -> [Transaction] {
-        selected(limit: limit, maxBytes: maxBytes, includesUnavailable: true)
+    /// What the next block can carry: what a template is handed, so its
+    /// policies judge one block's worth, never the whole pool.
+    public func nextBlock(_ spec: ChainSpec) -> [Transaction] {
+        Self.fill(spec, ordered).taken.map(\.transaction)
     }
 
     /// The next `count` blocks this pool would fill if nothing else arrived,
-    /// as this node's builder fills them: transactions in template order,
-    /// each block taking them until one does not fit in `transactionLimit`
-    /// transactions or `maxBytes` of transaction size, so a package may
-    /// straddle two blocks. A block's rate is the lowest of the packages it
-    /// carries any of. An estimate for fee pricing, not a template: the
-    /// block's own structure, which grows with its transaction count, shares
-    /// `maxBytes`, and other miners may fill gaps with smaller packages.
-    /// Empty when nothing is ready.
-    public func projectedBlocks(count: Int, transactionLimit: Int, maxBytes: Int) -> [ProjectedBlock] {
-        guard count > 0, transactionLimit > 0, maxBytes > 0 else { return [] }
+    /// each filled as `nextBlock` fills the first. An estimate for fee
+    /// pricing: other miners may fill theirs otherwise. Empty when the pool
+    /// is.
+    public func projectedBlocks(count: Int, spec: ChainSpec) -> [ProjectedBlock] {
         var blocks: [ProjectedBlock] = []
-        var current: ProjectedBlock?
-        _ = selected(limit: .max, maxBytes: .max, includesUnavailable: false) { members, fee, size in
-            for entry in members {
-                if let block = current,
-                   block.transactionCount < transactionLimit, entry.size <= maxBytes - block.bytes {
-                    current = block.adding(entry.size, fee: fee, packageSize: size)
-                    continue
-                }
-                if let block = current {
-                    blocks.append(block.closed())
-                    if blocks.count == count { return false }
-                }
-                // Admission caps a transaction at the block size, so one
-                // always fits an empty block.
-                current = ProjectedBlock(transactionCount: 1, bytes: entry.size, lowestFee: fee, lowestFeeBytes: size, full: false)
-            }
-            return true
+        var rest = ordered
+        while blocks.count < count {
+            let (taken, left) = Self.fill(spec, rest)
+            // In template order, so the last taken pays the lowest rate.
+            guard let lowest = taken.last else { break }
+            blocks.append(ProjectedBlock(
+                transactionCount: taken.count, bytes: taken.reduce(0) { $0 + $1.size },
+                lowestFee: lowest.fee, lowestFeeBytes: lowest.size, lowestFeeWeight: lowest.weight, full: !left.isEmpty
+            ))
+            rest = left
         }
-        if let current, blocks.count < count { blocks.append(current) }
         return blocks
     }
 
-    /// Packages that fail to fit, in a row, before selection gives up on a
-    /// nearly full template (Bitcoin Core's `MAX_CONSECUTIVE_FAILURES`).
+    /// Transactions that fail to fit, in a row, before a fill gives up on a
+    /// nearly full block (Bitcoin Core's `MAX_CONSECUTIVE_FAILURES`).
     static let maxConsecutiveMisses = 1_000
 
-    /// Bitcoin Core's package limits (`-limitancestorcount`,
-    /// `-limitdescendantcount`, both 25), each counting the entry itself. A
-    /// run is a chain, so both cap it at its first 25 entries.
-    static let maxPackageAncestors = 25
-
-    /// Greedy package fee-rate selection, as Bitcoin Core's `addPackageTxs`,
-    /// over chains.
-    ///
-    /// Ancestry is the nonce chain: Lattice applies each first signer's
-    /// transactions at consecutive nonces, so an entry's parent is the
-    /// pooled entry at `nonce - 1` for its first signer (co-signers' nonces
-    /// are not consensus). Every package is therefore a prefix of what is
-    /// left of a run (see `rerun`); its score is (sum of verified fees) /
-    /// (sum of sizes). Only a `.ready` entry's surplus is funding-checked, so
-    /// only it counts: an unverified entry can never raise its ancestors'
-    /// score.
-    ///
-    /// Each run offers its best package (`bestPrefix`) to a heap. The best
-    /// offer is taken whole if it fits, and its run offers the best of what
-    /// is left. One that does not fit is skipped, no package ends at its last
-    /// entry again, and its run offers its next best. Equal rates break by
-    /// the smaller CID of the package's last entry, so the order is
-    /// deterministic. Runs keep their first offer as the pool changes, so the
-    /// work is in the packages taken, not the pool. `visit`, when given,
-    /// sees each package as it is taken (its members, fee and size) and ends
-    /// selection by returning false.
-    private func selected(
-        limit: Int,
-        maxBytes: Int,
-        includesUnavailable: Bool,
-        visit: ((_ members: [Entry], _ fee: WorkSum, _ size: Int) -> Bool)? = nil
-    ) -> [Transaction] {
-        guard limit > 0, maxBytes > 0 else { return [] }
-
-        // Each run's counted entries and where what is left of it starts.
-        var runs: [(members: [String], start: Int)] = []
-        var offers: [PackageScore] = []
-        for chain in chains.values {
-            for run in chain.runs.values where includesUnavailable ? run.contextual : run.ready {
-                offers.append(PackageScore(run: runs.count, package: run.first))
-                runs.append((run.members, 0))
+    /// One block's fill from `entries`, in their order: each is charged its
+    /// bytes and its place in the block (`transactionAllowance`) against
+    /// what the block's own content leaves, and its state growth against
+    /// `growthRoom`, up to the spec's transaction count. One that does not
+    /// fit is skipped for a smaller one behind it, so what is taken fits the
+    /// block from any starting state, and the builder, which keeps the
+    /// longest prefix that fits, does not cut it short.
+    private static func fill(_ spec: ChainSpec, _ entries: [Entry]) -> (taken: [Entry], rest: [Entry]) {
+        let limit = Int(clamping: spec.maxNumberOfTransactionsPerBlock)
+        var room = spec.maxBlockSize - blockAllowance
+        var growthRoom = Self.growthRoom(spec)
+        var taken: [Entry] = []
+        var rest: [Entry] = []
+        var misses = 0
+        for (index, entry) in entries.enumerated() {
+            guard taken.count < limit, misses < maxConsecutiveMisses else {
+                rest += entries[index...]
+                break
+            }
+            let charged = entry.size + transactionAllowance
+            if charged <= room, entry.growth <= growthRoom {
+                taken.append(entry)
+                room -= charged
+                growthRoom -= entry.growth
+                misses = 0
+            } else {
+                rest.append(entry)
+                misses += 1
             }
         }
-        var frontier = PackageFrontier(offers)
+        return (taken, rest)
+    }
 
-        var result: [Transaction] = []
-        var bytes = 0
-        var skipped = Set<String>()
-        var misses = 0
-        while result.count < limit, let top = frontier.pop() {
-            let package = top.package
-            if package.members.count <= limit - result.count, package.size <= maxBytes - bytes {
-                misses = 0
-                let members = package.members.compactMap { entries[$0] }
-                result.append(contentsOf: members.map(\.transaction))
-                bytes += package.size
-                if let visit, !visit(members, package.fee, package.size) { break }
-                runs[top.run].start += members.count
-            } else {
-                skipped.insert(package.tip)
-                misses += 1
-                if misses >= Self.maxConsecutiveMisses { break }
-            }
-            let rest = runs[top.run].members[runs[top.run].start...].compactMap { entries[$0] }
-            if let next = Self.bestPrefix(rest, skipping: skipped) {
-                frontier.push(PackageScore(run: top.run, package: next))
-            }
+    /// Every entry, the higher fee rate first, then the smaller CID.
+    private var ordered: [Entry] {
+        entries.values.sorted(by: Self.inOrder)
+    }
+
+    private static func inOrder(_ lhs: Entry, _ rhs: Entry) -> Bool {
+        let order = rate(lhs, comparedTo: rhs)
+        return order != 0 ? order > 0 : lhs.cid < rhs.cid
+    }
+
+    private static func fees(_ entries: [Entry]) -> WorkSum {
+        entries.reduce(WorkSum(UInt256(0))) { $0 + $1.fee }
+    }
+
+    /// Whether `lhs` pays a higher fee rate than `rhs` (positive), the same
+    /// (zero) or a lower one, compared exactly: `lhs.fee * rhs.weight`
+    /// against `rhs.fee * lhs.weight`.
+    private static func rate(_ lhs: Entry, comparedTo rhs: Entry) -> Int {
+        Self.rate(lhs.fee, lhs.weight, comparedTo: rhs.fee, rhs.weight)
+    }
+
+    private static func rate(_ fee: WorkSum, _ weight: Int, comparedTo otherFee: WorkSum, _ otherWeight: Int) -> Int {
+        if let lhsFee = fee.uint64Value, let rhsFee = otherFee.uint64Value {
+            let lhs = lhsFee.multipliedFullWidth(by: UInt64(otherWeight))
+            let rhs = rhsFee.multipliedFullWidth(by: UInt64(weight))
+            return lhs == rhs ? 0 : (lhs.high, lhs.low) > (rhs.high, rhs.low) ? 1 : -1
+        }
+        let lhs = scaled(fee, by: otherWeight)
+        let rhs = scaled(otherFee, by: weight)
+        return lhs == rhs ? 0 : lhs > rhs ? 1 : -1
+    }
+
+    /// `value * factor` by doubling: WorkSum has no multiply.
+    private static func scaled(_ value: WorkSum, by factor: Int) -> WorkSum {
+        var result = WorkSum.zero
+        var addend = value
+        var remaining = factor
+        while remaining > 0 {
+            if remaining & 1 == 1 { result = result + addend }
+            remaining >>= 1
+            if remaining > 0 { addend = addend + addend }
         }
         return result
     }
 
-    /// Consecutive verified fees and sizes taken together: one entry, or a
-    /// prefix of a run.
-    private struct Chunk: Sendable {
-        var members: [String]
-        var fee: WorkSum
-        var size: Int
-        /// `fee` when it fits 64 bits, as a funded fee always does: rates
-        /// then compare in 128-bit integers, not by `WorkSum` doubling.
-        let fee64: UInt64?
-
-        init(members: [String], fee: WorkSum, size: Int) {
-            self.members = members
-            self.fee = fee
-            self.size = size
-            fee64 = fee.uint64Value
-        }
-
-        /// Whether this pays a higher rate than `other` (positive), the same
-        /// (zero) or a lower one, compared exactly.
-        func rate(comparedTo other: Chunk) -> Int {
-            if let lhsFee = fee64, let rhsFee = other.fee64 {
-                let lhs = lhsFee.multipliedFullWidth(by: UInt64(other.size))
-                let rhs = rhsFee.multipliedFullWidth(by: UInt64(size))
-                return lhs == rhs ? 0 : (lhs.high, lhs.low) > (rhs.high, rhs.low) ? 1 : -1
-            }
-            let lhs = PackageScore.scaled(fee, by: other.size)
-            let rhs = PackageScore.scaled(other.fee, by: size)
-            return lhs == rhs ? 0 : lhs > rhs ? 1 : -1
-        }
-
-        var tip: String { members.last ?? "" }
-    }
-
-    /// A selectable run: its counted entries, its best package, and which
-    /// selections take it (`transactions` when its head is ready,
-    /// `contextualTransactions` also when it is unavailable).
-    private struct Run: Sendable {
-        /// Its first `maxPackageAncestors` entries, in nonce order.
-        let members: [String]
-        /// Its best package, before anything is taken or skipped.
-        let first: Chunk
-        let ready: Bool
-        let contextual: Bool
-    }
-
-    /// A chain's selectable runs, by head nonce.
-    private struct Chain: Sendable {
-        var runs: [UInt64: Run] = [:]
-    }
-
-    /// The chain an entry belongs to: its first signer's, or its own when it
-    /// has no signer (then it extends nothing).
-    private static func chainKey(_ entry: Entry) -> String {
-        entry.conflictKey.signers.first ?? "\u{0}" + entry.cid
-    }
-
-    /// The best package of what is left of a run (`rest`, in nonce order):
-    /// the prefix with the highest rate, at equal rates the one whose last
-    /// entry has the smaller CID, among prefixes not ending at a skipped
-    /// entry. Nil when every prefix ends at one.
-    private static func bestPrefix(_ rest: [Entry], skipping skipped: Set<String> = []) -> Chunk? {
-        // Sums only while scanning; the best prefix's members are taken once.
-        var prefix = Chunk(members: [], fee: .zero, size: 0)
-        var best: (end: Int, fee: WorkSum, size: Int)?
-        for (index, entry) in rest.enumerated() {
-            // Only a `.ready` entry's surplus is funding-checked.
-            let fee = entry.disposition == .ready ? entry.minerSurplus : .zero
-            prefix = Chunk(members: [], fee: prefix.fee + fee, size: prefix.size + entry.size)
-            guard !skipped.contains(entry.cid) else { continue }
-            if let current = best {
-                let order = prefix.rate(comparedTo: Chunk(members: [], fee: current.fee, size: current.size))
-                guard order > 0 || (order == 0 && entry.cid < rest[current.end].cid) else { continue }
-            }
-            best = (index, prefix.fee, prefix.size)
-        }
-        return best.map { Chunk(members: rest[...$0.end].map(\.cid), fee: $0.fee, size: $0.size) }
-    }
-
-    /// Bring a chain's runs up to date after the entry at `nonce` arrived,
-    /// left or changed class. Only a run's first `maxPackageAncestors`
-    /// entries count, so the change reaches at most the run whose head is
-    /// that close behind it, and the run that starts (or no longer starts)
-    /// right after it: the work is bounded however long the chain.
-    private mutating func touch(_ key: String, at nonce: UInt64) {
-        let present = chainEntries[key] ?? [:]
-        var head: UInt64? = present[nonce] != nil ? nonce
-            : nonce > 0 && present[nonce - 1] != nil ? nonce - 1 : nil
-        var steps = 0
-        while let current = head, current > 0, present[current - 1] != nil, steps < Self.maxPackageAncestors {
-            head = current - 1
-            steps += 1
-        }
-        if let head { rerun(key, head: head) }
-        // A head that left takes its run with it.
-        if head != nonce { rerun(key, head: nonce) }
-        if nonce < .max { rerun(key, head: nonce + 1) }
-        if chains[key]?.runs.isEmpty == true { chains[key] = nil }
-    }
-
-    /// Recompute the run headed at `head`, or drop it when no run starts
-    /// there. A run is consecutive pooled nonces; it is selectable when its
-    /// head can execute without a pooled predecessor: ready (or,
-    /// contextually, unavailable), or signer-less at a nonce past 0.
-    /// Everything behind a nonce gap waits for its own head.
-    private mutating func rerun(_ key: String, head: UInt64) {
-        let present = chainEntries[key] ?? [:]
-        guard let headCID = present[head], let first = entries[headCID],
-              head == 0 || present[head - 1] == nil else {
-            chains[key]?.runs[head] = nil
-            return
-        }
-        var run = [first]
-        while run.count < Self.maxPackageAncestors, let last = run.last, last.conflictKey.nonce < .max,
-              let cid = present[last.conflictKey.nonce + 1], let next = entries[cid] {
-            run.append(next)
-        }
-        let extendsNothing = first.conflictKey.signers.isEmpty && first.conflictKey.nonce > 0
-        let ready = first.disposition == .ready || extendsNothing
-        let contextual = ready || first.disposition == .unavailable
-        guard ready || contextual else {
-            chains[key]?.runs[head] = nil
-            return
-        }
-        guard let first = Self.bestPrefix(run) else {
-            chains[key]?.runs[head] = nil
-            return
-        }
-        chains[key, default: Chain()].runs[head] = Run(
-            members: run.map(\.cid), first: first, ready: ready, contextual: contextual
-        )
-    }
-
-    /// Whether `fee` over `size` is a lower rate than `otherFee` over `otherSize`, exactly.
-    static func lowerRate(_ fee: WorkSum, _ size: Int, than otherFee: WorkSum, _ otherSize: Int) -> Bool {
-        Chunk(members: [], fee: fee, size: size).rate(comparedTo: Chunk(members: [], fee: otherFee, size: otherSize)) < 0
-    }
-
-    /// A package on offer: the best prefix of what is left of run `run`.
-    private struct PackageScore {
-        let run: Int
-        let package: Chunk
-
-        /// A higher fee rate first, compared exactly: `a.fee / a.size >
-        /// b.fee / b.size` as `a.fee * b.size > b.fee * a.size`. Equal rates
-        /// break by the smaller CID of the package's last entry.
-        func precedes(_ other: PackageScore) -> Bool {
-            let order = package.rate(comparedTo: other.package)
-            return order != 0 ? order > 0 : package.tip < other.package.tip
-        }
-
-        /// `value * factor` by doubling: WorkSum has no multiply.
-        static func scaled(_ value: WorkSum, by factor: Int) -> WorkSum {
-            var result = WorkSum.zero
-            var addend = value
-            var remaining = factor
-            while remaining > 0 {
-                if remaining & 1 == 1 { result = result + addend }
-                remaining >>= 1
-                if remaining > 0 { addend = addend + addend }
-            }
-            return result
-        }
-    }
-
-    /// A max-score binary heap of the runs' offers.
-    private struct PackageFrontier {
-        private var items: [PackageScore]
-
-        /// A heap of `offers`, built in one pass.
-        init(_ offers: [PackageScore] = []) {
-            items = offers
-            for index in stride(from: items.count / 2 - 1, through: 0, by: -1) { siftDown(index) }
-        }
-
-        mutating func push(_ score: PackageScore) {
-            items.append(score)
-            var child = items.count - 1
-            while child > 0 {
-                let parent = (child - 1) / 2
-                guard items[child].precedes(items[parent]) else { break }
-                items.swapAt(child, parent)
-                child = parent
-            }
-        }
-
-        mutating func pop() -> PackageScore? {
-            guard let top = items.first else { return nil }
-            items[0] = items[items.count - 1]
-            items.removeLast()
-            siftDown(0)
-            return top
-        }
-
-        private mutating func siftDown(_ start: Int) {
-            var parent = start
-            while true {
-                var best = parent
-                let left = 2 * parent + 1, right = left + 1
-                if left < items.count, items[left].precedes(items[best]) { best = left }
-                if right < items.count, items[right].precedes(items[best]) { best = right }
-                guard best != parent else { return }
-                items.swapAt(parent, best)
-                parent = best
-            }
-        }
-    }
-
-    /// Eviction priority when the pool is full: ready over non-ready, then the
-    /// higher `minerSurplus` (only when both are ready: a non-ready entry's
-    /// debits are not funding-checked, so its fee could be forged), then the
-    /// oldest, then the smaller CID. Positive keeps `lhs` over `rhs`.
+    /// Eviction priority when the pool is full: the higher fee rate, then
+    /// the oldest, then the smaller CID. Positive keeps `lhs` over `rhs`.
     private static func retention(_ lhs: Entry, _ rhs: Entry) -> Int {
-        let lhsReady = lhs.disposition == .ready
-        let rhsReady = rhs.disposition == .ready
-        if lhsReady != rhsReady { return lhsReady ? 1 : -1 }
-        if lhsReady, lhs.minerSurplus != rhs.minerSurplus {
-            return lhs.minerSurplus > rhs.minerSurplus ? 1 : -1
-        }
+        let order = rate(lhs, comparedTo: rhs)
+        if order != 0 { return order }
         if lhs.addedAt != rhs.addedAt { return lhs.addedAt < rhs.addedAt ? 1 : -1 }
         if lhs.cid != rhs.cid { return lhs.cid < rhs.cid ? 1 : -1 }
         return 0
-    }
-
-    /// Apply one preflight verdict to a pooled entry: invalid leaves the pool,
-    /// anything else is its new classification.
-    @discardableResult
-    public mutating func reclassify(_ cid: String, as disposition: MempoolDisposition) -> MempoolMutation {
-        var mutation = MempoolMutation()
-        guard let entry = entries[cid] else { return mutation }
-        if disposition == .invalid {
-            if let removed = removeEntry(cid) { mutation.removed = [Self.item(removed)] }
-        } else if entry.disposition != disposition {
-            mutation.reclassified = [Self.item(entry)]
-            entries[cid]?.disposition = disposition
-            touch(Self.chainKey(entry), at: entry.conflictKey.nonce)
-            version &+= 1
-        }
-        return mutation
     }
 
     @discardableResult
@@ -680,46 +518,66 @@ public struct Mempool: Sendable {
         return mutation
     }
 
+    /// A verdict on the tip read these balances: an account whose pooled
+    /// debits no longer fit sheds its transactions paying the lowest fee
+    /// rate until the rest do.
+    @discardableResult
+    public mutating func rebalance(_ balances: [String: UInt64]) -> MempoolMutation {
+        var mutation = MempoolMutation()
+        for (account, balance) in balances.sorted(by: { $0.key < $1.key }) {
+            for entry in shed(account, toFit: 0, in: balance, besides: [:]) ?? [] {
+                if let removed = removeEntry(entry.cid) { mutation.evicted.append(Self.item(removed)) }
+            }
+        }
+        return mutation
+    }
+
+    /// `account`'s pooled transactions, lowest fee rate first and besides
+    /// those already `gone`, that must go for its pooled debits and `debit`
+    /// more to fit `balance`: none when they fit already, nil when even all
+    /// would not.
+    private func shed(_ account: String, toFit debit: UInt64, in balance: UInt64, besides gone: [String: Entry]) -> [Entry]? {
+        var held = committed[account, default: 0] - gone.values.reduce(0) { $0 + ($1.debits[account] ?? 0) }
+        func fits() -> Bool { held <= balance && debit <= balance - held }
+        guard !fits() else { return [] }
+        var shed: [Entry] = []
+        let debiting = entries.values
+            .filter { $0.debits[account] != nil && gone[$0.cid] == nil }
+            .sorted { Self.retention($0, $1) < 0 }
+        for entry in debiting {
+            shed.append(entry)
+            held -= entry.debits[account] ?? 0
+            if fits() { return shed }
+        }
+        return nil
+    }
+
     @discardableResult
     public mutating func clear() -> MempoolMutation {
         remove(entries.keys.sorted())
     }
 
     private static func item(_ entry: Entry) -> MempoolItem {
-        MempoolItem(
-            cid: entry.cid,
-            transaction: entry.transaction,
-            disposition: entry.disposition,
-            addedAt: entry.addedAt
-        )
+        MempoolItem(cid: entry.cid, transaction: entry.transaction, addedAt: entry.addedAt)
     }
 
     private mutating func insert(_ entry: Entry) {
         precondition(entries[entry.cid] == nil)
         entries[entry.cid] = entry
-        for signer in entry.conflictKey.signers {
-            signerNonces[SignerNonce(signer: signer, nonce: entry.conflictKey.nonce)] = entry.cid
-        }
+        for claim in entry.claims { claimants[claim] = entry.cid }
+        for (account, debit) in entry.debits { committed[account, default: 0] += debit }
         byteCount += entry.size
-        let key = Self.chainKey(entry)
-        chainEntries[key, default: [:]][entry.conflictKey.nonce] = entry.cid
-        touch(key, at: entry.conflictKey.nonce)
         version &+= 1
     }
 
     private mutating func removeEntry(_ cid: String) -> Entry? {
         guard let removed = entries.removeValue(forKey: cid) else { return nil }
-        for signer in removed.conflictKey.signers {
-            let key = SignerNonce(signer: signer, nonce: removed.conflictKey.nonce)
-            if signerNonces[key] == cid { signerNonces.removeValue(forKey: key) }
+        for claim in removed.claims where claimants[claim] == cid { claimants.removeValue(forKey: claim) }
+        for (account, debit) in removed.debits {
+            let left = committed[account, default: 0] - debit
+            committed[account] = left == 0 ? nil : left
         }
         byteCount -= removed.size
-        let key = Self.chainKey(removed)
-        if chainEntries[key]?[removed.conflictKey.nonce] == cid {
-            chainEntries[key]?[removed.conflictKey.nonce] = nil
-            if chainEntries[key]?.isEmpty == true { chainEntries[key] = nil }
-        }
-        touch(key, at: removed.conflictKey.nonce)
         version &+= 1
         return removed
     }

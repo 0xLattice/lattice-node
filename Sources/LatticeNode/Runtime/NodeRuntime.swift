@@ -1049,19 +1049,19 @@ extension NodeRuntime {
             }.count
             let pool = level.mining.mempool
             let children = path == core.rootPath
-                ? core.ordered.dropFirst().compactMap {
-                    core.levels[$0].map { ($0.snapshot.actOnTip, $0.snapshot.bestHeaderTip, $0.mining.mempool) }
-                }
+                ? core.ordered.dropFirst().compactMap { core.levels[$0] }
                 : []
-            let key = ([(tip.hash, "", pool)] + children)
-                .map { "\($0.0)/\($0.1)/\($0.2.version)" }.joined(separator: "\n")
+            let key = ([(tip.hash, "", pool.version)] + children.map {
+                ($0.snapshot.actOnTip, $0.snapshot.bestHeaderTip, $0.mining.mempool.version)
+            }).map { "\($0.0)/\($0.1)/\($0.2)" }.joined(separator: "\n")
             let digest: String
             if let cached = digests[path], cached.key == key {
                 digest = cached.digest
             } else {
-                digest = path == core.rootPath
-                    ? NodeRuntime.templateDigest(tip: tip.hash, mempool: pool, levels: children)
-                    : NodeRuntime.templateDigest(tip: tip.hash, mempool: pool)
+                digest = NodeRuntime.templateDigest(
+                    tip: tip.hash, carrying: level.mining.nextBlock,
+                    levels: children.map { ($0.snapshot.actOnTip, $0.snapshot.bestHeaderTip, $0.mining.nextBlock) }
+                )
                 digests[path] = (key, digest)
             }
             // Status names the wait of the block after the act-on tip, its
@@ -1114,11 +1114,7 @@ extension NodeRuntime {
                 // A pool holds nothing before its level has a spec, so a
                 // projection waits only on the pool.
                 let projected = !reproject ? view.mempool.projected : level.mining.spec.map {
-                    pool.projectedBlocks(
-                        count: ChainReads.projectedFeeBlocks,
-                        transactionLimit: Int(clamping: $0.maxNumberOfTransactionsPerBlock),
-                        maxBytes: $0.maxBlockSize
-                    )
+                    pool.projectedBlocks(count: ChainReads.projectedFeeBlocks, spec: $0)
                 } ?? []
                 if reproject {
                     view.projectedVersion = pool.version
@@ -1126,7 +1122,7 @@ extension NodeRuntime {
                 }
                 view.mempool = ChainReads.MempoolListing(
                     count: pool.count, bytes: pool.byteCount, cids: pool.items.prefix(200).map(\.cid),
-                    projected: projected
+                    projected: projected, weight: level.mining.spec.map(FeeWeight.init)
                 )
             }
             view.poolVersion = pool.version
@@ -1571,7 +1567,9 @@ extension NodeRuntime {
                     }
                 }
             case .preflight:
-                guard let basis = core.levels[path].flatMap({ NodeRuntime.miningBasis(effect, tree: $0.tree) }) else { break }
+                guard let basis = core.levels[path].flatMap({
+                    NodeRuntime.miningBasis(effect, tree: $0.tree, parent: core.levels[Array(path.dropLast())])
+                }) else { break }
                 miningJobs.append(NodeRuntime.miningJob(effect, at: path, basis: basis, storage: storage))
                 startJobs()
             case .buildTemplate:
@@ -1598,10 +1596,8 @@ extension NodeRuntime {
                     path: child,
                     tipCID: executed ? snapshot.actOnTip : nil,
                     bestHeaderTip: snapshot.bestHeaderTip,
-                    // Every child block here has a carrier, so the pool's
-                    // contextual set: a withdrawal preflight could not settle
-                    // without one is checked against that carrier's state.
-                    transactions: level.mining.mempool.contextualTransactions(limit: .max),
+                    // Each is checked again against the carrier's state.
+                    transactions: level.mining.nextBlock,
                     anchor: executed ? NodeRuntime.anchor(level.tree, snapshot.actOnTip) : nil,
                     // A weighed root that has not executed carries nothing
                     // until it executes, rather than a rival genesis.

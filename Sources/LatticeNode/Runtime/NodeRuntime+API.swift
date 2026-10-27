@@ -108,6 +108,14 @@ struct HeightIndex: Sendable {
 /// when it executed no root), its pool, its difficulty anchor, and the spec a
 /// genesis is built from when it has no root yet, with the account that
 /// genesis pays the spec's premine to.
+/// Pooled transactions a template's policy check refused on `tipCID` of
+/// `path`, for that level's pool to drop.
+struct PolicyRefusal: Sendable, Equatable {
+    let path: ChainPath
+    let tipCID: String
+    let cids: [String]
+}
+
 struct ChildTemplateInput: Sendable {
     let path: ChainPath
     let tipCID: String?
@@ -128,6 +136,10 @@ struct ChildTemplateInput: Sendable {
 struct MiningBasis: Sendable {
     let snapshot: TipBlockSnapshot?
     let anchor: DifficultyAnchor?
+    /// For a child level's preflight: the hosted parent's executed post-state,
+    /// which a withdrawal's receipt is proven in. Nil at the root, or when
+    /// the parent is not hosted or has not executed.
+    var parentState: LatticeStateHeader? = nil
 }
 
 /// What a child block's connect reads of its parent level: whether the
@@ -496,7 +508,7 @@ extension NodeRuntime {
     /// The basis of a preflight or template job on `tree`, the live level's,
     /// taken when the job is spawned; nil for any other effect, or a tree
     /// made without a context.
-    static func miningBasis(_ effect: MiningEffect, tree: ChainTree) -> MiningBasis? {
+    static func miningBasis(_ effect: MiningEffect, tree: ChainTree, parent: ChainCore? = nil) -> MiningBasis? {
         let (tip, anchored): (String, Bool)
         switch effect {
         case .preflight(let job): (tip, anchored) = (job.tipCID, false)
@@ -504,8 +516,13 @@ extension NodeRuntime {
         default: return nil
         }
         guard tree.context != nil else { return nil }
+        let parentState = anchored ? nil : parent.flatMap { parent in
+            parent.tree.transactionPreflightTip(at: parent.snapshot.actOnTip).snapshot
+                .map { LatticeStateHeader(rawCID: $0.postStateCID) }
+        }
         return MiningBasis(
-            snapshot: tree.transactionPreflightTip(at: tip).snapshot, anchor: anchored ? anchor(tree, tip) : nil
+            snapshot: tree.transactionPreflightTip(at: tip).snapshot, anchor: anchored ? anchor(tree, tip) : nil,
+            parentState: parentState
         )
     }
 
@@ -534,21 +551,41 @@ extension NodeRuntime {
             return RuntimeJob(path: path, epoch: job.tipEpoch) {
                 guard let basis else { return [] }
                 // From this store alone: a transaction anyone may submit
-                // does not spend this node's requests to its peers.
+                // does not spend this node's requests to its peers. A child
+                // withdrawal is proven against the parent's executed state,
+                // so it is ready, invalid or a retry, never held unchecked.
                 let result = await TransactionPreflight.classify(
-                    job.transaction, tipCID: job.tipCID, snapshot: basis.snapshot, chainPath: path, fetcher: fetcher
+                    job.transaction, tipCID: job.tipCID, snapshot: basis.snapshot, chainPath: path,
+                    parentState: basis.parentState, fetcher: fetcher, checksPolicies: job.checksPolicies
                 )
-                return [.level(path, .mining(.preflighted(job, disposition(result.disposition))))]
+                // A ready transaction brings the balances it was funded from,
+                // read from the same tip state, for the pool's budget.
+                var verdict = disposition(result.disposition)
+                var balances: [String: UInt64] = [:]
+                if verdict == .ready {
+                    if let body = job.transaction.body.node,
+                       let snapshot = basis.snapshot,
+                       let state = try? await LatticeStateHeader(rawCID: snapshot.postStateCID).resolve(fetcher: fetcher).node,
+                       let read = await Mempool.balances(debitedBy: body, on: state, fetcher: fetcher) {
+                        balances = read
+                    } else {
+                        verdict = .unavailable
+                    }
+                }
+                return [.level(path, .mining(.preflighted(job, verdict, balances: balances)))]
             }
         case .buildTemplate(let job):
             return RuntimeJob(path: path, epoch: job.tipEpoch) {
-                let built = await reading(job.tipCID, storage: storage, remote: remote) { fetcher in
-                    await buildTemplate(
+                let (built, refused) = await reading(job.tipCID, storage: storage, remote: remote) { fetcher in
+                    var refused: [PolicyRefusal] = []
+                    let built = await buildTemplate(
                         job, difficultyAnchor: basis?.anchor, fetcher: fetcher, chainPath: path,
-                        children: children, levels: levels
+                        children: children, levels: levels, refused: &refused
                     )
+                    return (built, refused)
                 }
-                return [.level(path, .mining(.templateBuilt(job, built)))]
+                return refused.map { .level($0.path, .mining(.policyRefused(tipCID: $0.tipCID, cids: $0.cids))) }
+                    + [.level(path, .mining(.templateBuilt(job, built)))]
             }
         case .returnTransactions(let left, let carried):
             return RuntimeJob(path: path, epoch: nil) {
@@ -683,21 +720,23 @@ extension NodeRuntime {
 
     /// `MiningEffect.buildTemplate`: today's assembly (the bisecting fit, the
     /// policy filter, the minimum-work search target) on the job's tip.
-    /// Nil when no block can be built there.
+    /// Nil when no block can be built there. What the policy filter refused,
+    /// root and children, is added to `refused`.
     static func buildTemplate(
         _ job: TemplateJob,
         difficultyAnchor: DifficultyAnchor?,
         fetcher: any Fetcher,
         chainPath: [String],
         children: [ChildTemplateInput] = [],
-        levels: LiveLevels = .none
+        levels: LiveLevels = .none,
+        refused: inout [PolicyRefusal]
     ) async -> TemplateBuild? {
         guard job.request.parentCarrier == nil,
               let previous = try? await BlockHeader(rawCID: job.tipCID).resolve(fetcher: fetcher).node,
               let spec = try? await previous.spec.resolve(fetcher: fetcher).node,
               let timestamp = try? MiningPlan.nextTimestamp(after: previous.timestamp, parentCarrier: nil)
         else { return nil }
-        let pooled = await MiningPlan.policyAcceptedTransactions(
+        let (pooled, refusedHere) = await MiningPlan.policyAcceptedTransactions(
             job.transactions,
             chainPath: chainPath,
             previous: previous,
@@ -705,9 +744,10 @@ extension NodeRuntime {
             spec: spec,
             fetcher: fetcher
         )
+        if !refusedHere.isEmpty { refused.append(PolicyRefusal(path: chainPath, tipCID: job.tipCID, cids: refusedHere)) }
         let provided = await childCandidates(
             of: chainPath, among: children, entering: previous.postState, timestamp: timestamp,
-            request: job.request, levels: levels, fetcher: fetcher
+            request: job.request, levels: levels, fetcher: fetcher, refused: &refused
         )
         guard let template = try? await MiningTemplateAssembly.fit(
             chainPath: chainPath,
@@ -729,15 +769,8 @@ extension NodeRuntime {
             searchTarget: template.searchTarget,
             targets: template.targets,
             digest: templateDigest(
-                tip: job.tipCID,
-                transactions: job.transactions.compactMap { try? Mempool.cid(of: $0) },
-                levels: children.map {
-                    (
-                        $0.tipCID ?? "",
-                        $0.bestHeaderTip,
-                        $0.transactions.compactMap { try? Mempool.cid(of: $0) }
-                    )
-                }
+                tip: job.tipCID, carrying: job.transactions,
+                levels: children.map { ($0.tipCID ?? "", $0.bestHeaderTip, $0.transactions) }
             ),
             chains: await MiningTemplateAssembly.committedChains(
                 root: template.block, chainPath: chainPath, fetcher: fetcher
@@ -852,7 +885,8 @@ extension NodeRuntime {
         timestamp: Int64,
         request: TemplateRequest,
         levels: LiveLevels,
-        fetcher: any Fetcher
+        fetcher: any Fetcher,
+        refused: inout [PolicyRefusal]
     ) async -> [DirectChildCandidate] {
         var candidates: [DirectChildCandidate] = []
         for input in inputs where input.path.dropLast().elementsEqual(parent) {
@@ -877,11 +911,16 @@ extension NodeRuntime {
                 let below = tip != tipCID
                 let grandchildren = below ? [] : await childCandidates(
                     of: input.path, among: inputs, entering: previous.postState, timestamp: time,
-                    request: request, levels: levels, fetcher: fetcher
+                    request: request, levels: levels, fetcher: fetcher, refused: &refused
                 )
+                let (pooled, refusedHere) = below ? ([], []) : await MiningPlan.policyAcceptedTransactions(
+                    input.transactions, chainPath: input.path, previous: previous, timestamp: time,
+                    spec: spec, fetcher: fetcher
+                )
+                if !refusedHere.isEmpty { refused.append(PolicyRefusal(path: input.path, tipCID: tipCID, cids: refusedHere)) }
                 block = try? await MiningTemplateAssembly.fit(
                     chainPath: input.path, lifetime: .seconds(30), previous: previous,
-                    pooled: below ? [] : input.transactions, provided: grandchildren, parentCarrier: carrier,
+                    pooled: pooled, provided: grandchildren, parentCarrier: carrier,
                     timestamp: time, rewardRecipient: request.childRecipients[input.path],
                     minimumWork: request.minimumWork,
                     difficultyAnchor: below ? anchorBelow : input.anchor,
@@ -981,19 +1020,16 @@ extension NodeRuntime {
         }
     }
 
-    /// The template digest over the root and every hosted child: each tip,
-    /// best header, and transaction set a template job reads. Status serves
-    /// the current value, so it reads the same selections a build does: the
-    /// root's ready set, and each carried child's contextual set.
+    /// The digest of the template a build on `tip` carrying these (each
+    /// level's `nextBlock`) would give: status names it, so a miner sees its
+    /// template go stale.
     static func templateDigest(
-        tip: String, mempool: Mempool, levels: [(actOn: String, best: String, pool: Mempool)] = []
+        tip: String, carrying: [Transaction], levels: [(actOn: String, best: String, carrying: [Transaction])] = []
     ) -> String {
         templateDigest(
             tip: tip,
-            transactions: mempool.transactions(limit: .max).compactMap { try? Mempool.cid(of: $0) },
-            levels: levels.map {
-                ($0.actOn, $0.best, $0.pool.contextualTransactions(limit: .max).compactMap { try? Mempool.cid(of: $0) })
-            }
+            transactions: carrying.compactMap { try? Mempool.cid(of: $0) },
+            levels: levels.map { ($0.actOn, $0.best, $0.carrying.compactMap { try? Mempool.cid(of: $0) }) }
         )
     }
 

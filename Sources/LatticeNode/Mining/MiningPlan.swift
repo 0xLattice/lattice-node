@@ -1,6 +1,7 @@
 import Foundation
 import Lattice
 import UInt256
+import LatticeNodeCore
 import cashew
 
 /// The miner-facing plan and template checks the node runtime's RPC applies.
@@ -100,8 +101,14 @@ enum MiningPlan {
 
     /// Policies may read the carrying block's height and timestamp, which a
     /// pool verdict (taken against the tip, at its own time) did not see. Offer
-    /// only transactions the policies accept for THIS template; a skipped one
-    /// stays pooled until it passes or a tip change evicts it.
+    /// only transactions the policies accept for THIS template. Root and child
+    /// templates alike: the pool's own verdicts are not taken at this height.
+    /// `refused` names those the policies did not accept, for the pool to
+    /// drop: a refusal, or an error Lattice classifies as invalid (a trap), as
+    /// admission does. One this node could not judge (a body or module it
+    /// lacks, a failed fetch) is neither carried nor dropped. `transactions` is what the next block can carry
+    /// (`Mempool.nextBlock`), so policies run on one block's worth, never the
+    /// whole pool.
     static func policyAcceptedTransactions(
         _ transactions: [Transaction],
         chainPath: [String],
@@ -109,24 +116,35 @@ enum MiningPlan {
         timestamp: Int64,
         spec: ChainSpec,
         fetcher: any Fetcher
-    ) async -> [Transaction] {
-        guard !spec.wasmPolicies.isEmpty else { return transactions }
+    ) async -> (accepted: [Transaction], refused: [String]) {
+        guard !spec.wasmPolicies.isEmpty else { return (transactions, []) }
         let (height, overflow) = previous.height.addingReportingOverflow(1)
-        guard !overflow else { return [] }
+        guard !overflow else { return ([], []) }
         var accepted: [Transaction] = []
+        var refused: [String] = []
         for transaction in transactions {
-            guard let body = try? await transaction.body.resolve(fetcher: fetcher).node,
-                  (try? await TransactionBody.batchVerifyPolicies(
-                      bodies: [body],
-                      spec: spec,
-                      chainPath: chainPath,
-                      height: height,
-                      timestamp: timestamp,
-                      fetcher: fetcher
-                  )) == true else { continue }
-            accepted.append(transaction)
+            guard let body = try? await transaction.body.resolve(fetcher: fetcher).node else { continue }
+            let verdict: Bool
+            do {
+                verdict = try await TransactionBody.batchVerifyPolicies(
+                    bodies: [body],
+                    spec: spec,
+                    chainPath: chainPath,
+                    height: height,
+                    timestamp: timestamp,
+                    fetcher: fetcher
+                )
+            } catch {
+                guard wasmPolicyErrorVerdict(error) == .invalid else { continue }
+                verdict = false
+            }
+            if verdict {
+                accepted.append(transaction)
+            } else if let cid = try? Mempool.cid(of: transaction) {
+                refused.append(cid)
+            }
         }
-        return accepted
+        return (accepted, refused)
     }
 
     static func nextTimestamp(

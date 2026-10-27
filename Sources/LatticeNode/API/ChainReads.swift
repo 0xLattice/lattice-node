@@ -18,12 +18,15 @@ public struct ChainReads: Sendable {
         public let cids: [String]
         /// The pool's next blocks, for fee pricing (`Mempool.projectedBlocks`).
         public let projected: [ProjectedBlock]
+        /// What their rates are over, from the spec they were projected with.
+        public let weight: FeeWeight?
 
-        public init(count: Int, bytes: Int, cids: [String], projected: [ProjectedBlock] = []) {
+        public init(count: Int, bytes: Int, cids: [String], projected: [ProjectedBlock] = [], weight: FeeWeight? = nil) {
             self.count = count
             self.bytes = bytes
             self.cids = cids
             self.projected = projected
+            self.weight = weight
         }
     }
 
@@ -760,7 +763,8 @@ public struct ChainReads: Sendable {
         let pool = await mempool(false)
         return ExplorerFees(
             minRelayFee: storage.configuration.minRelayFee,
-            blocks: pool.projected.map(ExplorerProjectedBlock.init)
+            blocks: pool.projected.map(ExplorerProjectedBlock.init),
+            weight: pool.weight.map(ExplorerWeight.init)
         )
     }
 
@@ -817,12 +821,22 @@ private actor ProofVolumeCollector: VolumeStorer {
     }
 }
 
+extension ExplorerWeight {
+    init(_ weight: FeeWeight) {
+        self.init(
+            blockRoom: weight.blockRoom, growthRoom: weight.growthRoom,
+            maxTransactions: weight.maxTransactions, transactionAllowance: weight.transactionAllowance
+        )
+    }
+}
+
 extension ExplorerProjectedBlock {
     /// A selected package's fee is funded, so it fits a balance.
     init(_ block: ProjectedBlock) {
         self.init(
             transactionCount: block.transactionCount, bytes: block.bytes,
-            lowestFee: block.lowestFee.uint64Value ?? .max, lowestFeeBytes: block.lowestFeeBytes, full: block.full
+            lowestFee: block.lowestFee.uint64Value ?? .max, lowestFeeBytes: block.lowestFeeBytes,
+            lowestFeeWeight: block.lowestFeeWeight, full: block.full
         )
     }
 }

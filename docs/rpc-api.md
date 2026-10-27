@@ -282,15 +282,31 @@ Response:
 The body is content-bound and the signature, nonce, funding, fee, and path are
 validated before admission. An unhosted path returns 404. A transaction must
 fit in a block by itself: past `maxBlockSize` less 2048 bytes for the block's
-own content, the refusal is `tooLarge` (so a chain whose `maxBlockSize` is
-2048 or less admits nothing).
+own content and its place in it, the refusal is `tooLarge` (so a chain whose `maxBlockSize` is
+2048 or less admits nothing). So is one whose state growth, at most (Lattice's
+`stateGrowthCeiling`), is past `maxStateGrowth` less 128 bytes for the
+coinbase's.
 
 The node's pool admits only transactions paying at least the operator's
-`--min-relay-fee` (default 0): the fee is the transaction's balance excess,
+`--min-relay-fee` (default 1): the fee is the transaction's balance excess,
 which the block's recipient is credited. Below it the refusal is
 `belowMinRelayFee`. This is node relay policy, never consensus: a block
 carrying a cheaper transaction stays valid, and other nodes choose their own
 floor. `GET /api/chain/info` reports this node's as `minRelayFee`.
+
+A refusal names its reason. The retriable ones say to send the same
+transaction again later; the rest say to change it.
+
+| Reason | Meaning | Retry as is |
+|---|---|---|
+| `nonceAhead` | an earlier transaction from its first signer is not mined yet | yes, once it is |
+| `unavailable` | this node cannot judge it yet (state, a policy module, a withdrawal's receipt) | yes |
+| `insufficientFunds` | an account it debits cannot also pay what pooled transactions debit it, and displacing them would not put it in the next block and make that block pay the relay floor more | yes, once those are mined |
+| `full` | the pool is full of transactions paying a higher rate (429) | yes |
+| `contextChanged` | the tip moved too often while it waited (503) | yes |
+| `feeTooLow` | it shares a nonce, state key, deposit or receipt with pooled transactions, and displacing them would not put it in the next block and make that block pay the relay floor more (uncongested: all their fees plus the floor) | no: raise the fee |
+| `belowMinRelayFee` | its fee is under this node's floor | no: raise the fee |
+| `tooLarge`, `invalidState` | it can never be pooled | no |
 
 `GET /api/chain/info` also reports the chain's
 [node-local finality](operations.md#node-local-finality) window, in blocks,
@@ -300,37 +316,43 @@ node policy, never consensus, and is absent when off (the default).
 ### Fee pricing
 
 `GET /api/fees` projects the next blocks (up to 12) this node's pool would
-fill if nothing else arrived, as this node's builder fills them: ready
-transactions in template order (packages by fee per byte, a transaction with
-its signer's earlier pooled nonces), each block taking them until one does
-not fit the chain's transaction count or `maxBlockSize`. A package may
-straddle two blocks; a block's rate is the lowest of the packages it carries
-any of. It is recomputed on each new tip and, while the pool changes, at most
-once a second.
+fill if nothing else arrived, as this node's builder fills them: pooled
+transactions by fee per weight, each block taking them up to the chain's
+transaction count, `maxBlockSize` (each charged its place in the block) and
+`maxStateGrowth` (each charged its state growth at most), skipping one that
+does not fit for a smaller one behind it. A block's rate is the lowest it
+carries. It is recomputed on each new tip and, while the pool changes, at
+most once a second.
+
+A transaction's weight is the most of a block it takes of any limit, in the
+block's bytes: the largest of its size plus `transactionAllowance` (its place
+in the block), its state growth (Lattice's `stateGrowthCeiling`) times
+`blockRoom / growthRoom` rounded up, and `blockRoom / maxTransactions`. Where
+neither growth nor count binds before size, as on Nexus, weight is the bytes a
+block charges it. `weight` gives the four for this chain.
 
 ```json
 {
   "minRelayFee": "1",
   "blocks": [
-    { "transactionCount": 5000, "bytes": 912000, "lowestFee": "40", "lowestFeeBytes": 380, "full": true },
-    { "transactionCount": 1200, "bytes": 230000, "lowestFee": "1", "lowestFeeBytes": 350, "full": false }
-  ]
+    { "transactionCount": 1500, "bytes": 570000, "lowestFee": "40", "lowestFeeBytes": 380, "lowestFeeWeight": 636, "full": true },
+    { "transactionCount": 400, "bytes": 140000, "lowestFee": "1", "lowestFeeBytes": 350, "lowestFeeWeight": 606, "full": false }
+  ],
+  "weight": { "blockRoom": 998208, "growthRoom": 2999872, "maxTransactions": 5000, "transactionAllowance": 256 }
 }
 ```
 
 A block is `full` when ready transactions were left for a later one. While
 none is full (or `blocks` is empty), a fee at the floor makes the next block.
-To be in the first `k` blocks when block `k` is full, a transaction of `size`
-bytes pays more than `lowestFee * size / lowestFeeBytes` of that block.
+To be in the first `k` blocks when block `k` is full, a transaction of weight
+`w` pays more than `lowestFee * w / lowestFeeWeight` of that block. Older nodes
+omit `weight` and `lowestFeeWeight`; their rates are per byte. An older client
+that prices per byte against this node is close where weight tracks size, as
+on Nexus, and underpays on a chain whose growth or count binds first.
 
-This is an estimate from one node's pool, not a promise: only transaction
-bytes are counted, while a block's own structure (which grows with its
-transaction count) shares `maxBlockSize`, so a block of many small
-transactions holds fewer than projected; other miners may fill gaps with
-smaller packages, other pools differ, and new transactions arrive. On a child
-chain, a transaction only the parent's state makes executable is not
-projected, though a template may carry it. Fees above `UInt64` never occur
-for funded packages.
+This is an estimate from one node's pool, not a promise: other miners fill
+their blocks otherwise, other pools differ, and new transactions arrive. Fees
+above `UInt64` never occur for pooled transactions, which are funded.
 
 ## Transaction inclusion
 
@@ -406,8 +428,8 @@ The response contains:
 - `templateDigest` — fingerprint of the complete hosted tree's template
   inputs.
 
-A new transaction or candidate at any hosted level changes the digest, even if
-the Nexus tip did not move.
+A change to what the next block at any hosted level would carry, or a new
+candidate, changes the digest, even if the Nexus tip did not move.
 
 ## Submit mining work
 

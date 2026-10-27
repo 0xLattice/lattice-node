@@ -53,12 +53,19 @@ public struct TipMove: Sendable {
 /// move, so a tip that moves away and back (A, B, A) still makes the job
 /// stale. The move already issued the job again, so a backlog never runs
 /// more than one tip's worth of preflights.
+///
+/// `checksPolicies` is false for a pooled transaction: the chain's policies
+/// accepted it on admission, and every template, root or child, judges it
+/// by them again at the height that would carry it, removing one they
+/// refuse (`MiningEvent.policyRefused`). So a tip move costs the pool its
+/// state checks, never a policy evaluation per pooled transaction.
 public struct PreflightJob: Sendable {
     public let cid: String
     public let transaction: Transaction
     public let tipCID: String
     public let tipEpoch: UInt64
     public let poolVersion: UInt64
+    public let checksPolicies: Bool
 }
 
 /// The parent level's provisional carrier a child candidate builds under:
@@ -103,9 +110,8 @@ public struct TemplateRequest: Sendable, Equatable {
 
 /// Assemble a candidate on the executed tip `tipCID` from `transactions`, in
 /// this order, read from the pool at `poolVersion`. With a parent carrier the
-/// transactions are the pool's contextual set (unavailable entries included),
-/// and the job preflights each against the carrier's `prevState`, as the
-/// shell's assembler does today.
+/// job preflights each against the carrier's `prevState`, as the shell's
+/// assembler does today.
 ///
 /// Job contract: as for `PreflightJob`, an executor MUST skip the job iff
 /// `tipEpoch` differs from `MiningState.tipEpoch` read at dequeue, and the core
@@ -164,11 +170,17 @@ public struct TemplateBuild: Sendable {
 public enum MiningEvent: Sendable {
     /// A transaction whose content the shell has resolved.
     case transactionReceived(Transaction, origin: TransactionOrigin)
-    case preflighted(PreflightJob, MempoolDisposition)
+    /// `balances`: for a ready verdict, each account the transaction debits
+    /// and its balance on the job's tip (`Mempool.debits(of:)`).
+    case preflighted(PreflightJob, MempoolDisposition, balances: [String: UInt64])
     case tipMoved(TipMove)
     case templateRequested(replyID: UInt64, TemplateRequest)
     /// nil: the job could not build a block on its tip.
     case templateBuilt(TemplateJob, TemplateBuild?)
+    /// A template judged these pooled transactions by the chain's policies
+    /// at the height that would carry them on `tipCID`, and they refused
+    /// them. Applied only while `tipCID` is still the tip.
+    case policyRefused(tipCID: String, cids: [String])
     case submitWork(replyID: UInt64, workID: String, nonce: UInt64)
 }
 
@@ -300,6 +312,10 @@ public struct MiningState: Sendable {
     private var admissions: [String: Admission] = [:]
     /// Transactions with a preflight outstanding on the current tip epoch.
     private var preflighting: Set<String> = []
+    /// What the next block can carry: what a template is handed, and what
+    /// the status digest names.
+    public var nextBlock: [Transaction] { spec.map(mempool.nextBlock) ?? [] }
+
     /// Pooled transactions in the local journal.
     public private(set) var journaled: Set<String> = []
     private var builds: [UInt64: (job: TemplateJob, replies: [Waiting])] = [:]
@@ -332,14 +348,16 @@ public struct MiningState: Sendable {
         switch event {
         case .transactionReceived(let transaction, let origin):
             receive(transaction, origin: origin, now: now, &turn)
-        case .preflighted(let job, let disposition):
-            preflighted(job, disposition, now: now, &turn)
+        case .preflighted(let job, let disposition, let balances):
+            preflighted(job, disposition, balances: balances, now: now, &turn)
         case .tipMoved(let move):
             tipMoved(move, &turn)
         case .templateRequested(let replyID, let request):
             requestTemplate(request, waiting: [Waiting(replyID: replyID)], &turn)
         case .templateBuilt(let job, let build):
             built(job, build, now: now, &turn)
+        case .policyRefused(let refusedOn, let cids):
+            if refusedOn == tipCID { departed(mempool.remove(cids), &turn) }
         case .submitWork(let replyID, let workID, let nonce):
             do {
                 let block = try templates.submission(workID: workID, nonce: nonce, now: now)
@@ -376,17 +394,20 @@ public struct MiningState: Sendable {
         now: Int64,
         _ turn: inout Turn
     ) {
+        // A level that has not executed cannot judge yet: a restored row
+        // waits for its first tip, which preflights every admission.
+        if spec == nil, case .restored = origin, let cid = try? Mempool.cid(of: transaction) {
+            if admissions[cid] == nil {
+                open(cid, Admission(transaction: transaction, origins: [origin], slot: .local))
+            }
+            return
+        }
         let cid: String
         do {
-            guard let spec else { throw MempoolError.unresolved }
+            guard let spec else { throw MempoolError.unavailable }
             cid = try mempool.check(transaction, spec: spec)
         } catch {
-            // Too large or value-creating: the pool can never hold it, on any
-            // tip. Anything else (unresolved content, an encoding failure) is
-            // not a verdict and keeps a journal row.
-            let refusal = error as? MempoolError ?? .unresolved
-            let verdict = error as? MempoolError == .tooLarge || error as? MempoolError == .invalidState
-            refuse([origin], cid: try? Mempool.cid(of: transaction), refusal, verdict: verdict, &turn)
+            refuse([origin], cid: try? Mempool.cid(of: transaction), error as? MempoolError ?? .unresolved, &turn)
             return
         }
         if let pooled = mempool.item(cid) {
@@ -468,17 +489,20 @@ public struct MiningState: Sendable {
         return admission
     }
 
-    private mutating func preflight(_ cid: String, _ transaction: Transaction, _ turn: inout Turn) {
+    private mutating func preflight(
+        _ cid: String, _ transaction: Transaction, checksPolicies: Bool = true, _ turn: inout Turn
+    ) {
         guard preflighting.insert(cid).inserted else { return }
         turn.jobs.append(.preflight(PreflightJob(
             cid: cid, transaction: transaction, tipCID: tipCID, tipEpoch: tipEpoch,
-            poolVersion: mempool.version
+            poolVersion: mempool.version, checksPolicies: checksPolicies
         )))
     }
 
     private mutating func preflighted(
         _ job: PreflightJob,
         _ disposition: MempoolDisposition,
+        balances: [String: UInt64],
         now: Int64,
         _ turn: inout Turn
     ) {
@@ -486,11 +510,27 @@ public struct MiningState: Sendable {
         // job on the new tip.
         guard job.tipEpoch == tipEpoch else { return }
         preflighting.remove(job.cid)
-        if let admission = close(job.cid) {
-            admit(admission, cid: job.cid, disposition, now: now, &turn)
+        if let admission = admissions[job.cid] {
+            // A tip move's check skips policies; an admission is judged by
+            // them.
+            guard job.checksPolicies else {
+                preflight(job.cid, admission.transaction, &turn)
+                return
+            }
+            _ = close(job.cid)
+            admit(admission, cid: job.cid, disposition, balances: balances, now: now, &turn)
+            return
+        }
+        // The pool holds only what executes on the tip: a pooled transaction
+        // that no longer does, or that this node can no longer judge (a
+        // receipt or deposit a reorg took), leaves, freeing what it claims.
+        // One ahead or unjudged is its sender's to send again. One still
+        // ready brings its accounts' balances on the new tip: an account
+        // that can no longer pay all it backs sheds the lowest fee rate first.
+        if disposition == .ready {
+            departed(mempool.rebalance(balances), &turn)
         } else {
-            let mutation = mempool.reclassify(job.cid, as: disposition)
-            departed(mutation, &turn)
+            departed(mempool.remove([job.cid]), &turn)
         }
     }
 
@@ -498,6 +538,7 @@ public struct MiningState: Sendable {
         _ admission: Admission,
         cid: String,
         _ disposition: MempoolDisposition,
+        balances: [String: UInt64],
         now: Int64,
         _ turn: inout Turn
     ) {
@@ -505,23 +546,32 @@ public struct MiningState: Sendable {
             if case .restored(let addedAt) = origin { return addedAt }
             return nil
         }.first
+        // Only what executes on the tip now is pooled. A nonce ahead, or
+        // evidence this node lacks, is a retry for the sender, not a verdict.
+        let refusal: MempoolError? = switch disposition {
+        case .ready: nil
+        case .future: .nonceAhead
+        case .unavailable: .unavailable
+        case .invalid: .invalidState
+        }
+        if let refusal {
+            refuse(admission.origins, cid: cid, refusal, &turn)
+            return
+        }
         do {
-            guard let spec else { throw MempoolError.unresolved }
+            guard let spec else { throw MempoolError.unavailable }
             let mutation = try mempool.submit(
                 admission.transaction,
                 spec: spec,
-                disposition: disposition,
-                addedAt: restoredAt ?? now
+                addedAt: restoredAt ?? now,
+                balances: balances
             )
             departed(mutation, &turn)
             if let inserted = mutation.inserted { turn.delta.added.append(inserted) }
             guard let item = mempool.item(cid) else { return }
             admitted(item, origins: admission.origins, inserted: mutation.inserted != nil, &turn)
         } catch {
-            // Only the verdict makes a refusal final for a journal row; a
-            // capacity or conflict refusal leaves the row for the next boot.
-            refuse(admission.origins, cid: cid, error as? MempoolError ?? .invalidState,
-                   verdict: disposition == .invalid, &turn)
+            refuse(admission.origins, cid: cid, error as? MempoolError ?? .invalidState, &turn)
         }
     }
 
@@ -571,7 +621,6 @@ public struct MiningState: Sendable {
         _ origins: [TransactionOrigin],
         cid: String?,
         _ error: MempoolError,
-        verdict: Bool,
         _ turn: inout Turn
     ) {
         for origin in origins {
@@ -579,8 +628,9 @@ public struct MiningState: Sendable {
             case .local(let replyID), .submitted(let replyID):
                 turn.replies.append(.transactionRefused(replyID: replyID, error))
             case .restored:
-                // The journal row goes with a verdict, never with capacity.
-                if verdict, let cid { turn.delta.removed.append(cid) }
+                // A journal row lives as long as its pool entry: one not
+                // pooled again is its sender's to resend.
+                if let cid { turn.delta.removed.append(cid) }
             case .peer, .returned:
                 break
             }
@@ -653,7 +703,7 @@ public struct MiningState: Sendable {
         // move confirmed first, so no verdict refuses what it carries.
         preflighting.removeAll()
         for item in mempool.items {
-            preflight(item.cid, item.transaction, &turn)
+            preflight(item.cid, item.transaction, checksPolicies: false, &turn)
         }
         for (cid, admission) in admissions.sorted(by: { $0.key < $1.key }) {
             preflight(cid, admission.transaction, &turn)
@@ -719,9 +769,7 @@ public struct MiningState: Sendable {
             tipCID: tipCID,
             tipEpoch: tipEpoch,
             poolVersion: mempool.version,
-            transactions: request.parentCarrier == nil
-                ? mempool.transactions(limit: .max)
-                : mempool.contextualTransactions(limit: .max),
+            transactions: nextBlock,
             request: request
         )
         nextJobID += 1

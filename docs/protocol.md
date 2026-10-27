@@ -277,14 +277,31 @@ members are never retained or relayed. Lattice then validates the transaction
 against the current state, and the node relays only a newly admitted root.
 Co-hosted parent and child levels never merge mempools.
 
-The pool separates executable, future-nonce, and temporarily unavailable
-transactions by signer nonce. Template selection advances a dependency
-frontier across every signer, choosing the highest-fee eligible transaction
-without copying state validity out of Lattice. The pool applies
-bounded replacement and low-value eviction (there is no time-based expiry),
-caps non-ready work per
-signer, and always evicts non-ready work before executable work regardless of
-an unpaid declared fee. It revalidates after every canonical change.
+The pool holds only transactions Lattice finds ready on the executed tip,
+funds checked; a nonce ahead of the chain or evidence this node lacks is a
+retriable refusal, never held. Its rules:
+
+- Claimed once: a first signer's nonce, each state key written, each deposit
+  and each receipt belong to one pooled transaction.
+- Budgeted: an account's debits across the pool never exceed its balance on
+  the tip, so every pooled transaction executes alongside every other.
+- Conflicts go to what pays the miner more: a newcomer displaces what it
+  conflicts with, by claim or by an account's budget, when the next block,
+  filled in fee-rate order, then carries it and pays the relay floor (at
+  least 1) more. In an uncongested pool that is all of their fees plus the
+  floor. Congested, what it displaces may sit anywhere in the pool and its
+  own fee does not count, only the next block's; a node with a different
+  backlog may judge the same replacement differently.
+- Every tip move re-checks each pooled transaction's nonce, funds and
+  evidence, and one no longer ready leaves. Policies are judged at admission
+  and by templates, which are handed only what the next block can carry
+  (fee order, skipping what does not fit its bytes, count or state growth,
+  each charged its growth at most); what a template's policies refuse
+  leaves.
+
+There is no time-based expiry; capacity evicts the lowest fee rate. A fee
+rate is fee per weight: the most of a block a transaction takes of its bytes,
+state growth or count, in bytes (`rpc-api.md`, fee pricing).
 Transactions confirmed on the new chain leave the pool;
 ordinary transactions from removed blocks are reinserted when still valid.
 Locally submitted transaction roots survive restart and are revalidated before
