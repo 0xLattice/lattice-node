@@ -285,9 +285,11 @@ retriable refusal, never held. Its rules:
   and each receipt belong to one pooled transaction.
 - Budgeted: an account's debits across the pool never exceed its balance on
   the tip, so every pooled transaction executes alongside every other.
-- Conflicts go to the higher fee: a newcomer displaces what it conflicts
-  with, by claim or by an account's budget, by paying all of their fees plus
-  the relay floor (at least 1).
+- Conflicts go to what pays the miner more: a newcomer displaces what it
+  conflicts with, by claim or by an account's budget, when the next block,
+  filled in fee-rate order, then pays the relay floor (at least 1) more. In
+  an uncongested pool that is all of their fees plus the floor; a bid that
+  would not reach the next block holds nothing against one that would.
 - Every tip move re-checks each pooled transaction's nonce, funds and
   evidence, and one no longer ready leaves. Policies are judged at admission
   and by templates, which are handed only what the next block can carry

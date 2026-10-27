@@ -262,6 +262,33 @@ final class MempoolTests: XCTestCase {
         XCTAssertEqual(pool.count, 2, "the nonce it lost is free")
     }
 
+    /// A conflict goes to what makes the next block pay more. A large write
+    /// paying a high fee at a low rate never reaches the next block, so it
+    /// holds its key against nothing that would: a small bid paying less in
+    /// all takes it, by raising what the next block pays.
+    func testABidThatWouldNotReachTheNextBlockHoldsNothing() throws {
+        func write(_ key: (privateKey: String, publicKey: String), fee: Int64, padding: Int = 0) throws -> Transaction {
+            let body = TransactionBody(
+                accountActions: [AccountAction(owner: address(key), delta: -fee)],
+                actions: [Action(key: "name/ada", oldValue: nil, newValue: String(repeating: "x", count: padding + 1))],
+                depositActions: [], receiptActions: [], withdrawalActions: [],
+                signers: [address(key)], nonce: 0, chainPath: ["Nexus"]
+            )
+            return Transaction(signatures: [key.publicKey: "x"], body: try HeaderImpl(node: body))
+        }
+        let spec = testSpec(maxTransactions: 1)
+        var pool = Mempool()
+        let pin = try write(CryptoUtils.generateKeyPair(), fee: 500, padding: 20_000)
+        try pool.submit(pin, spec: spec, addedAt: 0)
+        try pool.submit(try paying(CryptoUtils.generateKeyPair(), fee: 100, nonce: 0), spec: spec, addedAt: 0)
+        XCTAssertThrowsError(try pool.submit(try write(CryptoUtils.generateKeyPair(), fee: 100), spec: spec, addedAt: 0)) {
+            XCTAssertEqual($0 as? MempoolError, .feeTooLow, "the next block would pay no more")
+        }
+        let bid = try write(CryptoUtils.generateKeyPair(), fee: 150)
+        XCTAssertEqual(try pool.submit(bid, spec: spec, addedAt: 0).replaced.map(\.cid), [try Mempool.cid(of: pin)])
+        XCTAssertEqual(try pool.nextBlock(spec).map(Mempool.cid(of:)), [try Mempool.cid(of: bid)])
+    }
+
     /// One transaction sharing claims with two pooled ones displaces both
     /// only by paying for both.
     func testATransactionOverlappingTwoPaysForBoth() throws {

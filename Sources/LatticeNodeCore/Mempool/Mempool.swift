@@ -17,8 +17,8 @@ public enum MempoolError: Error, Sendable, Equatable {
     /// are mined.
     case insufficientFunds
     /// It shares its first signer's nonce, a state key, a deposit or a
-    /// receipt with pooled transactions, and does not pay
-    /// `MempoolLimits.replacementIncrement` more than all it would displace.
+    /// receipt with pooled transactions, and displacing them would not make
+    /// the next block pay `MempoolLimits.replacementIncrement` more.
     case feeTooLow
     /// The fee is under this node's `MempoolLimits.minRelayFee`.
     case belowMinRelayFee
@@ -85,10 +85,10 @@ public struct MempoolLimits: Sendable, Equatable {
         self.minRelayFee = minRelayFee
     }
 
-    /// How much more a transaction pays than all it displaces: the relay
-    /// floor, and at least 1 (BIP125 rules 3 and 4). Each displacement costs
-    /// the sender at least this much in the fee that is finally mined, so
-    /// churning the pool is bounded by the sender's balance.
+    /// How much more the next block must pay once a newcomer displaces what
+    /// it conflicts with: the relay floor, and at least 1 (BIP125 rule 4).
+    /// Each displacement raises what the miner takes next by at least this
+    /// much, so churning the pool is bounded by the senders' balances.
     public var replacementIncrement: UInt64 { max(1, minRelayFee) }
 }
 
@@ -116,9 +116,9 @@ public struct ProjectedBlock: Sendable, Equatable {
 /// - Money is budgeted: an account's debits across the pool never exceed
 ///   its balance on the tip, as preflight read it. An account backs as many
 ///   transactions as it can pay, and no more.
-/// A conflict, over a claim or an account's balance, goes to the higher fee:
-/// a newcomer displaces what it conflicts with by paying all of their fees
-/// and `replacementIncrement` more. `version` moves on every change, so a
+/// A conflict, over a claim or an account's balance, goes to what pays the
+/// miner more: a newcomer displaces what it conflicts with when the next
+/// block then pays `replacementIncrement` more. `version` moves on every change, so a
 /// job built from the pool names the pool it read.
 public struct Mempool: Sendable {
     /// Bound parse work by wire capacity (a 16-bit length), not an invented
@@ -261,12 +261,13 @@ public struct Mempool: Sendable {
             addedAt: addedAt
         )
 
-        // Conflicts go to the higher fee. It displaces every pooled
+        // Conflicts go to what pays the miner more. It displaces every pooled
         // transaction sharing a claim with it, and, for each account it
         // debits, that account's transactions paying the lowest fee rate
-        // until its own debit fits the balance. It must pay what they all
-        // pay plus the increment: every displacement costs the sender in the
-        // fee that is finally mined, so bids cannot be raised for free.
+        // until its own debit fits the balance. It is admitted only if the
+        // next block, filled as a miner fills it, then pays the increment
+        // more: a bid that would not reach the next block holds nothing
+        // against one that would, and bids cannot be raised for free.
         var displaced: [String: Entry] = [:]
         for claim in entry.claims {
             if let holder = claimants[claim], let existing = entries[holder] { displaced[holder] = existing }
@@ -279,8 +280,11 @@ public struct Mempool: Sendable {
             for existing in shed { displaced[existing.cid] = existing }
         }
         if !displaced.isEmpty {
-            let owed = displaced.values.reduce(WorkSum(UInt256(limits.replacementIncrement))) { $0 + $1.fee }
-            guard entry.fee >= owed else {
+            let before = ordered
+            var after = before.filter { displaced[$0.cid] == nil }
+            after.insert(entry, at: after.firstIndex { Self.inOrder(entry, $0) } ?? after.count)
+            let owed = Self.fees(Self.fill(spec, before).taken) + WorkSum(UInt256(limits.replacementIncrement))
+            guard Self.fees(Self.fill(spec, after).taken) >= owed else {
                 throw claimsConflict ? MempoolError.feeTooLow : MempoolError.insufficientFunds
             }
         }
@@ -377,10 +381,16 @@ public struct Mempool: Sendable {
 
     /// Every entry, the higher fee rate first, then the smaller CID.
     private var ordered: [Entry] {
-        entries.values.sorted { lhs, rhs in
-            let order = Self.rate(lhs, comparedTo: rhs)
-            return order != 0 ? order > 0 : lhs.cid < rhs.cid
-        }
+        entries.values.sorted(by: Self.inOrder)
+    }
+
+    private static func inOrder(_ lhs: Entry, _ rhs: Entry) -> Bool {
+        let order = rate(lhs, comparedTo: rhs)
+        return order != 0 ? order > 0 : lhs.cid < rhs.cid
+    }
+
+    private static func fees(_ entries: [Entry]) -> WorkSum {
+        entries.reduce(WorkSum(UInt256(0))) { $0 + $1.fee }
     }
 
     /// Whether `lhs` pays a higher fee rate than `rhs` (positive), the same
