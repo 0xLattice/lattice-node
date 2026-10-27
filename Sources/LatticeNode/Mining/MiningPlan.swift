@@ -104,9 +104,9 @@ enum MiningPlan {
     /// only transactions the policies accept for THIS template. Root and child
     /// templates alike: the pool's own verdicts are not taken at this height.
     /// `refused` names those the policies did not accept, for the pool to
-    /// drop: a refusal, or an evaluation that failed on the input (a trap).
-    /// One this node could not judge (a body or module it lacks) is neither
-    /// carried nor dropped. `transactions` is what the next block can carry
+    /// drop: a refusal, or an error Lattice classifies as invalid (a trap), as
+    /// admission does. One this node could not judge (a body or module it
+    /// lacks, a failed fetch) is neither carried nor dropped. `transactions` is what the next block can carry
     /// (`Mempool.nextBlock`), so policies run on one block's worth, never the
     /// whole pool.
     static func policyAcceptedTransactions(
@@ -134,9 +134,8 @@ enum MiningPlan {
                     timestamp: timestamp,
                     fetcher: fetcher
                 )
-            } catch WasmPolicyError.missingModule {
-                continue
             } catch {
+                guard wasmPolicyErrorVerdict(error) == .invalid else { continue }
                 verdict = false
             }
             if verdict {
