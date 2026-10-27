@@ -237,7 +237,7 @@ final class LatticeCtlE2ETests: XCTestCase {
     /// transaction pooled, can lose it on every block. At Nexus's real
     /// target a child rides child-only carriers, which leave Nexus's
     /// post-state alone.
-    private func bringUpMiningHost(miner: TestKey?) async throws -> CtlHost {
+    private func bringUpMiningHost(miner: TestKey?, minRelayFee: UInt64? = nil) async throws -> CtlHost {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("lattice-node-e2e-ctl-\(UUID().uuidString)")
         try FileManager.default.createDirectory(
@@ -258,6 +258,7 @@ final class LatticeCtlE2ETests: XCTestCase {
             worker: "cpu", workers: 1, batchSize: 100_000,
             recipients: miner.map { ["Nexus": $0.address] }
         )
+        topology.minRelayFee = minRelayFee
         try topology.validated().save(root: root)
 
         _ = try await runCtl(["up"], root: root)
@@ -334,6 +335,186 @@ final class LatticeCtlE2ETests: XCTestCase {
         try await waitFor("transfer mined", seconds: 240) {
             await self.balance(host, recipient.address) == 10
         }
+    }
+
+    /// A key with no balance transacts on a Nexus with a relay floor by
+    /// paying a sponsor in work.
+    func testAnUnfundedKeyTransactsUnderAFloorByPayingASponsorInWork() async throws {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lattice-node-e2e-ctlkeys-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let sponsorKey = try await makeKey(scratch, "sponsor")
+        let host = try await bringUpMiningHost(miner: sponsorKey, minRelayFee: 5)
+        _ = try await runCtl(["mine", "start"], root: host.root)
+        try await waitFor("sponsor funded by Nexus rewards", seconds: 180) {
+            await self.balance(host, sponsorKey.address) >= 50
+        }
+        try await transactThroughSponsor(host, chain: "Nexus", sponsorKey: sponsorKey)
+    }
+
+    /// The same on a merge-mined child, from the same sponsor: its shares are
+    /// priced on the child's block in the merged template and its fee is paid
+    /// in the child's coin.
+    func testAnUnfundedKeyTransactsOnAChildUnderAFloorByPayingASponsorInWork() async throws {
+        let alpha = "Nexus/Alpha"
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lattice-node-e2e-ctlkeys-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let sponsorKey = try await makeKey(scratch, "sponsor")
+        let host = try await bringUpMiningHost(miner: nil, minRelayFee: 5)
+        _ = try await runCtl(["child", "create", alpha, "--block-time", "1000", "--reward", "100"], root: host.root)
+        var topology = try Topology.load(root: host.root)
+        topology.mine?.recipients = [alpha: sponsorKey.address]
+        try topology.validated().save(root: host.root)
+        try await waitFor("Nexus active after the restart") {
+            await self.health(host.nexusRPC)?["phase"] as? String == "active"
+        }
+        _ = try await runCtl(["mine", "start"], root: host.root)
+        try await waitFor("sponsor funded by Alpha rewards", seconds: 180) {
+            await self.balance(host, sponsorKey.address, chain: alpha) >= 50
+        }
+        try await transactThroughSponsor(host, chain: alpha, sponsorKey: sponsorKey)
+    }
+
+    /// A fresh key's first transaction on `chain`: the node's floor refuses
+    /// it at zero fee, `lattice-sponsor` sells it the fee for shares of the
+    /// sponsor's block template, and the co-signed transaction is mined.
+    private func transactThroughSponsor(_ host: CtlHost, chain: String, sponsorKey: TestKey) async throws {
+        let client = CryptoUtils.generateKeyPair()
+        let draft = TransactionBody(
+            accountActions: [],
+            actions: [Action(key: "greeting", oldValue: nil, newValue: "hello")],
+            depositActions: [],
+            receiptActions: [],
+            withdrawalActions: [],
+            signers: [CryptoUtils.createAddress(from: client.publicKey)],
+            nonce: 0,
+            chainPath: chain.components(separatedBy: "/")
+        )
+        func signed(_ body: TransactionBody, adding signatures: [String: String] = [:]) throws -> Transaction {
+            let header = try HeaderImpl(node: body)
+            var all = signatures
+            all[client.publicKey] = TransactionSigning.sign(bodyHeader: header, privateKeyHex: client.privateKey)
+            return Transaction(signatures: all, body: header)
+        }
+        let node = "http://127.0.0.1:\(host.nexusRPC)"
+        let cookie = HostLayout(root: host.root.path).rpcCookie
+        let (refusedStatus, refusal) = try await postJSON(
+            "\(node)/transactions", SubmitTransactionRequest(transaction: try signed(draft)), cookie: cookie
+        )
+        XCTAssertFalse((200..<300).contains(refusedStatus), "the floor refuses a zero-fee transaction")
+        XCTAssertTrue(String(decoding: refusal, as: UTF8.self).contains("belowMinRelayFee"))
+
+        let port = randomPorts(1)[0]
+        let sponsorProcess = Process()
+        sponsorProcess.executableURL = try binary("E2E_SPONSOR_BIN", "lattice-sponsor")
+        sponsorProcess.arguments = [
+            "--node", node, "--cookie-file", cookie.path, "--key", sponsorKey.file.path,
+            "--share-work", "2^8", "--port", String(port),
+        ]
+        sponsorProcess.standardOutput = FileHandle.nullDevice
+        sponsorProcess.standardError = FileHandle.nullDevice
+        try sponsorProcess.run()
+        defer { stop(sponsorProcess) }
+        let sponsor = "http://127.0.0.1:\(port)"
+        struct NewWork: Encodable { let chain: String }
+        var work: [String: Any] = [:]
+        try await waitFor("the sponsor hands out work") {
+            guard let (status, data) = try? await self.postJSON("\(sponsor)/work", NewWork(chain: chain)),
+                  status == 200,
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return false
+            }
+            work = object
+            return true
+        }
+        let clientToken = try XCTUnwrap(work["client"] as? String)
+        let assignment = try XCTUnwrap(work["assignment"] as? String)
+        let prefix = try XCTUnwrap((work["prefixHex"] as? String).flatMap { Data(hex: $0) })
+        let shareTarget = try XCTUnwrap((work["shareTarget"] as? String).flatMap(MinerLoopLogic.parseTarget))
+        let start = try XCTUnwrap((work["startNonce"] as? String).flatMap { UInt64($0) })
+        let needed = try XCTUnwrap((work["sharesForFee"] as? String).flatMap { UInt64($0) })
+        XCTAssertGreaterThan(needed, 0)
+
+        struct Share: Encodable {
+            let assignment: String
+            let nonce: String
+        }
+        let midstate = ProofOfWork.midstate(prefixBytes: ContiguousArray(prefix))
+        var found: UInt64 = 0
+        var nonce = start
+        while found < needed {
+            if ProofOfWork.hash(midstate: midstate, nonce: nonce) <= shareTarget {
+                let (status, body) = try await postJSON(
+                    "\(sponsor)/shares", Share(assignment: assignment, nonce: String(nonce))
+                )
+                XCTAssertEqual(status, 200, String(decoding: body, as: UTF8.self))
+                found += 1
+            }
+            nonce += 1
+        }
+
+        struct SponsorRequest: Encodable {
+            let client: String
+            let transaction: ContentBoundTransaction
+        }
+        struct Sponsored: Decodable {
+            let transaction: ContentBoundTransaction
+        }
+        let (sponsoredStatus, sponsoredData) = try await postJSON(
+            "\(sponsor)/sponsor",
+            SponsorRequest(client: clientToken, transaction: ContentBoundTransaction(signatures: [:], body: draft))
+        )
+        XCTAssertEqual(sponsoredStatus, 200, String(decoding: sponsoredData, as: UTF8.self))
+        let sponsored = try JSONDecoder().decode(Sponsored.self, from: sponsoredData).transaction
+        let (submitStatus, submitData) = try await postJSON(
+            "\(node)/transactions",
+            SubmitTransactionRequest(transaction: try signed(sponsored.body, adding: sponsored.signatures)),
+            cookie: cookie
+        )
+        XCTAssertEqual(submitStatus, 200, String(decoding: submitData, as: UTF8.self))
+        let cid = try JSONDecoder().decode(SubmitTransactionResponse.self, from: submitData).transactionCID
+        try await waitFor("the sponsored transaction is mined", seconds: 240) {
+            guard let url = URL(string: "\(node)/api/transaction/\(cid)" + Self.query(chain)),
+                  let authorization = try? String(contentsOf: cookie, encoding: .utf8) else { return false }
+            var request = URLRequest(url: url)
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            request.setValue("Basic " + Data(authorization.utf8).base64EncodedString(), forHTTPHeaderField: "Authorization")
+            guard let (data, _) = try? await URLSession.shared.data(for: request),
+                  let transaction = try? JSONDecoder().decode(ExplorerTransaction.self, from: data) else {
+                return false
+            }
+            return transaction.blockHeight != nil
+        }
+    }
+
+    /// Stop and reap `process`, bounded. `waitUntilExit` on a child whose
+    /// output nobody reads was seen to miss its exit and hang the teardown.
+    private func stop(_ process: Process) {
+        process.terminate()
+        let deadline = ContinuousClock.now + .seconds(10)
+        while ContinuousClock.now < deadline {
+            // Reaped here, or already by Foundation (-1, ECHILD).
+            if waitpid(process.processIdentifier, nil, WNOHANG) != 0 { return }
+            usleep(50_000)
+        }
+        kill(process.processIdentifier, SIGKILL)
+    }
+
+    private func postJSON<Body: Encodable>(
+        _ address: String, _ body: Body, cookie: URL? = nil
+    ) async throws -> (Int, Data) {
+        var request = URLRequest(url: URL(string: address)!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let cookie, let value = try? String(contentsOf: cookie, encoding: .utf8) {
+            request.setValue("Basic " + Data(value.utf8).base64EncodedString(), forHTTPHeaderField: "Authorization")
+        }
+        request.httpBody = try JSONEncoder().encode(body)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        return ((response as? HTTPURLResponse)?.statusCode ?? 0, data)
     }
 
     private static func query(_ chain: String) -> String {
