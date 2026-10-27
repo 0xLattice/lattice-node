@@ -12,16 +12,21 @@ import Foundation
 /// larger than the budget).
 ///
 /// Past the bound a session waits; nothing asked for is declined for it.
-/// Waiters are served first in, first out, the node's own work and each
-/// chain's next block to connect ahead of look-ahead fetches.
+/// Waiters are served first in, first out, by chain depth: a child chain
+/// connects only as far as its parent has executed, so while a parent
+/// catches up its fetches go first and its descendants' wait. At one
+/// depth, each chain's next block to connect goes ahead of look-ahead
+/// fetches, and the node's own work goes with the root's next blocks.
 public final class AcquisitionBudget: @unchecked Sendable {
     /// What a reservation is for, which orders it in line.
     public enum Priority: Sendable, Equatable {
         /// The node's own work: a connect, a template, a mined block.
         case ownWork
-        /// A body fetch for this block: ahead of look-ahead while the block
-        /// is one a chain can connect next (`prioritize`).
-        case body(String)
+        /// A body fetch for this block of a chain `depth` levels below the
+        /// root: ahead of deeper chains' fetches, and ahead of look-ahead at
+        /// its depth while the block is one a chain can connect next
+        /// (`prioritize`).
+        case body(String, depth: Int = 0)
     }
 
     /// Read and written under `lock` only.
@@ -129,16 +134,18 @@ public final class AcquisitionBudget: @unchecked Sendable {
         return granted
     }
 
-    /// The waiter first in line: the earliest urgent one, else the earliest.
+    /// The waiter first in line: the earliest at the shallowest depth, a
+    /// next block to connect (or the node's own work, at the root) before
+    /// look-ahead.
     private func first() -> Int? {
-        func urgent(_ waiter: Waiter) -> Bool {
+        func rank(_ waiter: Waiter) -> (depth: Int, lookAhead: Int) {
             switch waiter.priority {
-            case .ownWork: true
-            case .body(let cid): next.contains(cid)
+            case .ownWork: (0, 0)
+            case .body(let cid, let depth): (depth, next.contains(cid) ? 0 : 1)
             }
         }
-        // `waiters` is in arrival order.
-        return waiters.firstIndex(where: urgent) ?? (waiters.isEmpty ? nil : 0)
+        // `waiters` is in arrival order, so the first minimum is the earliest.
+        return waiters.indices.min { rank(waiters[$0]) < rank(waiters[$1]) }
     }
 
     private func resume(_ continuations: [(CheckedContinuation<Bool, Never>, Bool)]) {
