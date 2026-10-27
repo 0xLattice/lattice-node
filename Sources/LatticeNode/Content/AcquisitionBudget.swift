@@ -12,11 +12,11 @@ import Foundation
 /// larger than the budget).
 ///
 /// Past the bound a session waits; nothing asked for is declined for it.
-/// Waiters are served first in, first out, by chain depth: a child block
-/// connects only once its parent chain has executed its anchor, so a
-/// chain's fetches never wait behind its descendants'. At one depth, each
-/// chain's next block to connect goes ahead of look-ahead fetches, and the
-/// node's own work goes with the root's next blocks.
+/// Waiters are served first in, first out, by chain depth: a child chain
+/// connects only as far as its parent has executed, so while a parent
+/// catches up its fetches go first and its descendants' wait. At one
+/// depth, each chain's next block to connect goes ahead of look-ahead
+/// fetches, and the node's own work goes with the root's next blocks.
 public final class AcquisitionBudget: @unchecked Sendable {
     /// What a reservation is for, which orders it in line.
     public enum Priority: Sendable, Equatable {

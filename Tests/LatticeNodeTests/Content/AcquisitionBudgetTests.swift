@@ -190,12 +190,13 @@ final class AcquisitionBudgetTests: XCTestCase {
             try await waiter("child-ahead", .body("c1", depth: 1)),
             try await waiter("child-next", .body("c2", depth: 1)),
             try await waiter("root-ahead", .body("r", depth: 0)),
+            try await waiter("own", .ownWork),
         ]
         budget.prioritize(["g", "c2"])
         budget.release(10)
         for task in tasks { _ = await task.value }
         let granted = await order.granted
-        XCTAssertEqual(granted, ["root-ahead", "child-next", "child-ahead", "grandchild-next"])
+        XCTAssertEqual(granted, ["own", "root-ahead", "child-next", "child-ahead", "grandchild-next"])
         XCTAssertEqual(budget.reserved, 0)
     }
 

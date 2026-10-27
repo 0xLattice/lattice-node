@@ -27,7 +27,8 @@ final class StepTouchedTests: XCTestCase {
 
     /// Grinds mined at three levels, fetched and executed one step at a
     /// time: after every step, each level not touched is as it was, and a
-    /// child level's own body arrival touches that level alone.
+    /// child level's own body arrival touches only that level and the
+    /// levels below it (one its execution wakes), never an ancestor.
     func testAStepChangesOnlyTheLevelsItTouched() async throws {
         var rng = SplitMix64(state: 0x70C4)
         let world = try await LevelWorld.generate(
@@ -49,7 +50,7 @@ final class StepTouchedTests: XCTestCase {
                 }
                 if case .level(let path, .bodyFetched) = event, path.count > 1 {
                     childArrivals += 1
-                    XCTAssertTrue(host.touched.isSubset(of: [path]), "\(host.touched)")
+                    XCTAssertTrue(host.touched.allSatisfy { $0.starts(with: path) }, "\(host.touched)")
                 }
                 for effect in effects {
                     switch effect {
