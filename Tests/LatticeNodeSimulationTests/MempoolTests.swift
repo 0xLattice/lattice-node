@@ -530,6 +530,34 @@ final class MempoolTests: XCTestCase {
         return testSpec(maxBlockSize: bytes + allowance - Self.place, maxTransactions: count)
     }
 
+    /// The next block charges each transaction its state growth, at most,
+    /// against what the coinbase leaves: one that would overrun it is
+    /// skipped for one that adds less, and one that could never fit a block
+    /// is refused.
+    func testTheNextBlockChargesStateGrowth() throws {
+        func write(fee: Int64, bytes: Int) throws -> Transaction {
+            let key = CryptoUtils.generateKeyPair()
+            let body = TransactionBody(
+                accountActions: [AccountAction(owner: address(key), delta: -fee)],
+                actions: [Action(key: "name/\(address(key))", oldValue: nil, newValue: String(repeating: "x", count: bytes))],
+                depositActions: [], receiptActions: [], withdrawalActions: [],
+                signers: [address(key)], nonce: 0, chainPath: ["Nexus"]
+            )
+            return Transaction(signatures: [key.publicKey: "x"], body: try HeaderImpl(node: body))
+        }
+        let allowance = testSpec().maxStateGrowth - Mempool.growthRoom(testSpec())
+        let spec = testSpec(maxStateGrowth: allowance + 3_000)
+        var pool = Mempool()
+        let first = try write(fee: 1_000, bytes: 2_000)
+        let second = try write(fee: 900, bytes: 2_000)
+        let small = try write(fee: 10, bytes: 10)
+        for tx in [first, second, small] { try pool.submit(tx, spec: spec, addedAt: 0) }
+        XCTAssertEqual(try pool.nextBlock(spec).map(Mempool.cid(of:)), [try Mempool.cid(of: first), try Mempool.cid(of: small)])
+        XCTAssertThrowsError(try pool.submit(try write(fee: 1, bytes: 3_000), spec: spec, addedAt: 0)) {
+            XCTAssertEqual($0 as? MempoolError, .tooLarge)
+        }
+    }
+
     /// The next block takes the higher fee rate first; one that does not
     /// fit is skipped for a smaller one behind it.
     func testATransactionThatDoesNotFitIsSkippedForOneThatDoes() throws {
@@ -701,10 +729,10 @@ private func transactionBody(
     )
 }
 
-func testSpec(maxBlockSize: Int = 1_000_000, maxTransactions: UInt64 = 100) -> ChainSpec {
+func testSpec(maxBlockSize: Int = 1_000_000, maxTransactions: UInt64 = 100, maxStateGrowth: Int = 3_000_000) -> ChainSpec {
     ChainSpec(
         maxNumberOfTransactionsPerBlock: maxTransactions,
-        maxStateGrowth: 100_000,
+        maxStateGrowth: maxStateGrowth,
         maxBlockSize: maxBlockSize,
         premine: 0,
         targetBlockTime: 1_000,

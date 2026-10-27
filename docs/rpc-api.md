@@ -283,7 +283,9 @@ The body is content-bound and the signature, nonce, funding, fee, and path are
 validated before admission. An unhosted path returns 404. A transaction must
 fit in a block by itself: past `maxBlockSize` less 2048 bytes for the block's
 own content and its place in it, the refusal is `tooLarge` (so a chain whose `maxBlockSize` is
-2048 or less admits nothing).
+2048 or less admits nothing). So is one whose state growth, at most (Lattice's
+`stateGrowthCeiling`), is past `maxStateGrowth` less 128 bytes for the
+coinbase's.
 
 The node's pool admits only transactions paying at least the operator's
 `--min-relay-fee` (default 1): the fee is the transaction's balance excess,

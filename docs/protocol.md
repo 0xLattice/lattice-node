@@ -295,7 +295,8 @@ retriable refusal, never held. Its rules:
 - Every tip move re-checks each pooled transaction's nonce, funds and
   evidence, and one no longer ready leaves. Policies are judged at admission
   and by templates, which are handed only what the next block can carry
-  (fee order, skipping what does not fit); what a template's policies refuse
+  (fee order, skipping what does not fit its bytes, count or state growth,
+  each charged its growth at most); what a template's policies refuse
   leaves.
 
 There is no time-based expiry; capacity evicts the lowest fee rate.

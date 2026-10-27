@@ -129,6 +129,9 @@ public struct Mempool: Sendable {
         let cid: String
         let transaction: Transaction
         let size: Int
+        /// Its share of the block's state growth, at most: Lattice's
+        /// ceiling from the body alone, never below 0.
+        let growth: Int
         let claims: Set<String>
         let debits: [String: UInt64]
         let fee: WorkSum
@@ -194,7 +197,7 @@ public struct Mempool: Sendable {
     private func measure(
         _ transaction: Transaction,
         spec: ChainSpec
-    ) throws -> (cid: String, body: TransactionBody, size: Int, surplus: WorkSum, debits: [String: UInt64]) {
+    ) throws -> (cid: String, body: TransactionBody, size: Int, growth: Int, surplus: WorkSum, debits: [String: UInt64]) {
         guard transaction.signatures.count <= limits.maxSignatures,
               transaction.signatures.allSatisfy({ key, signature in
                   key.utf8.count <= Self.maximumSignatureFieldBytes
@@ -215,8 +218,23 @@ public struct Mempool: Sendable {
         }
         let (size, overflow) = envelopeData.count.addingReportingOverflow(bodyData.count)
         guard !overflow, size <= Self.transactionRoom(spec) else { throw MempoolError.tooLarge }
-        return (try Self.cid(of: transaction), body, size, surplus, debits)
+        guard let ceiling = try? TransactionBody.stateGrowthCeiling(of: [body]) else { throw MempoolError.invalidState }
+        let growth = max(0, ceiling)
+        guard growth <= Self.growthRoom(spec) else { throw MempoolError.tooLarge }
+        return (try Self.cid(of: transaction), body, size, growth, surplus, debits)
     }
+
+    /// The most state growth a block's transactions may add: `maxStateGrowth`
+    /// less what its coinbase may (`rewardAllowance`).
+    public static func growthRoom(_ spec: ChainSpec) -> Int {
+        spec.maxStateGrowth - rewardAllowance
+    }
+
+    /// What a block's coinbase may add to its state growth: a new balance
+    /// for its recipient, whose name (a canonical address is about 60
+    /// bytes) and value fit this. A longer name only makes the builder
+    /// bisect.
+    static let rewardAllowance = 128
 
     /// The most bytes a transaction may have: what a block carrying only it
     /// leaves of `maxBlockSize`. The block's own fields and transaction trie
@@ -255,6 +273,7 @@ public struct Mempool: Sendable {
             cid: cid,
             transaction: transaction,
             size: measured.size,
+            growth: measured.growth,
             claims: Self.claims(of: measured.body),
             debits: measured.debits,
             fee: measured.surplus,
@@ -351,15 +370,15 @@ public struct Mempool: Sendable {
 
     /// One block's fill from `entries`, in their order: each is charged its
     /// bytes and its place in the block (`transactionAllowance`) against
-    /// what the block's own content leaves, up to the spec's transaction
-    /// count. One that does not fit is skipped for a smaller one behind it,
-    /// so what is taken fits the block's bytes and count, and the builder,
-    /// which keeps the longest prefix that fits, does not cut it short for
-    /// them. State growth is not charged: on a chain whose `maxStateGrowth`
-    /// binds before its size, the builder may carry less.
+    /// what the block's own content leaves, and its state growth against
+    /// `growthRoom`, up to the spec's transaction count. One that does not
+    /// fit is skipped for a smaller one behind it, so what is taken fits the
+    /// block from any starting state, and the builder, which keeps the
+    /// longest prefix that fits, does not cut it short.
     private static func fill(_ spec: ChainSpec, _ entries: [Entry]) -> (taken: [Entry], rest: [Entry]) {
         let limit = Int(clamping: spec.maxNumberOfTransactionsPerBlock)
         var room = spec.maxBlockSize - blockAllowance
+        var growthRoom = Self.growthRoom(spec)
         var taken: [Entry] = []
         var rest: [Entry] = []
         var misses = 0
@@ -369,9 +388,10 @@ public struct Mempool: Sendable {
                 break
             }
             let charged = entry.size + transactionAllowance
-            if charged <= room {
+            if charged <= room, entry.growth <= growthRoom {
                 taken.append(entry)
                 room -= charged
+                growthRoom -= entry.growth
                 misses = 0
             } else {
                 rest.append(entry)
