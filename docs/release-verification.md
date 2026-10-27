@@ -12,8 +12,8 @@ For tagged releases, CI also publishes signed GitHub artifact attestations for t
 
 ```sh
 shasum -a 256 -c lattice-node-<version>-<platform>.tar.gz.sha256
-gh attestation verify lattice-node-<version>-<platform>.tar.gz --repo adalinxx/lattice-node
-gh attestation verify lattice-node-<version>-<platform>.tar.gz --repo adalinxx/lattice-node --predicate-type https://spdx.dev/Document/v2.3
+gh attestation verify lattice-node-<version>-<platform>.tar.gz --repo 0xLattice/lattice-node
+gh attestation verify lattice-node-<version>-<platform>.tar.gz --repo 0xLattice/lattice-node --predicate-type https://spdx.dev/Document/v2.3
 
 # From a lattice-node checkout, with all four release assets in one directory:
 .github/scripts/check-release-artifact-bindings.sh \
@@ -32,7 +32,7 @@ the executables: libatomic, libcurl, libsqlite3, and libxml2. The smoke test
 verifies the exact Nexus genesis, mines one canonical block through the external
 mining pipeline, then restarts the node and verifies the same persisted tip.
 
-The provenance attestation binds the archive artifact's name and digest to the GitHub workflow identity for `adalinxx/lattice-node`. The SBOM attestation binds that same archive artifact to the SPDX dependency inventory generated during the same workflow run. The checksum catches transfer corruption; the manifest records the archive name, checksum subject name, archive digest, and SBOM digest for the sibling release assets.
+The provenance attestation binds the archive artifact's name and digest to the GitHub workflow identity for `0xLattice/lattice-node`. The SBOM attestation binds that same archive artifact to the SPDX dependency inventory generated during the same workflow run. The checksum catches transfer corruption; the manifest records the archive name, checksum subject name, archive digest, and SBOM digest for the sibling release assets.
 
 The publishing job treats tagged releases as immutable: it fails rather than replacing assets on an existing release.
 Repository administrators should also protect the release tag patterns from force-updates and deletion. The workflow verifies the tag target immediately before publishing, but only repository policy can prevent a privileged actor from moving it afterward.
