@@ -481,14 +481,14 @@ final class AnchoredChildTemplateTests: XCTestCase {
     /// mined into a block every validator rejects, and named for Alpha's
     /// pool to drop.
     func testAChildTemplateCarriesOnlyWhatItsPoliciesAccept() async throws {
-        for (verdict, carried) in [(UInt8(0), 0), (1, 1)] {
+        for (verdict, carried) in [(UInt8(0), 0), (1, 2)] {
             var builder = try await LevelWorld.Builder(levels: 2)
             let module = WasmPolicyModule(bytes: Self.policyModule(verdict: verdict))
             let header = try WasmPolicyModuleHeader(node: module)
             try await header.storeRecursively(storer: builder.cas as any VolumeStorer)
             let base = LevelWorld.specFor(Self.alpha)
             builder.specs[Self.alpha] = ChainSpec(
-                maxNumberOfTransactionsPerBlock: base.maxNumberOfTransactionsPerBlock,
+                maxNumberOfTransactionsPerBlock: 2,
                 maxStateGrowth: base.maxStateGrowth, premine: base.premine,
                 targetBlockTime: base.targetBlockTime, initialReward: base.initialReward,
                 halvingInterval: base.halvingInterval, halfLife: base.halfLife,
@@ -504,16 +504,16 @@ final class AnchoredChildTemplateTests: XCTestCase {
             await host.feed(builder.grinds)
             XCTAssertEqual(host.alpha.snapshot.actOnTip, g.cid, "fixture: Alpha executed its genesis")
 
-            let spend = try Self.nonceSpend(1, on: Self.alpha)
+            let spends = try (1...3).map { try Self.nonceSpend($0, on: Self.alpha) }
             var refused: [PolicyRefusal] = []
             let block = try await candidate(
-                input(host, transactions: [spend]), levels: levels(host),
+                input(host, transactions: spends), levels: levels(host),
                 entering: n1, timestamp: t + 2 * interval, cas: host.cas, refused: &refused
             )
             let count = try await transactionCount(block, host.cas)
             XCTAssertEqual(count, carried, "policy verdict \(verdict)")
             XCTAssertEqual(
-                refused, carried == 0 ? [PolicyRefusal(path: Self.alpha, tipCID: g.cid, cids: [try Mempool.cid(of: spend)])] : []
+                refused, carried == 0 ? [PolicyRefusal(path: Self.alpha, tipCID: g.cid, cids: try spends.map(Mempool.cid(of:)))] : []
             )
         }
     }

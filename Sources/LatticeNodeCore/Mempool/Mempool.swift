@@ -12,15 +12,13 @@ public enum MempoolError: Error, Sendable, Equatable {
     case tooLarge
     case full
     case invalidState
-    /// It shares its first signer's nonce, a state key, a deposit or a
-    /// receipt with more than one pooled transaction, or with one it does not
-    /// replace.
-    case conflictingNonce
     /// An account it debits cannot also pay what pooled transactions
-    /// already debit it. Retriable once those are mined.
+    /// already debit it, and it does not outbid them. Retriable once those
+    /// are mined.
     case insufficientFunds
-    /// A replacement that does not pay `MempoolLimits.replacementIncrement`
-    /// more than the transaction it replaces.
+    /// It shares its first signer's nonce, a state key, a deposit or a
+    /// receipt with pooled transactions, and does not pay
+    /// `MempoolLimits.replacementIncrement` more than all it would displace.
     case feeTooLow
     /// The fee is under this node's `MempoolLimits.minRelayFee`.
     case belowMinRelayFee
@@ -71,7 +69,7 @@ public struct MempoolLimits: Sendable, Equatable {
     public var maxBytes: Int
     public var maxSignatures: Int
     /// The smallest fee (`minerSurplus`) admitted. Node relay policy, never
-    /// consensus; 0 admits any fee.
+    /// consensus. 0 admits any fee, and pool space is then free to hold.
     public var minRelayFee: UInt64
 
     public init(
@@ -87,10 +85,10 @@ public struct MempoolLimits: Sendable, Equatable {
         self.minRelayFee = minRelayFee
     }
 
-    /// How much more a replacement pays than what it replaces: the relay
-    /// floor, and at least 1 (BIP125 rule 4). Each bump costs the sender at
-    /// least this much in the fee that is finally mined, so churning a
-    /// slot is bounded by the sender's balance.
+    /// How much more a transaction pays than all it displaces: the relay
+    /// floor, and at least 1 (BIP125 rules 3 and 4). Each displacement costs
+    /// the sender at least this much in the fee that is finally mined, so
+    /// churning the pool is bounded by the sender's balance.
     public var replacementIncrement: UInt64 { max(1, minRelayFee) }
 }
 
@@ -131,9 +129,10 @@ public struct ProjectedBlock: Sendable, Equatable {
 /// - Money is budgeted: an account's debits across the pool never exceed
 ///   its balance on the tip, as preflight read it. An account backs as many
 ///   transactions as it can pay, and no more.
-/// A transaction is replaced only by its first signer's own, paying
-/// `replacementIncrement` more. `version` moves on every change, so a job
-/// built from the pool names the pool it read.
+/// A conflict, over a claim or an account's balance, goes to the higher fee:
+/// a newcomer displaces what it conflicts with by paying all of their fees
+/// and `replacementIncrement` more. `version` moves on every change, so a
+/// job built from the pool names the pool it read.
 public struct Mempool: Sendable {
     /// Bound parse work by wire capacity (a 16-bit length), not an invented
     /// cap: the signature's crypto verification is the authoritative check.
@@ -278,42 +277,44 @@ public struct Mempool: Sendable {
             addedAt: addedAt
         )
 
-        // Replace-by-fee: one pooled transaction sharing a claim, replaced
-        // by its first signer's own (both are ready, so at the same nonce),
-        // paying the increment more. A transaction that only shares a key,
-        // deposit or receipt with another sender's is refused, never a bid
-        // on it. The fee is funds the sender gives up when either is mined,
-        // so bids cannot be raised for free.
-        let overlapping = Set(entry.claims.compactMap { claimants[$0] })
-        let replaced: Entry?
-        if overlapping.isEmpty {
-            replaced = nil
-        } else if overlapping.count == 1, let overlap = overlapping.first, let existing = entries[overlap],
-                  let signer = measured.body.signers.first,
-                  existing.transaction.body.node?.signers.first == signer {
-            guard entry.fee >= existing.fee + WorkSum(UInt256(limits.replacementIncrement)) else {
-                throw MempoolError.feeTooLow
+        // Conflicts go to the higher fee. It displaces every pooled
+        // transaction sharing a claim with it, and, for each account it
+        // debits, that account's lowest-paying transactions until its own
+        // debit fits the balance. It must pay what they all pay plus the
+        // increment: every displacement costs the sender in the fee that is
+        // finally mined, so bids cannot be raised for free.
+        var displaced: [String: Entry] = [:]
+        for claim in entry.claims {
+            if let holder = claimants[claim], let existing = entries[holder] { displaced[holder] = existing }
+        }
+        let claimsConflict = !displaced.isEmpty
+        for (account, debit) in entry.debits.sorted(by: { $0.key < $1.key }) {
+            let balance = balances[account, default: 0]
+            guard debit <= balance else { throw MempoolError.insufficientFunds }
+            var held = committed[account, default: 0] - displaced.values.reduce(0) { $0 + ($1.debits[account] ?? 0) }
+            guard held > balance || debit > balance - held else { continue }
+            let debiting = entries.values
+                .filter { $0.debits[account] != nil && displaced[$0.cid] == nil }
+                .sorted { Self.retention($0, $1) < 0 }
+            for existing in debiting where held > balance || debit > balance - held {
+                displaced[existing.cid] = existing
+                held -= existing.debits[account] ?? 0
             }
-            replaced = existing
-        } else {
-            throw MempoolError.conflictingNonce
+        }
+        if !displaced.isEmpty {
+            let owed = displaced.values.reduce(WorkSum(UInt256(limits.replacementIncrement))) { $0 + $1.fee }
+            guard entry.fee >= owed else {
+                throw claimsConflict ? MempoolError.feeTooLow : MempoolError.insufficientFunds
+            }
         }
 
-        // Every account it debits pays this as well as what the pool
-        // already debits it (less what it replaces).
-        for (account, debit) in entry.debits {
-            let held = committed[account, default: 0] - (replaced?.debits[account] ?? 0)
-            let (total, overflow) = held.addingReportingOverflow(debit)
-            guard !overflow, total <= balances[account, default: 0] else { throw MempoolError.insufficientFunds }
-        }
-
-        var prospectiveCount = entries.count - (replaced == nil ? 0 : 1)
-        var prospectiveBytes = byteCount - (replaced?.size ?? 0)
+        var prospectiveCount = entries.count - displaced.count
+        var prospectiveBytes = byteCount - displaced.values.reduce(0) { $0 + $1.size }
         var evictions: [String] = []
         // Sorted only when full: admission stays linear in the pool.
         let full = prospectiveCount >= limits.maxCount || entry.size > limits.maxBytes - prospectiveBytes
         let candidates = !full ? [] : entries.values
-            .filter { $0.cid != replaced?.cid }
+            .filter { displaced[$0.cid] == nil }
             .sorted { Self.retention($0, $1) < 0 }
         for candidate in candidates
         where prospectiveCount >= limits.maxCount || entry.size > limits.maxBytes - prospectiveBytes {
@@ -328,9 +329,7 @@ public struct Mempool: Sendable {
         }
 
         var mutation = MempoolMutation(transactionCID: cid)
-        if let replaced, let removed = removeEntry(replaced.cid) {
-            mutation.replaced = [Self.item(removed)]
-        }
+        mutation.replaced = displaced.keys.sorted().compactMap { removeEntry($0).map(Self.item) }
         mutation.evicted = evictions.compactMap { removeEntry($0).map(Self.item) }
         insert(entry)
         mutation.inserted = Self.item(entry)
@@ -348,6 +347,14 @@ public struct Mempool: Sendable {
             return true
         }
         return result
+    }
+
+    /// What the next block can carry: pooled transactions in template order,
+    /// skipping one that does not fit for a smaller one behind it, up to the
+    /// spec's transaction count and `transactionRoom`. A template judges
+    /// these by its policies, never the whole pool.
+    public func nextBlock(_ spec: ChainSpec) -> [Transaction] {
+        transactions(limit: Int(clamping: spec.maxNumberOfTransactionsPerBlock), maxBytes: Self.transactionRoom(spec))
     }
 
     /// The next `count` blocks this pool would fill if nothing else arrived,

@@ -390,17 +390,20 @@ public struct MiningState: Sendable {
         now: Int64,
         _ turn: inout Turn
     ) {
+        // A level that has not executed cannot judge yet: a restored row
+        // waits for its first tip, which preflights every admission.
+        if spec == nil, case .restored = origin, let cid = try? Mempool.cid(of: transaction) {
+            if admissions[cid] == nil {
+                open(cid, Admission(transaction: transaction, origins: [origin], slot: .local))
+            }
+            return
+        }
         let cid: String
         do {
             guard let spec else { throw MempoolError.unresolved }
             cid = try mempool.check(transaction, spec: spec)
         } catch {
-            // Too large or value-creating: the pool can never hold it, on any
-            // tip. Anything else (unresolved content, an encoding failure) is
-            // not a verdict and keeps a journal row.
-            let refusal = error as? MempoolError ?? .unresolved
-            let verdict = error as? MempoolError == .tooLarge || error as? MempoolError == .invalidState
-            refuse([origin], cid: try? Mempool.cid(of: transaction), refusal, verdict: verdict, &turn)
+            refuse([origin], cid: try? Mempool.cid(of: transaction), error as? MempoolError ?? .unresolved, &turn)
             return
         }
         if let pooled = mempool.item(cid) {
@@ -503,7 +506,14 @@ public struct MiningState: Sendable {
         // job on the new tip.
         guard job.tipEpoch == tipEpoch else { return }
         preflighting.remove(job.cid)
-        if let admission = close(job.cid) {
+        if let admission = admissions[job.cid] {
+            // A tip move's check skips policies; an admission is judged by
+            // them.
+            guard job.checksPolicies else {
+                preflight(job.cid, admission.transaction, &turn)
+                return
+            }
+            _ = close(job.cid)
             admit(admission, cid: job.cid, disposition, balances: balances, now: now, &turn)
             return
         }
@@ -541,7 +551,7 @@ public struct MiningState: Sendable {
         case .invalid: .invalidState
         }
         if let refusal {
-            refuse(admission.origins, cid: cid, refusal, verdict: disposition == .invalid, &turn)
+            refuse(admission.origins, cid: cid, refusal, &turn)
             return
         }
         do {
@@ -557,9 +567,7 @@ public struct MiningState: Sendable {
             guard let item = mempool.item(cid) else { return }
             admitted(item, origins: admission.origins, inserted: mutation.inserted != nil, &turn)
         } catch {
-            // Only the verdict makes a refusal final for a journal row; a
-            // capacity or conflict refusal leaves the row for the next boot.
-            refuse(admission.origins, cid: cid, error as? MempoolError ?? .invalidState, verdict: false, &turn)
+            refuse(admission.origins, cid: cid, error as? MempoolError ?? .invalidState, &turn)
         }
     }
 
@@ -609,7 +617,6 @@ public struct MiningState: Sendable {
         _ origins: [TransactionOrigin],
         cid: String?,
         _ error: MempoolError,
-        verdict: Bool,
         _ turn: inout Turn
     ) {
         for origin in origins {
@@ -617,8 +624,9 @@ public struct MiningState: Sendable {
             case .local(let replyID), .submitted(let replyID):
                 turn.replies.append(.transactionRefused(replyID: replyID, error))
             case .restored:
-                // The journal row goes with a verdict, never with capacity.
-                if verdict, let cid { turn.delta.removed.append(cid) }
+                // A journal row lives as long as its pool entry: one not
+                // pooled again is its sender's to resend.
+                if let cid { turn.delta.removed.append(cid) }
             case .peer, .returned:
                 break
             }
@@ -757,7 +765,7 @@ public struct MiningState: Sendable {
             tipCID: tipCID,
             tipEpoch: tipEpoch,
             poolVersion: mempool.version,
-            transactions: mempool.transactions(limit: .max),
+            transactions: spec.map(mempool.nextBlock) ?? [],
             request: request
         )
         nextJobID += 1

@@ -173,8 +173,8 @@ struct TxOptions: ParsableArguments {
     @Option(name: .long, help: "Signer nonce; defaults to the chain's next expected nonce for the key.")
     var nonce: UInt64?
 
-    @Option(name: .long, help: "Fee, debited from the signer beyond the actions.")
-    var fee: UInt64 = 0
+    @Option(name: .long, help: "Fee, debited from the signer beyond the actions; defaults to the node's relay floor (minRelayFee).")
+    var fee: UInt64?
 
     struct Signer {
         let address: String
@@ -227,6 +227,12 @@ struct TxOptions: ParsableArguments {
                 rpc: NodeRPC(topology, rootOption.layout), address: signer.address, chain: chain
             )
         }
+        let fee: UInt64
+        if let chosen = self.fee {
+            fee = chosen
+        } else {
+            fee = try await relayFloor(rpc: NodeRPC(topology, rootOption.layout), chain: chain)
+        }
         var actions = accountActions
         if fee > 0 {
             actions.append(AccountAction(owner: signer.address, delta: -(try amountDelta(fee))))
@@ -274,6 +280,17 @@ func nextNonce(rpc: NodeRPC, address: String, chain: String = "Nexus") async thr
         throw CtlError("\(address) has a transaction pending at nonce \(pending); try again once it is mined")
     }
     return committed
+}
+
+/// The node's relay floor: the smallest fee it pools.
+func relayFloor(rpc: NodeRPC, chain: String = "Nexus") async throws -> UInt64 {
+    var request = try rpc.request("api/fees", chain: chain)
+    request.timeoutInterval = 10
+    let (data, response) = try await URLSession.shared.data(for: request)
+    guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+        throw CtlError("fee lookup failed")
+    }
+    return try JSONDecoder().decode(ExplorerFees.self, from: data).minRelayFee
 }
 
 /// The chain's own view of the key's next nonce, as of its tip.
@@ -324,8 +341,9 @@ func chainHasTip(rpc: NodeRPC, chain: String = "Nexus") async throws -> Bool {
     return status["tipCID"] as? String != nil
 }
 
-/// The highest nonce this signer already has pending, or nil for none. The
-/// pool listing is capped by the node, so this can only ever miss entries
+/// The highest nonce this signer already has pending, or nil for none. A
+/// nonce is its first signer's: one it only co-signs (a sponsor's) is not
+/// its own. The pool listing is capped by the node, so this can only ever miss entries
 /// beyond that cap — in which case the submit is refused rather than
 /// silently replacing, which is the safe direction.
 func highestPendingNonce(rpc: NodeRPC, signer: String, chain: String = "Nexus") async throws -> UInt64? {
@@ -345,7 +363,7 @@ func highestPendingNonce(rpc: NodeRPC, signer: String, chain: String = "Nexus") 
     var highest: UInt64?
     for cid in pool.transactions {
         guard let entry = try await pooledTransaction(rpc: rpc, cid: cid, chain: chain),
-              entry.signers.contains(signer) else { continue }
+              entry.signers.first == signer else { continue }
         highest = max(highest ?? entry.nonce, entry.nonce)
     }
     return highest

@@ -67,7 +67,7 @@ final class MempoolTests: XCTestCase {
         XCTAssertLessThan(room, spec.maxBlockSize)
         // The allowance is the same on any chain.
         XCTAssertEqual(Mempool.transactionRoom(testSpec(maxBlockSize: 4_000)), 4_000 - (spec.maxBlockSize - room))
-        var pool = Mempool()
+        var pool = Mempool(limits: MempoolLimits(minRelayFee: 0))
         XCTAssertNoThrow(try pool.submit(try storing(size: room), spec: spec, addedAt: 0))
         XCTAssertThrowsError(try pool.submit(try storing(size: room + 1), spec: spec, addedAt: 0)) {
             XCTAssertEqual($0 as? MempoolError, .tooLarge)
@@ -127,13 +127,38 @@ final class MempoolTests: XCTestCase {
         try pool.submit(try paying(sponsor, fee: 5, nonce: 0), spec: testSpec(), addedAt: 0, balances: balance)
         XCTAssertEqual(pool.count, 3)
 
-        // A replacement's debit stands in for the one it replaces.
+        // A replacement's debit stands in for the one it replaces; one that
+        // still does not fit must outbid what else the account pays for.
         XCTAssertThrowsError(try pool.submit(try sponsored(fee: 11, client: client), spec: testSpec(), addedAt: 0, balances: balance)) {
-            XCTAssertEqual($0 as? MempoolError, .insufficientFunds, "10 + 5 + 11 is over 25")
+            XCTAssertEqual($0 as? MempoolError, .feeTooLow, "10 + 5 + 11 is over 25, and 11 does not outbid 10 and 5")
         }
         XCTAssertEqual(try pool.submit(
             try sponsored(fee: 11, client: client), spec: testSpec(), addedAt: 0, balances: [address(sponsor): 26]
         ).replaced.count, 1)
+    }
+
+    /// A transaction an account's balance cannot also pay displaces that
+    /// account's lowest-paying transactions when it pays more than them.
+    func testAHigherPayerDisplacesAnAccountsLowestPaying() throws {
+        var pool = Mempool()
+        let sponsor = CryptoUtils.generateKeyPair()
+        func sponsored(fee: Int64) throws -> Transaction {
+            try SimTransactions.signed(keys: [CryptoUtils.generateKeyPair(), sponsor], accountActions: [
+                AccountAction(owner: address(sponsor), delta: -fee),
+            ], nonce: 0, chainPath: ["Nexus"])
+        }
+        let balance = [address(sponsor): UInt64(20)]
+        try pool.submit(try sponsored(fee: 12), spec: testSpec(), addedAt: 0, balances: balance)
+        let low = try sponsored(fee: 6)
+        try pool.submit(low, spec: testSpec(), addedAt: 0, balances: balance)
+        XCTAssertThrowsError(try pool.submit(try sponsored(fee: 6), spec: testSpec(), addedAt: 0, balances: balance)) {
+            XCTAssertEqual($0 as? MempoolError, .insufficientFunds, "6 does not outbid 6")
+        }
+        // 12 + 8 fits 20 once the 6 is gone, and 8 pays it and the increment.
+        let high = try sponsored(fee: 8)
+        let mutation = try pool.submit(high, spec: testSpec(), addedAt: 0, balances: balance)
+        XCTAssertEqual(mutation.replaced.map(\.cid), [try Mempool.cid(of: low)])
+        XCTAssertEqual(pool.count, 2)
     }
 
     /// When a verdict reads less on an account than the pool debits it,
@@ -200,8 +225,9 @@ final class MempoolTests: XCTestCase {
     }
 
     /// Two senders writing one state key never share the pool: one of them
-    /// could not be mined. A sender's own replacement may write other keys.
-    func testAStateKeyIsWrittenByOnePooledTransaction() throws {
+    /// could not be mined. The key goes to the higher fee, so a cheap write
+    /// cannot hold it against a better offer.
+    func testAStateKeyGoesToTheHigherFee() throws {
         func write(_ key: (privateKey: String, publicKey: String), _ stateKey: String, fee: Int64) throws -> Transaction {
             let body = TransactionBody(
                 accountActions: [AccountAction(owner: address(key), delta: -fee)],
@@ -213,20 +239,21 @@ final class MempoolTests: XCTestCase {
         }
         var pool = Mempool()
         let alice = CryptoUtils.generateKeyPair()
-        try pool.submit(try write(alice, "name/ada", fee: 1), spec: testSpec(), addedAt: 0)
-        XCTAssertThrowsError(try pool.submit(
-            try write(CryptoUtils.generateKeyPair(), "name/ada", fee: 100), spec: testSpec(), addedAt: 0
-        )) {
-            XCTAssertEqual($0 as? MempoolError, .conflictingNonce)
+        let bob = CryptoUtils.generateKeyPair()
+        let alices = try write(alice, "name/ada", fee: 1)
+        try pool.submit(alices, spec: testSpec(), addedAt: 0)
+        XCTAssertThrowsError(try pool.submit(try write(bob, "name/ada", fee: 1), spec: testSpec(), addedAt: 0)) {
+            XCTAssertEqual($0 as? MempoolError, .feeTooLow)
         }
-        let changed = try write(alice, "name/lin", fee: 2)
-        XCTAssertEqual(try pool.submit(changed, spec: testSpec(), addedAt: 0).replaced.count, 1)
-        try pool.submit(try write(CryptoUtils.generateKeyPair(), "name/ada", fee: 1), spec: testSpec(), addedAt: 0)
-        XCTAssertEqual(pool.count, 2, "the key it gave up is free")
+        let bobs = try write(bob, "name/ada", fee: 2)
+        XCTAssertEqual(try pool.submit(bobs, spec: testSpec(), addedAt: 0).replaced.map(\.cid), [try Mempool.cid(of: alices)])
+        try pool.submit(try write(alice, "name/lin", fee: 1), spec: testSpec(), addedAt: 0)
+        XCTAssertEqual(pool.count, 2, "the nonce it lost is free")
     }
 
-    /// One transaction sharing claims with two pooled ones replaces neither.
-    func testATransactionOverlappingTwoIsRefused() throws {
+    /// One transaction sharing claims with two pooled ones displaces both
+    /// only by paying for both.
+    func testATransactionOverlappingTwoPaysForBoth() throws {
         var pool = Mempool()
         let first = CryptoUtils.generateKeyPair()
         let second = CryptoUtils.generateKeyPair()
@@ -242,15 +269,17 @@ final class MempoolTests: XCTestCase {
         try pool.submit(try paying(first, fee: 1, nonce: 0), spec: testSpec(), addedAt: 0)
         try pool.submit(try body(second, fee: 1, writing: [write]), spec: testSpec(), addedAt: 0)
         // The first's nonce and the second's key.
-        let joint = try body(first, fee: 100, writing: [write])
-        XCTAssertThrowsError(try pool.submit(joint, spec: testSpec(), addedAt: 0)) {
-            XCTAssertEqual($0 as? MempoolError, .conflictingNonce)
+        XCTAssertThrowsError(try pool.submit(try body(first, fee: 2, writing: [write]), spec: testSpec(), addedAt: 0)) {
+            XCTAssertEqual($0 as? MempoolError, .feeTooLow, "2 does not pay 1 + 1 and the increment")
         }
         XCTAssertEqual(pool.count, 2)
+        XCTAssertEqual(try pool.submit(try body(first, fee: 3, writing: [write]), spec: testSpec(), addedAt: 0).replaced.count, 2)
+        XCTAssertEqual(pool.count, 1)
     }
 
-    /// A deposit and a receipt are claimed like signers: two transactions
-    /// that create, spend or pay for the same one never share the pool.
+    /// A deposit and a receipt are claimed like a nonce: two transactions
+    /// that create, spend or pay for the same one never share the pool, and
+    /// one paying no more than the other is refused.
     func testDepositsAndReceiptsAreClaimed() throws {
         let demander = address(CryptoUtils.generateKeyPair())
         func body(signer: String, deposits: [DepositAction] = [], receipts: [ReceiptAction] = [],
@@ -267,17 +296,17 @@ final class MempoolTests: XCTestCase {
         var pool = Mempool()
         try pool.submit(body(signer: "a", withdrawals: [withdrawal]), spec: testSpec(), addedAt: 0)
         XCTAssertThrowsError(try pool.submit(body(signer: "b", withdrawals: [withdrawal]), spec: testSpec(), addedAt: 0)) {
-            XCTAssertEqual($0 as? MempoolError, .conflictingNonce, "one deposit, spent once")
+            XCTAssertEqual($0 as? MempoolError, .feeTooLow, "one deposit, spent once")
         }
         XCTAssertThrowsError(try pool.submit(body(signer: "c", deposits: [deposit]), spec: testSpec(), addedAt: 0)) {
-            XCTAssertEqual($0 as? MempoolError, .conflictingNonce)
+            XCTAssertEqual($0 as? MempoolError, .feeTooLow)
         }
 
         let receipt = ReceiptAction(withdrawer: "w", nonce: 7, demander: demander, amountDemanded: 3, directory: "Child")
         var parent = Mempool()
         try parent.submit(body(signer: "a", receipts: [receipt]), spec: testSpec(), addedAt: 0)
         XCTAssertThrowsError(try parent.submit(body(signer: "b", receipts: [receipt]), spec: testSpec(), addedAt: 0)) {
-            XCTAssertEqual($0 as? MempoolError, .conflictingNonce, "one receipt, paid once")
+            XCTAssertEqual($0 as? MempoolError, .feeTooLow, "one receipt, paid once")
         }
     }
 
@@ -303,7 +332,7 @@ final class MempoolTests: XCTestCase {
 
     /// `minRelayFee` is node admission policy on the real fee (the balance
     /// excess): below it is refused by name, at it is admitted, and the
-    /// default 0 admits a zero-fee transaction.
+    /// default 0 admits a zero-fee transaction. The daemon's default is 1.
     func testMinRelayFeeRefusesCheaperTransactions() throws {
         let key = CryptoUtils.generateKeyPair()
         let recipient = address(CryptoUtils.generateKeyPair())
@@ -403,7 +432,7 @@ final class MempoolTests: XCTestCase {
     }
 
     func testVersionMovesOnEveryChangeAndOnlyThen() throws {
-        var pool = Mempool()
+        var pool = Mempool(limits: MempoolLimits(minRelayFee: 0))
         let key = CryptoUtils.generateKeyPair()
         let tx = try signed(key, [], nonce: 0)
         let start = pool.version
@@ -431,7 +460,7 @@ final class MempoolTests: XCTestCase {
     /// The template takes the higher fee rate first; one that does not fit
     /// is skipped for a smaller one behind it.
     func testATransactionThatDoesNotFitIsSkippedForOneThatDoes() throws {
-        var pool = Mempool()
+        var pool = Mempool(limits: MempoolLimits(minRelayFee: 0))
         let big = try storing(size: 2_000)
         let small = try paying(CryptoUtils.generateKeyPair(), fee: 1, nonce: 0)
         let rich = try paying(CryptoUtils.generateKeyPair(), fee: 1_000, nonce: 0)

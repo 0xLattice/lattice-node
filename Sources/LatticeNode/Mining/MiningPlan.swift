@@ -105,7 +105,9 @@ enum MiningPlan {
     /// templates alike: the pool's own verdicts are not taken at this height.
     /// `refused` names those a policy refused outright, for the pool to drop;
     /// one this node could not judge (a body or module it lacks) is in
-    /// neither.
+    /// neither. `transactions` is what the next block can carry
+    /// (`Mempool.nextBlock`), so policies run on one block's worth, never
+    /// the whole pool.
     static func policyAcceptedTransactions(
         _ transactions: [Transaction],
         chainPath: [String],

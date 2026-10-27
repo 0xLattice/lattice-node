@@ -1581,7 +1581,7 @@ extension NodeRuntime {
                     tipCID: executed ? snapshot.actOnTip : nil,
                     bestHeaderTip: snapshot.bestHeaderTip,
                     // Each is checked again against the carrier's state.
-                    transactions: level.mining.mempool.transactions(limit: .max),
+                    transactions: level.mining.spec.map(level.mining.mempool.nextBlock) ?? [],
                     anchor: executed ? NodeRuntime.anchor(level.tree, snapshot.actOnTip) : nil,
                     // A weighed root that has not executed carries nothing
                     // until it executes, rather than a rival genesis.
