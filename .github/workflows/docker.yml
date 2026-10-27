@@ -10,7 +10,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: adalinxx/lattice-node
+  IMAGE_NAME: 0xlattice/lattice-node
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
