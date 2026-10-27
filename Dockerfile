@@ -1,4 +1,4 @@
-# Stage 1: build the node, operator CLI, coordinator, and worker.
+# Stage 1: build the node, operator CLI, coordinator, worker, and sponsor.
 FROM swift:6.1-jammy AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /build/.build/release/lattice-node /usr/local/bin/lattice-node
 COPY --from=builder /build/.build/release/lattice-mining-coordinator /usr/local/bin/lattice-mining-coordinator
 COPY --from=builder /build/.build/release/lattice-miner /usr/local/bin/lattice-miner
+COPY --from=builder /build/.build/release/lattice-sponsor /usr/local/bin/lattice-sponsor
 COPY --from=builder /build/.build/release/lattice /usr/local/bin/lattice
 COPY deploy/entrypoint.sh /usr/local/bin/lattice-entrypoint
 RUN chmod +x /usr/local/bin/lattice-entrypoint
