@@ -288,13 +288,14 @@ public struct ExplorerFees: Codable, Sendable, Equatable {
     public var weight: ExplorerWeight?
 }
 
-/// A transaction's weight is the largest of its bytes, its state growth
-/// (Lattice's ceiling) times `blockRoom / growthRoom` rounded up, and
-/// `blockRoom / maxTransactions`.
+/// A transaction's weight (`FeeWeight`) is the largest of its bytes plus
+/// `transactionAllowance`, its state growth (Lattice's ceiling) times
+/// `blockRoom / growthRoom` rounded up, and `blockRoom / maxTransactions`.
 public struct ExplorerWeight: Codable, Sendable, Equatable {
     public let blockRoom: Int
     public let growthRoom: Int
     public let maxTransactions: Int
+    public let transactionAllowance: Int
 }
 
 public struct ExplorerProjectedBlock: Codable, Sendable, Equatable {

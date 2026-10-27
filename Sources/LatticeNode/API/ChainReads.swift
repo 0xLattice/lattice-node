@@ -18,12 +18,15 @@ public struct ChainReads: Sendable {
         public let cids: [String]
         /// The pool's next blocks, for fee pricing (`Mempool.projectedBlocks`).
         public let projected: [ProjectedBlock]
+        /// What their rates are over, from the spec they were projected with.
+        public let weight: FeeWeight?
 
-        public init(count: Int, bytes: Int, cids: [String], projected: [ProjectedBlock] = []) {
+        public init(count: Int, bytes: Int, cids: [String], projected: [ProjectedBlock] = [], weight: FeeWeight? = nil) {
             self.count = count
             self.bytes = bytes
             self.cids = cids
             self.projected = projected
+            self.weight = weight
         }
     }
 
@@ -758,21 +761,10 @@ public struct ChainReads: Sendable {
     /// this node's relay floor. Read from this node's pool alone.
     public func explorerFees() async -> ExplorerFees {
         let pool = await mempool(false)
-        let spec: ChainSpec?
-        if let tip = await tip().tipCID, let block = await blockNode(cid: tip) {
-            spec = try? await block.spec.resolve(fetcher: storage).node
-        } else {
-            spec = nil
-        }
         return ExplorerFees(
             minRelayFee: storage.configuration.minRelayFee,
             blocks: pool.projected.map(ExplorerProjectedBlock.init),
-            weight: spec.map {
-                ExplorerWeight(
-                    blockRoom: $0.maxBlockSize - Mempool.blockAllowance, growthRoom: Mempool.growthRoom($0),
-                    maxTransactions: Int(clamping: $0.maxNumberOfTransactionsPerBlock)
-                )
-            }
+            weight: pool.weight.map(ExplorerWeight.init)
         )
     }
 
@@ -826,6 +818,15 @@ private actor ProofVolumeCollector: VolumeStorer {
         return unique.sorted { $0.key < $1.key }.map {
             LightClientProof.WitnessNode(cid: $0.key, data: $0.value)
         }
+    }
+}
+
+extension ExplorerWeight {
+    init(_ weight: FeeWeight) {
+        self.init(
+            blockRoom: weight.blockRoom, growthRoom: weight.growthRoom,
+            maxTransactions: weight.maxTransactions, transactionAllowance: weight.transactionAllowance
+        )
     }
 }
 

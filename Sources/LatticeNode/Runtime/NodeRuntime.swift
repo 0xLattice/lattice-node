@@ -1106,7 +1106,7 @@ extension NodeRuntime {
                 }
                 view.mempool = ChainReads.MempoolListing(
                     count: pool.count, bytes: pool.byteCount, cids: pool.items.prefix(200).map(\.cid),
-                    projected: projected
+                    projected: projected, weight: level.mining.spec.map(FeeWeight.init)
                 )
             }
             view.poolVersion = pool.version

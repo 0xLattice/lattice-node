@@ -304,7 +304,7 @@ final class MempoolTests: XCTestCase {
             return Transaction(signatures: [key.publicKey: "x"], body: try HeaderImpl(node: body))
         }
         let rich = try write("name/x", fee: 100_000, padding: 2_000)
-        let honest = try write("name/ada", fee: 50)
+        let honest = try write("name/ada", fee: 100)
         let behind = try write("name/d", fee: 200, padding: 2_000)
         let spec = try blocks(holding: size(rich) + size(behind) + 2 * Self.place)
         var pool = Mempool()
@@ -537,16 +537,36 @@ final class MempoolTests: XCTestCase {
     func testWeightIsTheLargestShareOfAnyLimit() {
         let room = testSpec().maxBlockSize - Mempool.blockAllowance
         let reward = testSpec().maxStateGrowth - Mempool.growthRoom(testSpec())
-        // Size binds: bytes.
-        let roomy = testSpec(maxTransactions: UInt64(room), maxStateGrowth: reward + room)
-        XCTAssertEqual(Mempool.weight(size: 300, growth: 300, spec: roomy), 300)
+        let place = Mempool.transactionAllowance
+        // Size binds: bytes and its place in the block.
+        let roomy = FeeWeight(testSpec(maxTransactions: UInt64(room), maxStateGrowth: reward + room))
+        XCTAssertEqual(roomy.of(size: 300, growth: 300), 300 + place)
         // Growth binds at a tenth of the bytes: its growth, times ten.
-        let tight = testSpec(maxTransactions: UInt64(room), maxStateGrowth: reward + room / 10)
-        XCTAssertEqual(Mempool.weight(size: 300, growth: 0, spec: tight), 300)
-        XCTAssertGreaterThanOrEqual(Mempool.weight(size: 300, growth: 100, spec: tight), 1_000)
-        XCTAssertLessThanOrEqual(Mempool.weight(size: 300, growth: 100, spec: tight), 1_001)
-        // Count binds: a transaction's share of it.
-        XCTAssertEqual(Mempool.weight(size: 300, growth: 0, spec: testSpec(maxTransactions: 10)), room / 10)
+        let tight = FeeWeight(testSpec(maxTransactions: UInt64(room), maxStateGrowth: reward + room / 10))
+        XCTAssertEqual(tight.of(size: 300, growth: 0), 300 + place)
+        XCTAssertGreaterThanOrEqual(tight.of(size: 300, growth: 100), 1_000)
+        XCTAssertLessThanOrEqual(tight.of(size: 300, growth: 100), 1_001)
+        XCTAssertEqual(tight.of(size: 300, growth: room), room, "past the growth room: the whole block")
+        // Count binds: a transaction's share of it; a count past the room has none.
+        XCTAssertEqual(FeeWeight(testSpec(maxTransactions: 10)).of(size: 300, growth: 0), room / 10)
+        XCTAssertEqual(FeeWeight(testSpec(maxTransactions: .max)).maxTransactions, room)
+    }
+
+    /// An action with neither value is malformed: refused, never measured.
+    func testAMalformedActionIsRefusedBeforeItsGrowthIsMeasured() throws {
+        let key = CryptoUtils.generateKeyPair()
+        let body = TransactionBody(
+            accountActions: [AccountAction(owner: address(key), delta: -10)],
+            actions: [Action(key: "x", oldValue: nil, newValue: nil)],
+            depositActions: [], receiptActions: [], withdrawalActions: [],
+            signers: [address(key)], nonce: 0, chainPath: ["Nexus"]
+        )
+        var pool = Mempool()
+        XCTAssertThrowsError(try pool.submit(
+            Transaction(signatures: [key.publicKey: "x"], body: try HeaderImpl(node: body)), spec: testSpec(), addedAt: 0
+        )) {
+            XCTAssertEqual($0 as? MempoolError, .invalidState)
+        }
     }
 
     /// The next block charges each transaction its state growth, at most,

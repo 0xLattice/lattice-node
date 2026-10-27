@@ -98,13 +98,59 @@ public struct ProjectedBlock: Sendable, Equatable {
     /// Transaction size it carries (envelope plus body, as the pool measures).
     public let bytes: Int
     /// Its lowest-rate transaction: the verified fee over its weight
-    /// (`Mempool.weight`). A transaction paying a higher rate would have
-    /// been taken before it.
+    /// (`FeeWeight`). A transaction paying a higher rate would have been
+    /// taken before it.
     public let lowestFee: WorkSum
+    /// That transaction's size.
     public let lowestFeeBytes: Int
+    /// That transaction's weight.
     public let lowestFeeWeight: Int
     /// Whether ready transactions were left for a later block.
     public let full: Bool
+}
+
+/// What a chain's fee rates are over: a transaction's weight, the most of a
+/// block it takes of any limit, in the block's bytes. The largest of its
+/// bytes and its place in the block; its state growth as that share of
+/// `growthRoom`, rounded up; and one transaction's share of the count.
+/// Where neither growth nor count binds before size (Nexus), it is the
+/// bytes a block charges it. Like Bitcoin's sigop-adjusted size. `/api/fees`
+/// serves these, so a wallet weighs its own transaction as the pool does.
+public struct FeeWeight: Sendable, Equatable {
+    /// The block's bytes for transactions (`maxBlockSize` less its own).
+    public let blockRoom: Int
+    /// The state growth for transactions (`Mempool.growthRoom`).
+    public let growthRoom: Int
+    /// The transaction count, at most `blockRoom` (beyond it, no share).
+    public let maxTransactions: Int
+    /// What a block charges each transaction beyond its bytes.
+    public let transactionAllowance: Int
+
+    public init(_ spec: ChainSpec) {
+        blockRoom = spec.maxBlockSize - Mempool.blockAllowance
+        growthRoom = Mempool.growthRoom(spec)
+        maxTransactions = Int(clamping: min(spec.maxNumberOfTransactionsPerBlock, UInt64(max(0, blockRoom))))
+        transactionAllowance = Mempool.transactionAllowance
+    }
+
+    /// The weight of a transaction of `size` bytes adding at most `growth`
+    /// state; one past `growthRoom` takes the whole block.
+    public func of(size: Int, growth: Int) -> Int {
+        var weight = max(1, size + transactionAllowance)
+        guard blockRoom > 0 else { return weight }
+        if growth > 0 {
+            if growthRoom <= 0 || growth >= growthRoom {
+                weight = max(weight, blockRoom)
+            } else {
+                // growth * blockRoom / growthRoom, rounded up.
+                let product = UInt64(growth).multipliedFullWidth(by: UInt64(blockRoom))
+                let (quotient, remainder) = UInt64(growthRoom).dividingFullWidth(product)
+                weight = max(weight, Int(quotient) + (remainder > 0 ? 1 : 0))
+            }
+        }
+        if maxTransactions > 0 { weight = max(weight, blockRoom / maxTransactions) }
+        return weight
+    }
 }
 
 /// The transaction pool of one level as a value: no IO, no awaits. It holds
@@ -135,7 +181,7 @@ public struct Mempool: Sendable {
         /// Its share of the block's state growth, at most: Lattice's
         /// ceiling from the body alone, never below 0.
         let growth: Int
-        /// What its fee rate is over (`Mempool.weight`).
+        /// What its fee rate is over (`FeeWeight`).
         let weight: Int
         let claims: Set<String>
         let debits: [String: UInt64]
@@ -223,7 +269,9 @@ public struct Mempool: Sendable {
         }
         let (size, overflow) = envelopeData.count.addingReportingOverflow(bodyData.count)
         guard !overflow, size <= Self.transactionRoom(spec) else { throw MempoolError.tooLarge }
-        guard let ceiling = try? TransactionBody.stateGrowthCeiling(of: [body]) else { throw MempoolError.invalidState }
+        // The ceiling reads every action, which must be well formed first.
+        guard body.actions.allSatisfy({ $0.verify() }),
+              let ceiling = try? TransactionBody.stateGrowthCeiling(of: [body]) else { throw MempoolError.invalidState }
         let growth = max(0, ceiling)
         guard growth <= Self.growthRoom(spec) else { throw MempoolError.tooLarge }
         return (try Self.cid(of: transaction), body, size, growth, surplus, debits)
@@ -235,26 +283,6 @@ public struct Mempool: Sendable {
         spec.maxStateGrowth - rewardAllowance
     }
 
-    /// What a transaction's fee rate is over: the most of the block it takes
-    /// of any limit, in the block's bytes. Its own bytes; its state growth
-    /// as that share of `growthRoom` in bytes; and one transaction's share
-    /// of the count, in bytes. Where neither growth nor count binds before
-    /// size (Nexus), it is the bytes. Like Bitcoin's sigop-adjusted size.
-    public static func weight(size: Int, growth: Int, spec: ChainSpec) -> Int {
-        let room = spec.maxBlockSize - blockAllowance
-        guard room > 0 else { return max(1, size) }
-        var weight = max(1, size)
-        if growth > 0, growth <= growthRoom(spec) {
-            // growth * room / growthRoom, rounded up; at most room.
-            let product = UInt64(growth).multipliedFullWidth(by: UInt64(room))
-            let (quotient, remainder) = UInt64(growthRoom(spec)).dividingFullWidth(product)
-            weight = max(weight, Int(quotient) + (remainder > 0 ? 1 : 0))
-        }
-        if spec.maxNumberOfTransactionsPerBlock > 0 {
-            weight = max(weight, room / Int(clamping: spec.maxNumberOfTransactionsPerBlock))
-        }
-        return weight
-    }
 
     /// What a block's coinbase may add to its state growth: a new balance
     /// for its recipient, whose name (a canonical address is about 60
@@ -277,7 +305,7 @@ public struct Mempool: Sendable {
 
     /// What each transaction adds to its block beyond its own bytes, with
     /// room to spare: about 180 in the transaction trie.
-    static let transactionAllowance = 256
+    public static let transactionAllowance = 256
 
     /// Pool a transaction preflight found ready. `balances` holds, for each
     /// account it debits, the balance preflight read on the tip; one
@@ -300,7 +328,7 @@ public struct Mempool: Sendable {
             transaction: transaction,
             size: measured.size,
             growth: measured.growth,
-            weight: Self.weight(size: measured.size, growth: measured.growth, spec: spec),
+            weight: FeeWeight(spec).of(size: measured.size, growth: measured.growth),
             claims: Self.claims(of: measured.body),
             debits: measured.debits,
             fee: measured.surplus,
@@ -449,14 +477,14 @@ public struct Mempool: Sendable {
         Self.rate(lhs.fee, lhs.weight, comparedTo: rhs.fee, rhs.weight)
     }
 
-    private static func rate(_ fee: WorkSum, _ size: Int, comparedTo otherFee: WorkSum, _ otherSize: Int) -> Int {
+    private static func rate(_ fee: WorkSum, _ weight: Int, comparedTo otherFee: WorkSum, _ otherWeight: Int) -> Int {
         if let lhsFee = fee.uint64Value, let rhsFee = otherFee.uint64Value {
-            let lhs = lhsFee.multipliedFullWidth(by: UInt64(otherSize))
-            let rhs = rhsFee.multipliedFullWidth(by: UInt64(size))
+            let lhs = lhsFee.multipliedFullWidth(by: UInt64(otherWeight))
+            let rhs = rhsFee.multipliedFullWidth(by: UInt64(weight))
             return lhs == rhs ? 0 : (lhs.high, lhs.low) > (rhs.high, rhs.low) ? 1 : -1
         }
-        let lhs = scaled(fee, by: otherSize)
-        let rhs = scaled(otherFee, by: size)
+        let lhs = scaled(fee, by: otherWeight)
+        let rhs = scaled(otherFee, by: weight)
         return lhs == rhs ? 0 : lhs > rhs ? 1 : -1
     }
 
