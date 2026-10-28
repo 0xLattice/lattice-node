@@ -9,6 +9,8 @@ let package = Package(
     products: [
         .library(name: "LatticeNode", targets: ["LatticeNode"]),
         .library(name: "LatticeNodeAPI", targets: ["LatticeNodeAPI"]),
+        .library(name: "LatticeMinerCore", targets: ["LatticeMinerCore"]),
+        .library(name: "LatticeMiningCoordinator", targets: ["LatticeMiningCoordinator"]),
         .executable(name: "lattice-node", targets: ["LatticeNodeDaemon"]),
         .executable(name: "lattice-miner", targets: ["LatticeMiner"]),
         .executable(
