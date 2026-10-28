@@ -341,6 +341,7 @@ final class LatticeCtlE2ETests: XCTestCase {
     /// A key with no balance transacts on a Nexus with a relay floor by
     /// paying a sponsor in work.
     func testAnUnfundedKeyTransactsUnderAFloorByPayingASponsorInWork() async throws {
+        try requireSponsor()
         let scratch = FileManager.default.temporaryDirectory
             .appendingPathComponent("lattice-node-e2e-ctlkeys-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
@@ -358,6 +359,7 @@ final class LatticeCtlE2ETests: XCTestCase {
     /// priced on the child's block in the merged template and its fee is paid
     /// in the child's coin.
     func testAnUnfundedKeyTransactsOnAChildUnderAFloorByPayingASponsorInWork() async throws {
+        try requireSponsor()
         let alpha = "Nexus/Alpha"
         let scratch = FileManager.default.temporaryDirectory
             .appendingPathComponent("lattice-node-e2e-ctlkeys-\(UUID().uuidString)")
@@ -377,6 +379,17 @@ final class LatticeCtlE2ETests: XCTestCase {
             await self.balance(host, sponsorKey.address, chain: alpha) >= 50
         }
         try await transactThroughSponsor(host, chain: alpha, sponsorKey: sponsorKey)
+    }
+
+    /// lattice-sponsor, from its own repository (0xLattice/lattice-sponsor),
+    /// whose CI runs these tests against this node with `E2E_SPONSOR_BIN`.
+    /// Without it they skip.
+    @discardableResult
+    private func requireSponsor() throws -> URL {
+        guard let path = ProcessInfo.processInfo.environment["E2E_SPONSOR_BIN"], !path.isEmpty else {
+            throw XCTSkip("E2E_SPONSOR_BIN is not set; lattice-sponsor's CI runs this test")
+        }
+        return URL(fileURLWithPath: path)
     }
 
     /// A fresh key's first transaction on `chain`: the node's floor refuses
@@ -410,7 +423,7 @@ final class LatticeCtlE2ETests: XCTestCase {
 
         let port = randomPorts(1)[0]
         let sponsorProcess = Process()
-        sponsorProcess.executableURL = try binary("E2E_SPONSOR_BIN", "lattice-sponsor")
+        sponsorProcess.executableURL = try requireSponsor()
         sponsorProcess.arguments = [
             "--node", node, "--cookie-file", cookie.path, "--key", sponsorKey.file.path,
             "--share-work", "2^8", "--port", String(port),
