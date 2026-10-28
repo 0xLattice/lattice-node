@@ -194,7 +194,12 @@ Ivy releases through 14.0.0 end the session of a peer that sends an unknown
 Ivy tag; later ones ignore it. That is why the third rule is not optional.
 
 Capabilities in use: `volume-bundle`, the peer answers a Volume bundle
-request.
+request; `relay`, the peer carries a session between two peers it has
+sessions with; `host:<path>`, the peer hosts that child chain;
+`hello-updates`, the peer sends its hello again when what it hosts changes and
+takes a later hello on an open session as what that peer now speaks and hosts.
+A node sends a later hello only to a peer that named `hello-updates`, and
+takes one only from a peer whose hello named it.
 
 A level's weigh log streams header and proof entries by position. Stream pages
 carry IDs only. `getData` and `getAncestors` return bounded header entries that

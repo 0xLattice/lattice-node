@@ -736,6 +736,15 @@ extension NodeRuntime {
             }
         }
 
+        /// This node's hello: what it speaks and hosts now.
+        private func helloPayload() -> Data? {
+            try? ChainHandshake(
+                nexusGenesisCID: configuration.nexusGenesisCID,
+                chainPath: configuration.chainPath,
+                capabilities: configuration.helloCapabilities(relays: relays)
+            ).encode()
+        }
+
         /// Host the children `next` lists, and only those: a level no longer
         /// listed stops with every level below it, and a newly listed one
         /// starts, parent first, as it would at boot. What a stopped level
@@ -794,8 +803,17 @@ extension NodeRuntime {
                 )
             }
             levelReads.publish(reads)
+            let hostedBefore = hosted.value
             hosted.publish(Set(core.levels.keys))
             refreshView()
+            // Open sessions learn what is hosted now from a hello sent again,
+            // where they said they take one.
+            if hosted.value != hostedBefore, let hello = helloPayload() {
+                for session in sessions.values.sorted(by: { $0.id < $1.id })
+                where session.ready && session.capabilities.contains(ChainHandshake.helloUpdates) {
+                    await outbox.send(to: session.peer, topic: OverlayTopic.overlayHello, payload: hello)
+                }
+            }
             startNetworkMaintenance()
             if let failure { throw failure }
         }
@@ -1165,11 +1183,7 @@ extension NodeRuntime {
                     inputs.yield(.helloDeadline(peerKey: key, session: id))
                 }
                 // Built at each connect, so it names what is hosted now.
-                if let hello = try? ChainHandshake(
-                    nexusGenesisCID: configuration.nexusGenesisCID,
-                    chainPath: configuration.chainPath,
-                    capabilities: configuration.helloCapabilities(relays: relays)
-                ).encode() {
+                if let hello = helloPayload() {
                     await outbox.send(to: peer, topic: OverlayTopic.overlayHello, payload: hello)
                 }
                 if peer.route != .direct {
@@ -1202,8 +1216,10 @@ extension NodeRuntime {
                 }
                 if session.ready { return await step(.peerGone(session.coreID)) }
             case .hello(let peer, let payload):
+                // A ready session's later hello replaces its claims, if its
+                // first hello said it sends them; otherwise it is ignored.
                 guard var session = sessions[peer.key.hex], session.peer.sessionID == peer.sessionID,
-                      !session.ready else {
+                      !session.ready || session.capabilities.contains(ChainHandshake.helloUpdates) else {
                     return true
                 }
                     guard let remote = try? ChainHandshake.decode(payload),
@@ -1215,13 +1231,21 @@ extension NodeRuntime {
                         _ = await ivy.disconnectSession(ifCurrent: peer)
                         return true
                     }
+                let update = session.ready
+                let relayed = session.capabilities.contains(ChainHandshake.relay)
                 session.ready = true
                 session.capabilities = Set(remote.capabilities ?? [])
                 sessions[peer.key.hex] = session
                 // Asked for a route when a peer cannot be dialled. A session
                 // that is itself relayed cannot carry another.
-                if peer.route == .direct, session.capabilities.contains(ChainHandshake.relay) {
-                    await ivy.setRelaying(peer.id, true)
+                let relays = session.capabilities.contains(ChainHandshake.relay)
+                if peer.route == .direct, update ? relays != relayed : relays {
+                    await ivy.setRelaying(peer.id, relays)
+                }
+                guard !update else {
+                    // What it hosts changed: each chain's peers are counted again.
+                    startNetworkMaintenance()
+                    return true
                 }
                 return await step(.peerReady(session.coreID))
             case .sync(let peer, let chainPath, let message):

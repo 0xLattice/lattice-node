@@ -89,6 +89,13 @@ final class HostChainsRuntimeTests: XCTestCase {
             try await Self.alphaHealth(client, .ok)
         }
         XCTAssertEqual(follower.runtime.hostedChildren, [Self.alpha])
+        // The peer it was already connected to is told too, by a hello sent
+        // again on the open session.
+        func hostSeesAlphaHosted() -> Bool {
+            host.runtime.peerCapabilities.sessions(speaking: ChainHandshake.hosting(Self.alpha))
+                .contains { $0.key.hex == follower.endpoint.publicKey }
+        }
+        try await eventually("the connected peer learns the follower hosts Alpha") { hostSeesAlphaHosted() }
         let followerAlpha = try XCTUnwrap(follower.runtime.levelReads[Self.alpha])
         try await eventually("the follower syncs Alpha from the peer it already has", within: .seconds(20)) {
             (await followerAlpha.readSnapshot().height ?? 0) >= 2
@@ -106,6 +113,7 @@ final class HostChainsRuntimeTests: XCTestCase {
         }
         XCTAssertNil(follower.runtime.levelReads[Self.alpha])
         XCTAssertEqual(follower.runtime.hostedChildren, [])
+        try await eventually("the connected peer learns the follower no longer hosts Alpha") { !hostSeesAlphaHosted() }
         let held = await followerAlpha.readSnapshot().height ?? 0
 
         try await follower.runtime.host([Self.alpha])

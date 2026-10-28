@@ -30,6 +30,12 @@ public struct ChainHandshake: Codable, Equatable, Sendable {
     /// so, since one that does not relay ends the session of whoever asks.
     public static let relay = "relay"
 
+    /// The peer sends its hello again when what it hosts changes, and takes
+    /// a later hello from a peer that named this as what that peer now
+    /// speaks and hosts. A peer that did not name it keeps its first hello's
+    /// claims for the session, as before.
+    public static let helloUpdates = "hello-updates"
+
     /// The peer hosts the child chain at `chainPath`: one name per hosted
     /// child. Its own claim, a hint for whom to dial and whom to ask, never
     /// a reason to accept data. Nexus is not named: every node hosts it.

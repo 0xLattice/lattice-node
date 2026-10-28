@@ -246,7 +246,9 @@ The example Fly read replica uses nginx as the public boundary.
 
 Every peer follows Nexus on the same overlay, so every open session is a
 Nexus peer and its seed list is where Nexus discovers. A node names each
-child chain it hosts in its session hello (`host:<path>`), and periodically
+child chain it hosts in its session hello (`host:<path>`), sends the hello
+again on its open sessions when it starts or stops hosting a chain while
+running, and periodically
 announces one provider record per hosted child chain, its rendezvous:
 `lattice.chain-peers.v1:<nexus genesis>:<path>`. A child is keyed by path, not genesis, so a joiner is findable and can search
 before it holds any of the child's blocks, and competing geneses share one
