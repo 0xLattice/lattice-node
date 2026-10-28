@@ -96,6 +96,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Seconds each provider announcement lasts: each hosted chain's and each pinned Volume's. The node renews them at least every 10 minutes (every --peer-search-interval when shorter), so a lifetime shorter than that leaves gaps in which peers cannot find this node as a provider. At most 86400: peers drop announcements that last longer.")
     var announceLifetime: UInt64 = 1_200
 
+    @Flag(inversion: .prefixedNo, help: "Announce each pinned Volume as a provider record, on pinning and on every renewal. With --no-announce-pins pins are held and served but never announced: for a holder of many Volumes whose readers do not need a record per Volume.")
+    var announcePins = true
+
     @Option(help: "Public read-only HTTP port; binds all interfaces and serves ONLY the bounded GET read routes (the read-replica allowlist, enforced in code). Chain data is public; this exposes no operator or write surface.")
     var publicReadPort: UInt16?
 
@@ -229,6 +232,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             externalAddress: externalAddress,
             peerSearchInterval: peerSearchInterval,
             announceLifetime: announceLifetime,
+            announcePins: announcePins,
             resourcePolicy: NodeResourcePolicy(maximumAcquisitionBytes: maxAcquisitionBytes),
             blockBodies: blockBodies,
             state: state,

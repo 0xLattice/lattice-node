@@ -703,8 +703,9 @@ extension NodeRuntime {
                 return await step(event)
             case .maintenance:
                 // Read here, on the loop: the pass runs off it and must not
-                // hold the store open past a stop.
-                operatorPins = await storage.operatorPins()
+                // hold the store open past a stop. Pins not announced are
+                // not read.
+                operatorPins = configuration.announcePins ? await storage.operatorPins() : []
                 startNetworkMaintenance()
                 return true
             case .currentPeers(let current):

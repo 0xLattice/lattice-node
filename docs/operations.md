@@ -530,7 +530,8 @@ kept when the operator pins it: `POST /pins` on the operator port (see
 `rpc-api.md`). The operator provides the bytes of a Volume the node does not
 hold: the node never stores a pin a peer sent. An application that keeps
 someone else's media reads it with `GET /fetch/:cid`, which stores nothing,
-validates it, and then pins it. It serves it, announces it,
+validates it, and then pins it. It serves it, announces it
+(unless started with `--no-announce-pins`),
 and keeps it across restarts until `DELETE /pins/:cid`.
 Only the Volume the CID names is kept: Volumes it links to are not.
 

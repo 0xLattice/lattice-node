@@ -205,13 +205,15 @@ enum NodeRuntimeReply: Sendable {
 
 extension NodeRuntime {
     /// Operator pins: the node holds the Volume `root` names, serves it, and
-    /// announces that it has it, until the operator unpins it. A Volume the
-    /// node does not hold is stored only as the operator provides it
-    /// (`entries`), never read from peers. Throws when it is neither held
-    /// nor provided, or when what is provided does not match its CIDs.
+    /// announces that it has it (unless `announcePins` is off), until the
+    /// operator unpins it. A Volume the node does not hold is stored only
+    /// as the operator provides it (`entries`), never read from peers.
+    /// Throws when it is neither held nor provided, or when what is
+    /// provided does not match its CIDs.
     public func pinVolume(_ root: String, entries: [String: Data]? = nil) async throws {
         guard !maintenance.isCancelled else { throw NodeRuntimeError.stopped }
         try await storage.pin(root, entries: entries)
+        guard configuration.announcePins else { return }
         await ivy.announceProvider(rootCID: root, expiresAt: configuration.announcementExpiry(at: NodeRuntime.now()))
     }
 

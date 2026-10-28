@@ -168,6 +168,10 @@ public struct NodeConfiguration: Sendable {
     /// so a lifetime shorter than its cadence leaves gaps in which peers
     /// cannot find this node as a provider.
     public let announceLifetime: UInt64
+    /// Operator pins are announced as provider records (operator choice,
+    /// default on). Off, they are held and served but never announced: a
+    /// holder of many Volumes need not send a record per Volume.
+    public let announcePins: Bool
     /// The longest announcement the overlay accepts: an expiry further out
     /// is dropped, by this node's overlay and by every peer's.
     public static let maximumAnnounceLifetime = IvyConfig.defaultMaxProviderTTLSeconds
@@ -238,6 +242,7 @@ public struct NodeConfiguration: Sendable {
         externalAddress: String? = nil,
         peerSearchInterval: TimeInterval = 600,
         announceLifetime: UInt64 = 1_200,
+        announcePins: Bool = true,
         resourcePolicy: NodeResourcePolicy = .default,
         blockBodies: BlockBodies = .all,
         state: StateRetention = .all,
@@ -304,6 +309,7 @@ public struct NodeConfiguration: Sendable {
         self.peerSearchInterval = peerSearchInterval.isFinite
             ? max(0, peerSearchInterval) : 0
         self.announceLifetime = announceLifetime
+        self.announcePins = announcePins
         self.resourcePolicy = resourcePolicy
         self.blockBodies = blockBodies
         self.state = state

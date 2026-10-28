@@ -20,7 +20,12 @@ final class OperatorPinTests: XCTestCase {
     /// never accepted as a referral; dials to it are rewritten to loopback.
     private static func advertised(_ port: UInt16) -> String { "8.8.\(port >> 8).\(port & 0xFF)" }
 
-    private func host(keyByte: UInt8, peers: [PeerEndpoint] = [], storageDirectory reused: URL? = nil) throws -> Host {
+    private static let alpha = ["Nexus", "Alpha"]
+
+    private func host(
+        keyByte: UInt8, peers: [PeerEndpoint] = [], storageDirectory reused: URL? = nil,
+        hosted: [[String]] = [], announcePins: Bool = true
+    ) throws -> Host {
         let storageDirectory = reused ?? FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-node-pins-\(UUID().uuidString)", isDirectory: true
         )
@@ -37,7 +42,9 @@ final class OperatorPinTests: XCTestCase {
             // One peer is enough: a node does not go looking for others.
             peerTarget: 1,
             externalAddress: Self.advertised(port),
-            peerSearchInterval: 3_600
+            peerSearchInterval: 3_600,
+            announcePins: announcePins,
+            hostedChildren: hosted
         )
         return Host(
             configuration: configuration,
@@ -160,6 +167,63 @@ final class OperatorPinTests: XCTestCase {
         XCTAssertNil(held)
         await runtime.stop()
         await holderRuntime.stop()
+    }
+
+    /// With `announcePins` off, a pin is held but announced neither when it
+    /// is pinned nor by a maintenance pass; on, the same pass announces it.
+    /// Each node's own provider record is read: an announcement records it.
+    func testPinsAreNotAnnouncedWhenAnnouncingPinsIsOff() async throws {
+        let volume = try VolumeImpl<ChainSpec>(node: ChainSpec(
+            maxNumberOfTransactionsPerBlock: 5, maxStateGrowth: 5_555, premine: 5,
+            targetBlockTime: 5_000, initialReward: 5, halvingInterval: 5_555, halfLife: 5
+        ))
+        let root = volume.rawCID
+        let captured = CapturedVolumes()
+        try await volume.store(storer: captured)
+        let volumes = await captured.volumes
+        let entries = try XCTUnwrap(volumes.first { $0.root == root }).entries
+
+        var pinner = try host(keyByte: 0xc9, hosted: [Self.alpha], announcePins: false)
+        let ownKey = pinner.configuration.processPublicKey
+        let alphaKey = ChainPeersKey.key(
+            nexusGenesisCID: pinner.configuration.nexusGenesisCID, chainPath: Self.alpha
+        )
+        do {
+            let (runtime, storage) = try await start(pinner)
+            try await runtime.pinVolume(root, entries: entries)
+            let held = await storage.volume(root)
+            XCTAssertNotNil(held)
+            let announced = await runtime.ivy.providers(for: root)
+            XCTAssertEqual(announced, [], "pinning does not announce it")
+            await runtime.stop()
+        }
+
+        // A restart's first pass reads the pins and announces Alpha's
+        // rendezvous; with pins not announced, the pin is not.
+        pinner = try host(
+            keyByte: 0xc9, storageDirectory: pinner.configuration.storagePath, hosted: [Self.alpha],
+            announcePins: false
+        )
+        do {
+            let (runtime, _) = try await start(pinner)
+            try await eventually("the first pass announces Alpha") {
+                await runtime.ivy.providers(for: alphaKey).map(\.publicKey).contains(ownKey)
+            }
+            runtime.inputs.yield(.maintenance)
+            try await Task.sleep(for: .seconds(1))
+            let announced = await runtime.ivy.providers(for: root)
+            XCTAssertEqual(announced, [], "no pass announces it")
+            let pins = await runtime.pinnedVolumes()
+            XCTAssertEqual(pins, [root])
+            await runtime.stop()
+        }
+
+        pinner = try host(keyByte: 0xc9, storageDirectory: pinner.configuration.storagePath, hosted: [Self.alpha])
+        let (runtime, _) = try await start(pinner)
+        try await eventually("with pins announced, the first pass announces it") {
+            await runtime.ivy.providers(for: root).map(\.publicKey).contains(ownKey)
+        }
+        await runtime.stop()
     }
 
     /// Bytes the operator provides that are not the Volume its CID names are
