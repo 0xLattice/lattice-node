@@ -22,8 +22,9 @@ mempool, and mining candidates inside that process.
   `volumes.db` stores content; a block's or a step's content is one
   transaction there, durable before the facts that name it.
 - **One overlay with discovery.** Every peer follows Nexus. Nodes announce one
-  provider record per hosted chain - Nexus by its genesis, a child by its path -
-  and search a chain's record for more peers when that chain stops progressing.
+  provider record per hosted child chain, by its path, and search a chain's
+  record for peers when it has none, stops progressing, or is short of its
+  peer target.
 - **External mining.** The node owns templates and validation,
   `lattice-mining-coordinator` owns ranges, and stateless `lattice-miner`
   workers search nonces.

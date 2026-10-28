@@ -151,11 +151,15 @@ each hosted child under its path
 session hello as the capability `host:<path>`; Nexus, which every node
 hosts, has neither. It does not publish a provider record per block or
 state. A child's current peers are the sessions whose hello named it or that
-its providers include. While a hosted child has no current peer, or when
-its verified progress stalls, the node dials a bounded random set of that
-chain's providers. On a child block's first attempt its bundle is asked of the
-capable sessions among its current peers before other capable sessions; nothing
-else is routed by them. A Nexus stall retries disconnected bootstrap peers.
+its providers include. While a hosted child has no current peer, when its
+verified progress stalls, and once an interval while it has fewer current peers
+than the target, the node dials a bounded random set of that chain's providers.
+A lookup answers with a sample of the key's providers that announcing more
+often does not buy a place in. A child's current peers are what is routed by:
+its transaction announcements go only to them; on a block's first attempt its
+bundle is asked of the capable ones before other capable sessions; and each of
+its Volumes is asked of them before the ordinary order. Nexus's go to every
+session. A Nexus stall retries disconnected bootstrap peers.
 
 Parent facts, run reports and merged-mining candidates never cross a network
 plane: they pass in-process between co-hosted levels.
@@ -190,7 +194,12 @@ Ivy releases through 14.0.0 end the session of a peer that sends an unknown
 Ivy tag; later ones ignore it. That is why the third rule is not optional.
 
 Capabilities in use: `volume-bundle`, the peer answers a Volume bundle
-request.
+request; `relay`, the peer carries a session between two peers it has
+sessions with; `host:<path>`, the peer hosts that child chain;
+`hello-updates`, the peer sends its hello again when what it hosts changes and
+takes a later hello on an open session as what that peer now speaks and hosts.
+A node sends a later hello only to a peer that named `hello-updates`, and
+takes one only from a peer whose hello named it.
 
 A level's weigh log streams header and proof entries by position. Stream pages
 carry IDs only. `getData` and `getAncestors` return bounded header entries that

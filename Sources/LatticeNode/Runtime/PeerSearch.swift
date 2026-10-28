@@ -33,6 +33,7 @@ struct PeerSearch {
     private var highWater: [ChainPath: UInt64] = [:]
     private var lastProgressAt: [ChainPath: Int64] = [:]
     private var lastSearchAt: [ChainPath: Int64] = [:]
+    private var lastTopUpAt: [ChainPath: Int64] = [:]
 
     /// The levels due a search now, given each level's act-on height. A
     /// level seen for the first time has not progressed yet: it is due at once.
@@ -56,5 +57,20 @@ struct PeerSearch {
             }
         }
         return due
+    }
+
+    /// The levels that may look up their rendezvous for more peers now, when
+    /// short of the target: each at most once per interval, however often
+    /// new sessions start a pass, so a level whose whole network is smaller
+    /// than the target does not search on every pass. A level's peers grow
+    /// from the lookups' fresh samples, not only from the first few found.
+    mutating func topUps(paths: [ChainPath], now: Int64, interval: Int64, connected: Bool) -> Set<ChainPath> {
+        guard interval > 0, connected else { return [] }
+        var allowed = Set<ChainPath>()
+        for path in paths where now - (lastTopUpAt[path] ?? .min / 2) >= interval {
+            lastTopUpAt[path] = now
+            allowed.insert(path)
+        }
+        return allowed
     }
 }

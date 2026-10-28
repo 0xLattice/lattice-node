@@ -47,7 +47,9 @@ On each maintenance pass, each chain in turn, Nexus first:
    progressing.
 3. **Discovers.** A child chain with no current peer, or one that has stopped
    progressing, looks up its rendezvous among its parent's peers and dials up
-   to four of the hosts named there (see "Discovery and peer health").
+   to four of the hosts named there (see "Discovery and peer health"). One
+   with fewer than eight current peers does the same at most once per
+   `peerSearchInterval`.
 4. **Dials its seeds**, only while it still has fewer than two current peers.
    Nexus's seeds are the built-in ones: by name, `seed1.lattice.build` to
    `seed4.lattice.build` on port 4001, then the same seeds at fixed addresses
@@ -244,7 +246,9 @@ The example Fly read replica uses nginx as the public boundary.
 
 Every peer follows Nexus on the same overlay, so every open session is a
 Nexus peer and its seed list is where Nexus discovers. A node names each
-child chain it hosts in its session hello (`host:<path>`), and periodically
+child chain it hosts in its session hello (`host:<path>`), sends the hello
+again on its open sessions when it starts or stops hosting a chain while
+running, and periodically
 announces one provider record per hosted child chain, its rendezvous:
 `lattice.chain-peers.v1:<nexus genesis>:<path>`. A child is keyed by path, not genesis, so a joiner is findable and can search
 before it holds any of the child's blocks, and competing geneses share one
@@ -260,7 +264,7 @@ about every 10 minutes, later when a turn is slow, so a lifetime near that
 leaves gaps in which peers cannot find the node as a provider. A child chain's current peers are the sessions whose hello
 named it, and those its rendezvous names, so a peer on a build that predates
 the hello's claim still counts. Each hosted child chain searches its own
-rendezvous while it has no current peer - looked at at those same moments - and when it has not progressed since boot or for `peerSearchInterval`:
+rendezvous while it has no current peer - looked at at those same moments - when it has not progressed since boot or for `peerSearchInterval`, and, once per `peerSearchInterval`, while it has fewer current peers than the target (`peerTarget`, eight):
 the node asks the DHT for that chain's providers and dials up to four, drawn
 at random, that it is not already connected to. Peers that host only other
 chains cannot sync it. When Nexus is the stalled chain, the node re-dials
@@ -268,11 +272,17 @@ configured bootstrap endpoints without a live session.
 
 On the first attempt at a child chain's block, its bundle is asked of the
 bundle-capable sessions named under the chain's rendezvous before the other
-capable sessions. Nothing else is routed by the rendezvous: Volumes fetched one
-at a time, and every retry, go to peers in the overlay's ordinary order. The
-record is only a hint for whom to ask: content is verified the same whoever
-sent it, a named session that has no bundle costs one round trip before the
-others are asked, one that does not end its bundle is chosen for no further
+capable sessions. A child's Volumes fetched one at a time, on every attempt,
+are likewise asked of the chain's current peers first (one at a time, those
+that have been timing out last and then the least loaded, leaving out a peer
+already reported for that Volume) and then of peers in the overlay's ordinary
+order, which may ask those peers again; a Nexus Volume goes straight to the
+ordinary order, since every peer hosts Nexus. The record is only a hint for
+whom to ask: content is verified the same whoever sent it, a named session
+that has no bundle or Volume costs one round trip before the others are asked
+(one that does not answer costs a request timeout, after which it is asked
+after the others: for a Volume no answering host holds, each silent one costs
+a timeout, and the ordinary order may ask it again), one that does not end its bundle is chosen for no further
 bundle that session (requests already waiting for it when that is learned are
 still sent, at most one window of blocks, once per session), and no peer is
 refused service for what it announced.

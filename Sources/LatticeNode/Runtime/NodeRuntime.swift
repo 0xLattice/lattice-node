@@ -588,6 +588,8 @@ extension NodeRuntime {
             var ready = false
             /// What this session's hello said the peer speaks beyond version 6.
             var capabilities: Set<String> = []
+            /// The hello this node last sent on the session.
+            var sentHello: Data?
             var coreID: LatticeNodeCore.PeerID { .init(key: peer.key.hex, session: id) }
         }
 
@@ -736,6 +738,15 @@ extension NodeRuntime {
             }
         }
 
+        /// This node's hello: what it speaks and hosts now.
+        private func helloPayload() -> Data? {
+            try? ChainHandshake(
+                nexusGenesisCID: configuration.nexusGenesisCID,
+                chainPath: configuration.chainPath,
+                capabilities: configuration.helloCapabilities(relays: relays)
+            ).encode()
+        }
+
         /// Host the children `next` lists, and only those: a level no longer
         /// listed stops with every level below it, and a newly listed one
         /// starts, parent first, as it would at boot. What a stopped level
@@ -794,8 +805,18 @@ extension NodeRuntime {
                 )
             }
             levelReads.publish(reads)
+            let hostedBefore = hosted.value
             hosted.publish(Set(core.levels.keys))
             refreshView()
+            // Open sessions learn what is hosted now from a hello sent again,
+            // where they said they take one.
+            if hosted.value != hostedBefore, let hello = helloPayload() {
+                for session in sessions.values.sorted(by: { $0.id < $1.id })
+                where session.ready && session.capabilities.contains(ChainHandshake.helloUpdates) {
+                    sessions[session.peer.key.hex]?.sentHello = hello
+                    await outbox.send(to: session.peer, topic: OverlayTopic.overlayHello, payload: hello)
+                }
+            }
             startNetworkMaintenance()
             if let failure { throw failure }
         }
@@ -853,6 +874,15 @@ extension NodeRuntime {
                 now: now, interval: interval,
                 connected: sessions.values.contains(where: \.ready)
             )
+            // Only a child short of the target as the last pass counted it
+            // spends its turn: one that drops short just after is not kept
+            // waiting an interval by a turn it did not need.
+            let topUps = peerSearch.topUps(
+                paths: core.ordered.filter {
+                    $0 != core.rootPath && (currentPeers[$0]?.count ?? 0) < configuration.peerTarget
+                },
+                now: now, interval: interval, connected: sessions.values.contains(where: \.ready)
+            )
             // Every hosted chain, Nexus down, with what its routine needs.
             // The levels differ only in where discovery asks: a child has a
             // rendezvous among its parent's peers and the seeds its operator
@@ -867,6 +897,7 @@ extension NodeRuntime {
                     lineage: (root.count...path.count).map { Array(path.prefix($0)) },
                     hosts: path == root ? nil : ChainHosts(nexusGenesisCID: nexus, chainPath: path),
                     stalled: due.contains(path),
+                    topUp: topUps.contains(path),
                     seeds: path == root
                         ? [configuration.seedPeers, configuration.fixedSeedPeers]
                         : [configuration.childSeedPeers[path] ?? []]
@@ -952,9 +983,11 @@ extension NodeRuntime {
                     }
                     // A child's rendezvous names the peers that can sync it.
                     // It is searched while the chain has no current peer,
-                    // and when it stalled: a chain whose whole network is a
-                    // few nodes does not search on every pass.
-                    if let hosts = chain.hosts, current.isEmpty || chain.stalled {
+                    // when it stalled, and while it is short of the target
+                    // once an interval: a chain whose whole network is a few
+                    // nodes does not search on every pass.
+                    if let hosts = chain.hosts,
+                       current.isEmpty || chain.stalled || (chain.topUp && current.count < target) {
                         let fresh = (await ivy.discoverProviders(rootCID: hosts.key))
                             .filter { $0.publicKey != ownKey && !connected.contains($0.publicKey) && !attempted.contains($0) }
                         for endpoint in fresh.shuffled().prefix(4) where await dial(endpoint) == true {
@@ -1146,18 +1179,15 @@ extension NodeRuntime {
                 }
                 let replaced = sessions[peer.key.hex]
                 let id = nextSession
-                sessions[peer.key.hex] = Session(peer: peer, id: id)
+                let hello = helloPayload()
+                sessions[peer.key.hex] = Session(peer: peer, id: id, sentHello: hello)
                 nextSession += 1
                 let (inputs, key) = (inputs, peer.key.hex)
                 Timers.deadline(after: helloTimeout, generation: id) { id in
                     inputs.yield(.helloDeadline(peerKey: key, session: id))
                 }
                 // Built at each connect, so it names what is hosted now.
-                if let hello = try? ChainHandshake(
-                    nexusGenesisCID: configuration.nexusGenesisCID,
-                    chainPath: configuration.chainPath,
-                    capabilities: configuration.helloCapabilities(relays: relays)
-                ).encode() {
+                if let hello {
                     await outbox.send(to: peer, topic: OverlayTopic.overlayHello, payload: hello)
                 }
                 if peer.route != .direct {
@@ -1190,8 +1220,10 @@ extension NodeRuntime {
                 }
                 if session.ready { return await step(.peerGone(session.coreID)) }
             case .hello(let peer, let payload):
+                // A ready session's later hello replaces its claims, if its
+                // first hello said it sends them; otherwise it is ignored.
                 guard var session = sessions[peer.key.hex], session.peer.sessionID == peer.sessionID,
-                      !session.ready else {
+                      !session.ready || session.capabilities.contains(ChainHandshake.helloUpdates) else {
                     return true
                 }
                     guard let remote = try? ChainHandshake.decode(payload),
@@ -1199,17 +1231,41 @@ extension NodeRuntime {
                               expectedNexusGenesisCID: configuration.nexusGenesisCID,
                               expectedChainPath: configuration.chainPath
                           )) != nil else {
+                        // A later hello that does not hold is ignored: the
+                        // session keeps the claims it has.
+                        guard !session.ready else { return true }
                         sessions[peer.key.hex] = nil
                         _ = await ivy.disconnectSession(ifCurrent: peer)
                         return true
                     }
+                let update = session.ready
+                let before = session.capabilities
                 session.ready = true
                 session.capabilities = Set(remote.capabilities ?? [])
+                // What is hosted may have changed since this node's hello
+                // was sent, while the session was not yet ready to be told.
+                var resend: Data?
+                if !update, session.capabilities.contains(ChainHandshake.helloUpdates),
+                   let current = helloPayload(), current != session.sentHello {
+                    resend = current
+                    session.sentHello = current
+                }
                 sessions[peer.key.hex] = session
+                if let resend { await outbox.send(to: peer, topic: OverlayTopic.overlayHello, payload: resend) }
                 // Asked for a route when a peer cannot be dialled. A session
                 // that is itself relayed cannot carry another.
-                if peer.route == .direct, session.capabilities.contains(ChainHandshake.relay) {
-                    await ivy.setRelaying(peer.id, true)
+                let peerRelays = session.capabilities.contains(ChainHandshake.relay)
+                if peer.route == .direct,
+                   update ? peerRelays != before.contains(ChainHandshake.relay) : peerRelays {
+                    await ivy.setRelaying(peer.id, peerRelays)
+                }
+                guard !update else {
+                    // What it hosts changed: each chain's peers are counted again.
+                    func hosting(_ claims: Set<String>) -> Set<String> {
+                        claims.filter { $0.hasPrefix(ChainHandshake.hosting([])) }
+                    }
+                    if hosting(before) != hosting(session.capabilities) { startNetworkMaintenance() }
+                    return true
                 }
                 return await step(.peerReady(session.coreID))
             case .sync(let peer, let chainPath, let message):
@@ -1542,7 +1598,15 @@ extension NodeRuntime {
                 answer(replyID, .failure(error))
             case .announceTransaction(let cid):
                 guard let payload = try? TransactionAvailableMessage(volumeRootCID: cid).encoded() else { break }
-                for session in sessions.values.sorted(by: { $0.id < $1.id }) where session.ready {
+                // To the chain's current peers: no other peer runs its pool,
+                // and with many chains most sessions host others. Every
+                // session hosts Nexus.
+                let hosts = path == core.rootPath ? nil : ChainHosts(
+                    nexusGenesisCID: configuration.nexusGenesisCID, chainPath: path
+                )
+                let hosting = Set(await remote.peerCapabilities.sessions(hosting: hosts, ivy: ivy).map(\.sessionID))
+                for session in sessions.values.sorted(by: { $0.id < $1.id })
+                where session.ready && hosting.contains(session.peer.sessionID) {
                     await outbox.send(
                         to: session.peer, topic: OverlayTopic.transactionAvailable, payload: payload
                     )

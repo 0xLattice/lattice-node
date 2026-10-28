@@ -1,3 +1,4 @@
+import Crypto
 import Foundation
 import Ivy
 import Lattice
@@ -316,7 +317,9 @@ final class MergedMiningTests: XCTestCase {
 
     /// A transaction for a hosted child chain reaches a peer that hosts the
     /// same child, just as a Nexus transaction reaches it: the peer learns of
-    /// it by announcement and pools it on the level the transaction names.
+    /// it by announcement and pools it on the level the transaction names. A
+    /// peer that hosts only Nexus is told of the Nexus transaction and not of
+    /// the child's.
     func testAPeerPoolsAnAnnouncedTransactionOnTheChainItNames() async throws {
         func host(_ keyByte: String, peers: [PeerEndpoint] = []) throws -> (NodeConfiguration, IvyConfig, PeerEndpoint) {
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -362,7 +365,7 @@ final class MergedMiningTests: XCTestCase {
 
         // A second node that hosts both chains joins and catches up. It is the
         // one a transaction is submitted to, as a public submit node would be.
-        let (entryConfiguration, entryOverlay, _) = try host("5b", peers: [minerEndpoint])
+        let (entryConfiguration, entryOverlay, entryEndpoint) = try host("5b", peers: [minerEndpoint])
         let entry = try await NodeRuntime.start(
             storage: try await NodeStorage.open(configuration: entryConfiguration),
             configuration: entryConfiguration, overlay: entryOverlay
@@ -374,6 +377,19 @@ final class MergedMiningTests: XCTestCase {
             let entryAlphaTip = await entryAlpha.readSnapshot().tipCID, entryNexusTip = await entry.reads.readSnapshot().tipCID
             return alphaTip != nil && alphaTip == entryAlphaTip && nexusTip == entryNexusTip
         }
+
+        // A peer hosting only Nexus, listening for what the entry node announces.
+        let bystanderKey = Curve25519.Signing.PrivateKey()
+        let bystander = Ivy(config: IvyConfig(
+            signingKey: bystanderKey, listenPort: NetworkTransportTestPorts.allocate(), bootstrapPeers: [entryEndpoint],
+            requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false), mode: .overlay
+        ))
+        let announcements = AnnouncementRecorder(hello: try ChainHandshake(
+            nexusGenesisCID: entryConfiguration.nexusGenesisCID, chainPath: ["Nexus"]
+        ).encode())
+        await bystander.installRecorder(announcements)
+        try await bystander.start()
+        addTeardownBlock { await bystander.stop() }
 
         func pay(on chainPath: [String]) throws -> Transaction {
             let body = TransactionBody(
@@ -389,16 +405,29 @@ final class MergedMiningTests: XCTestCase {
                 body: header
             )
         }
-        // The control: a Nexus transaction submitted to the entry node reaches the miner's pool.
-        _ = try await entry.submitTransaction(SubmitTransactionRequest(transaction: try pay(on: ["Nexus"])))
+        // The control: a Nexus transaction submitted to the entry node reaches
+        // the miner's pool, and the Nexus-only peer is told of it.
+        try await eventually("the Nexus-only peer's session is ready") {
+            entry.peerCount >= 2
+        }
+        let nexusCID = try await entry.submitTransaction(
+            SubmitTransactionRequest(transaction: try pay(on: ["Nexus"]))
+        ).transactionCID
         try await eventually("the miner pools the announced Nexus transaction") {
             await miner.reads.readSnapshot().mempoolCount == 1
+        }
+        try await eventually("the Nexus-only peer is told of the Nexus transaction") {
+            announcements.announced.contains { $0.contains(nexusCID) }
         }
         // The same for the hosted child: it must land in the child's pool, and nowhere else.
         let alphaCID = try await entry.submitTransaction(SubmitTransactionRequest(transaction: try pay(on: Self.alpha))).transactionCID
         try await eventually("the miner pools the announced Alpha transaction", within: .seconds(10)) {
             await minerAlpha.readSnapshot().mempoolCount == 1
         }
+        XCTAssertFalse(
+            announcements.announced.contains { $0.contains(alphaCID) },
+            "a peer that does not host Alpha is not told of its transactions"
+        )
         let nexusPooled = await miner.reads.readSnapshot().mempoolCount
         XCTAssertEqual(nexusPooled, 1, "a child transaction never enters the root pool")
         // And the miner then mines it on Alpha.
@@ -1028,5 +1057,29 @@ final class MergedMiningTests: XCTestCase {
         await runtime.stop()
         return alphaHeight
 
+    }
+}
+
+private extension Ivy {
+    func installRecorder(_ delegate: IvyDelegate) { self.delegate = delegate }
+}
+
+/// A raw overlay peer that says hello and keeps the transaction announcements
+/// it is sent.
+private final class AnnouncementRecorder: IvyDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private let hello: Data
+    private var received: [String] = []
+    var announced: [String] { lock.withLock { received } }
+
+    init(hello: Data) { self.hello = hello }
+
+    func ivy(_ ivy: Ivy, didConnect peer: AuthenticatedPeer) async {
+        _ = await ivy.sendMessage(to: peer, topic: OverlayTopic.overlayHello, payload: hello)
+    }
+
+    func ivy(_ ivy: Ivy, didReceiveMessage message: PeerMessage, from peer: AuthenticatedPeer) async {
+        guard message.topic == OverlayTopic.transactionAvailable else { return }
+        lock.withLock { received.append(String(decoding: message.payload, as: UTF8.self)) }
     }
 }

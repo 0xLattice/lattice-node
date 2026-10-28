@@ -287,7 +287,13 @@ public struct IvyRootContentSource: Sendable {
 
     }
 
-    private let fetch: @Sendable (String) async -> AttributedVolumeResponse
+    /// One Volume under a root. A child's is asked first of its chain's
+    /// current peers (`hosts`) other than `excluding` (those reported for
+    /// it), then of anyone.
+    fileprivate typealias VolumeFetch =
+        @Sendable (_ rootCID: String, _ excluding: Set<PeerID>) async -> AttributedVolumeResponse
+    private let fetch: @Sendable (_ rootCID: String, _ hosts: ChainHosts?, _ excluding: Set<PeerID>) async
+        -> AttributedVolumeResponse
     /// The Volumes a peer that speaks bundles holds under a root (what it
     /// stored with that block), or none, and the session that sent them.
     /// Whatever a bundle lacks is fetched with `fetch`. The capable sessions
@@ -312,7 +318,7 @@ public struct IvyRootContentSource: Sendable {
     let budget: AcquisitionBudget
 
     public final class Session: ContentSource {
-        private let fetchVolume: @Sendable (String) async -> AttributedVolumeResponse
+        private let fetchVolume: VolumeFetch
         private let fetchBundle: BundleFetch
         private let credit: @Sendable (PeerID, Int) async -> Void
         private let report: @Sendable (String, PeerID) async -> Void
@@ -324,7 +330,7 @@ public struct IvyRootContentSource: Sendable {
             budget: AcquisitionBudget,
             reserving bytes: Int,
             priority: AcquisitionBudget.Priority,
-            fetch: @escaping @Sendable (String) async -> AttributedVolumeResponse,
+            fetch: @escaping VolumeFetch,
             fetchBundle: @escaping BundleFetch,
             credit: @escaping @Sendable (PeerID, Int) async -> Void,
             report: @escaping @Sendable (String, PeerID) async -> Void,
@@ -375,7 +381,7 @@ public struct IvyRootContentSource: Sendable {
                 var bundled = await context.bundled(rootCID, fetch: fetchBundle)
                 var reported = Set<PeerID>()
                 while true {
-                    let response = if let bundled { bundled.volume } else { await fetchVolume(rootCID) }
+                    let response = if let bundled { bundled.volume } else { await fetchVolume(rootCID, reported) }
                     let volume = SerializedVolume(
                         root: response.rootCID,
                         entries: response.entries
@@ -445,7 +451,25 @@ public struct IvyRootContentSource: Sendable {
         // A Volume is taken at whatever size the wire carries and measured
         // here once verified: the size a peer declares is its claim, and a
         // declared size past the budget would say nothing about the block.
-        fetch = { rootCID in await ivy.fetchVolume(rootCID: rootCID) }
+        // A child's Volume is asked of its current peers first, then of
+        // anyone (provider records, connected peers, then the DHT): a peer
+        // that hosts another chain rarely holds this one's content. Ivy asks
+        // the hosts one at a time in its own order (those timing out last,
+        // then the least loaded). Every peer hosts Nexus, so its Volumes go
+        // to anyone. A peer reported for this root is not asked first again.
+        fetch = { rootCID, hosts, excluding in
+            if let hosts {
+                let named = await capabilities.sessions(hosting: hosts, ivy: ivy)
+                    .filter { !excluding.contains($0.id) }
+                if !named.isEmpty {
+                    let answer = await ivy.fetchVolume(rootCID: rootCID, from: named)
+                    // This node's own capacity ends the search; hosts that
+                    // sent nothing do not.
+                    if !answer.entries.isEmpty || answer.failure == .localCapacityUnavailable { return answer }
+                }
+            }
+            return await ivy.fetchVolume(rootCID: rootCID)
+        }
         // Asked only of the sessions whose hello said they answer it, one at
         // a time, each read as still capable when its turn comes. A session
         // keeps the capability only while every bundle it is asked for ends
@@ -502,7 +526,7 @@ public struct IvyRootContentSource: Sendable {
         self.budget = budget ?? AcquisitionBudget(
             capacity: max(maximumStorageBytes, Self.defaultPolicy.maximumAcquisitionBytes)
         )
-        self.fetch = fetch
+        self.fetch = { rootCID, _, _ in await fetch(rootCID) }
         self.fetchBundle = { rootCID, _ in (await fetchBundle(rootCID), nil) }
     }
 
@@ -533,7 +557,8 @@ public struct IvyRootContentSource: Sendable {
         priority: AcquisitionBudget.Priority = .ownWork,
         operation: @Sendable (Session) async throws -> T
     ) async rethrows -> (value: T, attribution: Attribution) {
-        let fetchBundle = fetchBundle
+        let (fetch, fetchBundle) = (fetch, fetchBundle)
+        let fetched: VolumeFetch = { rootCID, excluding in await fetch(rootCID, hosts, excluding) }
         let bundled: BundleFetch = { rootCID in
             bundle ? await fetchBundle(rootCID, hosts) : ([], nil)
         }
@@ -542,7 +567,7 @@ public struct IvyRootContentSource: Sendable {
             budget: budget,
             reserving: min(max(bytes ?? maximumStorageBytes, 1), maximumStorageBytes),
             priority: priority,
-            fetch: fetch,
+            fetch: fetched,
             fetchBundle: bundled,
             credit: credit,
             report: report,
