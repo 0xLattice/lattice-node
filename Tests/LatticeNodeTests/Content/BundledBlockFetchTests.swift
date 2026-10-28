@@ -275,6 +275,7 @@ final class BundledBlockFetchTests: XCTestCase {
         private let source: NodeStorageIvyContentSource
         private let lock = NSLock()
         private var bundleRequests = 0
+        private var volumeRequests = 0
         var answersBundles = true
         /// The bundle names a Volume whose read never returns.
         var neverEnds = false
@@ -282,8 +283,10 @@ final class BundledBlockFetchTests: XCTestCase {
         init(_ storage: NodeStorage) { source = NodeStorageIvyContentSource(storage: storage) }
 
         var bundleRequestCount: Int { lock.withLock { bundleRequests } }
+        var volumeRequestCount: Int { lock.withLock { volumeRequests } }
 
         func volume(rootCID: String, maxDataBytes: Int) async -> [ContentEntry] {
+            lock.withLock { volumeRequests += 1 }
             if rootCID == "never" { try? await Task.sleep(for: .seconds(60)) }
             return await source.volume(rootCID: rootCID, maxDataBytes: maxDataBytes)
         }
@@ -511,6 +514,41 @@ final class BundledBlockFetchTests: XCTestCase {
             XCTAssertEqual(host.bundleRequestCount, count)
             XCTAssertEqual(bystander.bundleRequestCount, count)
         }
+    }
+
+    /// A child's Volumes fetched one at a time (a retry asks no bundle) are
+    /// asked of the peer its rendezvous names: a peer that holds the same
+    /// content and is not named is not asked.
+    func testAChildsVolumesAreAskedOfThePeerItsRendezvousNames() async throws {
+        let producer = try await storage(keyByte: 0x90)
+        let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
+        let recorded = await producer.volumeBundle(cid)
+        let (remote, host, bystander) = try await hostAndBystander(producer, producer, rendezvous: Self.alpha.key)
+        for keyByte in [UInt8(0x91), 0x92, 0x93] {
+            let stored = try await storage(keyByte: keyByte).fetchChainBody(
+                cid, remote: remote, bundle: false, hosts: Self.alpha
+            )
+            XCTAssertEqual(Set(stored), Set(recorded))
+        }
+        XCTAssertGreaterThan(host.volumeRequestCount, 0)
+        XCTAssertEqual(bystander.volumeRequestCount, 0)
+    }
+
+    /// The record is a hint: a Volume the named peer does not hold is then
+    /// asked of anyone, and the block still arrives.
+    func testAChildsVolumeTheNamedPeerLacksIsAskedOfAnyone() async throws {
+        let producer = try await storage(keyByte: 0x94)
+        let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
+        let recorded = await producer.volumeBundle(cid)
+        let (remote, host, bystander) = try await hostAndBystander(
+            try await storage(keyByte: 0x95), producer, rendezvous: Self.alpha.key
+        )
+        let stored = try await storage(keyByte: 0x96).fetchChainBody(
+            cid, remote: remote, bundle: false, hosts: Self.alpha
+        )
+        XCTAssertEqual(Set(stored), Set(recorded))
+        XCTAssertGreaterThan(host.volumeRequestCount, 0)
+        XCTAssertGreaterThan(bystander.volumeRequestCount, 0)
     }
 
     /// A named session is held to its bundles like any other: one that never

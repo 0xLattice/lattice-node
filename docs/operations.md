@@ -268,14 +268,17 @@ configured bootstrap endpoints without a live session.
 
 On the first attempt at a child chain's block, its bundle is asked of the
 bundle-capable sessions named under the chain's rendezvous before the other
-capable sessions. Nothing else is routed by the rendezvous: Volumes fetched one
-at a time, and every retry, go to peers in the overlay's ordinary order. The
-record is only a hint for whom to ask: content is verified the same whoever
-sent it, a named session that has no bundle costs one round trip before the
-others are asked, one that does not end its bundle is chosen for no further
-bundle that session (requests already waiting for it when that is learned are
-still sent, at most one window of blocks, once per session), and no peer is
-refused service for what it announced.
+capable sessions. A child's Volumes fetched one at a time, on every attempt,
+are likewise asked of the chain's current peers first (one at a time, in random
+order, skipping a peer already reported for that Volume) and then of peers in
+the overlay's ordinary order; a Nexus Volume goes straight to the ordinary
+order, since every peer hosts Nexus. The record is only a hint for whom to ask:
+content is verified the same whoever sent it, a named session that has no
+bundle or Volume costs one round trip before the others are asked, one that
+does not end its bundle is chosen for no further bundle that session (requests
+already waiting for it when that is learned are still sent, at most one window
+of blocks, once per session), and no peer is refused service for what it
+announced.
 
 The trigger uses the locally verified tip, never a remote height claim. Set it
 to `0` only for an intentionally isolated node.
