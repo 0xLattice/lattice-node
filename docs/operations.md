@@ -250,7 +250,8 @@ announces one provider record per hosted child chain, its rendezvous:
 before it holds any of the child's blocks, and competing geneses share one
 rendezvous. Provider records name chain availability, not individual blocks or
 states. A node that declares a public read URL also announces each hosted
-child under that child's read-endpoint key (below).
+child under that child's read-endpoint key, for nodes that still look that
+key up (below).
 
 A node announces what it hosts on every announcement turn and whenever a
 session opens. Each announcement, a hosted chain's or an operator pin's,
@@ -310,9 +311,9 @@ lattice.build, at any depth, without asking anyone:
 
 The rule is the same at every level. A node that hosts the parent `P` of a
 chain `P/D` answers `GET /api/chain/endpoints?chainPath=P/D`: it finds the
-hosts that announced `P/D`'s read-endpoint key (the chain's rendezvous) and
-asks a bounded number of them over the overlay for their declared URL. A node
-answers that question only for a level it hosts. The URLs come back
+hosts named under `P/D`'s rendezvous and asks a bounded number of them over
+the overlay for their declared URL. A node answers that question only for a
+level it hosts and only when it declared a URL; one without stays silent. The URLs come back
 unverified; a reader checks what each serves at `?chainPath=P/D`. What `P`
 commits never decides whether `P/D` is found: a committed child block can be
 one the child chain did not keep, or one nobody serves. The explorer starts

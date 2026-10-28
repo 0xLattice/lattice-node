@@ -29,18 +29,22 @@ final class ReadEndpointTests: XCTestCase {
         var released: [String] = []
         var discoveryDelay: UInt64 = 0
         let providers: [PeerEndpoint]
+        /// When set, the providers are announced under this key only.
+        let key: String?
         let respond: @Sendable (PeerEndpoint, ReadEndpointRequestMessage) -> [(String, ReadEndpointResponseMessage)]
         /// v2 answers, delivered before the v1 ones as a host sends them.
         let respondV2: @Sendable (PeerEndpoint, ReadEndpointRequestMessage) -> [(String, ReadEndpointResponseV2Message)]
 
         init(
             providers: [PeerEndpoint],
+            key: String? = nil,
             respondV2: @escaping @Sendable (PeerEndpoint, ReadEndpointRequestMessage)
                 -> [(String, ReadEndpointResponseV2Message)] = { _, _ in [] },
             respond: @escaping @Sendable (PeerEndpoint, ReadEndpointRequestMessage)
                 -> [(String, ReadEndpointResponseMessage)]
         ) {
             self.providers = providers
+            self.key = key
             self.respondV2 = respondV2
             self.respond = respond
         }
@@ -59,11 +63,11 @@ final class ReadEndpointTests: XCTestCase {
             waiting = []
         }
 
-        func lookup() async -> [PeerEndpoint] {
+        func lookup(_ key: String) async -> [PeerEndpoint] {
             lookups += 1
             if held { await withCheckedContinuation { waiting.append($0) } }
             if discoveryDelay > 0 { try? await Task.sleep(nanoseconds: discoveryDelay) }
-            return providers
+            return self.key == nil || self.key == key ? providers : []
         }
 
         /// Every ask "dials": a session the directory must release.
@@ -101,7 +105,7 @@ final class ReadEndpointTests: XCTestCase {
     ) async -> ReadEndpointDirectory {
         let directory = ReadEndpointDirectory(
             transport: ReadEndpointTransport(
-                providers: { _ in await script.lookup() },
+                providers: { await script.lookup($0) },
                 ask: { await script.ask($0, $1) },
                 release: { await script.release($0) }
             ),
@@ -142,6 +146,34 @@ final class ReadEndpointTests: XCTestCase {
         for url in urls {
             XCTAssertTrue(asked.contains { url.hasPrefix("https://\($0.prefix(16))-") }, "only asked providers count")
         }
+    }
+
+    /// Hosts are found through the chain's rendezvous, the key every host
+    /// announces, not the read-endpoint key.
+    func testHostsAreFoundThroughTheChainRendezvous() async throws {
+        let host = Self.endpoint(1)
+        let script = Script(
+            providers: [host],
+            key: ChainHosts(nexusGenesisCID: NexusGenesis.expectedBlockHash, chainPath: Self.path).key
+        ) { provider, request in
+            [Self.answer(provider, request, url: "https://host.example")]
+        }
+        let directory = await directory(script)
+        let urls = await directory.lookup(Self.path).map(\.url)
+        XCTAssertEqual(urls, ["https://host.example"])
+    }
+
+    /// The rendezvous names hosts without a URL too, which stay silent: as
+    /// many as one DHT answer holds are asked, so they cannot crowd out the
+    /// one host that has a URL.
+    func testHostsWithoutAURLDoNotCrowdOutOneWithIt() async throws {
+        let declaring = Self.endpoint(1)
+        let script = Script(providers: (1...ReadEndpointDirectory.maximumAsked).map(Self.endpoint)) { provider, request in
+            provider == declaring ? [Self.answer(provider, request, url: "https://declaring.example")] : []
+        }
+        let directory = await directory(script, deadline: .milliseconds(300))
+        let urls = await directory.lookup(Self.path).map(\.url)
+        XCTAssertEqual(urls, ["https://declaring.example"])
     }
 
     /// Providers that never answer cost one shared deadline, not one each.
@@ -255,6 +287,8 @@ final class ReadEndpointTests: XCTestCase {
         try await eventually("every request past the cap is answered at once") {
             answered.value == fired - cap
         }
+        // The running lookups reach discovery on their own schedule.
+        try await eventually("the lookups under the cap are running") { await script.lookups == cap }
         let started = await script.lookups
         XCTAssertEqual(started, cap)
         await script.release()

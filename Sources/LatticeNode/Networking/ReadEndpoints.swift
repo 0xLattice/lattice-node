@@ -5,9 +5,9 @@ import Tally
 /// Operator-declared public read URLs, discovered over the overlay. One rule
 /// at every level: a node answers "your read URL for chain P" only for a
 /// level it hosts, and a node hosting P's parent finds the hosts of P through
-/// the provider records they announce under P's read-endpoint key: P's
-/// rendezvous. Answers are UNVERIFIED claims: a reader checks what a URL
-/// serves before it uses it.
+/// P's rendezvous, the provider records every host of P announces under its
+/// chain-peers key, and asks each one. Answers are UNVERIFIED claims: a
+/// reader checks what a URL serves before it uses it.
 enum ReadEndpointTopic {
     static let request = "lattice.overlay.read-endpoint.request.v1"
     static let response = "lattice.overlay.read-endpoint.response.v1"
@@ -54,7 +54,8 @@ struct ReadEndpointResponseMessage: CanonicalJSONMessage, Equatable, Sendable {
 enum ReadEndpointKey {
     /// The provider-record key a host of `chainPath` with a declared read URL
     /// announces: scoped to the Nexus it runs under, so two networks sharing
-    /// a DHT never mix.
+    /// a DHT never mix. Lookups no longer read it; it is announced only for
+    /// nodes that still look it up.
     static func key(nexusGenesisCID: String, chainPath: [String]) -> String {
         "lattice.read-endpoint.v1:\(nexusGenesisCID):\(chainPath.joined(separator: "/"))"
     }
@@ -110,14 +111,16 @@ struct ReadEndpointResponseV2Message: CanonicalJSONMessage, Equatable, Sendable 
 
 /// Bounded lookups of the read URLs other hosts declare for a chain: at most
 /// `maximumAsked` providers (shuffled, so a crowd of announcers cannot pick
-/// who is asked), at most `perResponderCap` URLs from any one responder, one
+/// who is asked; as many as one DHT answer holds, Ivy's k, so the hosts
+/// without a URL, which do not answer, cannot crowd out one that has one),
+/// at most `perResponderCap` URLs from any one responder, one
 /// shared deadline, identical concurrent lookups coalesced, results cached
 /// for `cacheSeconds` (an empty one for `emptyCacheSeconds`, so a host that
 /// just announced is found soon), and at most `maximumConcurrentLookups`
 /// running at once: distinct names neither coalesce nor hit the cache, so
 /// under that pressure a request gets nothing rather than starting another.
 actor ReadEndpointDirectory {
-    static let maximumAsked = 8
+    static let maximumAsked = 20
     static let perResponderCap = 2
     static let emptyCacheSeconds = 5.0
     static let maximumConcurrentLookups = 16
@@ -225,7 +228,7 @@ actor ReadEndpointDirectory {
         let lookupID = nextID
         nextID += 1
         lookups[lookupID] = Lookup(chainPath: chainPath)
-        let key = ReadEndpointKey.key(nexusGenesisCID: nexusGenesisCID, chainPath: chainPath)
+        let key = ChainPeersKey.key(nexusGenesisCID: nexusGenesisCID, chainPath: chainPath)
         let transport = transport
         let discovery = Task {
             let providers = await transport.providers(key)

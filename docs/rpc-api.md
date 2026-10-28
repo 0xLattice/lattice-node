@@ -188,8 +188,8 @@ node predating the field has no `submitEndpoints`; read it as empty.
 `endpoints` lists this node's own declared URL first when it hosts the child,
 then URLs other hosts declared over the overlay
 (`lattice.overlay.read-endpoint.request.v1` / `.response.v1`; a node answers
-only for a level it hosts). The lookup asks at most 8 hosts found through the
-child's read-endpoint provider records, in random order, takes at most 2 URLs
+only for a level it hosts). The lookup asks at most 20 hosts found through the
+child's rendezvous provider records, in random order, takes at most 2 URLs
 from any one, ends within 2 seconds (provider discovery included), closes any
 session it dialed only to ask, coalesces identical concurrent lookups,
 caches a result for 30 seconds (an empty one for 5), and runs at most 16

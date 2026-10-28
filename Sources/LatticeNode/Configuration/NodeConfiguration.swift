@@ -197,7 +197,8 @@ public struct NodeConfiguration: Sendable {
     /// The URL at which the public read routes of every level this process
     /// hosts are reachable (operator declaration; never derived). A peer's
     /// read-endpoint request for a hosted level is answered with it, and each
-    /// hosted child level is announced under its read-endpoint key.
+    /// hosted child level is also announced under its read-endpoint key, for
+    /// nodes that still look that key up.
     public let publicReadURL: String?
     /// The public read listener also accepts `POST /transactions` (operator
     /// choice, default off). Declared beside `publicReadURL` to peers.

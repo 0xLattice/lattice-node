@@ -872,8 +872,9 @@ extension NodeRuntime {
                         : [configuration.childSeedPeers[path] ?? []]
                 )
             }
-            // A declared read URL is findable from the parent of each hosted
-            // child level: announced under the level's read-endpoint key.
+            // A declared read URL is found through each hosted child level's
+            // rendezvous. Nodes that predate that look up the level's
+            // read-endpoint key instead, so it is still announced for them.
             let announced = chains.compactMap(\.hosts?.key) + (configuration.publicReadURL == nil ? [] : core.ordered
                 .filter { $0 != core.rootPath }
                 .map { ReadEndpointKey.key(nexusGenesisCID: configuration.nexusGenesisCID, chainPath: $0) })
