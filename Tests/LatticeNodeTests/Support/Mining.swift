@@ -3,6 +3,7 @@ import LatticeMinerCore
 import UInt256
 import XCTest
 @testable import LatticeNode
+import LatticeNodeAPI
 
 // Deterministic nonce search for tests. Under the absolute (ASERT) schedule
 // every block after the anchor commits a target a little below the maximum

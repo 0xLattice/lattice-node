@@ -8,6 +8,7 @@ import NIOCore
 import XCTest
 @testable import LatticeNode
 @testable import LatticeNodeDaemon
+import LatticeNodeAPI
 
 /// The public read listener is the one surface an unauthenticated caller can
 /// drive as fast as it likes, and a directly exposed node has no proxy in front

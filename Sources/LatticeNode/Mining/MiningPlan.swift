@@ -3,6 +3,7 @@ import Lattice
 import UInt256
 import LatticeNodeCore
 import cashew
+import LatticeNodeAPI
 
 /// The miner-facing plan and template checks the node runtime's RPC applies.
 enum MiningPlan {

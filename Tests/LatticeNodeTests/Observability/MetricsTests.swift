@@ -6,6 +6,7 @@ import XCTest
 import cashew
 @testable import LatticeNode
 @testable import LatticeNodeDaemon
+import LatticeNodeAPI
 
 final class MetricsTests: XCTestCase {
     func testMetricsScrapeIsParseableExposition() async throws {

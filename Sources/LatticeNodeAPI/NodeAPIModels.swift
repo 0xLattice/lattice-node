@@ -1,6 +1,5 @@
 import Foundation
 import Lattice
-import LatticeNodeCore
 import UInt256
 
 public struct SubmitTransactionRequest: Codable, Sendable {
@@ -35,6 +34,12 @@ public struct SubmitTransactionResponse: Codable, Sendable, Equatable {
     public let transactionCID: String
     public let mempoolCount: Int
     public let mempoolBytes: Int
+
+    public init(transactionCID: String, mempoolCount: Int, mempoolBytes: Int) {
+        self.transactionCID = transactionCID
+        self.mempoolCount = mempoolCount
+        self.mempoolBytes = mempoolBytes
+    }
 }
 
 /// Where one chain's block reward and fees go: a wallet address for one
@@ -143,7 +148,7 @@ public struct MiningTemplateResponse: Codable, Sendable {
     /// from older nodes.
     public let chains: [TemplateChainBlock]?
 
-    init(
+    public init(
         workID: String,
         block: Block,
         searchTarget: UInt256,
@@ -162,24 +167,6 @@ public struct MiningTemplateResponse: Codable, Sendable {
         self.templateDigest = templateDigest
         self.chains = chains
     }
-
-    init(
-        template: MiningTemplate,
-        maximumLifetimeMilliseconds: UInt64,
-        templateDigest: String
-    ) {
-        self.templateDigest = templateDigest
-        workID = template.workID
-        block = template.block
-        searchTarget = template.searchTarget
-        targets = template.targets
-        chainPath = template.chainPath
-        chains = []
-        expiresInMilliseconds = min(
-            maximumLifetimeMilliseconds,
-            template.remainingLifetimeMilliseconds
-        )
-    }
 }
 
 /// One block a template commits: its chain, its committed target, its
@@ -197,13 +184,6 @@ public struct TemplateChainBlock: Codable, Sendable, Equatable {
         self.target = target
         self.height = height
         self.rewardRecipient = rewardRecipient
-    }
-
-    init(_ chain: TemplateChain) {
-        self.init(
-            chainPath: chain.chainPath, target: chain.target, height: chain.height,
-            rewardRecipient: chain.rewardRecipient
-        )
     }
 }
 
@@ -232,6 +212,18 @@ public struct SubmitWorkResponse: Codable, Sendable {
     public let disposition: WorkDisposition
     public let tipCID: String?
     public let durableChildProofs: [DirectChildProofSummary]
+
+    public init(
+        accepted: Bool,
+        disposition: WorkDisposition,
+        tipCID: String?,
+        durableChildProofs: [DirectChildProofSummary]
+    ) {
+        self.accepted = accepted
+        self.disposition = disposition
+        self.tipCID = tipCID
+        self.durableChildProofs = durableChildProofs
+    }
 }
 
 /// Bounded miner-facing acknowledgement. Proof bytes stay in the node.
@@ -270,6 +262,32 @@ public struct NodeStatusResponse: Codable, Sendable, Equatable {
     /// The reason is one of a fixed set; no error text is shown here. The
     /// node keeps retrying; nil when it waits on nothing.
     public var waiting: String? = nil
+
+    public init(
+        phase: NodeAPIPhase,
+        chainPath: [String],
+        nexusGenesisCID: String,
+        tipCID: String?,
+        height: UInt64? = nil,
+        revision: UInt64? = nil,
+        mempoolCount: Int,
+        mempoolBytes: Int,
+        templateDigest: String?,
+        bestHeaderHeight: UInt64? = nil,
+        waiting: String? = nil
+    ) {
+        self.phase = phase
+        self.chainPath = chainPath
+        self.nexusGenesisCID = nexusGenesisCID
+        self.tipCID = tipCID
+        self.height = height
+        self.revision = revision
+        self.mempoolCount = mempoolCount
+        self.mempoolBytes = mempoolBytes
+        self.templateDigest = templateDigest
+        self.bestHeaderHeight = bestHeaderHeight
+        self.waiting = waiting
+    }
 }
 
 public enum NodeAPIError: Error, Equatable, Sendable {

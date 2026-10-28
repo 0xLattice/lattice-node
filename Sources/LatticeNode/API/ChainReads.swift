@@ -4,6 +4,7 @@ import Lattice
 import LatticeLightClient
 import LatticeNodeCore
 import cashew
+import LatticeNodeAPI
 
 /// The node's read surface — chain status, blocks, transactions, state reads
 /// and the explorer API — over content-verified, by-CID reads of this

@@ -7,6 +7,7 @@ import VolumeBroker
 import XCTest
 import cashew
 @testable import LatticeNode
+import LatticeNodeAPI
 
 /// `blockBodies: none`: a node keeps only the bodies it needs to operate
 /// (the ones waiting to execute, each chain's tip, each genesis) and goes

@@ -7,6 +7,7 @@ import UInt256
 import XCTest
 import cashew
 @testable import LatticeNode
+import LatticeNodeAPI
 
 /// Merged mining on the node runtime: a node hosting Nexus and one child
 /// chain mines templates that carry the child's block, and one grind

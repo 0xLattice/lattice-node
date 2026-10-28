@@ -97,7 +97,7 @@ struct WireTransactionBody: Codable {
     @DecimalString var nonce: UInt64
     let chainPath: [String]
 
-    init(_ body: TransactionBody) {
+    public init(_ body: TransactionBody) {
         accountActions = body.accountActions.map { Account(owner: $0.owner, delta: $0.delta) }
         actions = body.actions
         depositActions = body.depositActions.map {

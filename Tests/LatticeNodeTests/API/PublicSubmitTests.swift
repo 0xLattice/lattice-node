@@ -8,6 +8,7 @@ import XCTest
 import cashew
 @testable import LatticeNode
 @testable import LatticeNodeDaemon
+import LatticeNodeAPI
 
 /// The opt-in public submit: off unless the operator turns it on; on, the
 /// operator route's body and answer, named refusals, a capped body, a

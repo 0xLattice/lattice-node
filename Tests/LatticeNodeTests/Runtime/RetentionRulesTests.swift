@@ -8,6 +8,7 @@ import Tally
 import XCTest
 import cashew
 @testable import LatticeNode
+import LatticeNodeAPI
 
 /// Content stays because a scope names it: a block's body under the
 /// block's name, what executions read and create under the chain's.

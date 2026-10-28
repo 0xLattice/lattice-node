@@ -91,7 +91,7 @@ The production source is grouped by adapter boundary:
 
 ```text
 LatticeNode/
-  API/             request/response models and read operations
+  API/             read operations; the request/response models are LatticeNodeAPI
   Configuration/   immutable process configuration and genesis policy
   Content/         content-addressed decoding and Ivy content adapters
   Mining/          template assembly and multi-level mining plans

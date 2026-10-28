@@ -15,6 +15,7 @@ import Lattice
 import LatticeCtlCore
 import LatticeNode
 import cashew
+import LatticeNodeAPI
 
 struct Tx: AsyncParsableCommand {
     static let configuration = CommandConfiguration(

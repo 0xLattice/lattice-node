@@ -3,6 +3,7 @@ import Foundation
 import Lattice
 import LatticeCtlCore
 import LatticeNode
+import LatticeNodeAPI
 
 /// Child chains this host runs as levels of its one process.
 struct Child: AsyncParsableCommand {

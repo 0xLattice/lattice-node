@@ -4,6 +4,7 @@ import Lattice
 import Tally
 import XCTest
 @testable import LatticeNode
+import LatticeNodeAPI
 
 /// A fresh node finds the peers hosting a child level through the level's
 /// rendezvous, while Nexus keeps advancing. The host and the follower share
