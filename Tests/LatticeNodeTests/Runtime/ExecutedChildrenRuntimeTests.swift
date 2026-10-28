@@ -4,6 +4,7 @@ import Lattice
 import LatticeNodeCore
 import XCTest
 @testable import LatticeNode
+import LatticeNodeAPI
 
 /// A level's list of child directories across a restart: built at boot from
 /// the blocks the store holds, not only grown by executions while running.

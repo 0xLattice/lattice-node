@@ -3,6 +3,7 @@ import Lattice
 @testable import LatticeNode
 import XCTest
 import cashew
+import LatticeNodeAPI
 
 /// Every 64- and 128-bit consensus integer on the JSON wire is a canonical
 /// decimal string (the SDK's `^(?:0|-?[1-9][0-9]*)$`), in both directions,

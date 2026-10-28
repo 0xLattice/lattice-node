@@ -5,6 +5,7 @@ import LatticeNodeCore
 import Synchronization
 import XCTest
 @testable import LatticeNode
+import LatticeNodeAPI
 
 /// A server whose headers answers hold one header each still brings a
 /// follower to its child level's tip: each answer is cut at the page cap and

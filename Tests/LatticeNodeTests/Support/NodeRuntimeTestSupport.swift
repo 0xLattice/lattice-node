@@ -8,6 +8,7 @@ import Lattice
 import UInt256
 import cashew
 @testable import LatticeNode
+import LatticeNodeAPI
 
 /// Strictly increasing, slightly-past block timestamps (admission is
 /// `timestamp <= now`).

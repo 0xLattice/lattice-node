@@ -7,6 +7,7 @@ import LatticeNodeCore
 import XCTest
 @testable import LatticeNode
 @testable import LatticeNodeDaemon
+import LatticeNodeAPI
 
 /// A running node starts and stops hosting a child chain when its operator
 /// says so, without a restart: a started level syncs from the peers it

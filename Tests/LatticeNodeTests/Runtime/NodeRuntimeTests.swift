@@ -7,6 +7,7 @@ import VolumeBroker
 import XCTest
 import cashew
 @testable import LatticeNode
+import LatticeNodeAPI
 
 /// The node runtime end to end: two Nexus nodes on loopback Ivy, each a
 /// `NodeRuntime` over its own `NodeStorage`. The producer's history is

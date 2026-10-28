@@ -8,6 +8,7 @@ import LatticeNode
 import LatticeNodeCore
 import UInt256
 import VolumeBroker
+import LatticeNodeAPI
 
 @main
 struct LatticeNodeCommand: AsyncParsableCommand {

@@ -90,7 +90,8 @@ Docker-compatible runtime without the GUI.
 | `Sources/LatticeNodeCore/Mempool` | Transaction-pool policy and mutations. |
 | `Sources/LatticeNodeCore/Mining` | Mining state, template jobs, and issued-work tracking. |
 | `Sources/LatticeNode/Runtime` | `NodeRuntime`, the production shell that drives `NodeCore` and executes effects. |
-| `Sources/LatticeNode/API` | Public service models, read operations, and route-input validation. |
+| `Sources/LatticeNodeAPI` | The service's request and response models, the library clients build on without the node. |
+| `Sources/LatticeNode/API` | Read operations, route-input validation, and the node's conversions into the models. |
 | `Sources/LatticeNode/Networking` | Overlay handshake, wire codecs, transport adapter, and wire validation. |
 | `Sources/LatticeNode/Content` | Content-addressed block decoding and Ivy/VolumeBroker adapters. |
 | `Sources/LatticeNode/Storage` | Durable fact journals, header content, SQLite rows, boot recovery, and locking. |

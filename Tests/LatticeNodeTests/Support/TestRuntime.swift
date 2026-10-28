@@ -4,6 +4,7 @@ import Ivy
 import XCTest
 @testable import LatticeNode
 @testable import LatticeNodeDaemon
+import LatticeNodeAPI
 
 extension XCTestCase {
     /// A node runtime over `storage`, on a loopback overlay with no peers,

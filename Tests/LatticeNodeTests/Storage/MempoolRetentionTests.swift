@@ -4,6 +4,7 @@ import Lattice
 import XCTest
 import cashew
 @testable import LatticeNode
+import LatticeNodeAPI
 
 /// The pool's retained roots across a restart: startup clears the live-pool
 /// scope and keeps the durable one; the restored local journal is retained

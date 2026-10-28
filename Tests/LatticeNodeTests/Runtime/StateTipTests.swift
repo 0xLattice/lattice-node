@@ -7,6 +7,7 @@ import VolumeBroker
 import XCTest
 import cashew
 @testable import LatticeNode
+import LatticeNodeAPI
 
 /// `state: tip`: a node keeps the state its chains' tips are made of, and
 /// lets go of what a newer block replaced.
