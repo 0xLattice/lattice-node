@@ -21,6 +21,8 @@ final class BundledBlockFetchTests: XCTestCase {
     }
 
     private let server = PeerID(publicKey: String(repeating: "ab", count: 32))
+    /// The last `hostAndBystander` client, and its session to the host.
+    private var overlayClient: (ivy: Ivy, host: AuthenticatedPeer)?
 
     private func storage(
         keyByte: UInt8, brokenCache: Bool = false, resourcePolicy: NodeResourcePolicy = .default
@@ -469,6 +471,8 @@ final class BundledBlockFetchTests: XCTestCase {
             if connections.all.count == 2, named == [hostID] { break }
             try await Task.sleep(for: .milliseconds(20))
         }
+        overlayClient = try connections.all.first { $0.id == hostID }.map { (client, $0) }
+            ?? { throw TestWaitError.timedOut("the client's session to the host") }()
         let claims: Set<String> = bothHost
             ? [ChainHandshake.volumeBundle, ChainHandshake.hosting(Self.alpha.path)]
             : [ChainHandshake.volumeBundle]
@@ -561,20 +565,27 @@ final class BundledBlockFetchTests: XCTestCase {
     /// Two peers name themselves the chain's hosts and one never answers a
     /// Volume: once it has timed out it is asked after the other, so it
     /// does not cost every Volume a timeout.
-    func testAHostThatNeverAnswersAVolumeIsAskedAfterTheOthers() async throws {
+    func testAHostThatHasTimedOutIsAskedAfterTheOthers() async throws {
         let producer = try await storage(keyByte: 0x97)
         let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
         let recorded = await producer.volumeBundle(cid)
         let (remote, stalled, host) = try await hostAndBystander(
-            producer, producer, rendezvous: Self.alpha.key, requestTimeout: .seconds(1), bothHost: true
+            producer, producer, rendezvous: Self.alpha.key,
+            requestTimeout: .seconds(2 * testTimeScale), bothHost: true
         )
         stalled.stallsVolumes = true
+        // It times out once.
+        let (client, silent) = try XCTUnwrap(overlayClient)
+        let missed = await client.fetchVolume(rootCID: cid, from: silent)
+        XCTAssertTrue(missed.entries.isEmpty)
+        XCTAssertEqual(stalled.volumeRequestCount, 1)
+
         let stored = try await storage(keyByte: 0x98).fetchChainBody(
             cid, remote: remote, bundle: false, hosts: Self.alpha
         )
         XCTAssertEqual(Set(stored), Set(recorded))
         XCTAssertGreaterThan(recorded.count, 2)
-        XCTAssertLessThanOrEqual(stalled.volumeRequestCount, 1)
+        XCTAssertEqual(stalled.volumeRequestCount, 1)
         XCTAssertGreaterThan(host.volumeRequestCount, 0)
     }
 

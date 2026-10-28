@@ -47,7 +47,9 @@ On each maintenance pass, each chain in turn, Nexus first:
    progressing.
 3. **Discovers.** A child chain with no current peer, or one that has stopped
    progressing, looks up its rendezvous among its parent's peers and dials up
-   to four of the hosts named there (see "Discovery and peer health").
+   to four of the hosts named there (see "Discovery and peer health"). One
+   with fewer than eight current peers does the same at most once per
+   `peerSearchInterval`.
 4. **Dials its seeds**, only while it still has fewer than two current peers.
    Nexus's seeds are the built-in ones: by name, `seed1.lattice.build` to
    `seed4.lattice.build` on port 4001, then the same seeds at fixed addresses
@@ -260,7 +262,7 @@ about every 10 minutes, later when a turn is slow, so a lifetime near that
 leaves gaps in which peers cannot find the node as a provider. A child chain's current peers are the sessions whose hello
 named it, and those its rendezvous names, so a peer on a build that predates
 the hello's claim still counts. Each hosted child chain searches its own
-rendezvous while it has no current peer - looked at at those same moments - and when it has not progressed since boot or for `peerSearchInterval`:
+rendezvous while it has no current peer - looked at at those same moments - when it has not progressed since boot or for `peerSearchInterval`, and, once per `peerSearchInterval`, while it has fewer current peers than the target (`peerTarget`, eight):
 the node asks the DHT for that chain's providers and dials up to four, drawn
 at random, that it is not already connected to. Peers that host only other
 chains cannot sync it. When Nexus is the stalled chain, the node re-dials

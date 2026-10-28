@@ -57,6 +57,17 @@ final class PeerSearchTests: XCTestCase {
         XCTAssertEqual(search.due(heights: [(nexus, 1)], now: 0, interval: 0, connected: true), [])
     }
 
+    /// A level short of peers tops up from its rendezvous at most once per
+    /// interval, however many passes new sessions start.
+    func testATopUpRepeatsAtMostOncePerInterval() {
+        var search = PeerSearch()
+        XCTAssertEqual(search.topUps(paths: [nexus, testnet], now: 0, interval: interval, connected: true), [nexus, testnet])
+        XCTAssertEqual(search.topUps(paths: [testnet], now: 1_000, interval: interval, connected: true), [])
+        XCTAssertEqual(search.topUps(paths: [testnet], now: 600_000, interval: interval, connected: true), [testnet])
+        XCTAssertEqual(search.topUps(paths: [testnet], now: 600_001, interval: interval, connected: false), [])
+        XCTAssertEqual(search.topUps(paths: [testnet], now: 0, interval: 0, connected: true), [])
+    }
+
     func testTheRendezvousIsScopedToItsNexusAndPath() {
         let key = ChainPeersKey.key(nexusGenesisCID: "bafyNexus", chainPath: testnet)
         XCTAssertEqual(key, "lattice.chain-peers.v1:bafyNexus:Nexus/testnet")

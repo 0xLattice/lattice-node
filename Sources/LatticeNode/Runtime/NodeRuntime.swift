@@ -853,6 +853,9 @@ extension NodeRuntime {
                 now: now, interval: interval,
                 connected: sessions.values.contains(where: \.ready)
             )
+            let topUps = peerSearch.topUps(
+                paths: core.ordered, now: now, interval: interval, connected: sessions.values.contains(where: \.ready)
+            )
             // Every hosted chain, Nexus down, with what its routine needs.
             // The levels differ only in where discovery asks: a child has a
             // rendezvous among its parent's peers and the seeds its operator
@@ -867,6 +870,7 @@ extension NodeRuntime {
                     lineage: (root.count...path.count).map { Array(path.prefix($0)) },
                     hosts: path == root ? nil : ChainHosts(nexusGenesisCID: nexus, chainPath: path),
                     stalled: due.contains(path),
+                    topUp: topUps.contains(path),
                     seeds: path == root
                         ? [configuration.seedPeers, configuration.fixedSeedPeers]
                         : [configuration.childSeedPeers[path] ?? []]
@@ -952,9 +956,11 @@ extension NodeRuntime {
                     }
                     // A child's rendezvous names the peers that can sync it.
                     // It is searched while the chain has no current peer,
-                    // and when it stalled: a chain whose whole network is a
-                    // few nodes does not search on every pass.
-                    if let hosts = chain.hosts, current.isEmpty || chain.stalled {
+                    // when it stalled, and while it is short of the target
+                    // once an interval: a chain whose whole network is a few
+                    // nodes does not search on every pass.
+                    if let hosts = chain.hosts,
+                       current.isEmpty || chain.stalled || (chain.topUp && current.count < target) {
                         let fresh = (await ivy.discoverProviders(rootCID: hosts.key))
                             .filter { $0.publicKey != ownKey && !connected.contains($0.publicKey) && !attempted.contains($0) }
                         for endpoint in fresh.shuffled().prefix(4) where await dial(endpoint) == true {
@@ -1542,7 +1548,15 @@ extension NodeRuntime {
                 answer(replyID, .failure(error))
             case .announceTransaction(let cid):
                 guard let payload = try? TransactionAvailableMessage(volumeRootCID: cid).encoded() else { break }
-                for session in sessions.values.sorted(by: { $0.id < $1.id }) where session.ready {
+                // To the chain's current peers: no other peer runs its pool,
+                // and with many chains most sessions host others. Every
+                // session hosts Nexus.
+                let hosts = path == core.rootPath ? nil : ChainHosts(
+                    nexusGenesisCID: configuration.nexusGenesisCID, chainPath: path
+                )
+                let hosting = Set(await remote.peerCapabilities.sessions(hosting: hosts, ivy: ivy).map(\.sessionID))
+                for session in sessions.values.sorted(by: { $0.id < $1.id })
+                where session.ready && hosting.contains(session.peer.sessionID) {
                     await outbox.send(
                         to: session.peer, topic: OverlayTopic.transactionAvailable, payload: payload
                     )
