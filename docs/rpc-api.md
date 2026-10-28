@@ -497,7 +497,9 @@ host it.
 ## Operator pins
 
 A Volume the operator names by its root CID is held, served to peers and
-announced as held, until the operator unpins it. The node does not look
+announced as held, until the operator unpins it. With
+`--no-announce-pins` pins are held and served but never announced: a
+holder of many Volumes need not send a record per Volume. The node does not look
 inside it or follow anything it names, and it is kept whatever
 `blockBodies` says. These routes are on the operator port only.
 
