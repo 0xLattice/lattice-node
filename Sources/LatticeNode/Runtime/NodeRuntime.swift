@@ -853,8 +853,14 @@ extension NodeRuntime {
                 now: now, interval: interval,
                 connected: sessions.values.contains(where: \.ready)
             )
+            // Only a child short of the target as the last pass counted it
+            // spends its turn: one that drops short just after is not kept
+            // waiting an interval by a turn it did not need.
             let topUps = peerSearch.topUps(
-                paths: core.ordered, now: now, interval: interval, connected: sessions.values.contains(where: \.ready)
+                paths: core.ordered.filter {
+                    $0 != core.rootPath && (currentPeers[$0]?.count ?? 0) < configuration.peerTarget
+                },
+                now: now, interval: interval, connected: sessions.values.contains(where: \.ready)
             )
             // Every hosted chain, Nexus down, with what its routine needs.
             // The levels differ only in where discovery asks: a child has a

@@ -279,7 +279,8 @@ ordinary order, since every peer hosts Nexus. The record is only a hint for
 whom to ask: content is verified the same whoever sent it, a named session
 that has no bundle or Volume costs one round trip before the others are asked
 (one that does not answer costs a request timeout, after which it is asked
-after the others), one that does not end its bundle is chosen for no further
+after the others: for a Volume no answering host holds, each silent one costs
+a timeout, and the ordinary order may ask it again), one that does not end its bundle is chosen for no further
 bundle that session (requests already waiting for it when that is learned are
 still sent, at most one window of blocks, once per session), and no peer is
 refused service for what it announced.
