@@ -8,6 +8,7 @@ import XCTest
 import cashew
 @testable import LatticeNode
 @testable import LatticeNodeDaemon
+import LatticeNodeAPI
 
 final class DaemonHTTPTests: XCTestCase {
     func testCompleteVolumeRouteServesTheLocalIvyArchive() async throws {

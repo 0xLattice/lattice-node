@@ -4,6 +4,7 @@ import HummingbirdTesting
 import XCTest
 @testable import LatticeNode
 @testable import LatticeNodeDaemon
+import LatticeNodeAPI
 
 /// The loopback RPC port's cookie authentication and browser-origin policy.
 final class LoopbackRPCAuthTests: XCTestCase {

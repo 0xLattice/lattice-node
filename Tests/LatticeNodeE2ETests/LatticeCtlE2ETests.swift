@@ -8,6 +8,7 @@ import LatticeMinerCore
 import LatticeNode
 import XCTest
 import cashew
+import LatticeNodeAPI
 
 /// Black-box E2Es for the `lattice` operator CLI: real shipped binaries,
 /// public HTTP, nothing in-process. Proves the CLI can bring up a Nexus

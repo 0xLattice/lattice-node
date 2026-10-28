@@ -43,9 +43,9 @@ import Lattice
 import cashew
 import LatticeMinerCore
 import LatticeMiningCoordinator
-import LatticeNode
 import LatticeSponsorCore
 import UInt256
+import LatticeNodeAPI
 
 @main
 struct LatticeSponsorCommand: AsyncParsableCommand {
@@ -96,7 +96,7 @@ struct LatticeSponsorCommand: AsyncParsableCommand {
             while !Task.isCancelled {
                 do {
                     // Hosted chains come and go without a restart.
-                    let chains = [ChainAddress.nexus] + (try await rpc.hostedChains())
+                    let chains = [DEFAULT_ROOT_DIRECTORY] + (try await rpc.hostedChains())
                     let request = try MiningTemplateRequestBody.make(
                         recipients: chains.map { "\($0)=\(signer.address)" }, minimumWork: []
                     )
@@ -157,7 +157,7 @@ struct WorkRequest: Decodable {
     let chain: String?
 
     var chainPath: [String] {
-        (chain ?? ChainAddress.nexus).components(separatedBy: "/")
+        (chain ?? DEFAULT_ROOT_DIRECTORY).components(separatedBy: "/")
     }
 }
 
@@ -403,7 +403,7 @@ struct SponsorRPC: Sendable {
     /// The child chains the node hosts, as absolute paths.
     func hostedChains() async throws -> [String] {
         struct Hosted: Decodable { let chains: [String] }
-        let hosted: Hosted = try await get("hosted-chains", on: [ChainAddress.nexus])
+        let hosted: Hosted = try await get("hosted-chains", on: [DEFAULT_ROOT_DIRECTORY])
         return hosted.chains
     }
 
@@ -467,7 +467,7 @@ struct SponsorRPC: Sendable {
 
     private func get<Value: Decodable>(_ path: String, on chainPath: [String]) async throws -> Value {
         var url = URLComponents(url: base.appendingPathComponent(path), resolvingAgainstBaseURL: false)
-        if chainPath != [ChainAddress.nexus] {
+        if chainPath != [DEFAULT_ROOT_DIRECTORY] {
             url?.queryItems = [URLQueryItem(name: "chainPath", value: chainPath.joined(separator: "/"))]
         }
         guard let resolved = url?.url else { throw RPCFailure.status(0) }

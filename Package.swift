@@ -8,6 +8,7 @@ let package = Package(
     ],
     products: [
         .library(name: "LatticeNode", targets: ["LatticeNode"]),
+        .library(name: "LatticeNodeAPI", targets: ["LatticeNodeAPI"]),
         .executable(name: "lattice-node", targets: ["LatticeNodeDaemon"]),
         .executable(name: "lattice-miner", targets: ["LatticeMiner"]),
         .executable(
@@ -83,8 +84,18 @@ let package = Package(
                 .product(name: "Crypto", package: "swift-crypto"),
             ]),
         .target(
+            name: "LatticeNodeAPI",
+            dependencies: [
+                "LatticeLightClient",
+                .product(name: "Lattice", package: "lattice"),
+                .product(name: "cashew", package: "cashew"),
+                .product(name: "UInt256", package: "UInt256"),
+            ]
+        ),
+        .target(
             name: "LatticeNode",
             dependencies: [
+                "LatticeNodeAPI",
                 "CSQLite",
                 "LatticeLightClient",
                 "LatticeNodeCore",
@@ -99,6 +110,7 @@ let package = Package(
         .executableTarget(
             name: "LatticeNodeDaemon",
             dependencies: [
+                "LatticeNodeAPI",
                 "LatticeNode",
                 "LatticeNodeCore",
                 "LatticeCtlCore",
@@ -147,6 +159,7 @@ let package = Package(
         .executableTarget(
             name: "LatticeCtl",
             dependencies: [
+                "LatticeNodeAPI",
                 "LatticeNode",
                 "LatticeCtlCore",
                 "LatticeProcessWait",
@@ -169,7 +182,7 @@ let package = Package(
         .executableTarget(
             name: "LatticeSponsor",
             dependencies: [
-                "LatticeNode",
+                "LatticeNodeAPI",
                 "LatticeMinerCore",
                 "LatticeMiningCoordinator",
                 "LatticeSponsorCore",
@@ -191,6 +204,7 @@ let package = Package(
         .testTarget(
             name: "LatticeNodeTests",
             dependencies: [
+                "LatticeNodeAPI",
                 "LatticeNode",
                 "LatticeCtlCore",
                 "LatticeProcessWait",
@@ -223,6 +237,7 @@ let package = Package(
         .testTarget(
             name: "LatticeNodeE2ETests",
             dependencies: [
+                "LatticeNodeAPI",
                 "LatticeNode",
                 "LatticeNodeDaemon",
                 "LatticeCtlCore",

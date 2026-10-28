@@ -8,6 +8,7 @@ import VolumeBroker
 import XCTest
 import cashew
 @testable import LatticeNode
+import LatticeNodeAPI
 
 /// Content a fact names and the store lacks is no fault: the node reads what
 /// its own work needs from peers, checked against its CID.

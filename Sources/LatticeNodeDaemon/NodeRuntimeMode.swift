@@ -2,6 +2,7 @@ import Foundation
 import Hummingbird
 import LatticeNode
 import LatticeNodeCore
+import LatticeNodeAPI
 
 /// What `GET /core/snapshot` answers: the root chain's last published
 /// snapshot.

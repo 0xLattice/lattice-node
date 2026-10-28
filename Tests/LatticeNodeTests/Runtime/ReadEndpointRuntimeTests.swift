@@ -6,6 +6,7 @@ import Lattice
 import XCTest
 @testable import LatticeNode
 @testable import LatticeNodeDaemon
+import LatticeNodeAPI
 
 /// Declared read URLs across three levels, Nexus → Alpha → Beta, on
 /// loopback Ivy. One host runs the whole tree and declares a URL; the others

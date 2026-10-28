@@ -3,6 +3,7 @@ import Lattice
 import LatticeMinerCore
 import cashew
 @testable import LatticeNode
+import LatticeNodeAPI
 
 /// Pins the external mining-worker contract documented in
 /// `docs/mining-workers.md`. The reference vector below is quoted verbatim in
