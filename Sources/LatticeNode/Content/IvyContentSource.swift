@@ -451,19 +451,20 @@ public struct IvyRootContentSource: Sendable {
         // A Volume is taken at whatever size the wire carries and measured
         // here once verified: the size a peer declares is its claim, and a
         // declared size past the budget would say nothing about the block.
-        // A child's Volume is asked of its current peers first, one at a
-        // time, then of anyone (provider records, connected peers, then the
-        // DHT): a peer that hosts another chain rarely holds this one's
-        // content. Every peer hosts Nexus, so its Volumes go to anyone. A
-        // peer reported for this root is not asked again.
+        // A child's Volume is asked of its current peers first, then of
+        // anyone (provider records, connected peers, then the DHT): a peer
+        // that hosts another chain rarely holds this one's content. Ivy asks
+        // the hosts one at a time in its own order (those timing out last,
+        // then the least loaded). Every peer hosts Nexus, so its Volumes go
+        // to anyone. A peer reported for this root is not asked first again.
         fetch = { rootCID, hosts, excluding in
             if let hosts {
-                for peer in await capabilities.sessions(hosting: hosts, ivy: ivy).shuffled()
-                where !excluding.contains(peer.id) {
-                    guard !Task.isCancelled else { return .empty }
-                    let answer = await ivy.fetchVolume(rootCID: rootCID, from: peer)
-                    // This node's own capacity ends the search; a host
-                    // that sent nothing, or could not be asked, does not.
+                let named = await capabilities.sessions(hosting: hosts, ivy: ivy)
+                    .filter { !excluding.contains($0.id) }
+                if !named.isEmpty {
+                    let answer = await ivy.fetchVolume(rootCID: rootCID, from: named)
+                    // This node's own capacity ends the search; hosts that
+                    // sent nothing do not.
                     if !answer.entries.isEmpty || answer.failure == .localCapacityUnavailable { return answer }
                 }
             }

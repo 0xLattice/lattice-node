@@ -279,6 +279,8 @@ final class BundledBlockFetchTests: XCTestCase {
         var answersBundles = true
         /// The bundle names a Volume whose read never returns.
         var neverEnds = false
+        /// No Volume read returns.
+        var stallsVolumes = false
 
         init(_ storage: NodeStorage) { source = NodeStorageIvyContentSource(storage: storage) }
 
@@ -287,6 +289,7 @@ final class BundledBlockFetchTests: XCTestCase {
 
         func volume(rootCID: String, maxDataBytes: Int) async -> [ContentEntry] {
             lock.withLock { volumeRequests += 1 }
+            if stallsVolumes { try? await Task.sleep(for: .seconds(60)) }
             if rootCID == "never" { try? await Task.sleep(for: .seconds(60)) }
             return await source.volume(rootCID: rootCID, maxDataBytes: maxDataBytes)
         }
@@ -425,7 +428,8 @@ final class BundledBlockFetchTests: XCTestCase {
     private func hostAndBystander(
         _ host: NodeStorage, _ bystander: NodeStorage, rendezvous: String,
         recordsPerPeer: Int = IvyConfig.defaultMaxProviderRecordsPerPeer,
-        requestTimeout: Duration = .seconds(5)
+        requestTimeout: Duration = .seconds(5),
+        bothHost: Bool = false
     ) async throws -> (remote: IvyRootContentSource, host: CountingSource, bystander: CountingSource) {
         func ivy() -> (Ivy, PeerEndpoint) {
             let (key, port) = (Curve25519.Signing.PrivateKey(), NetworkTransportTestPorts.allocate())
@@ -465,7 +469,10 @@ final class BundledBlockFetchTests: XCTestCase {
             if connections.all.count == 2, named == [hostID] { break }
             try await Task.sleep(for: .milliseconds(20))
         }
-        remote.peerCapabilities.set(connections.all.map { ($0, [ChainHandshake.volumeBundle]) })
+        let claims: Set<String> = bothHost
+            ? [ChainHandshake.volumeBundle, ChainHandshake.hosting(Self.alpha.path)]
+            : [ChainHandshake.volumeBundle]
+        remote.peerCapabilities.set(connections.all.map { ($0, claims) })
         return (remote, sources[0], sources[1])
     }
 
@@ -549,6 +556,26 @@ final class BundledBlockFetchTests: XCTestCase {
         XCTAssertEqual(Set(stored), Set(recorded))
         XCTAssertGreaterThan(host.volumeRequestCount, 0)
         XCTAssertGreaterThan(bystander.volumeRequestCount, 0)
+    }
+
+    /// Two peers name themselves the chain's hosts and one never answers a
+    /// Volume: once it has timed out it is asked after the other, so it
+    /// does not cost every Volume a timeout.
+    func testAHostThatNeverAnswersAVolumeIsAskedAfterTheOthers() async throws {
+        let producer = try await storage(keyByte: 0x97)
+        let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
+        let recorded = await producer.volumeBundle(cid)
+        let (remote, stalled, host) = try await hostAndBystander(
+            producer, producer, rendezvous: Self.alpha.key, requestTimeout: .seconds(1), bothHost: true
+        )
+        stalled.stallsVolumes = true
+        let stored = try await storage(keyByte: 0x98).fetchChainBody(
+            cid, remote: remote, bundle: false, hosts: Self.alpha
+        )
+        XCTAssertEqual(Set(stored), Set(recorded))
+        XCTAssertGreaterThan(recorded.count, 2)
+        XCTAssertLessThanOrEqual(stalled.volumeRequestCount, 1)
+        XCTAssertGreaterThan(host.volumeRequestCount, 0)
     }
 
     /// A named session is held to its bundles like any other: one that never
