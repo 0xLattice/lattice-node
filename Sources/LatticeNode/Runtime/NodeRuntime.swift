@@ -588,6 +588,8 @@ extension NodeRuntime {
             var ready = false
             /// What this session's hello said the peer speaks beyond version 6.
             var capabilities: Set<String> = []
+            /// The hello this node last sent on the session.
+            var sentHello: Data?
             var coreID: LatticeNodeCore.PeerID { .init(key: peer.key.hex, session: id) }
         }
 
@@ -811,6 +813,7 @@ extension NodeRuntime {
             if hosted.value != hostedBefore, let hello = helloPayload() {
                 for session in sessions.values.sorted(by: { $0.id < $1.id })
                 where session.ready && session.capabilities.contains(ChainHandshake.helloUpdates) {
+                    sessions[session.peer.key.hex]?.sentHello = hello
                     await outbox.send(to: session.peer, topic: OverlayTopic.overlayHello, payload: hello)
                 }
             }
@@ -1176,14 +1179,15 @@ extension NodeRuntime {
                 }
                 let replaced = sessions[peer.key.hex]
                 let id = nextSession
-                sessions[peer.key.hex] = Session(peer: peer, id: id)
+                let hello = helloPayload()
+                sessions[peer.key.hex] = Session(peer: peer, id: id, sentHello: hello)
                 nextSession += 1
                 let (inputs, key) = (inputs, peer.key.hex)
                 Timers.deadline(after: helloTimeout, generation: id) { id in
                     inputs.yield(.helloDeadline(peerKey: key, session: id))
                 }
                 // Built at each connect, so it names what is hosted now.
-                if let hello = helloPayload() {
+                if let hello {
                     await outbox.send(to: peer, topic: OverlayTopic.overlayHello, payload: hello)
                 }
                 if peer.route != .direct {
@@ -1227,24 +1231,40 @@ extension NodeRuntime {
                               expectedNexusGenesisCID: configuration.nexusGenesisCID,
                               expectedChainPath: configuration.chainPath
                           )) != nil else {
+                        // A later hello that does not hold is ignored: the
+                        // session keeps the claims it has.
+                        guard !session.ready else { return true }
                         sessions[peer.key.hex] = nil
                         _ = await ivy.disconnectSession(ifCurrent: peer)
                         return true
                     }
                 let update = session.ready
-                let relayed = session.capabilities.contains(ChainHandshake.relay)
+                let before = session.capabilities
                 session.ready = true
                 session.capabilities = Set(remote.capabilities ?? [])
+                // What is hosted may have changed since this node's hello
+                // was sent, while the session was not yet ready to be told.
+                var resend: Data?
+                if !update, session.capabilities.contains(ChainHandshake.helloUpdates),
+                   let current = helloPayload(), current != session.sentHello {
+                    resend = current
+                    session.sentHello = current
+                }
                 sessions[peer.key.hex] = session
+                if let resend { await outbox.send(to: peer, topic: OverlayTopic.overlayHello, payload: resend) }
                 // Asked for a route when a peer cannot be dialled. A session
                 // that is itself relayed cannot carry another.
-                let relays = session.capabilities.contains(ChainHandshake.relay)
-                if peer.route == .direct, update ? relays != relayed : relays {
-                    await ivy.setRelaying(peer.id, relays)
+                let peerRelays = session.capabilities.contains(ChainHandshake.relay)
+                if peer.route == .direct,
+                   update ? peerRelays != before.contains(ChainHandshake.relay) : peerRelays {
+                    await ivy.setRelaying(peer.id, peerRelays)
                 }
                 guard !update else {
                     // What it hosts changed: each chain's peers are counted again.
-                    startNetworkMaintenance()
+                    func hosting(_ claims: Set<String>) -> Set<String> {
+                        claims.filter { $0.hasPrefix(ChainHandshake.hosting([])) }
+                    }
+                    if hosting(before) != hosting(session.capabilities) { startNetworkMaintenance() }
                     return true
                 }
                 return await step(.peerReady(session.coreID))

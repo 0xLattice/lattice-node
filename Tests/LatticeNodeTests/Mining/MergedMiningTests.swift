@@ -407,7 +407,7 @@ final class MergedMiningTests: XCTestCase {
         // The control: a Nexus transaction submitted to the entry node reaches
         // the miner's pool, and the Nexus-only peer is told of it.
         try await eventually("the Nexus-only peer's session is ready") {
-            await entry.peerCount >= 2
+            entry.peerCount >= 2
         }
         let nexusCID = try await entry.submitTransaction(
             SubmitTransactionRequest(transaction: try pay(on: ["Nexus"]))

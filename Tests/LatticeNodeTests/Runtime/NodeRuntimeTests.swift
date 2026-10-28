@@ -234,6 +234,62 @@ final class NodeRuntimeTests: XCTestCase {
         XCTAssertTrue(runtime.peerCapabilities.sessions(speaking: ChainHandshake.volumeBundle).isEmpty)
     }
 
+    /// A peer that said it sends later hellos has its claims replaced by
+    /// one, and one that does not hold (malformed, another Nexus) is ignored:
+    /// the session stays as it was, still the node's peer.
+    func testALaterHelloReplacesClaimsAndABadOneIsIgnored() async throws {
+        let peerKey = Curve25519.Signing.PrivateKey()
+        let peerPort = NetworkTransportTestPorts.allocate()
+        let peer = Ivy(config: IvyConfig(
+            signingKey: peerKey, listenPort: peerPort, requestTimeout: .seconds(5), stunServers: [],
+            healthConfig: PeerHealthConfig(enabled: false), externalAddress: ("127.0.0.1", peerPort),
+            mode: .overlay
+        ))
+        func hello(nexus: String = NexusGenesis.expectedBlockHash, _ capabilities: Set<String>) throws -> Data {
+            try ChainHandshake(nexusGenesisCID: nexus, chainPath: ["Nexus"], capabilities: capabilities).encode()
+        }
+        let delegate = BootstrapHelloDelegate(hello: try hello([ChainHandshake.helloUpdates]))
+        await peer.installTestDelegate(delegate)
+        try await peer.start()
+        addTeardownBlock { await peer.stop() }
+        let peerEndpoint = PeerEndpoint(
+            publicKey: try PeerKey(rawRepresentation: peerKey.publicKey.rawRepresentation).hex,
+            host: "127.0.0.1", port: peerPort
+        )
+        let nodePort = NetworkTransportTestPorts.allocate()
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"], storagePath: temporaryDirectory(), privateKeyHex: String(repeating: "4a", count: 32),
+            listenPort: nodePort, rpcPort: NetworkTransportTestPorts.allocate(),
+            bootstrapPeers: [peerEndpoint], externalAddress: "127.0.0.1"
+        )
+        let runtime = try await NodeRuntime.start(
+            storage: try await NodeStorage.open(configuration: configuration),
+            configuration: configuration,
+            overlay: IvyConfig(
+                signingKey: configuration.signingKey, listenPort: nodePort, bootstrapPeers: [peerEndpoint],
+                requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
+                externalAddress: ("127.0.0.1", nodePort), mode: .overlay
+            )
+        )
+        addTeardownBlock { await runtime.stop() }
+        try await eventually("the session is ready") { runtime.peerCount == 1 }
+        let session = try XCTUnwrap(delegate.connected)
+        let alpha = ChainHandshake.hosting(["Nexus", "Alpha"])
+
+        // Bad ones first, then one that claims Alpha: taken on the same
+        // session, so the bad ones neither ended it nor changed its claims.
+        for bad in [Data("{".utf8), try hello(nexus: "not-this-nexus", [ChainHandshake.helloUpdates, alpha])] {
+            _ = await peer.sendMessage(to: session, topic: OverlayTopic.overlayHello, payload: bad)
+        }
+        _ = await peer.sendMessage(
+            to: session, topic: OverlayTopic.overlayHello, payload: try hello([ChainHandshake.helloUpdates, alpha])
+        )
+        try await eventually("the later hello's claim is taken") {
+            runtime.peerCapabilities.sessions(speaking: alpha).map(\.sessionID) == [session.sessionID]
+        }
+        XCTAssertEqual(runtime.peerCount, 1)
+    }
+
     func testMaintenanceAnnouncesNexusAndEveryHostedChildsRendezvous() async throws {
         let routerKey = try Curve25519.Signing.PrivateKey(
             rawRepresentation: Data(repeating: 0x46, count: 32)
