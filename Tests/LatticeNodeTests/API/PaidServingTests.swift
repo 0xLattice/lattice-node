@@ -296,6 +296,40 @@ final class PaidServingTests: XCTestCase {
         XCTAssertThrowsError(try ServingLedger(directory: directory, tally: Tally()))
     }
 
+    /// Tally drops its smallest balance past its bound; a credit that would
+    /// make it do so is refused instead, before anything is written.
+    func testACreditNeedingANewPlacePastTallysBoundIsRefused() async throws {
+        let directory = temporaryDirectory()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let config = TallyConfig(maxPeers: 1)
+        let tally = Tally(config: config)
+        let ledger = try ServingLedger(directory: directory, tally: tally, config: config)
+        let peers = (1...5).map { String(repeating: String(format: "%02x", $0), count: 32) }
+        for peer in peers.prefix(4) { _ = try await ledger.credit(peer: peer, bytes: 10) }
+        do {
+            _ = try await ledger.credit(peer: peers[4], bytes: 10, payment: "payment")
+            XCTFail("no place for a fifth balance")
+        } catch {
+            XCTAssertEqual(error as? ServingLedgerError, .balancesFull)
+        }
+        // Not burned: the payment is credited once there is room.
+        _ = try await ledger.credit(peer: peers[0], bytes: 5, payment: "payment")
+        XCTAssertEqual(tally.servingBalances().count, 4)
+        XCTAssertEqual(tally.servingBalance(for: PeerID(publicKey: peers[0])), 15)
+    }
+
+    func testACreditThatCannotBeWrittenIsNotApplied() async throws {
+        let tally = Tally()
+        let ledger = try ServingLedger(directory: temporaryDirectory(), tally: tally)
+        do {
+            _ = try await ledger.credit(peer: Self.peer, bytes: 10)
+            XCTFail("the directory does not exist")
+        } catch {
+            XCTAssertEqual(error as? ServingLedgerError, .notSaved)
+        }
+        XCTAssertEqual(tally.servingBalance(for: PeerID(publicKey: Self.peer)), 0)
+    }
+
     func testAPrepayIsBilledAsAnExpensiveRead() {
         XCTAssertEqual(PublicReadRouteClass(method: .post, path: "/serving-prepay"), .expensive)
         XCTAssertEqual(PublicReadRouteClass(method: .get, path: "/serving-terms"), .general)

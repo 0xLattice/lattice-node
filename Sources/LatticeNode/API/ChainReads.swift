@@ -511,7 +511,9 @@ public struct ChainReads: Sendable {
         guard let transaction = await transaction(cid: cid),
               let body = try? await transaction.body.resolve(fetcher: storage).node,
               let inclusion = await canonicalInclusion(cid: cid, body: body),
-              let tip = await tip().height, tip >= inclusion.height else {
+              let tip = await tip().height, tip >= inclusion.height,
+              // Still canonical against the tip the depth is counted from.
+              await canonicalCID(inclusion.height) == inclusion.hash else {
             return nil
         }
         return (transaction, body, tip - inclusion.height)

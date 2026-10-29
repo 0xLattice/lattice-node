@@ -7,7 +7,7 @@ listener is loopback-only and authenticated ([Authentication](#authentication)).
 The optional public-read listener is unauthenticated. The optional public-read
 listener registers only the GET routes in the read table below, plus
 `POST /transactions` when its operator turns public submit on
-([Public submit](#public-submit)); it is off by default; and the
+([Public submit](#public-submit)), which is off by default, and the
 [paid serving](#paid-serving) routes `GET /serving-terms` and
 `POST /serving-prepay`.
 
@@ -592,7 +592,10 @@ lattice-serving-prepay:v1:<chain>:<txCID>:<peer>
 
 The payment is the sum of the transaction's account action deltas on `payTo`
 (credits net of debits); `peer` is credited that times the chain's
-`bytesPerCoin` bytes (saturating), once per transaction ever.
+`bytesPerCoin` bytes (saturating), once per transaction by this node. Nodes
+keep their own credited sets, so each node selling serving needs its own
+`payTo`, and one that receives other payments should not be it: any signer of
+a transaction paying `payTo` can claim the payment.
 
 ```json
 {"peer": "<peer key>", "credited": 7168, "balance": 7168}
@@ -603,8 +606,9 @@ Refusals: `400` `invalidChainPath`, `unpricedChain` (no rate for `chain`),
 (nothing net to `payTo`); `404` `unknownChain` (not hosted here),
 `notIncluded` (not in the canonical chain, pending, or not held here);
 `425` `notDeepEnough` (retry once the chain has grown); `409`
-`alreadyCredited`; `503` `notSaved` (the credit could not be written, and was
-not applied).
+`alreadyCredited`; `413` over 4 KiB; `503` `notSaved` (the credit could not
+be written, and was not applied) or `balancesFull` (the node keeps balances
+for at most 4096 peers, and this one has none; nothing is written).
 
 ### `GET /serving-balance/:peer`
 
@@ -618,7 +622,8 @@ Operator port only.
 
 Operator port only: credits `bytes` (at least 1) to `peer` and answers its
 balance as `GET /serving-balance/:peer` does. A sponsor uses it to credit
-work. `400` `invalidPeer` or `invalidBytes`; `503` `notSaved`.
+work. `400` `invalidPeer` or `invalidBytes`; `503` `notSaved` or
+`balancesFull`.
 
 ```json
 {"peer": "<peer key>", "bytes": 1048576}
@@ -633,7 +638,8 @@ since the last write, never a credit.
 
 - `400 Bad Request` — malformed JSON, invalid content, policy refusal, or
   invalid work;
-- `413 Content Too Large` — public submit body over 1 MiB;
+- `413 Content Too Large` — public submit body over 1 MiB, or serving prepay
+  body over 4 KiB;
 - `401 Unauthorized` — operator route without the node's cookie (no challenge header);
 - `403 Forbidden` — browser `Origin` not listed, or a non-loopback `Host`;
 - `404 Not Found` — unknown resource or unhosted `chainPath`;

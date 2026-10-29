@@ -23,15 +23,20 @@ public actor ServingLedger {
 
     private let file: URL
     private let tally: Tally
+    /// The most balances Tally keeps. Past it Tally drops the smallest to
+    /// make room, which would take back a credit already granted; a credit
+    /// to a peer that would need a new place is refused instead.
+    private let capacity: Int
     private var credited: Set<String>
     private var written: [String: Int]
 
     /// Restores the balances on file into `tally`. A file that is there but
     /// cannot be read fails the start: it holds the payments already
     /// credited, and starting without them would credit them again.
-    init(directory: URL, tally: Tally) throws {
+    init(directory: URL, tally: Tally, config: TallyConfig = .default) throws {
         file = directory.appendingPathComponent(Self.fileName)
         self.tally = tally
+        capacity = Self.capacity(config)
         guard FileManager.default.fileExists(atPath: file.path) else {
             credited = []
             written = [:]
@@ -50,6 +55,13 @@ public actor ServingLedger {
         }
         credited = Set(saved.credited)
         written = Self.balances(of: tally)
+    }
+
+    /// Tally's own bound on the peers it keeps state for, which it does not
+    /// export: four per `maxPeers`, or 4096.
+    static func capacity(_ config: TallyConfig) -> Int {
+        guard let maxPeers = config.maxPeers else { return 4096 }
+        return max(maxPeers, 1) <= Int.max / 4 ? max(maxPeers, 1) * 4 : .max
     }
 
     /// A peer as Ivy and the node print it: its Ed25519 public key, 64
@@ -97,6 +109,9 @@ public actor ServingLedger {
     /// is not applied.
     private func apply(peer: PeerID, bytes: Int, payment: String?) throws {
         var balances = Self.balances(of: tally)
+        guard balances[peer.publicKey] != nil || balances.count < capacity else {
+            throw ServingLedgerError.balancesFull
+        }
         let (sum, overflow) = balances[peer.publicKey, default: 0].addingReportingOverflow(bytes)
         balances[peer.publicKey] = overflow ? .max : sum
         var credited = credited
@@ -110,10 +125,18 @@ public actor ServingLedger {
         tally.creditServingBalance(peer: peer, bytes: bytes)
     }
 
+    /// Replaced atomically and synced, with its directory, to stable
+    /// storage: a credited payment must not come back after a power loss.
     private func write(_ balances: [String: Int], credited: Set<String>) throws {
         let data = try JSONEncoder().encode(File(version: 1, balances: balances, credited: credited.sorted()))
         try data.write(to: file, options: .atomic)
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        for path in [file.path, file.deletingLastPathComponent().path] {
+            let descriptor = open(path, O_RDONLY)
+            guard descriptor >= 0 else { throw ServingLedgerError.notSaved }
+            defer { close(descriptor) }
+            guard fsync(descriptor) == 0 else { throw ServingLedgerError.notSaved }
+        }
         written = balances
     }
 
@@ -126,6 +149,7 @@ public enum ServingLedgerError: Error, Equatable, CustomStringConvertible {
     case invalidPeer
     case invalidBytes
     case alreadyCredited
+    case balancesFull
     case notSaved
     case unreadable(String)
 
@@ -134,6 +158,7 @@ public enum ServingLedgerError: Error, Equatable, CustomStringConvertible {
         case .invalidPeer: "invalidPeer"
         case .invalidBytes: "invalidBytes"
         case .alreadyCredited: "alreadyCredited"
+        case .balancesFull: "balancesFull"
         case .notSaved: "notSaved"
         case .unreadable(let path):
             "\(path) cannot be read: it holds the serving payments already credited; restore it or remove it to forget them"

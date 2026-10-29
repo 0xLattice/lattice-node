@@ -384,7 +384,8 @@ Readers find the terms at `GET /serving-terms` on the public read port, pay
 `POST /serving-balance` on the operator port (see
 [rpc-api.md](rpc-api.md#paid-serving)). Balances and credited payments are
 kept in `<data-directory>/serving.json`; a crash loses spending since the
-last write, never a credit. A file there that cannot be read stops the node
+last write, never a credit. Each node keeps its own credited payments, so
+give each node that sells serving its own `payTo`, used for nothing else. A file there that cannot be read stops the node
 from starting, since starting without it would credit its payments again.
 
 ## Health interpretation

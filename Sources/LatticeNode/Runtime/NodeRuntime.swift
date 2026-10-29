@@ -164,7 +164,9 @@ public final class NodeRuntime: Sendable {
         let (rootPath, levels) = (core.rootPath, Set(core.levels.keys))
         // Balances restored before the overlay serves anyone.
         let ivy = Ivy(config: overlay)
-        let servingLedger = try ServingLedger(directory: configuration.storagePath, tally: await ivy.tally)
+        let servingLedger = try ServingLedger(
+            directory: configuration.storagePath, tally: await ivy.tally, config: overlay.tallyConfig
+        )
         let runtime = NodeRuntime(
             core: consume core,
             storage: storage,

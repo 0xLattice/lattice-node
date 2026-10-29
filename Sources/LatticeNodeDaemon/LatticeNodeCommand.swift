@@ -1374,8 +1374,8 @@ private func serviceCall<Value: Encodable, Context: RequestContext>(
         throw HTTPError(.serviceUnavailable, message: "contextChanged")
     } catch ServingLedgerError.alreadyCredited {
         throw HTTPError(.conflict, message: "alreadyCredited")
-    } catch ServingLedgerError.notSaved {
-        throw HTTPError(.serviceUnavailable, message: "notSaved")
+    } catch let error as ServingLedgerError where error == .notSaved || error == .balancesFull {
+        throw HTTPError(.serviceUnavailable, message: reason(error))
     } catch let error as ServingLedgerError {
         throw HTTPError(.badRequest, message: reason(error))
     }
