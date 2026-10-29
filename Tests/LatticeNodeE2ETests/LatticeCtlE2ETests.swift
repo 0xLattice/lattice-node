@@ -1071,7 +1071,7 @@ extension LatticeCtlE2ETests {
         XCTAssertEqual(replayed.status, 409, "the credited payment is remembered: \(replayed.body)")
 
         // MARK: 3. spent only while waiting, by the bytes served
-        let volumes = try await Self.servedVolumes(32, valueBytes: 512 * 1024)
+        let volumes = try await Self.servedVolumes(48, valueBytes: 512 * 1024)
         let sizes = Set(volumes.map { encodeCompleteVolumeArchive($0)?.count ?? 0 })
         XCTAssertEqual(sizes.count, 1, "every Volume archives to the same size")
         let archiveBytes = try XCTUnwrap(sizes.first)
@@ -1105,7 +1105,7 @@ extension LatticeCtlE2ETests {
 
         // The unpaid reader asks for every Volume at once; once its first is
         // served the rest are queued (at the holder, up to Ivy's per-peer
-        // limit), and the paid reader asks for four.
+        // limit), and the paid reader asks for twelve.
         let roots = volumes.map(\.root)
         let (firstServed, served) = AsyncStream<Void>.makeStream()
         let unpaidRun = Task {
@@ -1118,25 +1118,26 @@ extension LatticeCtlE2ETests {
             break
         }
         XCTAssertTrue(anyServed, "the unpaid reader was served nothing")
+        let paidCount = 12
         let paidStart = ContinuousClock.now
-        let paidResults = await Self.fetchAll(paid, Array(roots.prefix(4))) {}
+        let paidResults = await Self.fetchAll(paid, Array(roots.prefix(paidCount))) {}
         let paidDone = ContinuousClock.now
         let unpaidResults = await unpaidRun.value
-        XCTAssertEqual(paidResults.map(\.status), [200, 200, 200, 200])
+        XCTAssertEqual(paidResults.map(\.status), Array(repeating: 200, count: paidCount))
         XCTAssertEqual(unpaidResults.map(\.status), Array(repeating: 200, count: volumes.count))
 
         let afterBurst = try await servingBalance(holder, reader)
         let spent = afterLoneFetch - afterBurst
         XCTAssertGreaterThan(spent, 0, "requests that waited spend the balance")
         XCTAssertEqual(spent % archiveBytes, 0, "spent by whole archives served: \(spent) of \(archiveBytes)-byte archives")
-        XCTAssertLessThanOrEqual(spent, 4 * archiveBytes, "never more than the paid reader was served")
-        // In arrival order the paid reader's four would wait behind the
-        // unpaid requests already queued at the holder, fifteen or so; its
-        // weight puts them first, so only the one being served and perhaps a
-        // couple more end while the paid reader waits.
+        XCTAssertLessThanOrEqual(spent, paidCount * archiveBytes, "never more than the paid reader was served")
+        // At equal weight the holder would alternate the two readers, and
+        // about twelve unpaid fetches would end while the paid reader's
+        // twelve wait; the paid balance (weight about 13 to 1) puts them
+        // first, so only the one being served and perhaps another end.
         let unpaidMeanwhile = unpaidResults.filter { $0.at > paidStart && $0.at < paidDone }.count
         XCTAssertLessThanOrEqual(
-            unpaidMeanwhile, 8, "\(unpaidMeanwhile) unpaid fetches ended while the paid reader's four waited"
+            unpaidMeanwhile, 4, "\(unpaidMeanwhile) unpaid fetches ended while the paid reader's \(paidCount) waited"
         )
     }
 
