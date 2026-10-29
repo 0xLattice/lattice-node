@@ -99,6 +99,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Flag(inversion: .prefixedNo, help: "Announce each pinned Volume as a provider record, on pinning and on every renewal. With --no-announce-pins pins are held and served but never announced: for a holder of many Volumes whose readers do not need a record per Volume.")
     var announcePins = true
 
+    @Option(help: "Overlay sessions provider walks may dial to reach the peers closest to what this node announces or looks up. 0 keeps announcements and lookups among already-connected peers: no dials, less reach, and every new session is told again. Reserved outbound sync slots are never used.")
+    var providerWalkSessions = IvyConfig.defaultMaxProviderWalkSessions
+
     @Option(help: "Public read-only HTTP port; binds all interfaces and serves ONLY the bounded GET read routes (the read-replica allowlist, enforced in code). Chain data is public; this exposes no operator or write surface.")
     var publicReadPort: UInt16?
 
@@ -233,6 +236,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             peerSearchInterval: peerSearchInterval,
             announceLifetime: announceLifetime,
             announcePins: announcePins,
+            providerWalkSessions: providerWalkSessions,
             resourcePolicy: NodeResourcePolicy(maximumAcquisitionBytes: maxAcquisitionBytes),
             blockBodies: blockBodies,
             state: state,

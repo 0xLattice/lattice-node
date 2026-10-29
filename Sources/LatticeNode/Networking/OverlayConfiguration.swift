@@ -30,6 +30,8 @@ struct OverlayConfiguration {
                 maxConcurrentContentRequests: configuration.contentServing.maxConcurrent,
                 minPeerKeyBits: configuration.minPeerKeyBits,
                 maxInFlightVolumeBytes: configuration.contentServing.maxInFlightVolumeBytes,
+                providerReach: configuration.providerWalkSessions > 0 ? .walk : .connectedPeers,
+                maxProviderWalkSessions: configuration.providerWalkSessions,
                 // Self-described reachable address: provider announcements and
                 // rendezvous records advertise this instead of the observed
                 // (NAT/proxy-mangled) one.

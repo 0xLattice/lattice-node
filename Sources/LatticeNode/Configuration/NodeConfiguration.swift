@@ -172,6 +172,12 @@ public struct NodeConfiguration: Sendable {
     /// default on). Off, they are held and served but never announced: a
     /// holder of many Volumes need not send a record per Volume.
     public let announcePins: Bool
+    /// Overlay sessions provider walks may dial to reach the peers closest
+    /// to what this node announces or looks up (operator choice). Zero keeps
+    /// announcements and lookups among the peers already connected: no
+    /// dials, but they reach only those peers, so every new session is told
+    /// again. The reserved outbound slots are never used either way.
+    public let providerWalkSessions: Int
     /// The longest announcement the overlay accepts: an expiry further out
     /// is dropped, by this node's overlay and by every peer's.
     public static let maximumAnnounceLifetime = IvyConfig.defaultMaxProviderTTLSeconds
@@ -243,6 +249,7 @@ public struct NodeConfiguration: Sendable {
         peerSearchInterval: TimeInterval = 600,
         announceLifetime: UInt64 = 1_200,
         announcePins: Bool = true,
+        providerWalkSessions: Int = IvyConfig.defaultMaxProviderWalkSessions,
         resourcePolicy: NodeResourcePolicy = .default,
         blockBodies: BlockBodies = .all,
         state: StateRetention = .all,
@@ -310,6 +317,7 @@ public struct NodeConfiguration: Sendable {
             ? max(0, peerSearchInterval) : 0
         self.announceLifetime = announceLifetime
         self.announcePins = announcePins
+        self.providerWalkSessions = max(0, providerWalkSessions)
         self.resourcePolicy = resourcePolicy
         self.blockBodies = blockBodies
         self.state = state
@@ -371,6 +379,31 @@ public struct NodeConfiguration: Sendable {
         ).encode()) != nil else {
             throw NodeConfigurationError.invalidChainPath
         }
+    }
+
+    /// Seconds between timed maintenance passes: at most ten minutes, and
+    /// every `peerSearchInterval` when that is shorter.
+    var maintenanceCadence: TimeInterval {
+        max(1, min(peerSearchInterval > 0 ? peerSearchInterval : 600, 600))
+    }
+
+    /// What a maintenance pass at `now` (milliseconds) announces of `wanted`,
+    /// given the expiry each key was last announced with, and which
+    /// announced keys it stops providing. A walk reaches a key's closest
+    /// peers wherever they are, so a key is announced when it is new or
+    /// would lapse before the timed pass after next could renew it, not
+    /// again for each session that opens. Kept among connected peers,
+    /// announcements reach only those, so every pass tells them all.
+    func announcementRenewal(
+        wanted: Set<String>, announced: [String: UInt64], at now: Int64
+    ) -> (announce: [String], withdraw: [String]) {
+        let renewBefore = UInt64(max(0, now / 1_000)) + UInt64(maintenanceCadence * 1.5)
+        return (
+            wanted.sorted().filter {
+                providerWalkSessions == 0 || (announced[$0] ?? 0) <= renewBefore
+            },
+            announced.keys.filter { !wanted.contains($0) }.sorted()
+        )
     }
 
     /// When an announcement made at `now` (milliseconds) lapses, in seconds.
