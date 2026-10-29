@@ -2,13 +2,15 @@ import Foundation
 import Ivy
 import Tally
 
-/// Each peer's prepaid serving balance, in bytes, kept across restarts in a
-/// file beside the node's store.
+/// Each peer's standing, in bytes, kept across restarts in a file beside the
+/// node's store. Standing does not decay, so every positive one is kept.
 ///
-/// Tally holds the live balances and spends them on contended serving; this
-/// restores them at start and writes them back after each credit, on every
-/// maintenance pass and at a clean stop. A crash loses the spending since the
-/// last write, never a credit: a credit is written before it is applied.
+/// Tally holds the live standings: it raises them for verified content a peer
+/// served this node and lowers them by the Volume bytes served to it. This
+/// restores them at start and writes them back after each operator credit, on
+/// every maintenance pass and at a clean stop. A crash loses only the changes
+/// since the last write, never an operator credit: a credit is written before
+/// it is applied.
 public actor ServingLedger {
     static let fileName = "serving.json"
 
@@ -16,26 +18,25 @@ public actor ServingLedger {
     /// ignored.
     private struct File: Codable {
         var version: Int
-        /// Peer key (raw hex) to bytes.
-        var balances: [String: Int]
+        /// Peer key (raw hex) to bytes of standing.
+        var standings: [String: Int]
+
+        enum CodingKeys: String, CodingKey {
+            case version
+            case standings = "balances"
+        }
     }
 
     private let file: URL
     private let tally: Tally
-    /// The most balances Tally keeps. Past it Tally drops the smallest to
-    /// make room, so a flood of fresh peers cannot erase larger balances; a
-    /// new peer's credit no larger than the smallest is refused instead of
-    /// being dropped as soon as it is granted.
-    private let capacity: Int
     private var written: [String: Int]
 
-    /// Restores the balances on file into `tally`. A file that is there but
+    /// Restores the standings on file into `tally`. A file that is there but
     /// cannot be read fails the start: starting without it would lose the
-    /// balances it holds.
-    init(directory: URL, tally: Tally, config: TallyConfig = .default) throws {
+    /// standings it holds.
+    init(directory: URL, tally: Tally) throws {
         file = directory.appendingPathComponent(Self.fileName)
         self.tally = tally
-        capacity = Self.capacity(config)
         guard FileManager.default.fileExists(atPath: file.path) else {
             written = [:]
             return
@@ -47,18 +48,11 @@ public actor ServingLedger {
             throw ServingLedgerError.unreadable(file.path)
         }
         guard saved.version == 1 else { throw ServingLedgerError.unreadable(file.path) }
-        for (key, bytes) in saved.balances {
+        for (key, bytes) in saved.standings {
             guard let peer = Self.peer(key) else { throw ServingLedgerError.unreadable(file.path) }
-            tally.creditServingBalance(peer: peer, bytes: bytes)
+            tally.creditStanding(peer: peer, bytes: bytes)
         }
-        written = Self.balances(of: tally)
-    }
-
-    /// Tally's own bound on the peers it keeps state for, which it does not
-    /// export: four per `maxPeers`, or 4096.
-    static func capacity(_ config: TallyConfig) -> Int {
-        guard let maxPeers = config.maxPeers else { return 4096 }
-        return max(maxPeers, 1) <= Int.max / 4 ? max(maxPeers, 1) * 4 : .max
+        written = Self.standings(of: tally)
     }
 
     /// A peer as Ivy and the node print it: its Ed25519 public key, 64
@@ -72,53 +66,47 @@ public actor ServingLedger {
         (try? PeerKey(key))?.hex == key
     }
 
-    public func balance(peer key: String) throws -> Int {
+    public func standing(peer key: String) throws -> Int {
         guard let peer = Self.peer(key) else { throw ServingLedgerError.invalidPeer }
-        return tally.servingBalance(for: peer)
+        return tally.standing(for: peer)
     }
 
-    /// Credits `bytes` to the peer and answers its balance.
+    /// Credits `bytes` to the peer's standing and answers the standing.
     public func credit(peer key: String, bytes: Int) throws -> Int {
         guard let peer = Self.peer(key) else { throw ServingLedgerError.invalidPeer }
         guard bytes > 0 else { throw ServingLedgerError.invalidBytes }
         try apply(peer: peer, bytes: bytes)
-        return tally.servingBalance(for: peer)
+        return tally.standing(for: peer)
     }
 
-    /// Writes the balances as Tally holds them now, when they changed.
+    /// Writes the standings as Tally holds them now, when they changed.
     /// Unwritten, they are written next time.
     public func save() {
-        let balances = Self.balances(of: tally)
-        guard balances != written else { return }
-        try? write(balances)
+        let standings = Self.standings(of: tally)
+        guard standings != written else { return }
+        try? write(standings)
     }
 
     /// The credit written first, then applied: one that cannot be written
     /// is not applied.
     private func apply(peer: PeerID, bytes: Int) throws {
-        var balances = Self.balances(of: tally)
-        if balances[peer.publicKey] == nil, balances.count >= capacity {
-            guard let smallest = balances.min(by: { $0.value < $1.value }), bytes > smallest.value else {
-                throw ServingLedgerError.balancesFull
-            }
-            balances[smallest.key] = nil
-        }
-        let (sum, overflow) = balances[peer.publicKey, default: 0].addingReportingOverflow(bytes)
-        balances[peer.publicKey] = overflow ? .max : sum
+        var standings = Self.standings(of: tally)
+        let (sum, overflow) = standings[peer.publicKey, default: 0].addingReportingOverflow(bytes)
+        standings[peer.publicKey] = overflow ? .max : sum
         do {
-            try write(balances)
+            try write(standings)
         } catch {
             throw ServingLedgerError.notSaved
         }
-        tally.creditServingBalance(peer: peer, bytes: bytes)
-        // What Tally made room with, should it differ from what was written.
+        tally.creditStanding(peer: peer, bytes: bytes)
+        // What serving changed between the read and the credit.
         save()
     }
 
     /// Replaced atomically and synced, with its directory, to stable
     /// storage: a credit must not be lost after a power loss.
-    private func write(_ balances: [String: Int]) throws {
-        let data = try JSONEncoder().encode(File(version: 1, balances: balances))
+    private func write(_ standings: [String: Int]) throws {
+        let data = try JSONEncoder().encode(File(version: 1, standings: standings))
         try data.write(to: file, options: .atomic)
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         for path in [file.path, file.deletingLastPathComponent().path] {
@@ -127,18 +115,17 @@ public actor ServingLedger {
             defer { close(descriptor) }
             guard fsync(descriptor) == 0 else { throw ServingLedgerError.notSaved }
         }
-        written = balances
+        written = standings
     }
 
-    private static func balances(of tally: Tally) -> [String: Int] {
-        Dictionary(uniqueKeysWithValues: tally.servingBalances().map { ($0.key.publicKey, $0.value) })
+    private static func standings(of tally: Tally) -> [String: Int] {
+        Dictionary(uniqueKeysWithValues: tally.standings().map { ($0.key.publicKey, $0.value) })
     }
 }
 
 public enum ServingLedgerError: Error, Equatable, CustomStringConvertible {
     case invalidPeer
     case invalidBytes
-    case balancesFull
     case notSaved
     case unreadable(String)
 
@@ -146,10 +133,9 @@ public enum ServingLedgerError: Error, Equatable, CustomStringConvertible {
         switch self {
         case .invalidPeer: "invalidPeer"
         case .invalidBytes: "invalidBytes"
-        case .balancesFull: "balancesFull"
         case .notSaved: "notSaved"
         case .unreadable(let path):
-            "\(path) cannot be read: it holds the peers' prepaid serving balances, and starting without it would lose them; restore it"
+            "\(path) cannot be read: it holds the peers' serving standings, and starting without it would lose them; restore it"
         }
     }
 }

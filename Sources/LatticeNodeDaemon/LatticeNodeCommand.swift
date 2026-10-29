@@ -1180,20 +1180,20 @@ private func addOperatorWriteRoutes(
             return PinsResponse(pins: await service.pinnedVolumes())
         }
     }
-    // Prepaid serving balance the operator credits by hand (its sponsor's
-    // work), and any peer's balance.
-    router.get("serving-balance/:peer") { request, context in
+    // Serving standing the operator credits by hand (its sponsor's work),
+    // and any peer's standing.
+    router.get("serving-credit/:peer") { request, context in
         let peer = context.parameters.get("peer") ?? ""
         return try await serviceCall(request: request, context: context) {
-            ServingBalanceResponse(peer: peer, balance: try await service.servingLedger.balance(peer: peer))
+            ServingCreditResponse(peer: peer, standing: try await service.servingLedger.standing(peer: peer))
         }
     }
-    router.post("serving-balance") { request, context in
-        let input: ServingBalanceRequest = try await decode(request, context: context)
+    router.post("serving-credit") { request, context in
+        let input: ServingCreditRequest = try await decode(request, context: context)
         return try await serviceCall(request: request, context: context) {
-            ServingBalanceResponse(
+            ServingCreditResponse(
                 peer: input.peer,
-                balance: try await service.servingLedger.credit(peer: input.peer, bytes: input.bytes)
+                standing: try await service.servingLedger.credit(peer: input.peer, bytes: input.bytes)
             )
         }
     }
@@ -1319,7 +1319,7 @@ private func serviceCall<Value: Encodable, Context: RequestContext>(
         throw HTTPError(.conflict, message: "conflictingVolume")
     } catch BrokerError.missingRetainedRoot {
         throw HTTPError(.serviceUnavailable, message: "contextChanged")
-    } catch let error as ServingLedgerError where error == .notSaved || error == .balancesFull {
+    } catch let error as ServingLedgerError where error == .notSaved {
         throw HTTPError(.serviceUnavailable, message: reason(error))
     } catch let error as ServingLedgerError {
         throw HTTPError(.badRequest, message: reason(error))

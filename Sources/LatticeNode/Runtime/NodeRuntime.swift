@@ -162,11 +162,9 @@ public final class NodeRuntime: Sendable {
         // What the journal replay below reads of the core, which the runtime
         // takes over.
         let (rootPath, levels) = (core.rootPath, Set(core.levels.keys))
-        // Balances restored before the overlay serves anyone.
+        // Standings restored before the overlay serves anyone.
         let ivy = Ivy(config: overlay)
-        let servingLedger = try ServingLedger(
-            directory: configuration.storagePath, tally: await ivy.tally, config: overlay.tallyConfig
-        )
+        let servingLedger = try ServingLedger(directory: configuration.storagePath, tally: await ivy.tally)
         let runtime = NodeRuntime(
             core: consume core,
             storage: storage,
@@ -419,7 +417,7 @@ public final class NodeRuntime: Sendable {
         await webSocket.stopListening()
         await ivy.stop()
         await ivy.setContentSource(nil)
-        // What contended serving spent, now that no more is served.
+        // What serving changed, now that no more is served.
         await servingLedger.save()
         inputs.yield(.stop)
         inputs.finish()

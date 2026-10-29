@@ -539,49 +539,47 @@ Unpins the Volume and answers the pins left. It goes from the store unless
 something else the node keeps names it. A CID the operator did not pin
 changes nothing.
 
-## Paid serving
+## Serving standing
 
-Serving is free whenever it is not contended: a peer's request that gets a
-serving slot at once is served and never charged. Only when every slot is
-busy do waiting requests share freed slots by weight, and a peer's prepaid
-balance, in bytes, adds to its weight; the bytes it is then served are spent
-from that balance. The node only holds balances: the operator credits them
-with `POST /serving-balance`, by hand or through a sponsor such as
-lattice-sponsor (see [operations.md](operations.md#paid-serving)).
+Serving is free while the holder has a free slot. Only when every slot is
+busy do waiting requests share freed slots by weight, which grows with the
+peer's standing: one non-negative byte count per peer. Standing goes up by
+bytes the operator credits (paid for, say, through a sponsor such as
+lattice-sponsor) and by verified content the peer served this node on
+request. It goes down by the Volume archive bytes this node serves the peer,
+contended or not, and never below zero. It does not decay (see
+[operations.md](operations.md#serving-standing)).
 
 A peer is named by its Ed25519 public key as Ivy and the node print it (the
 `storage:` line at start, `PeerEndpoint.publicKey`): exactly 64 lowercase hex
 characters, without the `ed01` multikey prefix. Any other spelling is `400`
 (`invalidPeer`).
 
-### `GET /serving-balance/:peer`
+### `GET /serving-credit/:peer`
 
 Operator port only.
 
 ```json
-{"peer": "<peer key>", "balance": 7168}
+{"peer": "<peer key>", "standing": 7168}
 ```
 
-### `POST /serving-balance`
+### `POST /serving-credit`
 
-Operator port only: credits `bytes` (at least 1) to `peer` and answers its
-balance as `GET /serving-balance/:peer` does. A sponsor uses it to credit
+Operator port only: credits `bytes` (at least 1) to `peer`'s standing and
+answers it as `GET /serving-credit/:peer` does. A sponsor uses it to credit
 work. `400` `invalidPeer` or `invalidBytes`; `503` `notSaved` (the credit
-could not be written, and was not applied) or `balancesFull` (the node keeps
-balances for at most 4096 peers; past that a new peer's credit takes the
-smallest balance's place, and one no larger than the smallest is refused,
-unwritten).
+could not be written, and was not applied).
 
 ```json
 {"peer": "<peer key>", "bytes": 1048576}
 ```
 
-Balances are kept in `<data-directory>/serving.json`, written before each
-credit is applied, on every maintenance pass and at a clean stop. A crash
-loses the balance spent since the last write, never a credit. It must move
-with the data directory: a node started without it starts with no balances.
-Fields it does not know (an earlier node's credited transactions) are
-ignored.
+Every standing is kept in `<data-directory>/serving.json`, written before
+each credit is applied, on every maintenance pass and at a clean stop. A
+crash loses only the changes since the last write, never a credit. It must
+move with the data directory: a node started without it starts with no
+standings. Fields it does not know (an earlier node's credited transactions)
+are ignored.
 
 ## Errors
 

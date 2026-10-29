@@ -361,21 +361,22 @@ What it costs and what it does not change:
 Behind a proxy that collapses client addresses (fly-proxy), set the per-client
 read rates to 0 as for reads; the submit listener budget still applies.
 
-## Paid serving
+## Serving standing
 
-Serving stays free whenever it is not contended: a request that gets a
-serving slot at once is never charged. Under contention, waiting requests
-share freed slots by weight, and a peer's prepaid balance, in bytes, adds to
-its weight; the bytes it is then served are spent from that balance.
+Serving is free while a slot is free. Under contention, waiting requests
+share freed slots by weight, which grows with the peer's standing: bytes the
+operator credited it plus verified content it served this node, less the
+Volume archive bytes this node served it (every one, contended or not), never
+below zero. Standing does not decay and is not capped.
 
-The node only holds balances. The operator credits them with
-`POST /serving-balance` on the operator port (see
-[rpc-api.md](rpc-api.md#paid-serving)), by hand or through a sponsor such as
-lattice-sponsor. Balances are kept in
-`<data-directory>/serving.json`; a crash loses spending since the last write,
-never a credit. Carry the file with the data directory (blue/green moves,
-restores), or its balances are lost. A file there that cannot be read stops
-the node from starting.
+The operator credits standing with `POST /serving-credit` on the operator
+port (see [rpc-api.md](rpc-api.md#serving-standing)), by hand or through a
+sponsor such as lattice-sponsor. Every standing is kept in
+`<data-directory>/serving.json`, restored before the overlay starts and
+written after each credit, on every maintenance pass and at a clean stop; a
+crash loses only the changes since the last write, never a credit. Carry the
+file with the data directory (blue/green moves, restores), or its standings
+are lost. A file there that cannot be read stops the node from starting.
 
 ## Health interpretation
 

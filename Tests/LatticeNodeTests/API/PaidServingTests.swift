@@ -10,8 +10,8 @@ import cashew
 @testable import LatticeNodeDaemon
 import LatticeNodeAPI
 
-/// Paid serving: the operator's credit of a peer's balance, and balances kept
-/// across restarts.
+/// Serving standing: the operator's credit of a peer's standing, and
+/// standings kept across restarts.
 final class PaidServingTests: XCTestCase {
     private static let peer = String(repeating: "ab", count: 32)
 
@@ -45,27 +45,27 @@ final class PaidServingTests: XCTestCase {
         String(decoding: response.body.readableBytesView, as: UTF8.self)
     }
 
-    func testTheOperatorCreditsAndReadsABalance() async throws {
+    func testTheOperatorCreditsAndReadsAStanding() async throws {
         let runtime = try await node(keyByte: 0x73)
         try await makeApplication(service: runtime, host: "127.0.0.1", port: 8080).test(.router) { client in
             let headers: HTTPFields = [.authorization: testOperatorAuthorization, .contentType: "application/json"]
             func credit(_ peer: String, _ bytes: Int) async throws -> TestResponse {
                 try await client.execute(
-                    uri: "/serving-balance", method: .post, headers: headers,
-                    body: ByteBuffer(bytes: try JSONEncoder().encode(ServingBalanceRequest(peer: peer, bytes: bytes)))
+                    uri: "/serving-credit", method: .post, headers: headers,
+                    body: ByteBuffer(bytes: try JSONEncoder().encode(ServingCreditRequest(peer: peer, bytes: bytes)))
                 )
             }
             let first = try await credit(Self.peer, 500)
             XCTAssertEqual(first.status, .ok, Self.text(first))
             let second = try await credit(Self.peer, 250)
-            XCTAssertEqual(try JSONDecoder().decode(ServingBalanceResponse.self, from: Data(buffer: second.body)).balance, 750)
+            XCTAssertEqual(try JSONDecoder().decode(ServingCreditResponse.self, from: Data(buffer: second.body)).standing, 750)
             let read = try await client.execute(
-                uri: "/serving-balance/\(Self.peer)", method: .get, headers: [.authorization: testOperatorAuthorization]
+                uri: "/serving-credit/\(Self.peer)", method: .get, headers: [.authorization: testOperatorAuthorization]
             )
             XCTAssertEqual(read.status, .ok)
-            let answer = try JSONDecoder().decode(ServingBalanceResponse.self, from: Data(buffer: read.body))
+            let answer = try JSONDecoder().decode(ServingCreditResponse.self, from: Data(buffer: read.body))
             XCTAssertEqual(answer.peer, Self.peer)
-            XCTAssertEqual(answer.balance, 750)
+            XCTAssertEqual(answer.standing, 750)
 
             let zero = try await credit(Self.peer, 0)
             XCTAssertEqual(zero.status, .badRequest)
@@ -74,42 +74,45 @@ final class PaidServingTests: XCTestCase {
             XCTAssertEqual(badPeer.status, .badRequest)
             XCTAssertTrue(Self.text(badPeer).contains("invalidPeer"), Self.text(badPeer))
             let badRead = try await client.execute(
-                uri: "/serving-balance/nobody", method: .get, headers: [.authorization: testOperatorAuthorization]
+                uri: "/serving-credit/nobody", method: .get, headers: [.authorization: testOperatorAuthorization]
             )
             XCTAssertEqual(badRead.status, .badRequest)
             // Operator surface: never without the cookie.
-            let anonymous = try await client.execute(uri: "/serving-balance/\(Self.peer)", method: .get)
+            let anonymous = try await client.execute(uri: "/serving-credit/\(Self.peer)", method: .get)
             XCTAssertEqual(anonymous.status, .unauthorized)
         }
         // Not on the public port.
         try await makePublicReadApplication(service: runtime, host: "127.0.0.1", port: 8081).test(.router) { client in
-            let response = try await client.execute(uri: "/serving-balance/\(Self.peer)", method: .get)
+            let response = try await client.execute(uri: "/serving-credit/\(Self.peer)", method: .get)
             XCTAssertEqual(response.status, .notFound)
         }
     }
 
-    func testBalancesSurviveARestart() async throws {
+    func testStandingsSurviveARestart() async throws {
         let directory = temporaryDirectory()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let tally = Tally()
         let ledger = try ServingLedger(directory: directory, tally: tally)
         _ = try await ledger.credit(peer: Self.peer, bytes: 1_500)
-        // Contended serving spends; the next save keeps what is left.
-        tally.spendServingBalance(peer: PeerID(publicKey: Self.peer), bytes: 300)
+        // Serving debits and served content credits; the next save keeps both.
+        tally.debitStanding(peer: PeerID(publicKey: Self.peer), bytes: 300)
+        let server = String(repeating: "cd", count: 32)
+        tally.recordUsefulReceived(peer: PeerID(publicKey: server), bytes: 40)
         await ledger.save()
 
         let restarted = Tally()
         let restored = try ServingLedger(directory: directory, tally: restarted)
-        let balance = try await restored.balance(peer: Self.peer)
-        XCTAssertEqual(balance, 1_200)
+        let standing = try await restored.standing(peer: Self.peer)
+        XCTAssertEqual(standing, 1_200)
+        XCTAssertEqual(restarted.standing(for: PeerID(publicKey: server)), 40)
 
-        // A file that cannot be read fails the start: it holds the balances.
+        // A file that cannot be read fails the start: it holds the standings.
         try Data("{".utf8).write(to: directory.appendingPathComponent(ServingLedger.fileName))
         XCTAssertThrowsError(try ServingLedger(directory: directory, tally: Tally()))
     }
 
     /// A file an earlier node wrote, with the payments it credited, still
-    /// loads: those are ignored, the balances kept.
+    /// loads: those are ignored, the standings kept.
     func testAFileWithCreditedPaymentsStillLoads() throws {
         let directory = temporaryDirectory()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -117,35 +120,7 @@ final class PaidServingTests: XCTestCase {
             .write(to: directory.appendingPathComponent(ServingLedger.fileName))
         let tally = Tally()
         _ = try ServingLedger(directory: directory, tally: tally)
-        XCTAssertEqual(tally.servingBalance(for: PeerID(publicKey: Self.peer)), 700)
-    }
-
-    /// Past Tally's bound a new peer's credit takes the smallest balance's
-    /// place, as Tally does; one no larger is refused before anything is
-    /// written.
-    func testPastTallysBoundANewCreditDisplacesOnlyASmallerBalance() async throws {
-        let directory = temporaryDirectory()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let config = TallyConfig(maxPeers: 1)
-        let tally = Tally(config: config)
-        let ledger = try ServingLedger(directory: directory, tally: tally, config: config)
-        let peers = (1...5).map { String(repeating: String(format: "%02x", $0), count: 32) }
-        for (index, peer) in peers.prefix(4).enumerated() { _ = try await ledger.credit(peer: peer, bytes: 10 + index) }
-        do {
-            _ = try await ledger.credit(peer: peers[4], bytes: 10)
-            XCTFail("no larger than the smallest balance")
-        } catch {
-            XCTAssertEqual(error as? ServingLedgerError, .balancesFull)
-        }
-        // Not burned: a larger credit for it takes the smallest's place.
-        _ = try await ledger.credit(peer: peers[4], bytes: 11)
-        XCTAssertEqual(tally.servingBalances().count, 4)
-        XCTAssertEqual(tally.servingBalance(for: PeerID(publicKey: peers[0])), 0)
-        XCTAssertEqual(tally.servingBalance(for: PeerID(publicKey: peers[4])), 11)
-        // And the file agrees.
-        let restored = Tally(config: config)
-        _ = try ServingLedger(directory: directory, tally: restored, config: config)
-        XCTAssertEqual(restored.servingBalances(), tally.servingBalances())
+        XCTAssertEqual(tally.standing(for: PeerID(publicKey: Self.peer)), 700)
     }
 
     func testACreditThatCannotBeWrittenIsNotApplied() async throws {
@@ -157,7 +132,7 @@ final class PaidServingTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? ServingLedgerError, .notSaved)
         }
-        XCTAssertEqual(tally.servingBalance(for: PeerID(publicKey: Self.peer)), 0)
+        XCTAssertEqual(tally.standing(for: PeerID(publicKey: Self.peer)), 0)
     }
 
 }
