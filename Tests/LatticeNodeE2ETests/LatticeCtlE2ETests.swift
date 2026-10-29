@@ -238,7 +238,9 @@ final class LatticeCtlE2ETests: XCTestCase {
     /// transaction pooled, can lose it on every block. At Nexus's real
     /// target a child rides child-only carriers, which leave Nexus's
     /// post-state alone.
-    private func bringUpMiningHost(miner: TestKey?, minRelayFee: UInt64? = nil) async throws -> CtlHost {
+    private func bringUpMiningHost(
+        miner: TestKey?, minRelayFee: UInt64? = nil, configure: (inout Topology) -> Void = { _ in }
+    ) async throws -> CtlHost {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("lattice-node-e2e-ctl-\(UUID().uuidString)")
         try FileManager.default.createDirectory(
@@ -260,6 +262,7 @@ final class LatticeCtlE2ETests: XCTestCase {
             recipients: miner.map { ["Nexus": $0.address] }
         )
         topology.minRelayFee = minRelayFee
+        configure(&topology)
         try topology.validated().save(root: root)
 
         _ = try await runCtl(["up"], root: root)
@@ -743,6 +746,182 @@ final class LatticeCtlE2ETests: XCTestCase {
            let object = try? JSONSerialization.jsonObject(with: data)
                as? [String: Any] else { return 0 }
         return (object["balance"] as? String).flatMap { UInt64($0) } ?? 0
+    }
+}
+
+// MARK: paid serving
+
+/// A peer's serving balance between real nodes: credited on the operator
+/// route, kept across the holder being killed and restarted, and spent only
+/// by fetches that waited for the holder's one serving slot. Only spending is
+/// asserted, never completion order or timing; Ivy's own tests cover the
+/// weighting.
+extension LatticeCtlE2ETests {
+    private static func operatorRequest(_ host: CtlHost, _ path: String) throws -> URLRequest {
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(host.nexusRPC)/\(path)")!)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        let cookie = try String(contentsOf: HostLayout(root: host.root.path).rpcCookie, encoding: .utf8)
+        request.setValue("Basic " + Data(cookie.utf8).base64EncodedString(), forHTTPHeaderField: "Authorization")
+        return request
+    }
+
+    /// The node's Ivy peer key, as it prints it on its `storage:` line.
+    private func peerKey(_ host: CtlHost) throws -> String {
+        let identity = HostLayout(root: host.root.path).identityKey(for: "Nexus")
+        let privateKey = try String(contentsOf: identity, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        return try NodeConfiguration(
+            chainPath: ["Nexus"], storagePath: host.root, privateKeyHex: privateKey
+        ).processPublicKey
+    }
+
+    private struct ServingBalance: Codable {
+        var peer: String
+        var balance: Int?
+        var bytes: Int?
+    }
+
+    private func servingBalance(_ host: CtlHost, _ peer: String) async throws -> Int {
+        let (data, response) = try await URLSession.shared.data(for: try Self.operatorRequest(host, "serving-balance/\(peer)"))
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200, String(decoding: data, as: UTF8.self))
+        return try XCTUnwrap(try JSONDecoder().decode(ServingBalance.self, from: data).balance)
+    }
+
+    /// `count` Volumes, distinct by `tag` and an index: one archive size for
+    /// every tag of one length.
+    private static func servedVolumes(_ count: Int, tag: String) async throws -> [SerializedVolume] {
+        actor Captured: VolumeStorer {
+            var volumes: [SerializedVolume] = []
+            func store(volume: SerializedVolume) async throws { volumes.append(volume) }
+        }
+        var volumes: [SerializedVolume] = []
+        for index in 0..<count {
+            let body = TransactionBody(
+                accountActions: [],
+                actions: [Action(
+                    key: "\(tag)-\(String(format: "%04d", index))", oldValue: nil,
+                    newValue: String(repeating: "x", count: 512 * 1024)
+                )],
+                depositActions: [], receiptActions: [], withdrawalActions: [],
+                signers: [], nonce: 0, chainPath: ["Nexus"]
+            )
+            let volume = try VolumeImpl<TransactionBody>(node: body)
+            let captured = Captured()
+            try await volume.store(storer: captured)
+            let stored = await captured.volumes.first { $0.root == volume.rawCID }
+            volumes.append(try XCTUnwrap(stored))
+        }
+        return volumes
+    }
+
+    /// Enough connections for a whole burst at once: `URLSession.shared`
+    /// holds a host to a few, which would queue the burst here instead of
+    /// at the holder.
+    private static let fetchSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpMaximumConnectionsPerHost = 64
+        return URLSession(configuration: configuration)
+    }()
+
+    /// `GET /fetch/:cid` on the reader, which reads it from its one peer.
+    private static func fetch(_ reader: CtlHost, _ cid: String) async -> Int {
+        guard let request = try? Self.operatorRequest(reader, "fetch/\(cid)"),
+              let (_, response) = try? await fetchSession.data(for: request) else { return 0 }
+        return (response as? HTTPURLResponse)?.statusCode ?? 0
+    }
+
+    /// Gone, or a zombie nobody reaps: a CI container's PID 1 never reaps an
+    /// adopted orphan, and a zombie still answers kill(pid, 0).
+    private static func isGone(_ pid: Int32) -> Bool {
+        guard kill(pid, 0) == 0 else { return true }
+        guard let stat = try? String(contentsOfFile: "/proc/\(pid)/stat", encoding: .utf8),
+              let close = stat.lastIndex(of: ")") else { return false }
+        return stat[stat.index(after: close)...].trimmingCharacters(in: .whitespaces).hasPrefix("Z")
+    }
+
+    func testAServingBalanceSurvivesARestartAndIsSpentOnlyByFetchesThatWaited() async throws {
+        // One serving slot: any two requests at once contend. Nothing is
+        // mined, so once the reader holds the holder's genesis no sync
+        // request takes the slot.
+        let holder = try await bringUpMiningHost(miner: nil) { $0.servingMaxConcurrent = 1 }
+        let listen = try Topology.load(root: holder.root).listen
+        let holderKey = try peerKey(holder)
+        let reader = try await bringUpMiningHost(miner: nil) {
+            $0.peers = ChainPeers(byChain: ["Nexus": ["\(holderKey)@127.0.0.1:\(listen)"]])
+        }
+        let peer = try peerKey(reader)
+
+        // MARK: credited on the operator route
+        let funded = 1 << 30
+        var credit = try Self.operatorRequest(holder, "serving-balance")
+        credit.httpMethod = "POST"
+        credit.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        credit.httpBody = try JSONEncoder().encode(ServingBalance(peer: peer, bytes: funded))
+        let (credited, creditResponse) = try await URLSession.shared.data(for: credit)
+        XCTAssertEqual((creditResponse as? HTTPURLResponse)?.statusCode, 200, String(decoding: credited, as: UTF8.self))
+        XCTAssertEqual(try JSONDecoder().decode(ServingBalance.self, from: credited).balance, funded)
+
+        // MARK: killed and restarted on the same data directory
+        let layout = HostLayout(root: holder.root.path)
+        let pidText = try String(contentsOf: layout.pidFile(for: "lattice-node"), encoding: .utf8)
+        let pid = try XCTUnwrap(pidText.split(separator: " ").first.flatMap { Int32($0) })
+        XCTAssertEqual(kill(pid, SIGKILL), 0)
+        try await waitFor("the holder is gone") {
+            let answering = await self.health(holder.nexusRPC) != nil
+            return Self.isGone(pid) && !answering
+        }
+        // What a crash leaves: a pidfile naming a dead process.
+        layout.removePidFile(for: "lattice-node", ifNaming: pid)
+        _ = try await runCtl(["up"], root: holder.root)
+        try await waitFor("the holder is active again") {
+            await self.health(holder.nexusRPC)?["phase"] as? String == "active"
+        }
+        let restored = try await servingBalance(holder, peer)
+        XCTAssertEqual(restored, funded, "the credit survives a kill")
+
+        // MARK: spent only by fetches that waited
+        let lone = try await Self.servedVolumes(1, tag: "alone")
+        let bursts = try await Self.servedVolumes(36, tag: "burst")
+        let sizes = Set((lone + bursts).map { encodeCompleteVolumeArchive($0)?.count ?? 0 })
+        XCTAssertEqual(sizes.count, 1, "every Volume archives to the same size")
+        let archiveBytes = try XCTUnwrap(sizes.first)
+        struct Pin: Encodable { let cid: String; let entries: [String: Data] }
+        for volume in lone + bursts {
+            var pin = try Self.operatorRequest(holder, "pins")
+            pin.httpMethod = "POST"
+            pin.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            pin.httpBody = try JSONEncoder().encode(Pin(cid: volume.root, entries: volume.entries))
+            let (data, response) = try await URLSession.shared.data(for: pin)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200, String(decoding: data, as: UTF8.self))
+        }
+
+        // Alone, a fetch gets the free slot at once and is never charged.
+        try await waitFor("the reader reads from the holder", seconds: 120) {
+            await Self.fetch(reader, lone[0].root) == 200
+        }
+        let afterLone = try await servingBalance(holder, peer)
+        XCTAssertEqual(afterLone, funded, "a fetch served at once is free")
+
+        // A burst at once: with one slot, every request but those that found
+        // it free waits, and what is served to those is spent. Whether a
+        // given burst overlaps at the holder is the runner's timing, so
+        // bursts of fresh Volumes repeat until one does.
+        var balance = afterLone
+        for burst in stride(from: 0, to: bursts.count, by: 12) {
+            let roots = bursts[burst..<(burst + 12)].map(\.root)
+            let statuses = await withTaskGroup(of: Int.self) { group in
+                for root in roots { group.addTask { await Self.fetch(reader, root) } }
+                return await group.reduce(into: []) { $0.append($1) }
+            }
+            XCTAssertEqual(statuses, Array(repeating: 200, count: roots.count))
+            let after = try await servingBalance(holder, peer)
+            let spent = balance - after
+            XCTAssertGreaterThanOrEqual(spent, 0)
+            XCTAssertEqual(spent % archiveBytes, 0, "spent by whole archives served: \(spent) of \(archiveBytes)")
+            XCTAssertLessThanOrEqual(spent, roots.count * archiveBytes, "never more than was served")
+            balance = after
+            if spent > 0 { break }
+        }
+        XCTAssertLessThan(balance, afterLone, "fetches that waited spend the balance")
     }
 }
 

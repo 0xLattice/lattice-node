@@ -2,23 +2,22 @@ import Foundation
 import Ivy
 import Tally
 
-/// Each peer's prepaid serving balance, in bytes, and the payments already
-/// credited, kept across restarts in a file beside the node's store.
+/// Each peer's prepaid serving balance, in bytes, kept across restarts in a
+/// file beside the node's store.
 ///
 /// Tally holds the live balances and spends them on contended serving; this
 /// restores them at start and writes them back after each credit, on every
 /// maintenance pass and at a clean stop. A crash loses the spending since the
-/// last write, never a credit: a credit is written before it is applied, and
-/// a payment is never credited twice.
+/// last write, never a credit: a credit is written before it is applied.
 public actor ServingLedger {
     static let fileName = "serving.json"
 
+    /// Fields it does not name (an older file's credited payments) are
+    /// ignored.
     private struct File: Codable {
         var version: Int
         /// Peer key (raw hex) to bytes.
         var balances: [String: Int]
-        /// Transaction CIDs whose payments were credited.
-        var credited: [String]
     }
 
     private let file: URL
@@ -28,18 +27,16 @@ public actor ServingLedger {
     /// new peer's credit no larger than the smallest is refused instead of
     /// being dropped as soon as it is granted.
     private let capacity: Int
-    private var credited: Set<String>
     private var written: [String: Int]
 
     /// Restores the balances on file into `tally`. A file that is there but
-    /// cannot be read fails the start: it holds the payments already
-    /// credited, and starting without them would credit them again.
+    /// cannot be read fails the start: starting without it would lose the
+    /// balances it holds.
     init(directory: URL, tally: Tally, config: TallyConfig = .default) throws {
         file = directory.appendingPathComponent(Self.fileName)
         self.tally = tally
         capacity = Self.capacity(config)
         guard FileManager.default.fileExists(atPath: file.path) else {
-            credited = []
             written = [:]
             return
         }
@@ -54,7 +51,6 @@ public actor ServingLedger {
             guard let peer = Self.peer(key) else { throw ServingLedgerError.unreadable(file.path) }
             tally.creditServingBalance(peer: peer, bytes: bytes)
         }
-        credited = Set(saved.credited)
         written = Self.balances(of: tally)
     }
 
@@ -85,16 +81,7 @@ public actor ServingLedger {
     public func credit(peer key: String, bytes: Int) throws -> Int {
         guard let peer = Self.peer(key) else { throw ServingLedgerError.invalidPeer }
         guard bytes > 0 else { throw ServingLedgerError.invalidBytes }
-        try apply(peer: peer, bytes: bytes, payment: nil)
-        return tally.servingBalance(for: peer)
-    }
-
-    /// Credits a payment's `bytes` to the peer once: a payment credited
-    /// before is refused.
-    public func credit(peer key: String, bytes: Int, payment: String) throws -> Int {
-        guard let peer = Self.peer(key) else { throw ServingLedgerError.invalidPeer }
-        guard !credited.contains(payment) else { throw ServingLedgerError.alreadyCredited }
-        try apply(peer: peer, bytes: bytes, payment: payment)
+        try apply(peer: peer, bytes: bytes)
         return tally.servingBalance(for: peer)
     }
 
@@ -103,12 +90,12 @@ public actor ServingLedger {
     public func save() {
         let balances = Self.balances(of: tally)
         guard balances != written else { return }
-        try? write(balances, credited: credited)
+        try? write(balances)
     }
 
     /// The credit written first, then applied: one that cannot be written
     /// is not applied.
-    private func apply(peer: PeerID, bytes: Int, payment: String?) throws {
+    private func apply(peer: PeerID, bytes: Int) throws {
         var balances = Self.balances(of: tally)
         if balances[peer.publicKey] == nil, balances.count >= capacity {
             guard let smallest = balances.min(by: { $0.value < $1.value }), bytes > smallest.value else {
@@ -118,23 +105,20 @@ public actor ServingLedger {
         }
         let (sum, overflow) = balances[peer.publicKey, default: 0].addingReportingOverflow(bytes)
         balances[peer.publicKey] = overflow ? .max : sum
-        var credited = credited
-        if let payment { credited.insert(payment) }
         do {
-            try write(balances, credited: credited)
+            try write(balances)
         } catch {
             throw ServingLedgerError.notSaved
         }
-        self.credited = credited
         tally.creditServingBalance(peer: peer, bytes: bytes)
         // What Tally made room with, should it differ from what was written.
         save()
     }
 
     /// Replaced atomically and synced, with its directory, to stable
-    /// storage: a credited payment must not come back after a power loss.
-    private func write(_ balances: [String: Int], credited: Set<String>) throws {
-        let data = try JSONEncoder().encode(File(version: 1, balances: balances, credited: credited.sorted()))
+    /// storage: a credit must not be lost after a power loss.
+    private func write(_ balances: [String: Int]) throws {
+        let data = try JSONEncoder().encode(File(version: 1, balances: balances))
         try data.write(to: file, options: .atomic)
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         for path in [file.path, file.deletingLastPathComponent().path] {
@@ -154,7 +138,6 @@ public actor ServingLedger {
 public enum ServingLedgerError: Error, Equatable, CustomStringConvertible {
     case invalidPeer
     case invalidBytes
-    case alreadyCredited
     case balancesFull
     case notSaved
     case unreadable(String)
@@ -163,11 +146,10 @@ public enum ServingLedgerError: Error, Equatable, CustomStringConvertible {
         switch self {
         case .invalidPeer: "invalidPeer"
         case .invalidBytes: "invalidBytes"
-        case .alreadyCredited: "alreadyCredited"
         case .balancesFull: "balancesFull"
         case .notSaved: "notSaved"
         case .unreadable(let path):
-            "\(path) cannot be read: it holds the serving payments already credited, and without it every one could be claimed again; restore it"
+            "\(path) cannot be read: it holds the peers' prepaid serving balances, and starting without it would lose them; restore it"
         }
     }
 }

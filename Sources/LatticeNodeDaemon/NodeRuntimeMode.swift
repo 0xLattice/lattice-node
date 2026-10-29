@@ -84,8 +84,7 @@ extension LatticeNodeCommand {
                         $0, maximumArchiveBytes: maximumCompleteVolumeArchiveBytes,
                         maximumEntries: maximumCompleteVolumeArchiveEntries
                     )
-                },
-                serving: ServingPayments(terms: configuration.paidServing, ledger: runtime.servingLedger)
+                }
             )
         }
         print("lattice-node (node runtime)")
