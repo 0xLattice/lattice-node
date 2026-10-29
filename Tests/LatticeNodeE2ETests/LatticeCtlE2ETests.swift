@@ -754,7 +754,8 @@ final class LatticeCtlE2ETests: XCTestCase {
 /// Paid serving between real nodes: a reader buys serving balance with a
 /// transfer to the holder's payee, the balance survives the holder being
 /// killed and restarted, and it is spent only on requests that waited for a
-/// serving slot, which it moves ahead of an unpaid reader's.
+/// serving slot, which its weight serves back to back rather than in turn
+/// with an unpaid reader's.
 extension LatticeCtlE2ETests {
     /// Bytes one Nexus coin buys at the holder.
     private static let bytesPerCoin = 1 << 21
@@ -939,6 +940,7 @@ extension LatticeCtlE2ETests {
 
     private func waitForReaders(_ readers: [CtlHost], toReach holder: CtlHost) async throws {
         let tip = await height(holder.nexusRPC, chain: "Nexus")
+        XCTAssertGreaterThanOrEqual(tip, 0, "the holder answers its height")
         for reader in readers {
             try await waitFor("a reader syncs the holder's chain", seconds: 240) {
                 await self.height(reader.nexusRPC, chain: "Nexus") >= tip
@@ -1134,7 +1136,11 @@ extension LatticeCtlE2ETests {
         // first and last; the paid balance (weight about 13 to 1) serves the
         // paid twelve back to back. Counted between the paid reader's own
         // completions, so the time its requests take to reach the holder
-        // (when the unpaid queue drains freely) is not in the window.
+        // (when the unpaid queue drains freely) is not in the window. This
+        // tells weighted shares from equal ones only: in plain arrival order
+        // the paid twelve would also run back to back, after the unpaid
+        // requests queued ahead of them, and how many those are depends on
+        // how long the paid requests take to arrive.
         let paidEnds = paidResults.map(\.at)
         let (firstPaid, lastPaid) = (try XCTUnwrap(paidEnds.min()), try XCTUnwrap(paidEnds.max()))
         let unpaidBetween = unpaidResults.filter { $0.at > firstPaid && $0.at < lastPaid }.count
