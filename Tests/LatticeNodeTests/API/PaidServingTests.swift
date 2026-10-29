@@ -86,7 +86,8 @@ final class PaidServingTests: XCTestCase {
 
     func testTermsAreNullWhenUnsetAndNamedWhenSet() async throws {
         let runtime = try await node(keyByte: 0x71)
-        try await try app(runtime, terms: try PaidServing()).test(.router) { client in
+        let unset = try app(runtime, terms: try PaidServing())
+        try await unset.test(.router) { client in
             let response = try await client.execute(uri: "/serving-terms", method: .get)
             XCTAssertEqual(response.status, .ok)
             let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any])
@@ -101,7 +102,8 @@ final class PaidServingTests: XCTestCase {
         let terms = try PaidServing(
             payTo: Self.payTo, rates: [["Nexus"]: 1024, ["Nexus", "Alpha"]: 8], depth: 3, workURL: "https://work.example.org"
         )
-        try await try app(runtime, terms: terms).test(.router) { client in
+        let served = try app(runtime, terms: terms)
+        try await served.test(.router) { client in
             let response = try await client.execute(uri: "/serving-terms", method: .get)
             let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any])
             XCTAssertEqual(object["payTo"] as? String, Self.payTo)
@@ -133,7 +135,9 @@ final class PaidServingTests: XCTestCase {
         let pending = try VolumeImpl<Transaction>(node: try Self.transaction(other, nonce: 0, actions: [])).rawCID
         let terms = try PaidServing(payTo: Self.payTo, rates: [["Nexus"]: 1000, ["Nexus", "Alpha"]: 1], depth: 2)
 
-        try await try app(runtime, terms: terms).test(.router) { client in
+
+        let served = try app(runtime, terms: terms)
+        try await served.test(.router) { client in
             func refused(_ response: TestResponse, _ status: HTTPResponse.Status, _ name: String) {
                 XCTAssertEqual(response.status, status, Self.text(response))
                 XCTAssertTrue(Self.text(response).contains(name), Self.text(response))
@@ -221,7 +225,8 @@ final class PaidServingTests: XCTestCase {
         let washCID = try await runtime.submitTransaction(SubmitTransactionRequest(transaction: wash)).transactionCID
         _ = try await runtime.mineBlock()
         let terms = try PaidServing(payTo: signer, rates: [["Nexus"]: 1], depth: 0)
-        try await try app(runtime, terms: terms).test(.router) { client in
+        let served = try app(runtime, terms: terms)
+        try await served.test(.router) { client in
             let response = try await Self.prepay(client, txCID: washCID, signer: signer, key: key.privateKey)
             XCTAssertEqual(response.status, .badRequest, Self.text(response))
             XCTAssertTrue(Self.text(response).contains("noPayment"), Self.text(response))
