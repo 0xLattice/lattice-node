@@ -886,9 +886,9 @@ extension LatticeCtlE2ETests {
         return volumes
     }
 
-    /// Every fetch of a burst is in flight at once: `URLSession.shared`
-    /// holds a host to a few connections, which would queue the burst here
-    /// instead of at the holder.
+    /// No cap of its own on a burst: `URLSession.shared` holds a host to a
+    /// few connections, which would queue the burst here instead of at the
+    /// reader (and the reader keeps up to Ivy's per-peer limit at the holder).
     private static let fetchSession: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpMaximumConnectionsPerHost = 64
@@ -958,7 +958,7 @@ extension LatticeCtlE2ETests {
         let strangerKey = try JSONDecoder().decode(KeyPair.self, from: Data(contentsOf: stranger.file))
         // Deep enough that stopping the miner once the payment is mined
         // leaves it short.
-        let depth: UInt64 = 30
+        let depth: UInt64 = 60
         let publicRead = randomPorts(1)[0]
         // One serving slot: any two requests at once contend.
         let holder = try await bringUpMiningHost(miner: payer) {
@@ -993,6 +993,7 @@ extension LatticeCtlE2ETests {
         let early = try await prepay(publicRead, txCID: txCID, peer: reader, signer: payer.address, signedBy: payerKey.privateKey)
         // Read after the prepay, so a block that landed after the stop counts.
         let stoppedAt = await height(holder.nexusRPC, chain: "Nexus")
+        XCTAssertGreaterThanOrEqual(stoppedAt, 0, "the holder answers its height")
         XCTAssertLessThan(
             stoppedAt - Int(included), Int(depth),
             "the miner went \(stoppedAt) - \(included) blocks past the payment before it stopped; raise the depth"
@@ -1103,8 +1104,8 @@ extension LatticeCtlE2ETests {
         XCTAssertEqual(afterLoneFetch, beforeLoneFetch, "a fetch served at once is free")
 
         // The unpaid reader asks for every Volume at once; once its first is
-        // served the rest are waiting at the holder, and the paid reader asks
-        // for four.
+        // served the rest are queued (at the holder, up to Ivy's per-peer
+        // limit), and the paid reader asks for four.
         let roots = volumes.map(\.root)
         let (firstServed, served) = AsyncStream<Void>.makeStream()
         let unpaidRun = Task {
@@ -1117,6 +1118,7 @@ extension LatticeCtlE2ETests {
             break
         }
         XCTAssertTrue(anyServed, "the unpaid reader was served nothing")
+        let paidStart = ContinuousClock.now
         let paidResults = await Self.fetchAll(paid, Array(roots.prefix(4))) {}
         let paidDone = ContinuousClock.now
         let unpaidResults = await unpaidRun.value
@@ -1128,13 +1130,13 @@ extension LatticeCtlE2ETests {
         XCTAssertGreaterThan(spent, 0, "requests that waited spend the balance")
         XCTAssertEqual(spent % archiveBytes, 0, "spent by whole archives served: \(spent) of \(archiveBytes)-byte archives")
         XCTAssertLessThanOrEqual(spent, 4 * archiveBytes, "never more than the paid reader was served")
-        // In arrival order the paid reader's four would wait behind every
-        // unpaid fetch still queued; its weight puts them first. Half leaves
-        // room for the unpaid fetches served while the paid ones arrive.
-        let unpaidAhead = unpaidResults.filter { $0.at < paidDone }.count
+        // In arrival order the paid reader's four would wait behind the
+        // unpaid requests already queued at the holder, fifteen or so; its
+        // weight puts them first, so only the one being served and perhaps a
+        // couple more end while the paid reader waits.
+        let unpaidMeanwhile = unpaidResults.filter { $0.at > paidStart && $0.at < paidDone }.count
         XCTAssertLessThanOrEqual(
-            unpaidAhead, volumes.count / 2,
-            "\(unpaidAhead) of the unpaid reader's \(volumes.count) fetches ended before the paid reader's four"
+            unpaidMeanwhile, 8, "\(unpaidMeanwhile) unpaid fetches ended while the paid reader's four waited"
         )
     }
 
