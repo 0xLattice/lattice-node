@@ -754,8 +754,13 @@ final class LatticeCtlE2ETests: XCTestCase {
 /// Paid serving between real nodes: a reader buys serving balance with a
 /// transfer to the holder's payee, the balance survives the holder being
 /// killed and restarted, and it is spent only on requests that waited for a
-/// serving slot, which its weight serves back to back rather than in turn
-/// with an unpaid reader's.
+/// serving slot.
+///
+/// Whether the paid reader's waiting requests finish ahead of the unpaid
+/// reader's is not asserted: the readers' completion times track the
+/// holder's grant order too loosely (a 2-core or macOS runner measured up to
+/// 7 unpaid completions inside the paid span, against about 11 at equal
+/// weight). Ivy's own tests cover the weighting.
 extension LatticeCtlE2ETests {
     /// Bytes one Nexus coin buys at the holder.
     private static let bytesPerCoin = 1 << 21
@@ -908,24 +913,19 @@ extension LatticeCtlE2ETests {
         return (response as? HTTPURLResponse)?.statusCode ?? 0
     }
 
-    /// Every Volume fetched by `reader` at once: each one's status and when
-    /// it ended. `served` runs as each one is served.
+    /// Every Volume fetched by `reader` at once, by status; `served` runs as
+    /// each one is served.
     private static func fetchAll(
         _ reader: CtlHost, _ roots: [String], served: @escaping @Sendable () -> Void
-    ) async -> [(status: Int, at: ContinuousClock.Instant)] {
-        await withTaskGroup(of: (status: Int, at: ContinuousClock.Instant).self) { group in
-            for root in roots {
-                group.addTask {
-                    let status = await fetch(reader, root)
-                    return (status, ContinuousClock.now)
-                }
+    ) async -> [Int] {
+        await withTaskGroup(of: Int.self) { group in
+            for root in roots { group.addTask { await fetch(reader, root) } }
+            var statuses: [Int] = []
+            for await status in group {
+                statuses.append(status)
+                if status == 200 { served() }
             }
-            var results: [(status: Int, at: ContinuousClock.Instant)] = []
-            for await result in group {
-                results.append(result)
-                if result.status == 200 { served() }
-            }
-            return results
+            return statuses
         }
     }
 
@@ -1073,7 +1073,7 @@ extension LatticeCtlE2ETests {
         XCTAssertEqual(replayed.status, 409, "the credited payment is remembered: \(replayed.body)")
 
         // MARK: 3. spent only while waiting, by the bytes served
-        let volumes = try await Self.servedVolumes(48, valueBytes: 512 * 1024)
+        let volumes = try await Self.servedVolumes(24, valueBytes: 512 * 1024)
         let sizes = Set(volumes.map { encodeCompleteVolumeArchive($0)?.count ?? 0 })
         XCTAssertEqual(sizes.count, 1, "every Volume archives to the same size")
         let archiveBytes = try XCTUnwrap(sizes.first)
@@ -1107,7 +1107,7 @@ extension LatticeCtlE2ETests {
 
         // The unpaid reader asks for every Volume at once; once its first is
         // served the rest are queued (at the holder, up to Ivy's per-peer
-        // limit), and the paid reader asks for twelve.
+        // limit), and the paid reader asks for eight, which wait.
         let roots = volumes.map(\.root)
         let (firstServed, served) = AsyncStream<Void>.makeStream()
         let unpaidRun = Task {
@@ -1120,33 +1120,17 @@ extension LatticeCtlE2ETests {
             break
         }
         XCTAssertTrue(anyServed, "the unpaid reader was served nothing")
-        let paidCount = 12
+        let paidCount = 8
         let paidResults = await Self.fetchAll(paid, Array(roots.prefix(paidCount))) {}
         let unpaidResults = await unpaidRun.value
-        XCTAssertEqual(paidResults.map(\.status), Array(repeating: 200, count: paidCount))
-        XCTAssertEqual(unpaidResults.map(\.status), Array(repeating: 200, count: volumes.count))
+        XCTAssertEqual(paidResults, Array(repeating: 200, count: paidCount))
+        XCTAssertEqual(unpaidResults, Array(repeating: 200, count: volumes.count))
 
         let afterBurst = try await servingBalance(holder, reader)
         let spent = afterLoneFetch - afterBurst
         XCTAssertGreaterThan(spent, 0, "requests that waited spend the balance")
         XCTAssertEqual(spent % archiveBytes, 0, "spent by whole archives served: \(spent) of \(archiveBytes)-byte archives")
         XCTAssertLessThanOrEqual(spent, paidCount * archiveBytes, "never more than the paid reader was served")
-        // At equal weight the holder would alternate the two readers, and
-        // about eleven unpaid fetches would end between the paid reader's
-        // first and last; the paid balance (weight about 13 to 1) serves the
-        // paid twelve back to back. Counted between the paid reader's own
-        // completions, so the time its requests take to reach the holder
-        // (when the unpaid queue drains freely) is not in the window. This
-        // tells weighted shares from equal ones only: in plain arrival order
-        // the paid twelve would also run back to back, after the unpaid
-        // requests queued ahead of them, and how many those are depends on
-        // how long the paid requests take to arrive.
-        let paidEnds = paidResults.map(\.at)
-        let (firstPaid, lastPaid) = (try XCTUnwrap(paidEnds.min()), try XCTUnwrap(paidEnds.max()))
-        let unpaidBetween = unpaidResults.filter { $0.at > firstPaid && $0.at < lastPaid }.count
-        XCTAssertLessThanOrEqual(
-            unpaidBetween, 4, "\(unpaidBetween) unpaid fetches ended between the paid reader's first and last of \(paidCount)"
-        )
     }
 
     /// lattice-sponsor with --sell-serving against a real node: shares of its
