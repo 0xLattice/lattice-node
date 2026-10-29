@@ -238,7 +238,9 @@ final class LatticeCtlE2ETests: XCTestCase {
     /// transaction pooled, can lose it on every block. At Nexus's real
     /// target a child rides child-only carriers, which leave Nexus's
     /// post-state alone.
-    private func bringUpMiningHost(miner: TestKey?, minRelayFee: UInt64? = nil) async throws -> CtlHost {
+    private func bringUpMiningHost(
+        miner: TestKey?, minRelayFee: UInt64? = nil, configure: (inout Topology) -> Void = { _ in }
+    ) async throws -> CtlHost {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("lattice-node-e2e-ctl-\(UUID().uuidString)")
         try FileManager.default.createDirectory(
@@ -260,6 +262,7 @@ final class LatticeCtlE2ETests: XCTestCase {
             recipients: miner.map { ["Nexus": $0.address] }
         )
         topology.minRelayFee = minRelayFee
+        configure(&topology)
         try topology.validated().save(root: root)
 
         _ = try await runCtl(["up"], root: root)
@@ -743,6 +746,178 @@ final class LatticeCtlE2ETests: XCTestCase {
            let object = try? JSONSerialization.jsonObject(with: data)
                as? [String: Any] else { return 0 }
         return (object["balance"] as? String).flatMap { UInt64($0) } ?? 0
+    }
+}
+
+// MARK: serving standing
+
+/// A peer's serving standing between real nodes: credited on the operator
+/// route, kept across the holder being killed and restarted, and lowered by
+/// the archive bytes of every Volume served to the peer, down to zero, where
+/// the peer is still served. Only amounts are asserted, never order or
+/// timing; Ivy's own tests cover the weighting.
+extension LatticeCtlE2ETests {
+    private static func operatorRequest(_ host: CtlHost, _ path: String) throws -> URLRequest {
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(host.nexusRPC)/\(path)")!)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        let cookie = try String(contentsOf: HostLayout(root: host.root.path).rpcCookie, encoding: .utf8)
+        request.setValue("Basic " + Data(cookie.utf8).base64EncodedString(), forHTTPHeaderField: "Authorization")
+        return request
+    }
+
+    /// The node's Ivy peer key, as it prints it on its `storage:` line.
+    private func peerKey(_ host: CtlHost) throws -> String {
+        let identity = HostLayout(root: host.root.path).identityKey(for: "Nexus")
+        let privateKey = try String(contentsOf: identity, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        return try NodeConfiguration(
+            chainPath: ["Nexus"], storagePath: host.root, privateKeyHex: privateKey
+        ).processPublicKey
+    }
+
+    private struct ServingCredit: Codable {
+        var peer: String
+        var standing: Int?
+        var bytes: Int?
+    }
+
+    private func standing(_ host: CtlHost, _ peer: String) async throws -> Int {
+        let (data, response) = try await URLSession.shared.data(for: try Self.operatorRequest(host, "serving-credit/\(peer)"))
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200, String(decoding: data, as: UTF8.self))
+        return try XCTUnwrap(try JSONDecoder().decode(ServingCredit.self, from: data).standing)
+    }
+
+    /// `count` Volumes, distinct by `tag` and an index: one archive size for
+    /// every tag of one length.
+    private static func servedVolumes(_ count: Int, tag: String) async throws -> [SerializedVolume] {
+        actor Captured: VolumeStorer {
+            var volumes: [SerializedVolume] = []
+            func store(volume: SerializedVolume) async throws { volumes.append(volume) }
+        }
+        var volumes: [SerializedVolume] = []
+        for index in 0..<count {
+            let body = TransactionBody(
+                accountActions: [],
+                actions: [Action(
+                    key: "\(tag)-\(String(format: "%04d", index))", oldValue: nil,
+                    newValue: String(repeating: "x", count: 512 * 1024)
+                )],
+                depositActions: [], receiptActions: [], withdrawalActions: [],
+                signers: [], nonce: 0, chainPath: ["Nexus"]
+            )
+            let volume = try VolumeImpl<TransactionBody>(node: body)
+            let captured = Captured()
+            try await volume.store(storer: captured)
+            let stored = await captured.volumes.first { $0.root == volume.rawCID }
+            volumes.append(try XCTUnwrap(stored))
+        }
+        return volumes
+    }
+
+    /// Never timed out here: a retry sent while the reader still reads the
+    /// first would be served, and charged, twice.
+    private static let fetchSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpMaximumConnectionsPerHost = 64
+        configuration.timeoutIntervalForRequest = 3_600
+        configuration.timeoutIntervalForResource = 3_600
+        return URLSession(configuration: configuration)
+    }()
+
+    /// `GET /fetch/:cid` on the reader, which reads it from its one peer.
+    private static func fetch(_ reader: CtlHost, _ cid: String) async -> Int {
+        guard let request = try? Self.operatorRequest(reader, "fetch/\(cid)"),
+              let (_, response) = try? await fetchSession.data(for: request) else { return 0 }
+        return (response as? HTTPURLResponse)?.statusCode ?? 0
+    }
+
+    /// Gone, or a zombie nobody reaps: a CI container's PID 1 never reaps an
+    /// adopted orphan, and a zombie still answers kill(pid, 0).
+    private static func isGone(_ pid: Int32) -> Bool {
+        guard kill(pid, 0) == 0 else { return true }
+        guard let stat = try? String(contentsOfFile: "/proc/\(pid)/stat", encoding: .utf8),
+              let close = stat.lastIndex(of: ")") else { return false }
+        return stat[stat.index(after: close)...].trimmingCharacters(in: .whitespaces).hasPrefix("Z")
+    }
+
+    func testAStandingSurvivesARestartAndIsLoweredByWhatIsServed() async throws {
+        // Nothing is mined, so once the reader holds the holder's genesis it
+        // fetches from the holder only what is asked of it here.
+        let holder = try await bringUpMiningHost(miner: nil)
+        let listen = try Topology.load(root: holder.root).listen
+        let holderKey = try peerKey(holder)
+        let reader = try await bringUpMiningHost(miner: nil) {
+            $0.peers = ChainPeers(byChain: ["Nexus": ["\(holderKey)@127.0.0.1:\(listen)"]])
+        }
+        let peer = try peerKey(reader)
+
+        let volumes = try await Self.servedVolumes(3, tag: "served")
+        let sizes = Set(volumes.map { encodeCompleteVolumeArchive($0)?.count ?? 0 })
+        XCTAssertEqual(sizes.count, 1, "every Volume archives to the same size")
+        let archiveBytes = try XCTUnwrap(sizes.first)
+        struct Pin: Encodable { let cid: String; let entries: [String: Data] }
+        for volume in volumes {
+            var pin = try Self.operatorRequest(holder, "pins")
+            pin.httpMethod = "POST"
+            pin.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            pin.httpBody = try JSONEncoder().encode(Pin(cid: volume.root, entries: volume.entries))
+            let (data, response) = try await URLSession.shared.data(for: pin)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200, String(decoding: data, as: UTF8.self))
+        }
+
+        // MARK: credited on the operator route
+        let funded = archiveBytes + archiveBytes / 2
+        var credit = try Self.operatorRequest(holder, "serving-credit")
+        credit.httpMethod = "POST"
+        credit.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        credit.httpBody = try JSONEncoder().encode(ServingCredit(peer: peer, bytes: funded))
+        let (credited, creditResponse) = try await URLSession.shared.data(for: credit)
+        XCTAssertEqual((creditResponse as? HTTPURLResponse)?.statusCode, 200, String(decoding: credited, as: UTF8.self))
+        XCTAssertEqual(try JSONDecoder().decode(ServingCredit.self, from: credited).standing, funded)
+
+        // MARK: killed and restarted on the same data directory
+        let layout = HostLayout(root: holder.root.path)
+        let pidText = try String(contentsOf: layout.pidFile(for: "lattice-node"), encoding: .utf8)
+        let pid = try XCTUnwrap(pidText.split(separator: " ").first.flatMap { Int32($0) })
+        XCTAssertEqual(kill(pid, SIGKILL), 0)
+        try await waitFor("the holder is gone") {
+            let answering = await self.health(holder.nexusRPC) != nil
+            return Self.isGone(pid) && !answering
+        }
+        // What a crash leaves: a pidfile naming a dead process.
+        layout.removePidFile(for: "lattice-node", ifNaming: pid)
+        _ = try await runCtl(["up"], root: holder.root)
+        try await waitFor("the holder is active again") {
+            await self.health(holder.nexusRPC)?["phase"] as? String == "active"
+        }
+        let restored = try await standing(holder, peer)
+        XCTAssertEqual(restored, funded, "the credit survives a kill")
+
+        // MARK: lowered by the archive bytes served
+        // Connected again, asked without fetching: a fetch retried after a
+        // failed one would be charged for whatever the failed one was sent.
+        try await waitFor("the reader holds a session with the holder", seconds: 120) {
+            guard let request = try? Self.operatorRequest(reader, "api/peers"),
+                  let (data, _) = try? await URLSession.shared.data(for: request),
+                  let peers = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return false }
+            return (peers["count"] as? Int ?? 0) > 0
+        }
+        let first = await Self.fetch(reader, volumes[0].root)
+        XCTAssertEqual(first, 200)
+        let afterFirst = try await standing(holder, peer)
+        XCTAssertEqual(afterFirst, funded - archiveBytes, "one archive served")
+
+        // Lowered to zero, never below.
+        let second = await Self.fetch(reader, volumes[1].root)
+        XCTAssertEqual(second, 200)
+        let afterSecond = try await standing(holder, peer)
+        XCTAssertEqual(afterSecond, 0, "standing stops at zero")
+
+        // MARK: a peer with no standing is still served
+        let third = await Self.fetch(reader, volumes[2].root)
+        XCTAssertEqual(third, 200)
+        let afterThird = try await standing(holder, peer)
+        XCTAssertEqual(afterThird, 0)
     }
 }
 

@@ -237,8 +237,7 @@ carries nothing more for the pair.
 
 The public-read listener serves the bounded GET routes and never registers
 operator status, metrics, or mining handlers; it registers
-`POST /transactions` only with public submit on (below), and
-`POST /serving-prepay` beside `GET /serving-terms` ([Paid serving](#paid-serving)). Set all three read-rate controls to
+`POST /transactions` only with public submit on (below). Set all three read-rate controls to
 zero only behind a proxy that supplies its own per-client and global limits
 (`--public-submit-rate` is a fourth ceiling; it bounds only `POST /transactions`).
 The example Fly read replica uses nginx as the public boundary.
@@ -362,38 +361,22 @@ What it costs and what it does not change:
 Behind a proxy that collapses client addresses (fly-proxy), set the per-client
 read rates to 0 as for reads; the submit listener budget still applies.
 
-## Paid serving
+## Serving standing
 
-Serving stays free whenever it is not contended: a request that gets a
-serving slot at once is never charged. Under contention, waiting requests
-share freed slots by weight, and an operator may sell weight as prepaid bytes
-of balance. Off by default; with none of these flags no payment is accepted
-(`GET /serving-terms` answers nulls, and the operator can still credit
-balance by hand).
+Serving is free while a slot is free. Under contention, waiting requests
+share freed slots by weight, which grows with the peer's standing: bytes the
+operator credited it plus verified content it served this node, less the
+Volume archive bytes this node served it (every one, contended or not), never
+below zero. Standing does not decay and is not capped.
 
-- `--serving-pay-to <address>`: the account readers pay. Requires
-  `--public-read-port`, `--state all` and `--block-bodies all`: a payment is
-  found by reading past states and the body that carried it.
-- `--serving-rate <chain-path>=<bytesPerCoin>` (repeatable): a chain whose
-  coin is accepted, and the bytes one unit of it (the unit its balances count
-  in) buys. Requires `--serving-pay-to`.
-- `--serving-prepay-depth <n>` (default 6): blocks built on a payment's block
-  before it is credited, against a reorganization taking it back.
-- `--serving-work-url <url>`: where readers earn balance by work instead
-  (the operator's sponsor), advertised in the terms.
-
-Readers find the terms at `GET /serving-terms` on the public read port, pay
-`payTo` with an ordinary transaction, and claim it for their peer key at
-`POST /serving-prepay`; the operator (or its sponsor) credits by hand with
-`POST /serving-balance` on the operator port (see
-[rpc-api.md](rpc-api.md#paid-serving)). Balances and credited payments are
-kept in `<data-directory>/serving.json`; a crash loses spending since the
-last write, never a credit. Each node keeps its own credited payments, so
-give each node that sells serving its own `payTo`, used for nothing else.
-Carry `serving.json` with the data directory (blue/green moves, restores):
-a node started without it, or with an older copy, would credit past payments
-again. A file there that cannot be read stops the node
-from starting, since starting without it would credit its payments again.
+The operator credits standing with `POST /serving-credit` on the operator
+port (see [rpc-api.md](rpc-api.md#serving-standing)), by hand or through a
+sponsor such as lattice-sponsor. Every standing is kept in
+`<data-directory>/serving.json`, restored before the overlay starts and
+written after each credit, on every maintenance pass and at a clean stop; a
+crash loses only the changes since the last write, never a credit. Carry the
+file with the data directory (blue/green moves, restores), or its standings
+are lost. A file there that cannot be read stops the node from starting.
 
 ## Health interpretation
 
