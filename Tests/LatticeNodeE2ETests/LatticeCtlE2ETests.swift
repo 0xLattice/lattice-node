@@ -990,12 +990,13 @@ extension LatticeCtlE2ETests {
         _ = try await runCtl(["mine", "stop"], root: holder.root)
         let inclusion = await blockHeight(of: txCID, on: holder)
         let included = try XCTUnwrap(inclusion)
+        let early = try await prepay(publicRead, txCID: txCID, peer: reader, signer: payer.address, signedBy: payerKey.privateKey)
+        // Read after the prepay, so a block that landed after the stop counts.
         let stoppedAt = await height(holder.nexusRPC, chain: "Nexus")
         XCTAssertLessThan(
             stoppedAt - Int(included), Int(depth),
             "the miner went \(stoppedAt) - \(included) blocks past the payment before it stopped; raise the depth"
         )
-        let early = try await prepay(publicRead, txCID: txCID, peer: reader, signer: payer.address, signedBy: payerKey.privateKey)
         XCTAssertEqual(early.status, 425, early.body)
         XCTAssertTrue(early.body.contains("notDeepEnough"), early.body)
 
@@ -1069,7 +1070,7 @@ extension LatticeCtlE2ETests {
         XCTAssertEqual(replayed.status, 409, "the credited payment is remembered: \(replayed.body)")
 
         // MARK: 3. spent only while waiting, by the bytes served
-        let volumes = try await Self.servedVolumes(12, valueBytes: 512 * 1024)
+        let volumes = try await Self.servedVolumes(32, valueBytes: 512 * 1024)
         let sizes = Set(volumes.map { encodeCompleteVolumeArchive($0)?.count ?? 0 })
         XCTAssertEqual(sizes.count, 1, "every Volume archives to the same size")
         let archiveBytes = try XCTUnwrap(sizes.first)
@@ -1107,13 +1108,18 @@ extension LatticeCtlE2ETests {
         let roots = volumes.map(\.root)
         let (firstServed, served) = AsyncStream<Void>.makeStream()
         let unpaidRun = Task {
-            await LatticeCtlE2ETests.fetchAll(unpaid, roots) { served.yield() }
+            defer { served.finish() }
+            return await LatticeCtlE2ETests.fetchAll(unpaid, roots) { served.yield() }
         }
-        for await _ in firstServed { break }
+        var anyServed = false
+        for await _ in firstServed {
+            anyServed = true
+            break
+        }
+        XCTAssertTrue(anyServed, "the unpaid reader was served nothing")
         let paidResults = await Self.fetchAll(paid, Array(roots.prefix(4))) {}
         let paidDone = ContinuousClock.now
         let unpaidResults = await unpaidRun.value
-        served.finish()
         XCTAssertEqual(paidResults.map(\.status), [200, 200, 200, 200])
         XCTAssertEqual(unpaidResults.map(\.status), Array(repeating: 200, count: volumes.count))
 
@@ -1122,11 +1128,13 @@ extension LatticeCtlE2ETests {
         XCTAssertGreaterThan(spent, 0, "requests that waited spend the balance")
         XCTAssertEqual(spent % archiveBytes, 0, "spent by whole archives served: \(spent) of \(archiveBytes)-byte archives")
         XCTAssertLessThanOrEqual(spent, 4 * archiveBytes, "never more than the paid reader was served")
-        // In arrival order the paid reader's four would wait behind the
-        // unpaid reader's eleven; its weight puts them first.
+        // In arrival order the paid reader's four would wait behind every
+        // unpaid fetch still queued; its weight puts them first. Half leaves
+        // room for the unpaid fetches served while the paid ones arrive.
         let unpaidAhead = unpaidResults.filter { $0.at < paidDone }.count
         XCTAssertLessThanOrEqual(
-            unpaidAhead, 4, "\(unpaidAhead) of the unpaid reader's fetches ended before the paid reader's four"
+            unpaidAhead, volumes.count / 2,
+            "\(unpaidAhead) of the unpaid reader's \(volumes.count) fetches ended before the paid reader's four"
         )
     }
 
