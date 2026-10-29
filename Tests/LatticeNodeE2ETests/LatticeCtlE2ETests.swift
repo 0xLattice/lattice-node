@@ -1119,9 +1119,7 @@ extension LatticeCtlE2ETests {
         }
         XCTAssertTrue(anyServed, "the unpaid reader was served nothing")
         let paidCount = 12
-        let paidStart = ContinuousClock.now
         let paidResults = await Self.fetchAll(paid, Array(roots.prefix(paidCount))) {}
-        let paidDone = ContinuousClock.now
         let unpaidResults = await unpaidRun.value
         XCTAssertEqual(paidResults.map(\.status), Array(repeating: 200, count: paidCount))
         XCTAssertEqual(unpaidResults.map(\.status), Array(repeating: 200, count: volumes.count))
@@ -1132,13 +1130,16 @@ extension LatticeCtlE2ETests {
         XCTAssertEqual(spent % archiveBytes, 0, "spent by whole archives served: \(spent) of \(archiveBytes)-byte archives")
         XCTAssertLessThanOrEqual(spent, paidCount * archiveBytes, "never more than the paid reader was served")
         // At equal weight the holder would alternate the two readers, and
-        // about twelve unpaid fetches would end while the paid reader's
-        // twelve wait; the paid balance (weight about 13 to 1) puts them
-        // first, so only the one being served and perhaps another end (the
-        // window also holds the paid reader's own request and response time).
-        let unpaidMeanwhile = unpaidResults.filter { $0.at > paidStart && $0.at < paidDone }.count
+        // about eleven unpaid fetches would end between the paid reader's
+        // first and last; the paid balance (weight about 13 to 1) serves the
+        // paid twelve back to back. Counted between the paid reader's own
+        // completions, so the time its requests take to reach the holder
+        // (when the unpaid queue drains freely) is not in the window.
+        let paidEnds = paidResults.map(\.at)
+        let (firstPaid, lastPaid) = (try XCTUnwrap(paidEnds.min()), try XCTUnwrap(paidEnds.max()))
+        let unpaidBetween = unpaidResults.filter { $0.at > firstPaid && $0.at < lastPaid }.count
         XCTAssertLessThanOrEqual(
-            unpaidMeanwhile, 6, "\(unpaidMeanwhile) unpaid fetches ended while the paid reader's \(paidCount) waited"
+            unpaidBetween, 4, "\(unpaidBetween) unpaid fetches ended between the paid reader's first and last of \(paidCount)"
         )
     }
 
