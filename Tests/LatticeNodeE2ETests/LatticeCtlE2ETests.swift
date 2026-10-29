@@ -815,10 +815,13 @@ extension LatticeCtlE2ETests {
 
     /// Enough connections for a whole burst at once: `URLSession.shared`
     /// holds a host to a few, which would queue the burst here instead of
-    /// at the holder.
+    /// at the holder. Never timed out here: a retry sent while the reader
+    /// still reads the first would contend with it.
     private static let fetchSession: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpMaximumConnectionsPerHost = 64
+        configuration.timeoutIntervalForRequest = 3_600
+        configuration.timeoutIntervalForResource = 3_600
         return URLSession(configuration: configuration)
     }()
 
