@@ -371,7 +371,9 @@ of balance. Off by default; with none of these flags no payment is accepted
 (`GET /serving-terms` answers nulls, and the operator can still credit
 balance by hand).
 
-- `--serving-pay-to <address>`: the account readers pay.
+- `--serving-pay-to <address>`: the account readers pay. Requires
+  `--public-read-port`, `--state all` and `--block-bodies all`: a payment is
+  found by reading past states and the body that carried it.
 - `--serving-rate <chain-path>=<bytesPerCoin>` (repeatable): a chain whose
   coin is accepted, and the bytes one unit of it (the unit its balances count
   in) buys. Requires `--serving-pay-to`.

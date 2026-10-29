@@ -127,6 +127,8 @@ public actor ServingLedger {
         }
         self.credited = credited
         tally.creditServingBalance(peer: peer, bytes: bytes)
+        // What Tally made room with, should it differ from what was written.
+        save()
     }
 
     /// Replaced atomically and synced, with its directory, to stable

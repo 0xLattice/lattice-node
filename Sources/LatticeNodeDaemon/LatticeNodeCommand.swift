@@ -184,6 +184,16 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         guard let state = StateRetention(rawValue: state) else {
             throw ValidationError("--state is all, tip or none")
         }
+        // A payment is found by reading the canonical chain's past states and
+        // the body of the block that carried it, on the public read port.
+        if servingPayTo != nil {
+            guard publicReadPort != nil else {
+                throw ValidationError("--serving-pay-to requires --public-read-port")
+            }
+            guard state == .all, blockBodies == .all else {
+                throw ValidationError("--serving-pay-to requires --state all and --block-bodies all")
+            }
+        }
         let publicReadLimits = try PublicReadRateLimits.validated(
             generalRate: publicReadRate,
             expensiveRate: publicReadExpensiveRate,
