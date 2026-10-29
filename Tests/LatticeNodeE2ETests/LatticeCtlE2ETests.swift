@@ -893,9 +893,17 @@ extension LatticeCtlE2ETests {
         XCTAssertEqual(restored, funded, "the credit survives a kill")
 
         // MARK: lowered by the archive bytes served
-        try await waitFor("the reader reads from the holder", seconds: 120) {
-            await Self.fetch(reader, volumes[0].root) == 200
+        // Connected again, asked without fetching: a fetch retried after a
+        // failed one would be charged for whatever the failed one was sent.
+        try await waitFor("the reader holds a session with the holder", seconds: 120) {
+            guard let request = try? Self.operatorRequest(reader, "api/peers"),
+                  let (data, _) = try? await URLSession.shared.data(for: request),
+                  let peers = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return false }
+            return (peers["count"] as? Int ?? 0) > 0
         }
+        let first = await Self.fetch(reader, volumes[0].root)
+        XCTAssertEqual(first, 200)
         let afterFirst = try await standing(holder, peer)
         XCTAssertEqual(afterFirst, funded - archiveBytes, "one archive served")
 

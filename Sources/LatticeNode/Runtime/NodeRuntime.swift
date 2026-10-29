@@ -96,7 +96,7 @@ public final class NodeRuntime: Sendable {
     /// The peers remembered across restarts; nil for a node told to connect
     /// to no one, which neither remembers nor redials anyone.
     let peerMemory: PeerMemory?
-    /// Each peer's prepaid serving balance, kept across restarts.
+    /// Each peer's serving standing, kept across restarts.
     public let servingLedger: ServingLedger
 
     /// How many overlay messages may wait for the loop before a delivering
