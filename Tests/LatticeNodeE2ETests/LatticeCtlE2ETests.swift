@@ -1134,10 +1134,11 @@ extension LatticeCtlE2ETests {
         // At equal weight the holder would alternate the two readers, and
         // about twelve unpaid fetches would end while the paid reader's
         // twelve wait; the paid balance (weight about 13 to 1) puts them
-        // first, so only the one being served and perhaps another end.
+        // first, so only the one being served and perhaps another end (the
+        // window also holds the paid reader's own request and response time).
         let unpaidMeanwhile = unpaidResults.filter { $0.at > paidStart && $0.at < paidDone }.count
         XCTAssertLessThanOrEqual(
-            unpaidMeanwhile, 4, "\(unpaidMeanwhile) unpaid fetches ended while the paid reader's \(paidCount) waited"
+            unpaidMeanwhile, 6, "\(unpaidMeanwhile) unpaid fetches ended while the paid reader's \(paidCount) waited"
         )
     }
 

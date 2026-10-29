@@ -382,7 +382,8 @@ balance by hand).
 - `--serving-work-url <url>`: where readers earn balance by work instead
   (the operator's sponsor), advertised in the terms.
 
-Readers find the terms at `GET /serving-terms` on the public read port, pay
+Readers find the terms at `GET /serving-terms` on the public read port (the
+operator's sponsor reads them on the operator port), pay
 `payTo` with an ordinary transaction, and claim it for their peer key at
 `POST /serving-prepay`; the operator (or its sponsor) credits by hand with
 `POST /serving-balance` on the operator port (see
