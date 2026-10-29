@@ -96,6 +96,8 @@ public final class NodeRuntime: Sendable {
     /// The peers remembered across restarts; nil for a node told to connect
     /// to no one, which neither remembers nor redials anyone.
     let peerMemory: PeerMemory?
+    /// Each peer's prepaid serving balance, kept across restarts.
+    public let servingLedger: ServingLedger
 
     /// How many overlay messages may wait for the loop before a delivering
     /// connection is held back.
@@ -160,11 +162,15 @@ public final class NodeRuntime: Sendable {
         // What the journal replay below reads of the core, which the runtime
         // takes over.
         let (rootPath, levels) = (core.rootPath, Set(core.levels.keys))
+        // Balances restored before the overlay serves anyone.
+        let ivy = Ivy(config: overlay)
+        let servingLedger = try ServingLedger(directory: configuration.storagePath, tally: await ivy.tally)
         let runtime = NodeRuntime(
             core: consume core,
             storage: storage,
             configuration: configuration,
-            ivy: Ivy(config: overlay),
+            ivy: ivy,
+            servingLedger: servingLedger,
             overlayPeers: overlay.bootstrapPeers,
             relays: overlay.relayEnabled,
             helloTimeout: overlay.requestTimeout,
@@ -262,6 +268,7 @@ public final class NodeRuntime: Sendable {
         storage: NodeStorage,
         configuration: NodeConfiguration,
         ivy: Ivy,
+        servingLedger: ServingLedger,
         overlayPeers: [PeerEndpoint],
         relays: Bool,
         helloTimeout: Duration,
@@ -291,6 +298,7 @@ public final class NodeRuntime: Sendable {
         self.publishedLevelReads = publishedLevelReads
         self.inputs = inputs
         self.ivy = ivy
+        self.servingLedger = servingLedger
         webSocket = WebSocketTransport(ivy: ivy)
         let gate = NodeRuntimeInputGate(capacity: Self.networkCapacity)
         self.gate = gate
@@ -339,6 +347,7 @@ public final class NodeRuntime: Sendable {
         maintenance = Task {
             while !Task.isCancelled {
                 guard await Timers.sleep(nanoseconds: UInt64(cadence * 1_000_000_000)) else { return }
+                await servingLedger.save()
                 inputs.yield(.maintenance)
             }
         }
@@ -408,6 +417,8 @@ public final class NodeRuntime: Sendable {
         await webSocket.stopListening()
         await ivy.stop()
         await ivy.setContentSource(nil)
+        // What contended serving spent, now that no more is served.
+        await servingLedger.save()
         inputs.yield(.stop)
         inputs.finish()
         await loop.value
