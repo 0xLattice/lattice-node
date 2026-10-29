@@ -504,21 +504,6 @@ public struct ChainReads: Sendable {
         return (height: high, hash: blockCID, timestamp: block.timestamp)
     }
 
-    /// A transaction this chain's canonical chain executed, and how many
-    /// blocks are built on the block that did: nil when it is not in it, or
-    /// what is needed to tell is not held here.
-    public func canonicalTransaction(cid: String) async -> (transaction: Transaction, body: TransactionBody, depth: UInt64)? {
-        guard let transaction = await transaction(cid: cid),
-              let body = try? await transaction.body.resolve(fetcher: storage).node,
-              let inclusion = await canonicalInclusion(cid: cid, body: body),
-              let tip = await tip().height, tip >= inclusion.height,
-              // Still canonical against the tip the depth is counted from.
-              await canonicalCID(inclusion.height) == inclusion.hash else {
-            return nil
-        }
-        return (transaction, body, tip - inclusion.height)
-    }
-
     /// `signer`'s next-expected nonce in `block`'s post-state.
     private func nextNonce(of signer: String, in block: Block) async -> UInt64? {
         guard let state = try? await block.postState.resolve(fetcher: storage).node else {
