@@ -129,6 +129,18 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(name: .customLong("finality-window"), help: "Node-local finality, in blocks: headers and work more than this many blocks below a chain's best tip are declined — never stored, never blamed. A fork from a block that deep can never connect, which keeps out the blocks an easy schedule makes nearly free: a fork d blocks deep is at most 2^(d / halfLife) cheaper than the tip, so a few half-lives is enough. The cost is this node's own: it will not follow a reorganization deeper than the window, even a heavier one, until its operator intervenes. A bare number sets every hosted chain; chain-path=blocks sets one chain, e.g. Nexus/Alpha=500, and 0 turns it off there (repeatable). Without it, everything is kept. A child chain's window should be at least its parent's: a parent reorganization can reorganize the child.")
     var finalityWindow: [String] = []
 
+    @Option(help: "The account readers pay for serving priority, on the chains --serving-rate prices. Paid balance counts only when serving is contended: a request that gets a free slot at once is never charged. Unset: no payment is accepted.")
+    var servingPayTo: String?
+
+    @Option(help: "A chain whose coin --serving-pay-to accepts, and the bytes of prepaid serving one unit of it buys (the unit its balances count in), as chain-path=bytesPerCoin, e.g. Nexus=1024 (repeatable). Requires --serving-pay-to.")
+    var servingRate: [String] = []
+
+    @Option(help: "Blocks built on the block carrying a serving payment before it is credited.")
+    var servingPrepayDepth: UInt64 = PaidServing.defaultDepth
+
+    @Option(help: "Where readers can earn serving balance by work instead of paying (this operator's sponsor), absolute http(s). Advertised in GET /serving-terms only.")
+    var servingWorkUrl: String?
+
     @Option(help: "Self-described publicly reachable host for overlay announcements (NAT/proxy-fronted nodes announce an unreachable observed address otherwise). Host only; the overlay listen port applies.")
     var externalAddress: String?
 
@@ -171,6 +183,16 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         }
         guard let state = StateRetention(rawValue: state) else {
             throw ValidationError("--state is all, tip or none")
+        }
+        // A payment is found by reading the canonical chain's past states and
+        // the body of the block that carried it, on the public read port.
+        if servingPayTo != nil {
+            guard publicReadPort != nil else {
+                throw ValidationError("--serving-pay-to requires --public-read-port")
+            }
+            guard state == .all, blockBodies == .all else {
+                throw ValidationError("--serving-pay-to requires --state all and --block-bodies all")
+            }
         }
         let publicReadLimits = try PublicReadRateLimits.validated(
             generalRate: publicReadRate,
@@ -244,7 +266,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             publicReadURL: publicReadUrl,
             publicSubmit: publicSubmit,
             minRelayFee: minRelayFee,
-            finality: try finalityWindows(finalityWindow)
+            finality: try finalityWindows(finalityWindow),
+            paidServing: try paidServing()
         )
         let cookieFile = rpcCookieFile.map { URL(fileURLWithPath: $0) }
             ?? storage.appendingPathComponent(".cookie")
@@ -284,6 +307,28 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             }
         }
         return windows
+    }
+
+    /// `--serving-pay-to`, `--serving-rate`, `--serving-prepay-depth` and
+    /// `--serving-work-url`.
+    private func paidServing() throws -> PaidServing {
+        var rates: [[String]: Int] = [:]
+        for value in servingRate {
+            let parts = value.split(separator: "=", maxSplits: 1).map(String.init)
+            guard parts.count == 2, let address = ChainAddress(string: parts[0]),
+                  let bytesPerCoin = Int(parts[1]), bytesPerCoin > 0 else {
+                throw ValidationError("--serving-rate takes chain-path=bytesPerCoin, bytesPerCoin at least 1")
+            }
+            guard rates[address.components] == nil else {
+                throw ValidationError("--serving-rate names \(parts[0]) twice")
+            }
+            rates[address.components] = bytesPerCoin
+        }
+        do {
+            return try PaidServing(payTo: servingPayTo, rates: rates, depth: servingPrepayDepth, workURL: servingWorkUrl)
+        } catch let error as PaidServingError {
+            throw ValidationError(error.description)
+        }
     }
 
     private func storageURL(for address: ChainAddress) throws -> URL {
@@ -461,6 +506,7 @@ protocol OperatorWrites: Sendable {
     func pinnedVolumes() async -> [String]
     func hostChains(_ request: HostedChainsRequest) async throws
     var hostedChildren: [[String]] { get }
+    var servingLedger: ServingLedger { get }
 }
 
 /// `POST /hosted-chains`: the child chains the node hosts from now on, in the
@@ -588,7 +634,8 @@ func makePublicReadApplication(
     healthClock: @escaping @Sendable () -> Double = PublicReadRateLimiter.monotonicSeconds,
     endpoints: @escaping ChainEndpointsLookup = { _ in nil },
     submit: PublicSubmit? = nil,
-    fetches: PublicVolumeFetches? = nil
+    fetches: PublicVolumeFetches? = nil,
+    serving: ServingPayments? = nil
 ) -> Application<RouterResponder<PublicReadRequestContext>> {
     // This listener faces the public internet with nothing in front of it, so
     // it carries its own arrival-rate ceilings. Its context is NOT
@@ -600,14 +647,15 @@ func makePublicReadApplication(
     // browser POST needs a preflight — denying .post here keeps those routes
     // reachable only by same-host (non-browser) clients. Cross-origin GETs to
     // the public read routes are "simple" requests and still succeed. An
-    // operator who turned public submit on also allows POST: that route is
-    // meant to be reached cross-origin. Installed OUTSIDE the limiter, so a
+    // operator who turned public submit on, or takes serving payments, also
+    // allows POST: those routes are meant to be reached cross-origin.
+    // Installed OUTSIDE the limiter, so a
     // refusal still carries CORS (a page sees a 429, not a CORS failure) and
     // a preflight is answered without spending the budget.
     router.add(middleware: CORSMiddleware(
         allowOrigin: .all,
         allowHeaders: [.contentType],
-        allowMethods: submit != nil ? [.get, .post, .options] : [.get, .options]
+        allowMethods: submit != nil || serving?.terms.payTo != nil ? [.get, .post, .options] : [.get, .options]
     ))
     // Middleware applies only to routes registered AFTER this call, so the
     // limiter must be installed before the routes it is meant to cover.
@@ -650,11 +698,29 @@ func makePublicReadApplication(
             }
         }
     }
+    if let serving {
+        let byPath = ChainReadsByPath(root: reads, levels: levelReads)
+        // What a reader pays, and where it can work instead.
+        router.get("serving-terms") { request, context in
+            try json(serving.terms, request: request, context: context)
+        }
+        if serving.terms.payTo != nil {
+            router.post("serving-prepay") { request, context in
+                let input: ServingPrepayRequest = try await decode(request, upTo: servingPrepayMaximumBytes)
+                return try await serviceCall(request: request, context: context) {
+                    try await creditPrepay(input, payments: serving, reads: byPath)
+                }
+            }
+        }
+    }
     return Application(
         responder: router.buildResponder(),
         configuration: .init(address: .hostname(host, port: port))
     )
 }
+
+/// A prepay is five short strings.
+let servingPrepayMaximumBytes = 4_096
 
 /// A complete Volume archive, immutable by its CID.
 private func volumeArchiveResponse(_ archive: ByteBuffer) -> Response {
@@ -1179,6 +1245,23 @@ private func addOperatorWriteRoutes(
             return PinsResponse(pins: await service.pinnedVolumes())
         }
     }
+    // Prepaid serving balance the operator credits by hand (its sponsor's
+    // work), and any peer's balance.
+    router.get("serving-balance/:peer") { request, context in
+        let peer = context.parameters.get("peer") ?? ""
+        return try await serviceCall(request: request, context: context) {
+            ServingBalanceResponse(peer: peer, balance: try await service.servingLedger.balance(peer: peer))
+        }
+    }
+    router.post("serving-balance") { request, context in
+        let input: ServingBalanceRequest = try await decode(request, context: context)
+        return try await serviceCall(request: request, context: context) {
+            ServingBalanceResponse(
+                peer: input.peer,
+                balance: try await service.servingLedger.credit(peer: input.peer, bytes: input.bytes)
+            )
+        }
+    }
     router.delete("pins/:cid") { request, context in
         try requireLoopbackHost(request)
         guard let cid = context.parameters.get("cid"), isPlausibleCID(cid) else {
@@ -1301,6 +1384,12 @@ private func serviceCall<Value: Encodable, Context: RequestContext>(
         throw HTTPError(.conflict, message: "conflictingVolume")
     } catch BrokerError.missingRetainedRoot {
         throw HTTPError(.serviceUnavailable, message: "contextChanged")
+    } catch ServingLedgerError.alreadyCredited {
+        throw HTTPError(.conflict, message: "alreadyCredited")
+    } catch let error as ServingLedgerError where error == .notSaved || error == .balancesFull {
+        throw HTTPError(.serviceUnavailable, message: reason(error))
+    } catch let error as ServingLedgerError {
+        throw HTTPError(.badRequest, message: reason(error))
     }
 }
 

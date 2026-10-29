@@ -7,7 +7,9 @@ listener is loopback-only and authenticated ([Authentication](#authentication)).
 The optional public-read listener is unauthenticated. The optional public-read
 listener registers only the GET routes in the read table below, plus
 `POST /transactions` when its operator turns public submit on
-([Public submit](#public-submit)); it is off by default.
+([Public submit](#public-submit)), which is off by default, and the
+[paid serving](#paid-serving) routes `GET /serving-terms` and, when the
+operator sets `--serving-pay-to`, `POST /serving-prepay`.
 
 Requests and responses are JSON unless noted. Operator POSTs require
 `Content-Type: application/json` and a loopback `Host` authority.
@@ -539,16 +541,116 @@ Unpins the Volume and answers the pins left. It goes from the store unless
 something else the node keeps names it. A CID the operator did not pin
 changes nothing.
 
+## Paid serving
+
+Serving is free whenever it is not contended: a peer's request that gets a
+serving slot at once is served and never charged. Only when every slot is
+busy do waiting requests share freed slots by weight, and a peer's prepaid
+balance, in bytes, adds to its weight; the bytes it is then served are spent
+from that balance. The operator chooses whether to sell balance
+(`--serving-pay-to`, `--serving-rate`; see
+[operations.md](operations.md#paid-serving)).
+
+A peer is named by its Ed25519 public key as Ivy and the node print it (the
+`storage:` line at start, `PeerEndpoint.publicKey`): exactly 64 lowercase hex
+characters, without the `ed01` multikey prefix. Any other spelling is `400`
+(`invalidPeer`).
+
+### `GET /serving-terms`
+
+Public read listener.
+
+```json
+{"payTo": "<address>", "rates": {"Nexus": {"bytesPerCoin": 1024}}, "depth": 6, "workURL": "https://work.example.org"}
+```
+
+`payTo` and `workURL` are `null` when unset (an exception to omitting absent
+fields). `rates` lists the chains whose coin is accepted and the bytes one
+unit of it (the unit balances count in) buys. `depth` is how many blocks must
+be built on the block carrying a payment before it is credited. `workURL` is
+where the operator's sponsor credits balance for work.
+
+### `POST /serving-prepay`
+
+Public read listener, only with `--serving-pay-to` set (404 otherwise); body
+capped at 4 KiB, billed to the expensive read budget.
+
+```json
+{"chain": "Nexus", "txCID": "<cid>", "peer": "<peer key>", "signer": "<address>", "signature": "<hex>"}
+```
+
+Credits a payment the transaction `txCID` made on `chain` to `peer`. The
+transaction must be in this node's canonical chain for `chain`, at least
+`depth` blocks deep. `signer` is one of its signers, as its body lists them
+(an address), and `signature` is that signer's key's signature, with
+Lattice's transaction signing primitive (`CryptoUtils.sign`, Ed25519, which
+prefixes the message with `lattice-tx-v1:` before signing), over the message
+
+```text
+lattice-serving-prepay:v1:<chain>:<txCID>:<peer>
+```
+
+The payment is the sum of the transaction's account action deltas on `payTo`
+(credits net of debits); `peer` is credited that times the chain's
+`bytesPerCoin` bytes (saturating), once per transaction by this node. Nodes
+keep their own credited sets, so each node selling serving needs its own
+`payTo`, and one that receives other payments should not be it: any signer of
+a transaction paying `payTo` can claim the payment.
+
+```json
+{"peer": "<peer key>", "credited": 7168, "balance": 7168}
+```
+
+Refusals: `400` `invalidChainPath`, `unpricedChain` (no rate for `chain`),
+`invalidCID`, `invalidPeer`, `notSigner`, `invalidSignature`, `noPayment`
+(nothing net to `payTo`); `404` `unknownChain` (not hosted here),
+`notIncluded` (not in the canonical chain, pending, or not held here);
+`425` `notDeepEnough` (retry once the chain has grown); `409`
+`alreadyCredited`; `413` over 4 KiB; `503` `notSaved` (the credit could not
+be written, and was not applied) or `balancesFull` (the node keeps balances
+for at most 4096 peers; past that a new peer's credit takes the smallest
+balance's place, and one no larger than the smallest is refused, unwritten).
+
+### `GET /serving-balance/:peer`
+
+Operator port only.
+
+```json
+{"peer": "<peer key>", "balance": 7168}
+```
+
+### `POST /serving-balance`
+
+Operator port only: credits `bytes` (at least 1) to `peer` and answers its
+balance as `GET /serving-balance/:peer` does. A sponsor uses it to credit
+work. `400` `invalidPeer` or `invalidBytes`; `503` `notSaved` or
+`balancesFull`.
+
+```json
+{"peer": "<peer key>", "bytes": 1048576}
+```
+
+Balances and the credited transactions are kept in
+`<data-directory>/serving.json`, written before each credit is applied, on
+every maintenance pass and at a clean stop. A crash loses the balance spent
+since the last write, never a credit. The file is what remembers which
+payments were credited: it must move with the data directory, and a node
+started without it (a fresh directory, an older backup) would credit past
+payments again.
+
 ## Errors
 
 - `400 Bad Request` — malformed JSON, invalid content, policy refusal, or
   invalid work;
-- `413 Content Too Large` — public submit body over 1 MiB;
+- `413 Content Too Large` — public submit body over 1 MiB, or serving prepay
+  body over 4 KiB;
 - `401 Unauthorized` — operator route without the node's cookie (no challenge header);
 - `403 Forbidden` — browser `Origin` not listed, or a non-loopback `Host`;
 - `404 Not Found` — unknown resource or unhosted `chainPath`;
-- `409 Conflict` — a pin whose root the store holds with other entries;
+- `409 Conflict` — a pin whose root the store holds with other entries, or a
+  serving payment already credited;
 - `415 Unsupported Media Type` — operator POST without JSON content type;
+- `425 Too Early` — a serving payment not yet deep enough;
 - `429 Too Many Requests` — mempool or public-read rate limit;
 - `503 Service Unavailable` — stopping process or transient core context.
 

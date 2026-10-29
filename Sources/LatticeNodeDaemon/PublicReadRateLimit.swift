@@ -168,6 +168,9 @@ enum PublicReadRouteClass: Sendable, Equatable {
             // and locates each visible deposit's creating block by a binary
             // search over the chain's post-states.
             self = .expensive
+        case 1 where components[0] == "serving-prepay" && method == .post:
+            // Finding the payment is the canonical-inclusion search above.
+            self = .expensive
         case 2 where components[0] == "volumes":
             // A complete Volume can be tens of MiB, and one this node does
             // not hold may be read from peers first.

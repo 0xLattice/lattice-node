@@ -216,6 +216,9 @@ public struct NodeConfiguration: Sendable {
     /// and work landing more than a chain's window behind that chain's best
     /// weighed tip, and so does not follow a reorganization deeper than it.
     public let finality: FinalityWindows
+    /// What readers pay for serving priority (operator choice; off by
+    /// default).
+    public let paidServing: PaidServing
 
     /// Overlay slots kept in reserve for outbound dials so a burst of inbound
     /// connections (from one source, especially behind a proxy where the
@@ -254,7 +257,8 @@ public struct NodeConfiguration: Sendable {
         publicReadURL: String? = nil,
         publicSubmit: Bool = false,
         minRelayFee: UInt64 = 0,
-        finality: FinalityWindows = FinalityWindows()
+        finality: FinalityWindows = FinalityWindows(),
+        paidServing: PaidServing? = nil
     ) throws {
         guard let address = ChainAddress(chainPath), address.isNexus else {
             throw NodeConfigurationError.invalidChainPath
@@ -323,6 +327,7 @@ public struct NodeConfiguration: Sendable {
         self.publicSubmit = publicSubmit
         self.minRelayFee = minRelayFee
         self.finality = finality
+        self.paidServing = try paidServing ?? PaidServing()
     }
 
     /// The same node hosting `hostedChildren` instead, with their specs,
