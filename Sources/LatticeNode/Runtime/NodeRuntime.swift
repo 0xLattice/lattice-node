@@ -98,6 +98,8 @@ public final class NodeRuntime: Sendable {
     let peerMemory: PeerMemory?
     /// Each peer's prepaid serving balance, kept across restarts.
     public let servingLedger: ServingLedger
+    /// What readers pay for serving priority, as `GET /serving-terms` answers.
+    public var servingTerms: PaidServing { configuration.paidServing }
 
     /// How many overlay messages may wait for the loop before a delivering
     /// connection is held back.

@@ -43,6 +43,7 @@ public struct Topology: Codable, Sendable {
         case publicReadRate, publicReadExpensiveRate, publicReadMaxRate, publicReadFetches
         case publicReadURL, publicSubmit, publicSubmitRate, minRelayFee
         case servingMaxConcurrent, servingMaxInFlightVolumeBytes, maxAcquisitionBytes, blockBodies, state, finalityWindow, finalityWindows, announceLifetime
+        case servingPayTo, servingRates, servingPrepayDepth, servingWorkURL
         case hostedChains, mine, rpcAllowedOrigins
     }
     public var listen: UInt16
@@ -115,6 +116,15 @@ public struct Topology: Codable, Sendable {
     /// Seconds each provider announcement lasts (`--announce-lifetime`).
     /// Absent = the node's default.
     public var announceLifetime: UInt64?
+    /// Paid serving (`--serving-pay-to`, `--serving-rate`,
+    /// `--serving-prepay-depth`, `--serving-work-url`): the account readers
+    /// pay, the bytes one coin unit buys by chain path, the blocks a payment
+    /// waits under, and where readers earn balance by work. Absent = off, or
+    /// the node's defaults.
+    public var servingPayTo: String?
+    public var servingRates: [String: Int]?
+    public var servingPrepayDepth: UInt64?
+    public var servingWorkURL: String?
     /// Child chains this process hosts as levels, parent before child.
     public var hostedChains: [String]?
     public var mine: TopologyMine?
@@ -287,6 +297,18 @@ public struct Topology: Codable, Sendable {
             arguments += ["--finality-window", "\(path)=\(value)"]
         }
         if let value = announceLifetime { arguments += ["--announce-lifetime", String(value)] }
+        return arguments
+    }
+
+    /// Node flags for paid serving in `lattice.json`; the node checks them.
+    public var paidServingArguments: [String] {
+        var arguments: [String] = []
+        if let value = servingPayTo { arguments += ["--serving-pay-to", value] }
+        for (path, value) in (servingRates ?? [:]).sorted(by: { $0.key < $1.key }) {
+            arguments += ["--serving-rate", "\(path)=\(value)"]
+        }
+        if let value = servingPrepayDepth { arguments += ["--serving-prepay-depth", String(value)] }
+        if let value = servingWorkURL { arguments += ["--serving-work-url", value] }
         return arguments
     }
 

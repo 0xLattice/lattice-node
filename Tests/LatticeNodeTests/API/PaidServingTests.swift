@@ -17,14 +17,15 @@ final class PaidServingTests: XCTestCase {
     private static let payTo = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
     private static let peer = String(repeating: "ab", count: 32)
 
-    private func node(keyByte: UInt8) async throws -> NodeRuntime {
+    private func node(keyByte: UInt8, terms: PaidServing? = nil) async throws -> NodeRuntime {
         let port = NetworkTransportTestPorts.allocate()
         let configuration = try NodeConfiguration(
             chainPath: ["Nexus"],
             storagePath: temporaryDirectory(),
             privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
             listenPort: port,
-            rpcPort: NetworkTransportTestPorts.allocate()
+            rpcPort: NetworkTransportTestPorts.allocate(),
+            paidServing: terms
         )
         let storage = try await NodeStorage.open(configuration: configuration)
         let runtime = try await NodeRuntime.start(
@@ -273,6 +274,24 @@ final class PaidServingTests: XCTestCase {
         try await makePublicReadApplication(service: runtime, host: "127.0.0.1", port: 8081).test(.router) { client in
             let response = try await client.execute(uri: "/serving-balance/\(Self.peer)", method: .get)
             XCTAssertEqual(response.status, .notFound)
+        }
+    }
+
+    /// The operator's sponsor reaches the node only on the operator port, so
+    /// the terms are answered there too, with the cookie.
+    func testTheOperatorPortAnswersTheTerms() async throws {
+        let terms = try PaidServing(payTo: Self.payTo, rates: [["Nexus"]: 1024])
+        let runtime = try await node(keyByte: 0x74, terms: terms)
+        try await makeApplication(service: runtime, host: "127.0.0.1", port: 8080).test(.router) { client in
+            let response = try await client.execute(
+                uri: "/serving-terms", method: .get, headers: [.authorization: testOperatorAuthorization]
+            )
+            XCTAssertEqual(response.status, .ok)
+            let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any])
+            XCTAssertEqual(object["payTo"] as? String, Self.payTo)
+            XCTAssertEqual(object["rates"] as? [String: [String: Int]], ["Nexus": ["bytesPerCoin": 1024]])
+            let anonymous = try await client.execute(uri: "/serving-terms", method: .get)
+            XCTAssertEqual(anonymous.status, .unauthorized)
         }
     }
 

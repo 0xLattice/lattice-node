@@ -180,6 +180,7 @@ func spawnHost(layout: HostLayout) throws {
     if let url = topology.publicReadURL { arguments += ["--public-read-url", url] }
     arguments += topology.publicSubmissionArguments
     arguments += topology.contentServingArguments
+    arguments += topology.paidServingArguments
     for origin in topology.rpcAllowedOrigins ?? [] { arguments += ["--rpc-allowed-origin", origin] }
     let hosted = hostedChainsRequest(layout, topology)
     arguments += hosted.hostChain.flatMap { ["--host-chain", $0] }

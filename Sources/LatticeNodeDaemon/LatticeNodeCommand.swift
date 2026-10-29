@@ -507,6 +507,7 @@ protocol OperatorWrites: Sendable {
     func hostChains(_ request: HostedChainsRequest) async throws
     var hostedChildren: [[String]] { get }
     var servingLedger: ServingLedger { get }
+    var servingTerms: PaidServing { get }
 }
 
 /// `POST /hosted-chains`: the child chains the node hosts from now on, in the
@@ -1244,6 +1245,11 @@ private func addOperatorWriteRoutes(
             try await service.pinVolume(input.cid, entries: input.entries)
             return PinsResponse(pins: await service.pinnedVolumes())
         }
+    }
+    // The terms the public read port answers, for the operator's sponsor,
+    // which reaches the node only here.
+    router.get("serving-terms") { request, context in
+        try json(service.servingTerms, request: request, context: context)
     }
     // Prepaid serving balance the operator credits by hand (its sponsor's
     // work), and any peer's balance.

@@ -558,7 +558,7 @@ characters, without the `ed01` multikey prefix. Any other spelling is `400`
 
 ### `GET /serving-terms`
 
-Public read listener.
+Public read listener, and the operator port (for the operator's sponsor).
 
 ```json
 {"payTo": "<address>", "rates": {"Nexus": {"bytesPerCoin": 1024}}, "depth": 6, "workURL": "https://work.example.org"}

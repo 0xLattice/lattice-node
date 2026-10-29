@@ -77,6 +77,10 @@ This is intentionally one schema:
   `publicRead`: the public listener also accepts `POST /transactions` (see
   [Running a public submit endpoint](operations.md#running-a-public-submit-endpoint));
   absent or false is off;
+- `servingPayTo`, `servingRates` (chain path to bytes per coin unit),
+  `servingPrepayDepth` and `servingWorkURL`, when set, are passed as
+  `--serving-pay-to`, `--serving-rate path=N`, `--serving-prepay-depth` and
+  `--serving-work-url` (see [Paid serving](operations.md#paid-serving));
 - unknown paths in mining policy are rejected.
 
 ## Lifecycle

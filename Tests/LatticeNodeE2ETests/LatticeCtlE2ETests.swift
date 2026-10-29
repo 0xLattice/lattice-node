@@ -238,7 +238,9 @@ final class LatticeCtlE2ETests: XCTestCase {
     /// transaction pooled, can lose it on every block. At Nexus's real
     /// target a child rides child-only carriers, which leave Nexus's
     /// post-state alone.
-    private func bringUpMiningHost(miner: TestKey?, minRelayFee: UInt64? = nil) async throws -> CtlHost {
+    private func bringUpMiningHost(
+        miner: TestKey?, minRelayFee: UInt64? = nil, configure: (inout Topology) -> Void = { _ in }
+    ) async throws -> CtlHost {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("lattice-node-e2e-ctl-\(UUID().uuidString)")
         try FileManager.default.createDirectory(
@@ -260,6 +262,7 @@ final class LatticeCtlE2ETests: XCTestCase {
             recipients: miner.map { ["Nexus": $0.address] }
         )
         topology.minRelayFee = minRelayFee
+        configure(&topology)
         try topology.validated().save(root: root)
 
         _ = try await runCtl(["up"], root: root)
@@ -743,6 +746,409 @@ final class LatticeCtlE2ETests: XCTestCase {
            let object = try? JSONSerialization.jsonObject(with: data)
                as? [String: Any] else { return 0 }
         return (object["balance"] as? String).flatMap { UInt64($0) } ?? 0
+    }
+}
+
+// MARK: paid serving
+
+/// Paid serving between real nodes: a reader buys serving balance with a
+/// transfer to the holder's payee, the balance survives the holder being
+/// killed and restarted, and it is spent only on requests that waited for a
+/// serving slot, which it moves ahead of an unpaid reader's.
+extension LatticeCtlE2ETests {
+    /// Bytes one Nexus coin buys at the holder.
+    private static let bytesPerCoin = 1 << 21
+
+    private func operatorRequest(_ host: CtlHost, _ path: String) throws -> URLRequest {
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(host.nexusRPC)/\(path)")!)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        let cookie = try String(contentsOf: HostLayout(root: host.root.path).rpcCookie, encoding: .utf8)
+        request.setValue("Basic " + Data(cookie.utf8).base64EncodedString(), forHTTPHeaderField: "Authorization")
+        return request
+    }
+
+    private func operatorGET(_ host: CtlHost, _ path: String) async -> (status: Int, body: Data)? {
+        guard let request = try? operatorRequest(host, path),
+              let (data, response) = try? await URLSession.shared.data(for: request) else { return nil }
+        return ((response as? HTTPURLResponse)?.statusCode ?? 0, data)
+    }
+
+    /// The node's Ivy peer key, as it prints it on its `storage:` line: the
+    /// public half of the identity key `lattice up` gave it.
+    private func peerKey(_ host: CtlHost) throws -> String {
+        let identity = HostLayout(root: host.root.path).identityKey(for: "Nexus")
+        let privateKey = try String(contentsOf: identity, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        return try NodeConfiguration(
+            chainPath: ["Nexus"], storagePath: host.root, privateKeyHex: privateKey
+        ).processPublicKey
+    }
+
+    private func servingBalance(_ host: CtlHost, _ peer: String) async throws -> Int {
+        struct Balance: Decodable { let balance: Int }
+        let fetched = await operatorGET(host, "serving-balance/\(peer)")
+        let answer = try XCTUnwrap(fetched, "the holder answers")
+        XCTAssertEqual(answer.status, 200, String(decoding: answer.body, as: UTF8.self))
+        return try JSONDecoder().decode(Balance.self, from: answer.body).balance
+    }
+
+    private struct Prepay: Encodable {
+        let chain: String
+        let txCID: String
+        let peer: String
+        let signer: String
+        let signature: String
+    }
+
+    private struct KeyPair: Decodable {
+        let address: String
+        let privateKey: String
+    }
+
+    private func prepay(
+        _ publicRead: UInt16, txCID: String, peer: String, signer: String, signedBy privateKey: String
+    ) async throws -> (status: Int, body: String) {
+        let message = "lattice-serving-prepay:v1:Nexus:\(txCID):\(peer)"
+        let signature = try XCTUnwrap(CryptoUtils.sign(message: message, privateKeyHex: privateKey))
+        let (status, data) = try await postJSON(
+            "http://127.0.0.1:\(publicRead)/serving-prepay",
+            Prepay(chain: "Nexus", txCID: txCID, peer: peer, signer: signer, signature: signature)
+        )
+        return (status, String(decoding: data, as: UTF8.self))
+    }
+
+    /// `lattice tx send`, retried until the node accepts it; the CID it
+    /// submitted.
+    private func sendUntilAccepted(_ host: CtlHost, from key: TestKey, to address: String, amount: UInt64) async throws -> String {
+        var cid: String?
+        lastTxFailure = nil
+        do {
+            try await waitFor("Nexus accepts the payment", seconds: 240) {
+                do {
+                    let output = try await self.runCtl([
+                        "tx", "send", "--chain", "Nexus", "--key", key.file.path,
+                        "--to", address, "--amount", String(amount),
+                    ], root: host.root)
+                    cid = output.split(separator: "\n").compactMap { line -> String? in
+                        line.hasPrefix("submitted ") ? String(line.dropFirst("submitted ".count)) : nil
+                    }.first
+                    return cid != nil
+                } catch {
+                    self.lastTxFailure = "\(error)"
+                    return false
+                }
+            }
+        } catch {
+            throw CtlE2EError("the payment was never accepted; last refusal: \(lastTxFailure ?? "none recorded")")
+        }
+        return try XCTUnwrap(cid)
+    }
+
+    private func blockHeight(of cid: String, on host: CtlHost) async -> UInt64? {
+        guard let answer = await operatorGET(host, "api/transaction/\(cid)"), answer.status == 200,
+              let transaction = try? JSONDecoder().decode(ExplorerTransaction.self, from: answer.body) else {
+            return nil
+        }
+        return transaction.blockHeight
+    }
+
+    /// A reader host: not mining, its only peer the holder.
+    private func bringUpReader(of holder: CtlHost, holderKey: String) async throws -> CtlHost {
+        let listen = try Topology.load(root: holder.root).listen
+        return try await bringUpMiningHost(miner: nil) {
+            $0.peers = ChainPeers(byChain: ["Nexus": ["\(holderKey)@127.0.0.1:\(listen)"]])
+        }
+    }
+
+    /// `count` Volumes of the same archive size, distinct by an index in
+    /// their one action's key.
+    private static func servedVolumes(_ count: Int, valueBytes: Int) async throws -> [SerializedVolume] {
+        actor Captured: VolumeStorer {
+            var volumes: [SerializedVolume] = []
+            func store(volume: SerializedVolume) async throws { volumes.append(volume) }
+        }
+        var volumes: [SerializedVolume] = []
+        for index in 0..<count {
+            let body = TransactionBody(
+                accountActions: [],
+                actions: [Action(
+                    key: "served-\(String(format: "%04d", index))", oldValue: nil,
+                    newValue: String(repeating: "x", count: valueBytes)
+                )],
+                depositActions: [], receiptActions: [], withdrawalActions: [],
+                signers: [], nonce: 0, chainPath: ["Nexus"]
+            )
+            let volume = try VolumeImpl<TransactionBody>(node: body)
+            let captured = Captured()
+            try await volume.store(storer: captured)
+            let stored = await captured.volumes.first { $0.root == volume.rawCID }
+            volumes.append(try XCTUnwrap(stored))
+        }
+        return volumes
+    }
+
+    /// `GET /fetch/:cid` on the reader: the Volume read from its peers.
+    private static func fetch(_ reader: CtlHost, _ cid: String) async -> Int {
+        guard let url = URL(string: "http://127.0.0.1:\(reader.nexusRPC)/fetch/\(cid)"),
+              let cookie = try? String(contentsOf: HostLayout(root: reader.root.path).rpcCookie, encoding: .utf8)
+        else { return 0 }
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("Basic " + Data(cookie.utf8).base64EncodedString(), forHTTPHeaderField: "Authorization")
+        guard let (_, response) = try? await URLSession.shared.data(for: request) else { return 0 }
+        return (response as? HTTPURLResponse)?.statusCode ?? 0
+    }
+
+    /// Every Volume fetched by `reader` at once; `served` runs as each ends.
+    private static func fetchAll(
+        _ reader: CtlHost, _ roots: [String], served: @escaping @Sendable () -> Void
+    ) async -> [Int] {
+        await withTaskGroup(of: Int.self) { group in
+            for root in roots { group.addTask { await fetch(reader, root) } }
+            var statuses: [Int] = []
+            for await status in group {
+                statuses.append(status)
+                served()
+            }
+            return statuses
+        }
+    }
+
+    func testAReaderBuysServingBalanceThatSurvivesARestartAndIsSpentOnlyWhenItWaits() async throws {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lattice-node-e2e-ctlkeys-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let payer = try await makeKey(scratch, "payer")
+        let payee = try await makeKey(scratch, "payee")
+        let stranger = try await makeKey(scratch, "stranger")
+        let payerKey = try JSONDecoder().decode(KeyPair.self, from: Data(contentsOf: payer.file))
+        let strangerKey = try JSONDecoder().decode(KeyPair.self, from: Data(contentsOf: stranger.file))
+        let depth: UInt64 = 10
+        let publicRead = randomPorts(1)[0]
+        // One serving slot: any two requests at once contend.
+        let holder = try await bringUpMiningHost(miner: payer) {
+            $0.publicRead = publicRead
+            // The test polls the prepay; the expensive-read budget is not
+            // what it is about.
+            $0.publicReadExpensiveRate = 0
+            $0.servingPayTo = payee.address
+            $0.servingRates = ["Nexus": Self.bytesPerCoin]
+            $0.servingPrepayDepth = depth
+            $0.servingMaxConcurrent = 1
+        }
+        let holderKey = try peerKey(holder)
+        let paid = try await bringUpReader(of: holder, holderKey: holderKey)
+        let unpaid = try await bringUpReader(of: holder, holderKey: holderKey)
+        let reader = try peerKey(paid)
+        XCTAssertTrue(reader.count == 64 && reader.allSatisfy { "0123456789abcdef".contains($0) }, reader)
+
+        // MARK: 1. a real payment, credited once it is deep enough
+        _ = try await runCtl(["mine", "start"], root: holder.root)
+        try await waitFor("the payer is funded by Nexus rewards", seconds: 180) {
+            await self.balance(holder, payer.address) >= 10
+        }
+        let amount: UInt64 = 5
+        let txCID = try await sendUntilAccepted(holder, from: payer, to: payee.address, amount: amount)
+        try await waitFor("the payment is mined", seconds: 240) {
+            await self.blockHeight(of: txCID, on: holder) != nil
+        }
+        // Stopped at once, so the chain is still short of the depth.
+        _ = try await runCtl(["mine", "stop"], root: holder.root)
+        let early = try await prepay(publicRead, txCID: txCID, peer: reader, signer: payer.address, signedBy: payerKey.privateKey)
+        XCTAssertEqual(early.status, 425, early.body)
+        XCTAssertTrue(early.body.contains("notDeepEnough"), early.body)
+
+        _ = try await runCtl(["mine", "start"], root: holder.root)
+        // Refusals past the depth check: a signature that is not the
+        // signer's, and a signer the transaction does not list.
+        var forged: (status: Int, body: String) = (0, "")
+        try await waitFor("the payment is deep enough", seconds: 240) {
+            guard let answer = try? await self.prepay(
+                publicRead, txCID: txCID, peer: reader, signer: payer.address, signedBy: strangerKey.privateKey
+            ) else { return false }
+            forged = answer
+            return answer.status != 425
+        }
+        _ = try await runCtl(["mine", "stop"], root: holder.root)
+        XCTAssertEqual(forged.status, 400, forged.body)
+        XCTAssertTrue(forged.body.contains("invalidSignature"), forged.body)
+        let otherSigner = try await prepay(
+            publicRead, txCID: txCID, peer: reader, signer: stranger.address, signedBy: strangerKey.privateKey
+        )
+        XCTAssertEqual(otherSigner.status, 400, otherSigner.body)
+        XCTAssertTrue(otherSigner.body.contains("notSigner"), otherSigner.body)
+        let balance1 = try await servingBalance(holder, reader)
+        XCTAssertEqual(balance1, 0, "a refused prepay credits nothing")
+
+        let credited = try await prepay(publicRead, txCID: txCID, peer: reader, signer: payer.address, signedBy: payerKey.privateKey)
+        XCTAssertEqual(credited.status, 200, credited.body)
+        struct Credited: Decodable { let peer: String; let credited: Int; let balance: Int }
+        let answer = try JSONDecoder().decode(Credited.self, from: Data(credited.body.utf8))
+        let bought = Int(amount) * Self.bytesPerCoin
+        XCTAssertEqual(answer.peer, reader)
+        XCTAssertEqual(answer.credited, bought)
+        XCTAssertEqual(answer.balance, bought)
+        let balance2 = try await servingBalance(holder, reader)
+        XCTAssertEqual(balance2, bought)
+        let replay = try await prepay(publicRead, txCID: txCID, peer: reader, signer: payer.address, signedBy: payerKey.privateKey)
+        XCTAssertEqual(replay.status, 409, replay.body)
+        XCTAssertTrue(replay.body.contains("alreadyCredited"), replay.body)
+
+        // MARK: 3. killed and restarted on the same data directory
+        let layout = HostLayout(root: holder.root.path)
+        let pidText = try String(contentsOf: layout.pidFile(for: "lattice-node"), encoding: .utf8)
+        let pid = try XCTUnwrap(pidText.split(separator: " ").first.flatMap { Int32($0) })
+        XCTAssertEqual(kill(pid, SIGKILL), 0)
+        try await waitFor("the holder is gone") { kill(pid, 0) != 0 }
+        _ = try await runCtl(["up"], root: holder.root)
+        try await waitFor("the holder is active again") {
+            await self.health(holder.nexusRPC)?["phase"] as? String == "active"
+        }
+        let balance3 = try await servingBalance(holder, reader)
+        XCTAssertEqual(balance3, bought, "the credit survives a kill")
+        var replayed: (status: Int, body: String) = (0, "")
+        try await waitFor("the public read port is back") {
+            guard let answer = try? await self.prepay(
+                publicRead, txCID: txCID, peer: reader, signer: payer.address, signedBy: payerKey.privateKey
+            ) else { return false }
+            replayed = answer
+            return true
+        }
+        XCTAssertEqual(replayed.status, 409, "the credited payment is remembered: \(replayed.body)")
+
+        // MARK: 2. spent only while waiting, by the bytes served
+        let volumes = try await Self.servedVolumes(12, valueBytes: 512 * 1024)
+        let sizes = Set(volumes.map { encodeCompleteVolumeArchive($0)?.count ?? 0 })
+        XCTAssertEqual(sizes.count, 1, "every Volume archives to the same size")
+        let archiveBytes = try XCTUnwrap(sizes.first)
+        for volume in volumes {
+            var request = try operatorRequest(holder, "pins")
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            struct Pin: Encodable { let cid: String; let entries: [String: Data] }
+            request.httpBody = try JSONEncoder().encode(Pin(cid: volume.root, entries: volume.entries))
+            let (data, response) = try await URLSession.shared.data(for: request)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200, String(decoding: data, as: UTF8.self))
+        }
+        // Quiet before measuring: both readers hold the holder's chain and
+        // nothing is mined, so no sync request takes the one slot.
+        let tip = await height(holder.nexusRPC, chain: "Nexus")
+        for reader in [paid, unpaid] {
+            try await waitFor("a reader syncs the holder's chain", seconds: 240) {
+                await self.height(reader.nexusRPC, chain: "Nexus") >= tip
+            }
+        }
+        try await waitFor("the unpaid reader reads from the holder", seconds: 120) {
+            await Self.fetch(unpaid, volumes[0].root) == 200
+        }
+        try await waitFor("the paid reader reads from the holder", seconds: 120) {
+            await Self.fetch(paid, volumes[0].root) == 200
+        }
+        let balance4 = try await servingBalance(holder, reader)
+        XCTAssertEqual(balance4, bought, "a fetch served at once is free")
+
+        // The unpaid reader asks for every Volume at once; once its first is
+        // served the rest are waiting, and the paid reader asks for four.
+        let roots = volumes.map(\.root)
+        let (firstServed, served) = AsyncStream<Void>.makeStream()
+        let unpaidRun = Task {
+            let statuses = await LatticeCtlE2ETests.fetchAll(unpaid, roots) { served.yield() }
+            return (statuses, ContinuousClock.now)
+        }
+        for await _ in firstServed { break }
+        let paidStatuses = await Self.fetchAll(paid, Array(roots.prefix(4))) {}
+        let paidDone = ContinuousClock.now
+        let (unpaidStatuses, unpaidDone) = await unpaidRun.value
+        served.finish()
+        XCTAssertEqual(paidStatuses, [200, 200, 200, 200])
+        XCTAssertEqual(unpaidStatuses, Array(repeating: 200, count: volumes.count))
+
+        let spent = bought - (try await servingBalance(holder, reader))
+        XCTAssertGreaterThan(spent, 0, "requests that waited spend the balance")
+        XCTAssertEqual(spent % archiveBytes, 0, "spent by whole archives served: \(spent) of \(archiveBytes)-byte archives")
+        XCTAssertLessThanOrEqual(spent, 4 * archiveBytes, "never more than the paid reader was served")
+        XCTAssertLessThan(paidDone, unpaidDone, "the paid reader's waiting requests go ahead of the unpaid reader's")
+    }
+
+    /// lattice-sponsor with --sell-serving against a real node: shares of its
+    /// template that name a reader's peer become that peer's serving
+    /// balance on the node.
+    func testASponsorSellsServingBalanceForWork() async throws {
+        let sponsorBinary = try requireSponsor()
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lattice-node-e2e-ctlkeys-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let sponsorKey = try await makeKey(scratch, "sponsor")
+        let payee = try await makeKey(scratch, "payee")
+        let host = try await bringUpMiningHost(miner: nil) {
+            $0.publicRead = self.randomPorts(1)[0]
+            $0.servingPayTo = payee.address
+            $0.servingRates = ["Nexus": Self.bytesPerCoin]
+        }
+        // A reader's peer key: an Ed25519 key without its multikey prefix.
+        let peer = String(CryptoUtils.generateKeyPair().publicKey.dropFirst(4))
+        XCTAssertEqual(peer.count, 64)
+
+        let node = "http://127.0.0.1:\(host.nexusRPC)"
+        let port = randomPorts(1)[0]
+        let sponsorProcess = Process()
+        sponsorProcess.executableURL = sponsorBinary
+        sponsorProcess.arguments = [
+            "--node", node, "--cookie-file", HostLayout(root: host.root.path).rpcCookie.path,
+            "--key", sponsorKey.file.path, "--share-work", "2^8", "--port", String(port), "--sell-serving",
+        ]
+        let sponsorLog = host.root.appendingPathComponent("sponsor.log")
+        _ = FileManager.default.createFile(atPath: sponsorLog.path, contents: nil)
+        let logHandle = try FileHandle(forWritingTo: sponsorLog)
+        sponsorProcess.standardOutput = logHandle
+        sponsorProcess.standardError = logHandle
+        try sponsorProcess.run()
+        defer { stop(sponsorProcess) }
+        let sponsor = "http://127.0.0.1:\(port)"
+        struct ServingWork: Encodable {
+            let chain: String
+            let peer: String
+        }
+        var work: [String: Any] = [:]
+        var lastAnswer = ""
+        do {
+            try await waitFor("the sponsor hands out serving work") {
+                guard let (status, data) = try? await self.postJSON(
+                    "\(sponsor)/work", ServingWork(chain: "Nexus", peer: peer)
+                ) else { return false }
+                lastAnswer = "\(status) \(String(decoding: data, as: UTF8.self))"
+                guard status == 200, let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    return false
+                }
+                work = object
+                return true
+            }
+        } catch {
+            throw CtlE2EError("no serving work; the sponsor last answered \(lastAnswer)")
+        }
+        let assignment = try XCTUnwrap(work["assignment"] as? String)
+        let prefix = try XCTUnwrap((work["prefixHex"] as? String).flatMap { Data(hex: $0) })
+        let shareTarget = try XCTUnwrap((work["shareTarget"] as? String).flatMap(MinerLoopLogic.parseTarget))
+        var nonce = try XCTUnwrap((work["startNonce"] as? String).flatMap { UInt64($0) })
+
+        struct Share: Encodable {
+            let assignment: String
+            let nonce: String
+        }
+        // At this host's near-maximum target one share is worth nearly the
+        // whole block reward, which is as much as one height can back.
+        let midstate = ProofOfWork.midstate(prefixBytes: ContiguousArray(prefix))
+        while ProofOfWork.hash(midstate: midstate, nonce: nonce) > shareTarget { nonce += 1 }
+        let (status, body) = try await postJSON("\(sponsor)/shares", Share(assignment: assignment, nonce: String(nonce)))
+        XCTAssertEqual(status, 200, String(decoding: body, as: UTF8.self))
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let owed = try XCTUnwrap((object["bytes"] as? String).flatMap { Int($0) })
+        XCTAssertGreaterThan(owed, 0, "the share buys serving bytes")
+        // The sponsor posts what it owes every few seconds.
+        try await waitFor("the node credits the peer what the sponsor owes it", seconds: 60) {
+            (try? await self.servingBalance(host, peer)) == owed
+        }
     }
 }
 

@@ -197,6 +197,24 @@ final class LatticeCtlTopologyTests: XCTestCase {
         XCTAssertEqual(try Topology.load(root: root).contentServingArguments, [])
     }
 
+    func testPaidServingLoadsFromConfigAndProducesNodeFlags() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ctl-paid-serving-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let body = #"{"listen":4001,"rpc":4003,"publicRead":8081,"servingPayTo":"payee","servingRates":{"Nexus/Alpha":2,"Nexus":1024},"servingPrepayDepth":3,"servingWorkURL":"https://work.example.org"}"#
+        try Data(body.utf8).write(to: root.appendingPathComponent(Topology.fileName))
+        XCTAssertEqual(try Topology.load(root: root).validated().paidServingArguments, [
+            "--serving-pay-to", "payee",
+            "--serving-rate", "Nexus=1024", "--serving-rate", "Nexus/Alpha=2",
+            "--serving-prepay-depth", "3",
+            "--serving-work-url", "https://work.example.org",
+        ])
+        let empty = #"{"listen":4001,"rpc":4003}"#
+        try Data(empty.utf8).write(to: root.appendingPathComponent(Topology.fileName))
+        XCTAssertEqual(try Topology.load(root: root).paidServingArguments, [])
+    }
+
     func testPublicSubmitPolicyLoadsFromConfigAndProducesNodeFlags() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ctl-submit-policy-\(UUID().uuidString)")
