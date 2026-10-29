@@ -24,8 +24,9 @@ public actor ServingLedger {
     private let file: URL
     private let tally: Tally
     /// The most balances Tally keeps. Past it Tally drops the smallest to
-    /// make room, which would take back a credit already granted; a credit
-    /// to a peer that would need a new place is refused instead.
+    /// make room, so a flood of fresh peers cannot erase larger balances; a
+    /// new peer's credit no larger than the smallest is refused instead of
+    /// being dropped as soon as it is granted.
     private let capacity: Int
     private var credited: Set<String>
     private var written: [String: Int]
@@ -109,8 +110,11 @@ public actor ServingLedger {
     /// is not applied.
     private func apply(peer: PeerID, bytes: Int, payment: String?) throws {
         var balances = Self.balances(of: tally)
-        guard balances[peer.publicKey] != nil || balances.count < capacity else {
-            throw ServingLedgerError.balancesFull
+        if balances[peer.publicKey] == nil, balances.count >= capacity {
+            guard let smallest = balances.min(by: { $0.value < $1.value }), bytes > smallest.value else {
+                throw ServingLedgerError.balancesFull
+            }
+            balances[smallest.key] = nil
         }
         let (sum, overflow) = balances[peer.publicKey, default: 0].addingReportingOverflow(bytes)
         balances[peer.publicKey] = overflow ? .max : sum
@@ -161,7 +165,7 @@ public enum ServingLedgerError: Error, Equatable, CustomStringConvertible {
         case .balancesFull: "balancesFull"
         case .notSaved: "notSaved"
         case .unreadable(let path):
-            "\(path) cannot be read: it holds the serving payments already credited; restore it or remove it to forget them"
+            "\(path) cannot be read: it holds the serving payments already credited, and without it every one could be claimed again; restore it"
         }
     }
 }

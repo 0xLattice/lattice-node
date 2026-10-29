@@ -694,10 +694,12 @@ func makePublicReadApplication(
         router.get("serving-terms") { request, context in
             try json(serving.terms, request: request, context: context)
         }
-        router.post("serving-prepay") { request, context in
-            let input: ServingPrepayRequest = try await decode(request, upTo: servingPrepayMaximumBytes)
-            return try await serviceCall(request: request, context: context) {
-                try await creditPrepay(input, payments: serving, reads: byPath)
+        if serving.terms.payTo != nil {
+            router.post("serving-prepay") { request, context in
+                let input: ServingPrepayRequest = try await decode(request, upTo: servingPrepayMaximumBytes)
+                return try await serviceCall(request: request, context: context) {
+                    try await creditPrepay(input, payments: serving, reads: byPath)
+                }
             }
         }
     }

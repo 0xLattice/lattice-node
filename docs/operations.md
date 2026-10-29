@@ -367,7 +367,9 @@ read rates to 0 as for reads; the submit listener budget still applies.
 Serving stays free whenever it is not contended: a request that gets a
 serving slot at once is never charged. Under contention, waiting requests
 share freed slots by weight, and an operator may sell weight as prepaid bytes
-of balance. Off by default; with none of these flags nothing changes.
+of balance. Off by default; with none of these flags no payment is accepted
+(`GET /serving-terms` answers nulls, and the operator can still credit
+balance by hand).
 
 - `--serving-pay-to <address>`: the account readers pay.
 - `--serving-rate <chain-path>=<bytesPerCoin>` (repeatable): a chain whose
@@ -385,7 +387,10 @@ Readers find the terms at `GET /serving-terms` on the public read port, pay
 [rpc-api.md](rpc-api.md#paid-serving)). Balances and credited payments are
 kept in `<data-directory>/serving.json`; a crash loses spending since the
 last write, never a credit. Each node keeps its own credited payments, so
-give each node that sells serving its own `payTo`, used for nothing else. A file there that cannot be read stops the node
+give each node that sells serving its own `payTo`, used for nothing else.
+Carry `serving.json` with the data directory (blue/green moves, restores):
+a node started without it, or with an older copy, would credit past payments
+again. A file there that cannot be read stops the node
 from starting, since starting without it would credit its payments again.
 
 ## Health interpretation

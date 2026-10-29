@@ -8,8 +8,8 @@ The optional public-read listener is unauthenticated. The optional public-read
 listener registers only the GET routes in the read table below, plus
 `POST /transactions` when its operator turns public submit on
 ([Public submit](#public-submit)), which is off by default, and the
-[paid serving](#paid-serving) routes `GET /serving-terms` and
-`POST /serving-prepay`.
+[paid serving](#paid-serving) routes `GET /serving-terms` and, when the
+operator sets `--serving-pay-to`, `POST /serving-prepay`.
 
 Requests and responses are JSON unless noted. Operator POSTs require
 `Content-Type: application/json` and a loopback `Host` authority.
@@ -572,8 +572,8 @@ where the operator's sponsor credits balance for work.
 
 ### `POST /serving-prepay`
 
-Public read listener; body capped at 4 KiB, billed to the expensive read
-budget.
+Public read listener, only with `--serving-pay-to` set (404 otherwise); body
+capped at 4 KiB, billed to the expensive read budget.
 
 ```json
 {"chain": "Nexus", "txCID": "<cid>", "peer": "<peer key>", "signer": "<address>", "signature": "<hex>"}
@@ -608,7 +608,8 @@ Refusals: `400` `invalidChainPath`, `unpricedChain` (no rate for `chain`),
 `425` `notDeepEnough` (retry once the chain has grown); `409`
 `alreadyCredited`; `413` over 4 KiB; `503` `notSaved` (the credit could not
 be written, and was not applied) or `balancesFull` (the node keeps balances
-for at most 4096 peers, and this one has none; nothing is written).
+for at most 4096 peers; past that a new peer's credit takes the smallest
+balance's place, and one no larger than the smallest is refused, unwritten).
 
 ### `GET /serving-balance/:peer`
 
@@ -632,7 +633,10 @@ work. `400` `invalidPeer` or `invalidBytes`; `503` `notSaved` or
 Balances and the credited transactions are kept in
 `<data-directory>/serving.json`, written before each credit is applied, on
 every maintenance pass and at a clean stop. A crash loses the balance spent
-since the last write, never a credit.
+since the last write, never a credit. The file is what remembers which
+payments were credited: it must move with the data directory, and a node
+started without it (a fresh directory, an older backup) would credit past
+payments again.
 
 ## Errors
 

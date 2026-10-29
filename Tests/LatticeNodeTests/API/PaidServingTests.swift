@@ -94,6 +94,9 @@ final class PaidServingTests: XCTestCase {
             XCTAssertTrue(object["workURL"] is NSNull)
             XCTAssertEqual((object["rates"] as? [String: Any])?.count, 0)
             XCTAssertEqual(object["depth"] as? Int, Int(PaidServing.defaultDepth))
+            // Nothing to pay, so nothing to claim.
+            let prepay = try await client.execute(uri: "/serving-prepay", method: .post, headers: [.contentType: "application/json"])
+            XCTAssertEqual(prepay.status, .notFound)
         }
         let terms = try PaidServing(
             payTo: Self.payTo, rates: [["Nexus"]: 1024, ["Nexus", "Alpha"]: 8], depth: 3, workURL: "https://work.example.org"
@@ -296,26 +299,32 @@ final class PaidServingTests: XCTestCase {
         XCTAssertThrowsError(try ServingLedger(directory: directory, tally: Tally()))
     }
 
-    /// Tally drops its smallest balance past its bound; a credit that would
-    /// make it do so is refused instead, before anything is written.
-    func testACreditNeedingANewPlacePastTallysBoundIsRefused() async throws {
+    /// Past Tally's bound a new peer's credit takes the smallest balance's
+    /// place, as Tally does; one no larger is refused before anything is
+    /// written.
+    func testPastTallysBoundANewCreditDisplacesOnlyASmallerBalance() async throws {
         let directory = temporaryDirectory()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let config = TallyConfig(maxPeers: 1)
         let tally = Tally(config: config)
         let ledger = try ServingLedger(directory: directory, tally: tally, config: config)
         let peers = (1...5).map { String(repeating: String(format: "%02x", $0), count: 32) }
-        for peer in peers.prefix(4) { _ = try await ledger.credit(peer: peer, bytes: 10) }
+        for (index, peer) in peers.prefix(4).enumerated() { _ = try await ledger.credit(peer: peer, bytes: 10 + index) }
         do {
             _ = try await ledger.credit(peer: peers[4], bytes: 10, payment: "payment")
-            XCTFail("no place for a fifth balance")
+            XCTFail("no larger than the smallest balance")
         } catch {
             XCTAssertEqual(error as? ServingLedgerError, .balancesFull)
         }
-        // Not burned: the payment is credited once there is room.
-        _ = try await ledger.credit(peer: peers[0], bytes: 5, payment: "payment")
+        // Not burned: a larger credit for it takes the smallest's place.
+        _ = try await ledger.credit(peer: peers[4], bytes: 11, payment: "payment")
         XCTAssertEqual(tally.servingBalances().count, 4)
-        XCTAssertEqual(tally.servingBalance(for: PeerID(publicKey: peers[0])), 15)
+        XCTAssertEqual(tally.servingBalance(for: PeerID(publicKey: peers[0])), 0)
+        XCTAssertEqual(tally.servingBalance(for: PeerID(publicKey: peers[4])), 11)
+        // And the file agrees.
+        let restored = Tally(config: config)
+        _ = try ServingLedger(directory: directory, tally: restored, config: config)
+        XCTAssertEqual(restored.servingBalances(), tally.servingBalances())
     }
 
     func testACreditThatCannotBeWrittenIsNotApplied() async throws {
