@@ -886,6 +886,15 @@ extension LatticeCtlE2ETests {
         return volumes
     }
 
+    /// Every fetch of a burst is in flight at once: `URLSession.shared`
+    /// holds a host to a few connections, which would queue the burst here
+    /// instead of at the holder.
+    private static let fetchSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpMaximumConnectionsPerHost = 64
+        return URLSession(configuration: configuration)
+    }()
+
     /// `GET /fetch/:cid` on the reader: the Volume read from its peers.
     private static func fetch(_ reader: CtlHost, _ cid: String) async -> Int {
         guard let url = URL(string: "http://127.0.0.1:\(reader.nexusRPC)/fetch/\(cid)"),
@@ -894,22 +903,46 @@ extension LatticeCtlE2ETests {
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("Basic " + Data(cookie.utf8).base64EncodedString(), forHTTPHeaderField: "Authorization")
-        guard let (_, response) = try? await URLSession.shared.data(for: request) else { return 0 }
+        guard let (_, response) = try? await fetchSession.data(for: request) else { return 0 }
         return (response as? HTTPURLResponse)?.statusCode ?? 0
     }
 
-    /// Every Volume fetched by `reader` at once; `served` runs as each ends.
+    /// Every Volume fetched by `reader` at once: each one's status and when
+    /// it ended. `served` runs as each one is served.
     private static func fetchAll(
         _ reader: CtlHost, _ roots: [String], served: @escaping @Sendable () -> Void
-    ) async -> [Int] {
-        await withTaskGroup(of: Int.self) { group in
-            for root in roots { group.addTask { await fetch(reader, root) } }
-            var statuses: [Int] = []
-            for await status in group {
-                statuses.append(status)
-                served()
+    ) async -> [(status: Int, at: ContinuousClock.Instant)] {
+        await withTaskGroup(of: (status: Int, at: ContinuousClock.Instant).self) { group in
+            for root in roots {
+                group.addTask {
+                    let status = await fetch(reader, root)
+                    return (status, ContinuousClock.now)
+                }
             }
-            return statuses
+            var results: [(status: Int, at: ContinuousClock.Instant)] = []
+            for await result in group {
+                results.append(result)
+                if result.status == 200 { served() }
+            }
+            return results
+        }
+    }
+
+    /// Gone, or a zombie nobody reaps: a CI container's PID 1 never reaps an
+    /// adopted orphan, and a zombie still answers kill(pid, 0).
+    private static func isGone(_ pid: Int32) -> Bool {
+        guard kill(pid, 0) == 0 else { return true }
+        guard let stat = try? String(contentsOfFile: "/proc/\(pid)/stat", encoding: .utf8),
+              let close = stat.lastIndex(of: ")") else { return false }
+        return stat[stat.index(after: close)...].trimmingCharacters(in: .whitespaces).hasPrefix("Z")
+    }
+
+    private func waitForReaders(_ readers: [CtlHost], toReach holder: CtlHost) async throws {
+        let tip = await height(holder.nexusRPC, chain: "Nexus")
+        for reader in readers {
+            try await waitFor("a reader syncs the holder's chain", seconds: 240) {
+                await self.height(reader.nexusRPC, chain: "Nexus") >= tip
+            }
         }
     }
 
@@ -923,7 +956,9 @@ extension LatticeCtlE2ETests {
         let stranger = try await makeKey(scratch, "stranger")
         let payerKey = try JSONDecoder().decode(KeyPair.self, from: Data(contentsOf: payer.file))
         let strangerKey = try JSONDecoder().decode(KeyPair.self, from: Data(contentsOf: stranger.file))
-        let depth: UInt64 = 10
+        // Deep enough that stopping the miner once the payment is mined
+        // leaves it short.
+        let depth: UInt64 = 30
         let publicRead = randomPorts(1)[0]
         // One serving slot: any two requests at once contend.
         let holder = try await bringUpMiningHost(miner: payer) {
@@ -952,8 +987,14 @@ extension LatticeCtlE2ETests {
         try await waitFor("the payment is mined", seconds: 240) {
             await self.blockHeight(of: txCID, on: holder) != nil
         }
-        // Stopped at once, so the chain is still short of the depth.
         _ = try await runCtl(["mine", "stop"], root: holder.root)
+        let inclusion = await blockHeight(of: txCID, on: holder)
+        let included = try XCTUnwrap(inclusion)
+        let stoppedAt = await height(holder.nexusRPC, chain: "Nexus")
+        XCTAssertLessThan(
+            stoppedAt - Int(included), Int(depth),
+            "the miner went \(stoppedAt) - \(included) blocks past the payment before it stopped; raise the depth"
+        )
         let early = try await prepay(publicRead, txCID: txCID, peer: reader, signer: payer.address, signedBy: payerKey.privateKey)
         XCTAssertEqual(early.status, 425, early.body)
         XCTAssertTrue(early.body.contains("notDeepEnough"), early.body)
@@ -977,9 +1018,12 @@ extension LatticeCtlE2ETests {
         )
         XCTAssertEqual(otherSigner.status, 400, otherSigner.body)
         XCTAssertTrue(otherSigner.body.contains("notSigner"), otherSigner.body)
-        let balance1 = try await servingBalance(holder, reader)
-        XCTAssertEqual(balance1, 0, "a refused prepay credits nothing")
+        let refusedBalance = try await servingBalance(holder, reader)
+        XCTAssertEqual(refusedBalance, 0, "a refused prepay credits nothing")
 
+        // Readers done syncing first: with one slot, their sync requests
+        // contend, and once credited the paid reader's would spend.
+        try await waitForReaders([paid, unpaid], toReach: holder)
         let credited = try await prepay(publicRead, txCID: txCID, peer: reader, signer: payer.address, signedBy: payerKey.privateKey)
         XCTAssertEqual(credited.status, 200, credited.body)
         struct Credited: Decodable { let peer: String; let credited: Int; let balance: Int }
@@ -988,24 +1032,32 @@ extension LatticeCtlE2ETests {
         XCTAssertEqual(answer.peer, reader)
         XCTAssertEqual(answer.credited, bought)
         XCTAssertEqual(answer.balance, bought)
-        let balance2 = try await servingBalance(holder, reader)
-        XCTAssertEqual(balance2, bought)
         let replay = try await prepay(publicRead, txCID: txCID, peer: reader, signer: payer.address, signedBy: payerKey.privateKey)
         XCTAssertEqual(replay.status, 409, replay.body)
         XCTAssertTrue(replay.body.contains("alreadyCredited"), replay.body)
 
-        // MARK: 3. killed and restarted on the same data directory
+        // MARK: 2. killed and restarted on the same data directory
+        // The readers stop first, so nothing they ask for spends the balance
+        // across the restart.
+        for reader in [paid, unpaid] { _ = try await runCtl(["down"], root: reader.root) }
+        let beforeKill = try await servingBalance(holder, reader)
+        XCTAssertEqual(beforeKill, bought)
         let layout = HostLayout(root: holder.root.path)
         let pidText = try String(contentsOf: layout.pidFile(for: "lattice-node"), encoding: .utf8)
         let pid = try XCTUnwrap(pidText.split(separator: " ").first.flatMap { Int32($0) })
         XCTAssertEqual(kill(pid, SIGKILL), 0)
-        try await waitFor("the holder is gone") { kill(pid, 0) != 0 }
+        try await waitFor("the holder is gone") {
+            let answering = await self.health(holder.nexusRPC) != nil
+            return Self.isGone(pid) && !answering
+        }
+        // What a crash leaves: a pidfile naming a dead process.
+        layout.removePidFile(for: "lattice-node", ifNaming: pid)
         _ = try await runCtl(["up"], root: holder.root)
         try await waitFor("the holder is active again") {
             await self.health(holder.nexusRPC)?["phase"] as? String == "active"
         }
-        let balance3 = try await servingBalance(holder, reader)
-        XCTAssertEqual(balance3, bought, "the credit survives a kill")
+        let afterRestart = try await servingBalance(holder, reader)
+        XCTAssertEqual(afterRestart, bought, "the credit survives a kill")
         var replayed: (status: Int, body: String) = (0, "")
         try await waitFor("the public read port is back") {
             guard let answer = try? await self.prepay(
@@ -1016,7 +1068,7 @@ extension LatticeCtlE2ETests {
         }
         XCTAssertEqual(replayed.status, 409, "the credited payment is remembered: \(replayed.body)")
 
-        // MARK: 2. spent only while waiting, by the bytes served
+        // MARK: 3. spent only while waiting, by the bytes served
         let volumes = try await Self.servedVolumes(12, valueBytes: 512 * 1024)
         let sizes = Set(volumes.map { encodeCompleteVolumeArchive($0)?.count ?? 0 })
         XCTAssertEqual(sizes.count, 1, "every Volume archives to the same size")
@@ -1030,44 +1082,52 @@ extension LatticeCtlE2ETests {
             let (data, response) = try await URLSession.shared.data(for: request)
             XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200, String(decoding: data, as: UTF8.self))
         }
-        // Quiet before measuring: both readers hold the holder's chain and
-        // nothing is mined, so no sync request takes the one slot.
-        let tip = await height(holder.nexusRPC, chain: "Nexus")
         for reader in [paid, unpaid] {
-            try await waitFor("a reader syncs the holder's chain", seconds: 240) {
-                await self.height(reader.nexusRPC, chain: "Nexus") >= tip
+            _ = try await runCtl(["up"], root: reader.root)
+            try await waitFor("a reader is active again") {
+                await self.health(reader.nexusRPC)?["phase"] as? String == "active"
             }
         }
+        // Quiet before measuring: both readers hold the holder's chain and
+        // nothing is mined, so no sync request takes the one slot.
+        try await waitForReaders([paid, unpaid], toReach: holder)
         try await waitFor("the unpaid reader reads from the holder", seconds: 120) {
             await Self.fetch(unpaid, volumes[0].root) == 200
         }
+        let beforeLoneFetch = try await servingBalance(holder, reader)
         try await waitFor("the paid reader reads from the holder", seconds: 120) {
             await Self.fetch(paid, volumes[0].root) == 200
         }
-        let balance4 = try await servingBalance(holder, reader)
-        XCTAssertEqual(balance4, bought, "a fetch served at once is free")
+        let afterLoneFetch = try await servingBalance(holder, reader)
+        XCTAssertEqual(afterLoneFetch, beforeLoneFetch, "a fetch served at once is free")
 
         // The unpaid reader asks for every Volume at once; once its first is
-        // served the rest are waiting, and the paid reader asks for four.
+        // served the rest are waiting at the holder, and the paid reader asks
+        // for four.
         let roots = volumes.map(\.root)
         let (firstServed, served) = AsyncStream<Void>.makeStream()
         let unpaidRun = Task {
-            let statuses = await LatticeCtlE2ETests.fetchAll(unpaid, roots) { served.yield() }
-            return (statuses, ContinuousClock.now)
+            await LatticeCtlE2ETests.fetchAll(unpaid, roots) { served.yield() }
         }
         for await _ in firstServed { break }
-        let paidStatuses = await Self.fetchAll(paid, Array(roots.prefix(4))) {}
+        let paidResults = await Self.fetchAll(paid, Array(roots.prefix(4))) {}
         let paidDone = ContinuousClock.now
-        let (unpaidStatuses, unpaidDone) = await unpaidRun.value
+        let unpaidResults = await unpaidRun.value
         served.finish()
-        XCTAssertEqual(paidStatuses, [200, 200, 200, 200])
-        XCTAssertEqual(unpaidStatuses, Array(repeating: 200, count: volumes.count))
+        XCTAssertEqual(paidResults.map(\.status), [200, 200, 200, 200])
+        XCTAssertEqual(unpaidResults.map(\.status), Array(repeating: 200, count: volumes.count))
 
-        let spent = bought - (try await servingBalance(holder, reader))
+        let afterBurst = try await servingBalance(holder, reader)
+        let spent = afterLoneFetch - afterBurst
         XCTAssertGreaterThan(spent, 0, "requests that waited spend the balance")
         XCTAssertEqual(spent % archiveBytes, 0, "spent by whole archives served: \(spent) of \(archiveBytes)-byte archives")
         XCTAssertLessThanOrEqual(spent, 4 * archiveBytes, "never more than the paid reader was served")
-        XCTAssertLessThan(paidDone, unpaidDone, "the paid reader's waiting requests go ahead of the unpaid reader's")
+        // In arrival order the paid reader's four would wait behind the
+        // unpaid reader's eleven; its weight puts them first.
+        let unpaidAhead = unpaidResults.filter { $0.at < paidDone }.count
+        XCTAssertLessThanOrEqual(
+            unpaidAhead, 4, "\(unpaidAhead) of the unpaid reader's fetches ended before the paid reader's four"
+        )
     }
 
     /// lattice-sponsor with --sell-serving against a real node: shares of its
