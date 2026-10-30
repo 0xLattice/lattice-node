@@ -251,14 +251,12 @@ enum MiningTemplateAssembly {
             blockCID: try BlockHeader(node: candidate).rawCID,
             minimumWork: minimumWork,
         )
-        // A committed child is scheduled like a carried one: the nonce mines
-        // it where the hash meets its target.
-        let commitments = carried(by: selected, from: committed, beside: childBlocks).values
-        for child in commitments { childTargets[child.directory] = (child.block.target, []) }
-        let scheduled = children + commitments
+        // A committed child rides in `children` but is never scheduled: its
+        // target is whatever its author wrote, so it must not set the search.
+        // It is mined when the root is.
         let scheduling = try await Self.scheduling(
             root: candidate,
-            children: scheduled,
+            children: children,
             targets: childTargets,
             chainPath: chainPath,
             minimumWork: minimumWork,
@@ -270,7 +268,7 @@ enum MiningTemplateAssembly {
             searchTarget: scheduling.searchTarget,
             chainPath: chainPath,
             expiresAt: ContinuousClock.now + lifetime,
-            childCandidates: scheduled,
+            childCandidates: children,
             searchWitness: scheduling.searchWitness,
             thresholds: scheduling.thresholds
         )
@@ -466,7 +464,7 @@ enum MiningTemplateAssembly {
     }
 
     /// The children `transactions` commit (`child/X` = C) that `committed`
-    /// holds by CID, each where X is not already carried. A commitment left
+    /// holds (keyed by `committedChildKey`), each where X is not already carried. A commitment left
     /// out here does not match the block's children, so the builder refuses
     /// its transaction and the bisection drops it.
     private static func carried(
@@ -479,12 +477,18 @@ enum MiningTemplateAssembly {
         for case let body? in transactions.map(\.body.node) {
             for commitment in Block.childCommitments(in: [body]) {
                 guard children[commitment.directory] == nil, carried[commitment.directory] == nil,
-                      let child = committed[commitment.child], child.directory == commitment.directory
+                      let child = committed[committedChildKey(commitment.directory, commitment.child)]
                 else { continue }
                 carried[commitment.directory] = child
             }
         }
         return carried
+    }
+
+    /// One commitment's key: the same block committed under two directories
+    /// is two commitments.
+    static func committedChildKey(_ directory: String, _ child: String) -> String {
+        directory + "/" + child
     }
 
     /// A transaction committing a child the block does not carry is left out
