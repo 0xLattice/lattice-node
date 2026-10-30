@@ -547,6 +547,7 @@ extension NodeRuntime {
         storage: NodeStorage,
         remote: IvyRootContentSource? = nil,
         children: [ChildTemplateInput] = [],
+        hosted: Set<String> = [],
         levels: LiveLevels = .none
     ) -> RuntimeJob {
         let fetcher = storage.workFetcher
@@ -565,6 +566,15 @@ extension NodeRuntime {
                 // A ready transaction brings the balances it was funded from,
                 // read from the same tip state, for the pool's budget.
                 var verdict = disposition(result.disposition)
+                // A chain this node hosts is mined with its own candidate, so
+                // a commitment into it is never carried here; a commitment
+                // naming no directory is never carried anywhere.
+                if verdict == .ready, let body = job.transaction.body.node,
+                   Block.childCommitments(in: [body]).contains(where: {
+                       hosted.contains($0.directory) || !_isBoundedDirectoryAtom($0.directory)
+                   }) {
+                    verdict = .invalid
+                }
                 var balances: [String: UInt64] = [:]
                 if verdict == .ready {
                     if let body = job.transaction.body.node,
@@ -753,12 +763,17 @@ extension NodeRuntime {
             of: chainPath, among: children, entering: previous.postState, timestamp: timestamp,
             request: job.request, levels: levels, fetcher: fetcher, refused: &refused
         )
+        let committed = await committedChildren(
+            in: pooled, entering: previous.postState,
+            hosted: hostedDirectories(below: chainPath, among: children), fetcher: fetcher
+        )
         guard let template = try? await MiningTemplateAssembly.fit(
             chainPath: chainPath,
             lifetime: .seconds(30),
             previous: previous,
             pooled: pooled,
             provided: provided,
+            committed: committed,
             parentCarrier: nil,
             timestamp: timestamp,
             rewardRecipient: job.request.rewardRecipient,
@@ -877,6 +892,33 @@ extension NodeRuntime {
         return valid ? block : nil
     }
 
+    /// The direct children of `parent` this node hosts, and so mines itself.
+    static func hostedDirectories(below parent: ChainPath, among inputs: [ChildTemplateInput]) -> Set<String> {
+        Set(inputs.filter { $0.path.dropLast().elementsEqual(parent) }.compactMap(\.path.last))
+    }
+
+    /// The child blocks `transactions` commit (`child/X` = C) that a block
+    /// entering `entering` can carry, by CID: C resolves here and commits that
+    /// entering state as its carrier's. A chain this node hosts is mined with
+    /// its own candidate, so its commitments are not carried.
+    static func committedChildren(
+        in transactions: [Transaction],
+        entering: LatticeStateHeader,
+        hosted: Set<String>,
+        fetcher: any Fetcher
+    ) async -> [String: DirectChildCandidate] {
+        var committed: [String: DirectChildCandidate] = [:]
+        let bodies = transactions.compactMap(\.body.node)
+        for commitment in Block.childCommitments(in: bodies)
+        where !hosted.contains(commitment.directory) && committed[commitment.child] == nil {
+            guard let block = try? await BlockHeader(rawCID: commitment.child).resolve(fetcher: fetcher).node,
+                  block.parentState.rawCID == entering.rawCID
+            else { continue }
+            committed[commitment.child] = DirectChildCandidate(directory: commitment.directory, block: block)
+        }
+        return committed
+    }
+
     /// Merged mining: a candidate block for each hosted direct child of
     /// `parent`, each carrying its own children's, every one committing its
     /// carrier's entering state. A child with an executed tip builds on it;
@@ -922,9 +964,13 @@ extension NodeRuntime {
                     spec: spec, fetcher: fetcher
                 )
                 if !refusedHere.isEmpty { refused.append(PolicyRefusal(path: input.path, tipCID: tipCID, cids: refusedHere)) }
+                let committed = await committedChildren(
+                    in: pooled, entering: previous.postState,
+                    hosted: hostedDirectories(below: input.path, among: inputs), fetcher: fetcher
+                )
                 block = try? await MiningTemplateAssembly.fit(
                     chainPath: input.path, lifetime: .seconds(30), previous: previous,
-                    pooled: pooled, provided: grandchildren, parentCarrier: carrier,
+                    pooled: pooled, provided: grandchildren, committed: committed, parentCarrier: carrier,
                     timestamp: time, rewardRecipient: request.childRecipients[input.path],
                     minimumWork: request.minimumWork,
                     difficultyAnchor: below ? anchorBelow : input.anchor,

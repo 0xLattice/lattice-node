@@ -4,7 +4,8 @@
 // against current state before it enters the pool. Four shapes cover the
 // protocol's action types: a plain transfer, and the three legs of a
 // parent/child value exchange (deposit on the child, receipt on the parent,
-// withdrawal on the child).
+// withdrawal on the child). A fifth asks the chain's miners to carry a child
+// block (`child/<directory>`).
 
 import Foundation
 #if canImport(FoundationNetworking)
@@ -20,7 +21,7 @@ import LatticeNodeAPI
 struct Tx: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Sign and submit a transaction on a chain in the tree.",
-        subcommands: [Send.self, Deposit.self, Receipt.self, Withdraw.self]
+        subcommands: [Send.self, Deposit.self, Receipt.self, Withdraw.self, CommitChild.self]
     )
 
     struct Send: AsyncParsableCommand {
@@ -152,6 +153,39 @@ struct Tx: AsyncParsableCommand {
     }
 }
 
+extension Tx {
+    struct CommitChild: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "commit-child",
+            abstract: "Pay this chain's miners to carry a child block under one of its directories."
+        )
+
+        @OptionGroup var tx: TxOptions
+
+        @Option(name: .long, help: "The child's directory edge under this chain (e.g. Market).")
+        var directory: String
+
+        @Option(name: .long, help: "CID of the child block to carry.")
+        var block: String
+
+        @Option(name: .long, help: "The directory's current commitment (its last carried CID); omit for the first.")
+        var previous: String?
+
+        func run() async throws {
+            let signer = try tx.signer()
+            guard !directory.isEmpty, !directory.contains("/") else {
+                throw CtlError("--directory is one edge label, not a path")
+            }
+            try await tx.submit(
+                signer: signer,
+                actions: [Action(
+                    key: CHILD_COMMITMENT_KEY_PREFIX + directory, oldValue: previous, newValue: block
+                )]
+            )
+        }
+    }
+}
+
 /// The deposit/receipt/withdrawal legs share one identity:
 /// `demander / amountDemanded / nonce` (plus the directory on the parent).
 struct SwapOptions: ParsableArguments {
@@ -209,6 +243,7 @@ struct TxOptions: ParsableArguments {
     func submit(
         signer: Signer,
         accountActions: [AccountAction] = [],
+        actions generalActions: [Action] = [],
         depositActions: [DepositAction] = [],
         receiptActions: [ReceiptAction] = [],
         withdrawalActions: [WithdrawalAction] = []
@@ -240,7 +275,7 @@ struct TxOptions: ParsableArguments {
         }
         let body = TransactionBody(
             accountActions: actions,
-            actions: [],
+            actions: generalActions,
             depositActions: depositActions,
             receiptActions: receiptActions,
             withdrawalActions: withdrawalActions,

@@ -151,6 +151,7 @@ enum MiningTemplateAssembly {
         previous: Block,
         transactions: [Transaction],
         children: [DirectChildCandidate],
+        committed: [String: DirectChildCandidate] = [:],
         parentCarrier: Block?,
         timestamp: Int64,
         transactionLimit: Int = .max,
@@ -219,7 +220,9 @@ enum MiningTemplateAssembly {
                 candidate = try await Self.makeCandidate(
                     previous: previous,
                     transactions: selected + chunk,
-                    children: childBlocks,
+                    children: childBlocks.merging(
+                        carried(by: selected + chunk, from: committed, beside: childBlocks).mapValues(\.block)
+                    ) { own, _ in own },
                     parentCarrier: parentCarrier,
                     timestamp: timestamp,
                     target: target,
@@ -233,7 +236,8 @@ enum MiningTemplateAssembly {
                 where error is StateErrors
                     || error is ProofErrors
                     || error is MiningCandidateValidationError
-                    || Self.breaksCoinbaseRule(error) {
+                    || Self.breaksCoinbaseRule(error)
+                    || Self.breaksChildCommitment(error) {
                 guard chunk.count > 1 else { continue }
                 let midpoint = chunk.index(
                     chunk.startIndex,
@@ -247,9 +251,14 @@ enum MiningTemplateAssembly {
             blockCID: try BlockHeader(node: candidate).rawCID,
             minimumWork: minimumWork,
         )
+        // A committed child is scheduled like a carried one: the nonce mines
+        // it where the hash meets its target.
+        let commitments = carried(by: selected, from: committed, beside: childBlocks).values
+        for child in commitments { childTargets[child.directory] = (child.block.target, []) }
+        let scheduled = children + commitments
         let scheduling = try await Self.scheduling(
             root: candidate,
-            children: children,
+            children: scheduled,
             targets: childTargets,
             chainPath: chainPath,
             minimumWork: minimumWork,
@@ -261,7 +270,7 @@ enum MiningTemplateAssembly {
             searchTarget: scheduling.searchTarget,
             chainPath: chainPath,
             expiresAt: ContinuousClock.now + lifetime,
-            childCandidates: children,
+            childCandidates: scheduled,
             searchWitness: scheduling.searchWitness,
             thresholds: scheduling.thresholds
         )
@@ -456,6 +465,35 @@ enum MiningTemplateAssembly {
         return candidate
     }
 
+    /// The children `transactions` commit (`child/X` = C) that `committed`
+    /// holds by CID, each where X is not already carried. A commitment left
+    /// out here does not match the block's children, so the builder refuses
+    /// its transaction and the bisection drops it.
+    private static func carried(
+        by transactions: [Transaction],
+        from committed: [String: DirectChildCandidate],
+        beside children: [String: Block]
+    ) -> [String: DirectChildCandidate] {
+        guard !committed.isEmpty else { return [:] }
+        var carried: [String: DirectChildCandidate] = [:]
+        for case let body? in transactions.map(\.body.node) {
+            for commitment in Block.childCommitments(in: [body]) {
+                guard children[commitment.directory] == nil, carried[commitment.directory] == nil,
+                      let child = committed[commitment.child], child.directory == commitment.directory
+                else { continue }
+                carried[commitment.directory] = child
+            }
+        }
+        return carried
+    }
+
+    /// A transaction committing a child the block does not carry is left out
+    /// like a chunk the state transform refuses.
+    private static func breaksChildCommitment(_ error: any Error) -> Bool {
+        if case BlockBuilderError.unmatchedChildCommitment = error { return true }
+        return false
+    }
+
     /// A chunk whose transactions together break the fee rule is left out
     /// like any other chunk the state transform refuses, so one bad pool
     /// entry never suppresses the template.
@@ -474,6 +512,7 @@ enum MiningTemplateAssembly {
         previous: Block,
         pooled: [Transaction],
         provided: [DirectChildCandidate],
+        committed: [String: DirectChildCandidate] = [:],
         parentCarrier: Block?,
         timestamp: Int64,
         rewardRecipient: String?,
@@ -482,6 +521,9 @@ enum MiningTemplateAssembly {
         spec: ChainSpec,
         fetcher: any Fetcher
     ) async throws -> MiningTemplate {
+        // A provided candidate holds its directory in every pass, so every
+        // pass leaves out the same commitments into it.
+        let carriable = committed.filter { _, child in !provided.contains { $0.directory == child.directory } }
         var poolLimit = Int(clamping: spec.maxNumberOfTransactionsPerBlock)
         var largestFittingPoolLimit = -1
         var largestFittingTemplate: FittingMiningTemplate?
@@ -493,6 +535,7 @@ enum MiningTemplateAssembly {
                 previous: previous,
                 transactions: pooled,
                 children: [],
+                committed: carriable,
                 parentCarrier: parentCarrier,
                 timestamp: timestamp,
                 transactionLimit: poolLimit,
@@ -539,6 +582,7 @@ enum MiningTemplateAssembly {
                 transactions: selectedTransactions,
                 children: optionalChildren.prefix(selectedChildCount)
                     .sorted { $0.directory < $1.directory },
+                committed: carriable,
                 parentCarrier: parentCarrier,
                 timestamp: timestamp,
                 rewardRecipient: rewardRecipient,
@@ -563,6 +607,7 @@ enum MiningTemplateAssembly {
                     transactions: selectedTransactions,
                     children: optionalChildren.prefix(minimumChildCount)
                         .sorted { $0.directory < $1.directory },
+                    committed: carriable,
                     parentCarrier: parentCarrier,
                     timestamp: timestamp,
                     rewardRecipient: rewardRecipient,
@@ -588,6 +633,7 @@ enum MiningTemplateAssembly {
                             transactions: selectedTransactions,
                             children: optionalChildren.prefix(probeLimit)
                                 .sorted { $0.directory < $1.directory },
+                            committed: carriable,
                             parentCarrier: parentCarrier,
                             timestamp: timestamp,
                             rewardRecipient: rewardRecipient,
