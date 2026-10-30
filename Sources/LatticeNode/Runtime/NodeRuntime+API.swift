@@ -547,6 +547,7 @@ extension NodeRuntime {
         storage: NodeStorage,
         remote: IvyRootContentSource? = nil,
         children: [ChildTemplateInput] = [],
+        hosted: Set<String> = [],
         levels: LiveLevels = .none
     ) -> RuntimeJob {
         let fetcher = storage.workFetcher
@@ -565,6 +566,10 @@ extension NodeRuntime {
                 // A ready transaction brings the balances it was funded from,
                 // read from the same tip state, for the pool's budget.
                 var verdict = disposition(result.disposition)
+                if verdict == .ready, let body = job.transaction.body.node, let snapshot = basis.snapshot,
+                   !carriesChildCommitments(body, hosted: hosted, entering: snapshot.postStateCID) {
+                    verdict = .invalid
+                }
                 var balances: [String: UInt64] = [:]
                 if verdict == .ready {
                     if let body = job.transaction.body.node,
@@ -776,9 +781,7 @@ extension NodeRuntime {
                 tip: job.tipCID, carrying: job.transactions,
                 levels: children.map { ($0.tipCID ?? "", $0.bestHeaderTip, $0.transactions) }
             ),
-            chains: await MiningTemplateAssembly.committedChains(
-                root: template.block, chainPath: chainPath, fetcher: fetcher
-            )
+            chains: MiningTemplateAssembly.committedChains(root: template.block, chainPath: chainPath)
         )
     }
 
@@ -875,6 +878,20 @@ extension NodeRuntime {
         )
         let (valid, _) = try await block.validateGenesis(fetcher: fetcher, chainPath: path)
         return valid ? block : nil
+    }
+
+    /// Whether a block on a tip entering `entering` can carry every child
+    /// commitment (`child/X` = `C@P`) `body` makes: X a directory this node
+    /// does not mine itself (it carries its own candidate there), C a standard
+    /// CID, and P exactly `entering`. Read from the transaction alone: C is
+    /// carried by CID, so a commitment never spends a request on its child.
+    static func carriesChildCommitments(_ body: TransactionBody, hosted: Set<String>, entering: String) -> Bool {
+        Block.childCommitments(in: [body]).allSatisfy { commitment in
+            guard !hosted.contains(commitment.directory), _isBoundedDirectoryAtom(commitment.directory),
+                  let value = Block.childCommitmentValue(commitment.value),
+                  CIDIdentity.isStandard(String(decoding: value.child, as: UTF8.self)) else { return false }
+            return value.parentState.elementsEqual(entering.utf8)
+        }
     }
 
     /// Merged mining: a candidate block for each hosted direct child of

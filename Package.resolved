@@ -1,5 +1,5 @@
 {
-  "originHash" : "db3eefc6e455c728f7d6039ee99b68a048a01599f019c47a97cf8af54e5de82f",
+  "originHash" : "5c60203e55d6832ace32f9067dbf9ce75fe4b014f4dc333b64c9c4bc1116ebb7",
   "pins" : [
     {
       "identity" : "arraytrie",
@@ -69,14 +69,14 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/0xLattice/Lattice.git",
       "state" : {
-        "revision" : "282ea57284a3f55c7e36252181ee277aad800ea7",
-        "version" : "54.2.1"
+        "revision" : "7dfab281b33270d4ed4b5c3c90b7ea2b45424317",
+        "version" : "56.0.0"
       }
     },
     {
       "identity" : "multikey",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/adalinxx/Multikey.git",
+      "location" : "https://github.com/0xLattice/Multikey.git",
       "state" : {
         "revision" : "413c70e96c4de9af573e16b58ffc6a107911eb9f",
         "version" : "1.0.0"

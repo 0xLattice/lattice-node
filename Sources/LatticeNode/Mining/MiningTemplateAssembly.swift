@@ -233,7 +233,8 @@ enum MiningTemplateAssembly {
                 where error is StateErrors
                     || error is ProofErrors
                     || error is MiningCandidateValidationError
-                    || Self.breaksCoinbaseRule(error) {
+                    || Self.breaksCoinbaseRule(error)
+                    || Self.breaksChildCommitment(error) {
                 guard chunk.count > 1 else { continue }
                 let midpoint = chunk.index(
                     chunk.startIndex,
@@ -270,24 +271,22 @@ enum MiningTemplateAssembly {
 
     /// Every block a nonce for `root` commits: the root and each block its
     /// child indexes carry, at any depth, with its committed target, height
-    /// and recipient. A child whose content cannot be read here is left out,
-    /// so a reader never counts on a block the work may not carry. The
+    /// and recipient. Only blocks the template holds are walked: a child
+    /// carried by CID alone (a transaction's commitment) is left out and
+    /// never fetched, so a reader never counts on a block the work may not
+    /// carry and no pool entry can make a build read the network. The
     /// committed target is not what the work is searched to: no hash above
     /// the template's search target is taken.
-    static func committedChains(
-        root: Block,
-        chainPath: [String],
-        fetcher: any Fetcher
-    ) async -> [TemplateChain] {
+    static func committedChains(root: Block, chainPath: [String]) -> [TemplateChain] {
         var chains: [TemplateChain] = []
         var frontier: [(block: Block, path: [String])] = [(root, chainPath)]
         while let (block, path) = frontier.popLast() {
             chains.append(TemplateChain(
                 chainPath: path, target: block.target, height: block.height, rewardRecipient: block.rewardRecipient
             ))
-            guard let children = try? await block.children.resolve(fetcher: fetcher).node else { continue }
+            guard let children = block.children.node else { continue }
             for (directory, child) in children.entries.sorted(by: { $0.key > $1.key }) {
-                guard let node = try? await child.resolve(fetcher: fetcher).node else { continue }
+                guard let node = child.node else { continue }
                 frontier.append((node, path + [directory]))
             }
         }
@@ -456,6 +455,14 @@ enum MiningTemplateAssembly {
         return candidate
     }
 
+    /// A transaction whose child commitment the block cannot carry (see
+    /// `Block.validateChildCommitments`) is left out like a chunk the state
+    /// transform refuses.
+    private static func breaksChildCommitment(_ error: any Error) -> Bool {
+        if case BlockBuilderError.unmatchedChildCommitment = error { return true }
+        return false
+    }
+
     /// A chunk whose transactions together break the fee rule is left out
     /// like any other chunk the state transform refuses, so one bad pool
     /// entry never suppresses the template.
@@ -482,6 +489,13 @@ enum MiningTemplateAssembly {
         spec: ChainSpec,
         fetcher: any Fetcher
     ) async throws -> MiningTemplate {
+        // A provided candidate may hold its directory in the final pass but
+        // not the provisional one, so a commitment into it is left out of both.
+        let pooled = pooled.filter { transaction in
+            !Block.childCommitments(in: transaction.body.node.map { [$0] } ?? []).contains { commitment in
+                provided.contains { $0.directory == commitment.directory }
+            }
+        }
         var poolLimit = Int(clamping: spec.maxNumberOfTransactionsPerBlock)
         var largestFittingPoolLimit = -1
         var largestFittingTemplate: FittingMiningTemplate?
