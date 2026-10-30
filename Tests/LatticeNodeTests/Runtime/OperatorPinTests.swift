@@ -24,7 +24,7 @@ final class OperatorPinTests: XCTestCase {
 
     private func host(
         keyByte: UInt8, peers: [PeerEndpoint] = [], storageDirectory reused: URL? = nil,
-        hosted: [[String]] = [], announcePins: Bool = true
+        hosted: [[String]] = [], announcePins: Bool = true, announceLifetime: UInt64 = 1_200
     ) throws -> Host {
         let storageDirectory = reused ?? FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-node-pins-\(UUID().uuidString)", isDirectory: true
@@ -43,6 +43,7 @@ final class OperatorPinTests: XCTestCase {
             peerTarget: 1,
             externalAddress: Self.advertised(port),
             peerSearchInterval: 3_600,
+            announceLifetime: announceLifetime,
             announcePins: announcePins,
             hostedChildren: hosted
         )
@@ -223,6 +224,56 @@ final class OperatorPinTests: XCTestCase {
         try await eventually("with pins announced, the first pass announces it") {
             await runtime.ivy.providers(for: root).map(\.publicKey).contains(ownKey)
         }
+        await runtime.stop()
+    }
+
+    /// A node that loses every session announces again to the next one,
+    /// however long its records last: the peers it told are gone. Its only
+    /// peer leaves, another connects, and that one is told the pin.
+    func testANodeThatLosesEverySessionAnnouncesAgainToTheNext() async throws {
+        let volume = try VolumeImpl<ChainSpec>(node: ChainSpec(
+            maxNumberOfTransactionsPerBlock: 4, maxStateGrowth: 4_444, premine: 4,
+            targetBlockTime: 4_000, initialReward: 4, halvingInterval: 4_444, halfLife: 4
+        ))
+        let root = volume.rawCID
+        let captured = CapturedVolumes()
+        try await volume.store(storer: captured)
+        let volumes = await captured.volumes
+        let entries = try XCTUnwrap(volumes.first { $0.root == root }).entries
+
+        // Records lasting a day: no timed pass renews them in this test.
+        var pinner = try host(keyByte: 0xca, announceLifetime: NodeConfiguration.maximumAnnounceLifetime)
+        let ownKey = pinner.configuration.processPublicKey
+        do {
+            let (runtime, _) = try await start(pinner)
+            try await runtime.pinVolume(root, entries: entries)
+            await runtime.stop()
+        }
+        // Restarted, its first pass reads the pin; the pass the first
+        // session starts announces it.
+        pinner = try host(
+            keyByte: 0xca, storageDirectory: pinner.configuration.storagePath,
+            announceLifetime: NodeConfiguration.maximumAnnounceLifetime
+        )
+        let (runtime, _) = try await start(pinner)
+        try await eventually("the first pass reads the pin") {
+            await runtime.ivy.providers(for: root).map(\.publicKey).contains(ownKey)
+        }
+
+        let (first, _) = try await start(try host(keyByte: 0xcb, peers: [pinner.endpoint]))
+        try await eventually("the first peer is told the pin", within: .seconds(20)) {
+            await first.ivy.providers(for: root).map(\.publicKey).contains(ownKey)
+        }
+        await first.stop()
+        try await eventually("the pinner has no session left", within: .seconds(20)) {
+            await runtime.ivy.connectedPeers.isEmpty
+        }
+
+        let (next, _) = try await start(try host(keyByte: 0xcc, peers: [pinner.endpoint]))
+        try await eventually("the next peer is told the pin", within: .seconds(20)) {
+            await next.ivy.providers(for: root).map(\.publicKey).contains(ownKey)
+        }
+        await next.stop()
         await runtime.stop()
     }
 

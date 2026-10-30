@@ -256,12 +256,21 @@ rendezvous. Provider records name chain availability, not individual blocks or
 states. A node that declares a public read URL also announces each hosted
 child under that child's read-endpoint key (below).
 
-A node announces what it hosts on every announcement turn and whenever a
-session opens. Each announcement, a hosted chain's or an operator pin's,
-lasts `announceLifetime` seconds (`--announce-lifetime`, default 1200, 1 to
-86400: peers drop announcements that last longer). The turns renew them
-about every 10 minutes, later when a turn is slow, so a lifetime near that
-leaves gaps in which peers cannot find the node as a provider. A child chain's current peers are the sessions whose hello
+An announcement walks the DHT to the peers closest to its key, wherever
+they are, so a node announces a key when it starts hosting or pinning it,
+and on a later turn only when the record would lapse within one and a half
+turns. A node that loses every session announces everything again when the
+next one opens. A key it stops hosting, or a Volume it unpins, stops being provided;
+records peers already hold lapse at their expiry. Each announcement, a
+hosted chain's or an operator pin's, lasts `announceLifetime` seconds
+(`--announce-lifetime`, default 1200, 1 to 86400: peers drop announcements
+that last longer). Turns run about every 10 minutes, later when a turn is
+slow, so a lifetime up to two and a half turns renews on every turn and one
+near a turn leaves gaps in which peers cannot find the node as a provider.
+`--provider-walk-sessions` (default 64) bounds the sessions those walks may
+dial, never into the reserved outbound slots; 0 keeps them among the
+sessions already open, and then the node announces everything on every turn
+and whenever a session opens, since only those peers hear it. A child chain's current peers are the sessions whose hello
 named it, and those its rendezvous names, so a peer on a build that predates
 the hello's claim still counts. Each hosted child chain searches its own
 rendezvous while it has no current peer - looked at at those same moments - when it has not progressed since boot or for `peerSearchInterval`, and, once per `peerSearchInterval`, while it has fewer current peers than the target (`peerTarget`, eight):

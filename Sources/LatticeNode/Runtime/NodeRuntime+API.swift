@@ -243,6 +243,7 @@ extension NodeRuntime {
     public func unpinVolume(_ root: String) async throws {
         guard !maintenance.isCancelled else { throw NodeRuntimeError.stopped }
         try await storage.unpin(root)
+        await ivy.stopProviding(rootCID: root)
     }
 
     public func pinnedVolumes() async -> [String] {

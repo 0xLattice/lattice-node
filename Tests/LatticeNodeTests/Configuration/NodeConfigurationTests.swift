@@ -50,6 +50,45 @@ final class NodeConfigurationTests: XCTestCase {
         }
     }
 
+    /// A pass announces what is new or would lapse before the pass after
+    /// next, and stops what is no longer wanted. Kept among connected
+    /// peers, every pass announces everything.
+    func testAPassAnnouncesOnlyWhatIsNewOrDue() throws {
+        func configuration(walkSessions: Int) throws -> NodeConfiguration {
+            try NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: URL(fileURLWithPath: "/tmp/lattice-node-test"),
+                privateKeyHex: String(repeating: "01", count: 32),
+                peerSearchInterval: 600,
+                announceLifetime: 1_200,
+                providerWalkSessions: walkSessions
+            )
+        }
+        let walking = try configuration(walkSessions: 64)
+        let now: Int64 = 10_000_000
+        // Announced at 10_000 s, the pass that time; renewable once 900 s
+        // (one and a half cadences) or less remain.
+        let announced: [String: UInt64] = ["fresh": 11_200, "due": 10_900, "dropped": 11_200]
+        let renewal = walking.announcementRenewal(
+            wanted: ["fresh", "due", "new"], announced: announced, at: now
+        )
+        XCTAssertEqual(renewal.announce, ["due", "new"])
+        XCTAssertEqual(renewal.withdraw, ["dropped"])
+        // A lifetime up to two and a half cadences renews on every timed
+        // pass: announced at 10_000 s to last 1_200 s, it is due at the
+        // next, 600 s on.
+        XCTAssertEqual(
+            walking.announcementRenewal(wanted: ["fresh"], announced: announced, at: now + 600_000).announce,
+            ["fresh"]
+        )
+
+        let connected = try configuration(walkSessions: 0)
+        XCTAssertEqual(
+            connected.announcementRenewal(wanted: ["fresh", "due"], announced: announced, at: now).announce,
+            ["due", "fresh"]
+        )
+    }
+
     func testNexusIdentityIsFixed() throws {
         let configuration = try NodeConfiguration(
             chainPath: ["Nexus"],

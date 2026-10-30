@@ -342,8 +342,7 @@ public final class NodeRuntime: Sendable {
             ivy: ivy, localKey: configuration.processPublicKey,
             forwardingTo: delegate, options: punchOptions)
         self.punch = punch
-        let cadence = max(1, min(configuration.peerSearchInterval > 0
-            ? configuration.peerSearchInterval : 600, 600))
+        let cadence = configuration.maintenanceCadence
         maintenance = Task {
             while !Task.isCancelled {
                 guard await Timers.sleep(nanoseconds: UInt64(cadence * 1_000_000_000)) else { return }
@@ -497,6 +496,10 @@ extension NodeRuntime {
             didSet {
                 let ready = sessions.values.filter(\.ready)
                 remote.peerCapabilities.set(ready.sorted { $0.id < $1.id }.map { ($0.peer, $0.capabilities) })
+                // With every session gone, what was announced may have
+                // reached no one who still holds it: the pass the next
+                // session starts announces it again.
+                if ready.isEmpty { announcedRoots = announcedRoots.mapValues { _ in 0 } }
                 if ready.count > oldValue.values.filter(\.ready).count { startNetworkMaintenance() }
             }
         }
@@ -505,6 +508,8 @@ extension NodeRuntime {
         /// The Volumes the operator pinned, as last read: announced with the
         /// chains by each maintenance pass.
         var operatorPins: [String] = []
+        /// What maintenance passes announced, with the expiry they sent.
+        var announcedRoots: [String: UInt64] = [:]
         /// The running jobs, which the loop waits for before it lets the
         /// store go: a job reading from peers can outlast a step.
         var jobs: [UInt64: Task<Void, Never>] = [:]
@@ -927,9 +932,21 @@ extension NodeRuntime {
                 peerMemory, configuration.peerTarget, configuration.peersBeforeSeeds
             )
             let retriesSeeds = !configuration.seedPeers.isEmpty
-            // What the operator pinned is announced with the chains.
-            let announcing = announced + operatorPins
+            // What the operator pinned is announced with the chains; a key
+            // no longer wanted stops being provided.
+            let (announcing, withdrawn) = configuration.announcementRenewal(
+                wanted: Set(announced + operatorPins), announced: announcedRoots, at: now
+            )
+            for key in withdrawn { announcedRoots.removeValue(forKey: key) }
+            // With no session open, the walk has no one to tell: the pass
+            // the first session starts announces again.
+            if sessions.values.contains(where: \.ready) {
+                for key in announcing { announcedRoots[key] = expiry }
+            }
             spawn {
+                for key in withdrawn {
+                    await ivy.stopProviding(rootCID: key)
+                }
                 for key in announcing {
                     await ivy.announceProvider(rootCID: key, expiresAt: expiry)
                 }
