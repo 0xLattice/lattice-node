@@ -271,24 +271,22 @@ enum MiningTemplateAssembly {
 
     /// Every block a nonce for `root` commits: the root and each block its
     /// child indexes carry, at any depth, with its committed target, height
-    /// and recipient. A child whose content cannot be read here is left out,
-    /// so a reader never counts on a block the work may not carry. The
+    /// and recipient. Only blocks the template holds are walked: a child
+    /// carried by CID alone (a transaction's commitment) is left out and
+    /// never fetched, so a reader never counts on a block the work may not
+    /// carry and no pool entry can make a build read the network. The
     /// committed target is not what the work is searched to: no hash above
     /// the template's search target is taken.
-    static func committedChains(
-        root: Block,
-        chainPath: [String],
-        fetcher: any Fetcher
-    ) async -> [TemplateChain] {
+    static func committedChains(root: Block, chainPath: [String]) -> [TemplateChain] {
         var chains: [TemplateChain] = []
         var frontier: [(block: Block, path: [String])] = [(root, chainPath)]
         while let (block, path) = frontier.popLast() {
             chains.append(TemplateChain(
                 chainPath: path, target: block.target, height: block.height, rewardRecipient: block.rewardRecipient
             ))
-            guard let children = try? await block.children.resolve(fetcher: fetcher).node else { continue }
+            guard let children = block.children.node else { continue }
             for (directory, child) in children.entries.sorted(by: { $0.key > $1.key }) {
-                guard let node = try? await child.resolve(fetcher: fetcher).node else { continue }
+                guard let node = child.node else { continue }
                 frontier.append((node, path + [directory]))
             }
         }

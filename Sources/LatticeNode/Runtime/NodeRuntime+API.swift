@@ -781,9 +781,7 @@ extension NodeRuntime {
                 tip: job.tipCID, carrying: job.transactions,
                 levels: children.map { ($0.tipCID ?? "", $0.bestHeaderTip, $0.transactions) }
             ),
-            chains: await MiningTemplateAssembly.committedChains(
-                root: template.block, chainPath: chainPath, fetcher: fetcher
-            )
+            chains: MiningTemplateAssembly.committedChains(root: template.block, chainPath: chainPath)
         )
     }
 

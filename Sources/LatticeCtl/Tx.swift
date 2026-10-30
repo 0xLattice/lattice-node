@@ -179,6 +179,9 @@ extension Tx {
             guard !directory.isEmpty, !directory.contains("/") else {
                 throw CtlError("--directory is one edge label, not a path")
             }
+            guard CIDIdentity.isStandard(block), CIDIdentity.isStandard(parentState) else {
+                throw CtlError("--block and --parent-state must each be a standard CID")
+            }
             try await tx.submit(
                 signer: signer,
                 actions: [Action(

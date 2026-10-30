@@ -92,6 +92,15 @@ final class TransactionChildCommitmentTemplateTests: XCTestCase {
         XCTAssertTrue(valid)
     }
 
+    /// The chains a template reports are walked from the blocks it holds: a
+    /// child carried by CID is not one, even where its content is at hand.
+    func testCommittedChainsNeverReadACommittedChild() async throws {
+        let fixture = try await fixture()
+        let block = try await template(fixture, pooled: [fixture.commitment]).block
+        let chains = MiningTemplateAssembly.committedChains(root: block, chainPath: Self.nexus)
+        XCTAssertEqual(chains.map(\.chainPath), [Self.nexus])
+    }
+
     /// The template's own candidate holds the directory: the commitment is
     /// left out of every pass, so the block stays valid and the template is built.
     func testAnOwnCandidateWinsTheDirectory() async throws {
@@ -108,6 +117,8 @@ final class TransactionChildCommitmentTemplateTests: XCTestCase {
         let (child, transactions) = try await carried(block, fixture.cas)
         XCTAssertEqual(child, own.cid)
         XCTAssertEqual(transactions, 0)
+        let chains = MiningTemplateAssembly.committedChains(root: block, chainPath: Self.nexus)
+        XCTAssertEqual(chains.map(\.chainPath), [Self.nexus, Self.alpha], "an own candidate is reported")
     }
 
     /// A commitment built on another state is left out: carrying it would
