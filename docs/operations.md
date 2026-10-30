@@ -258,13 +258,14 @@ child under that child's read-endpoint key (below).
 
 An announcement walks the DHT to the peers closest to its key, wherever
 they are, so a node announces a key when it starts hosting or pinning it,
-and on a later turn only when the record would lapse before the turn after
-next. A key it stops hosting, or a Volume it unpins, stops being provided;
+and on a later turn only when the record would lapse within one and a half
+turns. A node that loses every session announces everything again when the
+next one opens. A key it stops hosting, or a Volume it unpins, stops being provided;
 records peers already hold lapse at their expiry. Each announcement, a
 hosted chain's or an operator pin's, lasts `announceLifetime` seconds
 (`--announce-lifetime`, default 1200, 1 to 86400: peers drop announcements
 that last longer). Turns run about every 10 minutes, later when a turn is
-slow, so a lifetime under one and a half turns renews on every turn and one
+slow, so a lifetime up to two and a half turns renews on every turn and one
 near a turn leaves gaps in which peers cannot find the node as a provider.
 `--provider-walk-sessions` (default 64) bounds the sessions those walks may
 dial, never into the reserved outbound slots; 0 keeps them among the

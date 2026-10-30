@@ -74,6 +74,13 @@ final class NodeConfigurationTests: XCTestCase {
         )
         XCTAssertEqual(renewal.announce, ["due", "new"])
         XCTAssertEqual(renewal.withdraw, ["dropped"])
+        // A lifetime up to two and a half cadences renews on every timed
+        // pass: announced at 10_000 s to last 1_200 s, it is due at the
+        // next, 600 s on.
+        XCTAssertEqual(
+            walking.announcementRenewal(wanted: ["fresh"], announced: announced, at: now + 600_000).announce,
+            ["fresh"]
+        )
 
         let connected = try configuration(walkSessions: 0)
         XCTAssertEqual(

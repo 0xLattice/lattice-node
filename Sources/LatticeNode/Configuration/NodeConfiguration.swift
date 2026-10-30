@@ -391,8 +391,9 @@ public struct NodeConfiguration: Sendable {
     /// given the expiry each key was last announced with, and which
     /// announced keys it stops providing. A walk reaches a key's closest
     /// peers wherever they are, so a key is announced when it is new or
-    /// would lapse before the timed pass after next could renew it, not
-    /// again for each session that opens. Kept among connected peers,
+    /// would lapse within one and a half cadences (the next timed pass, half
+    /// a cadence late, could not renew it), not again for each session that
+    /// opens. Kept among connected peers,
     /// announcements reach only those, so every pass tells them all.
     func announcementRenewal(
         wanted: Set<String>, announced: [String: UInt64], at now: Int64

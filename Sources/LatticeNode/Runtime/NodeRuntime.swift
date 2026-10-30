@@ -496,6 +496,10 @@ extension NodeRuntime {
             didSet {
                 let ready = sessions.values.filter(\.ready)
                 remote.peerCapabilities.set(ready.sorted { $0.id < $1.id }.map { ($0.peer, $0.capabilities) })
+                // With every session gone, what was announced may have
+                // reached no one who still holds it: the pass the next
+                // session starts announces it again.
+                if ready.isEmpty { announcedRoots = announcedRoots.mapValues { _ in 0 } }
                 if ready.count > oldValue.values.filter(\.ready).count { startNetworkMaintenance() }
             }
         }
