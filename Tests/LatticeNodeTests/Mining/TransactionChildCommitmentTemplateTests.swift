@@ -5,11 +5,13 @@ import XCTest
 import cashew
 @testable import LatticeNode
 
-/// A pooled `child/X` = C transaction is carried with C at `children[X]`,
-/// unless the node mines X itself or C does not enter the template's state.
+/// A pooled `child/X` = `C@P` transaction is carried with C at `children[X]`
+/// by CID alone, unless the node mines X itself or the template does not
+/// enter P.
 final class TransactionChildCommitmentTemplateTests: XCTestCase {
     private static let nexus = LevelWorld.nexus
     private static let alpha = LevelWorld.alpha
+    private static let directory = LevelWorld.alpha.last!
 
     private struct Fixture {
         let cas: SimCAS
@@ -17,6 +19,7 @@ final class TransactionChildCommitmentTemplateTests: XCTestCase {
         let child: SimBlock
         let commitment: Transaction
         let timestamp: Int64
+        var entering: String { genesis.postState.rawCID }
     }
 
     /// `childTarget` nil: Alpha's genesis target; otherwise C claims it.
@@ -36,15 +39,17 @@ final class TransactionChildCommitmentTemplateTests: XCTestCase {
                 Self.alpha, parentState: genesis.block.postState.rawCID, at: timestamp
             )
         }
-        let commitment = try Self.commit(child.cid, under: Self.alpha.last!, key: 0)
+        let commitment = try Self.commit(
+            child.cid + "@" + genesis.block.postState.rawCID, under: Self.directory, key: 0
+        )
         return Fixture(cas: builder.cas, genesis: genesis.block, child: child, commitment: commitment, timestamp: timestamp)
     }
 
-    private static func commit(_ cid: String, under directory: String, key index: Int) throws -> Transaction {
+    private static func commit(_ value: String, under directory: String, key index: Int) throws -> Transaction {
         let key = SimTransactions.keys[index]
         let body = try HeaderImpl(node: TransactionBody(
             accountActions: [],
-            actions: [Action(key: CHILD_COMMITMENT_KEY_PREFIX + directory, oldValue: nil, newValue: cid)],
+            actions: [Action(key: CHILD_COMMITMENT_KEY_PREFIX + directory, oldValue: nil, newValue: value)],
             depositActions: [], receiptActions: [], withdrawalActions: [],
             signers: [CryptoUtils.createAddress(from: key.publicKey)], nonce: 0, chainPath: Self.nexus
         ))
@@ -55,88 +60,64 @@ final class TransactionChildCommitmentTemplateTests: XCTestCase {
     }
 
     private func template(
-        _ fixture: Fixture, committed: [String: DirectChildCandidate], provided: [DirectChildCandidate] = []
-    ) async throws -> Block {
-        try await fullTemplate(fixture, pooled: [fixture.commitment], committed: committed, provided: provided).block
-    }
-
-    private func fullTemplate(
-        _ fixture: Fixture, pooled: [Transaction], committed: [String: DirectChildCandidate],
-        provided: [DirectChildCandidate] = []
+        _ fixture: Fixture, pooled: [Transaction], provided: [DirectChildCandidate] = [], fetcher: SimCAS? = nil
     ) async throws -> MiningTemplate {
         let resolved = try await fixture.genesis.spec.resolve(fetcher: fixture.cas).node
         let spec = try XCTUnwrap(resolved)
         return try await MiningTemplateAssembly.fit(
             chainPath: Self.nexus, lifetime: .seconds(30), previous: fixture.genesis,
-            pooled: pooled, provided: provided, committed: committed, parentCarrier: nil,
+            pooled: pooled, provided: provided, parentCarrier: nil,
             timestamp: fixture.timestamp, rewardRecipient: nil, minimumWork: [:], difficultyAnchor: nil,
-            spec: spec, fetcher: fixture.cas
+            spec: spec, fetcher: fetcher ?? fixture.cas
         )
     }
 
     private func carried(_ block: Block, _ cas: SimCAS) async throws -> (child: String?, transactions: Int) {
         let children = try await block.children.resolve(fetcher: cas).node
         let transactions = try await MiningTemplateAssembly.blockTransactions(in: block, fetcher: cas)
-        return (children?[Self.alpha.last!]?.rawCID, transactions.count)
+        return (children?[Self.directory]?.rawCID, transactions.count)
     }
 
-    func testTheTemplateCarriesTheCommittedChildWithItsTransaction() async throws {
+    /// C is carried by CID from a store that never held it, and the block
+    /// validates without it.
+    func testTheTemplateCarriesTheCommittedChildByCID() async throws {
         let fixture = try await fixture()
-        let committed = await NodeRuntime.committedChildren(
-            in: [fixture.commitment], entering: fixture.genesis.postState, hosted: [], local: fixture.cas
-        )
-        XCTAssertEqual(committed.keys.sorted(), [MiningTemplateAssembly.committedChildKey(Self.alpha.last!, fixture.child.cid)])
-        let block = try await template(fixture, committed: committed)
-        let (child, transactions) = try await carried(block, fixture.cas)
+        let withoutChild = SimCAS()
+        withoutChild.put(fixture.cas.all.filter { $0.key != fixture.child.cid })
+        let block = try await template(fixture, pooled: [fixture.commitment], fetcher: withoutChild).block
+        let (child, transactions) = try await carried(block, withoutChild)
         XCTAssertEqual(child, fixture.child.cid)
         XCTAssertEqual(transactions, 1)
-        let valid = try await block.validateNexus(fetcher: fixture.cas).0
+        let valid = try await block.validateNexus(fetcher: withoutChild).0
         XCTAssertTrue(valid)
     }
 
-    /// A node mining Alpha carries its own Alpha candidate, so the commitment
-    /// is not carried and its transaction is left out.
-    func testAHostedChainsCommitmentIsLeftOut() async throws {
-        let fixture = try await fixture()
-        let committed = await NodeRuntime.committedChildren(
-            in: [fixture.commitment], entering: fixture.genesis.postState,
-            hosted: [Self.alpha.last!], local: fixture.cas
-        )
-        XCTAssertTrue(committed.isEmpty)
-        let block = try await template(fixture, committed: committed)
-        let (child, transactions) = try await carried(block, fixture.cas)
-        XCTAssertNil(child)
-        XCTAssertEqual(transactions, 0)
-    }
-
-    /// C commits the genesis's post-state as its carrier's; a template
-    /// entering any other state cannot carry it.
-    func testAChildEnteringAnotherStateIsNotCarried() async throws {
-        let fixture = try await fixture()
-        let committed = await NodeRuntime.committedChildren(
-            in: [fixture.commitment], entering: LatticeStateHeader(rawCID: fixture.child.cid), hosted: [], local: fixture.cas
-        )
-        XCTAssertTrue(committed.isEmpty)
-    }
-
-    /// The template's own candidate holds the directory: the commitment does
-    /// not match it, so its transaction is dropped and the block stays valid.
+    /// The template's own candidate holds the directory: the commitment is
+    /// left out of every pass, so the block stays valid and the template is built.
     func testAnOwnCandidateWinsTheDirectory() async throws {
         var builder = try await LevelWorld.Builder(levels: 2)
         let fixture = try await fixture()
-        let committed = await NodeRuntime.committedChildren(
-            in: [fixture.commitment], entering: fixture.genesis.postState, hosted: [], local: fixture.cas
-        )
         let own = try await builder.childGenesis(
-            Self.alpha, parentState: fixture.genesis.postState.rawCID, at: fixture.timestamp + 1
+            Self.alpha, parentState: fixture.entering, at: fixture.timestamp + 1
         )
         XCTAssertNotEqual(own.cid, fixture.child.cid)
         let block = try await template(
-            fixture, committed: committed,
-            provided: [DirectChildCandidate(directory: Self.alpha.last!, block: own.block)]
-        )
+            fixture, pooled: [fixture.commitment],
+            provided: [DirectChildCandidate(directory: Self.directory, block: own.block)]
+        ).block
         let (child, transactions) = try await carried(block, fixture.cas)
         XCTAssertEqual(child, own.cid)
+        XCTAssertEqual(transactions, 0)
+    }
+
+    /// A commitment built on another state is left out: carrying it would
+    /// make the block invalid.
+    func testACommitmentOnAnotherStateIsLeftOut() async throws {
+        let fixture = try await fixture()
+        let stale = try Self.commit(fixture.child.cid + "@" + fixture.child.cid, under: Self.directory, key: 1)
+        let block = try await template(fixture, pooled: [stale]).block
+        let (child, transactions) = try await carried(block, fixture.cas)
+        XCTAssertNil(child)
         XCTAssertEqual(transactions, 0)
     }
 
@@ -144,43 +125,29 @@ final class TransactionChildCommitmentTemplateTests: XCTestCase {
     /// or every nonce is a child-only hit and the root is never found.
     func testACommittedChildDoesNotSetTheSearch() async throws {
         let fixture = try await fixture(childTarget: .max)
-        let committed = await NodeRuntime.committedChildren(
-            in: [fixture.commitment], entering: fixture.genesis.postState, hosted: [], local: fixture.cas
-        )
-        XCTAssertEqual(committed.count, 1)
-        let without = try await fullTemplate(fixture, pooled: [], committed: [:])
-        let with = try await fullTemplate(fixture, pooled: [fixture.commitment], committed: committed)
+        let without = try await template(fixture, pooled: [])
+        let with = try await template(fixture, pooled: [fixture.commitment])
         let (child, _) = try await carried(with.block, fixture.cas)
         XCTAssertEqual(child, fixture.child.cid, "the commitment is carried")
         XCTAssertEqual(with.searchTarget, without.searchTarget)
         XCTAssertEqual(with.targets, without.targets)
     }
 
-    /// The same block committed under another directory is a separate
-    /// commitment: neither displaces the other.
-    func testOneBlockUnderTwoDirectoriesIsTwoCommitments() async throws {
+    /// Preflight reads the transaction alone: a hosted directory, another
+    /// state, a malformed value or a non-directory name is never carried.
+    func testPreflightCarriesOnlyWhatThisTipCan() async throws {
         let fixture = try await fixture()
-        let other = try Self.commit(fixture.child.cid, under: "Zed", key: 1)
-        let committed = await NodeRuntime.committedChildren(
-            in: [other, fixture.commitment], entering: fixture.genesis.postState, hosted: [], local: fixture.cas
-        )
-        XCTAssertEqual(committed.count, 2)
-        let block = try await template(fixture, committed: committed)
-        let (child, transactions) = try await carried(block, fixture.cas)
-        XCTAssertEqual(child, fixture.child.cid)
-        XCTAssertEqual(transactions, 1)
-    }
-
-    /// A C this node does not hold is not carried, and nothing is fetched.
-    func testAChildNotHeldLocallyIsNotCarried() async throws {
-        let fixture = try await fixture()
-        let empty = await NodeRuntime.committedChildren(
-            in: [fixture.commitment], entering: fixture.genesis.postState, hosted: [], local: SimCAS()
-        )
-        XCTAssertTrue(empty.isEmpty)
-        let none = await NodeRuntime.committedChildren(
-            in: [fixture.commitment], entering: fixture.genesis.postState, hosted: [], local: nil
-        )
-        XCTAssertTrue(none.isEmpty)
+        let state = fixture.entering
+        let cid = fixture.child.cid
+        func carries(_ value: String, under directory: String = Self.directory, hosted: Set<String> = []) throws -> Bool {
+            let body = try XCTUnwrap(Self.commit(value, under: directory, key: 0).body.node)
+            return NodeRuntime.carriesChildCommitments(body, hosted: hosted, entering: state)
+        }
+        XCTAssertTrue(try carries(cid + "@" + state))
+        XCTAssertFalse(try carries(cid + "@" + state, hosted: [Self.directory]), "hosted")
+        XCTAssertFalse(try carries(cid + "@" + cid), "another state")
+        XCTAssertFalse(try carries(cid), "no parent state")
+        XCTAssertFalse(try carries("not-a-cid@" + state), "non-standard CID")
+        XCTAssertFalse(try carries(cid + "@" + state, under: Self.directory + "/b"), "not a directory")
     }
 }

@@ -168,7 +168,10 @@ extension Tx {
         @Option(name: .long, help: "CID of the child block to carry.")
         var block: String
 
-        @Option(name: .long, help: "The directory's current commitment (its last carried CID); omit for the first.")
+        @Option(name: .long, help: "The child block's parentState CID: the state of this chain's tip it was built on. Only a block entering that state carries it.")
+        var parentState: String
+
+        @Option(name: .long, help: "The directory's current commitment value (<cid>@<parent-state>); omit for the first.")
         var previous: String?
 
         func run() async throws {
@@ -179,7 +182,8 @@ extension Tx {
             try await tx.submit(
                 signer: signer,
                 actions: [Action(
-                    key: CHILD_COMMITMENT_KEY_PREFIX + directory, oldValue: previous, newValue: block
+                    key: CHILD_COMMITMENT_KEY_PREFIX + directory, oldValue: previous,
+                    newValue: block + String(UnicodeScalar(CHILD_COMMITMENT_PARENT_STATE_SEPARATOR)) + parentState
                 )]
             )
         }

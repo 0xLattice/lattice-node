@@ -566,24 +566,9 @@ extension NodeRuntime {
                 // A ready transaction brings the balances it was funded from,
                 // read from the same tip state, for the pool's budget.
                 var verdict = disposition(result.disposition)
-                // A chain this node hosts is mined with its own candidate, so
-                // a commitment into it is never carried here; a commitment
-                // naming no directory is never carried anywhere.
-                if verdict == .ready, let body = job.transaction.body.node,
-                   Block.childCommitments(in: [body]).contains(where: {
-                       hosted.contains($0.directory) || !_isBoundedDirectoryAtom($0.directory)
-                   }) {
+                if verdict == .ready, let body = job.transaction.body.node, let snapshot = basis.snapshot,
+                   !carriesChildCommitments(body, hosted: hosted, entering: snapshot.postStateCID) {
                     verdict = .invalid
-                }
-                // A commitment this tip cannot carry (C not held here, or
-                // built on another tip) waits: it holds no place in the pool.
-                if verdict == .ready, let body = job.transaction.body.node,
-                   let entering = basis.snapshot.map({ LatticeStateHeader(rawCID: $0.postStateCID) }) {
-                    let commitments = Block.childCommitments(in: [body])
-                    let carriable = await committedChildren(
-                        in: [job.transaction], entering: entering, hosted: hosted, local: fetcher
-                    )
-                    if carriable.count < commitments.count { verdict = .unavailable }
                 }
                 var balances: [String: UInt64] = [:]
                 if verdict == .ready {
@@ -603,7 +588,7 @@ extension NodeRuntime {
                 let (built, refused) = await reading(job.tipCID, storage: storage, remote: remote) { fetcher in
                     var refused: [PolicyRefusal] = []
                     let built = await buildTemplate(
-                        job, difficultyAnchor: basis?.anchor, fetcher: fetcher, local: storage.workFetcher, chainPath: path,
+                        job, difficultyAnchor: basis?.anchor, fetcher: fetcher, chainPath: path,
                         children: children, levels: levels, refused: &refused
                     )
                     return (built, refused)
@@ -750,7 +735,6 @@ extension NodeRuntime {
         _ job: TemplateJob,
         difficultyAnchor: DifficultyAnchor?,
         fetcher: any Fetcher,
-        local: (any Fetcher)? = nil,
         chainPath: [String],
         children: [ChildTemplateInput] = [],
         levels: LiveLevels = .none,
@@ -772,11 +756,7 @@ extension NodeRuntime {
         if !refusedHere.isEmpty { refused.append(PolicyRefusal(path: chainPath, tipCID: job.tipCID, cids: refusedHere)) }
         let provided = await childCandidates(
             of: chainPath, among: children, entering: previous.postState, timestamp: timestamp,
-            request: job.request, levels: levels, fetcher: fetcher, local: local, refused: &refused
-        )
-        let committed = await committedChildren(
-            in: pooled, entering: previous.postState,
-            hosted: hostedDirectories(below: chainPath, among: children), local: local
+            request: job.request, levels: levels, fetcher: fetcher, refused: &refused
         )
         guard let template = try? await MiningTemplateAssembly.fit(
             chainPath: chainPath,
@@ -784,7 +764,6 @@ extension NodeRuntime {
             previous: previous,
             pooled: pooled,
             provided: provided,
-            committed: committed,
             parentCarrier: nil,
             timestamp: timestamp,
             rewardRecipient: job.request.rewardRecipient,
@@ -903,35 +882,18 @@ extension NodeRuntime {
         return valid ? block : nil
     }
 
-    /// The direct children of `parent` this node hosts, and so mines itself.
-    static func hostedDirectories(below parent: ChainPath, among inputs: [ChildTemplateInput]) -> Set<String> {
-        Set(inputs.filter { $0.path.dropLast().elementsEqual(parent) }.compactMap(\.path.last))
-    }
-
-    /// The child blocks `transactions` commit (`child/X` = C) that a block
-    /// entering `entering` can carry, by `committedChildKey`: C resolves here and commits that
-    /// entering state as its carrier's. A chain this node hosts is mined with
-    /// its own candidate, so its commitments are not carried. C is read from
-    /// `local` alone: a transaction anyone may submit never spends this node's
-    /// requests to its peers, on any build. No `local`, nothing is carried.
-    static func committedChildren(
-        in transactions: [Transaction],
-        entering: LatticeStateHeader,
-        hosted: Set<String>,
-        local: (any Fetcher)?
-    ) async -> [String: DirectChildCandidate] {
-        guard let fetcher = local else { return [:] }
-        var committed: [String: DirectChildCandidate] = [:]
-        let bodies = transactions.compactMap(\.body.node)
-        for commitment in Block.childCommitments(in: bodies) where !hosted.contains(commitment.directory) {
-            let key = MiningTemplateAssembly.committedChildKey(commitment.directory, commitment.child)
-            guard committed[key] == nil else { continue }
-            guard let block = try? await BlockHeader(rawCID: commitment.child).resolve(fetcher: fetcher).node,
-                  block.parentState.rawCID == entering.rawCID
-            else { continue }
-            committed[key] = DirectChildCandidate(directory: commitment.directory, block: block)
+    /// Whether a block on a tip entering `entering` can carry every child
+    /// commitment (`child/X` = `C@P`) `body` makes: X a directory this node
+    /// does not mine itself (it carries its own candidate there), C a standard
+    /// CID, and P exactly `entering`. Read from the transaction alone: C is
+    /// carried by CID, so a commitment never spends a request on its child.
+    static func carriesChildCommitments(_ body: TransactionBody, hosted: Set<String>, entering: String) -> Bool {
+        Block.childCommitments(in: [body]).allSatisfy { commitment in
+            guard !hosted.contains(commitment.directory), _isBoundedDirectoryAtom(commitment.directory),
+                  let value = Block.childCommitmentValue(commitment.value),
+                  CIDIdentity.isStandard(String(decoding: value.child, as: UTF8.self)) else { return false }
+            return value.parentState.elementsEqual(entering.utf8)
         }
-        return committed
     }
 
     /// Merged mining: a candidate block for each hosted direct child of
@@ -947,7 +909,6 @@ extension NodeRuntime {
         request: TemplateRequest,
         levels: LiveLevels,
         fetcher: any Fetcher,
-        local: (any Fetcher)? = nil,
         refused: inout [PolicyRefusal]
     ) async -> [DirectChildCandidate] {
         var candidates: [DirectChildCandidate] = []
@@ -973,20 +934,16 @@ extension NodeRuntime {
                 let below = tip != tipCID
                 let grandchildren = below ? [] : await childCandidates(
                     of: input.path, among: inputs, entering: previous.postState, timestamp: time,
-                    request: request, levels: levels, fetcher: fetcher, local: local, refused: &refused
+                    request: request, levels: levels, fetcher: fetcher, refused: &refused
                 )
                 let (pooled, refusedHere) = below ? ([], []) : await MiningPlan.policyAcceptedTransactions(
                     input.transactions, chainPath: input.path, previous: previous, timestamp: time,
                     spec: spec, fetcher: fetcher
                 )
                 if !refusedHere.isEmpty { refused.append(PolicyRefusal(path: input.path, tipCID: tipCID, cids: refusedHere)) }
-                let committed = await committedChildren(
-                    in: pooled, entering: previous.postState,
-                    hosted: hostedDirectories(below: input.path, among: inputs), local: local
-                )
                 block = try? await MiningTemplateAssembly.fit(
                     chainPath: input.path, lifetime: .seconds(30), previous: previous,
-                    pooled: pooled, provided: grandchildren, committed: committed, parentCarrier: carrier,
+                    pooled: pooled, provided: grandchildren, parentCarrier: carrier,
                     timestamp: time, rewardRecipient: request.childRecipients[input.path],
                     minimumWork: request.minimumWork,
                     difficultyAnchor: below ? anchorBelow : input.anchor,

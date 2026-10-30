@@ -29,7 +29,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/0xLattice/Lattice.git",
-            exact: "55.0.0"
+            branch: "consensus/child-commitment-parent-state"
         ),
         .package(
             url: "https://github.com/0xLattice/cashew.git",

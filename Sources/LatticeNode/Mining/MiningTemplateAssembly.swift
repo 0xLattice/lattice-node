@@ -151,7 +151,6 @@ enum MiningTemplateAssembly {
         previous: Block,
         transactions: [Transaction],
         children: [DirectChildCandidate],
-        committed: [String: DirectChildCandidate] = [:],
         parentCarrier: Block?,
         timestamp: Int64,
         transactionLimit: Int = .max,
@@ -220,9 +219,7 @@ enum MiningTemplateAssembly {
                 candidate = try await Self.makeCandidate(
                     previous: previous,
                     transactions: selected + chunk,
-                    children: childBlocks.merging(
-                        carried(by: selected + chunk, from: committed, beside: childBlocks).mapValues(\.block)
-                    ) { own, _ in own },
+                    children: childBlocks,
                     parentCarrier: parentCarrier,
                     timestamp: timestamp,
                     target: target,
@@ -251,9 +248,6 @@ enum MiningTemplateAssembly {
             blockCID: try BlockHeader(node: candidate).rawCID,
             minimumWork: minimumWork,
         )
-        // A committed child rides in `children` but is never scheduled: its
-        // target is whatever its author wrote, so it must not set the search.
-        // It is mined when the root is.
         let scheduling = try await Self.scheduling(
             root: candidate,
             children: children,
@@ -463,36 +457,9 @@ enum MiningTemplateAssembly {
         return candidate
     }
 
-    /// The children `transactions` commit (`child/X` = C) that `committed`
-    /// holds (keyed by `committedChildKey`), each where X is not already carried. A commitment left
-    /// out here does not match the block's children, so the builder refuses
-    /// its transaction and the bisection drops it.
-    private static func carried(
-        by transactions: [Transaction],
-        from committed: [String: DirectChildCandidate],
-        beside children: [String: Block]
-    ) -> [String: DirectChildCandidate] {
-        guard !committed.isEmpty else { return [:] }
-        var carried: [String: DirectChildCandidate] = [:]
-        for case let body? in transactions.map(\.body.node) {
-            for commitment in Block.childCommitments(in: [body]) {
-                guard children[commitment.directory] == nil, carried[commitment.directory] == nil,
-                      let child = committed[committedChildKey(commitment.directory, commitment.child)]
-                else { continue }
-                carried[commitment.directory] = child
-            }
-        }
-        return carried
-    }
-
-    /// One commitment's key: the same block committed under two directories
-    /// is two commitments.
-    static func committedChildKey(_ directory: String, _ child: String) -> String {
-        directory + "/" + child
-    }
-
-    /// A transaction committing a child the block does not carry is left out
-    /// like a chunk the state transform refuses.
+    /// A transaction whose child commitment the block cannot carry (see
+    /// `Block.validateChildCommitments`) is left out like a chunk the state
+    /// transform refuses.
     private static func breaksChildCommitment(_ error: any Error) -> Bool {
         if case BlockBuilderError.unmatchedChildCommitment = error { return true }
         return false
@@ -516,7 +483,6 @@ enum MiningTemplateAssembly {
         previous: Block,
         pooled: [Transaction],
         provided: [DirectChildCandidate],
-        committed: [String: DirectChildCandidate] = [:],
         parentCarrier: Block?,
         timestamp: Int64,
         rewardRecipient: String?,
@@ -525,9 +491,13 @@ enum MiningTemplateAssembly {
         spec: ChainSpec,
         fetcher: any Fetcher
     ) async throws -> MiningTemplate {
-        // A provided candidate holds its directory in every pass, so every
-        // pass leaves out the same commitments into it.
-        let carriable = committed.filter { _, child in !provided.contains { $0.directory == child.directory } }
+        // A provided candidate may hold its directory in the final pass but
+        // not the provisional one, so a commitment into it is left out of both.
+        let pooled = pooled.filter { transaction in
+            !Block.childCommitments(in: transaction.body.node.map { [$0] } ?? []).contains { commitment in
+                provided.contains { $0.directory == commitment.directory }
+            }
+        }
         var poolLimit = Int(clamping: spec.maxNumberOfTransactionsPerBlock)
         var largestFittingPoolLimit = -1
         var largestFittingTemplate: FittingMiningTemplate?
@@ -539,7 +509,6 @@ enum MiningTemplateAssembly {
                 previous: previous,
                 transactions: pooled,
                 children: [],
-                committed: carriable,
                 parentCarrier: parentCarrier,
                 timestamp: timestamp,
                 transactionLimit: poolLimit,
@@ -586,7 +555,6 @@ enum MiningTemplateAssembly {
                 transactions: selectedTransactions,
                 children: optionalChildren.prefix(selectedChildCount)
                     .sorted { $0.directory < $1.directory },
-                committed: carriable,
                 parentCarrier: parentCarrier,
                 timestamp: timestamp,
                 rewardRecipient: rewardRecipient,
@@ -611,7 +579,6 @@ enum MiningTemplateAssembly {
                     transactions: selectedTransactions,
                     children: optionalChildren.prefix(minimumChildCount)
                         .sorted { $0.directory < $1.directory },
-                    committed: carriable,
                     parentCarrier: parentCarrier,
                     timestamp: timestamp,
                     rewardRecipient: rewardRecipient,
@@ -637,7 +604,6 @@ enum MiningTemplateAssembly {
                             transactions: selectedTransactions,
                             children: optionalChildren.prefix(probeLimit)
                                 .sorted { $0.directory < $1.directory },
-                            committed: carriable,
                             parentCarrier: parentCarrier,
                             timestamp: timestamp,
                             rewardRecipient: rewardRecipient,
