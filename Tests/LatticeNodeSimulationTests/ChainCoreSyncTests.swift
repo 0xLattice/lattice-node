@@ -503,7 +503,7 @@ final class ChainCoreSyncTests: XCTestCase {
                 XCTAssertFalse(core.tree.contains(blockHash: carrier.cid))
             default:
                 XCTAssertTrue(disconnects(fetched).isEmpty, "availability, never blame")
-                XCTAssertTrue(core.sync.pending.entries.isEmpty)
+                XCTAssertNotNil(core.sync.pending.entries[carrier.cid], "it waits for another announcer")
             }
         }
     }
@@ -518,11 +518,11 @@ final class ChainCoreSyncTests: XCTestCase {
         let effects = relay(&core, [entry(carrier)], from: peer)
         XCTAssertTrue(disconnects(effects).isEmpty)
         XCTAssertEqual(fetches(effects), [cid])
-        // The honest map, over the limit, is unavailable here: the header is
-        // dropped unjudged (neither weighed nor excluded) and nobody is blamed.
+        // The honest map, over the limit, is unavailable here: the header
+        // waits unjudged (neither weighed nor excluded) and nobody is blamed.
         let fetched = core.step(.childIndexFetched(peer, cid: cid, carrier.children), now: Self.now)
         XCTAssertTrue(disconnects(fetched).isEmpty, "a resource limit, never blame")
-        XCTAssertTrue(core.sync.pending.entries.isEmpty)
+        XCTAssertNotNil(core.sync.pending.entries[carrier.cid])
         XCTAssertFalse(core.tree.contains(blockHash: carrier.cid))
         XCTAssertTrue(relays(fetched).isEmpty, "no verdict is logged or pushed")
 
