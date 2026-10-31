@@ -1084,11 +1084,11 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertTrue(host.disconnects.isEmpty)
     }
 
-    /// A burst of derived proofs past the per-source cap: a level hosted late
-    /// takes C from a peer with one proof, and every other committer of C is
-    /// derived at once; each credits, in no source's load.
-    func testABurstOfDerivedProofsPastTheSourceCapAllCredit() async throws {
-        let fixture = try await carriersWorld(ChildProofConfig().maxPerSource + 6)
+    /// A burst of derived proofs: a level hosted late takes C from a peer
+    /// with one proof, and every other committer of C is derived at once;
+    /// each credits.
+    func testABurstOfDerivedProofsAllCredit() async throws {
+        let fixture = try await carriersWorld(70)
         var host = Host(fixture.world, hosted: [])
         host.trace(testName, fixture.labels)
         for grind in fixture.mined { await host.step(.mined(grind)) }
@@ -1096,7 +1096,6 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertTrue(fixture.carrierCIDs.isSubset(of: try grinds(at: fixture.c.cid, host)))
         XCTAssertEqual(host.derived.filter { $0.cid == fixture.c.cid }.count, fixture.carriers.count,
                        "every committer, the peer's proof's included")
-        XCTAssertEqual(host.core.levels[Self.alpha]?.sync.proofs.load.isEmpty, true, "derived proofs are no source's load")
         XCTAssertTrue(host.disconnects.isEmpty)
     }
 

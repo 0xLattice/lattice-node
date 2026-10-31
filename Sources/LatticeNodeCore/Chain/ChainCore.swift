@@ -449,8 +449,7 @@ public struct ChainCore: Sendable {
         case .proofsFound(let cid, let proofs):
             proofsFound(proofs, for: cid, &turn)
         case .proofDropped(let job):
-            if let checked = sync.proofs.verifying.removeValue(forKey: job.key) {
-                sync.proofs.charge(checked, -1)
+            if sync.proofs.verifying.removeValue(forKey: job.key) != nil {
                 skipped(job.childCID)
             }
         case .proofVerified(let job, let result):
@@ -786,31 +785,15 @@ public struct ChainCore: Sendable {
     /// asked for (an object asked of another peer counts as held, until that
     /// request stalls). A header it holds but has not weighed gains the peer
     /// as an announcer (the peer holds its ancestors). Otherwise the next
-    /// page is pulled. Holes still lacking are asked again on a tick. A
-    /// child level asks for no more headers than it has room for their
-    /// proofs (`proofRoom`): the rest are asked as checks finish - once
-    /// half the peer's slots are free, so that a request, which occupies
-    /// the peer for a round trip, is not spent on the one slot the first
-    /// finished check frees.
+    /// page is pulled. Holes still lacking are asked again on a tick.
     mutating func pump(_ peer: PeerID, _ turn: inout Turn, again: Bool = false) {
         guard let state = sync.peers[peer], state.data == nil, sync.cursors[peer.key] != nil else { return }
         let inFlight = Set(sync.peers.values.flatMap { $0.data?.cids ?? [] })
-        let room = proofRoom(for: peer)
-        var requested = state.holes.last.map { Swift.max(state.requested, $0.position) } ?? state.requested
+        let requested = state.holes.last.map { Swift.max(state.requested, $0.position) } ?? state.requested
         var seen = Set<String>()
         var cids: [String] = []
         for hole in state.holes where (again || hole.position > state.requested) && lacks(hole.entry, inFlight: inFlight) {
-            guard seen.contains(hole.entry.block) || cids.count < room else {
-                requested = hole.position - 1
-                break
-            }
             if seen.insert(hole.entry.block).inserted { cids.append(hole.entry.block) }
-        }
-        if requested < (state.holes.last?.position ?? 0), cids.count * 2 < proofConfig.maxPerSource {
-            // The window is full and under half of it is free: wait for
-            // more checks to finish (some are in flight, or it would fit).
-            requested = state.requested
-            cids = []
         }
         for hole in state.holes where hole.position > state.requested && hole.position <= requested
             && hole.entry.kind == .header && sync.pending.entries[hole.entry.block] != nil {
