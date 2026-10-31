@@ -190,6 +190,91 @@ final class DaemonHTTPTests: XCTestCase {
         }
     }
 
+    func testChildBlockSubmitRefusesARootPathMalformedBytesAndAnUnhostedChain() async throws {
+        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-http-child-block-\(UUID().uuidString)"
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
+        let storage = try await NodeStorage.open(configuration: NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: storageDirectory,
+            privateKeyHex: String(repeating: "01", count: 32)
+        ))
+        let service = try await startRuntime(storage)
+        let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
+        let genesis = try await NexusGenesis.buildGenesisBlock(fetcher: storage.workFetcher)
+        let block = try XCTUnwrap(Block(data: try XCTUnwrap(genesis.toData()))?.toData())
+        let children = try XCTUnwrap(FlatDictionary<BlockHeader>().toData())
+        let cases: [(SubmitChildBlockRequest, HTTPResponse.Status)] = [
+            (SubmitChildBlockRequest(chainPath: ["Nexus"], block: block, children: children), .badRequest),
+            (SubmitChildBlockRequest(chainPath: ["Nexus", "Alpha"], block: Data([1, 2, 3]), children: children), .badRequest),
+            (SubmitChildBlockRequest(chainPath: ["Nexus", "Alpha"], block: block, children: children), .notFound),
+        ]
+
+        try await app.test(.router) { client in
+            for (request, status) in cases {
+                try await client.execute(
+                    uri: "/child-blocks",
+                    method: .post,
+                    headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
+                    body: ByteBuffer(bytes: try JSONEncoder().encode(request))
+                ) { response in
+                    XCTAssertEqual(response.status, status, "\(request.chainPath)")
+                }
+            }
+        }
+    }
+
+    /// A block the node already weighs, submitted again, answers `tree`:
+    /// the status the author's push stops on.
+    func testChildBlockSubmitOfAWeighedBlockAnswersTree() async throws {
+        let alpha = ["Nexus", "Alpha"]
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: temporaryDirectory(),
+            privateKeyHex: String(repeating: "01", count: 32),
+            hostedChildren: [alpha],
+            childSpecs: [alpha: ChainSpec(
+                maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
+                targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
+            )]
+        )
+        let storage = try await NodeStorage.open(configuration: configuration)
+        let service = try await startRuntime(storage)
+        let recipient = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
+        let template = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: alpha, address: recipient)])
+        let reads = try XCTUnwrap(service.levelReads[alpha])
+        try await eventually("Alpha is mined past genesis") {
+            _ = try? await service.mineBlock(template)
+            return (await reads.readSnapshot().height ?? 0) >= 1
+        }
+        let snapshot = await reads.readSnapshot()
+        let tip = try XCTUnwrap(snapshot.tipCID)
+        let blockContent = await storage.content([tip])
+        let blockData = try XCTUnwrap(blockContent[tip])
+        let block = try XCTUnwrap(Block(data: blockData))
+        let index = block.children.rawCID
+        let indexContent = await storage.content([index])
+        let children = try XCTUnwrap(indexContent[index])
+        let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
+
+        try await app.test(.router) { client in
+            try await client.execute(
+                uri: "/child-blocks",
+                method: .post,
+                headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
+                body: ByteBuffer(bytes: try JSONEncoder().encode(
+                    SubmitChildBlockRequest(chainPath: alpha, block: blockData, children: children)
+                ))
+            ) { response in
+                XCTAssertEqual(response.status, .ok, String(buffer: response.body))
+                let reply = try JSONDecoder().decode(SubmitChildBlockResponse.self, from: Data(buffer: response.body))
+                XCTAssertEqual(reply, SubmitChildBlockResponse(blockCID: tip, status: .tree))
+                XCTAssertTrue(String(buffer: response.body).contains(#""status":"tree""#))
+            }
+        }
+    }
+
     func testMiningTemplateRequestJSONDefaults() throws {
         let empty = try JSONDecoder().decode(
             MiningTemplateRequest.self,

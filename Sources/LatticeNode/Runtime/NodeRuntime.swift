@@ -1569,6 +1569,27 @@ extension NodeRuntime {
                 bodies.removeValue(forKey: BodyKey(path: path, cid: cid))?.cancel()
                 bodyRoots[BodyKey(path: path, cid: cid)] = nil
                 fetchWaits[BodyKey(path: path, cid: cid)] = nil
+            case .deriveProof(let job):
+                // From this node's own content only, never peers: the block
+                // (read from this store when weighed), the carrier, its child
+                // index and its saved proofs, written by the step that
+                // weighed it, before this effect.
+                let held = job.block ?? storage.store.header(job.childCID)?.block
+                let parent = Array(path.dropLast())
+                let (storage, failStop) = (storage, failStop)
+                executionJobs.append(RuntimeJob(path: path, epoch: nil) {
+                    var upstream: [ChildBlockProof] = []
+                    if parent.count > 1 {
+                        do {
+                            upstream = try storage.store.savedProofs(at: parent, for: [job.carrier])[job.carrier] ?? []
+                        } catch {
+                            failStop(error)
+                            return []
+                        }
+                    }
+                    return [.level(path, .derived(await job.run(held: held, upstream: upstream, fetcher: storage.workFetcher)))]
+                })
+                startJobs()
             case .verifyProof(let job):
                 // A job without its block reads it from the header store.
                 guard let block = job.block ?? storage.store.header(job.childCID)?.block else {

@@ -23,3 +23,5 @@ Tests/LatticeNodeTests/Content/BundledBlockFetchTests.swift|private final class 
 Sources/LatticeNode/Content/AcquisitionBudget.swift|public final class AcquisitionBudget: @unchecked Sendable {|All reservation, waiter-queue, and peak state is guarded by AcquisitionBudget's NSLock.
 Sources/LatticeNode/Content/AcquisitionBudget.swift|private final class Waiter: @unchecked Sendable {|A waiter's continuation and cancelled flag are read and written only under AcquisitionBudget's NSLock.
 Sources/LatticeNode/Runtime/NodeRuntime.swift|private final class Handoff<Value>: @unchecked Sendable {|Written once in init before the loop Task is created (Task creation orders it), then taken exactly once by that Task; no other access.
+Tests/LatticeNodeSimulationTests/DerivedGrindTrace.swift|final class GrindTracer: @unchecked Sendable {|Test-only trace recorder; each tracer is owned by one test host and mutated serially within that test.
+Tests/LatticeNodeSimulationTests/DerivedGrindTrace.swift|nonisolated(unsafe) static var open: [GrindTracer] = []|The open tracer list is read and replaced only while holding its static NSLock.

@@ -311,10 +311,9 @@ extension NodeStorage {
             for (directory, child) in children.entries.sorted(by: { $0.key < $1.key }) {
                 let childPath = path + [directory]
                 guard hosted.contains(childPath), let block = child.node else { continue }
-                let hop = try await ChildBlockProof.generate(
-                    rootHeader: BlockHeader(node: carrier), childDirectory: directory, fetcher: localFetcher
-                )
-                let proof = proofToCarrier.map { $0.composing(hop: hop) } ?? hop
+                guard let proof = try await ChildBlockProof.extending(
+                    proofToCarrier.map { [$0] }, by: BlockHeader(node: carrier), into: directory, fetcher: localFetcher
+                ).first else { continue }
                 // Only a block the grind's work meets is stored and walked.
                 guard case .success(let evidence) = await proof.verifySecuringWork(child: block, chainPath: childPath),
                       evidence.contribution != nil else { continue }

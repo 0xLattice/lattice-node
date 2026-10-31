@@ -168,6 +168,12 @@ public struct NodeCore: Sendable {
     public private(set) var touched: Set<ChainPath> = []
     /// Operator overrides: the one genesis a child chain admits.
     public let pins: [ChainPath: String]
+    /// The blocks of each child level restored from its facts (at boot or
+    /// by `host`), orphans included, that the next step takes as arrived:
+    /// their committers' grinds are derived again (`deriveGrinds`), since
+    /// nothing of a derivation is persisted and a crash can fall between a
+    /// carrier weighed and its derivation.
+    var restored: [ChainPath: Set<String>] = [:]
 
     /// A host over its root tree, running every hosted child level whose
     /// parent level it runs, each empty. The host owns the root tree: a
@@ -311,6 +317,15 @@ public struct NodeCore: Sendable {
         // `init` served is gone).
         guard serve(path), let parent = levels[Array(path.dropLast())] else { return }
         levels[path] = try restoreLevel(path, parent: parent, facts: facts, specs: specs, cursors: cursors)
+        restored[path] = Self.blocks(of: facts)
+    }
+
+    /// Every block `facts` weigh.
+    static func blocks(of facts: [BlockImportBatch]) -> Set<String> {
+        Set(facts.flatMap(\.facts).compactMap {
+            guard case .block(let block) = $0 else { return nil }
+            return block.blockHash
+        })
     }
 
     /// One child level over its journaled facts and its restored parent.
@@ -359,6 +374,8 @@ public struct NodeCore: Sendable {
         /// What each level's admissions weighed this step
         /// (`ChainTreeUpdate.weighed`), forwarded to run attribution.
         var weighed: [ChainPath: Set<String>] = [:]
+        /// What each level took in this step (`ChainCore.arrived`).
+        var arrived: [ChainPath: Set<String>] = [:]
         /// Every level the step ran (`NodeCore.touched`).
         var touched: Set<ChainPath> = []
     }
@@ -418,8 +435,9 @@ public struct NodeCore: Sendable {
     mutating func run(_ path: ChainPath, _ event: ChainEvent, _ turn: inout Turn) {
         guard var core = levels.removeValue(forKey: path) else { return }
         turn.touched.insert(path)
-        let effects = core.step(event, now: turn.now)
+        let effects = core.step(event, now: turn.now, parent: path.count > 1 ? levels[Array(path.dropLast())]?.tree : nil)
         turn.weighed[path, default: []].formUnion(core.weighed)
+        turn.arrived[path, default: []].formUnion(core.arrived)
         levels[path] = consume core
         absorb(effects, at: path, &turn)
         let executed = effects.contains {
@@ -513,6 +531,7 @@ public struct NodeCore: Sendable {
         else { return }
         hosted.insert(path)
         levels[path] = level
+        restored[path] = Self.blocks(of: facts)
         turn.touched.formUnion([path, Array(path.dropLast())])
         for peer in peers.sorted() { run(path, .peerReady(peer), &turn) }
     }
@@ -525,6 +544,7 @@ public struct NodeCore: Sendable {
         for held in levels.keys where held.starts(with: path) {
             levels[held] = nil
             hosted.remove(held)
+            restored[held] = nil
         }
     }
 
@@ -589,22 +609,27 @@ public struct NodeCore: Sendable {
     /// Credit each child level with the parent runs this step can have
     /// moved, parent levels first: the parent level's weighed blocks and the
     /// blocks its own derivation raised, and this level's weighed blocks,
-    /// forwarded unchanged. What a level raises flows on down.
+    /// forwarded unchanged. What a level raises flows on down. Beside them,
+    /// by the same index, the grinds of the parent's weighed blocks and of
+    /// the committers of what this level took in are derived (a level just
+    /// restored takes in every block it holds).
     mutating func attributeRuns(_ turn: inout Turn) {
         var raised: [ChainPath: Set<String>] = [:]
         for path in ordered where path.count > 1 {
             let parent = Array(path.dropLast())
             let parentBlocks = (turn.weighed[parent] ?? []).union(raised[parent] ?? [])
             let held = turn.weighed[path] ?? []
-            guard !parentBlocks.isEmpty || !held.isEmpty,
+            let arrived = (turn.arrived[path] ?? []).union(restored.removeValue(forKey: path) ?? [])
+            guard !parentBlocks.isEmpty || !held.isEmpty || !arrived.isEmpty,
                   let parentCore = levels[parent], var core = levels.removeValue(forKey: path) else { continue }
             let result = core.applyParentRun(
                 from: parentCore.tree, parentBlocks: parentBlocks, held: held, now: turn.now
             )
+            let derived = core.deriveGrinds(from: parentCore.tree, carriers: turn.weighed[parent] ?? [], arrived: arrived)
             levels[path] = consume core
             turn.touched.insert(path)
             raised[path] = Set(result.raised)
-            absorb(result.effects, at: path, &turn)
+            absorb(result.effects + derived, at: path, &turn)
         }
     }
 }

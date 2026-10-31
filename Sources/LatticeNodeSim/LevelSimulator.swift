@@ -511,6 +511,13 @@ public struct LevelSimulator {
             schedule(at: delay(), to: name, .host(.level(path, .bodyFetched(cid: cid))))
         case .cancelBody:
             break
+        case .deriveProof(let job):
+            // The carrier's proofs are this node's own, as the runtime reads
+            // them.
+            let held = job.block ?? node.store.levels[path]?.headers[job.childCID]?.block
+            let upstream = node.store.proofs(Array(path.dropLast()), job.carrier)
+            let derivation = await job.run(held: held, upstream: upstream, fetcher: world.cas)
+            schedule(at: delay(), to: name, .host(.level(path, .derived(derivation))))
         case .persist, .disconnect, .wakeAt, .connect:
             throw Invariants.fail(name, "a level effect escaped the host")
         }
