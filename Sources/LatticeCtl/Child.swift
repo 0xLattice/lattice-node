@@ -5,18 +5,6 @@ import LatticeCtlCore
 import LatticeNode
 import LatticeNodeAPI
 
-/// The chain's latest block, as its RPC reads it now.
-func latestBlock(rpc: NodeRPC, chain: String) async throws -> ExplorerLatestBlock {
-    var request = try rpc.request("api/block/latest", chain: chain)
-    request.timeoutInterval = 10
-    request.cachePolicy = .reloadIgnoringLocalCacheData
-    let (data, response) = try await URLSession.shared.data(for: request)
-    guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-        throw CtlError("latest block lookup failed")
-    }
-    return try JSONDecoder().decode(ExplorerLatestBlock.self, from: data)
-}
-
 /// Child chains this host runs as levels of its one process.
 struct Child: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
