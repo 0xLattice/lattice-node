@@ -230,11 +230,9 @@ public struct ChildProofSync: Sendable {
         deriving[child, default: 0] += 1
     }
 
-    /// Whether a derivation of `child` was in flight.
-    mutating func finishDeriving(_ child: String) -> Bool {
-        guard let count = deriving[child] else { return false }
+    mutating func finishDeriving(_ child: String) {
+        guard let count = deriving[child] else { return }
         deriving[child] = count == 1 ? nil : count - 1
-        return true
     }
 
     mutating func charge(_ proof: QueuedChildProof, _ sign: Int) {

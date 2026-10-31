@@ -338,6 +338,21 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertTrue(late.disconnects.isEmpty && after.disconnects.isEmpty)
     }
 
+    /// A derivation that answers after its count is gone (an unhost and
+    /// re-host between) is still applied: the job is pure, credit idempotent.
+    func testADerivationOutlivingItsCountIsStillApplied() async throws {
+        let fixture = try await committedWorld()
+        var late = await host(fixture)
+        late.holdDerivations = true
+        await late.relay(fixture.b, at: Self.nexus, from: Self.miner)
+        await late.meet(Self.alphaHost)
+        await late.relay(fixture.c, at: Self.alpha, from: Self.alphaHost)
+        late.core.levels[Self.alpha]?.sync.proofs.deriving = [:]
+        await late.runHeldDerivations()
+        XCTAssertNotNil(try late.digest(Self.alpha).blocks[fixture.c.cid]?.grinds[fixture.b.cid], "C is credited")
+        XCTAssertEqual(late.core.levels[Self.alpha]?.sync.proofs.deriving.isEmpty, true)
+    }
+
     /// B and its sibling S both commit C: each one's grind is credited at C,
     /// the second while C is held.
     func testSiblingCarriersOfOneBlockBothCreditIt() async throws {
