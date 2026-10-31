@@ -334,7 +334,9 @@ final class LevelSimulationTests: XCTestCase {
             doubleProbability: 0, withholdDelay: 1_000
         )
         let now = World.genesisTime + 1_000_000
-        let config = ChainCoreConfig()
+        // Small pages, so the chain takes several requests.
+        var config = ChainCoreConfig()
+        config.maxHeadersPerPage = 16
         let alpha = LevelWorld.alpha
         var host = NodeCore(root: world.rootBootstrap.tree.detached(), hosted: world.hosted, config: config)
         var source = LevelSource(name: "source", config: config)
