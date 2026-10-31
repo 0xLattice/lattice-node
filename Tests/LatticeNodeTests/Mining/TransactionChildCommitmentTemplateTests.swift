@@ -6,8 +6,8 @@ import cashew
 @testable import LatticeNode
 
 /// A pooled `child/X` = `C@P` transaction is carried with C at `children[X]`
-/// by CID alone, unless the node mines X itself or the template does not
-/// enter P.
+/// by CID alone, unless the node hosts X (it mines X itself) or the
+/// template does not enter P.
 final class TransactionChildCommitmentTemplateTests: XCTestCase {
     private static let nexus = LevelWorld.nexus
     private static let alpha = LevelWorld.alpha
@@ -60,13 +60,14 @@ final class TransactionChildCommitmentTemplateTests: XCTestCase {
     }
 
     private func template(
-        _ fixture: Fixture, pooled: [Transaction], provided: [DirectChildCandidate] = [], fetcher: SimCAS? = nil
+        _ fixture: Fixture, pooled: [Transaction], provided: [DirectChildCandidate] = [],
+        hosted: Set<String> = [], fetcher: SimCAS? = nil
     ) async throws -> MiningTemplate {
         let resolved = try await fixture.genesis.spec.resolve(fetcher: fixture.cas).node
         let spec = try XCTUnwrap(resolved)
         return try await MiningTemplateAssembly.fit(
             chainPath: Self.nexus, lifetime: .seconds(30), previous: fixture.genesis,
-            pooled: pooled, provided: provided, parentCarrier: nil,
+            pooled: pooled, provided: provided, hosted: hosted.union(provided.map(\.directory)), parentCarrier: nil,
             timestamp: fixture.timestamp, rewardRecipient: nil, minimumWork: [:], difficultyAnchor: nil,
             spec: spec, fetcher: fetcher ?? fixture.cas
         )
@@ -121,6 +122,16 @@ final class TransactionChildCommitmentTemplateTests: XCTestCase {
         XCTAssertEqual(chains.map(\.chainPath), [Self.nexus, Self.alpha], "an own candidate is reported")
     }
 
+    /// A hosting node never carries a commitment into its own directory,
+    /// even in a round it built no candidate there.
+    func testAHostedDirectoryIsLeftOutWithoutACandidate() async throws {
+        let fixture = try await fixture()
+        let block = try await template(fixture, pooled: [fixture.commitment], hosted: [Self.directory]).block
+        let (child, transactions) = try await carried(block, fixture.cas)
+        XCTAssertNil(child)
+        XCTAssertEqual(transactions, 0)
+    }
+
     /// A commitment built on another state is left out: carrying it would
     /// make the block invalid.
     func testACommitmentOnAnotherStateIsLeftOut() async throws {
@@ -144,18 +155,18 @@ final class TransactionChildCommitmentTemplateTests: XCTestCase {
         XCTAssertEqual(with.targets, without.targets)
     }
 
-    /// Preflight reads the transaction alone: a hosted directory, another
-    /// state, a malformed value or a non-directory name is never carried.
+    /// Preflight reads the transaction alone: another state, a malformed
+    /// value or a non-directory name is never carried. A hosted directory
+    /// is not read at all: a hosting node pools and relays the commitment.
     func testPreflightCarriesOnlyWhatThisTipCan() async throws {
         let fixture = try await fixture()
         let state = fixture.entering
         let cid = fixture.child.cid
-        func carries(_ value: String, under directory: String = Self.directory, hosted: Set<String> = []) throws -> Bool {
+        func carries(_ value: String, under directory: String = Self.directory) throws -> Bool {
             let body = try XCTUnwrap(Self.commit(value, under: directory, key: 0).body.node)
-            return NodeRuntime.carriesChildCommitments(body, hosted: hosted, entering: state)
+            return NodeRuntime.carriesChildCommitments(body, entering: state)
         }
         XCTAssertTrue(try carries(cid + "@" + state))
-        XCTAssertFalse(try carries(cid + "@" + state, hosted: [Self.directory]), "hosted")
         XCTAssertFalse(try carries(cid + "@" + cid), "another state")
         XCTAssertFalse(try carries(cid), "no parent state")
         XCTAssertFalse(try carries("not-a-cid@" + state), "non-standard CID")

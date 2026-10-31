@@ -81,6 +81,38 @@ public struct SubmitChildBlockResponse: Codable, Sendable, Equatable {
     }
 }
 
+/// `POST /child-blocks/build`: a block for the hosted child chain
+/// `chainPath`, built as this node's next template carries it, paying its
+/// reward to `recipient`, for its author to have another chain's miners
+/// commit (`child/X` = `C@P`) on the parent.
+public struct BuildChildBlockRequest: Codable, Sendable {
+    public let chainPath: [String]
+    public let recipient: String?
+
+    public init(chainPath: [String], recipient: String? = nil) {
+        self.chainPath = chainPath
+        self.recipient = recipient
+    }
+}
+
+/// The built block, stored and retained here: its CID, the parent state it
+/// was built on (P), the directory's current commitment value at P (the
+/// commitment's `oldValue`; nil for the first), and the push that submits it
+/// once a parent block commits it.
+public struct BuildChildBlockResponse: Codable, Sendable {
+    public let blockCID: String
+    public let parentState: String
+    public let previous: String?
+    public let submit: SubmitChildBlockRequest
+
+    public init(blockCID: String, parentState: String, previous: String?, submit: SubmitChildBlockRequest) {
+        self.blockCID = blockCID
+        self.parentState = parentState
+        self.previous = previous
+        self.submit = submit
+    }
+}
+
 /// Where one chain's block reward and fees go: a wallet address for one
 /// absolute chain path. The block commits it as `rewardRecipient`, which the
 /// proof of work covers, so a relayer cannot swap it. Process identity is
@@ -340,4 +372,7 @@ public enum NodeAPIError: Error, Equatable, Sendable {
     case timestampOverflow
     case templateTooLarge
     case malformedBlock
+    /// The node's template carries no block for the child chain now (its
+    /// root is weighed but not executed, or it has no spec to start from).
+    case noChildCandidate
 }

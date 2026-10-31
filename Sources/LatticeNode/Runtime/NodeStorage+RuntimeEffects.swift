@@ -257,24 +257,26 @@ extension NodeStorage {
     /// before its header is weighed (content first). Returns its child
     /// index, which the root header is inserted with. What the block names
     /// and this store lacks is read from peers, as the template that built
-    /// it read it.
+    /// it read it. A child block built for its author to commit (`at` its
+    /// chain) is stored the same way, before any parent commits it.
     nonisolated func storeMinedBlock(
-        _ block: Block, remote: IvyRootContentSource? = nil
+        _ block: Block, at path: ChainPath? = nil, remote: IvyRootContentSource? = nil
     ) async throws -> FlatDictionary<BlockHeader> {
         let header = try BlockHeader(node: block)
-        guard let remote else { return try await storeMinedBlock(header, block, fetcher: localFetcher) }
+        let path = path ?? configuration.chainPath
+        guard let remote else { return try await storeMinedBlock(header, block, at: path, fetcher: localFetcher) }
         return try await remote.withRootTracing(header.rawCID, bundle: false) { session in
             let children = try await storeMinedBlock(
-                header, block, fetcher: ownReads(through: session)
+                header, block, at: path, fetcher: ownReads(through: session)
             )
             return children
         }.value
     }
 
     private nonisolated func storeMinedBlock(
-        _ header: BlockHeader, _ block: Block, fetcher: any Fetcher
+        _ header: BlockHeader, _ block: Block, at path: ChainPath, fetcher: any Fetcher
     ) async throws -> FlatDictionary<BlockHeader> {
-        let roots = try await storingAndRetaining(header.rawCID, at: configuration.chainPath, from: fetcher) { storage in
+        let roots = try await storingAndRetaining(header.rawCID, at: path, from: fetcher) { storage in
             try await header.storeBlock(fetcher: fetcher, storer: storage)
         }
         bundles.record(root: header.rawCID, roots: roots)

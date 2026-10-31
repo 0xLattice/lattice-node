@@ -474,13 +474,15 @@ enum MiningTemplateAssembly {
     /// The largest template on `previous` that fits the block size: the
     /// pool's transactions (`pooled`, in order) bisected by count, then as
     /// many of the `provided` child candidates as still fit. Assembly only:
-    /// nothing is issued.
+    /// nothing is issued. `hosted` names the directories under `chainPath`
+    /// this node hosts.
     static func fit(
         chainPath: [String],
         lifetime: Duration,
         previous: Block,
         pooled: [Transaction],
         provided: [DirectChildCandidate],
+        hosted: Set<String>,
         parentCarrier: Block?,
         timestamp: Int64,
         rewardRecipient: String?,
@@ -489,12 +491,10 @@ enum MiningTemplateAssembly {
         spec: ChainSpec,
         fetcher: any Fetcher
     ) async throws -> MiningTemplate {
-        // A provided candidate may hold its directory in the final pass but
-        // not the provisional one, so a commitment into it is left out of both.
+        // A hosted directory is this node's to mine: it carries its own
+        // candidate there, or none this round, never another's commitment.
         let pooled = pooled.filter { transaction in
-            !Block.childCommitments(in: transaction.body.node.map { [$0] } ?? []).contains { commitment in
-                provided.contains { $0.directory == commitment.directory }
-            }
+            !Block.childCommitments(in: transaction.body.node.map { [$0] } ?? []).contains { hosted.contains($0.directory) }
         }
         var poolLimit = Int(clamping: spec.maxNumberOfTransactionsPerBlock)
         var largestFittingPoolLimit = -1

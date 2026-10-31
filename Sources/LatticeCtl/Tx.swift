@@ -184,10 +184,15 @@ extension Tx {
             }
             try await tx.submit(
                 signer: signer,
-                actions: [Action(
-                    key: CHILD_COMMITMENT_KEY_PREFIX + directory, oldValue: previous,
-                    newValue: block + String(UnicodeScalar(CHILD_COMMITMENT_PARENT_STATE_SEPARATOR)) + parentState
-                )]
+                actions: [Self.action(directory: directory, block: block, parentState: parentState, previous: previous)]
+            )
+        }
+
+        /// `child/<directory>` = `<block>@<parentState>`, replacing `previous`.
+        static func action(directory: String, block: String, parentState: String, previous: String?) -> Action {
+            Action(
+                key: CHILD_COMMITMENT_KEY_PREFIX + directory, oldValue: previous,
+                newValue: block + String(UnicodeScalar(CHILD_COMMITMENT_PARENT_STATE_SEPARATOR)) + parentState
             )
         }
     }
