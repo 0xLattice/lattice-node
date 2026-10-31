@@ -45,6 +45,7 @@ struct GrindTraceFixture {
 /// order the model can take, and only the last carries the state after.
 final class GrindTracer: @unchecked Sendable {
     nonisolated(unsafe) static var open: [GrindTracer] = []
+    private static let openLock = NSLock()
 
     let name: String
     let path: ChainPath
@@ -106,7 +107,7 @@ final class GrindTracer: @unchecked Sendable {
             || start.deriving.values.contains(where: { $0 > 0 }) {
             anomalies.append("trace started with work in flight")
         }
-        Self.open.append(self)
+        Self.openLock.withLock { Self.open.append(self) }
     }
 
     var grow: Bool { parentPath.count > 1 }
@@ -349,8 +350,11 @@ final class GrindTracer: @unchecked Sendable {
     /// is set; return them either way.
     @discardableResult
     static func flush() throws -> [GrindTracer] {
-        let traces = open
-        open = []
+        let traces = openLock.withLock {
+            let traces = open
+            open = []
+            return traces
+        }
         guard let directory = ProcessInfo.processInfo.environment["DERIVED_TRACE_DIR"] else { return traces }
         let url = URL(fileURLWithPath: directory)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
