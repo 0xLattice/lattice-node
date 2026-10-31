@@ -16,9 +16,8 @@ public struct ChildProofConfig: Sendable {
     /// Proofs taken from one header, and the largest proof taken at all.
     public var maxPerHeader: Int
     public var maxProofBytes: Int
-    /// Headers awaiting their first proof that weighs, at once and per peer.
+    /// Headers awaiting their first proof that weighs, at once.
     public var maxAwaiting: Int
-    public var maxAwaitingPerPeer: Int
     /// Blocks the evidence index named that this node does not hold: a
     /// header without proofs is taken only for one of these (or a parent a
     /// waiting header names).
@@ -32,7 +31,6 @@ public struct ChildProofConfig: Sendable {
         maxPerHeader: Int = 8,
         maxProofBytes: Int = 64 * 1_024,
         maxAwaiting: Int = 1_024,
-        maxAwaitingPerPeer: Int = 256,
         maxWanted: Int = 4_096
     ) {
         self.maxChecks = maxChecks
@@ -42,7 +40,6 @@ public struct ChildProofConfig: Sendable {
         self.maxPerHeader = maxPerHeader
         self.maxProofBytes = maxProofBytes
         self.maxAwaiting = maxAwaiting
-        self.maxAwaitingPerPeer = maxAwaitingPerPeer
         self.maxWanted = maxWanted
     }
 }
@@ -279,10 +276,6 @@ extension ChainCore {
             || sync.proofs.awaiting.values.contains { $0.block.parent?.rawCID == cid }
             || parentTree.map { !$0.committers(of: cid, directory: chainPath[chainPath.count - 1]).isEmpty } == true
         guard !entry.proofs.isEmpty || wanted else { return }
-        if let peer {
-            let fromPeer = sync.proofs.awaiting.values.filter { $0.source == peer }.count
-            guard fromPeer < proofConfig.maxAwaitingPerPeer else { return }
-        }
         guard makeRoomToAwait() else { return }
         sync.proofs.sequence += 1
         sync.proofs.awaiting[cid] = AwaitingChildProof(

@@ -292,6 +292,7 @@ final class DerivedChildGrindTests: XCTestCase {
     /// N0 and N1 (carrying Alpha's genesis G) mined as usual; C on G; B and
     /// its sibling S on N1 each commit C by CID through a transaction (their
     /// miners host no Alpha and make no proof); B2 on B commits nothing.
+    /// D1 and D2, C's siblings on G, are committed by nothing.
     private struct Committed {
         let world: LevelWorld
         let setup: [MinedGrind]
@@ -300,6 +301,7 @@ final class DerivedChildGrindTests: XCTestCase {
         let b: SimBlock
         let sibling: SimBlock
         let b2: SimBlock
+        let d: [SimBlock]
     }
 
     private func committedWorld() async throws -> Committed {
@@ -323,8 +325,12 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertEqual(children?[Self.alpha[1]]?.rawCID, c.cid, "B carries C by CID")
         XCTAssertNil(children?[Self.alpha[1]]?.node, "B carries C by CID alone")
         let b2 = try await builder.grind(on: b.root, carrying: [], at: Self.t + 3 * Self.interval, outcome: .block)
+        var d: [SimBlock] = []
+        for nonce in [UInt64(2), 3] {
+            d.append(try await builder.build(on: g, carrierPrevState: entering, timestamp: Self.t + 2 * Self.interval, nonce: nonce))
+        }
         return Committed(
-            world: builder.world(), setup: [n0.grind, n1.grind], g: g, c: c, b: b.root, sibling: sibling.root, b2: b2.root
+            world: builder.world(), setup: [n0.grind, n1.grind], g: g, c: c, b: b.root, sibling: sibling.root, b2: b2.root, d: d
         )
     }
 
@@ -701,6 +707,29 @@ final class DerivedChildGrindTests: XCTestCase {
         }
         XCTAssertTrue(asked, "its hole is asked again on a tick")
         XCTAssertNotNil(host.core.levels[Self.alpha]?.sync.pending.entries[fixture.c.cid]?.evidence[fixture.b.cid], "its credit is still kept")
+    }
+
+    /// One peer fills the whole waiting pool: there is no per-peer cap. An
+    /// honest header from another peer still gets in, evicting the oldest
+    /// entry not held.
+    func testOnePeerFillingTheWaitingPoolCannotKeepAnotherOut() async throws {
+        let fixture = try await committedWorld()
+        var config = ChainCoreConfig()
+        config.proofs.maxAwaiting = fixture.d.count
+        var (host, proof) = try await provedHost(fixture, config: config)
+        host.deferChecks = true
+        for block in fixture.d {
+            host.core.levels[Self.alpha]?.sync.proofs.wanted.insert(block.cid)
+            await host.relay(block, at: Self.alpha, from: Self.alphaHost)
+        }
+        XCTAssertEqual(Set(try XCTUnwrap(host.core.levels[Self.alpha]?.sync.proofs.awaiting).keys), Set(fixture.d.map(\.cid)),
+                       "one peer fills the pool")
+        await host.relay(fixture.c, at: Self.alpha, from: Self.otherHost, proofs: [proof])
+        let awaiting = try XCTUnwrap(host.core.levels[Self.alpha]?.sync.proofs.awaiting)
+        XCTAssertNotNil(awaiting[fixture.c.cid], "the honest header gets in")
+        XCTAssertNil(awaiting[fixture.d[0].cid], "the oldest idle entry goes")
+        XCTAssertNotNil(awaiting[fixture.d[1].cid])
+        XCTAssertTrue(host.disconnects.isEmpty)
     }
 
     /// A committed child genesis submitted as bytes (its spec a CID, as on
