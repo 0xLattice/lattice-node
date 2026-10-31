@@ -114,11 +114,43 @@ public struct BuildChildBlockResponse: Codable, Sendable {
 }
 
 extension BuildChildBlockResponse {
-    /// An author's round (`lattice child commit`): a fresh build on the
-    /// parent state the committed block was built on leaves that block
-    /// current, to push again; one on another state is committed instead.
-    public func supersedes(_ committed: BuildChildBlockResponse?) -> Bool {
-        committed?.parentState != parentState
+    /// The `child/X` value committing this block: `C@P`.
+    public var value: String {
+        blockCID + String(UnicodeScalar(CHILD_COMMITMENT_PARENT_STATE_SEPARATOR)) + parentState
+    }
+}
+
+/// `GET /child-blocks/commitment?chainPath=X`: the state P the parent's
+/// executed tip leaves (the one its next block enters) and `child/X` there.
+public struct ChildCommitmentResponse: Codable, Sendable, Equatable {
+    public let parentState: String
+    public let value: String?
+
+    public init(parentState: String, value: String?) {
+        self.parentState = parentState
+        self.value = value
+    }
+}
+
+/// One round of an author's commit loop (`lattice child commit`), decided
+/// from the chain: `landed` once `child/X` holds the committed block (push
+/// it until weighed, never commit again), `pending` while the parent's tip
+/// still enters the committed P (push it, nothing else), and `build`
+/// otherwise (build on the new P and commit it, replacing `value`).
+public enum ChildCommitStep: Sendable, Equatable {
+    case landed
+    case pending
+    case build
+
+    public init(_ read: ChildCommitmentResponse, committed: BuildChildBlockResponse?) {
+        guard let committed else { self = .build; return }
+        if read.value == committed.value {
+            self = .landed
+        } else if read.parentState == committed.parentState {
+            self = .pending
+        } else {
+            self = .build
+        }
     }
 }
 

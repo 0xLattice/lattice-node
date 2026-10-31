@@ -40,13 +40,12 @@ struct Child: AsyncParsableCommand {
     }
 
     /// Merged mining by the parent's miners: the hosted child's next block C
-    /// is built here on the parent's tip state P, committed on the parent
-    /// (`child/X` = `C@P`, as `tx commit-child` does), and pushed until a
-    /// parent block carrying it weighs it. While it is dropped, C is built
-    /// again: a build on the same P leaves the committed C current, one on
-    /// another P is committed instead. At most one commit's P is the
-    /// parent's tip, and each replaces the value the last left (`previous`),
-    /// so a stale commit never takes effect beside a current one.
+    /// is built here on the state P the parent's next block enters,
+    /// committed on the parent (`child/X` = `C@P`, as `tx commit-child`
+    /// does), and pushed until a parent block carrying it weighs it. Each
+    /// round decides from `child/X` on the parent's tip (`ChildCommitStep`):
+    /// C is built again only once the tip enters another P without carrying
+    /// it, so builds are bounded by parent blocks, not by time.
     struct Commit: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             abstract: "Build a hosted child chain's next block, commit it on its parent, and push it until it is weighed."
@@ -76,29 +75,33 @@ struct Child: AsyncParsableCommand {
                     + (fee.map { ["--fee", String($0)] } ?? [])
             )
             let signer = try tx.signer()
-            func build() async throws -> BuildChildBlockResponse {
-                try await post(
-                    rpc: rpc, path: "child-blocks/build",
-                    body: BuildChildBlockRequest(chainPath: components, recipient: signer.address)
-                )
-            }
-            // The first build's refusal is the operator's to fix; after it,
-            // a refusal or a lost connection is this round's, and the next
-            // round builds again.
-            var built = try await build()
             var committed: BuildChildBlockResponse?
-            var rebuild = false
+            var landed = false
             while true {
                 do {
-                    if rebuild { built = try await build() }
-                    rebuild = false
-                    if built.supersedes(committed) {
-                        print("built \(built.blockCID) on \(parent) state \(built.parentState)")
-                        try await tx.submit(signer: signer, actions: [Tx.CommitChild.action(
-                            directory: directory, block: built.blockCID,
-                            parentState: built.parentState, previous: built.previous
-                        )])
-                        committed = built
+                    if !landed {
+                        let read: ChildCommitmentResponse = try await get(
+                            rpc: rpc, path: "child-blocks/commitment", chain: path
+                        )
+                        switch ChildCommitStep(read, committed: committed) {
+                        case .landed:
+                            landed = true
+                        case .pending:
+                            break
+                        case .build:
+                            let built: BuildChildBlockResponse = try await post(
+                                rpc: rpc, path: "child-blocks/build",
+                                body: BuildChildBlockRequest(chainPath: components, recipient: signer.address)
+                            )
+                            // Recorded before the commit: a refused commit is
+                            // tried again on the next P, not built again on this one.
+                            committed = built
+                            print("built \(built.blockCID) on \(parent) state \(built.parentState)")
+                            try await tx.submit(signer: signer, actions: [Tx.CommitChild.action(
+                                directory: directory, block: built.blockCID,
+                                parentState: built.parentState, previous: built.previous
+                            )])
+                        }
                     }
                     if let committed {
                         let pushed: SubmitChildBlockResponse = try await post(
@@ -106,11 +109,9 @@ struct Child: AsyncParsableCommand {
                         )
                         print("\(pushed.blockCID): \(pushed.status.rawValue)")
                         if pushed.status == .tree { return }
-                        rebuild = pushed.status == .dropped
                     }
                 } catch {
                     print("\(error)")
-                    rebuild = true
                 }
                 try await Task.sleep(for: .seconds(3))
             }

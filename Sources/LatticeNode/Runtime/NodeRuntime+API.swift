@@ -383,18 +383,44 @@ extension NodeRuntime {
             throw NodeAPIError.malformedBlock
         }
         let parentState = block.parentState.rawCID
+        return BuildChildBlockResponse(
+            blockCID: try BlockHeader(node: block).rawCID,
+            parentState: parentState,
+            previous: try await commitment(into: path, at: parentState),
+            submit: SubmitChildBlockRequest(chainPath: path, block: blockData, children: childrenData, spec: spec)
+        )
+    }
+
+    /// `child/X` for the hosted child `chainPath` on its parent's executed
+    /// tip: the state P the next carrier enters, and the value there. Read
+    /// only: nothing is built or retained.
+    public func childCommitment(chainPath path: ChainPath) async throws -> ChildCommitmentResponse {
+        guard path.count > configuration.chainPath.count, path.starts(with: configuration.chainPath) else {
+            throw NodeConfigurationError.invalidChainPath
+        }
+        let parent = Array(path.dropLast())
+        guard levelReads[path] != nil,
+              let reads = parent == configuration.chainPath ? self.reads : levelReads[parent] else {
+            throw NodeRuntimeError.unknownChain
+        }
+        guard let tip = await reads.readSnapshot().tipCID, let block = await reads.blockNode(cid: tip) else {
+            throw NodeStorageError.missingMaterializedVolume(path.joined(separator: "/"))
+        }
+        let parentState = block.postState.rawCID
+        return ChildCommitmentResponse(parentState: parentState, value: try await commitment(into: path, at: parentState))
+    }
+
+    /// `child/X` in the parent state `parentState`, nil when unset. Read,
+    /// never guessed: a wrong `oldValue` makes a commit invalid, so a state
+    /// not held here is an error.
+    private func commitment(into path: ChainPath, at parentState: String) async throws -> String? {
+        let fetcher = storage.workFetcher
         let key = CHILD_COMMITMENT_KEY_PREFIX + path[path.count - 1]
-        // Read, never guessed: a wrong `oldValue` makes the commit invalid.
         guard let state = try await LatticeStateHeader(rawCID: parentState).resolve(fetcher: fetcher).node,
               let general = try await state.generalState.resolve(paths: [[key]: .targeted], fetcher: fetcher).node else {
             throw NodeStorageError.missingMaterializedVolume(parentState)
         }
-        return BuildChildBlockResponse(
-            blockCID: try BlockHeader(node: block).rawCID,
-            parentState: parentState,
-            previous: try general.get(key: key),
-            submit: SubmitChildBlockRequest(chainPath: path, block: blockData, children: childrenData, spec: spec)
-        )
+        return try general.get(key: key)
     }
 
     public func miningTemplate(
