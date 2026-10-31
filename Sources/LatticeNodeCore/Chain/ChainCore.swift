@@ -449,8 +449,7 @@ public struct ChainCore: Sendable {
         case .proofsFound(let cid, let proofs):
             proofsFound(proofs, for: cid, &turn)
         case .proofDropped(let job):
-            if let checked = sync.proofs.verifying.removeValue(forKey: job.key) {
-                sync.proofs.charge(checked, -1)
+            if sync.proofs.verifying.removeValue(forKey: job.key) != nil {
                 skipped(job.childCID)
             }
         case .proofVerified(let job, let result):
@@ -471,8 +470,9 @@ public struct ChainCore: Sendable {
         }
         drain(&turn)
         if !isRoot { proofWork(&turn) }
-        // Evict once the step's headers are processed, so a header held for
-        // its future timestamp is already in the first eviction tier.
+        // Evict once the step's headers are processed, so a header weighed
+        // this step (a promoted one whose parent is weighed) has already left
+        // the queue: only what still waits is evicted, largest hash first.
         sync.evict(to: config.pendingBudget)
         for peer in sync.peers.keys.sorted() {
             advanceCursor(of: peer, &turn)
@@ -769,7 +769,10 @@ public struct ChainCore: Sendable {
         if inFlight.contains(entry.block) { return false }
         switch entry.kind {
         case .header:
-            return !tree.contains(blockHash: entry.block) && sync.pending.entries[entry.block] == nil
+            // A pending header with no child index and no announcer waits
+            // on nobody: its hole is asked again, so a stall frees the slot.
+            let waiting = sync.pending.entries[entry.block].map { $0.children == nil && $0.announcers.isEmpty }
+            return !tree.contains(blockHash: entry.block) && waiting != false
                 && sync.proofs.awaiting[entry.block] == nil && !sync.declined.contains(entry.block)
         case .proof:
             return !applied(entry) && sync.pending.entries[entry.block]?.evidence[entry.cid] == nil
@@ -782,31 +785,15 @@ public struct ChainCore: Sendable {
     /// asked for (an object asked of another peer counts as held, until that
     /// request stalls). A header it holds but has not weighed gains the peer
     /// as an announcer (the peer holds its ancestors). Otherwise the next
-    /// page is pulled. Holes still lacking are asked again on a tick. A
-    /// child level asks for no more headers than it has room for their
-    /// proofs (`proofRoom`): the rest are asked as checks finish - once
-    /// half the peer's slots are free, so that a request, which occupies
-    /// the peer for a round trip, is not spent on the one slot the first
-    /// finished check frees.
+    /// page is pulled. Holes still lacking are asked again on a tick.
     mutating func pump(_ peer: PeerID, _ turn: inout Turn, again: Bool = false) {
         guard let state = sync.peers[peer], state.data == nil, sync.cursors[peer.key] != nil else { return }
         let inFlight = Set(sync.peers.values.flatMap { $0.data?.cids ?? [] })
-        let room = proofRoom(for: peer)
-        var requested = state.holes.last.map { Swift.max(state.requested, $0.position) } ?? state.requested
+        let requested = state.holes.last.map { Swift.max(state.requested, $0.position) } ?? state.requested
         var seen = Set<String>()
         var cids: [String] = []
         for hole in state.holes where (again || hole.position > state.requested) && lacks(hole.entry, inFlight: inFlight) {
-            guard seen.contains(hole.entry.block) || cids.count < room else {
-                requested = hole.position - 1
-                break
-            }
             if seen.insert(hole.entry.block).inserted { cids.append(hole.entry.block) }
-        }
-        if requested < (state.holes.last?.position ?? 0), cids.count * 2 < proofConfig.maxPerSource {
-            // The window is full and under half of it is free: wait for
-            // more checks to finish (some are in flight, or it would fit).
-            requested = state.requested
-            cids = []
         }
         for hole in state.holes where hole.position > state.requested && hole.position <= requested
             && hole.entry.kind == .header && sync.pending.entries[hole.entry.block] != nil {
@@ -1183,10 +1170,13 @@ public struct ChainCore: Sendable {
         // Over the operator's limit is unavailable here, exactly as absent.
         let index = index.flatMap { Self.size(of: $0) <= config.maxChildIndexBytes ? $0 : nil }
         guard let index else {
-            // The peer definitively lacks what its own header commits: drop
-            // that header, never blame.
-            for header in committing where header.source == peer {
-                sync.removePending(header.blockCID)
+            // This peer does not hold what its header commits. The header
+            // moves on to its next announcer, or waits for one; never blame.
+            for var header in committing where header.source == peer {
+                header.announcers.removeFirst()
+                sync.pending.entries[header.blockCID] = header
+                sync.announced[peer]?.remove(header.blockCID)
+                dirty(header.blockCID, &turn)
             }
             nextWant(of: peer, parent: false, &turn)
             return
