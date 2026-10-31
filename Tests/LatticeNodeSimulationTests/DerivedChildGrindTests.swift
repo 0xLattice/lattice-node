@@ -1196,6 +1196,21 @@ final class DerivedChildGrindTests: XCTestCase {
             return Set(level.sync.pending.entries[cid]?.evidence.keys.map { $0 } ?? [])
         }
 
+        /// Held work in an order that does not depend on CIDs (signatures
+        /// make them differ between runs), so a seed replays the same run.
+        mutating func sortHeld() {
+            let names = [fixture.c1.cid: "C1", fixture.c2.cid: "C2", fixture.w.cid: "W", fixture.b2.cid: "B2", fixture.b3.cid: "B3"]
+            func name(_ cid: String) -> String { names[cid] ?? cid }
+            func rank(_ event: NodeEvent) -> String {
+                guard case .level(_, .proofVerified(let job, _)) = event else { return "" }
+                return name(job.childCID) + name(job.proof.rootCID)
+            }
+            host.heldDerivations = host.heldDerivations.sorted {
+                name($0.job.childCID) + name($0.job.carrier) < name($1.job.childCID) + name($1.job.carrier)
+            }
+            host.deferred = host.deferred.sorted { rank($0) < rank($1) }
+        }
+
         /// What may credit each block: its carrier's grind, which meets.
         var owed: [String: String] { [fixture.c1.cid: fixture.b2.cid, fixture.c2.cid: fixture.b3.cid] }
 
@@ -1242,6 +1257,7 @@ final class DerivedChildGrindTests: XCTestCase {
                 return "hold \(host.holdDerivations)"
             case 13...17, 27, 28:
                 guard !host.heldDerivations.isEmpty else { return "none" }
+                sortHeld()
                 let index = Int(rng.next() % UInt64(host.heldDerivations.count))
                 let (path, job) = host.heldDerivations.remove(at: index)
                 await host.step(await host.derive(job, at: path))
@@ -1251,6 +1267,7 @@ final class DerivedChildGrindTests: XCTestCase {
                 return "defer \(host.deferChecks)"
             case 19...22, 29, 30:
                 guard !host.deferred.isEmpty else { return "none" }
+                sortHeld()
                 let answer = host.deferred.remove(at: Int(rng.next() % UInt64(host.deferred.count)))
                 await host.step(answer)
                 return "check"
@@ -1275,6 +1292,7 @@ final class DerivedChildGrindTests: XCTestCase {
         mutating func settle() async throws {
             host.holdDerivations = false
             host.deferChecks = false
+            sortHeld()
             while !host.heldDerivations.isEmpty || !host.deferred.isEmpty {
                 if !host.heldDerivations.isEmpty {
                     let (path, job) = host.heldDerivations.removeFirst()
