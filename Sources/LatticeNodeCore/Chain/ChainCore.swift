@@ -456,7 +456,7 @@ public struct ChainCore: Sendable {
         case .derived(let derivation):
             // A block read from this store is taken as a peer's header is,
             // from no peer, before its proofs are judged.
-            guard !isRoot, sync.proofs.finishDeriving(derivation.job.key) else { break }
+            guard !isRoot, sync.proofs.finishDeriving(derivation.job.childCID) else { break }
             if let entry = derivation.entry { _ = accept(entry, from: nil, &turn) }
             derived(derivation, &turn)
         case .evidenceChanged(let cids):

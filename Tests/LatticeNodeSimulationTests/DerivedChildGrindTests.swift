@@ -55,6 +55,9 @@ final class DerivedChildGrindTests: XCTestCase {
         /// When set, peer proof checks answer only when `deferred` is run.
         var deferChecks = false
         var deferred: [NodeEvent] = []
+        /// When set, derivations run only when `runHeldDerivations` is.
+        var holdDerivations = false
+        var heldDerivations: [(path: ChainPath, job: ChildDeriveJob)] = []
 
         init(_ world: LevelWorld, hosted: Set<ChainPath>? = nil) {
             self.world = world
@@ -106,11 +109,7 @@ final class DerivedChildGrindTests: XCTestCase {
                         // From this host's own content only.
                         derived.append(Derived(path: path, cid: job.childCID, carrier: job.carrier))
                         guard !lostDerivations.contains(job.carrier) else { break }
-                        let held = job.block ?? store.levels[path]?.headers[job.childCID]?.block
-                        let upstream = store.proofs(Array(path.dropLast()), job.carrier)
-                        let derivation = await job.run(held: held, upstream: upstream, fetcher: own())
-                        checks += derivation.checks.map { Check(path: path, cid: $0.0.childCID, root: $0.0.proof.rootCID) }
-                        queue.append(.level(path, .derived(derivation)))
+                        if holdDerivations { heldDerivations.append((path, job)) } else { queue.append(await derive(job, at: path)) }
                     case .connect(let path, let job):
                         let verdict = await ChainTree.connect(
                             job, fetcher: world.cas, parentFacts: core.parentFacts(for: path),
@@ -124,6 +123,23 @@ final class DerivedChildGrindTests: XCTestCase {
                     }
                 }
             }
+        }
+
+        /// `job` run from this host's own content, as it stands now.
+        mutating func derive(_ job: ChildDeriveJob, at path: ChainPath) async -> NodeEvent {
+            let held = job.block ?? store.levels[path]?.headers[job.childCID]?.block
+            let upstream = store.proofs(Array(path.dropLast()), job.carrier)
+            let derivation = await job.run(held: held, upstream: upstream, fetcher: own())
+            checks += derivation.checks.map { Check(path: path, cid: $0.0.childCID, root: $0.0.proof.rootCID) }
+            return .level(path, .derived(derivation))
+        }
+
+        /// The held derivations, run late in the order issued.
+        mutating func runHeldDerivations() async {
+            holdDerivations = false
+            let held = heldDerivations
+            heldDerivations = []
+            for (path, job) in held { await step(await derive(job, at: path)) }
         }
 
         /// A peer whose logs this host reads from their start.
@@ -295,6 +311,31 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertLessThanOrEqual(checks.values.reduce(0, +), 2, "the peer's check and the derived one")
         XCTAssertEqual(peer.derived.filter { $0.cid == fixture.c.cid }.count, 2, "the read on B, which held nothing, and C's arrival")
         XCTAssertTrue(author.disconnects.isEmpty && peer.disconnects.isEmpty)
+    }
+
+    /// B is weighed and its derivation, which reads nothing, runs late: C
+    /// arrives without proofs meanwhile and is derived again, not held back
+    /// by the stale one. C is credited, as when C arrives after the read.
+    func testADerivationInFlightDoesNotHoldBackOneOnArrival() async throws {
+        let fixture = try await committedWorld()
+        var late = await host(fixture)
+        late.holdDerivations = true
+        await late.relay(fixture.b, at: Self.nexus, from: Self.miner)
+        await late.meet(Self.alphaHost)
+        await late.relay(fixture.c, at: Self.alpha, from: Self.alphaHost)
+        XCTAssertNil(try late.digest(Self.alpha).blocks[fixture.c.cid], "nothing has run yet")
+        XCTAssertEqual(late.heldDerivations.map(\.job.carrier), [fixture.b.cid, fixture.b.cid],
+                       "the read on B, and C's arrival beside it")
+        await late.runHeldDerivations()
+        XCTAssertNotNil(try late.digest(Self.alpha).blocks[fixture.c.cid]?.grinds[fixture.b.cid], "C is credited")
+        XCTAssertEqual(late.core.levels[Self.alpha]?.sync.proofs.deriving.isEmpty, true)
+
+        var after = await host(fixture)
+        await after.relay(fixture.b, at: Self.nexus, from: Self.miner)
+        await after.meet(Self.alphaHost)
+        await after.relay(fixture.c, at: Self.alpha, from: Self.alphaHost)
+        XCTAssertEqual(try late.digest(Self.alpha), try after.digest(Self.alpha), "arrival order does not matter")
+        XCTAssertTrue(late.disconnects.isEmpty && after.disconnects.isEmpty)
     }
 
     /// B and its sibling S both commit C: each one's grind is credited at C,

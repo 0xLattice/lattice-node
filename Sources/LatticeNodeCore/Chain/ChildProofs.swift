@@ -115,7 +115,6 @@ public struct ChildDeriveJob: Sendable {
     /// The carrier's grinds owed here: not credited.
     public let grinds: Set<String>
     public let chainPath: [String]
-    let key: DeriveKey
 
     /// The job over `held` (the block, when the shell holds it), else the
     /// header read from `fetcher`: each proof built from `upstream` (the
@@ -149,15 +148,6 @@ public struct ChildDerivation: Sendable {
     public let job: ChildDeriveJob
     public let entry: HeaderEntry?
     public let checks: [(ChildProofJob, Result<VerifiedChildEvidence, ChildProofVerificationFailure>)]
-}
-
-/// A derivation in flight by what it is built from: a carrier, the block it
-/// commits and how many of the carrier's grinds it weighs. A new upstream
-/// proof at the carrier is a new key.
-struct DeriveKey: Hashable, Sendable {
-    let carrier: String
-    let child: String
-    let upstream: Int
 }
 
 extension ChildBlockProof {
@@ -220,9 +210,10 @@ public struct ChildProofSync: Sendable {
     var wanted: Set<String> = []
     var wantedOrder: [String] = []
     var sequence: UInt64 = 0
-    /// Derivations in flight, by the block derived (a waiting header with
-    /// one is never evicted). Soft: in memory only, gone on restart.
-    var deriving: [String: Set<DeriveKey>] = [:]
+    /// Derivations in flight, counted by the block derived (a waiting
+    /// header with one is never evicted). Soft: in memory only, gone on
+    /// restart.
+    var deriving: [String: Int] = [:]
 
     public init() {}
 
@@ -235,14 +226,14 @@ public struct ChildProofSync: Sendable {
             || deriving[cid] != nil
     }
 
-    mutating func startDeriving(_ key: DeriveKey) {
-        deriving[key.child, default: []].insert(key)
+    mutating func startDeriving(_ child: String) {
+        deriving[child, default: 0] += 1
     }
 
-    /// Whether `key` was in flight.
-    mutating func finishDeriving(_ key: DeriveKey) -> Bool {
-        guard deriving[key.child]?.remove(key) != nil else { return false }
-        if deriving[key.child]?.isEmpty == true { deriving[key.child] = nil }
+    /// Whether a derivation of `child` was in flight.
+    mutating func finishDeriving(_ child: String) -> Bool {
+        guard let count = deriving[child] else { return false }
+        deriving[child] = count == 1 ? nil : count - 1
         return true
     }
 
@@ -649,8 +640,9 @@ extension ChainCore {
     /// a second check of one grind credits once). A pair fully credited
     /// issues nothing, so a restored level's pass is cheap; a grind that
     /// misses the block's target is derived again at each trigger (a weigh
-    /// or an arrival). A block this level lacks is read from this store
-    /// alone; one nobody published here is not credited yet.
+    /// or an arrival), even with one in flight (it may have read nothing;
+    /// credit is idempotent). A block this level lacks is read from this
+    /// store alone; one nobody published here is not credited yet.
     mutating func deriveGrinds(from parent: ChainTree, carriers: Set<String>, arrived: Set<String>) -> [ChainEffect] {
         let directory = chainPath[chainPath.count - 1]
         var pairs: Set<[String]> = []
@@ -667,13 +659,12 @@ extension ChainCore {
             guard !sync.declined.contains(child), let meta = parent.getConsensusBlock(hash: carrier) else { continue }
             let grinds = meta.workContributions.keys.filter { !meta.attributedRuns.contains($0) }
             let owed = Set(grinds.filter { !credits($0, at: child) })
-            let key = DeriveKey(carrier: carrier, child: child, upstream: grinds.count)
-            guard !owed.isEmpty, sync.proofs.deriving[child]?.contains(key) != true else { continue }
-            sync.proofs.startDeriving(key)
+            guard !owed.isEmpty else { continue }
+            sync.proofs.startDeriving(child)
             effects.append(.deriveProof(ChildDeriveJob(
                 childCID: child,
                 block: sync.proofs.awaiting[child]?.block ?? sync.pending.entries[child]?.block,
-                carrier: carrier, grinds: owed, chainPath: chainPath, key: key
+                carrier: carrier, grinds: owed, chainPath: chainPath
             )))
         }
         return effects
