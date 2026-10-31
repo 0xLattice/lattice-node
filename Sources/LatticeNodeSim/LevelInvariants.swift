@@ -207,6 +207,9 @@ public enum LevelInvariants {
         if held.contains(where: { $0.bytes > bounds.maxProofBytes }) {
             throw fail("a proof larger than the per-proof bound is held")
         }
+        if held.reduce(0, { $0 + $1.bytes }) > bounds.maxQueuedBytes {
+            throw fail("proofs queued or in flight exceed their byte budget")
+        }
         for peer in Set(held.compactMap(\.source)) where core.sync.peers[peer] == nil {
             throw fail("proofs of the gone peer \(peer) are still held")
         }

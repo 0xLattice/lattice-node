@@ -12,6 +12,9 @@ public struct ChildProofConfig: Sendable {
     /// Proofs taken from one header, and the largest proof taken at all.
     public var maxPerHeader: Int
     public var maxProofBytes: Int
+    /// The operator's memory budget for proofs queued or in flight, all
+    /// sources together; over it, a proof is dropped without blame.
+    public var maxQueuedBytes: Int
     /// Headers awaiting their first proof that weighs, at once.
     public var maxAwaiting: Int
     /// Blocks the evidence index named that this node does not hold: a
@@ -24,6 +27,7 @@ public struct ChildProofConfig: Sendable {
         indexChecks: Int = 32,
         maxPerHeader: Int = 8,
         maxProofBytes: Int = 64 * 1_024,
+        maxQueuedBytes: Int = 16 * 1_024 * 1_024,
         maxAwaiting: Int = 1_024,
         maxWanted: Int = 4_096
     ) {
@@ -31,6 +35,7 @@ public struct ChildProofConfig: Sendable {
         self.indexChecks = indexChecks
         self.maxPerHeader = maxPerHeader
         self.maxProofBytes = maxProofBytes
+        self.maxQueuedBytes = maxQueuedBytes
         self.maxAwaiting = maxAwaiting
         self.maxWanted = maxWanted
     }
@@ -287,8 +292,9 @@ extension ChainCore {
     }
 
     /// Queue each new proof (by content) of a waiting, pending or weighed
-    /// header, up to `maxPerHeader` from one header. Checks start in
-    /// `proofWork`.
+    /// header, up to `maxPerHeader` from one header, within the queue's byte
+    /// budget; over it, a proof is dropped without blame and the block is
+    /// looked up again later. Checks start in `proofWork`.
     mutating func offer(_ proofs: [ChildBlockProof], cid: String, from source: PeerID?) {
         // Work crediting a block beyond the finality window is declined.
         if pastFinality(cid) { return }
@@ -296,6 +302,8 @@ extension ChainCore {
         // same proofs offers the ones a cap left out.
         var fresh: [ChildBlockProof] = []
         for proof in proofs where !credits(proof.rootCID, at: cid) { fresh.append(proof) }
+        var held = sync.proofs.queued.reduce(0) { $0 + $1.bytes }
+            + sync.proofs.verifying.values.reduce(0) { $0 + $1.bytes }
         for proof in fresh.prefix(proofConfig.maxPerHeader) {
             guard let bytes = try? proof.serialize(), bytes.count <= proofConfig.maxProofBytes else { continue }
             let id = "\(UInt256.hash(bytes))"
@@ -303,6 +311,11 @@ extension ChainCore {
             guard sync.proofs.verifying[queued.key] == nil,
                   !sync.proofs.queued.contains(where: { $0.key == queued.key }),
                   !credits(proof.rootCID, at: cid) else { continue }
+            guard held + queued.bytes <= proofConfig.maxQueuedBytes else {
+                skipped(cid)
+                continue
+            }
+            held += queued.bytes
             sync.proofs.queued.append(queued)
         }
     }

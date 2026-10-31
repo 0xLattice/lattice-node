@@ -47,6 +47,8 @@ final class DerivedChildGrindTests: XCTestCase {
         var disconnects: [PeerID] = []
         /// Child indexes asked for by CID, and of whom.
         var fetches: [(peer: PeerID, cid: String)] = []
+        /// Blocks looked up in the evidence index, in order.
+        var lookups: [String] = []
         /// Each peer's log position, per level.
         var position: [ChainPath: [PeerID: UInt64]] = [:]
         /// Blocks whose bodies the content layer never serves.
@@ -127,6 +129,7 @@ final class DerivedChildGrindTests: XCTestCase {
                         let answer = NodeEvent.level(path, .proofVerified(job, await job.run(block)))
                         if deferChecks { deferred.append(answer) } else { queue.append(answer) }
                     case .level(let path, .lookupProofs(let cids)):
+                        lookups += cids
                         for cid in cids where !store.proofs(path, cid).isEmpty {
                             queue.append(.level(path, .proofsFound(childCID: cid, store.proofs(path, cid))))
                         }
@@ -730,6 +733,48 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertNil(awaiting[fixture.d[0].cid], "the oldest idle entry goes")
         XCTAssertNotNil(awaiting[fixture.d[1].cid])
         XCTAssertTrue(host.disconnects.isEmpty)
+    }
+
+    /// One peer sends C with more proof bytes than the queue's budget: what
+    /// fits is queued, the rest dropped without blame, and once the queue
+    /// drains C is looked up again and credited with the dropped grind.
+    func testProofsPastTheQueueBudgetAreDroppedAndLookedUpAgain() async throws {
+        let fixture = try await committedWorld()
+        var proofs: [ChildBlockProof] = []
+        for carrier in [fixture.b, fixture.sibling] {
+            proofs.append(try await ChildBlockProof.generate(
+                rootHeader: BlockHeader(node: carrier.block), childDirectory: Self.alpha[1], fetcher: fixture.world.cas
+            ))
+        }
+        var config = ChainCoreConfig()
+        config.proofs.maxQueuedBytes = try proofs.map { try $0.serialize().count }.max()!
+        var host = Host(fixture.world, config: config)
+        for grind in fixture.setup { await host.step(.mined(grind)) }
+        await host.meet(Self.miner)
+        host.lostDerivations = [fixture.b.cid, fixture.sibling.cid]
+        await host.relay(fixture.b, at: Self.nexus, from: Self.miner)
+        await host.relay(fixture.sibling, at: Self.nexus, from: Self.miner)
+        await host.meet(Self.alphaHost)
+        host.deferChecks = true
+        await host.relay(fixture.c, at: Self.alpha, from: Self.alphaHost, proofs: proofs)
+        do {
+            let proofs = try XCTUnwrap(host.core.levels[Self.alpha]).sync.proofs
+            let held = (proofs.queued + Array(proofs.verifying.values)).reduce(0) { $0 + $1.bytes }
+            XCTAssertGreaterThan(held, 0)
+            XCTAssertLessThanOrEqual(held, config.proofs.maxQueuedBytes, "within the budget")
+        }
+        host.deferChecks = false
+        host.lookups = []
+        let answers = host.deferred
+        host.deferred = []
+        for answer in answers { await host.step(answer) }
+        await host.step(.tick)
+        XCTAssertTrue(host.lookups.contains(fixture.c.cid), "C is looked up again")
+        // The evidence index names the dropped proof.
+        await host.step(.level(Self.alpha, .proofsFound(childCID: fixture.c.cid, proofs)))
+        let grinds = try XCTUnwrap(try host.digest(Self.alpha).blocks[fixture.c.cid]?.grinds)
+        XCTAssertEqual(Set(grinds.keys), [fixture.b.cid, fixture.sibling.cid], "both grinds credit")
+        XCTAssertTrue(host.disconnects.isEmpty, "a budget, never blame")
     }
 
     /// A committed child genesis submitted as bytes (its spec a CID, as on
