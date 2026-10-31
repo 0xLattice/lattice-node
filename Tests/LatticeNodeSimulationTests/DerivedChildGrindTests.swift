@@ -804,6 +804,53 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertTrue(host.disconnects.isEmpty, "no one is blamed")
     }
 
+    /// A peer's proof whose claimed root misses C's target fails the cheap
+    /// test before the path walk: the walk alone would pass it (with no
+    /// work), the check rejects it, and its sender is blamed. An honest node
+    /// never sends one: it serves only proofs that credited work.
+    func testAProofWhoseRootMissesTheTargetFailsBeforeThePathWalk() async throws {
+        var builder = try await LevelWorld.Builder(levels: 2)
+        let n0 = try await builder.grind(on: try XCTUnwrap(builder.geneses[Self.nexus]), carrying: [], at: Self.t + Self.interval / 2, outcome: .block)
+        let entering = n0.root.block.postState
+        let hard = UInt256.max >> 24
+        let genesis = try await BlockBuilder.buildChildGenesis(
+            spec: try XCTUnwrap(builder.specs[Self.alpha]), parentState: entering,
+            timestamp: Self.t + Self.interval, target: hard, fetcher: builder.cas
+        )
+        let c = try await builder.store(genesis, releaseAt: Self.t + Self.interval, anchor: nil)
+        let tx = try Self.commit(c, parentState: entering.rawCID, under: Self.alpha[1], on: Self.nexus, key: 0)
+        let unmined = try await builder.build(
+            on: n0.root, carrierPrevState: nil, transactions: [tx], timestamp: Self.t + Self.interval, nonce: 0
+        )
+        let rootTarget = unmined.block.target
+        let mined = builder.mine(unmined.block) { rootTarget >= $0 && $0 > hard }
+        let b = try await builder.store(mined, releaseAt: Self.t + Self.interval, anchor: unmined.anchor)
+        let world = builder.world()
+        let proof = try await ChildBlockProof.generate(
+            rootHeader: BlockHeader(node: b.block), childDirectory: Self.alpha[1], fetcher: world.cas
+        )
+        guard case .success(let walked) = await proof.verifySecuringWork(child: c.block, chainPath: Self.alpha) else {
+            return XCTFail("the path walk alone passes the proof")
+        }
+        XCTAssertNil(walked.contribution, "with no work")
+        let job = ChildProofJob(
+            childCID: c.cid, block: c.block, proof: proof, proofID: try XCTUnwrap(ChildProofJob.id(of: proof)),
+            chainPath: Self.alpha
+        )
+        guard case .failure(.malformedEvidence) = await job.run(c.block) else {
+            return XCTFail("the cheap test rejects it before the walk")
+        }
+
+        var host = Host(world)
+        await host.step(.mined(n0.grind))
+        await host.meet(Self.miner)
+        await host.relay(b, at: Self.nexus, from: Self.miner)
+        await host.meet(Self.alphaHost)
+        await host.relay(c, at: Self.alpha, from: Self.alphaHost, proofs: [proof], spec: world.specs[Self.alpha])
+        XCTAssertTrue(try host.digest(Self.alpha).blocks.isEmpty, "nothing weighs")
+        XCTAssertEqual(host.disconnects, [Self.alphaHost], "its sender is blamed")
+    }
+
     /// A carrier that commits C on the wrong prevState (C anchors at N0's
     /// post-state, B enters N1's): the vertical binding fails, so nothing is
     /// credited and no one blamed.
