@@ -45,7 +45,10 @@ final class DerivedChildGrindTests: XCTestCase {
         var derived: [Derived] = []
         var checks: [Check] = []
         var disconnects: [PeerID] = []
-        var position: [ChainPath: UInt64] = [:]
+        /// Child indexes asked for by CID, and of whom.
+        var fetches: [(peer: PeerID, cid: String)] = []
+        /// Each peer's log position, per level.
+        var position: [ChainPath: [PeerID: UInt64]] = [:]
         /// Blocks whose bodies the content layer never serves.
         var withheldBodies: Set<String> = []
         /// Carriers whose derivations are lost (a crash before they ran).
@@ -116,6 +119,8 @@ final class DerivedChildGrindTests: XCTestCase {
                         if !withheldBodies.contains(cid) { queue.append(.level(path, .bodyFetched(cid: cid))) }
                     case .level(let path, .send(_, let message)):
                         sent.append((path, message))
+                    case .level(_, .fetchByCID(let peer, let cid)):
+                        fetches.append((peer, cid))
                     case .level(let path, .verifyProof(let job)):
                         guard let block = job.block ?? store.levels[path]?.headers[job.childCID]?.block else { break }
                         checks.append(Check(path: path, cid: job.childCID, root: job.proof.rootCID))
@@ -171,11 +176,13 @@ final class DerivedChildGrindTests: XCTestCase {
             }
         }
 
-        /// `peer` logs a header and serves it (with `proofs`) when asked.
+        /// `peer` logs a header and serves it (with `proofs`, and its child
+        /// index unless not `inline`) when asked.
         mutating func relay(
-            _ block: SimBlock, at path: ChainPath, from peer: PeerID, proofs: [ChildBlockProof] = [], spec: ChainSpec? = nil
+            _ block: SimBlock, at path: ChainPath, from peer: PeerID, proofs: [ChildBlockProof] = [], spec: ChainSpec? = nil,
+            inline: Bool = true
         ) async {
-            await relay(block, logged: .header(block.cid), at: path, from: peer, proofs: proofs, spec: spec)
+            await relay(block, logged: .header(block.cid), at: path, from: peer, proofs: proofs, spec: spec, inline: inline)
         }
 
         /// `peer` logs `proof` of `block`, a header this host already holds,
@@ -187,18 +194,20 @@ final class DerivedChildGrindTests: XCTestCase {
 
         private mutating func relay(
             _ block: SimBlock, logged: LogEntry, at path: ChainPath, from peer: PeerID, proofs: [ChildBlockProof],
-            spec: ChainSpec? = nil
+            spec: ChainSpec? = nil, inline: Bool = true
         ) async {
-            position[path, default: 0] += 1
+            position[path, default: [:]][peer, default: 0] += 1
             await step(.received(peer, path, .stream(StreamPage(
                 requestID: 0, logID: "peer",
-                entries: [StreamEntry(position: position[path]!, entry: logged)], hasMore: false
+                entries: [StreamEntry(position: position[path]![peer]!, entry: logged)], hasMore: false
             ))))
             for (sentAt, message) in take() where sentAt == path {
                 guard case .getData(let id, let cids) = message, cids.contains(block.cid) else { continue }
                 await step(.received(peer, path, .headers(HeadersResponse(
                     requestID: id,
-                    entries: [HeaderEntry(block: block.block, children: block.children, proofs: proofs, spec: spec)],
+                    entries: [HeaderEntry(
+                        block: block.block, children: inline ? block.children : nil, proofs: proofs, spec: spec
+                    )],
                     hasMore: false
                 ))))
             }
@@ -283,6 +292,7 @@ final class DerivedChildGrindTests: XCTestCase {
     /// N0 and N1 (carrying Alpha's genesis G) mined as usual; C on G; B and
     /// its sibling S on N1 each commit C by CID through a transaction (their
     /// miners host no Alpha and make no proof); B2 on B commits nothing.
+    /// D1 and D2, C's siblings on G, are committed by nothing.
     private struct Committed {
         let world: LevelWorld
         let setup: [MinedGrind]
@@ -291,6 +301,7 @@ final class DerivedChildGrindTests: XCTestCase {
         let b: SimBlock
         let sibling: SimBlock
         let b2: SimBlock
+        let d: [SimBlock]
     }
 
     private func committedWorld() async throws -> Committed {
@@ -314,8 +325,12 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertEqual(children?[Self.alpha[1]]?.rawCID, c.cid, "B carries C by CID")
         XCTAssertNil(children?[Self.alpha[1]]?.node, "B carries C by CID alone")
         let b2 = try await builder.grind(on: b.root, carrying: [], at: Self.t + 3 * Self.interval, outcome: .block)
+        var d: [SimBlock] = []
+        for nonce in [UInt64(2), 3] {
+            d.append(try await builder.build(on: g, carrierPrevState: entering, timestamp: Self.t + 2 * Self.interval, nonce: nonce))
+        }
         return Committed(
-            world: builder.world(), setup: [n0.grind, n1.grind], g: g, c: c, b: b.root, sibling: sibling.root, b2: b2.root
+            world: builder.world(), setup: [n0.grind, n1.grind], g: g, c: c, b: b.root, sibling: sibling.root, b2: b2.root, d: d
         )
     }
 
@@ -604,6 +619,123 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertTrue(core.makeRoomToAwait())
         XCTAssertNotNil(core.sync.proofs.awaiting[fixture.c.cid], "in flight: never evicted")
         XCTAssertNil(core.sync.proofs.awaiting["idle-0"], "the oldest idle header goes")
+    }
+
+    // MARK: - Liveness under the caps
+
+    private static let otherHost = PeerID(key: "other-host", session: 3)
+
+    /// A host of `fixture` that weighed B (its derivation lost, so C's
+    /// credit is a peer's proof) and reads both Alpha hosts. Untraced: these
+    /// steps leave the model's assumptions.
+    private func provedHost(_ fixture: Committed, config: ChainCoreConfig = ChainCoreConfig()) async throws
+        -> (Host, ChildBlockProof)
+    {
+        var host = Host(fixture.world, config: config)
+        for grind in fixture.setup { await host.step(.mined(grind)) }
+        await host.meet(Self.miner)
+        await host.relay(fixture.b, at: Self.nexus, from: Self.miner)
+        host.lostDerivations = [fixture.b.cid]
+        await host.meet(Self.alphaHost)
+        await host.meet(Self.otherHost)
+        let proof = try await ChildBlockProof.generate(
+            rootHeader: BlockHeader(node: fixture.b.block), childDirectory: Self.alpha[1], fetcher: fixture.world.cas
+        )
+        return (host, proof)
+    }
+
+    /// The pending queue is full of low-hash orphans when C's proof verifies:
+    /// C, its parent weighed, its children inline and its hash the largest,
+    /// is weighed before the step evicts, and the queue ends within budget.
+    func testAProvedHeaderWhoseParentIsWeighedIsWeighedBeforeEviction() async throws {
+        let fixture = try await committedWorld()
+        let orphanBytes = 10_000
+        var config = ChainCoreConfig()
+        config.pendingBudget = 4 * orphanBytes
+        var (host, proof) = try await provedHost(fixture, config: config)
+        for index in 0..<4 {
+            host.core.levels[Self.alpha]?.sync.pending.insert(PendingHeader(
+                blockCID: "orphan-\(index)", block: fixture.b2.block, children: nil, hash: UInt256(index + 1),
+                bytes: orphanBytes, announcers: []
+            ))
+        }
+        XCTAssertEqual(host.core.levels[Self.alpha]?.sync.pending.bytes, config.pendingBudget, "the queue is full")
+        await host.relay(fixture.c, at: Self.alpha, from: Self.alphaHost, proofs: [proof])
+        XCTAssertNotNil(try host.digest(Self.alpha).blocks[fixture.c.cid]?.grinds[fixture.b.cid], "C is weighed")
+        let level = try XCTUnwrap(host.core.levels[Self.alpha])
+        XCTAssertLessThanOrEqual(level.sync.pending.bytes, config.pendingBudget)
+        XCTAssertTrue(host.disconnects.isEmpty)
+    }
+
+    /// C, its child index omitted, is announced by two peers and the first
+    /// answers its index as missing: C stays pending with its credit, the
+    /// index is asked of the second, and C is weighed on its answer.
+    func testAMissingChildIndexMovesTheHeaderToItsNextAnnouncer() async throws {
+        let fixture = try await committedWorld()
+        var (host, proof) = try await provedHost(fixture)
+        await host.relay(fixture.c, at: Self.alpha, from: Self.alphaHost, proofs: [proof], inline: false)
+        await host.relay(fixture.c, at: Self.alpha, from: Self.otherHost, inline: false)
+        let index = fixture.c.block.children.rawCID
+        XCTAssertEqual(host.fetches.map(\.peer), [Self.alphaHost])
+        await host.step(.level(Self.alpha, .childIndexFetched(Self.alphaHost, cid: index, nil)))
+        let held = try XCTUnwrap(host.core.levels[Self.alpha]?.sync.pending.entries[fixture.c.cid], "C stays pending")
+        XCTAssertNotNil(held.evidence[fixture.b.cid], "its credit is kept")
+        XCTAssertEqual(host.fetches.map(\.peer), [Self.alphaHost, Self.otherHost], "asked of the next announcer")
+        XCTAssertEqual(host.fetches.last?.cid, index)
+        await host.step(.level(Self.alpha, .childIndexFetched(Self.otherHost, cid: index, fixture.c.children)))
+        XCTAssertNotNil(try host.digest(Self.alpha).blocks[fixture.c.cid]?.grinds[fixture.b.cid], "C is weighed")
+        XCTAssertTrue(host.disconnects.isEmpty, "availability, never blame")
+    }
+
+    /// C's sole announcer answers its child index as missing: C stays
+    /// pending with its credit, waiting for another announcer, and nobody
+    /// is blamed.
+    func testAMissingChildIndexFromTheSoleAnnouncerLeavesTheHeaderWaiting() async throws {
+        let fixture = try await committedWorld()
+        var (host, proof) = try await provedHost(fixture)
+        await host.relay(fixture.c, at: Self.alpha, from: Self.alphaHost, proofs: [proof], inline: false)
+        await host.step(.level(Self.alpha, .childIndexFetched(Self.alphaHost, cid: fixture.c.block.children.rawCID, nil)))
+        let held = try XCTUnwrap(host.core.levels[Self.alpha]?.sync.pending.entries[fixture.c.cid], "C stays pending")
+        XCTAssertNotNil(held.evidence[fixture.b.cid], "its credit is kept")
+        XCTAssertTrue(held.announcers.isEmpty, "it waits for an announcer")
+        XCTAssertEqual(host.fetches.count, 1, "asked of nobody else")
+        XCTAssertTrue(host.disconnects.isEmpty, "availability, never blame")
+        let tick = host.core.step(.tick, now: Self.now + host.config.headersTimeout)
+        let asked = tick.contains {
+            guard case .level(Self.alpha, .send(Self.alphaHost, .getData(_, let cids))) = $0 else { return false }
+            return cids.contains(fixture.c.cid)
+        }
+        XCTAssertTrue(asked, "its hole is asked again on a tick")
+        XCTAssertNotNil(host.core.levels[Self.alpha]?.sync.pending.entries[fixture.c.cid]?.evidence[fixture.b.cid], "its credit is still kept")
+    }
+
+    /// At its waiting cap, a peer's next header evicts its oldest one that
+    /// holds no proof check; when every one does, the header is refused.
+    func testAPeerAtItsWaitingCapEvictsItsOldestIdleHeader() async throws {
+        let fixture = try await committedWorld()
+        var config = ChainCoreConfig()
+        config.proofs.maxAwaitingPerPeer = 2
+        for held in [false, true] {
+            var (host, proof) = try await provedHost(fixture, config: config)
+            host.deferChecks = true
+            for block in fixture.d {
+                let bogus = ChildBlockProof(rootCID: fixture.b.cid, directoryPath: [Self.alpha[1]], entries: [])
+                if !held { host.core.levels[Self.alpha]?.sync.proofs.wanted.insert(block.cid) }
+                await host.relay(block, at: Self.alpha, from: Self.alphaHost, proofs: held ? [bogus] : [])
+            }
+            let before = try XCTUnwrap(host.core.levels[Self.alpha]?.sync.proofs.awaiting)
+            XCTAssertEqual(Set(before.keys), Set(fixture.d.map(\.cid)), "held: \(held)")
+            await host.relay(fixture.c, at: Self.alpha, from: Self.alphaHost, proofs: [proof])
+            let awaiting = try XCTUnwrap(host.core.levels[Self.alpha]?.sync.proofs.awaiting)
+            if held {
+                XCTAssertNil(awaiting[fixture.c.cid], "every entry holds a check: refused")
+                XCTAssertEqual(Set(awaiting.keys), Set(fixture.d.map(\.cid)))
+            } else {
+                XCTAssertNotNil(awaiting[fixture.c.cid], "C awaits its check")
+                XCTAssertNil(awaiting[fixture.d[0].cid], "the peer's oldest idle header goes")
+                XCTAssertNotNil(awaiting[fixture.d[1].cid])
+            }
+        }
     }
 
     /// A committed child genesis submitted as bytes (its spec a CID, as on

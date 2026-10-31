@@ -471,8 +471,9 @@ public struct ChainCore: Sendable {
         }
         drain(&turn)
         if !isRoot { proofWork(&turn) }
-        // Evict once the step's headers are processed, so a header held for
-        // its future timestamp is already in the first eviction tier.
+        // Evict once the step's headers are processed, so a header weighed
+        // this step (a promoted one whose parent is weighed) has already left
+        // the queue: only what still waits is evicted, largest hash first.
         sync.evict(to: config.pendingBudget)
         for peer in sync.peers.keys.sorted() {
             advanceCursor(of: peer, &turn)
@@ -769,7 +770,10 @@ public struct ChainCore: Sendable {
         if inFlight.contains(entry.block) { return false }
         switch entry.kind {
         case .header:
-            return !tree.contains(blockHash: entry.block) && sync.pending.entries[entry.block] == nil
+            // A pending header with no child index and no announcer waits
+            // on nobody: its hole is asked again, so a stall frees the slot.
+            let waiting = sync.pending.entries[entry.block].map { $0.children == nil && $0.announcers.isEmpty }
+            return !tree.contains(blockHash: entry.block) && waiting != false
                 && sync.proofs.awaiting[entry.block] == nil && !sync.declined.contains(entry.block)
         case .proof:
             return !applied(entry) && sync.pending.entries[entry.block]?.evidence[entry.cid] == nil
@@ -1183,10 +1187,13 @@ public struct ChainCore: Sendable {
         // Over the operator's limit is unavailable here, exactly as absent.
         let index = index.flatMap { Self.size(of: $0) <= config.maxChildIndexBytes ? $0 : nil }
         guard let index else {
-            // The peer definitively lacks what its own header commits: drop
-            // that header, never blame.
-            for header in committing where header.source == peer {
-                sync.removePending(header.blockCID)
+            // This peer does not hold what its header commits. The header
+            // moves on to its next announcer, or waits for one; never blame.
+            for var header in committing where header.source == peer {
+                header.announcers.removeFirst()
+                sync.pending.entries[header.blockCID] = header
+                sync.announced[peer]?.remove(header.blockCID)
+                dirty(header.blockCID, &turn)
             }
             nextWant(of: peer, parent: false, &turn)
             return

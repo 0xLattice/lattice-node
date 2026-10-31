@@ -503,7 +503,7 @@ final class ChainCoreSyncTests: XCTestCase {
                 XCTAssertFalse(core.tree.contains(blockHash: carrier.cid))
             default:
                 XCTAssertTrue(disconnects(fetched).isEmpty, "availability, never blame")
-                XCTAssertTrue(core.sync.pending.entries.isEmpty)
+                XCTAssertNotNil(core.sync.pending.entries[carrier.cid], "it waits for another announcer")
             }
         }
     }
@@ -518,11 +518,11 @@ final class ChainCoreSyncTests: XCTestCase {
         let effects = relay(&core, [entry(carrier)], from: peer)
         XCTAssertTrue(disconnects(effects).isEmpty)
         XCTAssertEqual(fetches(effects), [cid])
-        // The honest map, over the limit, is unavailable here: the header is
-        // dropped unjudged (neither weighed nor excluded) and nobody is blamed.
+        // The honest map, over the limit, is unavailable here: the header
+        // waits unjudged (neither weighed nor excluded) and nobody is blamed.
         let fetched = core.step(.childIndexFetched(peer, cid: cid, carrier.children), now: Self.now)
         XCTAssertTrue(disconnects(fetched).isEmpty, "a resource limit, never blame")
-        XCTAssertTrue(core.sync.pending.entries.isEmpty)
+        XCTAssertNotNil(core.sync.pending.entries[carrier.cid])
         XCTAssertFalse(core.tree.contains(blockHash: carrier.cid))
         XCTAssertTrue(relays(fetched).isEmpty, "no verdict is logged or pushed")
 
@@ -687,7 +687,7 @@ final class ChainCoreSyncTests: XCTestCase {
             requestID: request.requestID, logID: "L", entries: [StreamEntry(position: 1, entry: .header(carrier.cid))], hasMore: false
         ))), now: Self.now)
         // Served without its child index, which the peer then lacks: the
-        // header is dropped, and still lacking.
+        // header waits with no announcer, and still lacking.
         let ask = try XCTUnwrap(dataRequests(effects).first)
         effects = relay(&core, [entry(carrier, inline: false)], from: peer, requestID: ask.requestID)
         effects = core.step(.childIndexFetched(peer, cid: carrier.block.children.rawCID, nil), now: Self.now)
