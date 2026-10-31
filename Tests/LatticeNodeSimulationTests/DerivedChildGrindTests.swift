@@ -738,6 +738,38 @@ final class DerivedChildGrindTests: XCTestCase {
         }
     }
 
+    /// One answer from a peer brings more headers than its waiting cap: the
+    /// first `maxAwaitingPerPeer` are kept and the rest refused, never
+    /// evicting one another.
+    func testOneAnswerPastThePeerCapKeepsItsFirstHeaders() async throws {
+        let fixture = try await committedWorld()
+        var config = ChainCoreConfig()
+        config.proofs.maxAwaitingPerPeer = 2
+        var (host, proof) = try await provedHost(fixture, config: config)
+        host.deferChecks = true
+        for block in fixture.d { host.core.levels[Self.alpha]?.sync.proofs.wanted.insert(block.cid) }
+        let blocks = fixture.d + [fixture.c]
+        await host.step(.received(Self.alphaHost, Self.alpha, .stream(StreamPage(
+            requestID: 0, logID: "peer",
+            entries: blocks.enumerated().map { StreamEntry(position: UInt64($0.offset + 1), entry: .header($0.element.cid)) },
+            hasMore: false
+        ))))
+        let ask = try XCTUnwrap(host.take().compactMap { sent -> UInt64? in
+            guard sent.path == Self.alpha, case .getData(let id, let cids) = sent.message, Set(cids) == Set(blocks.map(\.cid)) else {
+                return nil
+            }
+            return id
+        }.first)
+        await host.step(.received(Self.alphaHost, Self.alpha, .headers(HeadersResponse(
+            requestID: ask,
+            entries: blocks.map { HeaderEntry(block: $0.block, children: $0.children, proofs: $0.cid == fixture.c.cid ? [proof] : []) },
+            hasMore: false
+        ))))
+        let awaiting = try XCTUnwrap(host.core.levels[Self.alpha]?.sync.proofs.awaiting)
+        XCTAssertEqual(Set(awaiting.keys), Set(fixture.d.map(\.cid)), "the first two are kept, the third refused")
+        XCTAssertTrue(host.disconnects.isEmpty)
+    }
+
     /// A committed child genesis submitted as bytes (its spec a CID, as on
     /// the wire) with its spec beside it weighs, and its spec is stored.
     func testASubmittedCommittedGenesisWeighs() async throws {

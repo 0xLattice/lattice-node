@@ -496,6 +496,9 @@ public struct ChainCore: Sendable {
         /// Stream cursors this step moved.
         var cursors: [String: StreamCursor] = [:]
         var mining: [MiningEffect] = []
+        /// The awaiting sequence before this step took its first waiting
+        /// header: entries at or below it came in earlier steps.
+        var awaitingBefore: UInt64?
         /// Pending headers to look at again, smallest priority first.
         var dirty = Heap<(priority: UInt256, cid: String)> {
             $0.priority != $1.priority ? $0.priority < $1.priority : $0.cid < $1.cid
