@@ -280,13 +280,8 @@ extension ChainCore {
             || parentTree.map { !$0.committers(of: cid, directory: chainPath[chainPath.count - 1]).isEmpty } == true
         guard !entry.proofs.isEmpty || wanted else { return }
         if let peer {
-            // Only an entry from an earlier step makes room: one answer keeps
-            // its first `maxAwaitingPerPeer` headers and refuses the rest.
-            let before = turn.awaitingBefore ?? sync.proofs.sequence
-            turn.awaitingBefore = before
-            guard makeRoomToAwait(limit: proofConfig.maxAwaitingPerPeer, upTo: before, { $0.source == peer }) else {
-                return
-            }
+            let fromPeer = sync.proofs.awaiting.values.filter { $0.source == peer }.count
+            guard fromPeer < proofConfig.maxAwaitingPerPeer else { return }
         }
         guard makeRoomToAwait() else { return }
         sync.proofs.sequence += 1
@@ -308,19 +303,12 @@ extension ChainCore {
         return Swift.max(0, proofConfig.maxPerSource - (sync.proofs.load[peer]?.count ?? 0))
     }
 
-    /// Room for one more waiting header among those `among` selects (all by
-    /// default), at most `limit` of them (`maxAwaiting` by default): evict
-    /// the oldest of them with no proof queued or in flight, sequenced at or
-    /// below `upTo`, or refuse.
-    mutating func makeRoomToAwait(
-        limit: Int? = nil,
-        upTo: UInt64 = .max,
-        _ among: (AwaitingChildProof) -> Bool = { _ in true }
-    ) -> Bool {
-        let selected = sync.proofs.awaiting.values.filter(among)
-        guard selected.count >= (limit ?? proofConfig.maxAwaiting) else { return true }
-        guard let victim = selected
-            .filter({ $0.sequence <= upTo && !sync.proofs.holds($0.blockCID) })
+    /// Room for one more waiting header: evict the oldest with no proof
+    /// queued or in flight, or refuse.
+    mutating func makeRoomToAwait() -> Bool {
+        guard sync.proofs.awaiting.count >= proofConfig.maxAwaiting else { return true }
+        guard let victim = sync.proofs.awaiting.values
+            .filter({ !sync.proofs.holds($0.blockCID) })
             .min(by: { $0.sequence < $1.sequence }) else { return false }
         sync.proofs.awaiting[victim.blockCID] = nil
         return true

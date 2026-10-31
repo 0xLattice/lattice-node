@@ -292,7 +292,6 @@ final class DerivedChildGrindTests: XCTestCase {
     /// N0 and N1 (carrying Alpha's genesis G) mined as usual; C on G; B and
     /// its sibling S on N1 each commit C by CID through a transaction (their
     /// miners host no Alpha and make no proof); B2 on B commits nothing.
-    /// D1 and D2, C's siblings on G, are committed by nothing.
     private struct Committed {
         let world: LevelWorld
         let setup: [MinedGrind]
@@ -301,7 +300,6 @@ final class DerivedChildGrindTests: XCTestCase {
         let b: SimBlock
         let sibling: SimBlock
         let b2: SimBlock
-        let d: [SimBlock]
     }
 
     private func committedWorld() async throws -> Committed {
@@ -325,12 +323,8 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertEqual(children?[Self.alpha[1]]?.rawCID, c.cid, "B carries C by CID")
         XCTAssertNil(children?[Self.alpha[1]]?.node, "B carries C by CID alone")
         let b2 = try await builder.grind(on: b.root, carrying: [], at: Self.t + 3 * Self.interval, outcome: .block)
-        var d: [SimBlock] = []
-        for nonce in [UInt64(2), 3] {
-            d.append(try await builder.build(on: g, carrierPrevState: entering, timestamp: Self.t + 2 * Self.interval, nonce: nonce))
-        }
         return Committed(
-            world: builder.world(), setup: [n0.grind, n1.grind], g: g, c: c, b: b.root, sibling: sibling.root, b2: b2.root, d: d
+            world: builder.world(), setup: [n0.grind, n1.grind], g: g, c: c, b: b.root, sibling: sibling.root, b2: b2.root
         )
     }
 
@@ -707,67 +701,6 @@ final class DerivedChildGrindTests: XCTestCase {
         }
         XCTAssertTrue(asked, "its hole is asked again on a tick")
         XCTAssertNotNil(host.core.levels[Self.alpha]?.sync.pending.entries[fixture.c.cid]?.evidence[fixture.b.cid], "its credit is still kept")
-    }
-
-    /// At its waiting cap, a peer's next header evicts its oldest one that
-    /// holds no proof check; when every one does, the header is refused.
-    func testAPeerAtItsWaitingCapEvictsItsOldestIdleHeader() async throws {
-        let fixture = try await committedWorld()
-        var config = ChainCoreConfig()
-        config.proofs.maxAwaitingPerPeer = 2
-        for held in [false, true] {
-            var (host, proof) = try await provedHost(fixture, config: config)
-            host.deferChecks = true
-            for block in fixture.d {
-                let bogus = ChildBlockProof(rootCID: fixture.b.cid, directoryPath: [Self.alpha[1]], entries: [])
-                if !held { host.core.levels[Self.alpha]?.sync.proofs.wanted.insert(block.cid) }
-                await host.relay(block, at: Self.alpha, from: Self.alphaHost, proofs: held ? [bogus] : [])
-            }
-            let before = try XCTUnwrap(host.core.levels[Self.alpha]?.sync.proofs.awaiting)
-            XCTAssertEqual(Set(before.keys), Set(fixture.d.map(\.cid)), "held: \(held)")
-            await host.relay(fixture.c, at: Self.alpha, from: Self.alphaHost, proofs: [proof])
-            let awaiting = try XCTUnwrap(host.core.levels[Self.alpha]?.sync.proofs.awaiting)
-            if held {
-                XCTAssertNil(awaiting[fixture.c.cid], "every entry holds a check: refused")
-                XCTAssertEqual(Set(awaiting.keys), Set(fixture.d.map(\.cid)))
-            } else {
-                XCTAssertNotNil(awaiting[fixture.c.cid], "C awaits its check")
-                XCTAssertNil(awaiting[fixture.d[0].cid], "the peer's oldest idle header goes")
-                XCTAssertNotNil(awaiting[fixture.d[1].cid])
-            }
-        }
-    }
-
-    /// One answer from a peer brings more headers than its waiting cap: the
-    /// first `maxAwaitingPerPeer` are kept and the rest refused, never
-    /// evicting one another.
-    func testOneAnswerPastThePeerCapKeepsItsFirstHeaders() async throws {
-        let fixture = try await committedWorld()
-        var config = ChainCoreConfig()
-        config.proofs.maxAwaitingPerPeer = 2
-        var (host, proof) = try await provedHost(fixture, config: config)
-        host.deferChecks = true
-        for block in fixture.d { host.core.levels[Self.alpha]?.sync.proofs.wanted.insert(block.cid) }
-        let blocks = fixture.d + [fixture.c]
-        await host.step(.received(Self.alphaHost, Self.alpha, .stream(StreamPage(
-            requestID: 0, logID: "peer",
-            entries: blocks.enumerated().map { StreamEntry(position: UInt64($0.offset + 1), entry: .header($0.element.cid)) },
-            hasMore: false
-        ))))
-        let ask = try XCTUnwrap(host.take().compactMap { sent -> UInt64? in
-            guard sent.path == Self.alpha, case .getData(let id, let cids) = sent.message, Set(cids) == Set(blocks.map(\.cid)) else {
-                return nil
-            }
-            return id
-        }.first)
-        await host.step(.received(Self.alphaHost, Self.alpha, .headers(HeadersResponse(
-            requestID: ask,
-            entries: blocks.map { HeaderEntry(block: $0.block, children: $0.children, proofs: $0.cid == fixture.c.cid ? [proof] : []) },
-            hasMore: false
-        ))))
-        let awaiting = try XCTUnwrap(host.core.levels[Self.alpha]?.sync.proofs.awaiting)
-        XCTAssertEqual(Set(awaiting.keys), Set(fixture.d.map(\.cid)), "the first two are kept, the third refused")
-        XCTAssertTrue(host.disconnects.isEmpty)
     }
 
     /// A committed child genesis submitted as bytes (its spec a CID, as on
