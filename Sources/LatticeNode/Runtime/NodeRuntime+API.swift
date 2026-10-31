@@ -384,12 +384,15 @@ extension NodeRuntime {
         }
         let parentState = block.parentState.rawCID
         let key = CHILD_COMMITMENT_KEY_PREFIX + path[path.count - 1]
-        let general = try? await LatticeStateHeader(rawCID: parentState).resolve(fetcher: fetcher).node?
-            .generalState.resolve(paths: [[key]: .targeted], fetcher: fetcher).node
+        // Read, never guessed: a wrong `oldValue` makes the commit invalid.
+        guard let state = try await LatticeStateHeader(rawCID: parentState).resolve(fetcher: fetcher).node,
+              let general = try await state.generalState.resolve(paths: [[key]: .targeted], fetcher: fetcher).node else {
+            throw NodeStorageError.missingMaterializedVolume(parentState)
+        }
         return BuildChildBlockResponse(
             blockCID: try BlockHeader(node: block).rawCID,
             parentState: parentState,
-            previous: general.flatMap { try? $0.get(key: key) },
+            previous: try general.get(key: key),
             submit: SubmitChildBlockRequest(chainPath: path, block: blockData, children: childrenData, spec: spec)
         )
     }

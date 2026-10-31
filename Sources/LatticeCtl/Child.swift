@@ -39,11 +39,14 @@ struct Child: AsyncParsableCommand {
         }
     }
 
-    /// Merged mining by another chain's miners: the hosted child's next
-    /// block C is built here on the parent's tip state P, committed on the
-    /// parent (`child/X` = `C@P`, `tx commit-child`), and pushed until a
-    /// parent block carrying it weighs it. A commit whose P the parent's tip
-    /// has moved past can never be carried: C is built again on the new tip.
+    /// Merged mining by the parent's miners: the hosted child's next block C
+    /// is built here on the parent's tip state P, committed on the parent
+    /// (`child/X` = `C@P`, as `tx commit-child` does), and pushed until a
+    /// parent block carrying it weighs it. While it is dropped, C is built
+    /// again: a build on the same P leaves the committed C current, one on
+    /// another P is committed instead. At most one commit's P is the
+    /// parent's tip, and each replaces the value the last left (`previous`),
+    /// so a stale commit never takes effect beside a current one.
     struct Commit: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             abstract: "Build a hosted child chain's next block, commit it on its parent, and push it until it is weighed."
@@ -68,59 +71,48 @@ struct Child: AsyncParsableCommand {
             let parent = components.dropLast().joined(separator: "/")
             let layout = rootOption.layout
             let rpc = NodeRPC(try Topology.load(root: layout.root).validated(), layout)
-            var tx = try TxOptions.parse(
+            let tx = try TxOptions.parse(
                 ["--chain", parent, "--key", key] + (rootOption.root.map { ["--root", $0] } ?? [])
                     + (fee.map { ["--fee", String($0)] } ?? [])
             )
             let signer = try tx.signer()
-            // One nonce for every commit: a rebuilt commit replaces a stale
-            // one still pooled, never queues behind it.
-            let nonce = try await nextNonce(rpc: rpc, address: signer.address, chain: parent)
-            tx.nonce = nonce
-            var built: (block: BuildChildBlockResponse, tip: String)?
-            while true {
-                guard let current = built else {
-                    let tip = try await latestBlock(rpc: rpc, chain: parent).hash
-                    let next: BuildChildBlockResponse = try await post(
-                        rpc: rpc, path: "child-blocks/build",
-                        body: BuildChildBlockRequest(chainPath: components, recipient: signer.address)
-                    )
-                    print("built \(next.blockCID) on \(parent) state \(next.parentState)")
-                    try await commit(next, directory: directory, tx: tx, signer: signer)
-                    built = (next, tip)
-                    continue
-                }
-                let pushed: SubmitChildBlockResponse = try await post(rpc: rpc, path: "child-blocks", body: current.block.submit)
-                print("\(pushed.blockCID): \(pushed.status.rawValue)")
-                if pushed.status == .tree { return }
-                // Stale: the parent's tip moved past the one C was built on,
-                // and the commit was not carried there (its nonce is unspent).
-                if pushed.status == .dropped,
-                   try await latestBlock(rpc: rpc, chain: parent).hash != current.tip,
-                   try await committedNextNonce(rpc: rpc, address: signer.address, chain: parent) <= nonce {
-                    built = nil
-                    continue
-                }
-                try await Task.sleep(for: .seconds(3))
+            func build() async throws -> BuildChildBlockResponse {
+                try await post(
+                    rpc: rpc, path: "child-blocks/build",
+                    body: BuildChildBlockRequest(chainPath: components, recipient: signer.address)
+                )
             }
-        }
-
-        /// The commit on the parent. One refused as `feeTooLow` conflicts
-        /// with the stale commit at the same nonce, still pooled until the
-        /// parent's pool drops it: wait for that.
-        private func commit(
-            _ built: BuildChildBlockResponse, directory: String, tx: TxOptions, signer: TxOptions.Signer
-        ) async throws {
-            let action = Tx.CommitChild.action(
-                directory: directory, block: built.blockCID, parentState: built.parentState, previous: built.previous
-            )
+            // The first build's refusal is the operator's to fix; after it,
+            // a refusal or a lost connection is this round's, and the next
+            // round builds again.
+            var built = try await build()
+            var committed: BuildChildBlockResponse?
+            var rebuild = false
             while true {
                 do {
-                    return try await tx.submit(signer: signer, actions: [action])
-                } catch let error as CtlError where "\(error)".contains("feeTooLow") {
-                    print("the stale commit is still pooled; waiting")
-                    try await Task.sleep(for: .seconds(3))
+                    if rebuild { built = try await build() }
+                    rebuild = false
+                    if built.supersedes(committed) {
+                        print("built \(built.blockCID) on \(parent) state \(built.parentState)")
+                        try await tx.submit(signer: signer, actions: [Tx.CommitChild.action(
+                            directory: directory, block: built.blockCID,
+                            parentState: built.parentState, previous: built.previous
+                        )])
+                        committed = built
+                    }
+                    if let committed {
+                        let pushed: SubmitChildBlockResponse = try await post(
+                            rpc: rpc, path: "child-blocks", body: committed.submit
+                        )
+                        print("\(pushed.blockCID): \(pushed.status.rawValue)")
+                        if pushed.status == .tree { return }
+                        rebuild = pushed.status == .dropped
+                    }
+                } catch {
+                    print("\(error)")
+                    rebuild = true
                 }
+                try await Task.sleep(for: .seconds(3))
             }
         }
     }

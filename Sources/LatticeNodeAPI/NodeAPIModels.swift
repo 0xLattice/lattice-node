@@ -113,6 +113,15 @@ public struct BuildChildBlockResponse: Codable, Sendable {
     }
 }
 
+extension BuildChildBlockResponse {
+    /// An author's round (`lattice child commit`): a fresh build on the
+    /// parent state the committed block was built on leaves that block
+    /// current, to push again; one on another state is committed instead.
+    public func supersedes(_ committed: BuildChildBlockResponse?) -> Bool {
+        committed?.parentState != parentState
+    }
+}
+
 /// Where one chain's block reward and fees go: a wallet address for one
 /// absolute chain path. The block commits it as `rewardRecipient`, which the
 /// proof of work covers, so a relayer cannot swap it. Process identity is

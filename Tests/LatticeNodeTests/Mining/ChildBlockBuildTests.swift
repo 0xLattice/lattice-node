@@ -106,24 +106,39 @@ final class ChildBlockBuildTests: XCTestCase {
         )
     }
 
-    /// Genesis, then an existing chain, then a pending child transaction,
-    /// each built on the node hosting Alpha, committed by a transaction
-    /// submitted there (which it pools and relays, but never mines into its
-    /// own template), mined into Nexus by a miner that does not host Alpha,
-    /// and pushed until weighed.
-    func testAParentMinerCarriesCommittedChildBlocksFromGenesisOn() async throws {
-        let payer = CryptoUtils.generateKeyPair()
-        let payerAddress = CryptoUtils.createAddress(from: payer.publicKey)
-        let alice = CryptoUtils.generateKeyPair()
-        let aliceAddress = CryptoUtils.createAddress(from: alice.publicKey)
-        let (builderConfiguration, builderOverlay, builderEndpoint) = try host("7b", hostsAlpha: true, alphaPremineTo: aliceAddress)
-        let (builder, _) = try await start(builderConfiguration, builderOverlay)
-        let (minerConfiguration, minerOverlay, _) = try host("7c", hostsAlpha: false, peers: [builderEndpoint])
-        let (miner, _) = try await start(minerConfiguration, minerOverlay)
-        let alphaReads = try XCTUnwrap(builder.levelReads[Self.alpha])
-        XCTAssertNil(miner.levelReads[Self.alpha], "the miner does not host Alpha")
-        let mining = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: payerAddress)])
+    /// A builder hosting Alpha (which mines nothing) and a miner hosting
+    /// Nexus only, the miner's blocks paying `payer`, funded and in step.
+    private struct Pair {
+        let builder: NodeRuntime
+        let miner: NodeRuntime
+        let builderStorage: NodeStorage
+        let payer: (privateKey: String, publicKey: String)
+        let alice: (privateKey: String, publicKey: String)
+        let mining: MiningTemplateRequest
+        var aliceAddress: String { CryptoUtils.createAddress(from: alice.publicKey) }
+        var payerAddress: String { CryptoUtils.createAddress(from: payer.publicKey) }
+        var build: BuildChildBlockRequest { BuildChildBlockRequest(chainPath: ChildBlockBuildTests.alpha, recipient: aliceAddress) }
 
+        /// The commit-child transaction at the payer's next nonce on the builder's tip.
+        func commit(_ built: BuildChildBlockResponse) async throws -> Transaction {
+            let tip = await builder.reads.readSnapshot().tipCID
+            let nonce = await builder.reads.account(owner: payerAddress, blockCID: try XCTUnwrap(tip))?.nonce ?? 0
+            return try ChildBlockBuildTests.commit(built, key: payer, nonce: nonce)
+        }
+    }
+
+    private func pair(_ bytes: (String, String)) async throws -> Pair {
+        let payer = CryptoUtils.generateKeyPair()
+        let alice = CryptoUtils.generateKeyPair()
+        let (builderConfiguration, builderOverlay, builderEndpoint) = try host(
+            bytes.0, hostsAlpha: true, alphaPremineTo: CryptoUtils.createAddress(from: alice.publicKey)
+        )
+        let (builder, builderStorage) = try await start(builderConfiguration, builderOverlay)
+        let (minerConfiguration, minerOverlay, _) = try host(bytes.1, hostsAlpha: false, peers: [builderEndpoint])
+        let (miner, _) = try await start(minerConfiguration, minerOverlay)
+        XCTAssertNil(miner.levelReads[Self.alpha], "the miner does not host Alpha")
+        let payerAddress = CryptoUtils.createAddress(from: payer.publicKey)
+        let mining = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: payerAddress)])
         try await eventually("the miner and builder are connected") { miner.peerCount >= 1 && builder.peerCount >= 1 }
         try await eventually("the payer is funded") {
             _ = try await miner.mineBlock(mining)
@@ -135,47 +150,114 @@ final class ChildBlockBuildTests: XCTestCase {
             let followed = await builder.reads.readSnapshot().tipCID
             return tip != nil && followed == tip
         }
+        return Pair(
+            builder: builder, miner: miner, builderStorage: builderStorage,
+            payer: payer, alice: alice, mining: mining
+        )
+    }
 
-        /// One round: build on the builder, commit there, mine on the miner
-        /// until the push answers `tree`.
-        func round(_ label: String, nonce: UInt64) async throws -> BuildChildBlockResponse {
-            let built = try await builder.buildChildBlock(BuildChildBlockRequest(chainPath: Self.alpha, recipient: aliceAddress))
-            let entering = try await Self.tipState(miner.reads)
-            XCTAssertEqual(built.parentState, entering, "\(label): built on the parent's tip state")
-            _ = try await builder.submitTransaction(SubmitTransactionRequest(transaction: Self.commit(built, key: payer, nonce: nonce)))
-            try await eventually("\(label): the miner pools the relayed commit") {
-                await miner.reads.readSnapshot().mempoolCount == 1
-            }
-            _ = try await miner.mineBlock(mining)
+    /// The relay rule on the production template path: a node that hosts
+    /// Alpha and mines Nexus pools a valid `child/Alpha` commit and relays
+    /// it, and neither the template it builds nor the block it mines from it
+    /// carries the commit; Alpha's slot holds its own candidate.
+    func testAHostingMinerRelaysAChildCommitButNeverMinesIt() async throws {
+        let pair = try await pair(("7d", "7e"))
+        let built = try await pair.builder.buildChildBlock(pair.build)
+        _ = try await pair.builder.submitTransaction(SubmitTransactionRequest(transaction: try await pair.commit(built)))
+        try await eventually("the peer pools the relayed commit") {
+            await pair.miner.reads.readSnapshot().mempoolCount == 1
+        }
+        let pooled = await pair.builder.reads.readSnapshot().mempoolCount
+        XCTAssertEqual(pooled, 1, "the hosting node pools the commit")
+        let template = try await pair.builder.miningTemplate(pair.mining)
+        let fetcher = pair.builderStorage.workFetcher
+        let carried = try await MiningTemplateAssembly.blockTransactions(in: template.block, fetcher: fetcher)
+        XCTAssertTrue(carried.isEmpty, "the hosting node's template leaves the commit out")
+        let own = template.block.children.node?[Self.alpha[1]]?.rawCID
+        XCTAssertNotNil(own)
+        XCTAssertNotEqual(own, built.blockCID)
+        let mined = try await pair.builder.mine(template)
+        let minedCarried = try await MiningTemplateAssembly.blockTransactions(in: mined, fetcher: fetcher)
+        XCTAssertTrue(minedCarried.isEmpty, "and so does the block it mines")
+    }
+
+    /// Genesis, then an existing chain, then a pending child transaction,
+    /// each built on the node hosting Alpha, committed there (it pools and
+    /// relays the commit), mined into Nexus by a miner that does not host
+    /// Alpha, and pushed until weighed, by `lattice child commit`'s loop. In
+    /// the last round Nexus's tip moves between the build and the commit
+    /// being mined: the push is dropped, the build again enters another
+    /// state, and that one is committed and lands.
+    func testAParentMinerCarriesCommittedChildBlocksFromGenesisOn() async throws {
+        let pair = try await pair(("7b", "7c"))
+        let (builder, miner) = (pair.builder, pair.miner)
+        let alphaReads = try XCTUnwrap(builder.levelReads[Self.alpha])
+
+        /// `lattice child commit`'s loop on the runtimes: build, commit when
+        /// the build supersedes the committed block, push; on `dropped` or an
+        /// error, build again. With `stale`, the first commit's tip is mined
+        /// past by a template taken before the commit, which never carries it.
+        func commitUntilWeighed(_ label: String, stale: Bool = false) async throws -> (first: BuildChildBlockResponse, weighed: BuildChildBlockResponse) {
+            var built = try await builder.buildChildBlock(pair.build)
+            let first = built
+            var past = stale ? try await miner.miningTemplate(pair.mining) : nil
+            var committed: BuildChildBlockResponse?
+            var rebuild = false
             try await eventually("\(label): the pushed block is weighed") {
-                try await builder.submitChildBlock(built.submit).status == .tree
+                do {
+                    if rebuild { built = try await builder.buildChildBlock(pair.build) }
+                    rebuild = false
+                    if built.supersedes(committed) {
+                        _ = try await builder.submitTransaction(SubmitTransactionRequest(transaction: try await pair.commit(built)))
+                        committed = built
+                        try await eventually("\(label): the miner pools the relayed commit") {
+                            await miner.reads.readSnapshot().mempoolCount == 1
+                        }
+                        if let template = past {
+                            past = nil
+                            _ = try await miner.mine(template)
+                        } else {
+                            _ = try await miner.mineBlock(pair.mining)
+                        }
+                    }
+                    guard let committed else { return false }
+                    let pushed = try await builder.submitChildBlock(committed.submit)
+                    if pushed.status == .tree { return true }
+                    rebuild = pushed.status == .dropped
+                } catch {
+                    rebuild = true
+                }
+                return false
             }
+            let weighed = try XCTUnwrap(committed)
             try await eventually("\(label): Alpha executes it") {
-                await alphaReads.readSnapshot().tipCID == built.blockCID
+                await alphaReads.readSnapshot().tipCID == weighed.blockCID
             }
-            return built
+            return (first, weighed)
         }
 
-        let genesis = try await round("genesis", nonce: 0)
+        let genesis = try await commitUntilWeighed("genesis").weighed
         XCTAssertNil(try XCTUnwrap(Block(data: genesis.submit.block)).parent)
         XCTAssertNil(genesis.previous)
-        let premined = await alphaReads.account(owner: aliceAddress, blockCID: genesis.blockCID)?.balance
+        let premined = await alphaReads.account(owner: pair.aliceAddress, blockCID: genesis.blockCID)?.balance
         XCTAssertEqual(premined, Self.alphaSpec.premineAmount())
 
-        let next = try await round("existing chain", nonce: 1)
+        let next = try await commitUntilWeighed("existing chain").weighed
         XCTAssertEqual(try XCTUnwrap(Block(data: next.submit.block)).parent?.rawCID, genesis.blockCID, "extends Alpha's executed tip")
         XCTAssertNil(next.submit.spec)
         XCTAssertEqual(next.previous, genesis.blockCID + "@" + genesis.parentState, "the earlier commitment")
 
         let bob = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
-        let transfer = try Self.signed(alice, TransactionBody(
-            accountActions: [AccountAction(owner: aliceAddress, delta: -3), AccountAction(owner: bob, delta: 2)],
+        let transfer = try Self.signed(pair.alice, TransactionBody(
+            accountActions: [AccountAction(owner: pair.aliceAddress, delta: -3), AccountAction(owner: bob, delta: 2)],
             actions: [], depositActions: [], receiptActions: [], withdrawalActions: [],
-            signers: [aliceAddress], nonce: 0, chainPath: Self.alpha
+            signers: [pair.aliceAddress], nonce: 0, chainPath: Self.alpha
         ))
         let transferCID = try await builder.submitTransaction(SubmitTransactionRequest(transaction: transfer)).transactionCID
         try await eventually("Alpha pools the transfer") { await alphaReads.readSnapshot().mempoolCount == 1 }
-        let carrying = try await round("pending child transaction", nonce: 2)
+        let (stale, carrying) = try await commitUntilWeighed("pending child transaction, tip moved", stale: true)
+        XCTAssertNotEqual(stale.parentState, carrying.parentState, "built again on the moved tip")
+        XCTAssertNotEqual(stale.blockCID, carrying.blockCID)
         XCTAssertEqual(carrying.previous, next.blockCID + "@" + next.parentState)
         let landed = await alphaReads.explorerTransaction(cid: transferCID)?.blockHash
         XCTAssertEqual(landed, carrying.blockCID, "the pending transfer lands in the weighed C")

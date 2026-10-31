@@ -24,7 +24,11 @@ extension NodeRuntime {
     /// Mine one block through the RPC surface: a template on the act-on tip,
     /// its nonce ground, the work submitted. Returns the mined block.
     func mineBlock(_ request: MiningTemplateRequest = MiningTemplateRequest()) async throws -> Block {
-        let template = try await miningTemplate(request)
+        try await mine(try await miningTemplate(request))
+    }
+
+    /// Grind and submit a template taken earlier.
+    func mine(_ template: MiningTemplateResponse) async throws -> Block {
         var nonce: UInt64 = 0
         // The hardest threshold: the advertised ones and every carried
         // block's own target. A child's target can be harder than the
