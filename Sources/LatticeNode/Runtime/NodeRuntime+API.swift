@@ -339,12 +339,14 @@ extension NodeRuntime {
             throw NodeRuntimeError.stopped
         }
         // Read after the submit's step: the loop takes inputs in order.
-        guard let held = await LiveLevels(inputs: inputs).read({ levels -> Bool in
-            guard let level = levels[path] else { return false }
-            return level.tree.contains(blockHash: cid) || level.sync.pending.entries[cid] != nil
-                || level.sync.proofs.awaiting[cid] != nil
+        guard let status = await LiveLevels(inputs: inputs).read({ levels -> SubmitChildBlockStatus in
+            guard let level = levels[path] else { return .dropped }
+            if level.tree.contains(blockHash: cid) { return .tree }
+            if level.sync.pending.entries[cid] != nil { return .pending }
+            if level.sync.proofs.awaiting[cid] != nil { return .awaiting }
+            return .dropped
         }) else { throw NodeRuntimeError.stopped }
-        return SubmitChildBlockResponse(blockCID: cid, held: held)
+        return SubmitChildBlockResponse(blockCID: cid, status: status)
     }
 
     public func miningTemplate(

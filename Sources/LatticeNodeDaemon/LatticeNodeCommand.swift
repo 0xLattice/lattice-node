@@ -1145,7 +1145,7 @@ private func addOperatorWriteRoutes(
             try await service.submitWork(input)
         }
     }
-    // A child block's author pushes it here until it is weighed.
+    // A child block's author pushes it here until its status is "tree".
     router.post("child-blocks") { request, context in
         let input: SubmitChildBlockRequest = try await decode(request, context: context)
         return try await serviceCall(request: request, context: context) {

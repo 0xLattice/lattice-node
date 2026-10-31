@@ -59,16 +59,25 @@ public struct SubmitChildBlockRequest: Codable, Sendable {
     }
 }
 
-/// The submitted block's CID, and whether the node holds it now (weighed,
-/// pending or waiting for a proof). `held` is false when it was dropped as
-/// the same gossip would be: no weighed parent block commits it yet.
+/// Where a submitted child block stands after the submit's step: weighed
+/// in the block tree, pending its parent, awaiting a proof, or dropped as
+/// the same gossip would be (no weighed parent block commits it yet).
+public enum SubmitChildBlockStatus: String, Codable, Sendable, Equatable {
+    case tree
+    case pending
+    case awaiting
+    case dropped
+}
+
+/// The submitted block's CID and where it stands. The author resubmits
+/// until `status` is `.tree`.
 public struct SubmitChildBlockResponse: Codable, Sendable, Equatable {
     public let blockCID: String
-    public let held: Bool
+    public let status: SubmitChildBlockStatus
 
-    public init(blockCID: String, held: Bool) {
+    public init(blockCID: String, status: SubmitChildBlockStatus) {
         self.blockCID = blockCID
-        self.held = held
+        self.status = status
     }
 }
 

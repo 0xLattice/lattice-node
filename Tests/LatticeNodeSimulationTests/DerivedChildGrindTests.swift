@@ -175,10 +175,24 @@ final class DerivedChildGrindTests: XCTestCase {
         mutating func relay(
             _ block: SimBlock, at path: ChainPath, from peer: PeerID, proofs: [ChildBlockProof] = [], spec: ChainSpec? = nil
         ) async {
+            await relay(block, logged: .header(block.cid), at: path, from: peer, proofs: proofs, spec: spec)
+        }
+
+        /// `peer` logs `proof` of `block`, a header this host already holds,
+        /// and serves the header with that proof when asked: gossip that
+        /// adds a proof to a held block.
+        mutating func relayProof(_ block: SimBlock, _ proof: ChildBlockProof, at path: ChainPath, from peer: PeerID) async {
+            await relay(block, logged: .proof(proof.rootCID, of: block.cid), at: path, from: peer, proofs: [proof])
+        }
+
+        private mutating func relay(
+            _ block: SimBlock, logged: LogEntry, at path: ChainPath, from peer: PeerID, proofs: [ChildBlockProof],
+            spec: ChainSpec? = nil
+        ) async {
             position[path, default: 0] += 1
             await step(.received(peer, path, .stream(StreamPage(
                 requestID: 0, logID: "peer",
-                entries: [StreamEntry(position: position[path]!, entry: .header(block.cid))], hasMore: false
+                entries: [StreamEntry(position: position[path]!, entry: logged)], hasMore: false
             ))))
             for (sentAt, message) in take() where sentAt == path {
                 guard case .getData(let id, let cids) = message, cids.contains(block.cid) else { continue }
@@ -544,6 +558,26 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertEqual(host.core.levels[Self.alpha]?.sync.proofs.verifying.isEmpty, true, "the peer's proof is forgotten")
         for answer in host.deferred { await host.step(answer) }
         XCTAssertNotNil(try host.digest(Self.alpha).blocks[fixture.c.cid]?.grinds[fixture.b.cid], "C is credited by derivation")
+        XCTAssertTrue(host.disconnects.isEmpty)
+    }
+
+    /// C waits for a proof (its derivation lost), and a peer then logs B's
+    /// proof of C: the host asks for it, takes the header it already holds
+    /// with that proof, and C is credited with B's grind.
+    func testAProofGossipedForAHeldBlockCreditsIt() async throws {
+        let fixture = try await committedWorld()
+        var host = await host(fixture)
+        await host.relay(fixture.b, at: Self.nexus, from: Self.miner)
+        host.lostDerivations = [fixture.b.cid]
+        await host.submit(fixture.c, at: Self.alpha)
+        XCTAssertNotNil(host.core.levels[Self.alpha]?.sync.proofs.awaiting[fixture.c.cid], "C awaits a proof")
+        await host.meet(Self.alphaHost)
+        let proof = try await ChildBlockProof.generate(
+            rootHeader: BlockHeader(node: fixture.b.block), childDirectory: Self.alpha[1], fetcher: fixture.world.cas
+        )
+        await host.relayProof(fixture.c, proof, at: Self.alpha, from: Self.alphaHost)
+        XCTAssertNotNil(try host.digest(Self.alpha).blocks[fixture.c.cid]?.grinds[fixture.b.cid], "C is credited by the peer's proof")
+        XCTAssertEqual(host.checkCounts(at: Self.alpha)[Check(path: Self.alpha, cid: fixture.c.cid, root: fixture.b.cid)], 1)
         XCTAssertTrue(host.disconnects.isEmpty)
     }
 
@@ -1152,13 +1186,16 @@ final class DerivedChildGrindTests: XCTestCase {
             return peer
         }
 
-        /// `peer` logs `block` and serves it (with `proofs`) when asked.
-        mutating func relay(_ block: SimBlock, at path: ChainPath, from role: String, proofs: [ChildBlockProof] = []) async {
+        /// `peer` logs `block` (or, with `logged`, an object of it) and
+        /// serves it (with `proofs`) when asked.
+        mutating func relay(
+            _ block: SimBlock, at path: ChainPath, from role: String, proofs: [ChildBlockProof] = [], logged: LogEntry? = nil
+        ) async {
             let peer = await peer(role)
             positions[peer, default: 0] += 1
             await host.step(.received(peer, path, .stream(StreamPage(
                 requestID: 0, logID: "peer",
-                entries: [StreamEntry(position: positions[peer]!, entry: .header(block.cid))], hasMore: false
+                entries: [StreamEntry(position: positions[peer]!, entry: logged ?? .header(block.cid))], hasMore: false
             ))))
             for (sentAt, message) in host.take() where sentAt == path {
                 guard case .getData(let id, let cids) = message, cids.contains(block.cid) else { continue }
@@ -1231,7 +1268,7 @@ final class DerivedChildGrindTests: XCTestCase {
             let alpha = DerivedChildGrindTests.alpha
             let hosted = host.core.levels[alpha] != nil
             let child = rng.next() % 2 == 0 ? fixture.c1 : fixture.c2
-            switch rng.next() % 32 {
+            switch rng.next() % 34 {
             case 0, 1:
                 let ready = [fixture.w, fixture.b2] + (relayed.contains(fixture.b2.cid) ? [fixture.b3] : [])
                 guard let carrier = ready.filter({ !relayed.contains($0.cid) }).randomElement(using: &rng) else { return "none" }
@@ -1252,6 +1289,14 @@ final class DerivedChildGrindTests: XCTestCase {
                 if let proof = proofs.first, proof.rootCID != owed[child.cid] { sentBad.insert(await peer("alpha")) }
                 await relay(child, at: alpha, from: "alpha", proofs: proofs)
                 return "gossip \(proofs.count)"
+            case 31, 32:
+                // A peer re-sends a header held here, with a proof.
+                guard hosted, ["awaiting", "pending", "tree"].contains(status(child.cid)) else { return "none" }
+                let proof = rng.next() % 2 == 0
+                    ? fixture.real[child.cid]! : fixture.failing[child.cid]!.randomElement(using: &rng)!
+                if proof.rootCID != owed[child.cid] { sentBad.insert(await peer("alpha")) }
+                await relay(child, at: alpha, from: "alpha", proofs: [proof], logged: .proof(proof.rootCID, of: child.cid))
+                return "regossip"
             case 12:
                 host.holdDerivations.toggle()
                 return "hold \(host.holdDerivations)"
@@ -1344,7 +1389,7 @@ final class DerivedChildGrindTests: XCTestCase {
             }
         }
         print("derived grind interleavings: \(actions.sorted { $0.key < $1.key })")
-        for action in ["weigh", "submit", "gossip", "derive", "check", "restart", "unhost", "rehost", "peer"] {
+        for action in ["weigh", "submit", "gossip", "regossip", "derive", "check", "restart", "unhost", "rehost", "peer"] {
             XCTAssertGreaterThan(actions[action] ?? 0, 0, "no run did \(action)")
         }
     }
