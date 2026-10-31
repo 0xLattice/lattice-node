@@ -423,27 +423,35 @@ public final class NodeRuntime: Sendable {
         await loop.value
     }
 
-    /// The content layer retries until the body is held or the core no longer
-    /// wants it (nil), and says why each attempt failed. A bundle is asked
-    /// for on the first attempt only.
+    /// The content layer retries until the body is held, the core no longer
+    /// wants it, or `attempts` ran out (nil), and says why each attempt
+    /// failed. A bundle is asked for on the first attempt only.
     static func retryingBody<T>(
+        attempts: Int = .max,
         _ attempt: (_ bundle: Bool) async throws -> T,
         waiting: (Error) -> Void
     ) async -> T? {
         var backoff: UInt64 = 250
         var bundle = true
-        while !Task.isCancelled {
+        var left = attempts
+        while !Task.isCancelled, left > 0 {
+            left -= 1
             do {
                 return try await attempt(bundle)
             } catch {
                 if !Task.isCancelled { waiting(error) }
             }
+            guard left > 0 else { break }
             bundle = false
             _ = await Timers.sleep(nanoseconds: backoff * 1_000_000)
             backoff = min(backoff * 2, 30_000)
         }
         return nil
     }
+
+    /// Attempts at a header wanted by CID before its fetch gives up: the
+    /// backoff doubling from 250 ms to its 30 s cap, about a minute.
+    static let headerAttempts = 8
 
     /// How often, at most, a changing pool is projected for `/api/fees`
     /// (milliseconds): fee estimates a second old are as good, and a burst of
@@ -1569,6 +1577,50 @@ extension NodeRuntime {
                 bodies.removeValue(forKey: BodyKey(path: path, cid: cid))?.cancel()
                 bodyRoots[BodyKey(path: path, cid: cid)] = nil
                 fetchWaits[BodyKey(path: path, cid: cid)] = nil
+            case .fetchHeader(let cid):
+                // A child header by CID, through the chain's content path as
+                // a body is: this store, the chain's current peers, then
+                // anyone, holding at most a page and the largest child index
+                // this node takes. A fetch that gives up answers nothing.
+                guard path.count > 1 else { break }
+                let (storage, remote, inputs) = (storage, remote, inputs)
+                let hosts = ChainHosts(nexusGenesisCID: configuration.nexusGenesisCID, chainPath: path)
+                let bytes = core.config.maxPageBytes + core.config.maxChildIndexBytes
+                spawn {
+                    let entry = await NodeRuntime.retryingBody(attempts: NodeRuntime.headerAttempts) { _ in
+                        try await remote.withRootTracing(
+                            cid, bundle: false, hosts: hosts, reserving: bytes,
+                            priority: .body(cid, depth: path.count - 1)
+                        ) { session in
+                            try await HeaderEntry.committed(cid, at: path, fetcher: storage.ownReads(through: session))
+                        }.value
+                    } waiting: { error in
+                        SyncTrace.log(chain: path, "header \(cid) not fetched: \(error)")
+                    }
+                    if let entry { inputs.yield(.event(.level(path, .headerFetched(cid: cid, entry)))) }
+                }
+            case .deriveProof(let job):
+                // From this node's own content only: the carrier, its child
+                // index and its saved proofs, written by the step that
+                // weighed it, before this effect. A block not held answers
+                // nothing: a later trigger derives it again.
+                guard let block = job.block ?? storage.store.header(job.childCID)?.block else { break }
+                let parent = Array(path.dropLast())
+                let (storage, failStop) = (storage, failStop)
+                executionJobs.append(RuntimeJob(path: path, epoch: nil) {
+                    var upstream: [ChildBlockProof] = []
+                    if parent.count > 1 {
+                        do {
+                            upstream = try storage.store.savedProofs(at: parent, for: [job.carrier])[job.carrier] ?? []
+                        } catch {
+                            failStop(error)
+                            return []
+                        }
+                    }
+                    return await job.run(block, upstream: upstream, fetcher: storage.workFetcher)
+                        .map { .level(path, .proofVerified($0, $1)) }
+                })
+                startJobs()
             case .verifyProof(let job):
                 // A job without its block reads it from the header store.
                 guard let block = job.block ?? storage.store.header(job.childCID)?.block else {

@@ -78,13 +78,15 @@ public struct QueuedChildProof: Sendable {
 /// One proof check the shell runs off the step: `verifySecuringWork` of
 /// `proof` for the block on the level's chain. Pure over its inputs, so its
 /// answer is never stale. `block` is nil for a weighed block: the shell
-/// reads it from its store, as it does to serve it.
+/// reads it from its store, as it does to serve it. A `derived` proof was
+/// built by this node (`ChildDeriveJob`): in no slot, blaming no one.
 public struct ChildProofJob: Sendable {
     public let childCID: String
     public let block: Block?
     public let proof: ChildBlockProof
     public let proofID: String
     public let chainPath: [String]
+    public internal(set) var derived = false
 
     public var key: ChildProofKey { ChildProofKey(childCID: childCID, proofID: proofID) }
 
@@ -96,6 +98,80 @@ public struct ChildProofJob: Sendable {
     public static func id(of proof: ChildBlockProof) -> String? {
         guard let bytes = try? proof.serialize() else { return nil }
         return "\(UInt256.hash(bytes))"
+    }
+}
+
+/// One derivation the shell runs off the step, from this node's own
+/// content: the proofs of a block at `chainPath` from `carrier`, a block of
+/// the parent level that commits it, each of the carrier's saved proofs
+/// (none for a root block) extended by the carrier's hop, then each checked
+/// as a derived `ChildProofJob`. `block` is nil for a weighed block.
+public struct ChildDeriveJob: Sendable {
+    public let childCID: String
+    public let block: Block?
+    public let carrier: String
+    public let chainPath: [String]
+
+    /// Each proof built from `upstream` (the carrier's saved proofs) with
+    /// its check; none when the hop cannot be built from `fetcher`.
+    public func run(
+        _ block: Block, upstream: [ChildBlockProof], fetcher: any Fetcher
+    ) async -> [(ChildProofJob, Result<VerifiedChildEvidence, ChildProofVerificationFailure>)] {
+        guard let bytes = block.toData() else { return [] }
+        let local = CoalescingFetcher(OverlayContentSource(entries: [childCID: bytes], fallback: FetcherContentSource(fetcher)))
+        let proofs = (try? await ChildBlockProof.extending(
+            chainPath.count == 2 ? nil : upstream, by: BlockHeader(rawCID: carrier),
+            into: chainPath[chainPath.count - 1], fetcher: local
+        )) ?? []
+        var answers: [(ChildProofJob, Result<VerifiedChildEvidence, ChildProofVerificationFailure>)] = []
+        for proof in proofs {
+            guard let id = ChildProofJob.id(of: proof) else { continue }
+            var check = ChildProofJob(childCID: childCID, block: self.block, proof: proof, proofID: id, chainPath: chainPath)
+            check.derived = true
+            answers.append((check, await check.run(block)))
+        }
+        return answers
+    }
+}
+
+extension ChildBlockProof {
+    /// The proofs of the block `carrier` commits at `directory`: each of
+    /// `upstream` (proofs of `carrier` from a root) extended by `carrier`'s
+    /// hop, or the hop alone when `upstream` is nil (`carrier` is the root).
+    public static func extending(
+        _ upstream: [ChildBlockProof]?, by carrier: BlockHeader, into directory: String, fetcher: any Fetcher
+    ) async throws -> [ChildBlockProof] {
+        let hop = try await generate(rootHeader: carrier, childDirectory: directory, fetcher: fetcher)
+        return upstream.map { $0.map { $0.composing(hop: hop) } } ?? [hop]
+    }
+}
+
+/// A header wanted by CID that the content layer did not serve (yet):
+/// unavailable, never invalid.
+public struct HeaderUnavailable: Error, Sendable {
+    public let cid: String
+}
+
+extension HeaderEntry {
+    /// A header wanted by CID (`ChainEffect.fetchHeader`) as it arrives: the
+    /// header `cid` of child level `path`, read through `fetcher` — exactly
+    /// its block, its child index and a genesis's spec, never a block the
+    /// index names nor a body. Anything unreadable throws
+    /// (`HeaderUnavailable`).
+    public static func committed(_ cid: String, at path: ChainPath, fetcher: any Fetcher) async throws -> HeaderEntry {
+        guard path.count > 1, let block = try? await BlockHeader(rawCID: cid).resolve(fetcher: fetcher).node,
+              (try? BlockHeader(node: block).rawCID) == cid else {
+            throw HeaderUnavailable(cid: cid)
+        }
+        var spec: ChainSpec?
+        if block.parent == nil {
+            guard let held = try? await block.spec.resolve(fetcher: fetcher).node else { throw HeaderUnavailable(cid: cid) }
+            spec = held
+        }
+        guard let children = try? await block.children.resolve(fetcher: fetcher).node else {
+            throw HeaderUnavailable(cid: cid)
+        }
+        return HeaderEntry(block: block, children: children, proofs: [], spec: spec)
     }
 }
 
@@ -191,10 +267,11 @@ extension ChainCore {
     /// A child header nobody weighed yet: it waits for a proof. A header with
     /// no proofs is taken only when wanted (the evidence index named it, or
     /// a waiting header names it as parent); otherwise it is dropped, so
-    /// strangers cannot spend this node's lookups.
-    mutating func awaitProof(_ entry: HeaderEntry, cid: String, from peer: PeerID, _ turn: inout Turn) {
+    /// strangers cannot spend this node's lookups. One from no peer (fetched
+    /// by CID) has no announcer.
+    mutating func awaitProof(_ entry: HeaderEntry, cid: String, from peer: PeerID?, _ turn: inout Turn) {
         if var held = sync.proofs.awaiting[cid] {
-            if !held.announcers.contains(peer) { held.announcers.append(peer) }
+            if let peer, !held.announcers.contains(peer) { held.announcers.append(peer) }
             if held.children == nil, let children = entry.children { held.children = children }
             if held.spec == nil { held.spec = Self.bound(entry.spec, by: entry.block) }
             sync.proofs.awaiting[cid] = held
@@ -204,14 +281,18 @@ extension ChainCore {
         let wanted = sync.proofs.wanted.contains(cid) || sync.pending.childrenOf[cid] != nil
             || sync.proofs.awaiting.values.contains { $0.block.parent?.rawCID == cid }
         guard !entry.proofs.isEmpty || wanted else { return }
-        let fromPeer = sync.proofs.awaiting.values.filter { $0.source == peer }.count
-        guard fromPeer < proofConfig.maxAwaitingPerPeer, makeRoomToAwait() else { return }
+        if let peer {
+            let fromPeer = sync.proofs.awaiting.values.filter { $0.source == peer }.count
+            guard fromPeer < proofConfig.maxAwaitingPerPeer else { return }
+        }
+        guard makeRoomToAwait() else { return }
         sync.proofs.sequence += 1
         sync.proofs.awaiting[cid] = AwaitingChildProof(
             blockCID: cid, block: entry.block, children: entry.children, spec: Self.bound(entry.spec, by: entry.block),
-            announcers: [peer], sequence: sync.proofs.sequence
+            announcers: peer.map { [$0] } ?? [], sequence: sync.proofs.sequence
         )
         sync.proofs.wanted.remove(cid)
+        arrived.append(cid)
         offer(entry.proofs, cid: cid, from: peer)
     }
 
@@ -278,6 +359,12 @@ extension ChainCore {
             || (tree.contains(blockHash: cid) && tree.workContribution(id: grind, at: cid) != nil)
     }
 
+    /// Whether this level holds `cid`: waiting for a proof, pending or
+    /// weighed.
+    func knows(_ cid: String) -> Bool {
+        sync.proofs.awaiting[cid] != nil || sync.pending.entries[cid] != nil || tree.contains(blockHash: cid)
+    }
+
     /// The evidence index's proofs for a block.
     mutating func proofsFound(_ proofs: [ChildBlockProof], for cid: String, _ turn: inout Turn) {
         guard sync.proofs.awaiting[cid] != nil || sync.pending.entries[cid] != nil || tree.contains(blockHash: cid) else { return }
@@ -311,19 +398,23 @@ extension ChainCore {
     /// (persisted, indexed, relayed), on a pending header when it is weighed,
     /// and a waiting header enters the pending queue with it. A proof that
     /// fails — malformed, or no work for this block — is a proof-of-work
-    /// failure: the peer that sent it is disconnected; the index's blame no
-    /// one.
+    /// failure: the peer that sent it is disconnected; the index's and a
+    /// derived proof's blame no one.
     mutating func proofVerified(
         _ job: ChildProofJob,
         _ result: Result<VerifiedChildEvidence, ChildProofVerificationFailure>,
         _ turn: inout Turn
     ) {
-        guard let checked = sync.proofs.verifying.removeValue(forKey: job.key) else { return }
-        sync.proofs.charge(checked, -1)
+        var source: PeerID?
+        if !job.derived {
+            guard let checked = sync.proofs.verifying.removeValue(forKey: job.key) else { return }
+            sync.proofs.charge(checked, -1)
+            source = checked.source
+        }
         let cid = job.childCID
         guard case .success(let evidence) = result, evidence.childCID == cid,
               let work = evidence.contribution, work.work > .zero else {
-            if let peer = checked.source { disconnect(peer, .proofOfWorkInvalid, &turn) }
+            if let peer = source { disconnect(peer, .proofOfWorkInvalid, &turn) }
             if sync.proofs.awaiting[cid] != nil, !sync.proofs.holds(cid) {
                 sync.proofs.awaiting[cid]?.lookedUp = false
             }
@@ -466,6 +557,7 @@ extension ChainCore {
     ) -> [ChainEffect] {
         var turn = Turn(now: now)
         weighed = []
+        arrived = []
         guard let cid = try? BlockHeader(node: block).rawCID else { return [] }
         let context = ValidationContext(nowMilliseconds: now)
         let held = tree.contains(blockHash: cid)
@@ -489,6 +581,7 @@ extension ChainCore {
         guard case .applied(let update) = admission else { return [] }
         weighed += update.weighed
         if !held {
+            arrived.append(cid)
             let waiting = sync.pending.childrenOf[cid] ?? []
             sync.removePending(cid)
             sync.proofs.awaiting[cid] = nil
@@ -519,5 +612,44 @@ extension ChainCore {
         ).raised
         guard !raised.isEmpty else { return ([], []) }
         return (raised, finish(Turn(now: now)))
+    }
+
+    /// Derive the grinds of parent-level carriers at the blocks they commit
+    /// here, beside run attribution and by its index: each block `carriers`
+    /// (weighed at the parent this step) commits into this directory, and
+    /// each committer of a block that `arrived` here. A block this level
+    /// lacks is wanted by CID; a held or waiting one is derived from each
+    /// carrier whose grinds it does not all credit yet. Nothing is kept: a
+    /// failed or unavailable derivation is derived again when either
+    /// trigger fires again.
+    mutating func deriveGrinds(from parent: ChainTree, carriers: Set<String>, arrived: Set<String>) -> [ChainEffect] {
+        let directory = chainPath[chainPath.count - 1]
+        var effects: [ChainEffect] = []
+        var derive: Set<[String]> = []
+        for carrier in carriers.sorted() {
+            guard let named = parent.recordedChildCommitments(of: carrier)?[directory] else { continue }
+            let child = CIDIdentity.canonicalString(named) ?? named
+            if knows(child) {
+                derive.insert([carrier, child])
+            } else if !sync.declined.contains(child) {
+                sync.proofs.want(child, proofConfig)
+                effects.append(.fetchHeader(cid: child))
+            }
+        }
+        for child in arrived {
+            for carrier in parent.committers(of: child, directory: directory) { derive.insert([carrier, child]) }
+        }
+        for pair in derive.sorted(by: { $0.lexicographicallyPrecedes($1) }) {
+            let (carrier, child) = (pair[0], pair[1])
+            guard knows(child), !pastFinality(child), let meta = parent.getConsensusBlock(hash: carrier) else { continue }
+            let grinds = meta.workContributions.keys.filter { !meta.attributedRuns.contains($0) }
+            guard !grinds.allSatisfy({ credits($0, at: child) }) else { continue }
+            effects.append(.deriveProof(ChildDeriveJob(
+                childCID: child,
+                block: sync.proofs.awaiting[child]?.block ?? sync.pending.entries[child]?.block,
+                carrier: carrier, chainPath: chainPath
+            )))
+        }
+        return effects
     }
 }

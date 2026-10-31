@@ -16,6 +16,10 @@ public enum ChainEvent: Sendable {
     case headersServed(PeerID, token: UInt64)
     /// The content layer holds the body Volume of this block locally.
     case bodyFetched(cid: String)
+    /// A child level: the answer to `ChainEffect.fetchHeader`, from no peer,
+    /// blaming no one. A fetch that gave up answers nothing (unavailable,
+    /// never invalid).
+    case headerFetched(cid: String, HeaderEntry)
     /// A connect job's verdict, with the CIDs of the transactions the block
     /// carries (the job read them from the body it executed): what the act-on
     /// chain confirms when it enters the block.
@@ -99,6 +103,12 @@ public enum ChainEffect: Sendable {
     case fetchBody(cid: String)
     /// The window no longer wants this body: stop fetching it.
     case cancelBody(cid: String)
+    /// A child level: fetch a header by CID through the content layer, as
+    /// a body is (this store, the chain's peers, then anyone), retried
+    /// until it arrives or the fetch gives up: exactly its block, its child
+    /// index and a genesis's spec (`HeaderEntry.committed`). Answer
+    /// `headerFetched`.
+    case fetchHeader(cid: String)
     /// Run `ChainTree.connect` on this job off the core and report its
     /// verdict as `connected`.
     case connect(ConnectJob)
@@ -111,6 +121,10 @@ public enum ChainEffect: Sendable {
     /// A child level: run `ChildBlockProof.verifySecuringWork`, a pure job,
     /// and answer `proofVerified`.
     case verifyProof(ChildProofJob)
+    /// A child level: derive a block's proofs from a parent-level block
+    /// that commits it, from this node's own content, and answer
+    /// `proofVerified` for each (`ChildDeriveJob`).
+    case deriveProof(ChildDeriveJob)
     /// The answer to a mined grind (`NodeEvent.mined` with a reply ID): at
     /// once unless its root waits to execute, then from its verdict.
     case workSubmitted(replyID: UInt64, MinedOutcome)
@@ -285,6 +299,9 @@ public struct ChainCore: Sendable {
     /// The blocks this step's admissions weighed (`ChainTreeUpdate.weighed`),
     /// for the host to forward to run attribution. Reset by every step.
     public internal(set) var weighed: [String] = []
+    /// The blocks this step took in: weighed, or waiting for a proof. Their
+    /// carriers' grinds are derived (`deriveGrinds`). Reset by every step.
+    public internal(set) var arrived: [String] = []
     /// The child directories this level's executed blocks commit: built from
     /// the held tree, then grown by every block that executes valid.
     public let executedChildren = ExecutedChildren()
@@ -391,6 +408,7 @@ public struct ChainCore: Sendable {
     public mutating func step(_ event: ChainEvent, now: Int64) -> [ChainEffect] {
         var turn = Turn(now: now)
         weighed = []
+        arrived = []
         switch event {
         case .peerReady(let peer):
             guard sync.peers[peer] == nil else { break }
@@ -414,6 +432,9 @@ public struct ChainCore: Sendable {
             }
         case .bodyFetched(let cid):
             bodyFetched(cid)
+        case .headerFetched(let cid, let entry):
+            // Taken as a peer's header is, from no peer.
+            if !isRoot, (try? BlockHeader(node: entry.block).rawCID) == cid { _ = accept(entry, from: nil, &turn) }
         case .connected(let verdict, let transactions):
             connected(verdict, transactions: transactions, &turn)
         case .transactionsRead(let blocks):
@@ -868,8 +889,9 @@ public struct ChainCore: Sendable {
 
     /// Take one header: only its proof-of-work is checked before it waits in
     /// the pending queue. Returns its CID, or nil when the peer was
-    /// disconnected.
-    private mutating func accept(_ entry: HeaderEntry, from peer: PeerID, _ turn: inout Turn) -> String? {
+    /// disconnected. A child header from no peer (fetched by CID) is judged
+    /// the same way and blames no one.
+    private mutating func accept(_ entry: HeaderEntry, from peer: PeerID?, _ turn: inout Turn) -> String? {
         // An inline children map over the operator's limit is as if not sent:
         // asked for by CID, where the same limit makes it unavailable.
         var entry = entry
@@ -877,7 +899,7 @@ public struct ChainCore: Sendable {
             entry = HeaderEntry(block: entry.block, children: nil, proofs: entry.proofs, spec: entry.spec)
         }
         guard let cid = try? BlockHeader(node: entry.block).rawCID else {
-            disconnect(peer, .proofOfWorkInvalid, &turn)
+            if let peer { disconnect(peer, .proofOfWorkInvalid, &turn) }
             return nil
         }
         if tree.contains(blockHash: cid) {
@@ -888,7 +910,7 @@ public struct ChainCore: Sendable {
         // A root header proves its own work first: one that fails is blamed
         // whatever else is wrong with it (a date too far ahead included).
         if isRoot, ChainTree.rootWork(of: entry.block) == nil {
-            disconnect(peer, .proofOfWorkInvalid, &turn)
+            if let peer { disconnect(peer, .proofOfWorkInvalid, &turn) }
             return nil
         }
         // Structural, never blame: an inline children map that is not the
@@ -908,7 +930,7 @@ public struct ChainCore: Sendable {
             return cid
         }
         if let held = sync.pending.entries[cid] {
-            announce(cid, by: peer, &turn)
+            if let peer { announce(cid, by: peer, &turn) }
             if let children = entry.children, held.children == nil {
                 sync.pending.setChildren(children, of: cid, bytes: Self.size(of: children))
             }
@@ -927,6 +949,7 @@ public struct ChainCore: Sendable {
         }
         // A peer that sent a header holds all its ancestors: this header
         // inherits every announcer of its pending children.
+        guard let peer else { return cid }
         var announcers = [peer]
         for child in (sync.pending.childrenOf[cid] ?? []).sorted() {
             for other in sync.pending.entries[child]?.announcers ?? [] where !announcers.contains(other) {
@@ -1062,6 +1085,7 @@ public struct ChainCore: Sendable {
         case .applied(let update):
             let waiting = sync.pending.childrenOf[cid] ?? []
             sync.removePending(cid)
+            arrived.append(cid)
             turn.headers.append(StoredHeader(
                 blockCID: cid, block: header.block, children: children,
                 spec: header.parent == nil ? header.spec : nil

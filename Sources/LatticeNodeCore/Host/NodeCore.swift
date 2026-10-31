@@ -168,6 +168,10 @@ public struct NodeCore: Sendable {
     public private(set) var touched: Set<ChainPath> = []
     /// Operator overrides: the one genesis a child chain admits.
     public let pins: [ChainPath: String]
+    /// Child levels started (at boot or by `host`) whose held blocks the
+    /// next step takes as arrived, so their carriers' grinds are derived
+    /// again (`deriveGrinds`): nothing of a derivation is persisted.
+    var started: Set<ChainPath> = []
 
     /// A host over its root tree, running every hosted child level whose
     /// parent level it runs, each empty. The host owns the root tree: a
@@ -359,6 +363,8 @@ public struct NodeCore: Sendable {
         /// What each level's admissions weighed this step
         /// (`ChainTreeUpdate.weighed`), forwarded to run attribution.
         var weighed: [ChainPath: Set<String>] = [:]
+        /// What each level took in this step (`ChainCore.arrived`).
+        var arrived: [ChainPath: Set<String>] = [:]
         /// Every level the step ran (`NodeCore.touched`).
         var touched: Set<ChainPath> = []
     }
@@ -420,6 +426,7 @@ public struct NodeCore: Sendable {
         turn.touched.insert(path)
         let effects = core.step(event, now: turn.now)
         turn.weighed[path, default: []].formUnion(core.weighed)
+        turn.arrived[path, default: []].formUnion(core.arrived)
         levels[path] = consume core
         absorb(effects, at: path, &turn)
         let executed = effects.contains {
@@ -525,6 +532,7 @@ public struct NodeCore: Sendable {
         for held in levels.keys where held.starts(with: path) {
             levels[held] = nil
             hosted.remove(held)
+            started.remove(held)
         }
     }
 
@@ -565,6 +573,7 @@ public struct NodeCore: Sendable {
                 proof: (carried.proof, carried.evidence), now: turn.now
             )
             turn.weighed[carried.path, default: []].formUnion(core.weighed)
+            turn.arrived[carried.path, default: []].formUnion(core.arrived)
             levels[carried.path] = consume core
             absorb(effects, at: carried.path, &turn)
         }
@@ -583,28 +592,41 @@ public struct NodeCore: Sendable {
         guard path.count > 1, var core = levels.removeValue(forKey: parent) else { return false }
         core.tree.serveRuns(for: path[path.count - 1])
         levels[parent] = core
+        started.insert(path)
         return true
     }
 
     /// Credit each child level with the parent runs this step can have
     /// moved, parent levels first: the parent level's weighed blocks and the
     /// blocks its own derivation raised, and this level's weighed blocks,
-    /// forwarded unchanged. What a level raises flows on down.
+    /// forwarded unchanged. What a level raises flows on down. Beside them,
+    /// by the same index, the grinds of the parent's weighed blocks and of
+    /// the committers of what this level took in are derived (a level just
+    /// started takes in every block it holds).
     mutating func attributeRuns(_ turn: inout Turn) {
         var raised: [ChainPath: Set<String>] = [:]
         for path in ordered where path.count > 1 {
             let parent = Array(path.dropLast())
             let parentBlocks = (turn.weighed[parent] ?? []).union(raised[parent] ?? [])
             let held = turn.weighed[path] ?? []
-            guard !parentBlocks.isEmpty || !held.isEmpty,
+            var arrived = turn.arrived[path] ?? []
+            if started.remove(path) != nil, let tree = levels[path]?.tree {
+                var stack = tree.genesisRoots
+                while let next = stack.popLast() {
+                    arrived.insert(next)
+                    stack += tree.children(of: next)
+                }
+            }
+            guard !parentBlocks.isEmpty || !held.isEmpty || !arrived.isEmpty,
                   let parentCore = levels[parent], var core = levels.removeValue(forKey: path) else { continue }
             let result = core.applyParentRun(
                 from: parentCore.tree, parentBlocks: parentBlocks, held: held, now: turn.now
             )
+            let derived = core.deriveGrinds(from: parentCore.tree, carriers: turn.weighed[parent] ?? [], arrived: arrived)
             levels[path] = consume core
             turn.touched.insert(path)
             raised[path] = Set(result.raised)
-            absorb(result.effects, at: path, &turn)
+            absorb(result.effects + derived, at: path, &turn)
         }
     }
 }
