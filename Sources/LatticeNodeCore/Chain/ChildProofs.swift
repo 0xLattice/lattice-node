@@ -112,8 +112,7 @@ public struct ChildDeriveJob: Sendable {
     public let childCID: String
     public let block: Block?
     public let carrier: String
-    /// The carrier's grinds owed here: not credited, and with no proof
-    /// queued or in a check here.
+    /// The carrier's grinds owed here: not credited.
     public let grinds: Set<String>
     public let chainPath: [String]
     let key: DeriveKey
@@ -124,7 +123,7 @@ public struct ChildDeriveJob: Sendable {
     /// the hop cannot be read from `fetcher`.
     public func run(held: Block?, upstream: [ChildBlockProof], fetcher: any Fetcher) async -> ChildDerivation {
         var entry: HeaderEntry?
-        if held == nil { entry = try? await HeaderEntry.committed(childCID, at: chainPath, fetcher: fetcher) }
+        if held == nil { entry = await HeaderEntry.committed(childCID, at: chainPath, fetcher: fetcher) }
         guard let block = held ?? entry?.block, let bytes = block.toData() else {
             return ChildDerivation(job: self, entry: nil, checks: [])
         }
@@ -152,9 +151,9 @@ public struct ChildDerivation: Sendable {
     public let checks: [(ChildProofJob, Result<VerifiedChildEvidence, ChildProofVerificationFailure>)]
 }
 
-/// A derivation by what it was built from: a carrier, the block it commits
-/// and how many of the carrier's grinds it weighed. A new upstream proof at
-/// the carrier is a new key.
+/// A derivation in flight by what it is built from: a carrier, the block it
+/// commits and how many of the carrier's grinds it weighs. A new upstream
+/// proof at the carrier is a new key.
 struct DeriveKey: Hashable, Sendable {
     let carrier: String
     let child: String
@@ -173,31 +172,21 @@ extension ChildBlockProof {
     }
 }
 
-/// A committed header this store does not hold: unavailable, never
-/// invalid.
-public struct HeaderUnavailable: Error, Sendable {
-    public let cid: String
-}
-
 extension HeaderEntry {
     /// A committed header as a derivation reads it: the header `cid` of
     /// child level `path`, read through `fetcher` (this store) — exactly
     /// its block, its child index and a genesis's spec, never a block the
-    /// index names nor a body. Anything unreadable throws
-    /// (`HeaderUnavailable`).
-    public static func committed(_ cid: String, at path: ChainPath, fetcher: any Fetcher) async throws -> HeaderEntry {
+    /// index names nor a body. Nil when anything is unreadable: unavailable,
+    /// never invalid.
+    public static func committed(_ cid: String, at path: ChainPath, fetcher: any Fetcher) async -> HeaderEntry? {
         guard path.count > 1, let block = try? await BlockHeader(rawCID: cid).resolve(fetcher: fetcher).node,
-              (try? BlockHeader(node: block).rawCID) == cid else {
-            throw HeaderUnavailable(cid: cid)
-        }
+              (try? BlockHeader(node: block).rawCID) == cid else { return nil }
         var spec: ChainSpec?
         if block.parent == nil {
-            guard let held = try? await block.spec.resolve(fetcher: fetcher).node else { throw HeaderUnavailable(cid: cid) }
+            guard let held = try? await block.spec.resolve(fetcher: fetcher).node else { return nil }
             spec = held
         }
-        guard let children = try? await block.children.resolve(fetcher: fetcher).node else {
-            throw HeaderUnavailable(cid: cid)
-        }
+        guard let children = try? await block.children.resolve(fetcher: fetcher).node else { return nil }
         return HeaderEntry(block: block, children: children, proofs: [], spec: spec)
     }
 }
@@ -231,11 +220,9 @@ public struct ChildProofSync: Sendable {
     var wanted: Set<String> = []
     var wantedOrder: [String] = []
     var sequence: UInt64 = 0
-    /// Derivations in flight, and those that built proofs: a carrier whose
-    /// grinds miss a block's target is not derived again for the same
-    /// upstream. Soft: in memory only, gone on restart.
-    var deriving: Set<DeriveKey> = []
-    var tried: Set<DeriveKey> = []
+    /// Derivations in flight, by the block derived (a waiting header with
+    /// one is never evicted). Soft: in memory only, gone on restart.
+    var deriving: [String: Set<DeriveKey>] = [:]
 
     public init() {}
 
@@ -245,7 +232,18 @@ public struct ChildProofSync: Sendable {
 
     func holds(_ cid: String) -> Bool {
         queued.contains { $0.cid == cid } || verifying.keys.contains { $0.childCID == cid }
-            || deriving.contains { $0.child == cid }
+            || deriving[cid] != nil
+    }
+
+    mutating func startDeriving(_ key: DeriveKey) {
+        deriving[key.child, default: []].insert(key)
+    }
+
+    /// Whether `key` was in flight.
+    mutating func finishDeriving(_ key: DeriveKey) -> Bool {
+        guard deriving[key.child]?.remove(key) != nil else { return false }
+        if deriving[key.child]?.isEmpty == true { deriving[key.child] = nil }
+        return true
     }
 
     mutating func charge(_ proof: QueuedChildProof, _ sign: Int) {
@@ -428,9 +426,7 @@ extension ChainCore {
     /// and a waiting header enters the pending queue with it. A proof that
     /// fails — malformed, or no work for this block — is a proof-of-work
     /// failure: the peer that sent it is disconnected; the index's and a
-    /// derived proof's blame no one. One not derived here that fails has the
-    /// block's committers derived, so a bogus proof sent first cannot leave
-    /// it uncredited.
+    /// derived proof's blame no one.
     mutating func proofVerified(
         _ job: ChildProofJob,
         _ result: Result<VerifiedChildEvidence, ChildProofVerificationFailure>,
@@ -446,10 +442,6 @@ extension ChainCore {
         guard case .success(let evidence) = result, evidence.childCID == cid,
               let work = evidence.contribution, work.work > .zero else {
             if let peer = source { disconnect(peer, .proofOfWorkInvalid, &turn) }
-            if !job.derived {
-                sync.proofs.tried = sync.proofs.tried.filter { $0.child != cid }
-                arrived.append(cid)
-            }
             if sync.proofs.awaiting[cid] != nil, !sync.proofs.holds(cid) {
                 sync.proofs.awaiting[cid]?.lookedUp = false
             }
@@ -652,11 +644,13 @@ extension ChainCore {
     /// here, beside run attribution and by its index: each block `carriers`
     /// (weighed at the parent this step) commits into this directory, and
     /// each committer of a block in `arrived`. A carrier is derived for its
-    /// grinds this level owes the block: not credited, and with no proof
-    /// already queued or in a check (that proof is the grind's one check).
-    /// A block this level lacks is read from this store alone; one nobody
-    /// published here is not credited yet. A derivation that built proofs
-    /// is not run again for the same upstream (`ChildProofSync.tried`).
+    /// grinds this level owes the block: those not credited, whatever peer
+    /// proofs are queued or in a check (a peer may vanish with its proofs;
+    /// a second check of one grind credits once). A pair fully credited
+    /// issues nothing, so a restored level's pass is cheap; a grind that
+    /// misses the block's target is derived again at each trigger (a weigh
+    /// or an arrival). A block this level lacks is read from this store
+    /// alone; one nobody published here is not credited yet.
     mutating func deriveGrinds(from parent: ChainTree, carriers: Set<String>, arrived: Set<String>) -> [ChainEffect] {
         let directory = chainPath[chainPath.count - 1]
         var pairs: Set<[String]> = []
@@ -671,12 +665,11 @@ extension ChainCore {
         for pair in pairs.sorted(by: { $0.lexicographicallyPrecedes($1) }) {
             let (carrier, child) = (pair[0], pair[1])
             guard !sync.declined.contains(child), let meta = parent.getConsensusBlock(hash: carrier) else { continue }
-            let checking = Set((sync.proofs.queued + sync.proofs.verifying.values).filter { $0.cid == child }.map(\.proof.rootCID))
-            let grinds = meta.workContributions.keys.filter { !meta.attributedRuns.contains($0) && !checking.contains($0) }
+            let grinds = meta.workContributions.keys.filter { !meta.attributedRuns.contains($0) }
             let owed = Set(grinds.filter { !credits($0, at: child) })
             let key = DeriveKey(carrier: carrier, child: child, upstream: grinds.count)
-            guard !owed.isEmpty, !sync.proofs.deriving.contains(key), !sync.proofs.tried.contains(key) else { continue }
-            sync.proofs.deriving.insert(key)
+            guard !owed.isEmpty, sync.proofs.deriving[child]?.contains(key) != true else { continue }
+            sync.proofs.startDeriving(key)
             effects.append(.deriveProof(ChildDeriveJob(
                 childCID: child,
                 block: sync.proofs.awaiting[child]?.block ?? sync.pending.entries[child]?.block,
@@ -687,9 +680,8 @@ extension ChainCore {
     }
 
     /// A derivation's checks, after the block it read (if any) was taken:
-    /// each judged as a derived proof. One that built proofs is remembered.
+    /// each judged as a derived proof.
     mutating func derived(_ derivation: ChildDerivation, _ turn: inout Turn) {
-        if !derivation.checks.isEmpty { sync.proofs.tried.insert(derivation.job.key) }
         for (check, result) in derivation.checks { proofVerified(check, result, &turn) }
     }
 }

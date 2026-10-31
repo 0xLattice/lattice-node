@@ -292,9 +292,8 @@ public struct ChainCore: Sendable {
     /// The blocks this step's admissions weighed (`ChainTreeUpdate.weighed`),
     /// for the host to forward to run attribution. Reset by every step.
     public internal(set) var weighed: [String] = []
-    /// The blocks this step took in to wait for a proof, and those a
-    /// proof not derived here failed at: their committers' grinds are
-    /// derived (`deriveGrinds`). Reset by every step.
+    /// The blocks this step took in to wait for a proof: their committers'
+    /// grinds are derived (`deriveGrinds`). Reset by every step.
     public internal(set) var arrived: [String] = []
     /// A child level, within one step only: its parent level's tree, whose
     /// committers make a header with no proofs worth taking (`awaitProof`).
@@ -457,7 +456,7 @@ public struct ChainCore: Sendable {
         case .derived(let derivation):
             // A block read from this store is taken as a peer's header is,
             // from no peer, before its proofs are judged.
-            guard !isRoot, sync.proofs.deriving.remove(derivation.job.key) != nil else { break }
+            guard !isRoot, sync.proofs.finishDeriving(derivation.job.key) else { break }
             if let entry = derivation.entry { _ = accept(entry, from: nil, &turn) }
             derived(derivation, &turn)
         case .evidenceChanged(let cids):
