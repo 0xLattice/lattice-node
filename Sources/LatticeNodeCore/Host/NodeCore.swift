@@ -168,10 +168,12 @@ public struct NodeCore: Sendable {
     public private(set) var touched: Set<ChainPath> = []
     /// Operator overrides: the one genesis a child chain admits.
     public let pins: [ChainPath: String]
-    /// Child levels started (at boot or by `host`) whose held blocks the
-    /// next step takes as arrived, so their carriers' grinds are derived
-    /// again (`deriveGrinds`): nothing of a derivation is persisted.
-    var started: Set<ChainPath> = []
+    /// The blocks of each child level restored from its facts (at boot or
+    /// by `host`), orphans included, that the next step takes as arrived:
+    /// their committers' grinds are derived again (`deriveGrinds`), since
+    /// nothing of a derivation is persisted and a crash can fall between a
+    /// carrier weighed and its derivation.
+    var restored: [ChainPath: Set<String>] = [:]
 
     /// A host over its root tree, running every hosted child level whose
     /// parent level it runs, each empty. The host owns the root tree: a
@@ -315,6 +317,15 @@ public struct NodeCore: Sendable {
         // `init` served is gone).
         guard serve(path), let parent = levels[Array(path.dropLast())] else { return }
         levels[path] = try restoreLevel(path, parent: parent, facts: facts, specs: specs, cursors: cursors)
+        restored[path] = Self.blocks(of: facts)
+    }
+
+    /// Every block `facts` weigh.
+    static func blocks(of facts: [BlockImportBatch]) -> Set<String> {
+        Set(facts.flatMap(\.facts).compactMap {
+            guard case .block(let block) = $0 else { return nil }
+            return block.blockHash
+        })
     }
 
     /// One child level over its journaled facts and its restored parent.
@@ -424,7 +435,7 @@ public struct NodeCore: Sendable {
     mutating func run(_ path: ChainPath, _ event: ChainEvent, _ turn: inout Turn) {
         guard var core = levels.removeValue(forKey: path) else { return }
         turn.touched.insert(path)
-        let effects = core.step(event, now: turn.now)
+        let effects = core.step(event, now: turn.now, parent: path.count > 1 ? levels[Array(path.dropLast())]?.tree : nil)
         turn.weighed[path, default: []].formUnion(core.weighed)
         turn.arrived[path, default: []].formUnion(core.arrived)
         levels[path] = consume core
@@ -520,6 +531,7 @@ public struct NodeCore: Sendable {
         else { return }
         hosted.insert(path)
         levels[path] = level
+        restored[path] = Self.blocks(of: facts)
         turn.touched.formUnion([path, Array(path.dropLast())])
         for peer in peers.sorted() { run(path, .peerReady(peer), &turn) }
     }
@@ -532,7 +544,7 @@ public struct NodeCore: Sendable {
         for held in levels.keys where held.starts(with: path) {
             levels[held] = nil
             hosted.remove(held)
-            started.remove(held)
+            restored[held] = nil
         }
     }
 
@@ -573,7 +585,6 @@ public struct NodeCore: Sendable {
                 proof: (carried.proof, carried.evidence), now: turn.now
             )
             turn.weighed[carried.path, default: []].formUnion(core.weighed)
-            turn.arrived[carried.path, default: []].formUnion(core.arrived)
             levels[carried.path] = consume core
             absorb(effects, at: carried.path, &turn)
         }
@@ -592,7 +603,6 @@ public struct NodeCore: Sendable {
         guard path.count > 1, var core = levels.removeValue(forKey: parent) else { return false }
         core.tree.serveRuns(for: path[path.count - 1])
         levels[parent] = core
-        started.insert(path)
         return true
     }
 
@@ -602,21 +612,14 @@ public struct NodeCore: Sendable {
     /// forwarded unchanged. What a level raises flows on down. Beside them,
     /// by the same index, the grinds of the parent's weighed blocks and of
     /// the committers of what this level took in are derived (a level just
-    /// started takes in every block it holds).
+    /// restored takes in every block it holds).
     mutating func attributeRuns(_ turn: inout Turn) {
         var raised: [ChainPath: Set<String>] = [:]
         for path in ordered where path.count > 1 {
             let parent = Array(path.dropLast())
             let parentBlocks = (turn.weighed[parent] ?? []).union(raised[parent] ?? [])
             let held = turn.weighed[path] ?? []
-            var arrived = turn.arrived[path] ?? []
-            if started.remove(path) != nil, let tree = levels[path]?.tree {
-                var stack = tree.genesisRoots
-                while let next = stack.popLast() {
-                    arrived.insert(next)
-                    stack += tree.children(of: next)
-                }
-            }
+            let arrived = (turn.arrived[path] ?? []).union(restored.removeValue(forKey: path) ?? [])
             guard !parentBlocks.isEmpty || !held.isEmpty || !arrived.isEmpty,
                   let parentCore = levels[parent], var core = levels.removeValue(forKey: path) else { continue }
             let result = core.applyParentRun(

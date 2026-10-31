@@ -511,18 +511,14 @@ public struct LevelSimulator {
             schedule(at: delay(), to: name, .host(.level(path, .bodyFetched(cid: cid))))
         case .cancelBody:
             break
-        case .fetchHeader(let cid):
-            // The content layer holds every header.
-            guard let entry = try? await HeaderEntry.committed(cid, at: path, fetcher: world.cas) else { break }
-            schedule(at: delay(), to: name, .host(.level(path, .headerFetched(cid: cid, entry))))
         case .deriveProof(let job):
             // The carrier's proofs are this node's own, as the runtime reads
-            // them.
-            guard let block = job.block ?? node.store.levels[path]?.headers[job.childCID]?.block else { break }
+            // them. A block the level lacks is read from this node's store,
+            // which holds nothing it has not weighed: nothing is read.
+            let held = job.block ?? node.store.levels[path]?.headers[job.childCID]?.block
             let upstream = node.store.proofs(Array(path.dropLast()), job.carrier)
-            for (check, result) in await job.run(block, upstream: upstream, fetcher: world.cas) {
-                schedule(at: delay(), to: name, .host(.level(path, .proofVerified(check, result))))
-            }
+            let derivation = await job.run(held: held, upstream: upstream, fetcher: held == nil ? SimCAS() : world.cas)
+            schedule(at: delay(), to: name, .host(.level(path, .derived(derivation))))
         case .persist, .disconnect, .wakeAt, .connect:
             throw Invariants.fail(name, "a level effect escaped the host")
         }
