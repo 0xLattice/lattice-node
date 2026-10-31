@@ -687,7 +687,7 @@ final class ChainCoreSyncTests: XCTestCase {
             requestID: request.requestID, logID: "L", entries: [StreamEntry(position: 1, entry: .header(carrier.cid))], hasMore: false
         ))), now: Self.now)
         // Served without its child index, which the peer then lacks: the
-        // header is dropped, and still lacking.
+        // header waits with no announcer, and still lacking.
         let ask = try XCTUnwrap(dataRequests(effects).first)
         effects = relay(&core, [entry(carrier, inline: false)], from: peer, requestID: ask.requestID)
         effects = core.step(.childIndexFetched(peer, cid: carrier.block.children.rawCID, nil), now: Self.now)

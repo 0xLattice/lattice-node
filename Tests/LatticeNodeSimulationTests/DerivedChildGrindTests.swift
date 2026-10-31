@@ -700,6 +700,13 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertTrue(held.announcers.isEmpty, "it waits for an announcer")
         XCTAssertEqual(host.fetches.count, 1, "asked of nobody else")
         XCTAssertTrue(host.disconnects.isEmpty, "availability, never blame")
+        let tick = host.core.step(.tick, now: Self.now + host.config.headersTimeout)
+        let asked = tick.contains {
+            guard case .level(Self.alpha, .send(Self.alphaHost, .getData(_, let cids))) = $0 else { return false }
+            return cids.contains(fixture.c.cid)
+        }
+        XCTAssertTrue(asked, "its hole is asked again on a tick")
+        XCTAssertNotNil(host.core.levels[Self.alpha]?.sync.pending.entries[fixture.c.cid]?.evidence[fixture.b.cid], "its credit is still kept")
     }
 
     /// At its waiting cap, a peer's next header evicts its oldest one that

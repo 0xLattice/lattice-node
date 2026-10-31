@@ -770,7 +770,10 @@ public struct ChainCore: Sendable {
         if inFlight.contains(entry.block) { return false }
         switch entry.kind {
         case .header:
-            return !tree.contains(blockHash: entry.block) && sync.pending.entries[entry.block] == nil
+            // A pending header with no child index and no announcer waits
+            // on nobody: its hole is asked again, so a stall frees the slot.
+            let waiting = sync.pending.entries[entry.block].map { $0.children == nil && $0.announcers.isEmpty }
+            return !tree.contains(blockHash: entry.block) && waiting != false
                 && sync.proofs.awaiting[entry.block] == nil && !sync.declined.contains(entry.block)
         case .proof:
             return !applied(entry) && sync.pending.entries[entry.block]?.evidence[entry.cid] == nil
