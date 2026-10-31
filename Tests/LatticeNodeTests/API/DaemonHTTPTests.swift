@@ -190,6 +190,41 @@ final class DaemonHTTPTests: XCTestCase {
         }
     }
 
+    func testChildBlockSubmitRefusesARootPathMalformedBytesAndAnUnhostedChain() async throws {
+        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-http-child-block-\(UUID().uuidString)"
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
+        let storage = try await NodeStorage.open(configuration: NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: storageDirectory,
+            privateKeyHex: String(repeating: "01", count: 32)
+        ))
+        let service = try await startRuntime(storage)
+        let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
+        let genesis = try await NexusGenesis.buildGenesisBlock(fetcher: storage.workFetcher)
+        let block = try XCTUnwrap(Block(data: try XCTUnwrap(genesis.toData()))?.toData())
+        let children = try XCTUnwrap(FlatDictionary<BlockHeader>().toData())
+        let cases: [(SubmitChildBlockRequest, HTTPResponse.Status)] = [
+            (SubmitChildBlockRequest(chainPath: ["Nexus"], block: block, children: children), .badRequest),
+            (SubmitChildBlockRequest(chainPath: ["Nexus", "Alpha"], block: Data([1, 2, 3]), children: children), .badRequest),
+            (SubmitChildBlockRequest(chainPath: ["Nexus", "Alpha"], block: block, children: children), .notFound),
+        ]
+
+        try await app.test(.router) { client in
+            for (request, status) in cases {
+                try await client.execute(
+                    uri: "/child-blocks",
+                    method: .post,
+                    headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
+                    body: ByteBuffer(bytes: try JSONEncoder().encode(request))
+                ) { response in
+                    XCTAssertEqual(response.status, status, "\(request.chainPath)")
+                }
+            }
+        }
+    }
+
     func testMiningTemplateRequestJSONDefaults() throws {
         let empty = try JSONDecoder().decode(
             MiningTemplateRequest.self,

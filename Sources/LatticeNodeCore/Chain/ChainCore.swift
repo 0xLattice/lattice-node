@@ -37,6 +37,9 @@ public enum ChainEvent: Sendable {
     case proofVerified(ChildProofJob, Result<VerifiedChildEvidence, ChildProofVerificationFailure>)
     /// A child level: a `deriveProof` job finished, every time it ran.
     case derived(ChildDerivation)
+    /// A child level: a header submitted on this node (its author's push),
+    /// taken as the same header gossiped from no peer.
+    case submitted(HeaderEntry)
     /// A child level: the evidence index's proofs changed for these blocks.
     case evidenceChanged(childCIDs: [String])
     /// The level's mempool and miner work: transactions, preflight and
@@ -113,9 +116,8 @@ public enum ChainEffect: Sendable {
     /// A child level: run `ChildBlockProof.verifySecuringWork`, a pure job,
     /// and answer `proofVerified`.
     case verifyProof(ChildProofJob)
-    /// A child level: derive a block's proofs from a parent-level block
-    /// that commits it, from this node's own content only (a block this
-    /// level lacks is read from this store, never from peers), and answer
+    /// A child level: derive a held block's proofs from a parent-level
+    /// block that commits it, from this node's own content only, and answer
     /// `derived` (`ChildDeriveJob`).
     case deriveProof(ChildDeriveJob)
     /// The answer to a mined grind (`NodeEvent.mined` with a reply ID): at
@@ -454,14 +456,14 @@ public struct ChainCore: Sendable {
         case .proofVerified(let job, let result):
             proofVerified(job, result, &turn)
         case .derived(let derivation):
-            // A block read from this store is taken as a peer's header is,
-            // from no peer, before its proofs are judged.
             // Applied even when it outlived its count (an unhost between):
             // the job is pure and credit idempotent.
             guard !isRoot else { break }
             sync.proofs.finishDeriving(derivation.job.childCID)
-            if let entry = derivation.entry { _ = accept(entry, from: nil, &turn) }
             derived(derivation, &turn)
+        case .submitted(let entry):
+            guard !isRoot else { break }
+            _ = accept(entry, from: nil, &turn)
         case .evidenceChanged(let cids):
             evidenceChanged(cids)
         case .mining(let event):
@@ -896,8 +898,8 @@ public struct ChainCore: Sendable {
 
     /// Take one header: only its proof-of-work is checked before it waits in
     /// the pending queue. Returns its CID, or nil when the peer was
-    /// disconnected. A child header from no peer (read from this store by a
-    /// derivation) is judged the same way and blames no one.
+    /// disconnected. A child header from no peer (a local submit) is judged
+    /// the same way and blames no one.
     private mutating func accept(_ entry: HeaderEntry, from peer: PeerID?, _ turn: inout Turn) -> String? {
         // An inline children map over the operator's limit is as if not sent:
         // asked for by CID, where the same limit makes it unavailable.

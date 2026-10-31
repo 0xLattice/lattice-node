@@ -42,6 +42,36 @@ public struct SubmitTransactionResponse: Codable, Sendable, Equatable {
     }
 }
 
+/// `POST /child-blocks`: a child block this node's operator holds (normally
+/// its author), as a peer would gossip it without proofs: its block node's
+/// bytes, its child index's, and a child genesis's spec.
+public struct SubmitChildBlockRequest: Codable, Sendable {
+    public let chainPath: [String]
+    public let block: Data
+    public let children: Data
+    public let spec: Data?
+
+    public init(chainPath: [String], block: Data, children: Data, spec: Data? = nil) {
+        self.chainPath = chainPath
+        self.block = block
+        self.children = children
+        self.spec = spec
+    }
+}
+
+/// The submitted block's CID, and whether the node holds it now (weighed,
+/// pending or waiting for a proof). `held` is false when it was dropped as
+/// the same gossip would be: no weighed parent block commits it yet.
+public struct SubmitChildBlockResponse: Codable, Sendable, Equatable {
+    public let blockCID: String
+    public let held: Bool
+
+    public init(blockCID: String, held: Bool) {
+        self.blockCID = blockCID
+        self.held = held
+    }
+}
+
 /// Where one chain's block reward and fees go: a wallet address for one
 /// absolute chain path. The block commits it as `rewardRecipient`, which the
 /// proof of work covers, so a relayer cannot swap it. Process identity is
@@ -300,4 +330,5 @@ public enum NodeAPIError: Error, Equatable, Sendable {
     case invalidWorkID
     case timestampOverflow
     case templateTooLarge
+    case malformedBlock
 }

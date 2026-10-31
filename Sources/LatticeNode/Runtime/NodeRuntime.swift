@@ -1571,9 +1571,9 @@ extension NodeRuntime {
                 fetchWaits[BodyKey(path: path, cid: cid)] = nil
             case .deriveProof(let job):
                 // From this node's own content only, never peers: the block
-                // (read from this store when the level lacks it), the
-                // carrier, its child index and its saved proofs, written by
-                // the step that weighed it, before this effect.
+                // (read from this store when weighed), the carrier, its child
+                // index and its saved proofs, written by the step that
+                // weighed it, before this effect.
                 let held = job.block ?? storage.store.header(job.childCID)?.block
                 let parent = Array(path.dropLast())
                 let (storage, failStop) = (storage, failStop)

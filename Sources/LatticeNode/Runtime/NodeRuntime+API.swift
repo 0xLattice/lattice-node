@@ -314,6 +314,39 @@ extension NodeRuntime {
         return SubmitTransactionResponse(transactionCID: cid, mempoolCount: count, mempoolBytes: bytes)
     }
 
+    /// A child block submitted on this node (its author's push): taken
+    /// exactly as the same header gossiped from no peer, so it is held only
+    /// when a weighed parent block commits it, and its content is stored as
+    /// a received header's. Nothing records the submit: the author pushes
+    /// again until the block is weighed (after a restart, an unhost or an
+    /// eviction too).
+    public func submitChildBlock(_ request: SubmitChildBlockRequest) async throws -> SubmitChildBlockResponse {
+        let path = request.chainPath
+        guard path.count > 1 else { throw NodeConfigurationError.invalidChainPath }
+        let wire = WireHeaderEntry(block: request.block, children: request.children, proofs: [], spec: request.spec)
+        guard wire.isCanonical, let block = Block(data: request.block),
+              let children = FlatDictionary<BlockHeader>(data: request.children),
+              let cid = try? BlockHeader(node: block).rawCID else { throw NodeAPIError.malformedBlock }
+        let spec = try request.spec.map {
+            guard let spec = ChainSpec(data: $0) else { throw NodeAPIError.malformedBlock }
+            return spec
+        }
+        let entry = HeaderEntry(block: block, children: children, spec: spec)
+        guard await LiveLevels(inputs: inputs).read({ $0[path] != nil }) == true else {
+            throw NodeRuntimeError.unknownChain
+        }
+        if case .terminated = inputs.yield(.event(.level(path, .submitted(entry)))) {
+            throw NodeRuntimeError.stopped
+        }
+        // Read after the submit's step: the loop takes inputs in order.
+        guard let held = await LiveLevels(inputs: inputs).read({ levels -> Bool in
+            guard let level = levels[path] else { return false }
+            return level.tree.contains(blockHash: cid) || level.sync.pending.entries[cid] != nil
+                || level.sync.proofs.awaiting[cid] != nil
+        }) else { throw NodeRuntimeError.stopped }
+        return SubmitChildBlockResponse(blockCID: cid, held: held)
+    }
+
     public func miningTemplate(
         _ request: MiningTemplateRequest
     ) async throws -> MiningTemplateResponse {

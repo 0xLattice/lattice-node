@@ -459,6 +459,7 @@ protocol OperatorWrites: Sendable {
     func submitTransaction(_ request: SubmitTransactionRequest) async throws -> SubmitTransactionResponse
     func miningTemplate(_ request: MiningTemplateRequest) async throws -> MiningTemplateResponse
     func submitWork(_ request: SubmitWorkRequest) async throws -> SubmitWorkResponse
+    func submitChildBlock(_ request: SubmitChildBlockRequest) async throws -> SubmitChildBlockResponse
     func pinVolume(_ root: String, entries: [String: Data]?) async throws
     func fetchVolume(_ root: String) async throws -> SerializedVolume?
     func unpinVolume(_ root: String) async throws
@@ -1142,6 +1143,13 @@ private func addOperatorWriteRoutes(
         let input: SubmitWorkRequest = try await decode(request, context: context)
         return try await serviceCall(request: request, context: context) {
             try await service.submitWork(input)
+        }
+    }
+    // A child block's author pushes it here until it is weighed.
+    router.post("child-blocks") { request, context in
+        let input: SubmitChildBlockRequest = try await decode(request, context: context)
+        return try await serviceCall(request: request, context: context) {
+            try await service.submitChildBlock(input)
         }
     }
     // Operator pins: a Volume the node holds, serves and announces until

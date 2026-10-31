@@ -513,11 +513,10 @@ public struct LevelSimulator {
             break
         case .deriveProof(let job):
             // The carrier's proofs are this node's own, as the runtime reads
-            // them. A block the level lacks is read from this node's store,
-            // which holds nothing it has not weighed: nothing is read.
+            // them.
             let held = job.block ?? node.store.levels[path]?.headers[job.childCID]?.block
             let upstream = node.store.proofs(Array(path.dropLast()), job.carrier)
-            let derivation = await job.run(held: held, upstream: upstream, fetcher: held == nil ? SimCAS() : world.cas)
+            let derivation = await job.run(held: held, upstream: upstream, fetcher: world.cas)
             schedule(at: delay(), to: name, .host(.level(path, .derived(derivation))))
         case .persist, .disconnect, .wakeAt, .connect:
             throw Invariants.fail(name, "a level effect escaped the host")
