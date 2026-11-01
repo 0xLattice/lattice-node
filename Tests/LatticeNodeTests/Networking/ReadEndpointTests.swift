@@ -28,7 +28,9 @@ final class ReadEndpointTests: XCTestCase {
         var asked: [String] = []
         var released: [String] = []
         var discoveryDelay: UInt64 = 0
-        let providers: [PeerEndpoint]
+        var providers: [PeerEndpoint]
+        /// Providers this node has a session with: not what the search returns.
+        var connected: [PeerEndpoint] = []
         let respond: @Sendable (PeerEndpoint, ReadEndpointRequestMessage) -> [(String, ReadEndpointResponseMessage)]
         /// v2 answers, delivered before the v1 ones as a host sends them.
         let respondV2: @Sendable (PeerEndpoint, ReadEndpointRequestMessage) -> [(String, ReadEndpointResponseV2Message)]
@@ -48,6 +50,10 @@ final class ReadEndpointTests: XCTestCase {
         func set(_ directory: ReadEndpointDirectory) { self.directory = directory }
 
         func slowDiscovery(_ nanoseconds: UInt64) { discoveryDelay = nanoseconds }
+
+        func provide(_ providers: [PeerEndpoint]) { self.providers = providers }
+
+        func connect(_ providers: [PeerEndpoint]) { connected = providers }
 
         /// While held, discovery waits until `release` opens the gate.
         private var held = false
@@ -101,6 +107,7 @@ final class ReadEndpointTests: XCTestCase {
     ) async -> ReadEndpointDirectory {
         let directory = ReadEndpointDirectory(
             transport: ReadEndpointTransport(
+                connectedProviders: { _ in await script.connected },
                 providers: { _ in await script.lookup() },
                 ask: { await script.ask($0, $1) },
                 release: { await script.release($0) }
@@ -255,6 +262,8 @@ final class ReadEndpointTests: XCTestCase {
         try await eventually("every request past the cap is answered at once") {
             answered.value == fired - cap
         }
+        // The running lookups reach discovery on their own tasks.
+        try await eventually("every running lookup reaches discovery") { await script.lookups == cap }
         let started = await script.lookups
         XCTAssertEqual(started, cap)
         await script.release()
@@ -280,6 +289,167 @@ final class ReadEndpointTests: XCTestCase {
         _ = await directory.lookup(Self.path)
         let expired = await script.lookups
         XCTAssertEqual(expired, 2)
+    }
+
+    /// A lookup that finds nothing after one that found hosts answers with
+    /// those, up to `lastFoundSeconds`: a missed search is no news that the
+    /// hosts left. Past that, nothing found is nothing.
+    func testALookupThatFindsNothingKeepsTheHostsFoundLast() async throws {
+        let clock = Clock()
+        let host = Self.endpoint(1)
+        let script = Script(providers: [host]) { provider, request in
+            [Self.answer(provider, request, url: "https://host.example")]
+        }
+        let directory = await directory(script, deadline: .milliseconds(200), clock: clock)
+        let found = await directory.lookup(Self.path).map(\.url)
+        XCTAssertEqual(found, ["https://host.example"])
+
+        // The search now misses its deadline.
+        await script.slowDiscovery(5_000_000_000)
+        clock.advance(31)
+        let missed = await directory.lookup(Self.path).map(\.url)
+        XCTAssertEqual(missed, ["https://host.example"])
+
+        // Nothing is found for longer than the hosts are kept.
+        await script.slowDiscovery(0)
+        await script.provide([])
+        clock.advance(ReadEndpointDirectory.lastFoundSeconds)
+        let gone = await directory.lookup(Self.path).map(\.url)
+        XCTAssertEqual(gone, [])
+        let lookups = await script.lookups
+        XCTAssertEqual(lookups, 3)
+    }
+
+    /// Providers this node is connected to are asked at once; once one has
+    /// answered with a URL, a search still out has `searchGrace` more, not
+    /// the whole deadline.
+    func testConnectedProvidersAnswerWhileTheSearchIsStillOut() async throws {
+        let near = Self.endpoint(1)
+        let script = Script(providers: [Self.endpoint(2)]) { provider, request in
+            [Self.answer(provider, request, url: "https://\(provider.port).example")]
+        }
+        await script.connect([near])
+        await script.slowDiscovery(30_000_000_000)
+        let directory = await directory(script, deadline: .seconds(20))
+        let start = ContinuousClock.now
+        let urls = await directory.lookup(Self.path).map(\.url)
+        XCTAssertEqual(urls, ["https://20001.example"])
+        XCTAssertLessThan(ContinuousClock.now - start, .seconds(5), "ended by the grace, not the deadline")
+    }
+
+    /// A connected provider that names no URL gives no grace: the lookup
+    /// waits for the search, and ends a grace after its host answers, not
+    /// at the deadline the silent one would hold it to.
+    func testConnectedProvidersWithoutAURLWaitForTheSearch() async throws {
+        let near = Self.endpoint(1)
+        let far = Self.endpoint(2)
+        let script = Script(providers: [far]) { provider, request in
+            provider == far ? [Self.answer(provider, request, url: "https://far.example")] : []
+        }
+        await script.connect([near])
+        await script.slowDiscovery(800_000_000)
+        let directory = await directory(script, deadline: .seconds(20))
+        let start = ContinuousClock.now
+        let urls = await directory.lookup(Self.path).map(\.url)
+        XCTAssertEqual(urls, ["https://far.example"])
+        XCTAssertLessThan(ContinuousClock.now - start, .seconds(5), "ended by the grace, not the deadline")
+    }
+
+    /// Connected providers (whose records any peer can refer) take at most
+    /// `maximumConnectedAsked` of the asks: the rest is the search's.
+    func testConnectedProvidersCannotCrowdOutTheSearch() async throws {
+        let connected = (1...12).map(Self.endpoint)
+        let searched = (100...111).map(Self.endpoint)
+        let script = Script(providers: searched) { _, _ in [] }
+        await script.connect(connected)
+        let directory = await directory(script, deadline: .milliseconds(300))
+        _ = await directory.lookup(Self.path)
+        let asked = Set(await script.asked)
+        XCTAssertEqual(asked.count, ReadEndpointDirectory.maximumAsked)
+        XCTAssertEqual(asked.intersection(connected.map(\.publicKey)).count, ReadEndpointDirectory.maximumConnectedAsked)
+        XCTAssertEqual(
+            asked.intersection(searched.map(\.publicKey)).count,
+            ReadEndpointDirectory.maximumAsked - ReadEndpointDirectory.maximumConnectedAsked
+        )
+    }
+
+    /// A provider both connected and found by the search is asked once, and
+    /// the two together are asked no more than `maximumAsked`.
+    func testConnectedAndSearchedProvidersShareOneAskEach() async throws {
+        let crowd = (1...20).map(Self.endpoint)
+        let script = Script(providers: crowd) { provider, request in
+            [Self.answer(provider, request, url: "https://\(provider.port).example")]
+        }
+        await script.connect(Array(crowd.prefix(ReadEndpointDirectory.maximumConnectedAsked)))
+        let directory = await directory(script)
+        let urls = await directory.lookup(Self.path).map(\.url)
+        let asked = await script.asked
+        XCTAssertEqual(asked.count, ReadEndpointDirectory.maximumAsked)
+        XCTAssertEqual(Set(asked).count, asked.count, "no provider is asked twice")
+        XCTAssertTrue(
+            Set(crowd.prefix(ReadEndpointDirectory.maximumConnectedAsked).map(\.publicKey)).isSubset(of: Set(asked)),
+            "connected ones first"
+        )
+        XCTAssertEqual(urls.count, ReadEndpointDirectory.maximumAsked)
+    }
+
+    /// Hosts kept stand in for a lookup that found nothing only as briefly as
+    /// nothing found is cached: a host that just announced is found soon.
+    func testKeptHostsAreCachedOnlyAsLongAsNothingFound() async throws {
+        let clock = Clock()
+        let script = Script(providers: [Self.endpoint(1)]) { provider, request in
+            [Self.answer(provider, request, url: "https://one.example")]
+        }
+        let directory = await directory(script, deadline: .milliseconds(200), clock: clock)
+        _ = await directory.lookup(Self.path)
+        await script.provide([])
+        clock.advance(31)
+        let kept = await directory.lookup(Self.path).map(\.url)
+        XCTAssertEqual(kept, ["https://one.example"])
+        clock.advance(ReadEndpointDirectory.emptyCacheSeconds + 1)
+        _ = await directory.lookup(Self.path)
+        let lookups = await script.lookups
+        XCTAssertEqual(lookups, 3)
+    }
+
+    /// With every lookup slot taken, a path whose hosts were found answers
+    /// with them rather than nothing.
+    func testUnderPressureTheHostsFoundLastStillAnswer() async throws {
+        let clock = Clock()
+        let script = Script(providers: [Self.endpoint(1)]) { provider, request in
+            [Self.answer(provider, request, url: "https://one.example")]
+        }
+        let directory = await directory(script, deadline: .seconds(600), clock: clock)
+        let found = await directory.lookup(Self.path).map(\.url)
+        XCTAssertEqual(found, ["https://one.example"])
+        await script.hold()
+        let cap = ReadEndpointDirectory.maximumConcurrentLookups
+        let held = (0..<cap).map { n in Task { await directory.lookup(["Nexus", "Made-up-\(n)"]) } }
+        try await eventually("every slot is taken") { await script.lookups == 1 + cap }
+        clock.advance(31)
+        let kept = await directory.lookup(Self.path).map(\.url)
+        XCTAssertEqual(kept, ["https://one.example"])
+        await script.release()
+        for task in held { _ = await task.value }
+    }
+
+    /// Hosts found are kept from the last lookup that found any: a later one
+    /// that finds others replaces them.
+    func testTheHostsKeptAreTheLastFound() async throws {
+        let clock = Clock()
+        let script = Script(providers: [Self.endpoint(1)]) { provider, request in
+            [Self.answer(provider, request, url: "https://\(provider.port).example")]
+        }
+        let directory = await directory(script, deadline: .milliseconds(200), clock: clock)
+        _ = await directory.lookup(Self.path)
+        await script.provide([Self.endpoint(2)])
+        clock.advance(31)
+        let second = await directory.lookup(Self.path).map(\.url)
+        XCTAssertEqual(second, ["https://20002.example"])
+        await script.provide([])
+        clock.advance(31)
+        let kept = await directory.lookup(Self.path).map(\.url)
+        XCTAssertEqual(kept, ["https://20002.example"])
     }
 
     /// A node answers only for a level it hosts, and only with a declared URL.
