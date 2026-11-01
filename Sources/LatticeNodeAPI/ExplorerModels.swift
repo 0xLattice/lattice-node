@@ -41,6 +41,26 @@ public struct ExplorerLatestBlock: Codable, Sendable, Equatable {
     }
 }
 
+/// `GET /api/state/tip`: the tip a reader starts from, in one answer. Only
+/// `hash` is the node's word; every archive is checked by its root CID, so a
+/// reader verifies the rest exactly as it would from `/volumes/:cid`.
+public struct ExplorerTipState: Codable, Sendable, Equatable {
+    public let hash: String
+    @DecimalString public var height: UInt64
+    /// Complete Volume archives, the bytes `/volumes/:cid` serves, rooted in
+    /// order at the tip block, its post-state and that state's general
+    /// state. The list stops at the first one not held completely here, or
+    /// that would pass the response bound; the reader reads the rest from
+    /// `/volumes/:cid`.
+    public let volumes: [Data]
+
+    public init(hash: String, height: UInt64, volumes: [Data]) {
+        self.hash = hash
+        self.height = height
+        self.volumes = volumes
+    }
+}
+
 public struct ExplorerBlock: Codable, Sendable, Equatable {
     @DecimalString public var height: UInt64
     public let hash: String

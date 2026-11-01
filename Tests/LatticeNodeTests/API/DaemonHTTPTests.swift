@@ -420,7 +420,7 @@ final class DaemonHTTPTests: XCTestCase {
             // The bounded read surface is served.
             for uri in [
                 "/health", "/api/chain/info", "/api/chain/spec",
-                "/api/block/latest", "/api/blocks", "/api/peers", "/api/mempool", "/api/fees",
+                "/api/block/latest", "/api/state/tip", "/api/blocks", "/api/peers", "/api/mempool", "/api/fees",
             ] {
                 try await client.execute(uri: uri, method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
                     XCTAssertEqual(response.status, .ok, uri)
@@ -914,6 +914,7 @@ final class DaemonHTTPTests: XCTestCase {
                 "/api/block/\(genesis)/transactions?offset=\(query)&limit=\(query)",
                 "/accounts/\(genesis)?block=\(query)",
                 "/api/block/latest?chainPath=\(query)",
+                "/api/state/tip?chainPath=\(query)",
                 "/api/blocks?before=\(query)",
                 "/api/blocks?limit=\(query)",
                 "/api/blocks?before=\(query)&limit=\(query)",
@@ -1010,6 +1011,139 @@ final class DaemonHTTPTests: XCTestCase {
         }
     }
 
+    /// `/api/state/tip` answers the tip hash with the block, post-state and
+    /// general-state Volumes, each the bytes `/volumes/:cid` serves and each
+    /// rooted at the CID the one before it names.
+    func testTipStateRouteServesTheTipAndItsFirstStateVolumes() async throws {
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: temporaryDirectory(prefix: "lattice-http-tip-state"),
+            privateKeyHex: String(repeating: "01", count: 32)
+        )
+        let storage = try await NodeStorage.open(configuration: configuration)
+        let service = try await startRuntime(storage)
+        let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
+        try await app.test(.router) { client in
+            _ = try await mineOneBlock(client: client)
+            let tip = try await mineOneBlock(client: client)
+            var body = Data()
+            try await client.execute(
+                uri: "/api/state/tip?chainPath=Nexus", method: .get,
+                headers: [.authorization: testOperatorAuthorization]
+            ) { response in
+                XCTAssertEqual(response.status, .ok)
+                XCTAssertEqual(response.headers[.cacheControl], statusCacheControl)
+                body = Data(response.body.readableBytesView)
+            }
+            let wire = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+            XCTAssertEqual(wire["hash"] as? String, tip)
+            XCTAssertEqual(wire["height"] as? String, "2", "height is decimal on the wire")
+            XCTAssertEqual((wire["volumes"] as? [String])?.count, 3, "archives are base64 strings")
+            let state = try JSONDecoder().decode(ExplorerTipState.self, from: body)
+
+            // Each archive's root is the CID the one before it names.
+            let blockEntries = try volumeArchiveEntries(state.volumes[0])
+            let block = try XCTUnwrap(Block(data: try XCTUnwrap(blockEntries[tip])))
+            let postState = block.postState.rawCID
+            let stateEntries = try volumeArchiveEntries(state.volumes[1])
+            let lattice = try XCTUnwrap(LatticeState(data: try XCTUnwrap(stateEntries[postState])))
+            let generalState = lattice.generalState.rawCID
+            XCTAssertNotNil(try volumeArchiveEntries(state.volumes[2])[generalState])
+            // And each is exactly what `/volumes/:cid` serves.
+            for (root, archive) in zip([tip, postState, generalState], state.volumes) {
+                try await client.execute(
+                    uri: "/volumes/\(root)", method: .get,
+                    headers: [.authorization: testOperatorAuthorization]
+                ) { response in
+                    XCTAssertEqual(response.status, .ok, root)
+                    XCTAssertEqual(Data(response.body.readableBytesView), archive, root)
+                }
+            }
+
+            // Another chain's path is not this one's tip.
+            for uri in ["/api/state/tip?chainPath=Nexus/Nope", "/api/state/tip?chainPath=Nope"] {
+                try await client.execute(
+                    uri: uri, method: .get, headers: [.authorization: testOperatorAuthorization]
+                ) { response in
+                    XCTAssertEqual(response.status, .notFound, uri)
+                }
+            }
+        }
+    }
+
+    /// No tip is a 404's nil; a Volume not held completely ends the list
+    /// there, so the reader reads the rest from `/volumes/:cid`.
+    func testTipStateStopsAtTheFirstVolumeNotHeld() async throws {
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: temporaryDirectory(prefix: "lattice-tip-state-held"),
+            privateKeyHex: String(repeating: "01", count: 32)
+        )
+        let storage = try await NodeStorage.open(configuration: configuration)
+        let service = try await startRuntime(storage)
+        let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
+        // Paid, so the tip's post-state is not genesis's, which every store
+        // opened on this chain holds.
+        let miner = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
+        try await app.test(.router) { client in
+            _ = try await mineOneBlock(client: client, request: MiningTemplateRequest(
+                recipients: [MiningRecipient(chainPath: ["Nexus"], address: miner)]
+            ))
+        }
+        let fullRead = await service.reads.explorerTipState()
+        let full = try XCTUnwrap(fullRead)
+        XCTAssertEqual(full.volumes.count, 3)
+        let block = try XCTUnwrap(Block(data: try XCTUnwrap(
+            try volumeArchiveEntries(full.volumes[0])[full.hash]
+        )))
+
+        func reads(over store: NodeStorage, tipCID: String?) -> ChainReads {
+            ChainReads(
+                storage: store,
+                tip: { ChainStatus(
+                    phase: .active, chainPath: ["Nexus"],
+                    nexusGenesisCID: configuration.nexusGenesisCID,
+                    tipCID: tipCID, height: tipCID == nil ? nil : 1, revision: nil
+                ) },
+                canonicalCID: { _ in nil },
+                mempool: { _ in ChainReads.MempoolListing(count: 0, bytes: 0, cids: []) }
+            )
+        }
+        let noTip = await reads(over: storage, tipCID: nil).explorerTipState()
+        XCTAssertNil(noTip)
+
+        // A store holding genesis, then the tip block's Volume, then its
+        // post-state's.
+        let partial = try await NodeStorage.open(configuration: NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: temporaryDirectory(prefix: "lattice-tip-state-partial"),
+            privateKeyHex: String(repeating: "02", count: 32)
+        ))
+        let partialReads = reads(over: partial, tipCID: full.hash)
+        let nothingHeld = await partialReads.explorerTipState()
+        XCTAssertNil(nothingHeld, "the tip block itself is not held")
+
+        let blockVolume = await storage.volume(full.hash)
+        try await partial.store(volume: try XCTUnwrap(blockVolume))
+        let heldState = await partial.volume(block.postState.rawCID)
+        XCTAssertNil(heldState, "the premise: the tip's post-state is not held")
+        let blockOnly = await partialReads.explorerTipState()
+        XCTAssertEqual(blockOnly?.hash, full.hash)
+        XCTAssertEqual(blockOnly?.height, 1)
+        let generalState = try XCTUnwrap(LatticeState(data: try XCTUnwrap(
+            try volumeArchiveEntries(full.volumes[1])[block.postState.rawCID]
+        ))).generalState.rawCID
+        let heldGeneral = await partial.volume(generalState)
+        XCTAssertNotNil(heldGeneral, "genesis's general state is held here")
+        // The list stops: a later Volume held here is not listed past a gap.
+        XCTAssertEqual(blockOnly?.volumes, [full.volumes[0]])
+
+        let stateVolume = await storage.volume(block.postState.rawCID)
+        try await partial.store(volume: try XCTUnwrap(stateVolume))
+        let complete = await partialReads.explorerTipState()
+        XCTAssertEqual(complete, full)
+    }
+
     func testTransactionRoutePreservesConcreteBody() async throws {
         let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-http-test-\(UUID().uuidString)"
@@ -1074,13 +1208,16 @@ final class DaemonHTTPTests: XCTestCase {
 
 /// Mines exactly one block atop the current tip via the public template/work
 /// routes, solving the issued template, and returns the new tip's CID.
-private func mineOneBlock(client: some TestClientProtocol) async throws -> String {
+private func mineOneBlock(
+    client: some TestClientProtocol,
+    request: MiningTemplateRequest = MiningTemplateRequest()
+) async throws -> String {
     var template: MiningTemplateResponse?
     try await client.execute(
         uri: "/mining/templates",
         method: .post,
         headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
-        body: ByteBuffer(bytes: try JSONEncoder().encode(MiningTemplateRequest()))
+        body: ByteBuffer(bytes: try JSONEncoder().encode(request))
     ) { response in
         template = try JSONDecoder().decode(
             MiningTemplateResponse.self,
@@ -1105,6 +1242,29 @@ private func mineOneBlock(client: some TestClientProtocol) async throws -> Strin
         tipCID = submitted.tipCID
     }
     return try XCTUnwrap(tipCID)
+}
+
+/// The entries of a complete Volume archive, keyed by CID: a big-endian
+/// UInt16 count, then each entry's UInt16 CID length, CID, UInt32 length and
+/// bytes.
+private func volumeArchiveEntries(_ archive: Data) throws -> [String: Data] {
+    let bytes = [UInt8](archive)
+    var offset = 0
+    func read(_ count: Int) throws -> ArraySlice<UInt8> {
+        guard count <= bytes.count - offset else { throw CocoaError(.coderReadCorrupt) }
+        defer { offset += count }
+        return bytes[offset..<(offset + count)]
+    }
+    func integer(_ width: Int) throws -> Int {
+        try read(width).reduce(0) { $0 << 8 | Int($1) }
+    }
+    var entries: [String: Data] = [:]
+    for _ in 0..<(try integer(2)) {
+        let cid = String(decoding: try read(try integer(2)), as: UTF8.self)
+        entries[cid] = Data(try read(try integer(4)))
+    }
+    XCTAssertEqual(offset, bytes.count, "no trailing bytes")
+    return entries
 }
 
 private actor CompletionFlag {

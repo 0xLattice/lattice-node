@@ -790,6 +790,21 @@ private func addPublicReadRoutes<Context: RequestContext>(
             context: context
         )
     }
+    router.get("api/state/tip") { request, context in
+        let service = try byPath(request)
+        guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {
+            throw HTTPError(.notFound)
+        }
+        guard let tip = await service.explorerTipState() else {
+            throw HTTPError(.notFound)
+        }
+        return try jsonCached(
+            tip,
+            cacheControl: statusCacheControl,
+            request: request,
+            context: context
+        )
+    }
     router.get("api/blocks") { request, context in
         let service = try byPath(request)
         guard explorerChainPathAllows(request, own: service.explorerChainPath()) else {

@@ -369,6 +369,7 @@ GET|HEAD /health
 GET /transactions/:cid, /accounts/:owner
 GET /api/block/latest, /api/block/:id, /api/block/:id/transactions,
     /api/block/:id/children, /api/transaction/:cid, /api/state/account/:addr,
+    /api/state/tip,
     /api/mempool, /api/peers, /api/chain/info, /api/chain/spec,
     /api/chain/genesis
 ```

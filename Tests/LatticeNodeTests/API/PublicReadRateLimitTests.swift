@@ -158,6 +158,8 @@ final class PublicReadRateLimitTests: XCTestCase {
             "/api/block/bafy/children",
             "/api/chain/endpoints",
             "/api/deposits",
+            "/api/state/tip",
+            "//api/state//tip/",
             "/volumes/bafy",
         ] {
             XCTAssertEqual(
@@ -171,6 +173,7 @@ final class PublicReadRateLimitTests: XCTestCase {
             "/api/blocks",
             "/api/peers",
             "/api/mempool",
+            "/api/state/account/bafy",
             "/unknown",
         ] {
             XCTAssertEqual(

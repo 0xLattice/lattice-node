@@ -168,6 +168,10 @@ enum PublicReadRouteClass: Sendable, Equatable {
             // and locates each visible deposit's creating block by a binary
             // search over the chain's post-states.
             self = .expensive
+        case 3 where components[0] == "api" && components[1] == "state" && components[2] == "tip":
+            // Up to three complete Volumes in one answer, a few MiB at most:
+            // what it replaces is three `/volumes` reads.
+            self = .expensive
         case 2 where components[0] == "volumes":
             // A complete Volume can be tens of MiB, and one this node does
             // not hold may be read from peers first.

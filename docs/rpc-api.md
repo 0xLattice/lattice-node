@@ -76,6 +76,7 @@ Mining templates are requested at Nexus and can carry every hosted descendant.
 | `GET /volumes/:cid` | Complete Volume as the Ivy binary archive | yes |
 | `GET /accounts/:owner?block=<cid>` | Account balance and next nonce at an accepted block | yes |
 | `GET /api/block/latest` | Latest executed block summary | yes |
+| `GET /api/state/tip` | The tip's hash and height with its block, post-state and general-state Volumes | yes |
 | `GET /api/block/:height-or-cid` | Block detail | yes |
 | `GET /api/blocks?before=<height>&limit=<n>` | Page of canonical block summaries, newest first | yes |
 | `GET /api/block/:cid/transactions` | Paginated block transactions | yes |
@@ -126,6 +127,21 @@ credited that recipient (`Block.coinbaseAmount`): the block reward at that
 height plus the block's fees, the balance excess of its transactions. It is
 `0` for a burned block and omitted only when this node does not hold the
 block's spec or transaction bodies.
+
+`/api/state/tip` is a reader's first read of a chain, in one request instead
+of four serial ones (`/api/block/latest`, then `/volumes/:cid` for the block,
+its post-state and the general state). It returns
+`{"hash": "<cid>", "height": "<n>", "volumes": ["<base64>", ...]}`: the tip
+this node acts on, and complete Volume archives, each exactly the bytes
+`/volumes/:cid` serves, rooted in order at the tip block, its post-state
+(`LatticeState`) and that state's general state. Only `hash` is the node's
+word; a reader checks each archive by its root CID as it would one read from
+`/volumes/:cid`. The list stops at the first Volume this node does not hold
+completely (it never reads one from peers here), or at the one that would take
+the archives past 4 MiB, and the reader reads the rest from `/volumes/:cid`.
+404 when there is no tip. It is billed to the expensive public-read budget,
+like the `/volumes` reads it replaces, and selects a hosted child with
+`?chainPath=`.
 
 `/api/blocks` lists the chain to the tip this node acts on, newest first,
 at any hosted level (`?chainPath=`). It returns

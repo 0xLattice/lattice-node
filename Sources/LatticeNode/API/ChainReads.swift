@@ -212,6 +212,40 @@ public struct ChainReads: Sendable {
         )
     }
 
+    /// The tip and the first levels of its state as complete Volume
+    /// archives: the block, its post-state, and the post-state's general
+    /// state, each exactly what `/volumes/:cid` serves. One read in place of
+    /// four serial ones. Every archive is bound to its root CID, so only the
+    /// tip hash is taken on trust, as with `/api/block/latest`. The list stops
+    /// at the first Volume not held completely here, or that would take the
+    /// archives past one read response's bound.
+    public func explorerTipState() async -> ExplorerTipState? {
+        guard let cid = await tip().tipCID,
+              let data = await storage.content([cid])[cid],
+              data.count <= Self.maximumReadResponseBytes,
+              let block = _contentBoundBlock(cid: cid, data: data) else {
+            return nil
+        }
+        var volumes: [Data] = []
+        var total = 0
+        func add(_ root: String) async -> Bool {
+            guard let archive = await completeVolumeArchive(rootCID: root),
+                  archive.count <= Self.maximumReadResponseBytes - total else {
+                return false
+            }
+            volumes.append(archive)
+            total += archive.count
+            return true
+        }
+        let postState = block.postState.rawCID
+        if await add(cid),
+           await add(postState),
+           let state = try? await block.postState.resolve(fetcher: storage).node {
+            _ = await add(state.generalState.rawCID)
+        }
+        return ExplorerTipState(hash: cid, height: block.height, volumes: volumes)
+    }
+
     /// A page of canonical block summaries below height `before` (default:
     /// past the tip), newest first. Reads each block and its transactions
     /// dictionary root (for the count) — never a transaction body.
