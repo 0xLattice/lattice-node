@@ -62,6 +62,9 @@ enum ReadEndpointKey {
 
 /// What the directory needs from the overlay.
 struct ReadEndpointTransport: Sendable {
+    /// Providers of a key this node already has a session with, from the
+    /// records it holds: asked at once, without a search.
+    var connectedProviders: @Sendable (String) async -> [PeerEndpoint] = { _ in [] }
     /// Provider endpoints announced under a key.
     let providers: @Sendable (String) async -> [PeerEndpoint]
     /// Connect when needed, then send the request; true when it dialed a
@@ -71,8 +74,15 @@ struct ReadEndpointTransport: Sendable {
     let release: @Sendable (PeerEndpoint) async -> Void
 
     /// The node's overlay: providers from the DHT, a dial when no session.
+    /// The DHT search leaves out providers this node is connected to (it
+    /// looks for peers it has no session with), so those come from the
+    /// records it holds.
     static func overlay(_ ivy: Ivy, keep: Set<String> = []) -> ReadEndpointTransport {
         ReadEndpointTransport(
+            connectedProviders: { key in
+                let providers = Set(await ivy.providers(for: key).map(\.publicKey))
+                return await ivy.connectedPeerEndpoints.filter { providers.contains($0.publicKey) }
+            },
             providers: { await ivy.discoverProviders(rootCID: $0) },
             ask: { provider, request in
                 guard let key = try? PeerKey(provider.publicKey),
@@ -116,10 +126,18 @@ struct ReadEndpointResponseV2Message: CanonicalJSONMessage, Equatable, Sendable 
 /// just announced is found soon), and at most `maximumConcurrentLookups`
 /// running at once: distinct names neither coalesce nor hit the cache, so
 /// under that pressure a request gets nothing rather than starting another.
+///
+/// A lookup that finds nothing where one before found hosts answers with
+/// those, while they are under `lastFoundSeconds` old: a search that missed
+/// its deadline (a slow walk, a far provider's dial) is no news that the
+/// hosts went away. Only a lookup that found hosts is kept, so what made-up
+/// names cost stays bounded as before; the answers are unverified claims
+/// either way, which a reader checks before it uses one.
 actor ReadEndpointDirectory {
     static let maximumAsked = 8
     static let perResponderCap = 2
     static let emptyCacheSeconds = 5.0
+    static let lastFoundSeconds = 600.0
     static let maximumConcurrentLookups = 16
 
     private let transport: ReadEndpointTransport
@@ -130,6 +148,8 @@ actor ReadEndpointDirectory {
     private let clock: @Sendable () -> Double
 
     private var cache: [[String]: (at: Double, urls: [DeclaredReadEndpoint])] = [:]
+    /// The last lookup of each path that found hosts.
+    private var lastFound: [[String]: (at: Double, urls: [DeclaredReadEndpoint])] = [:]
     private var inFlight: [[String]: Task<[DeclaredReadEndpoint], Never>] = [:]
     private var lookups: [UInt64: Lookup] = [:]
     /// Each request in flight: its lookup and the peer it was sent to.
@@ -140,8 +160,13 @@ actor ReadEndpointDirectory {
 
     private struct Lookup {
         let chainPath: [String]
-        /// Nil until the providers are found and asked.
-        var unanswered: Set<UInt64>?
+        /// Requests sent and not yet answered.
+        var unanswered: Set<UInt64> = []
+        /// Peers asked, this node's own key among them so it never is.
+        var asked: Set<String>
+        /// Until the DHT search returns, more providers may come.
+        var searching = true
+        var done: Bool { !searching && unanswered.isEmpty }
         var urls: [DeclaredReadEndpoint] = []
         var perResponder: [String: Int] = [:]
         var asks: [Task<Void, Never>] = []
@@ -154,7 +179,9 @@ actor ReadEndpointDirectory {
         transport: ReadEndpointTransport,
         nexusGenesisCID: String,
         ownKey: String,
-        deadline: Duration = .seconds(2),
+        // A fresh lookup searches the DHT and dials hosts across regions:
+        // on the testnet's nodes that took 1 to 2 seconds.
+        deadline: Duration = .seconds(5),
         cacheSeconds: Double = 30,
         clock: @escaping @Sendable () -> Double = { Date().timeIntervalSince1970 }
     ) {
@@ -174,12 +201,19 @@ actor ReadEndpointDirectory {
         guard inFlight.count < Self.maximumConcurrentLookups else { return [] }
         let task = Task { await self.run(chainPath) }
         inFlight[chainPath] = task
-        let urls = await task.value
+        var urls = await task.value
         inFlight[chainPath] = nil
-        cache[chainPath] = (clock(), urls)
+        let now = clock()
+        if !urls.isEmpty {
+            lastFound[chainPath] = (now, urls)
+        } else if let found = lastFound[chainPath], now - found.at < Self.lastFoundSeconds {
+            urls = found.urls
+        }
+        cache[chainPath] = (now, urls)
         // Expired entries go when the next lookup lands, so the cache holds
         // at most the paths asked for within one window.
         cache = cache.filter { fresh($0.value) }
+        lastFound = lastFound.filter { now - $0.value.at < Self.lastFoundSeconds }
         return urls
     }
 
@@ -215,21 +249,24 @@ actor ReadEndpointDirectory {
             lookup.perResponder[peerKey, default: 0] += 1
             lookup.urls.append(DeclaredReadEndpoint(url: url, acceptsSubmit: acceptsSubmit))
         }
-        lookup.unanswered?.remove(requestID)
+        lookup.unanswered.remove(requestID)
         lookups[request.lookup] = lookup
-        if lookup.unanswered?.isEmpty == true { finish(request.lookup) }
+        if lookup.done { finish(request.lookup) }
     }
 
-    /// One lookup under one deadline, provider discovery included.
+    /// One lookup under one deadline, provider discovery included: the
+    /// providers this node is connected to are asked at once, those the
+    /// search finds as it returns, and at the deadline the lookup answers
+    /// with what came in, as every DHT's provider search does.
     private func run(_ chainPath: [String]) async -> [DeclaredReadEndpoint] {
         let lookupID = nextID
         nextID += 1
-        lookups[lookupID] = Lookup(chainPath: chainPath)
+        lookups[lookupID] = Lookup(chainPath: chainPath, asked: [ownKey])
         let key = ReadEndpointKey.key(nexusGenesisCID: nexusGenesisCID, chainPath: chainPath)
         let transport = transport
         let discovery = Task {
-            let providers = await transport.providers(key)
-            self.ask(lookupID, providers)
+            self.ask(lookupID, await transport.connectedProviders(key), searchOver: false)
+            self.ask(lookupID, await transport.providers(key), searchOver: true)
         }
         let (seconds, attoseconds) = deadline.components
         let nanoseconds = UInt64(max(0, seconds)) * 1_000_000_000 + UInt64(max(0, attoseconds) / 1_000_000_000)
@@ -239,37 +276,39 @@ actor ReadEndpointDirectory {
         }
         let urls = await withCheckedContinuation { continuation in
             lookups[lookupID]?.waiter = continuation
-            if lookups[lookupID]?.unanswered?.isEmpty == true { finish(lookupID) }
+            if lookups[lookupID]?.done == true { finish(lookupID) }
         }
         timer.cancel()
         discovery.cancel()
         return urls
     }
 
-    /// Ask up to `maximumAsked` of the providers found, unless the lookup
-    /// already ended.
-    private func ask(_ lookupID: UInt64, _ providers: [PeerEndpoint]) {
+    /// Ask the providers not asked yet, up to `maximumAsked` in all, unless
+    /// the lookup already ended. `searchOver`: no more will come.
+    private func ask(_ lookupID: UInt64, _ providers: [PeerEndpoint], searchOver: Bool) {
         guard var lookup = lookups[lookupID] else { return }
-        var seen: Set<String> = [ownKey]
-        let asked = providers.shuffled()
-            .compactMap { provider in (try? PeerKey(provider.publicKey)).map { (provider, $0.hex) } }
-            .filter { seen.insert($0.1).inserted }
-            .prefix(Self.maximumAsked)
-        var unanswered: Set<UInt64> = []
+        // This node's own key is in `asked` from the start, never asked.
+        let room = Self.maximumAsked - (lookup.asked.count - 1)
+        var fresh: [(PeerEndpoint, String)] = []
+        for provider in providers.shuffled() where fresh.count < room {
+            guard let peerKey = (try? PeerKey(provider.publicKey))?.hex,
+                  lookup.asked.insert(peerKey).inserted else { continue }
+            fresh.append((provider, peerKey))
+        }
         let transport = transport
-        for (provider, peerKey) in asked {
+        for (provider, peerKey) in fresh {
             let requestID = nextID
             nextID += 1
             requests[requestID] = (lookupID, peerKey)
-            unanswered.insert(requestID)
+            lookup.unanswered.insert(requestID)
             let message = ReadEndpointRequestMessage(chainPath: lookup.chainPath, requestID: requestID)
             lookup.asks.append(Task {
                 if await transport.ask(provider, message) { await self.dialed(lookupID, provider) }
             })
         }
-        lookup.unanswered = unanswered
+        if searchOver { lookup.searching = false }
         lookups[lookupID] = lookup
-        if unanswered.isEmpty { finish(lookupID) }
+        if lookup.done { finish(lookupID) }
     }
 
     private func dialed(_ lookupID: UInt64, _ provider: PeerEndpoint) async {
