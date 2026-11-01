@@ -81,6 +81,96 @@ public struct SubmitChildBlockResponse: Codable, Sendable, Equatable {
     }
 }
 
+/// `POST /child-blocks/build`: a block for the hosted child chain
+/// `chainPath`, built as this node's next template carries it, paying its
+/// reward to `recipient`, for its author to have another chain's miners
+/// commit (`child/X` = `C@P`) on the parent.
+public struct BuildChildBlockRequest: Codable, Sendable {
+    public let chainPath: [String]
+    public let recipient: String?
+
+    public init(chainPath: [String], recipient: String? = nil) {
+        self.chainPath = chainPath
+        self.recipient = recipient
+    }
+}
+
+/// The built block, stored and retained here: its CID, the parent state it
+/// was built on (P), the directory's current commitment value at P (the
+/// commitment's `oldValue`; nil for the first), and the push that submits it
+/// once a parent block commits it.
+public struct BuildChildBlockResponse: Codable, Sendable {
+    public let blockCID: String
+    public let parentState: String
+    public let previous: String?
+    public let submit: SubmitChildBlockRequest
+
+    public init(blockCID: String, parentState: String, previous: String?, submit: SubmitChildBlockRequest) {
+        self.blockCID = blockCID
+        self.parentState = parentState
+        self.previous = previous
+        self.submit = submit
+    }
+}
+
+/// `GET /child-blocks/commitment?chainPath=X`: the state P the parent's
+/// executed tip leaves (the one its next block enters) and `child/X` there.
+public struct ChildCommitmentResponse: Codable, Sendable, Equatable {
+    public let parentState: String
+    public let value: String?
+
+    public init(parentState: String, value: String?) {
+        self.parentState = parentState
+        self.value = value
+    }
+}
+
+/// One round of an author's commit loop (`lattice child commit`), decided
+/// by the node: `pushed` is the answer to pushing the built block (nil when
+/// none is built), `read` the commitment read once that answer is
+/// `dropped` or there is no block, `accepted` whether the parent's pool took
+/// the built block's commit.
+///
+/// Any answer but `dropped` means a weighed parent block commits the block
+/// (the node's committers index, which spans forks): it waits for `tree`,
+/// whatever was committed since. Dropped, a parent tip still entering the
+/// built block's P waits for its commit, sending it again until the pool
+/// takes it; a tip on another P is built on, unless it holds the built
+/// block's own commitment (a carrier landed since the push).
+public enum ChildCommitStep: Sendable, Equatable {
+    /// Weighed in the child's tree: stop.
+    case done
+    /// Carried, or committed and pending: push again next round.
+    case wait
+    /// Dropped, or nothing built: read the commitment, then decide again.
+    case read
+    /// Send the built block's commit again.
+    case commit
+    /// Build on the read P and commit that.
+    case build
+
+    public init(
+        pushed: SubmitChildBlockStatus?, read: ChildCommitmentResponse?,
+        built: BuildChildBlockResponse?, accepted: Bool
+    ) {
+        switch pushed {
+        case .tree: self = .done; return
+        case .pending, .awaiting: self = .wait; return
+        case .dropped, nil: break
+        }
+        guard let read else { self = .read; return }
+        if let built, read.parentState == built.parentState {
+            self = accepted ? .wait : .commit
+        } else if let built, read.value == built.blockCID
+            + String(UnicodeScalar(CHILD_COMMITMENT_PARENT_STATE_SEPARATOR)) + built.parentState {
+            // A carrier landed after the push: the next push answers carried.
+            self = .wait
+        } else {
+            self = .build
+        }
+    }
+}
+
 /// Where one chain's block reward and fees go: a wallet address for one
 /// absolute chain path. The block commits it as `rewardRecipient`, which the
 /// proof of work covers, so a relayer cannot swap it. Process identity is
@@ -340,4 +430,7 @@ public enum NodeAPIError: Error, Equatable, Sendable {
     case timestampOverflow
     case templateTooLarge
     case malformedBlock
+    /// The node's template carries no block for the child chain now (its
+    /// root is weighed but not executed, or it has no spec to start from).
+    case noChildCandidate
 }

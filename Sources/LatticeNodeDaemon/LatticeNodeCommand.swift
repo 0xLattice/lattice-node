@@ -460,6 +460,8 @@ protocol OperatorWrites: Sendable {
     func miningTemplate(_ request: MiningTemplateRequest) async throws -> MiningTemplateResponse
     func submitWork(_ request: SubmitWorkRequest) async throws -> SubmitWorkResponse
     func submitChildBlock(_ request: SubmitChildBlockRequest) async throws -> SubmitChildBlockResponse
+    func buildChildBlock(_ request: BuildChildBlockRequest) async throws -> BuildChildBlockResponse
+    func childCommitment(chainPath: [String]) async throws -> ChildCommitmentResponse
     func pinVolume(_ root: String, entries: [String: Data]?) async throws
     func fetchVolume(_ root: String) async throws -> SerializedVolume?
     func unpinVolume(_ root: String) async throws
@@ -1150,6 +1152,22 @@ private func addOperatorWriteRoutes(
         let input: SubmitChildBlockRequest = try await decode(request, context: context)
         return try await serviceCall(request: request, context: context) {
             try await service.submitChildBlock(input)
+        }
+    }
+    // A child block built here for its author to commit on the parent; the
+    // answer carries the push above.
+    router.post("child-blocks/build") { request, context in
+        let input: BuildChildBlockRequest = try await decode(request, context: context)
+        return try await serviceCall(request: request, context: context) {
+            try await service.buildChildBlock(input)
+        }
+    }
+    // `child/X` on the parent's executed tip, read only: what the author's
+    // loop decides each round from.
+    router.get("child-blocks/commitment") { request, context in
+        let path = request.uri.queryParameters["chainPath"].map { $0.split(separator: "/").map(String.init) } ?? []
+        return try await serviceCall(request: request, context: context) {
+            try await service.childCommitment(chainPath: path)
         }
     }
     // Operator pins: a Volume the node holds, serves and announces until

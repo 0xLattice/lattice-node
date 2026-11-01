@@ -8,9 +8,123 @@ import LatticeNodeAPI
 /// Child chains this host runs as levels of its one process.
 struct Child: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Create and host child chains.",
-        subcommands: [Create.self]
+        abstract: "Create, host and commit child chains.",
+        subcommands: [Create.self, Host.self, Commit.self]
     )
+
+    /// Host a child chain that already exists: the running host syncs it
+    /// from its peers and carries it in its templates from now on.
+    struct Host: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Host an existing child chain; it is synced from its peers."
+        )
+
+        @OptionGroup var rootOption: RootOption
+
+        @Argument(help: "The child chain's path, e.g. Nexus/Alpha.")
+        var path: String
+
+        func run() async throws {
+            let layout = rootOption.layout
+            var topology = try Topology.load(root: layout.root)
+            guard !(topology.hostedChains ?? []).contains(path) else {
+                throw CtlError("\(path) is already hosted")
+            }
+            topology.hostedChains = (topology.hostedChains ?? []) + [path]
+            _ = try topology.validated()
+            try topology.save(root: layout.root)
+            let updated = try await withSpawnLock(layout) { try await updateHostIfRunningLocked(layout) }
+            print("\(path): hosted; synced from its peers")
+            if updated { print("the host now runs \(path)") }
+        }
+    }
+
+    /// Merged mining by the parent's miners: the hosted child's next block C
+    /// is built here on the state P the parent's next block enters,
+    /// committed on the parent (`child/X` = `C@P`, as `tx commit-child`
+    /// does), and pushed until a parent block carrying it weighs it. Each
+    /// round decides from the push's answer and, when it is dropped, the
+    /// parent's tip (`ChildCommitStep`): C is built again only once the tip
+    /// enters another P, so builds are bounded by parent blocks, not by
+    /// time, and a carried C is never committed again.
+    struct Commit: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Build a hosted child chain's next block, commit it on its parent, and push it until it is weighed."
+        )
+
+        @OptionGroup var rootOption: RootOption
+
+        @Argument(help: "The hosted child chain's path, e.g. Nexus/Alpha.")
+        var path: String
+
+        @Option(name: .long, help: "Key file (from `lattice key generate`) that signs and pays the commit on the parent and is paid the child block's reward.")
+        var key: String
+
+        @Option(name: .long, help: "The commit's fee; defaults to the parent's relay floor (minRelayFee).")
+        var fee: UInt64?
+
+        func run() async throws {
+            let components = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+            guard components.count > 1, let directory = components.last else {
+                throw CtlError("\(path) is not a child chain's path")
+            }
+            let parent = components.dropLast().joined(separator: "/")
+            let layout = rootOption.layout
+            let rpc = NodeRPC(try Topology.load(root: layout.root).validated(), layout)
+            let tx = try TxOptions.parse(
+                ["--chain", parent, "--key", key] + (rootOption.root.map { ["--root", $0] } ?? [])
+                    + (fee.map { ["--fee", String($0)] } ?? [])
+            )
+            let signer = try tx.signer()
+            var built: BuildChildBlockResponse?
+            var accepted = false
+            func commit(_ block: BuildChildBlockResponse) async throws {
+                try await tx.submit(signer: signer, actions: [Tx.CommitChild.action(
+                    directory: directory, block: block.blockCID,
+                    parentState: block.parentState, previous: block.previous
+                )])
+                accepted = true
+            }
+            while true {
+                do {
+                    var pushed: SubmitChildBlockStatus?
+                    if let built {
+                        let answer: SubmitChildBlockResponse = try await post(
+                            rpc: rpc, path: "child-blocks", body: built.submit
+                        )
+                        print("\(answer.blockCID): \(answer.status.rawValue)")
+                        pushed = answer.status
+                    }
+                    var step = ChildCommitStep(pushed: pushed, read: nil, built: built, accepted: accepted)
+                    if step == .read {
+                        let read: ChildCommitmentResponse = try await get(
+                            rpc: rpc, path: "child-blocks/commitment", chain: path
+                        )
+                        step = ChildCommitStep(pushed: pushed, read: read, built: built, accepted: accepted)
+                    }
+                    switch step {
+                    case .done:
+                        return
+                    case .wait, .read:
+                        break
+                    case .commit:
+                        if let built { try await commit(built) }
+                    case .build:
+                        let next: BuildChildBlockResponse = try await post(
+                            rpc: rpc, path: "child-blocks/build",
+                            body: BuildChildBlockRequest(chainPath: components, recipient: signer.address)
+                        )
+                        (built, accepted) = (next, false)
+                        print("built \(next.blockCID) on \(parent) state \(next.parentState)")
+                        try await commit(next)
+                    }
+                } catch {
+                    print("\(error)")
+                }
+                try await Task.sleep(for: .seconds(3))
+            }
+        }
+    }
 
     /// Write a child chain's spec and host it. Its genesis is built from the
     /// spec in the next template that carries it, committing that carrier's

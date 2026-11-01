@@ -275,6 +275,51 @@ final class DaemonHTTPTests: XCTestCase {
         }
     }
 
+    /// The author's routes: the commitment read names the parent's tip
+    /// state and an unset `child/Alpha`; a build answers on that state.
+    func testChildBlockBuildAndCommitmentRoutes() async throws {
+        let alpha = ["Nexus", "Alpha"]
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: temporaryDirectory(),
+            privateKeyHex: String(repeating: "01", count: 32),
+            hostedChildren: [alpha],
+            childSpecs: [alpha: ChainSpec(
+                maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
+                targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
+            )]
+        )
+        let service = try await startRuntime(try await NodeStorage.open(configuration: configuration))
+        let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
+        try await app.test(.router) { client in
+            var read: ChildCommitmentResponse?
+            try await client.execute(
+                uri: "/child-blocks/commitment?chainPath=Nexus/Alpha", method: .get,
+                headers: [.authorization: testOperatorAuthorization]
+            ) { response in
+                XCTAssertEqual(response.status, .ok, String(buffer: response.body))
+                read = try JSONDecoder().decode(ChildCommitmentResponse.self, from: Data(buffer: response.body))
+            }
+            XCTAssertNil(read?.value)
+            try await client.execute(
+                uri: "/child-blocks/commitment?chainPath=Nexus/Beta", method: .get,
+                headers: [.authorization: testOperatorAuthorization]
+            ) { response in
+                XCTAssertEqual(response.status, .notFound)
+            }
+            try await client.execute(
+                uri: "/child-blocks/build", method: .post,
+                headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
+                body: ByteBuffer(bytes: try JSONEncoder().encode(BuildChildBlockRequest(chainPath: alpha)))
+            ) { response in
+                XCTAssertEqual(response.status, .ok, String(buffer: response.body))
+                let built = try JSONDecoder().decode(BuildChildBlockResponse.self, from: Data(buffer: response.body))
+                XCTAssertEqual(built.parentState, read?.parentState)
+                XCTAssertNil(built.previous)
+            }
+        }
+    }
+
     func testMiningTemplateRequestJSONDefaults() throws {
         let empty = try JSONDecoder().decode(
             MiningTemplateRequest.self,

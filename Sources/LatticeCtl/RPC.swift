@@ -55,3 +55,16 @@ func post<Body: Encodable, Response: Decodable>(
     return try JSONDecoder().decode(Response.self, from: data)
 }
 
+
+/// GET the local node's JSON answer for `path`, on `chain`.
+func get<Response: Decodable>(rpc: NodeRPC, path: String, chain: String) async throws -> Response {
+    var request = try rpc.request(path, chain: chain)
+    request.timeoutInterval = 30
+    request.cachePolicy = .reloadIgnoringLocalCacheData
+    let (data, response) = try await URLSession.shared.data(for: request)
+    guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        throw CtlError("\(path) failed: HTTP \(status) \(String(decoding: data.prefix(512), as: UTF8.self))")
+    }
+    return try JSONDecoder().decode(Response.self, from: data)
+}
