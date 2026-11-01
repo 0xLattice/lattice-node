@@ -185,6 +185,65 @@ For a nested child, create the parent first. Its genesis is not eligible until
 the parent has executed a block. Give a chain positive rewards before relying
 on it as a parent; a reward-free, transaction-free chain never changes state.
 
+To host a child chain that already exists, add its path:
+
+```bash
+lattice child host Nexus/Alpha --root /var/lib/lattice
+```
+
+It is added to `hostedChains`, and a running host is told over
+[`POST /hosted-chains`](rpc-api.md#post-hosted-chains), as `child create`
+does. The chain syncs from the node's peers.
+
+### Committing a child block on its parent
+
+A hosted child's block can be carried by the parent's miners that do not
+host it. `lattice child commit` builds the child's next block `C` on the
+state `P` the parent's next block enters, commits it on the parent as
+`child/X` = `C@P` (Lattice spec §6.3), and pushes `C` until a carrier weighs
+it ([push-only derived grinds](design/proof-derived-work.md#push-only-derived-grinds)):
+
+```bash
+lattice child commit Nexus/Alpha \
+  --root /var/lib/lattice \
+  --key ./wallet.json \
+  --fee 1
+```
+
+`--key` signs and pays the commit on the parent and is paid `C`'s block
+reward. `--fee` defaults to the parent's `minRelayFee`. Every 3 seconds the
+loop pushes `C` ([`POST /child-blocks`](rpc-api.md#post-child-blocks)) and
+stops on `tree`. On `pending` or `awaiting` a carrier commits `C`, and it
+waits. On `dropped` it reads the parent's commitment
+([`GET /child-blocks/commitment`](rpc-api.md#get-child-blockscommitment)): on
+`C`'s `P` it sends the commit again until the parent's pool takes it; on
+another `P` (a new tip, or a reorg past the carrier) it builds there
+([`POST /child-blocks/build`](rpc-api.md#post-child-blocksbuild)) and commits
+with the build's `previous` as the `oldValue`. It builds at most once per
+`P` and never commits a carried `C` again. Errors are printed and the loop
+goes on.
+
+The three flows:
+
+```bash
+# A new chain: its genesis is the first C.
+lattice child create Nexus/Alpha --root /var/lib/lattice --spec alpha-spec.json
+lattice child commit Nexus/Alpha --root /var/lib/lattice --key ./wallet.json
+
+# An existing chain: C extends its executed tip.
+lattice child host Nexus/Alpha --root /var/lib/lattice
+lattice child commit Nexus/Alpha --root /var/lib/lattice --key ./wallet.json
+
+# A pending child transaction: the next C carries the pool.
+lattice tx send --root /var/lib/lattice --chain Nexus/Alpha \
+  --key ./wallet.json --to <address> --amount 25 --fee 1
+lattice child commit Nexus/Alpha --root /var/lib/lattice --key ./wallet.json
+```
+
+A node that hosts `X` pools and relays `child/X` commitments but leaves every
+one out of its own templates, whether or not they carry its own candidate
+for `X`.
+
 ## Mining
 
 | Command | Effect |
@@ -223,7 +282,25 @@ lattice tx send \
 ```
 
 `tx deposit`, `tx receipt`, and `tx withdraw` expose the three cross-level
-exchange actions. All submissions use the one RPC listener and carry their
+exchange actions. `tx commit-child` signs one child commitment on `--chain`,
+which `child commit` sends for its author:
+
+```bash
+lattice tx commit-child \
+  --root /var/lib/lattice \
+  --chain Nexus \
+  --key ./wallet.json \
+  --directory Alpha \
+  --block <child block CID> \
+  --parent-state <parent state CID> \
+  --previous <current C@P>
+```
+
+`--directory` is one edge label under `--chain`. `--block` and
+`--parent-state` must be standard CIDs; only a block entering that state
+carries it. `--previous` is the directory's current commitment value, omitted
+for the first. The node pools it only while the chain's executed tip leaves
+that parent state, and a pooled one leaves the pool when the tip moves on. All submissions use the one RPC listener and carry their
 absolute chain path. The CLI rejects a path this host does not serve; the node
 also returns 404 for an unhosted path.
 

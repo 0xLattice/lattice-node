@@ -166,10 +166,66 @@ this design forbids.
 - Candidate content is retained with issued mining work; a submitted grind
   transfers the roots only for levels whose targets it actually meets.
 
-Unknown-child proofs are bounded per peer and globally. Triggered sync is
-rate- and concurrency-limited. A valid proof for a child that has not yet
-arrived is not punishable; lying about advertised availability or returning
-malformed bytes is.
+Queued child proofs share one operator byte budget across all sources, with
+no per-peer bound ([Push-only derived grinds](#push-only-derived-grinds)).
+Triggered sync is rate- and concurrency-limited. A valid proof for a child
+that has not yet arrived is not punishable; lying about advertised
+availability or returning malformed bytes is.
+
+## Push-only derived grinds
+
+A parent block can commit a child block `C` at `children[X]` by CID alone,
+for example when its miner carries a `child/X` = `C@P` transaction (spec
+§6.3) without hosting `X`. No `ChildBlockProof` for `C` leaves that miner,
+so the grind's work at `C` has no proof on the wire. Whoever holds `C`'s
+bytes, with the co-hosted parent level, derives the grind's proof from its
+own trees (`ChildBlockProof.extending`, shared with the mined-carrier path),
+credits it as a verified proof, and relays it with `C`'s header, so peers
+credit the same grinds from the gossiped proof. Nodes never fetch `C` over
+the network, and a derivation reads nothing from peers.
+
+A child header with no proofs is taken only when it is wanted. One that a
+connected parent block commits is wanted: the parent level's committers index
+(`ChainTree.committers(of:directory:)`) spans forks and is never pruned, so a
+proofless `C` committed on any branch is accepted. An uncommitted one is
+dropped.
+
+Two triggers derive:
+
+1. **Carrier weigh.** For each parent block weighed in a step that commits
+   into a hosted directory, the child level derives the grinds it has not
+   credited at the committed block, if it holds that block, awaits a proof
+   for it or has it pending. A block it does not know is neither derived nor
+   fetched.
+2. **Arrival.** A child block that enters the level to await a proof, by
+   gossip or a local submit, has the grinds of each of its committers
+   derived.
+
+A derivation is pure over this node's own content and its answer is always
+applied; credit is idempotent. It does not wait on peer proofs that are
+queued or in a check, so neither a bogus front-run proof nor a peer that
+leaves can keep `C` from being credited. A derived proof that fails blames no
+one. A header with a derivation in flight is never evicted. Nothing about a
+derivation is persisted: a restored child level treats every block it
+restores as arrived, so its committers are derived again.
+
+**The author pushes until `C` is weighed.** `C` enters a node only by gossip
+or by a local submit ([`POST /child-blocks`](../rpc-api.md#post-child-blocks)).
+The node keeps no record of authored blocks. A submit dropped before its
+carrier is weighed, or lost to a restart, an unhost or an eviction, is pushed
+again; `lattice child commit` does this until the submit answers `tree`
+([operator CLI](../operator-cli.md#committing-a-child-block-on-its-parent)).
+
+**Budgets.** Proofs queued or in a check share one operator budget,
+`ChildProofConfig.maxQueuedBytes` (default 16 MiB), over all sources. A proof
+past it is dropped without blame and nothing is evicted; the block is looked
+up again, so its hole is asked again once the queue drains. Headers awaiting
+a proof share the global `maxAwaiting`, which evicts the oldest with no proof
+queued or in flight. There are no per-peer or per-source caps: peers are
+cheap to make, so such a cap protects nothing. Security comes from
+proof-of-work and verification: a proofless header is taken only when
+wanted, and a peer-sent proof that fails is a proof-of-work failure that
+disconnects its sender.
 
 ## What the design leaves out
 
