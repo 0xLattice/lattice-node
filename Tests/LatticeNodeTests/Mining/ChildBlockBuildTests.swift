@@ -156,19 +156,27 @@ final class ChildBlockBuildTests: XCTestCase {
         )
     }
 
-    /// The loop's step reads the chain: a carrier the builder has not taken
-    /// in yet leaves the old P, so the commit is pending (pushed, never
-    /// committed again); once taken in, `child/X` holds it and it has landed;
-    /// only a moved P without it builds again.
-    func testTheCommitStepDecidesFromTheChain() throws {
+    /// The loop's step: any push answer but `dropped` means a weighed carrier
+    /// commits the block (whatever was committed since, a reorg the
+    /// committers index still spans), so it waits; dropped on the built P,
+    /// it resends a commit the pool has not taken and never builds again;
+    /// dropped on another P (a reorg past its carrier too), it builds.
+    func testTheCommitStepDecidesFromThePushAndTheChain() throws {
         let submit = SubmitChildBlockRequest(chainPath: Self.alpha, block: Data(), children: Data())
-        let committed = BuildChildBlockResponse(blockCID: "c1", parentState: "p1", previous: "c0@p0", submit: submit)
-        XCTAssertEqual(committed.value, "c1@p1")
-        XCTAssertEqual(ChildCommitStep(ChildCommitmentResponse(parentState: "p1", value: "c0@p0"), committed: nil), .build)
-        XCTAssertEqual(ChildCommitStep(ChildCommitmentResponse(parentState: "p1", value: "c0@p0"), committed: committed), .pending)
-        XCTAssertEqual(ChildCommitStep(ChildCommitmentResponse(parentState: "p2", value: "c1@p1"), committed: committed), .landed)
-        XCTAssertEqual(ChildCommitStep(ChildCommitmentResponse(parentState: "p2", value: "c0@p0"), committed: committed), .build)
-        XCTAssertEqual(ChildCommitStep(ChildCommitmentResponse(parentState: "p2", value: "x@p1"), committed: committed), .build)
+        let built = BuildChildBlockResponse(blockCID: "c1", parentState: "p1", previous: "c0@p0", submit: submit)
+        let onP1 = ChildCommitmentResponse(parentState: "p1", value: "c0@p0")
+        let onP2 = ChildCommitmentResponse(parentState: "p2", value: "x@p1")
+        XCTAssertEqual(ChildCommitStep(pushed: nil, read: nil, built: nil, accepted: false), .read)
+        XCTAssertEqual(ChildCommitStep(pushed: nil, read: onP1, built: nil, accepted: false), .build)
+        XCTAssertEqual(ChildCommitStep(pushed: .tree, read: nil, built: built, accepted: true), .done)
+        for carried in [SubmitChildBlockStatus.pending, .awaiting] {
+            XCTAssertEqual(ChildCommitStep(pushed: carried, read: nil, built: built, accepted: true), .wait, "carried")
+            XCTAssertEqual(ChildCommitStep(pushed: carried, read: onP2, built: built, accepted: false), .wait, "overwritten since")
+        }
+        XCTAssertEqual(ChildCommitStep(pushed: .dropped, read: nil, built: built, accepted: true), .read)
+        XCTAssertEqual(ChildCommitStep(pushed: .dropped, read: onP1, built: built, accepted: true), .wait, "commit pending")
+        XCTAssertEqual(ChildCommitStep(pushed: .dropped, read: onP1, built: built, accepted: false), .commit, "not taken: resend")
+        XCTAssertEqual(ChildCommitStep(pushed: .dropped, read: onP2, built: built, accepted: true), .build, "tip moved or reorged")
     }
 
     /// The relay rule on the production template path: a node that hosts
@@ -200,86 +208,101 @@ final class ChildBlockBuildTests: XCTestCase {
     /// each built on the node hosting Alpha, committed there (it pools and
     /// relays the commit), mined into Nexus by a miner that does not host
     /// Alpha, and pushed until weighed, by `lattice child commit`'s loop. In
-    /// the last round Nexus's tip moves between the build and the commit
+    /// the third round Nexus's tip moves between the build and the commit
     /// being mined: the push is dropped, the build again enters another
-    /// state, and that one is committed and lands.
+    /// state, its commit is resent until taken, and it lands. In the last,
+    /// another author's commit replaces ours once it is carried: the loop
+    /// never commits again, and ours is weighed.
     func testAParentMinerCarriesCommittedChildBlocksFromGenesisOn() async throws {
         let pair = try await pair(("7b", "7c"))
         let (builder, miner) = (pair.builder, pair.miner)
         let alphaReads = try XCTUnwrap(builder.levelReads[Self.alpha])
 
         /// `lattice child commit`'s loop on the runtimes, each round decided
-        /// by `ChildCommitStep` from `child/Alpha` on the builder's Nexus tip.
-        /// A commit is mined once the miner pools it; with `stale`, the first
-        /// is mined past by a template taken before it, which never carries
-        /// it. Returns every block built and the one weighed.
-        func commitUntilWeighed(_ label: String, stale: Bool = false) async throws -> (builds: [BuildChildBlockResponse], weighed: BuildChildBlockResponse) {
+        /// by `ChildCommitStep`. A taken commit is mined once the miner pools
+        /// it. `staleTip`: the first commit's tip is mined past by a template
+        /// taken before it (and the next round runs without waiting for the
+        /// stale commit's eviction). `overwritten`: after the carrier, another
+        /// author's commit replaces `child/Alpha` before any round runs.
+        /// Returns every block the loop built and the one weighed.
+        enum Twist { case none, staleTip, overwritten }
+        func commitUntilWeighed(_ label: String, _ twist: Twist = .none) async throws -> (builds: [BuildChildBlockResponse], weighed: BuildChildBlockResponse) {
             var builds: [BuildChildBlockResponse] = []
-            var committed: BuildChildBlockResponse?
-            var landed = false
-            let past = stale ? try await miner.miningTemplate(pair.mining) : nil
-            func round() async throws -> SubmitChildBlockStatus? {
-                if !landed {
-                    switch ChildCommitStep(try await builder.childCommitment(chainPath: Self.alpha), committed: committed) {
-                    case .landed:
-                        landed = true
-                    case .pending:
-                        break
-                    case .build:
-                        let built = try await builder.buildChildBlock(pair.build)
-                        committed = built
-                        builds.append(built)
-                        _ = try await builder.submitTransaction(SubmitTransactionRequest(transaction: try await pair.commit(built)))
-                    }
-                }
-                guard let committed else { return nil }
-                return try await builder.submitChildBlock(committed.submit).status
+            var built: BuildChildBlockResponse?
+            var accepted = false
+            var taken: String?
+            let past = twist == .staleTip ? try await miner.miningTemplate(pair.mining) : nil
+            func commit(_ block: BuildChildBlockResponse) async throws {
+                taken = try await builder.submitTransaction(SubmitTransactionRequest(transaction: try await pair.commit(block))).transactionCID
+                accepted = true
             }
-            func minePooledCommit() async throws {
-                try await eventually("\(label): the miner pools the relayed commit") {
-                    await miner.reads.readSnapshot().mempoolCount == 1
+            func round() async throws -> ChildCommitStep {
+                var pushed: SubmitChildBlockStatus?
+                if let built { pushed = try await builder.submitChildBlock(built.submit).status }
+                var step = ChildCommitStep(pushed: pushed, read: nil, built: built, accepted: accepted)
+                if step == .read {
+                    let read = try await builder.childCommitment(chainPath: Self.alpha)
+                    step = ChildCommitStep(pushed: pushed, read: read, built: built, accepted: accepted)
                 }
-                _ = try await miner.mineBlock(pair.mining)
+                switch step {
+                case .done, .wait, .read:
+                    break
+                case .commit:
+                    if let built { try await commit(built) }
+                case .build:
+                    let next = try await builder.buildChildBlock(pair.build)
+                    (built, accepted) = (next, false)
+                    builds.append(next)
+                    try await commit(next)
+                }
+                return step
             }
+            func pooled(_ cid: String) async -> Bool {
+                await miner.reads.explorerMempool().transactions.contains(cid)
+            }
+            func value(_ block: BuildChildBlockResponse) -> String { block.blockCID + "@" + block.parentState }
 
             _ = try await round()
             XCTAssertEqual(builds.count, 1, "\(label): the first round builds")
-            try await eventually("\(label): the miner pools the relayed commit") {
-                await miner.reads.readSnapshot().mempoolCount == 1
-            }
-            for _ in 0..<3 {
-                let status = try await round()
-                XCTAssertNotEqual(status, .tree)
-            }
+            let first = try XCTUnwrap(taken)
+            try await eventually("\(label): the miner pools the relayed commit") { await pooled(first) }
+            for _ in 0..<3 { _ = try await round() }
             XCTAssertEqual(builds.count, 1, "\(label): rounds on one P build (and retain) one block")
-            if let past {
-                _ = try await miner.mine(past)
-                // The stale commit leaves both pools when the tip moves past its P.
-                try await eventually("\(label): the stale commit is evicted") {
-                    let builderPool = await builder.reads.readSnapshot().mempoolCount
-                    let minerPool = await miner.reads.readSnapshot().mempoolCount
-                    let moved = try await builder.childCommitment(chainPath: Self.alpha).parentState != builds[0].parentState
-                    return builderPool == 0 && minerPool == 0 && moved
-                }
-            } else {
-                // Rounds run at once, before the builder has taken the
-                // carrier in: they read the old P and push, never commit again.
+            var mined: String? = first
+            switch twist {
+            case .staleTip:
+                _ = try await miner.mine(try XCTUnwrap(past))
+                mined = nil
+            case .none:
                 _ = try await miner.mineBlock(pair.mining)
-            }
-            var recommitMined = false
-            try await eventually("\(label): the pushed block is weighed") {
-                guard let status = try? await round() else { return false }
-                if builds.count > 1, !recommitMined {
-                    recommitMined = true
-                    try await minePooledCommit()
+            case .overwritten:
+                _ = try await miner.mineBlock(pair.mining)
+                let ours = try XCTUnwrap(built)
+                try await eventually("\(label): ours is carried") {
+                    try await builder.childCommitment(chainPath: Self.alpha).value == value(ours)
                 }
-                return status == .tree
+                let theirs = try await builder.buildChildBlock(pair.build)
+                let cid = try await builder.submitTransaction(SubmitTransactionRequest(transaction: try await pair.commit(theirs))).transactionCID
+                try await eventually("\(label): the miner pools their commit") { await pooled(cid) }
+                _ = try await miner.mineBlock(pair.mining)
+                try await eventually("\(label): theirs replaces ours") {
+                    try await builder.childCommitment(chainPath: Self.alpha).value == value(theirs)
+                }
             }
-            XCTAssertEqual(builds.count, stale ? 2 : 1, "\(label): one commit per P the tip entered")
-            let weighed = try XCTUnwrap(committed)
-            XCTAssertEqual(weighed.blockCID, builds.last?.blockCID)
-            try await eventually("\(label): Alpha executes it") {
-                await alphaReads.readSnapshot().tipCID == weighed.blockCID
+            try await eventually("\(label): the pushed block is weighed") {
+                let step = try? await round()
+                if let taken, taken != mined, await pooled(taken) {
+                    mined = taken
+                    _ = try await miner.mineBlock(pair.mining)
+                }
+                return step == .done
+            }
+            XCTAssertEqual(builds.count, twist == .staleTip ? 2 : 1, "\(label): one build per P the tip entered, none once carried")
+            let weighed = try XCTUnwrap(built)
+            if twist != .overwritten {
+                try await eventually("\(label): Alpha executes it") {
+                    await alphaReads.readSnapshot().tipCID == weighed.blockCID
+                }
             }
             return (builds, weighed)
         }
@@ -303,7 +326,7 @@ final class ChildBlockBuildTests: XCTestCase {
         ))
         let transferCID = try await builder.submitTransaction(SubmitTransactionRequest(transaction: transfer)).transactionCID
         try await eventually("Alpha pools the transfer") { await alphaReads.readSnapshot().mempoolCount == 1 }
-        let (builds, carrying) = try await commitUntilWeighed("pending child transaction, tip moved", stale: true)
+        let (builds, carrying) = try await commitUntilWeighed("pending child transaction, tip moved", .staleTip)
         let stale = builds[0]
         XCTAssertNotEqual(stale.parentState, carrying.parentState, "built again on the moved tip")
         XCTAssertNotEqual(stale.blockCID, carrying.blockCID)
@@ -312,6 +335,9 @@ final class ChildBlockBuildTests: XCTestCase {
         XCTAssertEqual(landed, carrying.blockCID, "the pending transfer lands in the weighed C")
         let paid = await alphaReads.account(owner: bob, blockCID: carrying.blockCID)?.balance
         XCTAssertEqual(paid, 2)
+
+        let carried = try await commitUntilWeighed("overwritten after carried", .overwritten).weighed
+        XCTAssertEqual(carried.previous, carrying.blockCID + "@" + carrying.parentState)
     }
 }
 

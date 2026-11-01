@@ -113,13 +113,6 @@ public struct BuildChildBlockResponse: Codable, Sendable {
     }
 }
 
-extension BuildChildBlockResponse {
-    /// The `child/X` value committing this block: `C@P`.
-    public var value: String {
-        blockCID + String(UnicodeScalar(CHILD_COMMITMENT_PARENT_STATE_SEPARATOR)) + parentState
-    }
-}
-
 /// `GET /child-blocks/commitment?chainPath=X`: the state P the parent's
 /// executed tip leaves (the one its next block enters) and `child/X` there.
 public struct ChildCommitmentResponse: Codable, Sendable, Equatable {
@@ -133,21 +126,40 @@ public struct ChildCommitmentResponse: Codable, Sendable, Equatable {
 }
 
 /// One round of an author's commit loop (`lattice child commit`), decided
-/// from the chain: `landed` once `child/X` holds the committed block (push
-/// it until weighed, never commit again), `pending` while the parent's tip
-/// still enters the committed P (push it, nothing else), and `build`
-/// otherwise (build on the new P and commit it, replacing `value`).
+/// by the node: `pushed` is the answer to pushing the built block (nil when
+/// none is built), `read` the commitment read once that answer is
+/// `dropped` or there is no block, `accepted` whether the parent's pool took
+/// the built block's commit.
+///
+/// Any answer but `dropped` means a weighed parent block commits the block
+/// (the node's committers index, which spans forks): it waits for `tree`,
+/// whatever was committed since. Dropped, a parent tip still entering the
+/// built block's P waits for its commit, sending it again until the pool
+/// takes it; a tip on another P is built on.
 public enum ChildCommitStep: Sendable, Equatable {
-    case landed
-    case pending
+    /// Weighed in the child's tree: stop.
+    case done
+    /// Carried, or committed and pending: push again next round.
+    case wait
+    /// Dropped, or nothing built: read the commitment, then decide again.
+    case read
+    /// Send the built block's commit again.
+    case commit
+    /// Build on the read P and commit that.
     case build
 
-    public init(_ read: ChildCommitmentResponse, committed: BuildChildBlockResponse?) {
-        guard let committed else { self = .build; return }
-        if read.value == committed.value {
-            self = .landed
-        } else if read.parentState == committed.parentState {
-            self = .pending
+    public init(
+        pushed: SubmitChildBlockStatus?, read: ChildCommitmentResponse?,
+        built: BuildChildBlockResponse?, accepted: Bool
+    ) {
+        switch pushed {
+        case .tree: self = .done; return
+        case .pending, .awaiting: self = .wait; return
+        case .dropped, nil: break
+        }
+        guard let read else { self = .read; return }
+        if let built, read.parentState == built.parentState {
+            self = accepted ? .wait : .commit
         } else {
             self = .build
         }
