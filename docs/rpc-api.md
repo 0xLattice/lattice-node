@@ -458,6 +458,102 @@ secured by that hash.
 The reply is sent after the resulting node step is durable. Every affected
 level's facts and stream cursors commit in one `state.db` transaction.
 
+## Child blocks
+
+A hosted child chain's block can be carried by miners of its parent that do
+not host it: a parent transaction `child/X` = `C@P` asks them to commit `C`
+at `children[X]` (Lattice spec §6.3), and the block's author pushes `C`
+until a carrier weighs it ([push-only derived
+grinds](design/proof-derived-work.md#push-only-derived-grinds)).
+`lattice child commit` drives these routes
+([operator CLI](operator-cli.md#committing-a-child-block-on-its-parent)).
+They are on the operator port only. `block`, `children` and `spec` are the
+base64 bytes of the block node, its child index and a child genesis's spec.
+
+### `POST /child-blocks`
+
+```json
+{
+  "chainPath": ["Nexus", "Alpha"],
+  "block": "<base64 bytes>",
+  "children": "<base64 bytes>",
+  "spec": "<base64 bytes>"
+}
+```
+
+`spec` is given only for a genesis. The bytes must be canonical, as on the
+gossip wire. The block is taken as a header gossiped without proofs from no
+peer would be, and stored as a received header is. Nothing records the
+submit.
+
+Response, read after the submit's step:
+
+```json
+{"blockCID": "<cid>", "status": "tree"}
+```
+
+| `status` | Meaning |
+|---|---|
+| `tree` | weighed in the child's block tree: done |
+| `pending` | proved, waiting for its previous block to be weighed |
+| `awaiting` | taken, waiting for a proof that weighs |
+| `dropped` | not taken: no connected parent block commits it yet, or the level let it go |
+
+Only `tree` is final. The author submits again on any other status, and
+after a restart, an unhost or an eviction. `400` `invalidChainPath` for a
+root path, `400` `malformedBlock` for bytes that do not parse or are not
+canonical, `404` `unknownChain` for an unhosted chain.
+
+### `POST /child-blocks/build`
+
+```json
+{"chainPath": ["Nexus", "Alpha"], "recipient": "<address>"}
+```
+
+Builds the child's next block `C` as this node's next template carries it
+(its executed tip extended, or its genesis), paying the block reward to
+`recipient` (optional; omitted burns it), and stores and retains it with its
+closure as a mined block is. Response:
+
+```json
+{
+  "blockCID": "<cid>",
+  "parentState": "<cid>",
+  "previous": "<cid>@<cid>",
+  "submit": {"chainPath": ["Nexus", "Alpha"], "block": "<base64 bytes>", "children": "<base64 bytes>"}
+}
+```
+
+`parentState` is the parent state `P` the block was built on. `previous` is
+`child/X` in `P`'s general state, the commitment's `oldValue`; it is omitted
+when unset (the first commitment). `submit` is the `POST /child-blocks` body
+that pushes the block, with `spec` for a genesis.
+
+`400` `invalidChainPath` for a path that is not below this node's chain,
+`400` `invalidRecipientPlan` for a recipient that is not an address, `404`
+`unknownChain` for an unhosted chain, `400` `noChildCandidate` when the
+template carries no block for the chain (its genesis is weighed but not
+executed, or it has no spec to start from), `404` `notHeld` when `P`'s state
+is not readable here. `previous` is never guessed.
+
+### `GET /child-blocks/commitment`
+
+```text
+GET /child-blocks/commitment?chainPath=Nexus/Alpha
+```
+
+Read only: nothing is built or retained.
+
+```json
+{"parentState": "<cid>", "value": "<cid>@<cid>"}
+```
+
+`parentState` is the post-state of the parent's executed tip, the state its
+next block enters. `value` is `child/X` there, read as the build route reads
+`previous`; omitted when unset. `400` `invalidChainPath`, `404`
+`unknownChain`, and `404` `notHeld` when the parent has no executed tip or
+its state is not readable here.
+
 ## Hosted chains
 
 The child chains the node hosts change while it runs. These routes are on the
