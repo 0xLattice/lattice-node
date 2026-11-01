@@ -177,6 +177,8 @@ final class ChildBlockBuildTests: XCTestCase {
         XCTAssertEqual(ChildCommitStep(pushed: .dropped, read: onP1, built: built, accepted: true), .wait, "commit pending")
         XCTAssertEqual(ChildCommitStep(pushed: .dropped, read: onP1, built: built, accepted: false), .commit, "not taken: resend")
         XCTAssertEqual(ChildCommitStep(pushed: .dropped, read: onP2, built: built, accepted: true), .build, "tip moved or reorged")
+        let landedSincePush = ChildCommitmentResponse(parentState: "p2", value: "c1@p1")
+        XCTAssertEqual(ChildCommitStep(pushed: .dropped, read: landedSincePush, built: built, accepted: true), .wait, "carried since the push")
     }
 
     /// The relay rule on the production template path: a node that hosts

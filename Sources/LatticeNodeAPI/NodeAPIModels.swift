@@ -135,7 +135,8 @@ public struct ChildCommitmentResponse: Codable, Sendable, Equatable {
 /// (the node's committers index, which spans forks): it waits for `tree`,
 /// whatever was committed since. Dropped, a parent tip still entering the
 /// built block's P waits for its commit, sending it again until the pool
-/// takes it; a tip on another P is built on.
+/// takes it; a tip on another P is built on, unless it holds the built
+/// block's own commitment (a carrier landed since the push).
 public enum ChildCommitStep: Sendable, Equatable {
     /// Weighed in the child's tree: stop.
     case done
@@ -160,6 +161,10 @@ public enum ChildCommitStep: Sendable, Equatable {
         guard let read else { self = .read; return }
         if let built, read.parentState == built.parentState {
             self = accepted ? .wait : .commit
+        } else if let built, read.value == built.blockCID
+            + String(UnicodeScalar(CHILD_COMMITMENT_PARENT_STATE_SEPARATOR)) + built.parentState {
+            // A carrier landed after the push: the next push answers carried.
+            self = .wait
         } else {
             self = .build
         }
