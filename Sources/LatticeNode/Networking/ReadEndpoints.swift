@@ -139,6 +139,14 @@ actor ReadEndpointDirectory {
     static let emptyCacheSeconds = 5.0
     static let lastFoundSeconds = 600.0
     static let maximumConcurrentLookups = 16
+    /// At most this many of the asked are connected providers: their
+    /// records can be referred by any peer, so the rest is kept for the
+    /// providers the search finds.
+    static let maximumConnectedAsked = maximumAsked / 2
+    /// Once one URL is in, the others asked (and the search, if still out)
+    /// have this long more: a provider that does not host the chain never
+    /// answers, so waiting for every answer is waiting for the deadline.
+    static let searchGrace: Duration = .milliseconds(500)
 
     private let transport: ReadEndpointTransport
     private let nexusGenesisCID: String
@@ -147,7 +155,7 @@ actor ReadEndpointDirectory {
     private let cacheSeconds: Double
     private let clock: @Sendable () -> Double
 
-    private var cache: [[String]: (at: Double, urls: [DeclaredReadEndpoint])] = [:]
+    private var cache: [[String]: (until: Double, urls: [DeclaredReadEndpoint])] = [:]
     /// The last lookup of each path that found hosts.
     private var lastFound: [[String]: (at: Double, urls: [DeclaredReadEndpoint])] = [:]
     private var inFlight: [[String]: Task<[DeclaredReadEndpoint], Never>] = [:]
@@ -166,7 +174,9 @@ actor ReadEndpointDirectory {
         var asked: Set<String>
         /// Until the DHT search returns, more providers may come.
         var searching = true
-        var done: Bool { !searching && unanswered.isEmpty }
+        var graceStarted = false
+        var graceOver = false
+        var done: Bool { graceOver || (!searching && unanswered.isEmpty) }
         var urls: [DeclaredReadEndpoint] = []
         var perResponder: [String: Int] = [:]
         var asks: [Task<Void, Never>] = []
@@ -195,30 +205,37 @@ actor ReadEndpointDirectory {
 
     /// The URLs other hosts declared for `chainPath`, unverified.
     func lookup(_ chainPath: [String]) async -> [DeclaredReadEndpoint] {
-        if let cached = cache[chainPath], fresh(cached) { return cached.urls }
+        if let cached = cache[chainPath], clock() < cached.until { return cached.urls }
         if let running = inFlight[chainPath] { return await running.value }
-        // Under pressure: nothing, and nothing cached.
-        guard inFlight.count < Self.maximumConcurrentLookups else { return [] }
+        // Under pressure: the hosts found last, or nothing; nothing cached.
+        guard inFlight.count < Self.maximumConcurrentLookups else { return kept(chainPath) ?? [] }
         let task = Task { await self.run(chainPath) }
         inFlight[chainPath] = task
-        var urls = await task.value
+        let found = await task.value
         inFlight[chainPath] = nil
         let now = clock()
-        if !urls.isEmpty {
-            lastFound[chainPath] = (now, urls)
-        } else if let found = lastFound[chainPath], now - found.at < Self.lastFoundSeconds {
-            urls = found.urls
+        let urls: [DeclaredReadEndpoint]
+        if !found.isEmpty {
+            lastFound[chainPath] = (now, found)
+            urls = found
+            cache[chainPath] = (now + cacheSeconds, urls)
+        } else {
+            // Nothing found is looked for again soon, whether or not the
+            // hosts found last stand in for it.
+            urls = kept(chainPath) ?? []
+            cache[chainPath] = (now + min(cacheSeconds, Self.emptyCacheSeconds), urls)
         }
-        cache[chainPath] = (now, urls)
         // Expired entries go when the next lookup lands, so the cache holds
         // at most the paths asked for within one window.
-        cache = cache.filter { fresh($0.value) }
+        cache = cache.filter { now < $0.value.until }
         lastFound = lastFound.filter { now - $0.value.at < Self.lastFoundSeconds }
         return urls
     }
 
-    private func fresh(_ entry: (at: Double, urls: [DeclaredReadEndpoint])) -> Bool {
-        clock() - entry.at < (entry.urls.isEmpty ? min(cacheSeconds, Self.emptyCacheSeconds) : cacheSeconds)
+    /// The hosts the last lookup of `chainPath` found, while kept.
+    private func kept(_ chainPath: [String]) -> [DeclaredReadEndpoint]? {
+        guard let found = lastFound[chainPath], clock() - found.at < Self.lastFoundSeconds else { return nil }
+        return found.urls
     }
 
     /// A response from an authenticated peer: counted only as the answer to
@@ -250,14 +267,19 @@ actor ReadEndpointDirectory {
             lookup.urls.append(DeclaredReadEndpoint(url: url, acceptsSubmit: acceptsSubmit))
         }
         lookup.unanswered.remove(requestID)
+        // The first URL in: the rest get a grace, not the whole deadline.
+        let graceStarts = !lookup.graceStarted && !lookup.urls.isEmpty
+        if graceStarts { lookup.graceStarted = true }
         lookups[request.lookup] = lookup
-        if lookup.done { finish(request.lookup) }
+        if lookup.done { return finish(request.lookup) }
+        if graceStarts { startGrace(request.lookup) }
     }
 
     /// One lookup under one deadline, provider discovery included: the
     /// providers this node is connected to are asked at once, those the
-    /// search finds as it returns, and at the deadline the lookup answers
-    /// with what came in, as every DHT's provider search does.
+    /// search finds as it returns, and the lookup answers with what came in
+    /// `searchGrace` after the first URL, or at the deadline, as DHT
+    /// provider searches stop once they have enough.
     private func run(_ chainPath: [String]) async -> [DeclaredReadEndpoint] {
         let lookupID = nextID
         nextID += 1
@@ -265,8 +287,8 @@ actor ReadEndpointDirectory {
         let key = ReadEndpointKey.key(nexusGenesisCID: nexusGenesisCID, chainPath: chainPath)
         let transport = transport
         let discovery = Task {
-            self.ask(lookupID, await transport.connectedProviders(key), searchOver: false)
-            self.ask(lookupID, await transport.providers(key), searchOver: true)
+            self.ask(lookupID, await transport.connectedProviders(key), connected: true)
+            self.ask(lookupID, await transport.providers(key), connected: false)
         }
         let (seconds, attoseconds) = deadline.components
         let nanoseconds = UInt64(max(0, seconds)) * 1_000_000_000 + UInt64(max(0, attoseconds) / 1_000_000_000)
@@ -283,12 +305,13 @@ actor ReadEndpointDirectory {
         return urls
     }
 
-    /// Ask the providers not asked yet, up to `maximumAsked` in all, unless
-    /// the lookup already ended. `searchOver`: no more will come.
-    private func ask(_ lookupID: UInt64, _ providers: [PeerEndpoint], searchOver: Bool) {
+    /// Ask the providers not asked yet, up to `maximumAsked` in all and
+    /// `maximumConnectedAsked` of the `connected`, unless the lookup already
+    /// ended. The search's providers (not `connected`) are the last to come.
+    private func ask(_ lookupID: UInt64, _ providers: [PeerEndpoint], connected: Bool) {
         guard var lookup = lookups[lookupID] else { return }
         // This node's own key is in `asked` from the start, never asked.
-        let room = Self.maximumAsked - (lookup.asked.count - 1)
+        let room = connected ? Self.maximumConnectedAsked : Self.maximumAsked - (lookup.asked.count - 1)
         var fresh: [(PeerEndpoint, String)] = []
         for provider in providers.shuffled() where fresh.count < room {
             guard let peerKey = (try? PeerKey(provider.publicKey))?.hex,
@@ -306,9 +329,24 @@ actor ReadEndpointDirectory {
                 if await transport.ask(provider, message) { await self.dialed(lookupID, provider) }
             })
         }
-        if searchOver { lookup.searching = false }
+        if !connected { lookup.searching = false }
         lookups[lookupID] = lookup
         if lookup.done { finish(lookupID) }
+    }
+
+    private func startGrace(_ lookupID: UInt64) {
+        let (seconds, attoseconds) = Self.searchGrace.components
+        let nanoseconds = UInt64(max(0, seconds)) * 1_000_000_000 + UInt64(max(0, attoseconds) / 1_000_000_000)
+        Task {
+            _ = await Timers.sleep(nanoseconds: nanoseconds)
+            self.graceEnded(lookupID)
+        }
+    }
+
+    private func graceEnded(_ lookupID: UInt64) {
+        guard lookups[lookupID] != nil else { return }
+        lookups[lookupID]?.graceOver = true
+        finish(lookupID)
     }
 
     private func dialed(_ lookupID: UInt64, _ provider: PeerEndpoint) async {
