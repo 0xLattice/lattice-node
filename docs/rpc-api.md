@@ -74,6 +74,7 @@ Mining templates are requested at Nexus and can carry every hosted descendant.
 | `GET /health` | Published chain and mempool status | yes |
 | `GET /transactions/:cid` | Content-verified transaction by CID | yes |
 | `GET /volumes/:cid` | Complete Volume as the Ivy binary archive | yes |
+| `GET /volumes?cids=<cid>,<cid>,...` | The complete Volumes this node holds, many in one body | yes |
 | `GET /accounts/:owner?block=<cid>` | Account balance and next nonce at an accepted block | yes |
 | `GET /api/block/latest` | Latest executed block summary | yes |
 | `GET /api/block/:height-or-cid` | Block detail | yes |
@@ -118,6 +119,29 @@ reads. `--public-read-fetches 0` serves only what the node holds. A Volume no
 peer served within the caps above is 404. The immutable response is billed to the
 expensive public-read budget. Like the other per-level reads, a hosted child is selected
 with `?chainPath=Nexus/Alpha`; omitting it selects Nexus.
+
+`GET /volumes?cids=<cid>,<cid>,...` answers many Volumes in one request, for a
+client that walks content-addressed state itself and knows several CIDs at
+once. The node resolves nothing: it serves only the CIDs named. It returns
+`application/vnd.lattice.volumes`: for each requested CID the node holds as a
+complete Volume, in request order and once however often it is named, one
+record:
+
+```text
+u16 BE root CID length | root CID (UTF-8) | u32 BE archive length | archive
+```
+
+The archive is exactly what `GET /volumes/:cid` serves. A CID the node does not
+hold is left out and is never read from peers here; a client reads it with
+`GET /volumes/:cid`, where the public listener may read it from peers. The body
+is at most 4 MiB (one protocol frame): the first record that would take it past
+that ends the body, and every CID after it is left out unread, so a single
+archive over 4 MiB is never in it, never truncated. At most 32 CIDs are
+accepted; more, none, or any that is not a CID is `400`. When every requested
+CID is in the body the response is immutable like `/volumes/:cid`; otherwise
+it is cached for the status max-age only, since the node may hold more later.
+It is billed to the expensive public-read budget and takes `?chainPath=` like
+the single route.
 
 Both `/api/block/latest` and `/api/block/:height-or-cid` report the block's
 coinbase. `rewardRecipient` is the header's recipient address; it is omitted
