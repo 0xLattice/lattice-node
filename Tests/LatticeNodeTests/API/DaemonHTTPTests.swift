@@ -43,6 +43,159 @@ final class DaemonHTTPTests: XCTestCase {
         }
     }
 
+    /// Many Volumes in one read: each held one's record, in request order
+    /// and once, carrying exactly what `/volumes/:cid` serves; one not held
+    /// is left out and the answer then caches only briefly.
+    func testManyVolumesRouteServesHeldArchivesInRequestOrder() async throws {
+        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-http-volumes-\(UUID().uuidString)"
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
+        let storage = try await NodeStorage.open(configuration: NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: storageDirectory,
+            privateKeyHex: String(repeating: "01", count: 32)
+        ))
+        let held = try [
+            VolumeImpl<ChainSpec>(node: ChainSpec(
+                maxNumberOfTransactionsPerBlock: 3, maxStateGrowth: 3_333, premine: 3,
+                targetBlockTime: 3_000, initialReward: 3, halvingInterval: 3_333, halfLife: 3
+            )),
+            VolumeImpl<ChainSpec>(node: ChainSpec(
+                maxNumberOfTransactionsPerBlock: 5, maxStateGrowth: 5_555, premine: 5,
+                targetBlockTime: 5_000, initialReward: 5, halvingInterval: 5_555, halfLife: 5
+            )),
+        ]
+        let storer = NodeImportStorage(storage: await storage.broker)
+        for volume in held { try await volume.store(storer: storer) }
+        try await storer.commit()
+        let absent = try VolumeImpl<ChainSpec>(node: ChainSpec(
+            maxNumberOfTransactionsPerBlock: 4, maxStateGrowth: 4_444, premine: 4,
+            targetBlockTime: 4_000, initialReward: 4, halvingInterval: 4_444, halfLife: 4
+        )).rawCID
+        let service = try await startRuntime(storage)
+        let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
+        let genesis = storage.configuration.nexusGenesisCID
+        let auth: HTTPFields = [.authorization: testOperatorAuthorization]
+
+        try await app.test(.router) { client in
+            var single: [String: Data] = [:]
+            for cid in [genesis] + held.map(\.rawCID) {
+                try await client.execute(uri: "/volumes/\(cid)", method: .get, headers: auth) { response in
+                    XCTAssertEqual(response.status, .ok, cid)
+                    single[cid] = Data(response.body.readableBytesView)
+                }
+            }
+            func records(_ body: Data) throws -> [(String, Data)] {
+                var records: [(String, Data)] = []
+                var at = body.startIndex
+                func read(_ count: Int) throws -> Data {
+                    guard body.endIndex - at >= count else { throw HTTPError(.internalServerError) }
+                    defer { at += count }
+                    return body[at..<(at + count)]
+                }
+                while at < body.endIndex {
+                    let rootLength = try read(2).reduce(0) { $0 << 8 | Int($1) }
+                    let root = String(decoding: try read(rootLength), as: UTF8.self)
+                    let archiveLength = try read(4).reduce(0) { $0 << 8 | Int($1) }
+                    records.append((root, try read(archiveLength)))
+                }
+                return records
+            }
+
+            // Request order, not store order; a duplicate once.
+            let order = [held[1].rawCID, genesis, held[0].rawCID, held[1].rawCID]
+            try await client.execute(
+                uri: "/volumes?cids=\(order.joined(separator: ","))", method: .get, headers: auth
+            ) { response in
+                XCTAssertEqual(response.status, .ok)
+                XCTAssertEqual(response.headers[.contentType], "application/vnd.lattice.volumes")
+                XCTAssertEqual(response.headers[.cacheControl], immutableCacheControl, "every CID is answered")
+                let got = try records(Data(response.body.readableBytesView))
+                XCTAssertEqual(got.map(\.0), [held[1].rawCID, genesis, held[0].rawCID])
+                for (root, archive) in got { XCTAssertEqual(archive, single[root], root) }
+            }
+            // One not held is left out, and may be held later.
+            try await client.execute(
+                uri: "/volumes?cids=\(absent),\(held[0].rawCID)&chainPath=Nexus", method: .get, headers: auth
+            ) { response in
+                XCTAssertEqual(response.status, .ok)
+                XCTAssertEqual(response.headers[.cacheControl], statusCacheControl)
+                let got = try records(Data(response.body.readableBytesView))
+                XCTAssertEqual(got.map(\.0), [held[0].rawCID])
+            }
+            try await client.execute(uri: "/volumes?cids=\(absent)", method: .get, headers: auth) { response in
+                XCTAssertEqual(response.status, .ok)
+                XCTAssertEqual(response.headers[.cacheControl], statusCacheControl)
+                XCTAssertEqual(response.body.readableBytes, 0)
+            }
+            // As browsers send it: the commas and the chain path's slash escaped.
+            try await client.execute(
+                uri: "/volumes?cids=\(genesis)%2C\(held[0].rawCID)&chainPath=Nexus", method: .get, headers: auth
+            ) { response in
+                XCTAssertEqual(response.status, .ok)
+                let got = try records(Data(response.body.readableBytesView))
+                XCTAssertEqual(got.map(\.0), [genesis, held[0].rawCID])
+            }
+            // Gated like the single route.
+            try await client.execute(
+                uri: "/volumes?cids=\(genesis)&chainPath=Nexus/Unhosted", method: .get, headers: auth
+            ) { response in
+                XCTAssertEqual(response.status, .notFound)
+            }
+            let full = Array(repeating: genesis, count: maximumCompleteVolumeRecordsRoots)
+            try await client.execute(
+                uri: "/volumes?cids=\(full.joined(separator: ","))", method: .get, headers: auth
+            ) { response in
+                XCTAssertEqual(response.status, .ok, "the limit itself is served")
+            }
+            for query in [
+                "", "?cids=", "?cids=,", "?cids=\(genesis),", "?cids=\(genesis),,\(genesis)",
+                "?cids=not-a-cid", "?cids=\(genesis),not-a-cid",
+                "?cids=\((full + [genesis]).joined(separator: ","))",
+            ] {
+                try await client.execute(uri: "/volumes\(query)", method: .get, headers: auth) { response in
+                    XCTAssertEqual(response.status, .badRequest, query)
+                }
+            }
+        }
+    }
+
+    /// The body stays within its bound: the first record that would pass it
+    /// ends the body, whole records only, and the answer is then partial.
+    func testManyVolumeRecordsStopAtTheBound() async {
+        let archives = ["a": Data(repeating: 1, count: 10), "b": Data(repeating: 2, count: 30), "c": Data(repeating: 3, count: 5)]
+        let read: (String) async -> HeldVolume = { archives[$0].map(HeldVolume.archive) ?? .notHeld }
+        // a's record is 6 + 1 + 10 = 17 bytes, b's 37, c's 12.
+        let all = await encodeCompleteVolumeRecords(["a", "b", "c"], maximumBytes: 66, archive: read)
+        XCTAssertEqual(all.body.count, 66)
+        XCTAssertTrue(all.complete)
+        XCTAssertEqual(Array(all.body.prefix(7)), [0, 1, UInt8(ascii: "a"), 0, 0, 0, 10])
+
+        let stopped = await encodeCompleteVolumeRecords(["a", "b", "c"], maximumBytes: 65, archive: read)
+        XCTAssertEqual(stopped.body, all.body.prefix(54), "c does not fit, and is left out whole")
+        XCTAssertFalse(stopped.complete)
+
+        let oversize = await encodeCompleteVolumeRecords(["b", "a"], maximumBytes: 36, archive: read)
+        XCTAssertEqual(oversize.body.count, 0, "one archive over the bound is left out, not truncated")
+        XCTAssertFalse(oversize.complete)
+
+        let missing = await encodeCompleteVolumeRecords(["x", "c", "c"], archive: read)
+        XCTAssertEqual(missing.body.count, 12, "a root not held is left out, a duplicate answered once")
+        XCTAssertFalse(missing.complete)
+
+        // A Volume held but over the archive bounds was read whole: it ends
+        // the read, so the roots after it are not read at all.
+        var asked: [String] = []
+        let unencodable = await encodeCompleteVolumeRecords(["a", "big", "c"]) { root in
+            asked.append(root)
+            return root == "big" ? .unencodable : await read(root)
+        }
+        XCTAssertEqual(unencodable.body, all.body.prefix(17), "a, then nothing after big")
+        XCTAssertFalse(unencodable.complete)
+        XCTAssertEqual(asked, ["a", "big"])
+    }
+
     func testNexusTemplateDoesNotRequireParentReadiness() async throws {
         let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-http-parent-unavailable-\(UUID().uuidString)"
@@ -421,6 +574,7 @@ final class DaemonHTTPTests: XCTestCase {
             for uri in [
                 "/health", "/api/chain/info", "/api/chain/spec",
                 "/api/block/latest", "/api/blocks", "/api/peers", "/api/mempool", "/api/fees",
+                "/volumes?cids=\(configuration.nexusGenesisCID)",
             ] {
                 try await client.execute(uri: uri, method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
                     XCTAssertEqual(response.status, .ok, uri)
@@ -906,6 +1060,15 @@ final class DaemonHTTPTests: XCTestCase {
                 "/accounts/\(segment)?block=\(genesis)",
             ]
         }
+        for id in ids {
+            let query = queryValue(id)
+            uris += [
+                "/volumes?cids=\(query)",
+                "/volumes?cids=\(genesis),\(query)",
+                "/volumes?cids=\(query)&chainPath=\(query)",
+            ]
+        }
+        uris.append("/volumes?cids=" + Array(repeating: genesis, count: 1_000).joined(separator: ","))
         for value in integerEdges {
             let query = queryValue(value)
             uris += [

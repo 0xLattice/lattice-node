@@ -744,6 +744,30 @@ private func addPublicReadRoutes<Context: RequestContext>(
         case .notServed, nil: throw HTTPError(.notFound)
         }
     }
+    // Many Volumes in one request, for a client walking content it already
+    // knows the CIDs of. Only what this node holds: a CID left out is read
+    // on its own, where a peer read may apply.
+    router.get("volumes") { request, context in
+        let service = try byPath(request)
+        guard let list = request.uri.queryParameters["cids"] else {
+            throw HTTPError(.badRequest)
+        }
+        let cids = list.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+        guard cids.count <= maximumCompleteVolumeRecordsRoots,
+              cids.allSatisfy(isPlausibleCID) else {
+            throw HTTPError(.badRequest)
+        }
+        let records = await service.completeVolumeRecords(rootCIDs: cids)
+        return Response(
+            status: .ok,
+            headers: [
+                .contentType: "application/vnd.lattice.volumes",
+                // A CID left out may be held later.
+                .cacheControl: records.complete ? immutableCacheControl : statusCacheControl,
+            ],
+            body: ResponseBody(byteBuffer: ByteBuffer(bytes: records.body))
+        )
+    }
     router.get("accounts/:owner") { request, context in
         let service = try byPath(request)
         guard let owner = context.parameters.get("owner"), isPlausibleCID(owner) else {
