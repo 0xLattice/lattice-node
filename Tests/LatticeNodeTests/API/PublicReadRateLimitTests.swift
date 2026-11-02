@@ -159,6 +159,8 @@ final class PublicReadRateLimitTests: XCTestCase {
             "/api/chain/endpoints",
             "/api/deposits",
             "/volumes/bafy",
+            "/volumes",
+            "//volumes/",
         ] {
             XCTAssertEqual(
                 PublicReadRouteClass(method: .get, path: path), .expensive, path

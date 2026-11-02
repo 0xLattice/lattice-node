@@ -172,6 +172,9 @@ enum PublicReadRouteClass: Sendable, Equatable {
             // A complete Volume can be tens of MiB, and one this node does
             // not hold may be read from peers first.
             self = .expensive
+        case 1 where components[0] == "volumes":
+            // Up to 32 local Volume reads, bounded to one frame of body.
+            self = .expensive
         default:
             self = .general
         }
