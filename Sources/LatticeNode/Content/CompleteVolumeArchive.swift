@@ -55,7 +55,10 @@ extension ChainReads {
     /// Many complete Volumes already held by this node, as
     /// `encodeCompleteVolumeRecords` frames them; never read from peers.
     public func completeVolumeRecords(rootCIDs: [String]) async -> CompleteVolumeRecords {
-        await encodeCompleteVolumeRecords(rootCIDs) { await completeVolumeArchive(rootCID: $0) }
+        await encodeCompleteVolumeRecords(rootCIDs) { root in
+            guard let volume = await storage.volume(root), volume.root == root else { return .notHeld }
+            return encodeCompleteVolumeArchive(volume).map(HeldVolume.archive) ?? .unencodable
+        }
     }
 }
 
@@ -64,6 +67,14 @@ public let maximumCompleteVolumeRecordsRoots = 32
 /// A many-Volume body stays within one protocol frame, like the node's other
 /// bounded reads; a single Volume over it is read by its own CID.
 public let maximumCompleteVolumeRecordsBytes = Int(IvyConfig.defaultProtocolMaxFrameSize)
+
+/// One root of a many-Volume read: its archive; held but over the archive
+/// bounds (it was read whole all the same, so it ends the read); or not held.
+public enum HeldVolume: Sendable, Equatable {
+    case archive(Data)
+    case unencodable
+    case notHeld
+}
 
 /// The answer to a many-Volume read: the framed records, and whether every
 /// requested root is among them.
@@ -74,23 +85,33 @@ public struct CompleteVolumeRecords: Sendable, Equatable {
 
 /// Each root's complete archive, in request order and once per root, framed
 /// `u16 root length | root | u32 archive length | archive` (big-endian). A
-/// root `archive` does not answer is left out. The first archive whose
-/// record would take the body past `maximumBytes` ends it: the rest are left
-/// out unread, so one request reads at most the bound plus one archive.
+/// root not held is left out. The first Volume read whole but not sent, as
+/// its record would take the body past `maximumBytes` or it is over the
+/// archive bounds, ends it: the rest are left out unread, so one request
+/// reads at most the bound plus one Volume.
 public func encodeCompleteVolumeRecords(
     _ roots: [String],
     maximumBytes: Int = maximumCompleteVolumeRecordsBytes,
-    archive: (String) async -> Data?
+    archive held: (String) async -> HeldVolume
 ) async -> CompleteVolumeRecords {
     var body = Data()
     var seen = Set<String>()
     var complete = true
     for root in roots where seen.insert(root).inserted {
         let rootBytes = Array(root.utf8)
-        guard rootBytes.count <= Int(UInt16.max), let archive = await archive(root),
-              archive.count <= Int(UInt32.max) else {
+        guard rootBytes.count <= Int(UInt16.max) else {
             complete = false
             continue
+        }
+        let archive: Data
+        switch await held(root) {
+        case .notHeld:
+            complete = false
+            continue
+        case .unencodable:
+            return CompleteVolumeRecords(body: body, complete: false)
+        case .archive(let bytes):
+            archive = bytes
         }
         guard body.count + 6 + rootBytes.count + archive.count <= maximumBytes else {
             return CompleteVolumeRecords(body: body, complete: false)

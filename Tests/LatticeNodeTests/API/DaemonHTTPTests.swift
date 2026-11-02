@@ -129,6 +129,14 @@ final class DaemonHTTPTests: XCTestCase {
                 XCTAssertEqual(response.headers[.cacheControl], statusCacheControl)
                 XCTAssertEqual(response.body.readableBytes, 0)
             }
+            // As browsers send it: the commas and the chain path's slash escaped.
+            try await client.execute(
+                uri: "/volumes?cids=\(genesis)%2C\(held[0].rawCID)&chainPath=Nexus", method: .get, headers: auth
+            ) { response in
+                XCTAssertEqual(response.status, .ok)
+                let got = try records(Data(response.body.readableBytesView))
+                XCTAssertEqual(got.map(\.0), [genesis, held[0].rawCID])
+            }
             // Gated like the single route.
             try await client.execute(
                 uri: "/volumes?cids=\(genesis)&chainPath=Nexus/Unhosted", method: .get, headers: auth
@@ -157,7 +165,7 @@ final class DaemonHTTPTests: XCTestCase {
     /// ends the body, whole records only, and the answer is then partial.
     func testManyVolumeRecordsStopAtTheBound() async {
         let archives = ["a": Data(repeating: 1, count: 10), "b": Data(repeating: 2, count: 30), "c": Data(repeating: 3, count: 5)]
-        let read: (String) async -> Data? = { archives[$0] }
+        let read: (String) async -> HeldVolume = { archives[$0].map(HeldVolume.archive) ?? .notHeld }
         // a's record is 6 + 1 + 10 = 17 bytes, b's 37, c's 12.
         let all = await encodeCompleteVolumeRecords(["a", "b", "c"], maximumBytes: 66, archive: read)
         XCTAssertEqual(all.body.count, 66)
@@ -175,6 +183,17 @@ final class DaemonHTTPTests: XCTestCase {
         let missing = await encodeCompleteVolumeRecords(["x", "c", "c"], archive: read)
         XCTAssertEqual(missing.body.count, 12, "a root not held is left out, a duplicate answered once")
         XCTAssertFalse(missing.complete)
+
+        // A Volume held but over the archive bounds was read whole: it ends
+        // the read, so the roots after it are not read at all.
+        var asked: [String] = []
+        let unencodable = await encodeCompleteVolumeRecords(["a", "big", "c"]) { root in
+            asked.append(root)
+            return root == "big" ? .unencodable : await read(root)
+        }
+        XCTAssertEqual(unencodable.body, all.body.prefix(17), "a, then nothing after big")
+        XCTAssertFalse(unencodable.complete)
+        XCTAssertEqual(asked, ["a", "big"])
     }
 
     func testNexusTemplateDoesNotRequireParentReadiness() async throws {
