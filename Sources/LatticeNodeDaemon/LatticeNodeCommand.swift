@@ -87,7 +87,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Which block bodies (a block's own Volume and its transactions') this node keeps beyond the ones it needs to operate: all, or none. It always holds the bodies waiting to execute, each chain's tip, and each genesis block. With none, a body is let go of once another block is the tip, and is no longer served; headers, facts and state stay, so what the node weighs and selects does not change. A node that syncs from genesis needs peers that keep all.")
     var blockBodies = "all"
 
-    @Option(help: "Which state this node keeps: all, the state of every block it executed; tip, the state of each chain's tip; or none, only what a block reads until it executes and what the last execution touched. With tip, state a newer block replaced is let go of and is no longer served or read at an older block. Execution reads from peers the state it does not hold; a submitted transaction that needs state the node does not hold is pooled unchecked and mined by a peer. A node that syncs from genesis needs peers that keep all.")
+    @Option(help: "Which state this node keeps: all, the state of every block it executed; recent, what the executions of each chain's last --state-window blocks read and created; or none, what the last execution read and created, until the next. Kept state is a cache: execution, a submitted transaction's check and reads all read from peers the state this node does not hold, so recent and none answer the same as all, a read of state they let go of costing a fetch. A network needs nodes on all to serve what the others let go of, and a node that syncs from genesis needs peers that keep all. tip, the earlier name, means recent.")
     var state = "all"
 
     @Option(help: "Seconds with no newly accepted block on a hosted chain after which the node widens that chain's peer search: Nexus re-dials configured peers without a session, a child chain looks up its providers, and either dials peers it remembers. The node also announces each hosted child chain. Staleness is measured from the verified local tip. Discovery never affects validation or fork choice. 0 disables search.")
@@ -132,6 +132,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(name: .customLong("finality-window"), help: "Node-local finality, in blocks: headers and work more than this many blocks below a chain's best tip are declined — never stored, never blamed. A fork from a block that deep can never connect, which keeps out the blocks an easy schedule makes nearly free: a fork d blocks deep is at most 2^(d / halfLife) cheaper than the tip, so a few half-lives is enough. The cost is this node's own: it will not follow a reorganization deeper than the window, even a heavier one, until its operator intervenes. A bare number sets every hosted chain; chain-path=blocks sets one chain, e.g. Nexus/Alpha=500, and 0 turns it off there (repeatable). Without it, everything is kept. A child chain's window should be at least its parent's: a parent reorganization can reorganize the child.")
     var finalityWindow: [String] = []
 
+    @Option(name: .customLong("state-window"), help: "With --state recent, how many of a chain's blocks, counting its tip, have the state their executions read and created kept: the state a reorganization that deep or a block touching recent state needs, held without a fetch. A bare number sets every hosted chain; chain-path=blocks sets one chain, e.g. Nexus/Alpha=500 (repeatable). At least 1. Default 64.")
+    var stateWindow: [String] = []
+
     @Option(help: "Self-described publicly reachable host for overlay announcements (NAT/proxy-fronted nodes announce an unreachable observed address otherwise). Host only; the overlay listen port applies.")
     var externalAddress: String?
 
@@ -172,8 +175,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         guard let blockBodies = BlockBodies(rawValue: blockBodies) else {
             throw ValidationError("--block-bodies is all or none")
         }
-        guard let state = StateRetention(rawValue: state) else {
-            throw ValidationError("--state is all, tip or none")
+        guard let state = StateRetention(named: state) else {
+            throw ValidationError("--state is all, recent or none")
         }
         let publicReadLimits = try PublicReadRateLimits.validated(
             generalRate: publicReadRate,
@@ -248,7 +251,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             publicReadURL: publicReadUrl,
             publicSubmit: publicSubmit,
             minRelayFee: minRelayFee,
-            finality: try finalityWindows(finalityWindow)
+            finality: try windows(finalityWindow, option: "--finality-window", zeroIsOff: true),
+            stateWindows: try windows(stateWindow, option: "--state-window", zeroIsOff: false)
         )
         let cookieFile = rpcCookieFile.map { URL(fileURLWithPath: $0) }
             ?? storage.appendingPathComponent(".cookie")
@@ -260,12 +264,16 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         )
     }
 
-    /// `--finality-window` values: a bare number of blocks for every chain,
-    /// or chain-path=blocks for one; 0 is no window.
-    private func finalityWindows(_ values: [String]) throws -> FinalityWindows {
+    /// A per-chain window option's values (`--finality-window`,
+    /// `--state-window`): a bare number of blocks for every chain, or
+    /// chain-path=blocks for one. 0 turns a finality window off, and is no
+    /// state window.
+    private func windows(_ values: [String], option: String, zeroIsOff: Bool) throws -> FinalityWindows {
         func blocks(_ text: Substring) throws -> UInt64? {
-            guard let blocks = UInt64(text) else {
-                throw ValidationError("--finality-window takes blocks, or chain-path=blocks")
+            guard let blocks = UInt64(text), zeroIsOff || blocks > 0 else {
+                throw ValidationError(zeroIsOff
+                    ? "\(option) takes blocks, or chain-path=blocks"
+                    : "\(option) takes at least 1 block, or chain-path=blocks")
             }
             return blocks > 0 ? blocks : nil
         }
@@ -275,14 +283,14 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             if let split = value.firstIndex(of: "=") {
                 let components = value[..<split].split(separator: "/").map(String.init)
                 guard let address = ChainAddress(components) else {
-                    throw ValidationError("--finality-window: \(value[..<split]) is not a chain path")
+                    throw ValidationError("\(option): \(value[..<split]) is not a chain path")
                 }
                 guard windows.byChain[address.components] == nil else {
-                    throw ValidationError("--finality-window names \(value[..<split]) twice")
+                    throw ValidationError("\(option) names \(value[..<split]) twice")
                 }
                 windows.byChain[address.components] = .some(try blocks(value[value.index(after: split)...]))
             } else {
-                guard !sawDefault else { throw ValidationError("--finality-window has two defaults") }
+                guard !sawDefault else { throw ValidationError("\(option) has two defaults") }
                 sawDefault = true
                 windows.all = try blocks(value[...])
             }

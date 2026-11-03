@@ -47,9 +47,9 @@ extension NodeStorage {
         // pinned under its block's name by the job that executed it, and the
         // journal still names it.
         var stored: [String] = []
-        // With only the tip's state kept, or none: the state each level's
-        // executions created, under the level's state scope.
-        var states: [ChainPath: [String]] = [:]
+        // With recent state kept, or none: the state each level's
+        // executions stored, under the height of its newest block.
+        var states: [ChainPath: (height: UInt64, roots: [String])] = [:]
         let storage = NodeImportStorage(storage: broker)
         for (path, level) in batch.levels.sorted(by: {
             $0.path.count != $1.path.count
@@ -69,8 +69,16 @@ extension NodeStorage {
             switch configuration.state {
             case .all:
                 stored.append(contentsOf: created)
-            case .tip, .none:
-                states[path] = executed
+            case .recent, .none:
+                let heights = level.facts.flatMap(\.facts).compactMap { fact -> UInt64? in
+                    if case .block(let block) = fact { return block.blockHeight }
+                    return nil
+                }
+                if let height = heights.max() {
+                    states[path] = (height, executed)
+                } else {
+                    stored.append(contentsOf: executed)
+                }
                 stored.append(contentsOf: specs)
             }
             let roots = created + (bodyRoots[path] ?? [])
@@ -85,19 +93,8 @@ extension NodeStorage {
         }
         try await storage.commit()
         try await retainHeld(stored)
-        for (path, roots) in states where !roots.isEmpty {
-            if configuration.state == .tip {
-                // Until the kept state has counted what of it the tip holds.
-                try await retainHeld(roots, scope: scopes.executed(at: path))
-                continue
-            }
-            let scope = scopes.state(at: path)
-            // With no state kept, only what the last execution touched
-            // stays: the next block most likely reads it.
-            let earlier = configuration.state == .none ? try await broker.retainedRoots(scope: scope) : []
-            try await retainHeld(roots, scope: scope)
-            let gone = Set(earlier).subtracting(roots)
-            if !gone.isEmpty { try await broker.releaseRetainedRoots(scope: scope, roots: gone.sorted()) }
+        for (path, state) in states where !state.roots.isEmpty {
+            try await retainHeld(state.roots, scope: scopes.window(at: path, height: state.height))
         }
         try await store.stageNodeFacts(durable, logID: logID)
     }

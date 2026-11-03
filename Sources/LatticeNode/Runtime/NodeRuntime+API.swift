@@ -495,6 +495,7 @@ extension NodeRuntime {
 
     static func reads(
         storage: NodeStorage,
+        remote: IvyRootContentSource? = nil,
         configuration: NodeConfiguration,
         published: PublishedValue<ChainSnapshot>,
         view: PublishedValue<NodeReadView>,
@@ -503,6 +504,7 @@ extension NodeRuntime {
     ) -> ChainReads {
         ChainReads(
             storage: storage,
+            remote: remote,
             chainPath: chainPath,
             accepted: accepted,
             tip: {

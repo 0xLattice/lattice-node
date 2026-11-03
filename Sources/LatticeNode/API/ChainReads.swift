@@ -43,6 +43,12 @@ public struct ChainReads: Sendable {
     }
 
     let storage: NodeStorage
+    /// What state reads read: this store, then what is in memory, then
+    /// peers. State is a cache: a node of an executed block's state this
+    /// store let go of is read again, never answered as absent. Blocks and
+    /// transactions asked for by CID are read from this store alone, so a
+    /// reader cannot make this node fetch whatever it names.
+    let fetcher: any Fetcher
     /// The tip readers see: the tip this node acts on, its heaviest executed tip.
     let tip: @Sendable () async -> ChainStatus
     /// The block at a height of the chain to that tip.
@@ -62,6 +68,7 @@ public struct ChainReads: Sendable {
 
     init(
         storage: NodeStorage,
+        remote: IvyRootContentSource? = nil,
         chainPath: [String]? = nil,
         accepted: (@Sendable (String) async -> Bool)? = nil,
         tip: @escaping @Sendable () async -> ChainStatus,
@@ -71,6 +78,7 @@ public struct ChainReads: Sendable {
         peerCount: @escaping @Sendable () -> Int = { 0 }
     ) {
         self.storage = storage
+        self.fetcher = remote.map { StateReadFetcher(storage: storage, remote: $0) } ?? storage
         self.chainPath = chainPath ?? storage.configuration.chainPath
         if let accepted {
             self.accepted = accepted
@@ -153,16 +161,16 @@ public struct ChainReads: Sendable {
         blockCID: String
     ) async -> (balance: UInt64, nonce: UInt64)? {
         guard let block = await blockNode(cid: blockCID) else { return nil }
-        guard let state = try? await block.postState.resolve(fetcher: storage).node else {
+        guard let state = try? await block.postState.resolve(fetcher: fetcher).node else {
             return nil
         }
         guard let nonce = try? await state.accountState.nextExpectedNonce(
                 for: owner,
-                fetcher: storage
+                fetcher: fetcher
               ),
               let resolved = try? await state.accountState.resolve(
                 paths: [[owner]: .targeted],
-                fetcher: storage
+                fetcher: fetcher
               ),
               let accountNode = resolved.node else {
             return nil
@@ -199,7 +207,7 @@ public struct ChainReads: Sendable {
             return nil
         }
         let transactionCount = (try? await block.transactions.resolve(
-            fetcher: storage
+            fetcher: fetcher
         ))?.node?.count ?? 0
         return ExplorerLatestBlock(
             height: block.height,
@@ -230,7 +238,7 @@ public struct ChainReads: Sendable {
             guard let cid = await canonicalCID(height),
                   let block = await block(cid: cid) else { continue }
             let transactionCount = (try? await block.transactions.resolve(
-                fetcher: storage
+                fetcher: fetcher
             ))?.node?.count ?? 0
             blocks.append(ExplorerBlockSummary(
                 height: block.height,
@@ -247,10 +255,10 @@ public struct ChainReads: Sendable {
     public func explorerBlock(cid: String) async -> ExplorerBlock? {
         guard let block = await block(cid: cid) else { return nil }
         let transactionCount = (try? await block.transactions.resolve(
-            fetcher: storage
+            fetcher: fetcher
         ))?.node?.count ?? 0
         let childBlockCount = (try? await block.children.resolve(
-            fetcher: storage
+            fetcher: fetcher
         ))?.node?.count ?? 0
         return ExplorerBlock(
             height: block.height,
@@ -276,13 +284,13 @@ public struct ChainReads: Sendable {
     /// no recipient (burned); nil when the block's content is not held here.
     private func rewardCredited(by block: Block) async -> UInt64? {
         guard block.rewardRecipient != nil else { return 0 }
-        guard let spec = try? await block.spec.resolve(fetcher: storage).node,
-              let transactions = try? await MiningTemplateAssembly.blockTransactions(in: block, fetcher: storage)
+        guard let spec = try? await block.spec.resolve(fetcher: fetcher).node,
+              let transactions = try? await MiningTemplateAssembly.blockTransactions(in: block, fetcher: fetcher)
         else { return nil }
         var bodies: [TransactionBody] = []
         for transaction in transactions {
             guard let body = try? await transaction.body.resolve(
-                fetcher: storage
+                fetcher: fetcher
             ).node else { return nil }
             bodies.append(body)
         }
@@ -308,7 +316,7 @@ public struct ChainReads: Sendable {
         guard offset >= 0 else { return nil }
         guard let block = await block(cid: cid) else { return nil }
         guard let dictionary = (try? await block.transactions.resolve(
-            fetcher: storage
+            fetcher: fetcher
         ))?.node else { return nil }
         let total = dictionary.count
         let boundedLimit = Self.boundedExplorerLimit(limit)
@@ -326,16 +334,16 @@ public struct ChainReads: Sendable {
                 let key = String(index)
                 guard let node = (try? await block.transactions.resolve(
                         paths: [[key]: .targeted],
-                        fetcher: storage
+                        fetcher: fetcher
                       ))?.node,
                       let volume = (try? node.get(key: key)) ?? nil else {
                     continue
                 }
                 guard let transaction = try? await volume.resolve(
-                        fetcher: storage
+                        fetcher: fetcher
                       ).node,
                       let body = try? await transaction.body.resolve(
-                        fetcher: storage
+                        fetcher: fetcher
                       ).node else {
                     continue
                 }
@@ -361,7 +369,7 @@ public struct ChainReads: Sendable {
     ) async -> ExplorerBlockChildren? {
         guard let block = await block(cid: cid) else { return nil }
         guard let index = (try? await block.children.resolve(
-            fetcher: storage
+            fetcher: fetcher
         ))?.node else { return nil }
         let boundedLimit = Self.boundedExplorerLimit(limit)
         guard boundedLimit > 0 else { return ExplorerBlockChildren(children: []) }
@@ -373,10 +381,10 @@ public struct ChainReads: Sendable {
         for (directory, volume) in entries {
             // A child chain this node does not host has its commitment here
             // but not its block: listed by CID, without the block's details.
-            let child = try? await volume.resolve(fetcher: storage).node
+            let child = try? await volume.resolve(fetcher: fetcher).node
             var transactionCount: Int?
             if let child {
-                transactionCount = (try? await child.transactions.resolve(fetcher: storage))?.node?.count ?? 0
+                transactionCount = (try? await child.transactions.resolve(fetcher: fetcher))?.node?.count ?? 0
             }
             children.append(ExplorerChildBlock(
                 directory: directory,
@@ -395,7 +403,7 @@ public struct ChainReads: Sendable {
         var height = top
         while top - height < depth {
             if let cid = await canonicalCID(height), let block = await block(cid: cid),
-               let index = (try? await block.children.resolve(fetcher: storage))?.node,
+               let index = (try? await block.children.resolve(fetcher: fetcher))?.node,
                let child = index.entries[directory] {
                 return child.rawCID
             }
@@ -418,7 +426,7 @@ public struct ChainReads: Sendable {
 
     public func explorerTransaction(cid: String) async -> ExplorerTransaction? {
         guard let transaction = await transaction(cid: cid) else { return nil }
-        guard let body = try? await transaction.body.resolve(fetcher: storage).node else {
+        guard let body = try? await transaction.body.resolve(fetcher: fetcher).node else {
             return nil
         }
         let inclusion = await canonicalInclusion(cid: cid, body: body)
@@ -506,19 +514,19 @@ public struct ChainReads: Sendable {
 
     /// `signer`'s next-expected nonce in `block`'s post-state.
     private func nextNonce(of signer: String, in block: Block) async -> UInt64? {
-        guard let state = try? await block.postState.resolve(fetcher: storage).node else {
+        guard let state = try? await block.postState.resolve(fetcher: fetcher).node else {
             return nil
         }
-        return try? await state.accountState.nextExpectedNonce(for: signer, fetcher: storage)
+        return try? await state.accountState.nextExpectedNonce(for: signer, fetcher: fetcher)
     }
 
     /// Whether `block`'s transaction list holds `cid`. Reads the list's
     /// entries (transaction CIDs), never a transaction body; the list is
     /// bounded by the chain's own per-block transaction limit.
     private func carries(_ block: Block, transaction cid: String) async -> Bool {
-        guard let dictionary = (try? await block.transactions.resolve(fetcher: storage))?.node,
+        guard let dictionary = (try? await block.transactions.resolve(fetcher: fetcher))?.node,
               let entries = try? await dictionary.boundedKeysAndValues(
-                limit: dictionary.count, fetcher: storage
+                limit: dictionary.count, fetcher: fetcher
               ) else { return false }
         return entries.contains { $0.1.rawCID == cid }
     }
@@ -538,16 +546,16 @@ public struct ChainReads: Sendable {
     public func explorerDeposits(limit: Int, after: String?) async throws -> ExplorerDepositsPage? {
         guard let tipCID = await tip().tipCID,
               let block = await blockNode(cid: tipCID),
-              let resolvedState = try? await block.postState.resolve(fetcher: storage),
+              let resolvedState = try? await block.postState.resolve(fetcher: fetcher),
               let state = resolvedState.node,
-              let deposits = try? await state.depositState.resolve(fetcher: storage).node else {
+              let deposits = try? await state.depositState.resolve(fetcher: fetcher).node else {
             return nil
         }
         let boundedLimit = Self.boundedExplorerLimit(limit)
         guard let scanned = try? await deposits.boundedKeysAndValues(
             after: after,
             limit: boundedLimit + 1,
-            fetcher: storage
+            fetcher: fetcher
         ) else { return nil }
         let entries = Array(scanned.prefix(boundedLimit))
         let next = scanned.count > boundedLimit ? entries.last?.key : nil
@@ -571,7 +579,7 @@ public struct ChainReads: Sendable {
         let proofPaths = Swift.Dictionary(uniqueKeysWithValues: entries.map { ([$0.key], SparseMerkleProof.existence) })
         let proven = entries.isEmpty
             ? try DepositStateHeader(node: deposits)
-            : try await state.depositState.proof(paths: proofPaths, fetcher: storage)
+            : try await state.depositState.proof(paths: proofPaths, fetcher: fetcher)
         let proof = try await stateProof(
             blockCID: tipCID, block: block, state: resolvedState,
             dictionary: .deposits, dictionaryHeader: proven,
@@ -619,14 +627,14 @@ public struct ChainReads: Sendable {
             let middle = range.low + (range.high - range.low) / 2
             guard let middleCID = await canonicalCID(middle),
                   let middleBlock = await blockNode(cid: middleCID),
-                  let state = try? await middleBlock.postState.resolve(fetcher: storage).node else {
+                  let state = try? await middleBlock.postState.resolve(fetcher: fetcher).node else {
                 continue // not held here: these keys go unplaced
             }
             let root = state.depositState.rawCID
             let unread = range.keys.filter { known[root]?[$0] == nil }
             if !unread.isEmpty {
                 let paths = Swift.Dictionary(uniqueKeysWithValues: unread.map { ([$0], ResolutionStrategy.targeted) })
-                guard let deposits = try? await state.depositState.resolve(paths: paths, fetcher: storage).node else {
+                guard let deposits = try? await state.depositState.resolve(paths: paths, fetcher: fetcher).node else {
                     continue
                 }
                 for key in unread { known[root, default: [:]][key] = (try? deposits.get(key: key)) != nil }
@@ -656,18 +664,18 @@ public struct ChainReads: Sendable {
     public func explorerDepositState(key: String) async throws -> ExplorerDepositState? {
         guard let tipCID = await tip().tipCID,
               let block = await blockNode(cid: tipCID),
-              let resolvedState = try? await block.postState.resolve(fetcher: storage),
+              let resolvedState = try? await block.postState.resolve(fetcher: fetcher),
               let state = resolvedState.node else {
             return nil
         }
         let targeted = try? await state.depositState.resolve(
             paths: [[key]: .targeted],
-            fetcher: storage
+            fetcher: fetcher
         ).node
         let amount = targeted.flatMap { try? $0.get(key: key) }
         let value = amount.map { String($0) }
         let proofKind: SparseMerkleProof = amount == nil ? .insertion : .existence
-        let proven = try await state.depositState.proof(paths: [[key]: proofKind], fetcher: storage)
+        let proven = try await state.depositState.proof(paths: [[key]: proofKind], fetcher: fetcher)
         let proof = try await stateProof(
             blockCID: tipCID, block: block, state: resolvedState,
             dictionary: .deposits, dictionaryHeader: proven,
@@ -691,7 +699,7 @@ public struct ChainReads: Sendable {
         guard let directory = destinationPath.last,
               let tipCID = await tip().tipCID,
               let block = await blockNode(cid: tipCID),
-              let resolvedState = try? await block.postState.resolve(fetcher: storage),
+              let resolvedState = try? await block.postState.resolve(fetcher: fetcher),
               let state = resolvedState.node else {
             return nil
         }
@@ -704,12 +712,12 @@ public struct ChainReads: Sendable {
         ))
         let targeted = try? await state.receiptState.resolve(
             paths: [[logicalKey.storageKey]: .targeted],
-            fetcher: storage
+            fetcher: fetcher
         ).node
         let withdrawer = targeted.flatMap { try? $0.get(key: logicalKey.storageKey) }
         let proofKind: SparseMerkleProof = withdrawer == nil ? .insertion : .existence
         let proven = try await state.receiptState.proof(
-            paths: [[logicalKey.storageKey]: proofKind], fetcher: storage
+            paths: [[logicalKey.storageKey]: proofKind], fetcher: fetcher
         )
         let proof = try await stateProof(
             blockCID: tipCID, block: block, state: resolvedState,
@@ -784,7 +792,7 @@ public struct ChainReads: Sendable {
     public func explorerChainSpec() async -> ExplorerChainSpec? {
         guard let tip = await tip().tipCID,
               let block = await blockNode(cid: tip),
-              let spec = try? await block.spec.resolve(fetcher: storage).node else {
+              let spec = try? await block.spec.resolve(fetcher: fetcher).node else {
             return nil
         }
         return ExplorerChainSpec(
@@ -839,5 +847,21 @@ extension ExplorerProjectedBlock {
             lowestFee: block.lowestFee.uint64Value ?? .max, lowestFeeBytes: block.lowestFeeBytes,
             lowestFeeWeight: block.lowestFeeWeight, full: block.full
         )
+    }
+}
+
+/// A state read through peers when this store lacks it: each miss read as
+/// the operator's own work reads (`NodeStorage.ownReads`), whose answers
+/// are checked against their CIDs and kept in memory for the next read.
+struct StateReadFetcher: Fetcher {
+    let storage: NodeStorage
+    let remote: IvyRootContentSource
+
+    func fetch(rawCid: String) async throws -> Data {
+        if let data = try? await storage.workFetcher.fetch(rawCid: rawCid) { return data }
+        let storage = storage
+        return try await remote.withRootTracing(rawCid, bundle: false) { session in
+            try await storage.ownReads(through: session).fetch(rawCid: rawCid)
+        }.value
     }
 }

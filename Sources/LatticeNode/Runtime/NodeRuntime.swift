@@ -282,14 +282,17 @@ public final class NodeRuntime: Sendable {
         self.readView = readView
         self.configuration = configuration
         self.storage = storage
-        reads = Self.reads(storage: storage, configuration: configuration, published: published, view: readView)
+        let remote = IvyRootContentSource(ivy: ivy, policy: configuration.resourcePolicy)
+        reads = Self.reads(
+            storage: storage, remote: remote, configuration: configuration, published: published, view: readView
+        )
         var outputs: [ChainPath: LevelOutput] = [core.rootPath: LevelOutput(published: published, view: readView)]
         var levelReads: [ChainPath: ChainReads] = [:]
         for path in core.ordered where path != core.rootPath {
             let output = LevelOutput(published: PublishedValue(core.levels[path]?.snapshot), view: PublishedValue())
             outputs[path] = output
             levelReads[path] = Self.reads(
-                storage: storage, configuration: configuration, published: output.published, view: output.view,
+                storage: storage, remote: remote, configuration: configuration, published: output.published, view: output.view,
                 chainPath: path,
                 accepted: { await storage.hasAcceptedBlock($0, at: path) }
             )
@@ -350,7 +353,6 @@ public final class NodeRuntime: Sendable {
                 inputs.yield(.maintenance)
             }
         }
-        let remote = IvyRootContentSource(ivy: ivy, policy: configuration.resourcePolicy)
         peerCapabilities = remote.peerCapabilities
         // The loop task takes the only copy of the core: a copy its closure
         // kept would share every level's tree with the running loop.
@@ -379,9 +381,7 @@ public final class NodeRuntime: Sendable {
             for (path, level) in state.core.levels { state.bodyTips[path] = level.snapshot.actOnTip }
             await storage.letGoOfBodies(except: state.bodyTips)
             await storage.letGoOfReads()
-            // Counts describe a state only `tip` keeps; any other run lets
-            // that state go, so a later run on `tip` counts afresh.
-            if configuration.state != .tip { await storage.forgetStateCounts() }
+            await storage.letGoOfLegacyState()
             await state.settleState()
             state.refreshView()
             // After the loop ends, inputs are only drained until the stream
@@ -1758,13 +1758,14 @@ extension NodeRuntime {
             }
         }
 
-        /// With only the tip's state kept: the kept state follows each
-        /// level's tip.
+        /// With a state window: as each level's tip moves, what executions
+        /// stored more than a window below it goes.
         mutating func settleState() async {
-            guard configuration.state == .tip else { return }
+            guard configuration.state != .all else { return }
             for (path, level) in core.levels where stateTips[path] != level.snapshot.actOnTip {
                 stateTips[path] = level.snapshot.actOnTip
-                await storage.keepState(of: level.snapshot.actOnTip, at: path)
+                guard !level.snapshot.actOnTip.isEmpty else { continue }
+                await storage.letGoOfState(at: path, below: level.snapshot.actOnHeight)
             }
         }
 
