@@ -529,12 +529,15 @@ they let go of costs a fetch. A submitted transaction is first checked
 against what this node holds, and only one that passes those checks (its
 signatures, chain, fee and size) reads further state from peers. A
 reorganization within the window, and blocks that touch recent state, run
-without fetching. Blocks and transactions asked for by CID are answered from
-this node's store alone.
+without fetching. Block bodies (a block's transactions and children) and
+anything asked for by CID are answered from this node's store alone: which
+bodies it keeps is `blockBodies`, and a reader cannot make it fetch whatever
+it names.
 
-A start after a version that kept exactly the tip's state (`tip`) lets go of
-that state and its counts; what the tips still name is read from peers as
-it is needed.
+A start after a version that kept exactly the tip's state (`tip`) moves that
+state into each chain's window at its tip, so it goes a window later like
+any state, and forgets its counts. What a node kept for a chain it no longer
+hosts goes at its next start.
 
 A node that is the only holder of a state and lets it go has lost it, so a
 network needs nodes on `all`. Switching to `recent` or `none` applies to state

@@ -357,9 +357,10 @@ final class StateWindowTests: XCTestCase {
         await producerRuntime.stop()
     }
 
-    /// A start moves what an earlier version kept a tip's state under into
-    /// the chain's window at its tip's height, so a network that kept only
-    /// tips' state still holds it, and forgets that version's counts.
+    /// A start moves what an earlier version kept a hosted chain's tip
+    /// state under into the chain's window at its tip's height, and forgets
+    /// that version's counts. What either kept for a chain no longer hosted
+    /// goes.
     func testAStartMovesWhatEarlierVersionsKeptIntoTheWindow() async throws {
         let node = try host(keyByte: 0xd3, state: .recent)
         do {
@@ -367,7 +368,11 @@ final class StateWindowTests: XCTestCase {
             let genesis = node.configuration.nexusGenesisCID
             for prefix in storage.scopes.legacyStatePrefixes {
                 try await storage.broker.mergeRetainedRoots(scope: prefix + "Nexus", roots: [genesis])
+                try await storage.broker.mergeRetainedRoots(scope: prefix + "Nexus/Gone", roots: [genesis])
             }
+            try await storage.broker.mergeRetainedRoots(
+                scope: storage.scopes.window(at: ["Nexus", "Gone"], height: 5), roots: [genesis]
+            )
             try await storage.store.writeLegacyStateCount()
         }
         let (runtime, storage) = try await start(node)
@@ -380,6 +385,8 @@ final class StateWindowTests: XCTestCase {
         }
         let window = try await storage.broker.retainedRoots(scope: storage.scopes.window(at: ["Nexus"], height: 0))
         XCTAssertEqual(window, [node.configuration.nexusGenesisCID], "what they named is in the window at the tip's height")
+        let gone = try await windowHeights(storage, at: ["Nexus", "Gone"])
+        XCTAssertEqual(gone, [], "nothing is kept for a chain no longer hosted")
         let counts = try await storage.store.legacyStateCountRows()
         XCTAssertEqual(counts, 0, "the counts are forgotten")
         await runtime.stop()
@@ -424,6 +431,16 @@ final class StateWindowTests: XCTestCase {
 }
 
 extension NodeStore {
+    /// The executed block's fact, which names the state it produced.
+    func blockFact(_ blockCID: String, at chainPath: [String]) throws -> ChainBlockFact? {
+        guard let row = try database.row(
+            ImportFactRow.self,
+            "SELECT chain_path, fact_id, payload FROM admission_facts WHERE chain_path = ?1 AND fact_id = ?2",
+            params: [.text(chainPath.joined(separator: "/")), .blob(try Self.encode(ChainFactID.block(blockCID)))]
+        ), case .block(let fact) = try Self.decode(ChainFact.self, from: try row.payload) else { return nil }
+        return fact
+    }
+
     /// A count as an earlier version kept of a tip's state.
     func writeLegacyStateCount() throws {
         _ = try database.execute("INSERT INTO core_meta (key, value) VALUES ('state_pin:Nexus:x', '1')")

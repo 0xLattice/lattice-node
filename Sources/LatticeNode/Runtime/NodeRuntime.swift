@@ -913,7 +913,7 @@ extension NodeRuntime {
                     // The chain and its ancestors: a peer that hosts a chain
                     // hosts every one of them.
                     lineage: (root.count...path.count).map { Array(path.prefix($0)) },
-                    hosts: path == root ? nil : ChainHosts(nexusGenesisCID: nexus, chainPath: path),
+                    hosts: ChainHosts.of(path, nexusGenesisCID: nexus),
                     stalled: due.contains(path),
                     topUp: topUps.contains(path),
                     seeds: path == root
@@ -1550,9 +1550,7 @@ extension NodeRuntime {
                 let (storage, remote, inputs) = (storage, remote, inputs)
                 // Every peer hosts Nexus; a child's hosts are its current
                 // peers: a hint for whom to ask for the bundle.
-                let rendezvous = path == core.rootPath ? nil : ChainHosts(
-                    nexusGenesisCID: configuration.nexusGenesisCID, chainPath: path
-                )
+                let rendezvous = ChainHosts.of(path, nexusGenesisCID: configuration.nexusGenesisCID)
                 let maxBlockSize = core.levels[path]?.maxBlockSize(of: cid)
                 bodies[key] = Task {
                     let roots = await NodeRuntime.retryingBody { bundle in
@@ -1652,9 +1650,7 @@ extension NodeRuntime {
                 // To the chain's current peers: no other peer runs its pool,
                 // and with many chains most sessions host others. Every
                 // session hosts Nexus.
-                let hosts = path == core.rootPath ? nil : ChainHosts(
-                    nexusGenesisCID: configuration.nexusGenesisCID, chainPath: path
-                )
+                let hosts = ChainHosts.of(path, nexusGenesisCID: configuration.nexusGenesisCID)
                 let hosting = Set(await remote.peerCapabilities.sessions(hosting: hosts, ivy: ivy).map(\.sessionID))
                 for session in sessions.values.sorted(by: { $0.id < $1.id })
                 where session.ready && hosting.contains(session.peer.sessionID) {

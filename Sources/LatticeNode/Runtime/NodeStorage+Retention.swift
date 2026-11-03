@@ -26,7 +26,9 @@ struct RetentionScopes: Sendable {
         return windowPrefix(at: path) + String(repeating: "0", count: max(0, 20 - digits.count)) + digits
     }
 
-    func windowPrefix(at path: ChainPath) -> String { chain + ":window:" + path.joined(separator: "/") + ":" }
+    func windowPrefix(at path: ChainPath) -> String { windowsPrefix + path.joined(separator: "/") + ":" }
+
+    var windowsPrefix: String { chain + ":window:" }
 
     /// Scopes earlier versions kept state under: a chain's tip state, and
     /// what its last executions stored.
@@ -193,22 +195,31 @@ extension NodeStorage {
         }
     }
 
-    /// At a start: what an earlier version kept a chain's tip state under
-    /// moves to the chain's window at its tip's height (`tips`), or to the
-    /// chain on `all`, and goes from there as any state does; the counts
-    /// it kept are forgotten. A network of nodes that kept only the tip's
-    /// state still holds it after they upgrade. The state windows of a run
-    /// that kept recent state stay: they go by height as the tips move, or
-    /// are kept with everything else on `all`.
+    /// At a start, with `tips` the hosted chains' tip heights: what an
+    /// earlier version kept a hosted chain's tip state under moves to the
+    /// chain's window at its tip's height, or to the chain on `all`, and
+    /// goes from there as any state does, a window later on `recent`; the
+    /// counts it kept are forgotten. The state windows of a run that kept
+    /// recent state stay: they go by height as the tips move, or are kept
+    /// with everything else on `all`. What either kept for a chain no
+    /// longer hosted goes.
     nonisolated func moveLegacyState(tips: [ChainPath: UInt64]) async {
+        func path(_ scope: String, after prefix: String) -> ChainPath {
+            scope.dropFirst(prefix.count).split(separator: "/").map(String.init)
+        }
         do {
+            for scope in try await broker.retainedScopes(prefix: scopes.windowsPrefix) {
+                guard let colon = scope.lastIndex(of: ":") else { continue }
+                let chain = path(String(scope[..<colon]), after: scopes.windowsPrefix)
+                if tips[chain] == nil { try await release(scope: scope) }
+            }
             for prefix in scopes.legacyStatePrefixes {
                 for scope in try await broker.retainedScopes(prefix: prefix) {
-                    let path = scope.dropFirst(prefix.count).split(separator: "/").map(String.init)
+                    let path = path(scope, after: prefix)
                     let roots = try await broker.retainedRoots(scope: scope)
-                    if !roots.isEmpty {
+                    if !roots.isEmpty, let tip = tips[path] {
                         let kept = configuration.stateWindow(for: path) == nil
-                            ? retentionScope : scopes.window(at: path, height: tips[path] ?? 0)
+                            ? retentionScope : scopes.window(at: path, height: tip)
                         try await broker.mergeRetainedRoots(scope: kept, roots: roots)
                     }
                     try await release(scope: scope)

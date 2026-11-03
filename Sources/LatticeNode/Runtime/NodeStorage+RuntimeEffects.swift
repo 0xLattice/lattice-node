@@ -71,13 +71,16 @@ extension NodeStorage {
                 stored.append(contentsOf: created)
             case .recent, .none:
                 // The height of the newest block whose state this step
-                // executed; a state no block fact of the step names (none
-                // does today) goes first, at height 0.
+                // executed. A state no block fact of the step names (none
+                // does today) is kept to the step's highest block: kept too
+                // long, never let go of early.
                 let roots = Set(level.states.compactMap { try? LatticeStateHeader(node: $0).rawCID })
-                let height = level.facts.flatMap(\.facts).compactMap { fact -> UInt64? in
-                    guard case .block(let block) = fact, roots.contains(block.postStateCID) else { return nil }
-                    return block.blockHeight
-                }.max() ?? 0
+                let blocks = level.facts.flatMap(\.facts).compactMap { fact -> ChainBlockFact? in
+                    if case .block(let block) = fact { return block }
+                    return nil
+                }
+                let height = blocks.filter { roots.contains($0.postStateCID) }.map(\.blockHeight).max()
+                    ?? blocks.map(\.blockHeight).max() ?? 0
                 states[path] = (height, executed)
                 stored.append(contentsOf: specs)
             }
