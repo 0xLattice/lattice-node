@@ -62,6 +62,28 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     let liveMempoolOwner: String
     private let directoryLock: StorageDirectoryLock
     private var livePinnedMempoolRoots = Set<String>()
+    /// With `state: tip`: nodes of each chain's kept state this store
+    /// lacks, as the last walk found them, until the runtime takes them to
+    /// fill; and the chains whose state is to be counted afresh.
+    private var stateGaps: [[String]: [any Header]] = [:]
+    private var stateRecounts: Set<[String]> = []
+
+    /// What a walk found missing, none included: a chain walked whole has
+    /// nothing left to fill.
+    func noteStateGaps(_ gaps: [any Header], at path: [String]) { stateGaps[path] = gaps }
+
+    /// The gaps noted since the last take, by chain; an empty list for a
+    /// chain walked whole.
+    func takeStateGaps() -> [[String]: [any Header]] {
+        defer { stateGaps.removeAll() }
+        return stateGaps
+    }
+
+    func requestStateRecount(at path: [String]) { stateRecounts.insert(path) }
+
+    func wantsStateRecount(at path: [String]) -> Bool { stateRecounts.contains(path) }
+
+    func takeStateRecount(at path: [String]) -> Bool { stateRecounts.remove(path) != nil }
 
     // Actors are reentrant. This queue keeps each retained-root update in
     // one order across its suspension points.

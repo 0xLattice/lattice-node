@@ -393,7 +393,7 @@ extension NodeStorage {
         try await storeLoaded(LatticeStateHeader(node: state), in: storer)
     }
 
-    private static func storeLoaded(_ header: any Header, in storer: any VolumeStorer) async throws {
+    static func storeLoaded(_ header: any Header, in storer: any VolumeStorer) async throws {
         guard loadedNode(of: header) != nil else { return }
         if let volume = header as? any Volume {
             try await volume.store(storer: storer)

@@ -222,10 +222,12 @@ final class StateTipTests: XCTestCase {
     }
 
     /// After a move to another branch, state the branch it left changed and
-    /// no block of the new one changes is not held: it is left out of the
-    /// counts. A block that reads it reads it from a peer; once a block
-    /// changes it, the node holds it again.
-    func testStateNoBlockOfTheNewBranchReadsComesBackWithABlockThatReadsIt() async throws {
+    /// no block of the new one changes is not held at first: the node finds
+    /// the gap and fills it from a peer, without a block reading it. Then
+    /// the kept state is the tip's whole state, and a transaction that reads
+    /// it passes this node's preflight, which reads this store alone. Once a
+    /// block changes it, the node still holds it.
+    func testStateNoBlockOfTheNewBranchReadsIsFilledFromAPeer() async throws {
         let (payer, account): (Key, Key) = (CryptoUtils.generateKeyPair(), CryptoUtils.generateKeyPair())
         let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(payer))])
         let first = try host(keyByte: 0xb8)
@@ -273,17 +275,19 @@ final class StateTipTests: XCTestCase {
         try await eventually("the kept state is moved to the heavier branch") {
             try await storage.store.stateTip(at: ["Nexus"]) == secondTip
         }
-        let counted = try await storage.store.stateCounts(at: ["Nexus"])
-        let held = try await heldStateNodes(of: secondTip, in: storage)
-        XCTAssertEqual(counted, held, "the counts are what the node holds of the tip's state")
-        let missing = await runtime.reads.account(owner: address(account), blockCID: secondTip)
-        XCTAssertNil(missing, "no block of the new branch read the account")
+        try await eventually("the gap is filled from the peer and counted") {
+            guard let whole = try await self.stateNodes(of: secondTip, in: storage) else { return false }
+            return try await storage.store.stateCounts(at: ["Nexus"]) == whole
+        }
+        let filled = await runtime.reads.account(owner: address(account), blockCID: secondTip)
+        XCTAssertEqual(filled?.balance, 5, "the account no block of the new branch read is held")
 
-        // The heavier branch's producer mines the account's transaction,
-        // which changes its balance whatever else the block carries.
-        _ = try await secondRuntime.submitTransaction(SubmitTransactionRequest(
-            transaction: try transaction(account, nonce: 0, moves: [(address(account), -2)])
-        ))
+        // The account's transaction passes this node's preflight, then the
+        // heavier branch's producer mines it, which changes its balance
+        // whatever else the block carries.
+        let spend = try transaction(account, nonce: 0, moves: [(address(account), -2)])
+        _ = try await runtime.submitTransaction(SubmitTransactionRequest(transaction: spend))
+        _ = try await secondRuntime.submitTransaction(SubmitTransactionRequest(transaction: spend))
         let spending = try await mine(secondRuntime)
         try await eventually("the node executes the block that reads the account") {
             runtime.published.value?.actOnTip == spending
@@ -292,7 +296,7 @@ final class StateTipTests: XCTestCase {
             try await storage.store.stateTip(at: ["Nexus"]) == spending
         }
         let after = await runtime.reads.account(owner: address(account), blockCID: spending)
-        XCTAssertEqual(after?.nonce, 1, "the account's state is held again")
+        XCTAssertEqual(after?.nonce, 1, "the account's state is held")
         XCTAssertNotNil(after?.balance)
         let countedAfter = try await storage.store.stateCounts(at: ["Nexus"])
         let heldAfter = try await heldStateNodes(of: spending, in: storage)
@@ -300,6 +304,139 @@ final class StateTipTests: XCTestCase {
         await runtime.stop()
         await firstRuntime.stop()
         await secondRuntime.stop()
+    }
+
+    /// A node on `tip` whose store lost a node of its tip's state (a run
+    /// from before gaps were noted let it go): its start counts the state
+    /// afresh, finds the
+    /// gap, and fills it from a peer, with no block reading it; then a
+    /// transaction passes this node's preflight, which reads this store alone.
+    func testAStartFillsTheKeptStateAnEarlierRunLost() async throws {
+        let payer: Key = CryptoUtils.generateKeyPair()
+        let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(payer))])
+        let producer = try host(keyByte: 0xbc)
+        let (producerRuntime, _) = try await start(producer)
+        var tip = ""
+        for _ in 0..<3 { tip = try BlockHeader(node: try await producerRuntime.mineBlock(paid)).rawCID }
+
+        var node = try host(keyByte: 0xbd, peers: [producer.endpoint], state: .tip)
+        var lost = ""
+        do {
+            let (runtime, storage) = try await start(node)
+            try await eventually("the node executes the producer's blocks") { runtime.published.value?.actOnTip == tip }
+            try await assertKeepsExactlyTheStateOf(tip, storage, "before the loss")
+            await runtime.stop()
+            // A node of the state, other than its root, that only the kept state pins.
+            let fact = try await storage.store.blockFact(tip, at: ["Nexus"])
+            let root = try XCTUnwrap(fact?.postStateCID)
+            let counts = try await storage.store.stateCounts(at: ["Nexus"])
+            lost = try XCTUnwrap(counts.keys.sorted().first { $0 != root && counts[$0] == 1 })
+            try await storage.store.forgetStateGapsChecked()
+            try await storage.broker.releaseRetainedRoots(scope: storage.scopes.state(at: ["Nexus"]), roots: [lost])
+            _ = try await storage.broker.sweep()
+            let held = await storage.broker.hasVolume(root: lost)
+            XCTAssertFalse(held, "the node of the state is lost")
+            let whole = try await stateNodes(of: tip, in: storage)
+            XCTAssertNil(whole, "the tip's state is not whole")
+        }
+        node = try host(
+            keyByte: 0xbd, peers: [producer.endpoint], storageDirectory: node.configuration.storagePath, state: .tip
+        )
+        let (runtime, storage) = try await start(node)
+        try await eventually("the gap is filled from the peer and counted") {
+            guard let whole = try await self.stateNodes(of: tip, in: storage) else { return false }
+            return try await storage.store.stateCounts(at: ["Nexus"]) == whole
+        }
+        let held = await storage.broker.hasVolume(root: lost)
+        XCTAssertTrue(held, "the lost node is held again")
+        _ = try await runtime.submitTransaction(SubmitTransactionRequest(
+            transaction: try transaction(payer, nonce: 0, moves: [(address(payer), -1)])
+        ))
+        await runtime.stop()
+        await producerRuntime.stop()
+    }
+
+    /// What each node of the state of `block` names, read from this store.
+    private func stateTree(of block: String, in storage: NodeStorage) async throws -> [String: [String]] {
+        let fact = try await storage.store.blockFact(block, at: ["Nexus"])
+        let state = try await LatticeStateHeader(rawCID: try XCTUnwrap(fact?.postStateCID))
+            .resolveRecursive(fetcher: storage.localFetcher)
+        var tree: [String: [String]] = [:]
+        func walk(_ header: any Header) {
+            guard tree[header.rawCID] == nil, let node = header.node else { return }
+            let children = node.properties().sorted().compactMap { node.get(property: $0) }
+            tree[header.rawCID] = children.map(\.rawCID)
+            for child in children { walk(child) }
+        }
+        walk(state)
+        return tree
+    }
+
+    /// A node of the kept state lost while no peer has it, with what it
+    /// names still held: runs that find the gap and cannot fill it keep
+    /// what sits below it, across restarts that sweep. A run with a peer
+    /// fills it, and the pins end exactly the counts, the fill scope empty.
+    func testWhatABlankGapNamesStaysUntilAPeerFillsIt() async throws {
+        let payer: Key = CryptoUtils.generateKeyPair()
+        let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(payer))])
+        let producer = try host(keyByte: 0xbe)
+        let (producerRuntime, _) = try await start(producer)
+        var tip = ""
+        for _ in 0..<4 { tip = try BlockHeader(node: try await producerRuntime.mineBlock(paid)).rawCID }
+
+        var node = try host(keyByte: 0xbf, peers: [producer.endpoint], state: .tip)
+        var lost = "", below: [String] = []
+        do {
+            let (runtime, storage) = try await start(node)
+            try await eventually("the node executes the producer's blocks") { runtime.published.value?.actOnTip == tip }
+            try await assertKeepsExactlyTheStateOf(tip, storage, "before the loss")
+            await runtime.stop()
+            let fact = try await storage.store.blockFact(tip, at: ["Nexus"])
+            let root = try XCTUnwrap(fact?.postStateCID)
+            let counts = try await storage.store.stateCounts(at: ["Nexus"])
+            let tree = try await stateTree(of: tip, in: storage)
+            // An interior node, named once, whose children are named once too.
+            lost = try XCTUnwrap(tree.keys.sorted().first { cid in
+                cid != root && counts[cid] == 1 && !(tree[cid] ?? []).isEmpty
+                    && (tree[cid] ?? []).allSatisfy { counts[$0] == 1 }
+            }, "an interior node of the state")
+            below = tree[lost] ?? []
+            try await storage.store.forgetStateGapsChecked()
+            try await storage.broker.releaseRetainedRoots(scope: storage.scopes.state(at: ["Nexus"]), roots: [lost])
+            _ = try await storage.broker.sweep()
+            let gone = await storage.broker.hasVolume(root: lost)
+            XCTAssertFalse(gone, "the node is lost")
+        }
+        // Two runs with no peer: each finds the gap and cannot fill it; the
+        // second starts with a sweep.
+        for run in 1...2 {
+            node = try host(keyByte: 0xbf, storageDirectory: node.configuration.storagePath, state: .tip)
+            let (runtime, storage) = try await start(node)
+            try await eventually("run \(run) finds the gap") { try await storage.store.stateHasGaps(at: ["Nexus"]) }
+            await runtime.stop()
+            for cid in below {
+                let held = await storage.broker.hasVolume(root: cid)
+                XCTAssertTrue(held, "run \(run): what the gap names stays")
+            }
+        }
+        node = try host(
+            keyByte: 0xbf, peers: [producer.endpoint], storageDirectory: node.configuration.storagePath, state: .tip
+        )
+        let (runtime, storage) = try await start(node)
+        try await eventually("the gap is filled from the peer and counted") {
+            guard let whole = try await self.stateNodes(of: tip, in: storage) else { return false }
+            return try await storage.store.stateCounts(at: ["Nexus"]) == whole
+        }
+        try await eventually("the fill scope is let go of and the gaps forgotten") {
+            let filling = try await storage.broker.retainedRoots(scope: storage.scopes.stateFill(at: ["Nexus"]))
+            let gaps = try await storage.store.stateHasGaps(at: ["Nexus"])
+            return filling.isEmpty && !gaps
+        }
+        let pinned = Set(try await storage.broker.retainedRoots(scope: storage.scopes.state(at: ["Nexus"])))
+        let counted = Set(try await storage.store.stateCounts(at: ["Nexus"]).keys)
+        XCTAssertEqual(pinned, counted, "the state scope pins exactly what is counted")
+        await runtime.stop()
+        await producerRuntime.stop()
     }
 
     /// Keys that split a node of the state while a node below it changes,

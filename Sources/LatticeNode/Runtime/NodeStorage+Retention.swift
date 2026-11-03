@@ -22,6 +22,10 @@ struct RetentionScopes: Sendable {
     /// keeps no other.
     func state(at path: ChainPath) -> String { chain + ":state:" + path.joined(separator: "/") }
 
+    /// What was fetched from peers to fill the kept state of the chain at
+    /// `path`, until the state is counted again with it.
+    func stateFill(at path: ChainPath) -> String { chain + ":state-fill:" + path.joined(separator: "/") }
+
     /// What the last step's executions stored, until the kept state has
     /// counted what of it the tip's state holds.
     func executed(at path: ChainPath) -> String { chain + ":executed:" + path.joined(separator: "/") }
@@ -180,9 +184,12 @@ extension NodeStorage {
     /// any more is let go of. The walk reads this store alone and runs in
     /// the step that stored the tip, so nothing else writes this scope
     /// meanwhile. A node of the new state this store lacks (a move to
-    /// another branch brings back what was let go of) is not counted: it
-    /// is fetched when a block reads it, and counted when the state that
-    /// names it is walked again.
+    /// another branch brings back what was let go of, or an earlier run
+    /// lost it) is not counted, and is noted as a gap: the runtime fetches
+    /// the gaps from peers off the loop (`fillState`), and the state is
+    /// then counted afresh, with them. Until then a read of the state from
+    /// this store alone, such as a submitted transaction's preflight, finds
+    /// it missing.
     nonisolated func forgetStateCounts() async {
         do { try await store.forgetStateCounts() } catch { syncTrace("state counts not forgotten: \(error)") }
     }
@@ -190,6 +197,9 @@ extension NodeStorage {
     nonisolated func keepState(of tip: String, at path: ChainPath) async {
         guard configuration.state == .tip else { return }
         do {
+            // Counted afresh: from a start, or once gaps were filled.
+            let afresh = await takeStateRecount(at: path)
+            if afresh { try await store.forgetStateCounts(at: path) }
             let last = try await store.stateTip(at: path)
             guard last != tip, let root = try await store.blockFact(tip, at: path)?.postStateCID else { return }
             var lastRoot: String?
@@ -203,9 +213,12 @@ extension NodeStorage {
             // counted node the next start sweeps.
             try await retainHeld(await walk.entering, scope: scopes.state(at: path))
             var gone = try await store.moveStateCounts(at: path, to: tip, changes: changes).left
-            if last == nil {
-                // Counted afresh: what an earlier run left pinned and this
-                // state does not hold goes.
+            let missing = await walk.missing
+            if last == nil, missing.isEmpty {
+                // Counted afresh and whole: what an earlier run left pinned
+                // and this state does not hold goes. With gaps, what sits
+                // below them is held but not counted, and stays pinned
+                // until a count reaches it through them.
                 let counted = Set(changes.filter { $0.value > 0 }.keys)
                 gone += try await broker.retainedRoots(scope: scopes.state(at: path)).filter { !counted.contains($0) }
             }
@@ -213,9 +226,53 @@ extension NodeStorage {
             // What executions stored and the tip's state does not hold goes.
             let executed = try await broker.retainedRoots(scope: scopes.executed(at: path))
             try await broker.releaseRetainedRoots(scope: scopes.executed(at: path), roots: executed)
+            if last == nil {
+                // What was filled is counted now, or no longer the state's.
+                let filled = try await broker.retainedRoots(scope: scopes.stateFill(at: path))
+                try await broker.releaseRetainedRoots(scope: scopes.stateFill(at: path), roots: filled)
+            }
+            try await store.setStateHasGaps(!missing.isEmpty, at: path)
+            await noteStateGaps(missing, at: path)
         } catch {
             syncTrace("state of \(tip) not kept: \(error)")
         }
+    }
+
+    /// With `state: tip`: resolves each of the kept state's `gaps` at
+    /// `path` whole, from this store, then peers, and stores it under the
+    /// fill scope, until the state is counted again.
+    /// Off the loop: it only stores content and pins it, and touches no
+    /// count. Each gap is stored and pinned as it is read, so memory holds
+    /// one gap's content at a time. Returns the gaps it could not fill, and
+    /// how many Volumes it stored.
+    nonisolated func fillState(
+        _ gaps: [any Header], at path: ChainPath, remote: IvyRootContentSource
+    ) async -> (left: [any Header], stored: Int) {
+        var left: [any Header] = []
+        var stored = 0
+        for gap in gaps {
+            if Task.isCancelled { left.append(gap); continue }
+            do {
+                let storer = NodeImportStorage(storage: broker)
+                try await remote.withRootTracing(gap.rawCID, bundle: false) { session in
+                    let fetcher = CoalescingFetcher(CompositeContentSource([broker, session]))
+                    try await Self.storeLoaded(try await Self.whole(gap, fetcher: fetcher), in: storer)
+                }.value
+                try await storer.commit()
+                let roots = await storer.takeStoredVolumeRoots()
+                try await retainHeld(roots, scope: scopes.stateFill(at: path))
+                stored += roots.count
+            } catch {
+                syncTrace("state gap \(gap.rawCID) at \(path.joined(separator: "/")) not filled: \(error)")
+                left.append(gap)
+            }
+        }
+        return (left, stored)
+    }
+
+    /// `header` and all it names, resolved.
+    private static func whole<H: Header>(_ header: H, fetcher: any Fetcher) async throws -> any Header {
+        try await header.resolveRecursive(fetcher: fetcher)
     }
 }
 
@@ -225,6 +282,9 @@ private actor TipStateWalk {
     private let path: ChainPath
     private var counted: [String: Int] = [:]
     private(set) var changes: [String: Int] = [:]
+    /// The nodes of the new state this store lacks, each once.
+    private(set) var missing: [any Header] = []
+    private var missed: Set<String> = []
 
     /// The nodes the changes bring into the state: counted by none before.
     var entering: [String] {
@@ -242,11 +302,15 @@ private actor TipStateWalk {
     }
 
     /// One more node names `header`. A node not counted before is new to
-    /// the state, and names its own; one this store lacks is left out.
+    /// the state, and names its own; one this store lacks is left out, and
+    /// noted as missing.
     func hold(_ header: any Header) async throws {
         let named = try await count(header.rawCID)
         if named == 0 {
-            guard let resolved = try? await Self.resolved(header, fetcher: storage.localFetcher) else { return }
+            guard let resolved = try? await Self.resolved(header, fetcher: storage.localFetcher) else {
+                if missed.insert(header.rawCID).inserted { missing.append(header) }
+                return
+            }
             changes[header.rawCID, default: 0] += 1
             for child in NodeStorage.children(of: resolved) { try await hold(child) }
         } else {
