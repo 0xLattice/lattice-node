@@ -275,10 +275,12 @@ final class AbsentContentTests: XCTestCase {
         await producerRuntime.stop()
     }
 
-    /// A transaction anyone may submit is checked from this store alone:
-    /// on a store that lacks the state it needs, nothing is asked of peers
-    /// for it, and it stays pooled.
-    func testASubmittedTransactionSpendsNoRequestsToPeers() async throws {
+    /// A transaction anyone may submit is checked from this store first:
+    /// one this store can refuse (here, signed by a key that is not its
+    /// signer's) asks nothing of peers, even on a store that lacks the
+    /// tip's state. Only a transaction that passes those checks reads
+    /// state the store lacks through peers.
+    func testATransactionThisStoreRefusesSpendsNoRequestsToPeers() async throws {
         let producer = try host(keyByte: 0x6A)
         let producerStorage = try await NodeStorage.open(configuration: producer.configuration)
         let producerRuntime = try await NodeRuntime.start(
@@ -305,6 +307,7 @@ final class AbsentContentTests: XCTestCase {
         try await eventually("the joiner reaches its peer") { runtime.reads.peerCount() > 0 }
 
         let key = CryptoUtils.generateKeyPair()
+        let impostor = CryptoUtils.generateKeyPair()
         let bodyHeader = try HeaderImpl(node: TransactionBody(
             accountActions: [], actions: [], depositActions: [],
             receiptActions: [], withdrawalActions: [],
@@ -312,8 +315,8 @@ final class AbsentContentTests: XCTestCase {
             nonce: 0, chainPath: ["Nexus"]
         ))
         let transaction = Transaction(
-            signatures: [key.publicKey: try XCTUnwrap(TransactionSigning.sign(
-                bodyHeader: bodyHeader, privateKeyHex: key.privateKey
+            signatures: [impostor.publicKey: try XCTUnwrap(TransactionSigning.sign(
+                bodyHeader: bodyHeader, privateKeyHex: impostor.privateKey
             ))],
             body: bodyHeader
         )
