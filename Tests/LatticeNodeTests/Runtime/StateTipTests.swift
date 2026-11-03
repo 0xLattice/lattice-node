@@ -550,6 +550,46 @@ final class StateTipTests: XCTestCase {
     }
 
     /// The default keeps the state of every block, and counts nothing.
+    /// State is a cache: a node of the tip's state this store lost (the
+    /// account tree's root, which every account read goes through) is read
+    /// from a peer when a submitted transaction's preflight needs it, and
+    /// the transaction is pooled.
+    func testAPreflightReadsWhatTheStoreLostFromAPeer() async throws {
+        let payer: Key = CryptoUtils.generateKeyPair()
+        let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(payer))])
+        let producer = try host(keyByte: 0xc8)
+        let (producerRuntime, _) = try await start(producer)
+        var tip = ""
+        for _ in 0..<3 { tip = try BlockHeader(node: try await producerRuntime.mineBlock(paid)).rawCID }
+
+        var node = try host(keyByte: 0xc9, peers: [producer.endpoint], state: .tip)
+        do {
+            let (runtime, storage) = try await start(node)
+            try await eventually("the node executes the producer's blocks") { runtime.published.value?.actOnTip == tip }
+            await runtime.stop()
+            let fact = try await storage.store.blockFact(tip, at: ["Nexus"])
+            let state = try await LatticeStateHeader(rawCID: try XCTUnwrap(fact?.postStateCID))
+                .resolve(fetcher: storage.localFetcher)
+            let accounts = try XCTUnwrap(state.node).accountState.rawCID
+            for scope in try await storage.broker.retainedScopes(prefix: storage.scopes.chain) {
+                guard try await storage.broker.retainedRoots(scope: scope).contains(accounts) else { continue }
+                _ = try await storage.broker.releaseRetainedRoots(scope: scope, roots: [accounts])
+            }
+            _ = try await storage.broker.sweep()
+            let held = await storage.broker.hasVolume(root: accounts)
+            XCTAssertFalse(held, "the store lost the account tree's root")
+        }
+        node = try host(keyByte: 0xc9, peers: [producer.endpoint], storageDirectory: node.configuration.storagePath, state: .tip)
+        let (runtime, _) = try await start(node)
+        try await eventually("the node is at the tip with a peer") {
+            runtime.published.value?.actOnTip == tip && runtime.peerCount > 0
+        }
+        let response = try await runtime.submitTransaction(SubmitTransactionRequest(
+            transaction: try transaction(payer, nonce: 0, moves: [(address(payer), -1)])
+        ))
+        XCTAssertEqual(response.mempoolCount, 1, "the transaction is pooled")
+    }
+
     func testANodeOnAllKeepsEveryState() async throws {
         let node = try host(keyByte: 0xb6)
         let (runtime, storage) = try await start(node)
