@@ -231,7 +231,7 @@ extension NodeStorage {
                 let filled = try await broker.retainedRoots(scope: scopes.stateFill(at: path))
                 try await broker.releaseRetainedRoots(scope: scopes.stateFill(at: path), roots: filled)
             }
-            try await store.setStateHasGaps(!missing.isEmpty, at: path)
+            try await recordStateHasGaps(!missing.isEmpty, at: path)
             await noteStateGaps(missing, at: path)
         } catch {
             syncTrace("state of \(tip) not kept: \(error)")

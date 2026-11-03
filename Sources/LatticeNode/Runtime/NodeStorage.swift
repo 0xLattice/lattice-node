@@ -79,6 +79,17 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         return stateGaps
     }
 
+    /// Whether each chain's last count had gaps, as the store has it:
+    /// written only when it changes.
+    private var stateGapFlags: [[String]: Bool] = [:]
+
+    func recordStateHasGaps(_ gaps: Bool, at path: [String]) async throws {
+        let had: Bool
+        if let known = stateGapFlags[path] { had = known } else { had = try await store.stateHasGaps(at: path) }
+        if had != gaps { try await store.setStateHasGaps(gaps, at: path) }
+        stateGapFlags[path] = gaps
+    }
+
     func requestStateRecount(at path: [String]) { stateRecounts.insert(path) }
 
     func wantsStateRecount(at path: [String]) -> Bool { stateRecounts.contains(path) }
