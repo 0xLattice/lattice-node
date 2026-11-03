@@ -663,31 +663,42 @@ extension NodeRuntime {
         case .preflight(let job):
             return RuntimeJob(path: path, epoch: job.tipEpoch) {
                 guard let basis else { return [] }
-                // From this store alone: a transaction anyone may submit
-                // does not spend this node's requests to its peers. A child
-                // withdrawal is proven against the parent's executed state,
-                // so it is ready, invalid or a retry, never held unchecked.
-                let result = await TransactionPreflight.classify(
-                    job.transaction, tipCID: job.tipCID, snapshot: basis.snapshot, chainPath: path,
-                    parentState: basis.parentState, fetcher: fetcher, checksPolicies: job.checksPolicies
-                )
-                // A ready transaction brings the balances it was funded from,
-                // read from the same tip state, for the pool's budget.
-                var verdict = disposition(result.disposition)
-                if verdict == .ready, let body = job.transaction.body.node, let snapshot = basis.snapshot,
-                   !carriesChildCommitments(body, entering: snapshot.postStateCID) {
-                    verdict = .invalid
-                }
-                var balances: [String: UInt64] = [:]
-                if verdict == .ready {
-                    if let body = job.transaction.body.node,
-                       let snapshot = basis.snapshot,
-                       let state = try? await LatticeStateHeader(rawCID: snapshot.postStateCID).resolve(fetcher: fetcher).node,
-                       let read = await Mempool.balances(debitedBy: body, on: state, fetcher: fetcher) {
-                        balances = read
-                    } else {
-                        verdict = .unavailable
+                // A child withdrawal is proven against the parent's executed
+                // state, so it is ready, invalid or a retry, never held
+                // unchecked.
+                let judge: @Sendable (any Fetcher) async -> (MempoolDisposition, [String: UInt64]) = { fetcher in
+                    let result = await TransactionPreflight.classify(
+                        job.transaction, tipCID: job.tipCID, snapshot: basis.snapshot, chainPath: path,
+                        parentState: basis.parentState, fetcher: fetcher, checksPolicies: job.checksPolicies
+                    )
+                    // A ready transaction brings the balances it was funded
+                    // from, read from the same tip state, for the pool's budget.
+                    var verdict = disposition(result.disposition)
+                    if verdict == .ready, let body = job.transaction.body.node, let snapshot = basis.snapshot,
+                       !carriesChildCommitments(body, entering: snapshot.postStateCID) {
+                        verdict = .invalid
                     }
+                    var balances: [String: UInt64] = [:]
+                    if verdict == .ready {
+                        if let body = job.transaction.body.node,
+                           let snapshot = basis.snapshot,
+                           let state = try? await LatticeStateHeader(rawCID: snapshot.postStateCID).resolve(fetcher: fetcher).node,
+                           let read = await Mempool.balances(debitedBy: body, on: state, fetcher: fetcher) {
+                            balances = read
+                        } else {
+                            verdict = .unavailable
+                        }
+                    }
+                    return (verdict, balances)
+                }
+                // From this store first: what it refuses (a bad signature,
+                // the wrong chain, a stale nonce) costs no request to peers.
+                // State is a cache, so a node of the tip's state this store
+                // lacks is read as any work reads it, through peers, and the
+                // transaction is judged again.
+                var (verdict, balances) = await judge(fetcher)
+                if verdict == .unavailable, remote != nil, basis.snapshot != nil {
+                    (verdict, balances) = await reading(job.tipCID, storage: storage, remote: remote, judge)
                 }
                 return [.level(path, .mining(.preflighted(job, verdict, balances: balances)))]
             }

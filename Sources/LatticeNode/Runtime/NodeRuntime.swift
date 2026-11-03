@@ -1684,7 +1684,7 @@ extension NodeRuntime {
                 guard let basis = core.levels[path].flatMap({
                     NodeRuntime.miningBasis(effect, tree: $0.tree, parent: core.levels[Array(path.dropLast())])
                 }) else { break }
-                miningJobs.append(NodeRuntime.miningJob(effect, at: path, basis: basis, storage: storage))
+                miningJobs.append(NodeRuntime.miningJob(effect, at: path, basis: basis, storage: storage, remote: remote))
                 startJobs()
             case .buildTemplate:
                 guard let basis = core.levels[path].flatMap({ NodeRuntime.miningBasis(effect, tree: $0.tree) }) else { break }
