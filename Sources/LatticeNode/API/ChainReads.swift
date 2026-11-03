@@ -78,8 +78,14 @@ public struct ChainReads: Sendable {
         peerCount: @escaping @Sendable () -> Int = { 0 }
     ) {
         self.storage = storage
-        self.fetcher = remote.map { StateReadFetcher(storage: storage, remote: $0) } ?? storage
-        self.chainPath = chainPath ?? storage.configuration.chainPath
+        let chainPath = chainPath ?? storage.configuration.chainPath
+        self.fetcher = remote.map {
+            StateReadFetcher(
+                storage: storage, remote: $0,
+                hosts: ChainHosts.of(chainPath, nexusGenesisCID: storage.configuration.nexusGenesisCID)
+            )
+        } ?? storage
+        self.chainPath = chainPath
         if let accepted {
             self.accepted = accepted
         } else {
@@ -859,12 +865,14 @@ extension ExplorerProjectedBlock {
 struct StateReadFetcher: Fetcher {
     let storage: NodeStorage
     let remote: IvyRootContentSource
+    /// A child chain's hosts, asked first, as its execution asks them.
+    let hosts: ChainHosts?
 
     func fetch(rawCid: String) async throws -> Data {
         if let data = try? await storage.workFetcher.fetch(rawCid: rawCid) { return data }
         let storage = storage
         return try await remote.withRootTracing(
-            rawCid, bundle: false, reserving: Int(IvyConfig.defaultProtocolMaxFrameSize), priority: .read
+            rawCid, bundle: false, hosts: hosts, reserving: Int(IvyConfig.defaultProtocolMaxFrameSize), priority: .read
         ) { session in
             try await storage.readersReads(through: session).fetch(rawCid: rawCid)
         }.value

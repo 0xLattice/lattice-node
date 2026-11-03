@@ -18,9 +18,15 @@ final class StateWindowTests: XCTestCase {
         let endpoint: PeerEndpoint
     }
 
+    static let alpha = ["Nexus", "Alpha"]
+    static let alphaSpec = ChainSpec(
+        maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
+        targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
+    )
+
     private func host(
         keyByte: UInt8, peers: [PeerEndpoint] = [], storageDirectory reused: URL? = nil, state: StateRetention = .all,
-        stateWindow: UInt64? = nil
+        stateWindow: UInt64? = nil, hosted: Bool = false
     ) throws -> Host {
         let storageDirectory = reused ?? FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-node-state-\(UUID().uuidString)", isDirectory: true
@@ -35,6 +41,8 @@ final class StateWindowTests: XCTestCase {
             rpcPort: NetworkTransportTestPorts.allocate(),
             webSocket: .off,
             state: state,
+            hostedChildren: hosted ? [Self.alpha] : [],
+            childSpecs: hosted ? [Self.alpha: Self.alphaSpec] : [:],
             stateWindows: FinalityWindows(all: stateWindow)
         )
         return Host(
@@ -60,12 +68,13 @@ final class StateWindowTests: XCTestCase {
     private func address(_ key: Key) -> String { CryptoUtils.createAddress(from: key.publicKey) }
 
     private func transaction(
-        _ signer: Key, nonce: UInt64, moves: [(String, Int64)] = [], actions: [Action] = []
+        _ signer: Key, nonce: UInt64, moves: [(String, Int64)] = [], actions: [Action] = [],
+        chainPath: [String] = ["Nexus"]
     ) throws -> Transaction {
         let header = try HeaderImpl(node: TransactionBody(
             accountActions: moves.map { AccountAction(owner: $0.0, delta: $0.1) },
             actions: actions, depositActions: [], receiptActions: [], withdrawalActions: [],
-            signers: [address(signer)], nonce: nonce, chainPath: ["Nexus"]
+            signers: [address(signer)], nonce: nonce, chainPath: chainPath
         ))
         return Transaction(
             signatures: [signer.publicKey: try XCTUnwrap(TransactionSigning.sign(
@@ -230,8 +239,8 @@ final class StateWindowTests: XCTestCase {
 
 
     /// The heights a chain's state window scopes name, in order.
-    private func windowHeights(_ storage: NodeStorage) async throws -> [UInt64] {
-        let prefix = storage.scopes.windowPrefix(at: ["Nexus"])
+    private func windowHeights(_ storage: NodeStorage, at path: [String] = ["Nexus"]) async throws -> [UInt64] {
+        let prefix = storage.scopes.windowPrefix(at: path)
         return try await storage.broker.retainedScopes(prefix: prefix).compactMap { UInt64($0.dropFirst(prefix.count)) }.sorted()
     }
 
@@ -287,6 +296,63 @@ final class StateWindowTests: XCTestCase {
             transaction: try transaction(payer, nonce: 0, moves: [(address(payer), -1)])
         ))
         XCTAssertEqual(response.mempoolCount, 1, "the transaction is checked against state read from a peer, and pooled")
+        await runtime.stop()
+        await producerRuntime.stop()
+    }
+
+    /// A child chain behaves as Nexus does: a node hosting Nexus/Alpha on
+    /// `recent` with a window of 2 keeps only Alpha's last 2 heights, and
+    /// after its store is swept answers a read of Alpha state it let go of
+    /// and pools an Alpha transaction spending from it, both read from a
+    /// peer (Alpha's host first).
+    func testAChildChainOnRecentKeepsItsWindowAndReadsTheRestFromAPeer() async throws {
+        let payer: Key = CryptoUtils.generateKeyPair()
+        let producer = try host(keyByte: 0xd5, hosted: true)
+        let (producerRuntime, _) = try await start(producer)
+        // The first block carries Alpha's genesis, which pays no one: the
+        // payer is paid by Alpha's second block, and no later one.
+        // Each Alpha block executes before the next template is built, so
+        // each Nexus block carries one.
+        for round in 0..<9 {
+            let before = await producerRuntime.levelReads[Self.alpha]?.readSnapshot().height
+            _ = try await producerRuntime.mineBlock(MiningTemplateRequest(recipients: [
+                MiningRecipient(chainPath: ["Nexus"], address: address(CryptoUtils.generateKeyPair())),
+                MiningRecipient(chainPath: Self.alpha, address: round == 1 ? address(payer) : address(CryptoUtils.generateKeyPair())),
+            ]))
+            try await eventually("the producer's Alpha executes the block it carried") {
+                let height = await producerRuntime.levelReads[Self.alpha]?.readSnapshot().height
+                return height.map { h in before.map { h > $0 } ?? true } ?? false
+            }
+        }
+        let produced = await producerRuntime.levelReads[Self.alpha]?.readSnapshot()
+        let (alphaTip, alphaHeight) = (try XCTUnwrap(produced?.tipCID), try XCTUnwrap(produced?.height))
+        XCTAssertGreaterThan(alphaHeight, 3, "Alpha grew past the window")
+        let paidRead = await producerRuntime.levelReads[Self.alpha]?.account(owner: address(payer), blockCID: alphaTip)
+        let paid = try XCTUnwrap(paidRead?.balance)
+        XCTAssertGreaterThan(paid, 0)
+
+        let node = try host(keyByte: 0xd6, peers: [producer.endpoint], state: .recent, stateWindow: 2, hosted: true)
+        do {
+            let (runtime, storage) = try await start(node)
+            try await eventually("the node executes Alpha's tip") {
+                await runtime.levelReads[Self.alpha]?.readSnapshot().tipCID == alphaTip
+            }
+            try await eventually("Alpha's window is its last 2 blocks") {
+                try await self.windowHeights(storage, at: Self.alpha) == [alphaHeight - 1, alphaHeight]
+            }
+            await runtime.stop()
+            _ = try await storage.broker.sweep()
+        }
+        let (runtime, _) = try await start(node)
+        try await eventually("the node is at Alpha's tip with a peer") {
+            await runtime.levelReads[Self.alpha]?.readSnapshot().tipCID == alphaTip && runtime.peerCount > 0
+        }
+        let read = await runtime.levelReads[Self.alpha]?.account(owner: address(payer), blockCID: alphaTip)?.balance
+        XCTAssertEqual(read, paid, "Alpha's account is read from a peer")
+        let response = try await runtime.submitTransaction(SubmitTransactionRequest(
+            transaction: try transaction(payer, nonce: 0, moves: [(address(payer), -1)], chainPath: Self.alpha)
+        ))
+        XCTAssertEqual(response.mempoolCount, 1, "the Alpha transaction is checked against state read from a peer, and pooled")
         await runtime.stop()
         await producerRuntime.stop()
     }
