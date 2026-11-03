@@ -291,9 +291,10 @@ final class StateWindowTests: XCTestCase {
         await producerRuntime.stop()
     }
 
-    /// A start lets go of what an earlier version kept a tip's state under:
-    /// its scopes and its counts.
-    func testAStartLetsGoOfWhatEarlierVersionsKeptState() async throws {
+    /// A start moves what an earlier version kept a tip's state under into
+    /// the chain's window at its tip's height, so a network that kept only
+    /// tips' state still holds it, and forgets that version's counts.
+    func testAStartMovesWhatEarlierVersionsKeptIntoTheWindow() async throws {
         let node = try host(keyByte: 0xd3, state: .recent)
         do {
             let storage = try await NodeStorage.open(configuration: node.configuration)
@@ -304,13 +305,15 @@ final class StateWindowTests: XCTestCase {
             try await storage.store.writeLegacyStateCount()
         }
         let (runtime, storage) = try await start(node)
-        try await eventually("the earlier scopes are let go of") {
+        try await eventually("the earlier scopes are moved") {
             var left: [String] = []
             for prefix in storage.scopes.legacyStatePrefixes {
                 left += try await storage.broker.retainedScopes(prefix: prefix)
             }
             return left.isEmpty
         }
+        let window = try await storage.broker.retainedRoots(scope: storage.scopes.window(at: ["Nexus"], height: 0))
+        XCTAssertEqual(window, [node.configuration.nexusGenesisCID], "what they named is in the window at the tip's height")
         let counts = try await storage.store.legacyStateCountRows()
         XCTAssertEqual(counts, 0, "the counts are forgotten")
         await runtime.stop()

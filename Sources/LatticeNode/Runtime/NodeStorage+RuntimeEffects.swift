@@ -70,15 +70,15 @@ extension NodeStorage {
             case .all:
                 stored.append(contentsOf: created)
             case .recent, .none:
-                let heights = level.facts.flatMap(\.facts).compactMap { fact -> UInt64? in
-                    if case .block(let block) = fact { return block.blockHeight }
-                    return nil
-                }
-                if let height = heights.max() {
-                    states[path] = (height, executed)
-                } else {
-                    stored.append(contentsOf: executed)
-                }
+                // The height of the newest block whose state this step
+                // executed; a state no block fact of the step names (none
+                // does today) goes first, at height 0.
+                let roots = Set(level.states.compactMap { try? LatticeStateHeader(node: $0).rawCID })
+                let height = level.facts.flatMap(\.facts).compactMap { fact -> UInt64? in
+                    guard case .block(let block) = fact, roots.contains(block.postStateCID) else { return nil }
+                    return block.blockHeight
+                }.max() ?? 0
+                states[path] = (height, executed)
                 stored.append(contentsOf: specs)
             }
             let roots = created + (bodyRoots[path] ?? [])
@@ -118,6 +118,12 @@ extension NodeStorage {
     /// are kept there for the next read.
     nonisolated func ownReads(through peers: any ContentSource) -> CoalescingFetcher {
         CoalescingFetcher(CompositeContentSource([workSource, readCache, readCache.remembering(peers)]))
+    }
+
+    /// How a reader's state read reads what this store lacks: what is in
+    /// memory, then peers, whose answers are not kept for later reads.
+    nonisolated func readersReads(through peers: any ContentSource) -> CoalescingFetcher {
+        CoalescingFetcher(CompositeContentSource([readCache, peers]))
     }
 
     /// Stores a block and pins what was stored: its body is what `fetcher`,

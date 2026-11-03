@@ -99,10 +99,7 @@ extension NodeStorage {
     nonisolated func releaseReads(_ blockCID: String, at path: ChainPath) async {
         guard configuration.state != .all else { return }
         do {
-            let scope = scopes.reads(blockCID, at: path)
-            let roots = try await broker.retainedRoots(scope: scope)
-            guard !roots.isEmpty else { return }
-            try await broker.releaseRetainedRoots(scope: scope, roots: roots)
+            try await release(scope: scopes.reads(blockCID, at: path))
         } catch {
             syncTrace("reads of \(blockCID) not released: \(error)")
         }
@@ -112,10 +109,7 @@ extension NodeStorage {
     /// also names stays.
     nonisolated func releaseBody(_ blockCID: String, at path: ChainPath = ["Nexus"]) async {
         do {
-            let scope = scopes.body(blockCID, at: path)
-            let roots = try await broker.retainedRoots(scope: scope)
-            guard !roots.isEmpty else { return }
-            try await broker.releaseRetainedRoots(scope: scope, roots: roots)
+            try await release(scope: scopes.body(blockCID, at: path))
         } catch {
             syncTrace("body of \(blockCID) not released: \(error)")
         }
@@ -175,6 +169,12 @@ extension NodeStorage {
         try await broker.releaseRetainedRoots(scope: scopes.operatorPins, roots: [root])
     }
 
+    /// Lets go of everything `scope` names.
+    nonisolated func release(scope: String) async throws {
+        let roots = try await broker.retainedRoots(scope: scope)
+        if !roots.isEmpty { try await broker.releaseRetainedRoots(scope: scope, roots: roots) }
+    }
+
     // MARK: - State: recent
 
     /// With a state window: what executions stored at heights more than a
@@ -186,29 +186,37 @@ extension NodeStorage {
         let kept = scopes.window(at: path, height: height - window + 1)
         do {
             for scope in try await broker.retainedScopes(prefix: scopes.windowPrefix(at: path)) where scope < kept {
-                let roots = try await broker.retainedRoots(scope: scope)
-                if !roots.isEmpty { try await broker.releaseRetainedRoots(scope: scope, roots: roots) }
+                try await release(scope: scope)
             }
         } catch {
             syncTrace("state below \(height) not let go of: \(error)")
         }
     }
 
-    /// At a start: what earlier versions kept state under goes (exact
-    /// counts of the tip's state, and their scopes). The state windows of a
-    /// run that kept recent state stay: they go by height as the tips move,
-    /// or are kept with everything else on `all`.
-    nonisolated func letGoOfLegacyState() async {
+    /// At a start: what an earlier version kept a chain's tip state under
+    /// moves to the chain's window at its tip's height (`tips`), or to the
+    /// chain on `all`, and goes from there as any state does; the counts
+    /// it kept are forgotten. A network of nodes that kept only the tip's
+    /// state still holds it after they upgrade. The state windows of a run
+    /// that kept recent state stay: they go by height as the tips move, or
+    /// are kept with everything else on `all`.
+    nonisolated func moveLegacyState(tips: [ChainPath: UInt64]) async {
         do {
-            try await store.forgetStateCounts()
             for prefix in scopes.legacyStatePrefixes {
                 for scope in try await broker.retainedScopes(prefix: prefix) {
+                    let path = scope.dropFirst(prefix.count).split(separator: "/").map(String.init)
                     let roots = try await broker.retainedRoots(scope: scope)
-                    if !roots.isEmpty { try await broker.releaseRetainedRoots(scope: scope, roots: roots) }
+                    if !roots.isEmpty {
+                        let kept = configuration.stateWindow(for: path) == nil
+                            ? retentionScope : scopes.window(at: path, height: tips[path] ?? 0)
+                        try await broker.mergeRetainedRoots(scope: kept, roots: roots)
+                    }
+                    try await release(scope: scope)
                 }
             }
+            try await store.forgetStateCounts()
         } catch {
-            syncTrace("earlier state not let go of at start: \(error)")
+            syncTrace("earlier state not moved at start: \(error)")
         }
     }
 }

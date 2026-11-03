@@ -381,10 +381,11 @@ public struct ChainReads: Sendable {
         for (directory, volume) in entries {
             // A child chain this node does not host has its commitment here
             // but not its block: listed by CID, without the block's details.
-            let child = try? await volume.resolve(fetcher: fetcher).node
+            // A child block is read from this store alone.
+            let child = try? await volume.resolve(fetcher: storage).node
             var transactionCount: Int?
             if let child {
-                transactionCount = (try? await child.transactions.resolve(fetcher: fetcher))?.node?.count ?? 0
+                transactionCount = (try? await child.transactions.resolve(fetcher: storage))?.node?.count ?? 0
             }
             children.append(ExplorerChildBlock(
                 directory: directory,
@@ -850,9 +851,11 @@ extension ExplorerProjectedBlock {
     }
 }
 
-/// A state read through peers when this store lacks it: each miss read as
-/// the operator's own work reads (`NodeStorage.ownReads`), whose answers
-/// are checked against their CIDs and kept in memory for the next read.
+/// A state read through peers when this store lacks it. It waits behind
+/// the node's own fetches (`AcquisitionBudget.Priority.read`), reserves one
+/// frame, the most a peer's answer holds, and reads what is in memory
+/// without adding to it: readers do not crowd out what the node's own work
+/// fetched.
 struct StateReadFetcher: Fetcher {
     let storage: NodeStorage
     let remote: IvyRootContentSource
@@ -860,8 +863,10 @@ struct StateReadFetcher: Fetcher {
     func fetch(rawCid: String) async throws -> Data {
         if let data = try? await storage.workFetcher.fetch(rawCid: rawCid) { return data }
         let storage = storage
-        return try await remote.withRootTracing(rawCid, bundle: false) { session in
-            try await storage.ownReads(through: session).fetch(rawCid: rawCid)
+        return try await remote.withRootTracing(
+            rawCid, bundle: false, reserving: Int(IvyConfig.defaultProtocolMaxFrameSize), priority: .read
+        ) { session in
+            try await storage.readersReads(through: session).fetch(rawCid: rawCid)
         }.value
     }
 }

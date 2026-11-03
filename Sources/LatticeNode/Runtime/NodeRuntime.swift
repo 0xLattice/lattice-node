@@ -381,7 +381,7 @@ public final class NodeRuntime: Sendable {
             for (path, level) in state.core.levels { state.bodyTips[path] = level.snapshot.actOnTip }
             await storage.letGoOfBodies(except: state.bodyTips)
             await storage.letGoOfReads()
-            await storage.letGoOfLegacyState()
+            await storage.moveLegacyState(tips: state.core.levels.mapValues(\.snapshot.actOnHeight))
             await state.settleState()
             state.refreshView()
             // After the loop ends, inputs are only drained until the stream
@@ -816,7 +816,8 @@ extension NodeRuntime {
             for path in core.ordered where path != core.rootPath {
                 guard let output = outputs[path] else { continue }
                 reads[path] = levelReads.value?[path] ?? NodeRuntime.reads(
-                    storage: storage, configuration: configuration, published: output.published, view: output.view,
+                    storage: storage, remote: remote, configuration: configuration,
+                    published: output.published, view: output.view,
                     chainPath: path,
                     accepted: { [storage] in await storage.hasAcceptedBlock($0, at: path) }
                 )

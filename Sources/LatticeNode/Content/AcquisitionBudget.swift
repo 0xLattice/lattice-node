@@ -27,6 +27,9 @@ public final class AcquisitionBudget: @unchecked Sendable {
         /// its depth while the block is one a chain can connect next
         /// (`prioritize`).
         case body(String, depth: Int = 0)
+        /// A state read made for a reader, not for the node: behind every
+        /// fetch of its own.
+        case read
     }
 
     /// Read and written under `lock` only.
@@ -142,6 +145,7 @@ public final class AcquisitionBudget: @unchecked Sendable {
             switch waiter.priority {
             case .ownWork: (0, 0)
             case .body(let cid, let depth): (depth, next.contains(cid) ? 0 : 1)
+            case .read: (Int.max, 0)
             }
         }
         // `waiters` is in arrival order, so the first minimum is the earliest.
