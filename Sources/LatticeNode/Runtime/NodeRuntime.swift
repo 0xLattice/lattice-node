@@ -127,8 +127,8 @@ public final class NodeRuntime: Sendable {
         case maintenance
         /// The network I/O started by a maintenance turn ended.
         case maintenanceFinished
-        /// A fill of a level's kept-state gaps ended: the gaps it could not read.
-        case stateFilled(ChainPath, left: [any Header], stored: Int)
+        /// A heal of a level's kept state ended: whether it read the state whole.
+        case stateHealed(ChainPath, healed: Bool)
         /// Each hosted chain's current peers, by key, as a maintenance pass
         /// counted them.
         case currentPeers([ChainPath: Set<String>])
@@ -382,21 +382,21 @@ public final class NodeRuntime: Sendable {
             await storage.letGoOfBodies(except: state.bodyTips)
             await storage.letGoOfReads()
             // Counts describe a state only `tip` keeps; any other run lets
-            // that state go, so a later run on `tip` counts afresh. A run on
-            // `tip` counts each level afresh too: what of its state an
-            // earlier run lost is found, and filled from peers.
+            // that state go, so a later run on `tip` heals it. A run on `tip`
+            // heals a level whose counts no run found whole: a store from
+            // before the state window, one a run left lacking, or one moved
+            // off `all` or `none`.
             if configuration.state != .tip {
                 await storage.forgetStateCounts()
             } else {
-                // A level a run left with gaps, and every level once on a
-                // store no run has checked, which may have lost state
-                // without noting it.
-                let checked = (try? await storage.store.stateGapsChecked()) ?? false
                 for path in state.core.levels.keys {
-                    let gaps = (try? await storage.store.stateHasGaps(at: path)) ?? true
-                    if !checked || gaps { await storage.requestStateRecount(at: path) }
+                    if (try? await storage.store.stateWhole(at: path)) == true {
+                        // A heal that ended before a stop: its counts are whole.
+                        try? await storage.letGoOfHeal(at: path)
+                    } else {
+                        await storage.requestStateHeal(at: path)
+                    }
                 }
-                if !checked { try? await storage.store.setStateGapsChecked() }
             }
             await state.settleState()
             state.refreshView()
@@ -607,15 +607,10 @@ extension NodeRuntime {
         /// Each level's tip the kept state was last moved to, and the blocks
         /// executed or found invalid this step, whose reads go after it.
         var stateTips: [ChainPath: String] = [:]
-        /// Each level's fill of its kept state's gaps under way, and when
-        /// one that left gaps may try again.
-        var stateFills: [ChainPath: Task<Void, Never>] = [:]
-        var stateFillRetries: [ChainPath: (gaps: [any Header], after: ContinuousClock.Instant)] = [:]
-        /// A level whose filled gaps are to be counted, and when: at most
-        /// one count afresh for a fill a minute, each a walk of the whole
-        /// state; and when a fill's last was.
-        var stateRecountsDue: [ChainPath: ContinuousClock.Instant] = [:]
-        var stateRecounted: [ChainPath: ContinuousClock.Instant] = [:]
+        /// Each level's heal of its kept state under way, and when a level
+        /// whose last heal failed may try again.
+        var stateHeals: [ChainPath: Task<Void, Never>] = [:]
+        var stateHealsAfter: [ChainPath: ContinuousClock.Instant] = [:]
         var readsDone: [BodyKey] = []
 
         struct BodyKey: Hashable {
@@ -748,6 +743,14 @@ extension NodeRuntime {
                 // not read.
                 operatorPins = configuration.announcePins ? await storage.operatorPins() : []
                 startNetworkMaintenance()
+                // A heal waiting to try again does not wait for a block.
+                await healStates()
+                return true
+            case .stateHealed(let path, let healed):
+                stateHeals[path] = nil
+                // Read whole: counted afresh with it. Not: tried again later.
+                if healed { await storage.requestStateRecount(at: path) }
+                await settleState()
                 return true
             case .currentPeers(let current):
                 currentPeers = current
@@ -768,19 +771,6 @@ extension NodeRuntime {
                     reply.resume(throwing: error)
                     // A step that ended the loop.
                     if case NodeRuntimeError.stopped = error { return false }
-                }
-                return true
-            case .stateFilled(let path, let left, let stored):
-                stateFills[path] = nil
-                if !left.isEmpty { stateFillRetries[path] = (left, .now + .seconds(60)) }
-                // Counted afresh only when something was stored: a fill
-                // that stored nothing changes nothing to count. What it
-                // stored is pinned and read already; the count only
-                // decides how long it stays, so it can wait its turn.
-                if stored > 0 {
-                    let earliest = stateRecounted[path].map { $0 + .seconds(60) } ?? .now
-                    stateRecountsDue[path] = max(earliest, stateRecountsDue[path] ?? .now)
-                    await settleState()
                 }
                 return true
             case .maintenanceFinished:
@@ -1800,48 +1790,39 @@ extension NodeRuntime {
         /// level's tip.
         mutating func settleState() async {
             guard configuration.state == .tip else { return }
-            let now = ContinuousClock.now
-            for (path, due) in stateRecountsDue where due <= now {
-                stateRecountsDue[path] = nil
-                stateRecounted[path] = now
-                await storage.requestStateRecount(at: path)
-            }
             for (path, level) in core.levels {
                 let afresh = await storage.wantsStateRecount(at: path)
                 guard afresh || stateTips[path] != level.snapshot.actOnTip else { continue }
                 stateTips[path] = level.snapshot.actOnTip
-                await storage.keepState(of: level.snapshot.actOnTip, at: path)
+                // As deep as this level's finality window, when it has one:
+                // a deeper move is refused anyway.
+                let window = level.config.finality.window(for: path) ?? Self.stateWindow
+                await storage.keepState(of: level.snapshot.actOnTip, at: path, window: window)
             }
-            fillStateGaps(await storage.takeStateGaps())
+            await healStates()
         }
 
-        /// Fills each level's kept-state gaps from peers, off the loop, one
-        /// fill per level at a time; when it ends, the level's state is
-        /// counted afresh with what it stored. Gaps a fill could not read
-        /// are tried again a minute later, with the next step.
-        private mutating func fillStateGaps(_ found: [ChainPath: [any Header]]) {
+        /// How far below the tip the kept state's window reaches, on a level
+        /// with no finality window.
+        static let stateWindow: UInt64 = 64
+
+        /// Heals each level whose kept state lacks something, off the loop,
+        /// one heal per level at a time, at the level's tip then; when it
+        /// ends, the level is counted afresh. A level that still lacks
+        /// something is healed again, a minute after the last began.
+        mutating func healStates() async {
+            guard configuration.state == .tip else { return }
             let now = ContinuousClock.now
-            var due: [ChainPath: [any Header]] = [:]
-            for (path, gaps) in found {
-                // A level walked whole has nothing left to try again.
-                if gaps.isEmpty { stateFillRetries[path] = nil; continue }
-                // A level waiting to try again waits, with what it lacks now.
-                if let retry = stateFillRetries[path], retry.after > now {
-                    stateFillRetries[path] = (gaps, retry.after)
-                } else {
-                    due[path] = gaps
-                    stateFillRetries[path] = nil
-                }
-            }
-            for (path, retry) in stateFillRetries where retry.after <= now {
-                due[path] = retry.gaps
-                stateFillRetries[path] = nil
-            }
-            for (path, gaps) in due where stateFills[path] == nil && !gaps.isEmpty {
+            for path in await storage.stateHealsWanted() where stateHeals[path] == nil {
+                guard await !storage.wantsStateRecount(at: path), let level = core.levels[path] else { continue }
+                if let after = stateHealsAfter[path], after > now { continue }
+                // At most one heal a minute per level, however the last ended.
+                stateHealsAfter[path] = now + .seconds(60)
+                let tip = level.snapshot.actOnTip
                 let (storage, remote, inputs) = (storage, remote, inputs)
-                stateFills[path] = Task {
-                    let (left, stored) = await storage.fillState(gaps, at: path, remote: remote)
-                    inputs.yield(.stateFilled(path, left: left, stored: stored))
+                stateHeals[path] = Task {
+                    let healed = await storage.healState(of: tip, at: path, remote: remote)
+                    inputs.yield(.stateHealed(path, healed: healed))
                 }
             }
         }
@@ -1857,9 +1838,9 @@ extension NodeRuntime {
             replies.removeAll()
             wake?.task.cancel()
             for task in bodies.values { task.cancel() }
-            for task in stateFills.values { task.cancel() }
-            stateFills.removeAll()
             bodies.removeAll()
+            for task in stateHeals.values { task.cancel() }
+            stateHeals.removeAll()
         }
     }
 }

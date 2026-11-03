@@ -62,39 +62,28 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     let liveMempoolOwner: String
     private let directoryLock: StorageDirectoryLock
     private var livePinnedMempoolRoots = Set<String>()
-    /// With `state: tip`: nodes of each chain's kept state this store
-    /// lacks, as the last walk found them, until the runtime takes them to
-    /// fill; and the chains whose state is to be counted afresh.
-    private var stateGaps: [[String]: [any Header]] = [:]
+    /// With `state: tip`: the chains whose kept state lacks something and
+    /// is to be healed, until a count afresh finds it whole; and the chains
+    /// whose state is to be counted afresh, once a heal has read it.
+    private var stateHeals: Set<[String]> = []
     private var stateRecounts: Set<[String]> = []
 
-    /// What a walk found missing, none included: a chain walked whole has
-    /// nothing left to fill.
-    func noteStateGaps(_ gaps: [any Header], at path: [String]) { stateGaps[path] = gaps }
+    func requestStateHeal(at path: [String]) { stateHeals.insert(path) }
 
-    /// The gaps noted since the last take, by chain; an empty list for a
-    /// chain walked whole.
-    func takeStateGaps() -> [[String]: [any Header]] {
-        defer { stateGaps.removeAll() }
-        return stateGaps
-    }
+    func wantsStateHeal(at path: [String]) -> Bool { stateHeals.contains(path) }
 
-    /// Whether each chain's last count had gaps, as the store has it:
-    /// written only when it changes.
-    private var stateGapFlags: [[String]: Bool] = [:]
-
-    func recordStateHasGaps(_ gaps: Bool, at path: [String]) async throws {
-        let had: Bool
-        if let known = stateGapFlags[path] { had = known } else { had = try await store.stateHasGaps(at: path) }
-        if had != gaps { try await store.setStateHasGaps(gaps, at: path) }
-        stateGapFlags[path] = gaps
-    }
+    func stateHealsWanted() -> Set<[String]> { stateHeals }
 
     func requestStateRecount(at path: [String]) { stateRecounts.insert(path) }
 
     func wantsStateRecount(at path: [String]) -> Bool { stateRecounts.contains(path) }
 
-    func takeStateRecount(at path: [String]) -> Bool { stateRecounts.remove(path) != nil }
+    /// A count afresh ended: whole, so the heal it followed is done, or
+    /// not, so the chain heals again.
+    func finishStateRecount(at path: [String], whole: Bool) {
+        stateRecounts.remove(path)
+        if whole { stateHeals.remove(path) } else { stateHeals.insert(path) }
+    }
 
     // Actors are reentrant. This queue keeps each retained-root update in
     // one order across its suspension points.

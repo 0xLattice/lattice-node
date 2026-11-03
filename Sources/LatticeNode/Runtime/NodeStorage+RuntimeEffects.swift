@@ -48,8 +48,10 @@ extension NodeStorage {
         // journal still names it.
         var stored: [String] = []
         // With only the tip's state kept, or none: the state each level's
-        // executions created, under the level's state scope.
+        // executions created, under the level's state scope; with `tip`,
+        // the highest block they executed.
         var states: [ChainPath: [String]] = [:]
+        var executedHeights: [ChainPath: UInt64] = [:]
         let storage = NodeImportStorage(storage: broker)
         for (path, level) in batch.levels.sorted(by: {
             $0.path.count != $1.path.count
@@ -71,6 +73,10 @@ extension NodeStorage {
                 stored.append(contentsOf: created)
             case .tip, .none:
                 states[path] = executed
+                executedHeights[path] = level.facts.flatMap(\.facts).compactMap { fact -> UInt64? in
+                    if case .block(let block) = fact { return block.blockHeight }
+                    return nil
+                }.max()
                 stored.append(contentsOf: specs)
             }
             let roots = created + (bodyRoots[path] ?? [])
@@ -87,8 +93,11 @@ extension NodeStorage {
         try await retainHeld(stored)
         for (path, roots) in states where !roots.isEmpty {
             if configuration.state == .tip {
-                // Until the kept state has counted what of it the tip holds.
-                try await retainHeld(roots, scope: scopes.executed(at: path))
+                // In the state window: a move onto any branch executed
+                // within it finds its state here, whichever tip the kept
+                // state moves to meanwhile.
+                let scope = executedHeights[path].map { scopes.stateWindow(at: path, height: $0) }
+                try await retainHeld(roots, scope: scope ?? scopes.executed(at: path))
                 continue
             }
             let scope = scopes.state(at: path)
@@ -393,7 +402,7 @@ extension NodeStorage {
         try await storeLoaded(LatticeStateHeader(node: state), in: storer)
     }
 
-    static func storeLoaded(_ header: any Header, in storer: any VolumeStorer) async throws {
+    private static func storeLoaded(_ header: any Header, in storer: any VolumeStorer) async throws {
         guard loadedNode(of: header) != nil else { return }
         if let volume = header as? any Volume {
             try await volume.store(storer: storer)
