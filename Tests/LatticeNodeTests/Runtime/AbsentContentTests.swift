@@ -116,8 +116,12 @@ final class AbsentContentTests: XCTestCase {
         XCTAssertEqual(runtime.published.value?.actOnTip, tip, "the facts alone give the tip")
         let held = await storage.volume(tip)
         XCTAssertNil(held, "nothing of the tip's body is held")
-        let unread = await runtime.reads.account(owner: first, blockCID: tip)
-        XCTAssertNil(unread, "the public reads answer from this store alone")
+        // State is a cache: a read of state the store lacks reads it from
+        // the producer once it is reached.
+        let produced = await producerRuntime.reads.account(owner: first, blockCID: tip)
+        try await eventually("a state read is answered from a peer") {
+            await runtime.reads.account(owner: first, blockCID: tip)?.balance == produced?.balance
+        }
 
         // Its tip's spec and state come from the producer once it is reached.
         // What the template read is remembered, not written to the store: a

@@ -18,13 +18,21 @@ struct RetentionScopes: Sendable {
 
     var bodyPrefix: String { chain + ":body:" }
 
-    /// The state of the tip of the chain at `path`, when the operator
-    /// keeps no other.
-    func state(at path: ChainPath) -> String { chain + ":state:" + path.joined(separator: "/") }
+    /// What the executions of the chain at `path` stored at `height`, when
+    /// the operator keeps recent state. Zero-padded, so the scopes of a
+    /// chain list in height order.
+    func window(at path: ChainPath, height: UInt64) -> String {
+        let digits = String(height)
+        return windowPrefix(at: path) + String(repeating: "0", count: max(0, 20 - digits.count)) + digits
+    }
 
-    /// What the last step's executions stored, until the kept state has
-    /// counted what of it the tip's state holds.
-    func executed(at path: ChainPath) -> String { chain + ":executed:" + path.joined(separator: "/") }
+    func windowPrefix(at path: ChainPath) -> String { windowsPrefix + path.joined(separator: "/") + ":" }
+
+    var windowsPrefix: String { chain + ":window:" }
+
+    /// Scopes earlier versions kept state under: a chain's tip state, and
+    /// what its last executions stored.
+    var legacyStatePrefixes: [String] { [chain + ":state:", chain + ":executed:"] }
 
     var readsPrefix: String { chain + ":reads:" }
 
@@ -93,10 +101,7 @@ extension NodeStorage {
     nonisolated func releaseReads(_ blockCID: String, at path: ChainPath) async {
         guard configuration.state != .all else { return }
         do {
-            let scope = scopes.reads(blockCID, at: path)
-            let roots = try await broker.retainedRoots(scope: scope)
-            guard !roots.isEmpty else { return }
-            try await broker.releaseRetainedRoots(scope: scope, roots: roots)
+            try await release(scope: scopes.reads(blockCID, at: path))
         } catch {
             syncTrace("reads of \(blockCID) not released: \(error)")
         }
@@ -106,10 +111,7 @@ extension NodeStorage {
     /// also names stays.
     nonisolated func releaseBody(_ blockCID: String, at path: ChainPath = ["Nexus"]) async {
         do {
-            let scope = scopes.body(blockCID, at: path)
-            let roots = try await broker.retainedRoots(scope: scope)
-            guard !roots.isEmpty else { return }
-            try await broker.releaseRetainedRoots(scope: scope, roots: roots)
+            try await release(scope: scopes.body(blockCID, at: path))
         } catch {
             syncTrace("body of \(blockCID) not released: \(error)")
         }
@@ -169,101 +171,84 @@ extension NodeStorage {
         try await broker.releaseRetainedRoots(scope: scopes.operatorPins, roots: [root])
     }
 
-    // MARK: - State: tip
-
-    /// With `state: tip`: the state kept for the chain at `path` becomes
-    /// that of `tip`. A node of the state is named by its content, so one
-    /// can be named from several places: each is counted once for every
-    /// node of the tip's state that names it. The new state is walked
-    /// from its root down to the nodes already counted, and the last one
-    /// from its root down to the nodes still named; a node nothing names
-    /// any more is let go of. The walk reads this store alone and runs in
-    /// the step that stored the tip, so nothing else writes this scope
-    /// meanwhile. A node of the new state this store lacks (a move to
-    /// another branch brings back what was let go of) is not counted: it
-    /// is fetched when a block reads it, and counted when the state that
-    /// names it is walked again.
-    nonisolated func forgetStateCounts() async {
-        do { try await store.forgetStateCounts() } catch { syncTrace("state counts not forgotten: \(error)") }
+    /// Lets go of everything `scope` names.
+    nonisolated func release(scope: String) async throws {
+        let roots = try await broker.retainedRoots(scope: scope)
+        if !roots.isEmpty { try await broker.releaseRetainedRoots(scope: scope, roots: roots) }
     }
 
-    nonisolated func keepState(of tip: String, at path: ChainPath) async {
-        guard configuration.state == .tip else { return }
+    // MARK: - State: recent
+
+    /// With a state window: what executions stored at heights more than a
+    /// window below `height`, the tip's, goes. What a newer block still
+    /// names is read from peers when something reads it.
+    nonisolated func letGoOfState(at path: ChainPath, below height: UInt64) async {
+        guard let window = configuration.stateWindow(for: path) else { return }
+        guard height >= window else { return }
+        let kept = scopes.window(at: path, height: height - window + 1)
         do {
-            let last = try await store.stateTip(at: path)
-            guard last != tip, let root = try await store.blockFact(tip, at: path)?.postStateCID else { return }
-            var lastRoot: String?
-            if let last { lastRoot = try await store.blockFact(last, at: path)?.postStateCID }
-            let walk = TipStateWalk(storage: self, path: path)
-            try await walk.hold(LatticeStateHeader(rawCID: root))
-            if let lastRoot { await walk.letGo(LatticeStateHeader(rawCID: lastRoot)) }
-            let changes = await walk.changes
-            // A node enters the state scope before the counts say it is
-            // held: a stop between the two leaves a pin too many, never a
-            // counted node the next start sweeps.
-            try await retainHeld(await walk.entering, scope: scopes.state(at: path))
-            var gone = try await store.moveStateCounts(at: path, to: tip, changes: changes).left
-            if last == nil {
-                // Counted afresh: what an earlier run left pinned and this
-                // state does not hold goes.
-                let counted = Set(changes.filter { $0.value > 0 }.keys)
-                gone += try await broker.retainedRoots(scope: scopes.state(at: path)).filter { !counted.contains($0) }
+            for scope in try await broker.retainedScopes(prefix: scopes.windowPrefix(at: path)) where scope < kept {
+                try await release(scope: scope)
             }
-            try await broker.releaseRetainedRoots(scope: scopes.state(at: path), roots: gone)
-            // What executions stored and the tip's state does not hold goes.
-            let executed = try await broker.retainedRoots(scope: scopes.executed(at: path))
-            try await broker.releaseRetainedRoots(scope: scopes.executed(at: path), roots: executed)
         } catch {
-            syncTrace("state of \(tip) not kept: \(error)")
-        }
-    }
-}
-
-/// One move of the kept state: the counts it read and how it changes them.
-private actor TipStateWalk {
-    private let storage: NodeStorage
-    private let path: ChainPath
-    private var counted: [String: Int] = [:]
-    private(set) var changes: [String: Int] = [:]
-
-    /// The nodes the changes bring into the state: counted by none before.
-    var entering: [String] {
-        changes.filter { $0.value > 0 && (counted[$0.key] ?? 0) == 0 }.keys.sorted()
-    }
-
-    init(storage: NodeStorage, path: ChainPath) {
-        self.storage = storage
-        self.path = path
-    }
-
-    private func count(_ cid: String) async throws -> Int {
-        if counted[cid] == nil { counted[cid] = try await storage.store.stateCount(cid, at: path) }
-        return (counted[cid] ?? 0) + (changes[cid] ?? 0)
-    }
-
-    /// One more node names `header`. A node not counted before is new to
-    /// the state, and names its own; one this store lacks is left out.
-    func hold(_ header: any Header) async throws {
-        let named = try await count(header.rawCID)
-        if named == 0 {
-            guard let resolved = try? await Self.resolved(header, fetcher: storage.localFetcher) else { return }
-            changes[header.rawCID, default: 0] += 1
-            for child in NodeStorage.children(of: resolved) { try await hold(child) }
-        } else {
-            changes[header.rawCID, default: 0] += 1
+            syncTrace("state below \(height) not let go of: \(error)")
         }
     }
 
-    /// One node fewer names `header`. A node nothing names any more has
-    /// left the state, and no longer names its own.
-    func letGo(_ header: any Header) async {
-        guard let named = try? await count(header.rawCID), named > 0 else { return }
-        changes[header.rawCID, default: 0] -= 1
-        guard named == 1, let resolved = try? await Self.resolved(header, fetcher: storage.localFetcher) else { return }
-        for child in NodeStorage.children(of: resolved) { await letGo(child) }
+    /// When the chain at `path` is no longer hosted: every state window it
+    /// kept goes.
+    nonisolated func letGoOfWindows(at path: ChainPath) async {
+        guard let listed = try? await broker.retainedScopes(prefix: scopes.windowPrefix(at: path)) else { return }
+        for scope in listed { await letGoOfWindow(scope) }
     }
 
-    private static func resolved<H: Header>(_ header: H, fetcher: any Fetcher) async throws -> any Header {
-        try await header.resolve(fetcher: fetcher)
+    private nonisolated func letGoOfWindow(_ scope: String) async {
+        do { try await release(scope: scope) } catch { syncTrace("\(scope) not released: \(error)") }
+    }
+
+    /// At a start, with `tips` the hosted chains' tip heights: what an
+    /// earlier version kept a hosted chain's tip state under moves to the
+    /// chain's window at its tip's height, or to the chain on `all`, and
+    /// goes from there as any state does, a window later on `recent`; the
+    /// counts it kept are forgotten. The state windows of a run that kept
+    /// recent state stay: they go by height as the tips move, or are kept
+    /// with everything else on `all`. What either kept for a chain no
+    /// longer hosted goes.
+    nonisolated func moveLegacyState(tips: [ChainPath: UInt64]) async {
+        func path(_ scope: String, after prefix: String) -> ChainPath {
+            scope.dropFirst(prefix.count).split(separator: "/").map(String.init)
+        }
+        // Each scope on its own: one that fails stays for the next start,
+        // and the rest move.
+        func each(_ prefix: String, _ move: (String) async throws -> Void) async {
+            guard let listed = try? await broker.retainedScopes(prefix: prefix) else { return }
+            for scope in listed {
+                do { try await move(scope) } catch { syncTrace("\(scope) not moved at start: \(error)") }
+            }
+        }
+        await each(scopes.windowsPrefix) { scope in
+            guard let colon = scope.lastIndex(of: ":") else { return }
+            if tips[path(String(scope[..<colon]), after: scopes.windowsPrefix)] == nil {
+                await letGoOfWindow(scope)
+            }
+        }
+        for prefix in scopes.legacyStatePrefixes {
+            await each(prefix) { scope in
+                let path = path(scope, after: prefix)
+                if let tip = tips[path] {
+                    // What this store no longer holds is not kept: it is
+                    // read again, as any state let go of is.
+                    var held: [String] = []
+                    for root in try await broker.retainedRoots(scope: scope) where await broker.hasVolume(root: root) {
+                        held.append(root)
+                    }
+                    let kept = configuration.stateWindow(for: path) == nil
+                        ? retentionScope : scopes.window(at: path, height: tip)
+                    if !held.isEmpty { try await broker.mergeRetainedRoots(scope: kept, roots: held) }
+                }
+                try await release(scope: scope)
+            }
+        }
+        do { try await store.forgetStateCounts() } catch { syncTrace("earlier counts not forgotten: \(error)") }
     }
 }

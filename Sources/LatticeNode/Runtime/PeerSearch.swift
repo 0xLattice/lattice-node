@@ -23,6 +23,12 @@ public struct ChainHosts: Hashable, Sendable {
         path = chainPath
         key = ChainPeersKey.key(nexusGenesisCID: nexusGenesisCID, chainPath: chainPath)
     }
+
+    /// The hosts a read of the chain at `path` asks first: a child chain's
+    /// own; none for Nexus, whose peers all host it.
+    static func of(_ path: ChainPath, nexusGenesisCID: String) -> ChainHosts? {
+        path.count > 1 ? ChainHosts(nexusGenesisCID: nexusGenesisCID, chainPath: path) : nil
+    }
 }
 
 /// When to look for more peers, per hosted level: a level that has not

@@ -42,7 +42,7 @@ public struct Topology: Codable, Sendable {
         case listen, rpc, webSocket, peers, publicRead, externalAddress
         case publicReadRate, publicReadExpensiveRate, publicReadMaxRate, publicReadFetches
         case publicReadURL, publicSubmit, publicSubmitRate, minRelayFee
-        case servingMaxConcurrent, servingMaxInFlightVolumeBytes, maxAcquisitionBytes, blockBodies, state, finalityWindow, finalityWindows, announceLifetime
+        case servingMaxConcurrent, servingMaxInFlightVolumeBytes, maxAcquisitionBytes, blockBodies, state, stateWindow, stateWindows, finalityWindow, finalityWindows, announceLifetime
         case hostedChains, mine, rpcAllowedOrigins
     }
     public var listen: UInt16
@@ -102,8 +102,14 @@ public struct Topology: Codable, Sendable {
     /// The block bodies kept beyond what the node needs to operate
     /// (`--block-bodies`): `all` or `none`. Absent = `all`.
     public var blockBodies: String?
-    /// The state kept (`--state`): `all`, `tip` or `none`. Absent = `all`.
+    /// The state kept (`--state`): `all`, `recent` or `none` (`tip` is the
+    /// earlier name of `recent`). Absent = `all`.
     public var state: String?
+    /// With `recent`, the blocks of each chain, counting its tip, whose
+    /// executions' state is kept (`--state-window`). Absent = 64.
+    public var stateWindow: UInt64?
+    /// Per-chain state windows in blocks, by chain path, over `stateWindow`.
+    public var stateWindows: [String: UInt64]?
     /// Node-local finality in blocks (`--finality-window`): headers and work
     /// more than this many blocks below a chain's best tip are declined, and
     /// the node does not follow a reorganization deeper than this. Absent or
@@ -206,8 +212,18 @@ public struct Topology: Codable, Sendable {
         if let blockBodies, blockBodies != "all", blockBodies != "none" {
             throw CtlError("blockBodies is all or none, not \(blockBodies)")
         }
-        if let state, !["all", "tip", "none"].contains(state) {
-            throw CtlError("state is all, tip or none, not \(state)")
+        if let state, StateRetention(named: state) == nil {
+            throw CtlError("state is all, recent or none, not \(state)")
+        }
+        if stateWindow != nil || !(stateWindows ?? [:]).isEmpty, StateRetention(named: state ?? "all") != .recent {
+            throw CtlError("a state window applies to state recent only")
+        }
+        if stateWindow == 0 || (stateWindows ?? [:]).values.contains(0) {
+            throw CtlError("a state window is at least 1 block")
+        }
+        for path in (stateWindows ?? [:]).keys
+        where ChainAddress(path.split(separator: "/").map(String.init)) == nil {
+            throw CtlError("stateWindows names \(path), which is not a chain path")
         }
         for path in (finalityWindows ?? [:]).keys
         where ChainAddress(path.split(separator: "/").map(String.init)) == nil {
@@ -282,6 +298,10 @@ public struct Topology: Codable, Sendable {
         if let value = maxAcquisitionBytes { arguments += ["--max-acquisition-bytes", String(value)] }
         if let value = blockBodies { arguments += ["--block-bodies", value] }
         if let value = state { arguments += ["--state", value] }
+        if let value = stateWindow { arguments += ["--state-window", String(value)] }
+        for (path, value) in (stateWindows ?? [:]).sorted(by: { $0.key < $1.key }) {
+            arguments += ["--state-window", "\(path)=\(value)"]
+        }
         if let value = finalityWindow { arguments += ["--finality-window", String(value)] }
         for (path, value) in (finalityWindows ?? [:]).sorted(by: { $0.key < $1.key }) {
             arguments += ["--finality-window", "\(path)=\(value)"]

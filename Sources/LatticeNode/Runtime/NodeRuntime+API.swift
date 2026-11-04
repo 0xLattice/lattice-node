@@ -495,6 +495,7 @@ extension NodeRuntime {
 
     static func reads(
         storage: NodeStorage,
+        remote: IvyRootContentSource? = nil,
         configuration: NodeConfiguration,
         published: PublishedValue<ChainSnapshot>,
         view: PublishedValue<NodeReadView>,
@@ -503,6 +504,7 @@ extension NodeRuntime {
     ) -> ChainReads {
         ChainReads(
             storage: storage,
+            remote: remote,
             chainPath: chainPath,
             accepted: accepted,
             tip: {
@@ -698,13 +700,13 @@ extension NodeRuntime {
                 // transaction is judged again.
                 var (verdict, balances) = await judge(fetcher)
                 if verdict == .unavailable, remote != nil, basis.snapshot != nil {
-                    (verdict, balances) = await reading(job.tipCID, storage: storage, remote: remote, judge)
+                    (verdict, balances) = await reading(job.tipCID, at: path, storage: storage, remote: remote, judge)
                 }
                 return [.level(path, .mining(.preflighted(job, verdict, balances: balances)))]
             }
         case .buildTemplate(let job):
             return RuntimeJob(path: path, epoch: job.tipEpoch) {
-                let (built, refused) = await reading(job.tipCID, storage: storage, remote: remote) { fetcher in
+                let (built, refused) = await reading(job.tipCID, at: path, storage: storage, remote: remote) { fetcher in
                     var refused: [PolicyRefusal] = []
                     let built = await buildTemplate(
                         job, difficultyAnchor: basis?.anchor, fetcher: fetcher, chainPath: path,
@@ -719,7 +721,7 @@ extension NodeRuntime {
             return RuntimeJob(path: path, epoch: nil) {
                 var returned: [NodeEvent] = []
                 for cid in left {
-                    for transaction in await transactions(ofLeftBlock: cid, storage: storage, remote: remote)
+                    for transaction in await transactions(ofLeftBlock: cid, at: path, storage: storage, remote: remote)
                     where (try? Mempool.cid(of: transaction)).map({ !carried.contains($0) }) ?? false {
                         returned.append(.level(path, .mining(.transactionReceived(transaction, origin: .returned))))
                     }
@@ -750,12 +752,13 @@ extension NodeRuntime {
     /// body, from peers, the block's own Volume first (its header record
     /// names the transactions and does not hold them).
     static func transactions(
-        ofLeftBlock cid: String, storage: NodeStorage, remote: IvyRootContentSource?
+        ofLeftBlock cid: String, at path: ChainPath, storage: NodeStorage, remote: IvyRootContentSource?
     ) async -> [Transaction] {
         guard let remote, await !storage.broker.hasVolume(root: cid) else {
             return await transactions(ofBlock: cid, fetcher: storage.localFetcher)
         }
-        return await remote.withRootTracing(cid, bundle: false) { session in
+        let hosts = ChainHosts.of(path, nexusGenesisCID: storage.configuration.nexusGenesisCID)
+        return await remote.withRootTracing(cid, bundle: false, hosts: hosts) { session in
             await transactions(ofBlock: cid, fetcher: CoalescingFetcher(CompositeContentSource([storage.broker, session])))
         }.value
     }
@@ -787,7 +790,7 @@ extension NodeRuntime {
         remote: IvyRootContentSource? = nil
     ) -> RuntimeJob {
         RuntimeJob(path: path, epoch: nil) {
-            await reading(job.blockHash, storage: storage, remote: remote) { fetcher in
+            await reading(job.blockHash, at: path, storage: storage, remote: remote) { fetcher in
                 let verdict = await ChainTree.connect(
                     job,
                     fetcher: fetcher,
@@ -827,12 +830,16 @@ extension NodeRuntime {
     /// Without an overlay (`remote` nil) the read is from this store.
     static func reading<T: Sendable>(
         _ rootCID: String,
+        at path: ChainPath,
         storage: NodeStorage,
         remote: IvyRootContentSource?,
         _ work: @Sendable (any Fetcher) async -> T
     ) async -> T {
         guard let remote else { return await work(storage.workFetcher) }
-        return await remote.withRootTracing(rootCID, bundle: false) { session in
+        // A child chain's content is asked first of the chain's own hosts,
+        // as its bodies are; Nexus's of any peer.
+        let hosts = ChainHosts.of(path, nexusGenesisCID: storage.configuration.nexusGenesisCID)
+        return await remote.withRootTracing(rootCID, bundle: false, hosts: hosts) { session in
             // Peers serve whole Volumes by their roots. A block's own Volume
             // this store does not hold is read whole first, so what it lists
             // is read from it, not asked of peers one entry at a time.

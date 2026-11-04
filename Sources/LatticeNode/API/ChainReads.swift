@@ -43,6 +43,16 @@ public struct ChainReads: Sendable {
     }
 
     let storage: NodeStorage
+    /// What state reads (an executed block's post-state: accounts, nonces,
+    /// deposits, receipts) read through when this store lacks it (nil: this
+    /// store alone), and a child chain's hosts, asked first. State is a
+    /// cache: a node of it this store let go of is read again, never
+    /// answered as absent. Block bodies (a block's transactions and children
+    /// index) and anything asked for by CID are read from this store alone:
+    /// which bodies a node keeps is the operator's choice (`blockBodies`),
+    /// and a reader cannot make this node fetch whatever it names.
+    let remote: IvyRootContentSource?
+    let hosts: ChainHosts?
     /// The tip readers see: the tip this node acts on, its heaviest executed tip.
     let tip: @Sendable () async -> ChainStatus
     /// The block at a height of the chain to that tip.
@@ -62,6 +72,7 @@ public struct ChainReads: Sendable {
 
     init(
         storage: NodeStorage,
+        remote: IvyRootContentSource? = nil,
         chainPath: [String]? = nil,
         accepted: (@Sendable (String) async -> Bool)? = nil,
         tip: @escaping @Sendable () async -> ChainStatus,
@@ -71,7 +82,10 @@ public struct ChainReads: Sendable {
         peerCount: @escaping @Sendable () -> Int = { 0 }
     ) {
         self.storage = storage
-        self.chainPath = chainPath ?? storage.configuration.chainPath
+        let chainPath = chainPath ?? storage.configuration.chainPath
+        self.remote = remote
+        self.hosts = ChainHosts.of(chainPath, nexusGenesisCID: storage.configuration.nexusGenesisCID)
+        self.chainPath = chainPath
         if let accepted {
             self.accepted = accepted
         } else {
@@ -145,6 +159,25 @@ public struct ChainReads: Sendable {
         return transaction
     }
 
+    /// One read's state, in one session: this store, then what is in memory,
+    /// then peers (a child chain's hosts first). The session reserves one
+    /// frame, the most a peer's answer holds, and only once something is
+    /// missing: a read of what this store holds costs no budget, and one
+    /// read can never fetch more than a frame. Peers' answers are not kept
+    /// for later reads, so readers do not evict what the node's own work
+    /// fetched. A reader that went away stops the session.
+    func readingState<T: Sendable>(
+        _ rootCID: String, _ work: @Sendable (any Fetcher) async throws -> T
+    ) async rethrows -> T {
+        guard let remote else { return try await work(storage) }
+        let storage = storage
+        return try await remote.withRootTracing(
+            rootCID, bundle: false, hosts: hosts, reserving: Int(IvyConfig.defaultProtocolMaxFrameSize)
+        ) { session in
+            try await work(storage.readersReads(through: session))
+        }.value
+    }
+
     /// Bounded public read: an account's balance and next-expected nonce as of
     /// one accepted block's post-state. It uses direct storage reads plus
     /// targeted trie resolution without entering the runtime loop.
@@ -153,16 +186,22 @@ public struct ChainReads: Sendable {
         blockCID: String
     ) async -> (balance: UInt64, nonce: UInt64)? {
         guard let block = await blockNode(cid: blockCID) else { return nil }
-        guard let state = try? await block.postState.resolve(fetcher: storage).node else {
+        return await readingState(blockCID) { fetcher in await Self.account(owner: owner, in: block, fetcher: fetcher) }
+    }
+
+    private static func account(
+        owner: String, in block: Block, fetcher: any Fetcher
+    ) async -> (balance: UInt64, nonce: UInt64)? {
+        guard let state = try? await block.postState.resolve(fetcher: fetcher).node else {
             return nil
         }
         guard let nonce = try? await state.accountState.nextExpectedNonce(
                 for: owner,
-                fetcher: storage
+                fetcher: fetcher
               ),
               let resolved = try? await state.accountState.resolve(
                 paths: [[owner]: .targeted],
-                fetcher: storage
+                fetcher: fetcher
               ),
               let accountNode = resolved.node else {
             return nil
@@ -421,7 +460,7 @@ public struct ChainReads: Sendable {
         guard let body = try? await transaction.body.resolve(fetcher: storage).node else {
             return nil
         }
-        let inclusion = await canonicalInclusion(cid: cid, body: body)
+        let inclusion = await readingState(cid) { fetcher in await canonicalInclusion(cid: cid, body: body, fetcher: fetcher) }
         return ExplorerTransaction(
             txCID: cid,
             blockHeight: inclusion?.height,
@@ -475,11 +514,12 @@ public struct ChainReads: Sendable {
     /// construction: only the current canonical chain is read.
     func canonicalInclusion(
         cid: String,
-        body: TransactionBody
+        body: TransactionBody,
+        fetcher: any Fetcher
     ) async -> (height: UInt64, hash: String, timestamp: Int64)? {
         guard body.chainPath == chainPath, let signer = body.signers.first,
               let tipCID = await tip().tipCID, let tipBlock = await blockNode(cid: tipCID),
-              let tipNonce = await nextNonce(of: signer, in: tipBlock),
+              let tipNonce = await Self.nextNonce(of: signer, in: tipBlock, fetcher: fetcher),
               tipNonce > body.nonce else {
             return nil
         }
@@ -490,7 +530,7 @@ public struct ChainReads: Sendable {
             let middle = low + (high - low) / 2
             guard let middleCID = await canonicalCID(middle),
                   let middleBlock = await blockNode(cid: middleCID),
-                  let nonce = await nextNonce(of: signer, in: middleBlock) else {
+                  let nonce = await Self.nextNonce(of: signer, in: middleBlock, fetcher: fetcher) else {
                 return nil
             }
             if nonce > body.nonce { high = middle } else { low = middle + 1 }
@@ -505,11 +545,11 @@ public struct ChainReads: Sendable {
     }
 
     /// `signer`'s next-expected nonce in `block`'s post-state.
-    private func nextNonce(of signer: String, in block: Block) async -> UInt64? {
-        guard let state = try? await block.postState.resolve(fetcher: storage).node else {
+    private static func nextNonce(of signer: String, in block: Block, fetcher: any Fetcher) async -> UInt64? {
+        guard let state = try? await block.postState.resolve(fetcher: fetcher).node else {
             return nil
         }
-        return try? await state.accountState.nextExpectedNonce(for: signer, fetcher: storage)
+        return try? await state.accountState.nextExpectedNonce(for: signer, fetcher: fetcher)
     }
 
     /// Whether `block`'s transaction list holds `cid`. Reads the list's
@@ -536,53 +576,56 @@ public struct ChainReads: Sendable {
     /// Active deposits in the canonical tip state. The page is bounded before
     /// resolving trie values so this remains safe on the public read surface.
     public func explorerDeposits(limit: Int, after: String?) async throws -> ExplorerDepositsPage? {
-        guard let tipCID = await tip().tipCID,
-              let block = await blockNode(cid: tipCID),
-              let resolvedState = try? await block.postState.resolve(fetcher: storage),
-              let state = resolvedState.node,
-              let deposits = try? await state.depositState.resolve(fetcher: storage).node else {
-            return nil
+        guard let tipCID = await tip().tipCID else { return nil }
+        return try await readingState(tipCID) { fetcher in
+            guard let block = await blockNode(cid: tipCID),
+                  let resolvedState = try? await block.postState.resolve(fetcher: fetcher),
+                  let state = resolvedState.node,
+                  let deposits = try? await state.depositState.resolve(fetcher: fetcher).node else {
+                return nil
+            }
+            let boundedLimit = Self.boundedExplorerLimit(limit)
+            guard let scanned = try? await deposits.boundedKeysAndValues(
+                after: after,
+                limit: boundedLimit + 1,
+                fetcher: fetcher
+            ) else { return nil }
+            let entries = Array(scanned.prefix(boundedLimit))
+            let next = scanned.count > boundedLimit ? entries.last?.key : nil
+            let listed = entries.filter { $0.value > 0 && DepositKey($0.key) != nil }
+            let created = await canonicalDepositInclusions(
+                keys: listed.map(\.key), tipCID: tipCID, tipBlock: block, tipRoot: state.depositState.rawCID,
+                fetcher: fetcher
+            )
+            var active: [ExplorerDeposit] = []
+            for entry in listed {
+                guard let key = DepositKey(entry.key) else { continue }
+                active.append(ExplorerDeposit(
+                    key: entry.key,
+                    demander: key.demander,
+                    amountDemanded: key.amountDemanded,
+                    nonce: String(key.nonce),
+                    amountDeposited: entry.value,
+                    blockHeight: created[entry.key]?.height,
+                    blockHash: created[entry.key]?.hash
+                ))
+            }
+            let proofPaths = Swift.Dictionary(uniqueKeysWithValues: entries.map { ([$0.key], SparseMerkleProof.existence) })
+            let proven = entries.isEmpty
+                ? try DepositStateHeader(node: deposits)
+                : try await state.depositState.proof(paths: proofPaths, fetcher: fetcher)
+            let proof = try await stateProof(
+                blockCID: tipCID, block: block, state: resolvedState,
+                dictionary: .deposits, dictionaryHeader: proven,
+                claims: entries.map { .init(key: $0.key, value: String($0.value)) }
+            )
+            return ExplorerDepositsPage(
+                deposits: active,
+                chain: chainPath.joined(separator: "/"),
+                next: next,
+                proof: proof
+            )
         }
-        let boundedLimit = Self.boundedExplorerLimit(limit)
-        guard let scanned = try? await deposits.boundedKeysAndValues(
-            after: after,
-            limit: boundedLimit + 1,
-            fetcher: storage
-        ) else { return nil }
-        let entries = Array(scanned.prefix(boundedLimit))
-        let next = scanned.count > boundedLimit ? entries.last?.key : nil
-        let listed = entries.filter { $0.value > 0 && DepositKey($0.key) != nil }
-        let created = await canonicalDepositInclusions(
-            keys: listed.map(\.key), tipCID: tipCID, tipBlock: block, tipRoot: state.depositState.rawCID
-        )
-        var active: [ExplorerDeposit] = []
-        for entry in listed {
-            guard let key = DepositKey(entry.key) else { continue }
-            active.append(ExplorerDeposit(
-                key: entry.key,
-                demander: key.demander,
-                amountDemanded: key.amountDemanded,
-                nonce: String(key.nonce),
-                amountDeposited: entry.value,
-                blockHeight: created[entry.key]?.height,
-                blockHash: created[entry.key]?.hash
-            ))
-        }
-        let proofPaths = Swift.Dictionary(uniqueKeysWithValues: entries.map { ([$0.key], SparseMerkleProof.existence) })
-        let proven = entries.isEmpty
-            ? try DepositStateHeader(node: deposits)
-            : try await state.depositState.proof(paths: proofPaths, fetcher: storage)
-        let proof = try await stateProof(
-            blockCID: tipCID, block: block, state: resolvedState,
-            dictionary: .deposits, dictionaryHeader: proven,
-            claims: entries.map { .init(key: $0.key, value: String($0.value)) }
-        )
-        return ExplorerDepositsPage(
-            deposits: active,
-            chain: chainPath.joined(separator: "/"),
-            next: next,
-            proof: proof
-        )
     }
 
     /// The canonical block that created each of `keys`, derived at read time
@@ -603,7 +646,7 @@ public struct ChainReads: Sendable {
     /// is left out when a state needed to place it is not held here; nothing
     /// is returned if the canonical chain moved during the search.
     func canonicalDepositInclusions(
-        keys: [String], tipCID: String, tipBlock: Block, tipRoot: String
+        keys: [String], tipCID: String, tipBlock: Block, tipRoot: String, fetcher: any Fetcher
     ) async -> [String: (height: UInt64, hash: String)] {
         guard !keys.isEmpty else { return [:] }
         // Keys present under a dictionary root, for every key ever asked of it.
@@ -619,14 +662,14 @@ public struct ChainReads: Sendable {
             let middle = range.low + (range.high - range.low) / 2
             guard let middleCID = await canonicalCID(middle),
                   let middleBlock = await blockNode(cid: middleCID),
-                  let state = try? await middleBlock.postState.resolve(fetcher: storage).node else {
+                  let state = try? await middleBlock.postState.resolve(fetcher: fetcher).node else {
                 continue // not held here: these keys go unplaced
             }
             let root = state.depositState.rawCID
             let unread = range.keys.filter { known[root]?[$0] == nil }
             if !unread.isEmpty {
                 let paths = Swift.Dictionary(uniqueKeysWithValues: unread.map { ([$0], ResolutionStrategy.targeted) })
-                guard let deposits = try? await state.depositState.resolve(paths: paths, fetcher: storage).node else {
+                guard let deposits = try? await state.depositState.resolve(paths: paths, fetcher: fetcher).node else {
                     continue
                 }
                 for key in unread { known[root, default: [:]][key] = (try? deposits.get(key: key)) != nil }
@@ -654,31 +697,33 @@ public struct ChainReads: Sendable {
     /// key was never deposited. Proven either way, without scanning the
     /// listing: a wallet settles a purchase on the exact keys it bought.
     public func explorerDepositState(key: String) async throws -> ExplorerDepositState? {
-        guard let tipCID = await tip().tipCID,
-              let block = await blockNode(cid: tipCID),
-              let resolvedState = try? await block.postState.resolve(fetcher: storage),
-              let state = resolvedState.node else {
-            return nil
+        guard let tipCID = await tip().tipCID else { return nil }
+        return try await readingState(tipCID) { fetcher in
+            guard let block = await blockNode(cid: tipCID),
+                  let resolvedState = try? await block.postState.resolve(fetcher: fetcher),
+                  let state = resolvedState.node else {
+                return nil
+            }
+            let targeted = try? await state.depositState.resolve(
+                paths: [[key]: .targeted],
+                fetcher: fetcher
+            ).node
+            let amount = targeted.flatMap { try? $0.get(key: key) }
+            let value = amount.map { String($0) }
+            let proofKind: SparseMerkleProof = amount == nil ? .insertion : .existence
+            let proven = try await state.depositState.proof(paths: [[key]: proofKind], fetcher: fetcher)
+            let proof = try await stateProof(
+                blockCID: tipCID, block: block, state: resolvedState,
+                dictionary: .deposits, dictionaryHeader: proven,
+                claims: [.init(key: key, value: value)]
+            )
+            return ExplorerDepositState(
+                key: key,
+                value: value,
+                chain: chainPath.joined(separator: "/"),
+                proof: proof
+            )
         }
-        let targeted = try? await state.depositState.resolve(
-            paths: [[key]: .targeted],
-            fetcher: storage
-        ).node
-        let amount = targeted.flatMap { try? $0.get(key: key) }
-        let value = amount.map { String($0) }
-        let proofKind: SparseMerkleProof = amount == nil ? .insertion : .existence
-        let proven = try await state.depositState.proof(paths: [[key]: proofKind], fetcher: storage)
-        let proof = try await stateProof(
-            blockCID: tipCID, block: block, state: resolvedState,
-            dictionary: .deposits, dictionaryHeader: proven,
-            claims: [.init(key: key, value: value)]
-        )
-        return ExplorerDepositState(
-            key: key,
-            value: value,
-            chain: chainPath.joined(separator: "/"),
-            proof: proof
-        )
     }
 
     /// The withdrawer recorded by a receipt on this (parent) chain.
@@ -688,13 +733,11 @@ public struct ChainReads: Sendable {
         nonce: UInt128,
         destinationPath: [String]
     ) async throws -> ExplorerReceiptState? {
+        // The key is built before the read's closure, which captures only
+        // its strings: this function's arguments (a `UInt128` among them)
+        // captured by the closure arrived corrupted, a miscompile.
         guard let directory = destinationPath.last,
-              let tipCID = await tip().tipCID,
-              let block = await blockNode(cid: tipCID),
-              let resolvedState = try? await block.postState.resolve(fetcher: storage),
-              let state = resolvedState.node else {
-            return nil
-        }
+              let tipCID = await tip().tipCID else { return nil }
         let logicalKey = ReceiptKey(receiptAction: ReceiptAction(
             withdrawer: "",
             nonce: nonce,
@@ -702,27 +745,35 @@ public struct ChainReads: Sendable {
             amountDemanded: amountDemanded,
             directory: directory
         ))
-        let targeted = try? await state.receiptState.resolve(
-            paths: [[logicalKey.storageKey]: .targeted],
-            fetcher: storage
-        ).node
-        let withdrawer = targeted.flatMap { try? $0.get(key: logicalKey.storageKey) }
-        let proofKind: SparseMerkleProof = withdrawer == nil ? .insertion : .existence
-        let proven = try await state.receiptState.proof(
-            paths: [[logicalKey.storageKey]: proofKind], fetcher: storage
-        )
-        let proof = try await stateProof(
-            blockCID: tipCID, block: block, state: resolvedState,
-            dictionary: .receipts, dictionaryHeader: proven,
-            claims: [.init(key: logicalKey.storageKey, value: withdrawer)]
-        )
-        return ExplorerReceiptState(
-            withdrawer: withdrawer,
-            directory: directory,
-            chainPath: destinationPath,
-            key: logicalKey.description,
-            proof: proof
-        )
+        let storageKey = logicalKey.storageKey, keyName = logicalKey.description
+        return try await readingState(tipCID) { fetcher in
+            guard let block = await blockNode(cid: tipCID),
+                  let resolvedState = try? await block.postState.resolve(fetcher: fetcher),
+                  let state = resolvedState.node else {
+                return nil
+            }
+            let targeted = try? await state.receiptState.resolve(
+                paths: [[storageKey]: .targeted],
+                fetcher: fetcher
+            ).node
+            let withdrawer = targeted.flatMap { try? $0.get(key: storageKey) }
+            let proofKind: SparseMerkleProof = withdrawer == nil ? .insertion : .existence
+            let proven = try await state.receiptState.proof(
+                paths: [[storageKey]: proofKind], fetcher: fetcher
+            )
+            let proof = try await stateProof(
+                blockCID: tipCID, block: block, state: resolvedState,
+                dictionary: .receipts, dictionaryHeader: proven,
+                claims: [.init(key: storageKey, value: withdrawer)]
+            )
+            return ExplorerReceiptState(
+                withdrawer: withdrawer,
+                directory: directory,
+                chainPath: destinationPath,
+                key: keyName,
+                proof: proof
+            )
+        }
     }
 
     private func stateProof<NodeType>(

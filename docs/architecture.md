@@ -140,12 +140,16 @@ until both are let go of. What executions read and create (state, specs,
 policy modules) and the Nexus genesis block are named by the chain. A body
 is let go of when its block is found invalid, and, when the operator keeps
 no bodies beyond the ones the node operates on (`blockBodies: none`), when
-another block becomes its chain's tip. When the operator keeps only the tip's state (`state:
-tip`), state is named by its chain's state scope, and a node of it is let
-go of when no node of the tip's state names it. On `tip` and on `none`,
-what a block reads is named by that block until it executes; on `none` the
-state scope names only what the last execution touched. Pins are in the store and a start leaves them as it finds
-them, and sweeps what no scope names. The journal still lists the roots
+another block becomes its chain's tip. When the operator keeps recent
+state (`state: recent`, or `none`, which is a window of one block), what a
+step's executions stored is named by its chain and the height of the
+step's newest block, and is let go of once that height is a state window
+or more below the chain's tip. On `recent` and on `none`, what a block reads
+is named by that block until it executes. Kept state is a cache: whatever
+reads state the store lacks (execution, a submitted transaction's check, a
+state read) reads it from peers. Pins are in the store and a start leaves
+them as it finds them, but for the scopes earlier versions kept a tip's
+state under, which it lets go of, and sweeps what no scope names. The journal still lists the roots
 each batch stored, and nothing reads that list.
 
 A fact does not depend on its content being held, so a store that lacks

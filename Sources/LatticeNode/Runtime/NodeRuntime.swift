@@ -282,14 +282,17 @@ public final class NodeRuntime: Sendable {
         self.readView = readView
         self.configuration = configuration
         self.storage = storage
-        reads = Self.reads(storage: storage, configuration: configuration, published: published, view: readView)
+        let remote = IvyRootContentSource(ivy: ivy, policy: configuration.resourcePolicy)
+        reads = Self.reads(
+            storage: storage, remote: remote, configuration: configuration, published: published, view: readView
+        )
         var outputs: [ChainPath: LevelOutput] = [core.rootPath: LevelOutput(published: published, view: readView)]
         var levelReads: [ChainPath: ChainReads] = [:]
         for path in core.ordered where path != core.rootPath {
             let output = LevelOutput(published: PublishedValue(core.levels[path]?.snapshot), view: PublishedValue())
             outputs[path] = output
             levelReads[path] = Self.reads(
-                storage: storage, configuration: configuration, published: output.published, view: output.view,
+                storage: storage, remote: remote, configuration: configuration, published: output.published, view: output.view,
                 chainPath: path,
                 accepted: { await storage.hasAcceptedBlock($0, at: path) }
             )
@@ -350,7 +353,6 @@ public final class NodeRuntime: Sendable {
                 inputs.yield(.maintenance)
             }
         }
-        let remote = IvyRootContentSource(ivy: ivy, policy: configuration.resourcePolicy)
         peerCapabilities = remote.peerCapabilities
         // The loop task takes the only copy of the core: a copy its closure
         // kept would share every level's tree with the running loop.
@@ -379,9 +381,7 @@ public final class NodeRuntime: Sendable {
             for (path, level) in state.core.levels { state.bodyTips[path] = level.snapshot.actOnTip }
             await storage.letGoOfBodies(except: state.bodyTips)
             await storage.letGoOfReads()
-            // Counts describe a state only `tip` keeps; any other run lets
-            // that state go, so a later run on `tip` counts afresh.
-            if configuration.state != .tip { await storage.forgetStateCounts() }
+            await storage.moveLegacyState(tips: state.core.levels.mapValues(\.snapshot.actOnHeight))
             await state.settleState()
             state.refreshView()
             // After the loop ends, inputs are only drained until the stream
@@ -774,6 +774,8 @@ extension NodeRuntime {
             let listed = Set(next.hostedChildren)
             for path in core.ordered where path != core.rootPath && !listed.contains(path) {
                 guard await step(.unhost(path)) else { throw NodeRuntimeError.stopped }
+                stateTips[path] = nil
+                await storage.letGoOfWindows(at: path)
             }
             var failure: (any Error)?
             for path in next.hostedChildren where core.levels[path] == nil {
@@ -816,7 +818,8 @@ extension NodeRuntime {
             for path in core.ordered where path != core.rootPath {
                 guard let output = outputs[path] else { continue }
                 reads[path] = levelReads.value?[path] ?? NodeRuntime.reads(
-                    storage: storage, configuration: configuration, published: output.published, view: output.view,
+                    storage: storage, remote: remote, configuration: configuration,
+                    published: output.published, view: output.view,
                     chainPath: path,
                     accepted: { [storage] in await storage.hasAcceptedBlock($0, at: path) }
                 )
@@ -912,7 +915,7 @@ extension NodeRuntime {
                     // The chain and its ancestors: a peer that hosts a chain
                     // hosts every one of them.
                     lineage: (root.count...path.count).map { Array(path.prefix($0)) },
-                    hosts: path == root ? nil : ChainHosts(nexusGenesisCID: nexus, chainPath: path),
+                    hosts: ChainHosts.of(path, nexusGenesisCID: nexus),
                     stalled: due.contains(path),
                     topUp: topUps.contains(path),
                     seeds: path == root
@@ -1549,9 +1552,7 @@ extension NodeRuntime {
                 let (storage, remote, inputs) = (storage, remote, inputs)
                 // Every peer hosts Nexus; a child's hosts are its current
                 // peers: a hint for whom to ask for the bundle.
-                let rendezvous = path == core.rootPath ? nil : ChainHosts(
-                    nexusGenesisCID: configuration.nexusGenesisCID, chainPath: path
-                )
+                let rendezvous = ChainHosts.of(path, nexusGenesisCID: configuration.nexusGenesisCID)
                 let maxBlockSize = core.levels[path]?.maxBlockSize(of: cid)
                 bodies[key] = Task {
                     let roots = await NodeRuntime.retryingBody { bundle in
@@ -1651,9 +1652,7 @@ extension NodeRuntime {
                 // To the chain's current peers: no other peer runs its pool,
                 // and with many chains most sessions host others. Every
                 // session hosts Nexus.
-                let hosts = path == core.rootPath ? nil : ChainHosts(
-                    nexusGenesisCID: configuration.nexusGenesisCID, chainPath: path
-                )
+                let hosts = ChainHosts.of(path, nexusGenesisCID: configuration.nexusGenesisCID)
                 let hosting = Set(await remote.peerCapabilities.sessions(hosting: hosts, ivy: ivy).map(\.sessionID))
                 for session in sessions.values.sorted(by: { $0.id < $1.id })
                 where session.ready && hosting.contains(session.peer.sessionID) {
@@ -1758,13 +1757,14 @@ extension NodeRuntime {
             }
         }
 
-        /// With only the tip's state kept: the kept state follows each
-        /// level's tip.
+        /// With a state window: as each level's tip moves, what executions
+        /// stored more than a window below it goes.
         mutating func settleState() async {
-            guard configuration.state == .tip else { return }
+            guard configuration.state != .all else { return }
             for (path, level) in core.levels where stateTips[path] != level.snapshot.actOnTip {
                 stateTips[path] = level.snapshot.actOnTip
-                await storage.keepState(of: level.snapshot.actOnTip, at: path)
+                guard !level.snapshot.actOnTip.isEmpty else { continue }
+                await storage.letGoOfState(at: path, below: level.snapshot.actOnHeight)
             }
         }
 

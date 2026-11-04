@@ -808,7 +808,7 @@ final class BundledBlockFetchTests: XCTestCase {
         let unstored = await joiner.volume(cid)
         XCTAssertNil(unstored, "nothing a peer sent is stored before the block is found valid")
 
-        let stored = await NodeRuntime.reading(cid, storage: joiner, remote: remote) { fetcher in
+        let stored = await NodeRuntime.reading(cid, at: ["Nexus"], storage: joiner, remote: remote) { fetcher in
             (try? await joiner.storeValidBlock(cid, at: ["Nexus"], from: fetcher)) != nil
         }
         XCTAssertTrue(stored)
@@ -859,7 +859,7 @@ final class BundledBlockFetchTests: XCTestCase {
         let fetchedVolumes = await requests.volumes
 
         let next = window[0]
-        let stored = await NodeRuntime.reading(next, storage: joiner, remote: remote) { fetcher in
+        let stored = await NodeRuntime.reading(next, at: ["Nexus"], storage: joiner, remote: remote) { fetcher in
             (try? await joiner.storeValidBlock(next, at: ["Nexus"], from: fetcher)) != nil
         }
         XCTAssertTrue(stored)
@@ -935,7 +935,7 @@ final class BundledBlockFetchTests: XCTestCase {
         let kept = await joiner.readCache.volume(cid)
         XCTAssertNil(kept)
 
-        let stored = await NodeRuntime.reading(cid, storage: joiner, remote: poisoned) { fetcher in
+        let stored = await NodeRuntime.reading(cid, at: ["Nexus"], storage: joiner, remote: poisoned) { fetcher in
             (try? await joiner.storeValidBlock(cid, at: ["Nexus"], from: fetcher)) != nil
         }
         XCTAssertTrue(stored)
@@ -954,7 +954,7 @@ final class BundledBlockFetchTests: XCTestCase {
         let blocking = await remote.budget.reserve(remote.budget.capacity, priority: .ownWork)
         XCTAssertEqual(blocking, remote.budget.capacity)
 
-        let read = await NodeRuntime.reading(cid, storage: producer, remote: remote) { fetcher in
+        let read = await NodeRuntime.reading(cid, at: ["Nexus"], storage: producer, remote: remote) { fetcher in
             await NodeRuntime.transactionIDs(ofBlock: cid, fetcher: fetcher).count
         }
 

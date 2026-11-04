@@ -515,31 +515,34 @@ their own reason to run one. Keep `all` on a node an explorer reads.
 `state` in `lattice.json` (`--state`) says which state it keeps:
 
 - `all`, the default: the state of every block it executed.
-- `tip`: the state of each chain's tip. State a newer block replaced is
-  let go of.
-- `none`: none between blocks. What a block reads is held until it has
-  executed, and what the last execution touched until the next one.
+- `recent`: what the executions of each chain's last `stateWindow` blocks
+  (`--state-window`, counting the tip) read and created. 64 blocks unless
+  set; `stateWindows` (or `--state-window Nexus/Alpha=500`) sets one chain.
+  `tip`, the earlier name, means `recent`.
+- `none`: a window of 1: what the executions at each chain's tip height read
+  and created (and of side blocks above it, until the tip passes them), and
+  what a block reads, until it has executed. `--state-window` applies to
+  `recent` only; set with `all` or `none` it is refused.
 
-Executing a block is the node's own work: state it reads and does not
-hold comes from peers. What anyone can cause, a submitted transaction's
-check and a state read, uses only what the node holds.
+Kept state is a cache, not a promise: execution, a submitted transaction's
+check, and state reads all read the state this node does not hold from
+peers, so `recent` and `none` answer what `all` answers, and a read of state
+they let go of costs a fetch. A submitted transaction is first checked
+against what this node holds, and only one that passes those checks (its
+signatures, chain, fee and size) reads further state from peers. A
+reorganization within the window, and blocks that touch recent state, run
+without fetching. Block bodies (a block's transactions and children) and
+anything asked for by CID are answered from this node's store alone: which
+bodies it keeps is `blockBodies`, and a reader cannot make it fetch whatever
+it names.
 
-On `tip` the node answers state reads at its tip, and `404` for what an
-older block's state held and the tip's does not. When the chain moves to
-another branch, state the branch it left had changed is needed again. A
-block that reads it reads it from peers; the node holds it again once a
-block changes it. Until then reads of it answer `404`, and a transaction
-that needs it is pooled unchecked and is mined by a peer, not by this node.
-The first start on `tip` counts the whole state of each tip; state reads
-are answered meanwhile, while submissions and mining wait for it.
-
-On `none` the node answers state reads only for what the last block
-touched. A submitted transaction is checked against what this node holds:
-one that needs other state is pooled unchecked, relayed, and mined by a
-peer, not by this node.
+A start after a version that kept exactly the tip's state (`tip`) moves that
+state into each chain's window at its tip, so it goes a window later like
+any state, and forgets its counts. What a node kept for a chain it no longer
+hosts goes at its next start.
 
 A node that is the only holder of a state and lets it go has lost it, so a
-network needs nodes on `all`. Switching to `tip` or `none` applies to state
+network needs nodes on `all`. Switching to `recent` or `none` applies to state
 stored from then on: what a run on `all` stored stays until the node is
 synced again.
 

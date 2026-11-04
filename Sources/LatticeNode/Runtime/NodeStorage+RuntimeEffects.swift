@@ -47,9 +47,9 @@ extension NodeStorage {
         // pinned under its block's name by the job that executed it, and the
         // journal still names it.
         var stored: [String] = []
-        // With only the tip's state kept, or none: the state each level's
-        // executions created, under the level's state scope.
-        var states: [ChainPath: [String]] = [:]
+        // With recent state kept, or none: the state each level's
+        // executions stored, under the height of its newest block.
+        var states: [ChainPath: (height: UInt64?, roots: [String])] = [:]
         let storage = NodeImportStorage(storage: broker)
         for (path, level) in batch.levels.sorted(by: {
             $0.path.count != $1.path.count
@@ -69,8 +69,16 @@ extension NodeStorage {
             switch configuration.state {
             case .all:
                 stored.append(contentsOf: created)
-            case .tip, .none:
-                states[path] = executed
+            case .recent, .none:
+                // The height of the newest block whose state this step
+                // executed; one no block fact of the step names (none does
+                // today) joins the chain's newest window below.
+                let roots = Set(level.states.compactMap { try? LatticeStateHeader(node: $0).rawCID })
+                let height = level.facts.flatMap(\.facts).compactMap { fact -> UInt64? in
+                    guard case .block(let block) = fact, roots.contains(block.postStateCID) else { return nil }
+                    return block.blockHeight
+                }.max()
+                states[path] = (height, executed)
                 stored.append(contentsOf: specs)
             }
             let roots = created + (bodyRoots[path] ?? [])
@@ -85,19 +93,16 @@ extension NodeStorage {
         }
         try await storage.commit()
         try await retainHeld(stored)
-        for (path, roots) in states where !roots.isEmpty {
-            if configuration.state == .tip {
-                // Until the kept state has counted what of it the tip holds.
-                try await retainHeld(roots, scope: scopes.executed(at: path))
-                continue
+        for (path, state) in states where !state.roots.isEmpty {
+            // A state of no known height goes with the newest the chain
+            // keeps: kept as long as that, never let go of before it.
+            let scope = if let height = state.height {
+                scopes.window(at: path, height: height)
+            } else {
+                try await broker.retainedScopes(prefix: scopes.windowPrefix(at: path)).max()
+                    ?? scopes.window(at: path, height: 0)
             }
-            let scope = scopes.state(at: path)
-            // With no state kept, only what the last execution touched
-            // stays: the next block most likely reads it.
-            let earlier = configuration.state == .none ? try await broker.retainedRoots(scope: scope) : []
-            try await retainHeld(roots, scope: scope)
-            let gone = Set(earlier).subtracting(roots)
-            if !gone.isEmpty { try await broker.releaseRetainedRoots(scope: scope, roots: gone.sorted()) }
+            try await retainHeld(state.roots, scope: scope)
         }
         try await store.stageNodeFacts(durable, logID: logID)
     }
@@ -121,6 +126,13 @@ extension NodeStorage {
     /// are kept there for the next read.
     nonisolated func ownReads(through peers: any ContentSource) -> CoalescingFetcher {
         CoalescingFetcher(CompositeContentSource([workSource, readCache, readCache.remembering(peers)]))
+    }
+
+    /// How a reader's state read reads: this store, a block's header
+    /// record, what is in memory, then peers, whose answers are not kept
+    /// for later reads.
+    nonisolated func readersReads(through peers: any ContentSource) -> CoalescingFetcher {
+        CoalescingFetcher(CompositeContentSource([workSource, readCache, peers]))
     }
 
     /// Stores a block and pins what was stored: its body is what `fetcher`,

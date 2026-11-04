@@ -86,15 +86,22 @@ public enum BlockBodies: String, Sendable, CaseIterable {
 }
 
 /// Which state a node keeps. State is what executions read and create; it
-/// is not a block body.
+/// is not a block body. Kept state is a cache: whatever reads state this
+/// node does not hold (execution, preflight, reads) reads it from peers.
 public enum StateRetention: String, Sendable, CaseIterable {
     /// The state of every block it executed.
     case all
-    /// The state of each chain's tip.
-    case tip
-    /// None between blocks: what a block reads is held until it executes,
-    /// and what the last execution touched until the next.
+    /// What the executions of a chain's most recent blocks read and created,
+    /// for its state window (`NodeConfiguration.stateWindow(for:)`).
+    case recent
+    /// What the last execution read and created, until the next.
     case none
+
+    /// An operator's name for it. `tip`, which kept exactly the tip's state,
+    /// is now `recent`.
+    public init?(named name: String) {
+        self.init(rawValue: name == "tip" ? "recent" : name)
+    }
 }
 
 /// Immutable setup and process identity for one Nexus-rooted hosted tree.
@@ -223,6 +230,22 @@ public struct NodeConfiguration: Sendable {
     /// weighed tip, and so does not follow a reorganization deeper than it.
     public let finality: FinalityWindows
 
+    /// With `state: recent`, per chain: the blocks below and including a
+    /// chain's tip whose executions' state is kept (operator choice).
+    public let stateWindows: FinalityWindows
+    /// The state window of a chain without one of its own.
+    public static let defaultStateWindow: UInt64 = 64
+
+    /// The blocks of the chain at `path` whose executions' state is kept,
+    /// counting its tip: nil when every state is.
+    public func stateWindow(for path: [String]) -> UInt64? {
+        switch state {
+        case .all: nil
+        case .recent: max(1, stateWindows.window(for: path) ?? Self.defaultStateWindow)
+        case .none: 1
+        }
+    }
+
     /// Overlay slots kept in reserve for outbound dials so a burst of inbound
     /// connections (from one source, especially behind a proxy where the
     /// per-netgroup cap cannot discriminate) can never exhaust total capacity and
@@ -261,7 +284,8 @@ public struct NodeConfiguration: Sendable {
         publicReadURL: String? = nil,
         publicSubmit: Bool = false,
         minRelayFee: UInt64 = 0,
-        finality: FinalityWindows = FinalityWindows()
+        finality: FinalityWindows = FinalityWindows(),
+        stateWindows: FinalityWindows = FinalityWindows()
     ) throws {
         guard let address = ChainAddress(chainPath), address.isNexus else {
             throw NodeConfigurationError.invalidChainPath
@@ -331,6 +355,7 @@ public struct NodeConfiguration: Sendable {
         self.publicSubmit = publicSubmit
         self.minRelayFee = minRelayFee
         self.finality = finality
+        self.stateWindows = stateWindows
     }
 
     /// The same node hosting `hostedChildren` instead, with their specs,

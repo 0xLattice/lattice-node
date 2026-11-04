@@ -72,23 +72,18 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   to the pool from this store, and from peers for a body it let go of; one
   no peer serves is not returned. State and facts are untouched, and the node builds
   on a block whose body is gone. Pinned by `BlockBodiesTests`.
-- **NODE-STORAGE-002.h** — With `state: tip` the node keeps the state each
-  chain's tip is made of. A node of the state is named by its content and
-  can be named from several places: the node counts, for each, the nodes of
-  the tip's state that name it, walking the new tip's state down to what is
-  already counted and the last one down to what is still named, and lets go
-  of a node nothing names. The walk reads this store alone and runs in the
-  step that stored the tip; what that step's executions stored is named by
-  its own scope until then. The state scope names exactly what is counted.
-  A node of the tip's state the store lacks is not counted. A run on another
-  setting drops the counts, and the next run on `tip` counts afresh and lets
-  go of what an earlier one left pinned. Pinned by `StateTipTests`.
-- **NODE-STORAGE-002.i** — With `state: tip` or `none` what a stored block
-  reads is named by that block until it executes or is found invalid (a
-  start lets go of what an executed block's scope still names); with
-  `none` the state
-  scope names only what the last execution of its chain touched. Pinned by
-  `StateTipTests.testANodeOnNoneSyncsAndKeepsValidatingHoldingNoState`.
+- **NODE-STORAGE-002.h** — With `state: recent` what a step's executions
+  stored is named by its chain and the height of the step's newest block,
+  and is let go of once the chain's tip is a state window or more above it
+  (`--state-window`, 64 blocks unless the operator sets one, per chain or
+  for every chain); `none` is a window of one block. A start lets go of the
+  scopes and counts earlier versions kept a tip's state under. State the
+  store lacks is read from peers by execution, preflight and state reads
+  alike. Pinned by `StateWindowTests`.
+- **NODE-STORAGE-002.i** — With `state: recent` or `none` what a stored
+  block reads is named by that block until it executes or is found invalid
+  (a start lets go of what an executed block's scope still names). Pinned
+  by `StateWindowTests.testANodeOnNoneSyncsAndKeepsValidatingHoldingNoState`.
 - **NODE-STORAGE-002.j** — A Volume the operator pins is named by the
   operator scope until it is unpinned, whatever the other rules keep. Pinned
   by `OperatorPinTests` and `DaemonHTTPTests.testOperatorPinRoutes`.
