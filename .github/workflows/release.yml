@@ -36,7 +36,10 @@ jobs:
       - name: Install Linux dependencies
         run: LATTICE_RELEASE_CONTAINER=1 bash scripts/install-linux-build-dependencies.sh
 
+      # Build & Test runs this suite on every PR; PRs only need the packaging
+      # path and the archived E2E below.
       - name: Run tests before packaging
+        if: github.event_name != 'pull_request'
         run: swift test
 
       - name: Build release artifacts from canonical source path
@@ -138,7 +141,10 @@ jobs:
       - name: Verify jq
         run: jq --version
 
+      # Build & Test runs this suite on every PR; PRs only need the packaging
+      # path and the archived E2E below.
       - name: Run tests before packaging
+        if: github.event_name != 'pull_request'
         run: swift test
 
       - name: Build release artifacts

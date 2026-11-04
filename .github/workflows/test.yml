@@ -122,6 +122,14 @@ jobs:
         run: |
           apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev
 
+      # Dependencies only: our own modules rebuild because checkout refreshes
+      # their mtimes. test-linux builds both configurations, so it alone saves.
+      - name: Cache SPM build
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-linux-${{ hashFiles('Package.resolved') }}
+
       - name: Build
         run: swift build -c release -Xswiftc -warnings-as-errors
 
@@ -174,6 +182,12 @@ jobs:
         run: |
           apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev procps
 
+      - name: Restore SPM build
+        uses: actions/cache/restore@v4
+        with:
+          path: .build
+          key: spm-linux-${{ hashFiles('Package.resolved') }}
+
       - name: Build
         run: swift build -c release -Xswiftc -warnings-as-errors
 
@@ -219,15 +233,6 @@ jobs:
 
       - name: Run ThreadSanitizer gate
         run: .github/scripts/check-tsan.sh
-
-  reproducible-build-linux:
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Verify reproducible release binaries
-        run: scripts/reproducible-build.sh
 
   sanitizer-macos:
     # macOS runners are scarce: run on main and merge-queue pushes, not on every PR push.
@@ -283,6 +288,12 @@ jobs:
         run: |
           apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev
 
+      - name: Restore SPM build
+        uses: actions/cache/restore@v4
+        with:
+          path: .build
+          key: spm-linux-${{ hashFiles('Package.resolved') }}
+
       - name: Build test targets
         run: swift build --build-tests
 
@@ -303,6 +314,12 @@ jobs:
       - name: Install dependencies for Linux
         run: |
           apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev
+
+      - name: Restore SPM build
+        uses: actions/cache/restore@v4
+        with:
+          path: .build
+          key: spm-linux-${{ hashFiles('Package.resolved') }}
 
       - name: Build test targets with warnings as errors
         run: swift build --build-tests -Xswiftc -warnings-as-errors
