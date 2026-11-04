@@ -515,10 +515,12 @@ their own reason to run one. Keep `all` on a node an explorer reads.
 `state` in `lattice.json` (`--state`) says which state it keeps:
 
 - `all`, the default: the state of every block it executed.
-- `recent`: what the executions of each chain's last `stateWindow` blocks
-  (`--state-window`, counting the tip) read and created. 64 blocks unless
-  set; `stateWindows` (or `--state-window Nexus/Alpha=500`) sets one chain.
-  `tip`, the earlier name, means `recent`.
+- `recent`: the whole current state of each chain, and what its last
+  `stateWindow` blocks (`--state-window`, counting the tip) replaced. 64
+  blocks unless set; `stateWindows` (or `--state-window Nexus/Alpha=500`)
+  sets one chain. `tip`, the earlier name, means `recent`. This is what a
+  pruned full node keeps elsewhere: Bitcoin Core with `-prune` keeps the
+  whole UTXO set, geth keeps the whole current state and recent diffs.
 - `none`: a window of 1: what the executions at each chain's tip height read
   and created (and of side blocks above it, until the tip passes them), and
   what a block reads, until it has executed. `--state-window` applies to
@@ -529,17 +531,29 @@ check, and state reads all read the state this node does not hold from
 peers, so `recent` and `none` answer what `all` answers, and a read of state
 they let go of costs a fetch. A submitted transaction is first checked
 against what this node holds, and only one that passes those checks (its
-signatures, chain, fee and size) reads further state from peers. A
-reorganization within the window, and blocks that touch recent state, run
-without fetching. Block bodies (a block's transactions and children) and
-anything asked for by CID are answered from this node's store alone: which
+signatures, chain, fee and size) reads further state from peers. On
+`recent` a read of the current state is answered from this node's store,
+and a reorganization within the window runs without fetching. Block bodies
+(a block's transactions and children) and anything asked for by CID are answered from this node's store alone: which
 bodies it keeps is `blockBodies`, and a reader cannot make it fetch whatever
 it names.
+
+On `recent` a node counts how many places each node of a chain's state
+holds, as of the block a window below the tip. As a block leaves the
+window its state diff moves the counts: what it created is kept, and what
+it replaced goes once no place holds it. A start with no counts for a
+chain (the first start on this version, or a store a run that kept only
+the window left) walks the state of the block a window below the tip,
+reads from peers what the store lacks, and keeps all of it. Until that walk
+completes the node keeps only the window, and a walk no peer could serve is
+tried again later. A reorganization deeper than the window walks the new
+chain's state the same way.
 
 A start after a version that kept exactly the tip's state (`tip`) moves that
 state into each chain's window at its tip, so it goes a window later like
 any state, and forgets its counts. What a node kept for a chain it no longer
-hosts goes at its next start.
+hosts goes at its next start. A start on `all` keeps the current state a
+run on `recent` kept; one on `none` lets it go.
 
 A node that is the only holder of a state and lets it go has lost it, so a
 network needs nodes on `all`. Switching to `recent` or `none` applies to state

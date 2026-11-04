@@ -76,10 +76,18 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   stored is named by its chain and the height of the step's newest block,
   and is let go of once the chain's tip is a state window or more above it
   (`--state-window`, 64 blocks unless the operator sets one, per chain or
-  for every chain); `none` is a window of one block. A start lets go of the
-  scopes and counts earlier versions kept a tip's state under. State the
-  store lacks is read from peers by execution, preflight and state reads
-  alike. Pinned by `StateWindowTests`.
+  for every chain); `none` is a window of one block. On `recent` the
+  chain's current scope also names every node of the state of the act-on
+  block a window below the tip, counted per place: a block's state diff
+  moves the counts as the block leaves the window, before its window goes,
+  so a node it created is still held when it joins, and a node goes when
+  no place holds it. With no counts, or counts of a block no longer on the
+  act-on chain, that state is walked off the loop, what the store lacks
+  read from peers and stored, and the windows above it stay until the walk
+  ends. A start lets go of the scopes and counts earlier versions kept a
+  tip's state under, and of the current state of a chain no longer hosted
+  or on `none`. State the store lacks is read from peers by execution,
+  preflight and state reads alike. Pinned by `StateWindowTests`.
 - **NODE-STORAGE-002.i** — With `state: recent` or `none` what a stored
   block reads is named by that block until it executes or is found invalid
   (a start lets go of what an executed block's scope still names). Pinned

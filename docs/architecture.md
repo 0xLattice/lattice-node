@@ -144,12 +144,17 @@ another block becomes its chain's tip. When the operator keeps recent
 state (`state: recent`, or `none`, which is a window of one block), what a
 step's executions stored is named by its chain and the height of the
 step's newest block, and is let go of once that height is a state window
-or more below the chain's tip. On `recent` and on `none`, what a block reads
-is named by that block until it executes. Kept state is a cache: whatever
-reads state the store lacks (execution, a submitted transaction's check, a
-state read) reads it from peers. Pins are in the store and a start leaves
-them as it finds them, but for the scopes earlier versions kept a tip's
-state under, which it lets go of, and sweeps what no scope names. The journal still lists the roots
+or more below the chain's tip. On `recent` the chain's current scope names
+the whole state of the block a window below the tip: counts of the places
+each node holds move by each block's state diff as it leaves the window,
+so the store holds the whole current state and what the window replaced.
+On `recent` and on `none`, what a block reads is named by that block until
+it executes. Kept state is a cache: whatever reads state the store lacks
+(execution, a submitted transaction's check, a state read) reads it from
+peers. Pins are in the store and a start leaves them as it finds them, but
+for the scopes earlier versions kept a tip's state under, which it lets go
+of, and the current state of a chain no longer hosted or no longer on
+`recent`, and sweeps what no scope names. The journal still lists the roots
 each batch stored, and nothing reads that list.
 
 A fact does not depend on its content being held, so a store that lacks
