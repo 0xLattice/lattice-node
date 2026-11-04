@@ -375,8 +375,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/0xLattice/VolumeBroker.git",
       "state" : {
-        "revision" : "095c70f757a53c9a57eee6461aa7c58a7e220cae",
-        "version" : "9.2.3"
+        "revision" : "5780a13de702a1cb929e838e79cca8b06cd8c636",
+        "version" : "9.3.0"
       }
     },
     {

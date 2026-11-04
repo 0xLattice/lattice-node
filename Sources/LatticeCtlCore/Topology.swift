@@ -106,7 +106,8 @@ public struct Topology: Codable, Sendable {
     /// earlier name of `recent`). Absent = `all`.
     public var state: String?
     /// With `recent`, the blocks of each chain, counting its tip, whose
-    /// executions' state is kept (`--state-window`). Absent = 64.
+    /// replaced state is kept beside the current state (`--state-window`).
+    /// Absent = 64.
     public var stateWindow: UInt64?
     /// Per-chain state windows in blocks, by chain path, over `stateWindow`.
     public var stateWindows: [String: UInt64]?

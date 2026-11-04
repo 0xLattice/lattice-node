@@ -9,8 +9,10 @@ import cashew
 @testable import LatticeNode
 import LatticeNodeAPI
 
-/// `state: recent` and `none`: a node keeps what its chains' recent
-/// executions read and created, and reads the rest from peers.
+/// `state: recent` and `none`: on `recent` a node keeps the whole current
+/// state of its chains and what their recent blocks replaced; on `none`
+/// what the last executions read and created. Either reads the rest from
+/// peers.
 final class StateWindowTests: XCTestCase {
     private struct Host {
         let configuration: NodeConfiguration
@@ -26,7 +28,7 @@ final class StateWindowTests: XCTestCase {
 
     private func host(
         keyByte: UInt8, peers: [PeerEndpoint] = [], storageDirectory reused: URL? = nil, state: StateRetention = .all,
-        stateWindow: UInt64? = nil, hosted: Bool = false
+        stateWindow: UInt64? = nil, hosted: Bool = false, peerSearchInterval: TimeInterval = 600
     ) throws -> Host {
         let storageDirectory = reused ?? FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-node-state-\(UUID().uuidString)", isDirectory: true
@@ -40,6 +42,7 @@ final class StateWindowTests: XCTestCase {
             listenPort: port,
             rpcPort: NetworkTransportTestPorts.allocate(),
             webSocket: .off,
+            peerSearchInterval: peerSearchInterval,
             state: state,
             hostedChildren: hosted ? [Self.alpha] : [],
             childSpecs: hosted ? [Self.alpha: Self.alphaSpec] : [:],
@@ -198,9 +201,9 @@ final class StateWindowTests: XCTestCase {
     }
 
     /// State is a cache: a node of the tip's state this store lost (the
-    /// account tree's root, which every account read goes through) is read
-    /// from a peer when a submitted transaction's preflight needs it, and
-    /// the transaction is pooled.
+    /// account tree's root, which every account read goes through, with the
+    /// counts that kept it) is read from a peer when a submitted
+    /// transaction's preflight needs it, and the transaction is pooled.
     func testAPreflightReadsWhatTheStoreLostFromAPeer() async throws {
         let payer: Key = CryptoUtils.generateKeyPair()
         let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(payer))])
@@ -222,6 +225,7 @@ final class StateWindowTests: XCTestCase {
                 guard try await storage.broker.retainedRoots(scope: scope).contains(accounts) else { continue }
                 _ = try await storage.broker.releaseRetainedRoots(scope: scope, roots: [accounts])
             }
+            try await storage.broker.dropCountedScope(scope: storage.scopes.counted(at: ["Nexus"]))
             _ = try await storage.broker.sweep()
             let held = await storage.broker.hasVolume(root: accounts)
             XCTAssertFalse(held, "the store lost the account tree's root")
@@ -259,19 +263,85 @@ final class StateWindowTests: XCTestCase {
         await runtime.stop()
     }
 
-    /// A node on `recent` with a window of 2 lets go of an account's state
-    /// a block paid long ago, and the store is swept. It still answers a
-    /// read of that account and pools a transaction that spends from it:
-    /// both read what the store lacks from a peer.
-    func testRecentAnswersReadsAndChecksOfStateItLetGoOf() async throws {
-        let payer: Key = CryptoUtils.generateKeyPair()
-        let producer = try host(keyByte: 0xd1)
-        let (producerRuntime, _) = try await start(producer)
-        _ = try await producerRuntime.mineBlock(MiningTemplateRequest(
+    /// Every node of the state of `block` with the places it holds in it,
+    /// read from this store alone, walked apart from the node's own walk.
+    private func places(of block: String, in storage: NodeStorage, at path: [String] = ["Nexus"]) async throws -> [String: Int] {
+        let fact = try await storage.store.blockFact(block, at: path)
+        let state = try await LatticeStateHeader(rawCID: try XCTUnwrap(fact?.postStateCID))
+            .resolveRecursive(fetcher: storage.localFetcher)
+        var places: [String: Int] = [:]
+        func count(_ header: any Header) {
+            places[header.rawCID, default: 0] += 1
+            guard let node = header.node else { return }
+            for property in node.properties() {
+                if let child = node.get(property: property) { count(child) }
+            }
+        }
+        count(state)
+        return places
+    }
+
+    /// The chain's counts and their marker.
+    private func counted(_ storage: NodeStorage, at path: [String] = ["Nexus"]) async throws -> (marker: CountedMarker?, counts: [String: Int]) {
+        let state = try await storage.broker.countedState(scope: storage.scopes.counted(at: path))
+        return (state.marker.flatMap(CountedMarker.init), state.counts)
+    }
+
+    /// The oracle: the counts are the places of the tip's state, walked
+    /// fresh from this store (so every node of it is held), plus the places
+    /// each block above the cursor replaced, on the tip's chain.
+    private func assertCountsHold(
+        _ storage: NodeStorage, at path: [String] = ["Nexus"], _ message: String = "",
+        file: StaticString = #filePath, line: UInt = #line
+    ) async throws {
+        let (marker, counts) = try await counted(storage, at: path)
+        let at = try XCTUnwrap(marker, "the counts have a marker", file: file, line: line)
+        var expected = try await places(of: at.tip.cid, in: storage, at: path)
+        var block = at.tip.cid
+        while true {
+            let fact = try await storage.store.blockFact(block, at: path)
+            let held = try XCTUnwrap(fact, file: file, line: line)
+            if held.blockHeight <= at.cursor.height {
+                XCTAssertEqual(block, at.cursor.cid, "the cursor is on the tip's chain", file: file, line: line)
+                break
+            }
+            for (cid, count) in NodeStore.net(held.stateDiff).replaced { expected[cid, default: 0] += count }
+            block = try XCTUnwrap(held.parentBlockHash, file: file, line: line)
+        }
+        XCTAssertEqual(counts, expected, "counts at \(at.text) \(message)", file: file, line: line)
+    }
+
+    /// Whether the counts are moved to `tip` and their cursor is a window
+    /// below it, or above that.
+    private func settled(_ storage: NodeStorage, at tip: String, path: [String] = ["Nexus"]) async throws -> Bool {
+        try await counted(storage, at: path).marker?.tip.cid == tip
+    }
+
+    /// A producer keeping all state whose first block pays `payer` and
+    /// whose next 8 pay no one: the payer's account is written at height 1
+    /// and no later block touches it. Returns the producer, its runtime,
+    /// and its tip.
+    private func produceAnAccountPaidOnce(
+        keyByte: UInt8, payer: Key
+    ) async throws -> (host: Host, runtime: NodeRuntime, tip: String) {
+        let producer = try host(keyByte: keyByte)
+        let (runtime, _) = try await start(producer)
+        _ = try await runtime.mineBlock(MiningTemplateRequest(
             recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(payer))]
         ))
         var tip = ""
-        for _ in 0..<8 { tip = try BlockHeader(node: try await producerRuntime.mineBlock()).rawCID }
+        for _ in 0..<8 { tip = try BlockHeader(node: try await runtime.mineBlock()).rawCID }
+        return (producer, runtime, tip)
+    }
+
+    /// A node on `recent` with a window of 2 keeps the whole current state:
+    /// an account paid at height 1 and untouched by the 8 blocks after is
+    /// still held, its block far below the window, after the store is
+    /// swept. With no peer at all, the node answers a read of that account
+    /// and pools a transaction that spends from it.
+    func testRecentKeepsStateNoRecentBlockTouchedAndServesItWithNoPeers() async throws {
+        let payer: Key = CryptoUtils.generateKeyPair()
+        let (producer, producerRuntime, tip) = try await produceAnAccountPaidOnce(keyByte: 0xd1, payer: payer)
         let produced = await producerRuntime.reads.account(owner: address(payer), blockCID: tip)?.balance
         let paid = try XCTUnwrap(produced)
         XCTAssertGreaterThan(paid, 0)
@@ -281,31 +351,425 @@ final class StateWindowTests: XCTestCase {
             let (runtime, storage) = try await start(node)
             try await eventually("the node executes the producer's blocks") { runtime.published.value?.actOnTip == tip }
             try await eventually("the window is the last 2 blocks") { try await self.windowHeights(storage) == [8, 9] }
+            try await eventually("the counts reach the tip") { try await self.settled(storage, at: tip) }
             await runtime.stop()
             _ = try await storage.broker.sweep()
-            let whole = try await stateNodes(of: tip, in: storage)
-            XCTAssertNil(whole, "the tip's state is not all held: the payer's account went with its block")
+            try await assertCountsHold(storage)
+            let cursor = try await counted(storage).marker?.cursor.height
+            XCTAssertEqual(cursor, 7, "the cursor is a window below the tip")
         }
-        let (runtime, _) = try await start(node)
-        try await eventually("the node is at the tip with a peer") {
-            runtime.published.value?.actOnTip == tip && runtime.peerCount > 0
-        }
+        await producerRuntime.stop()
+        let alone = try host(keyByte: 0xd2, storageDirectory: node.configuration.storagePath, state: .recent, stateWindow: 2)
+        let (runtime, _) = try await start(alone)
+        try await eventually("the node is at the tip") { runtime.published.value?.actOnTip == tip }
+        XCTAssertEqual(runtime.peerCount, 0)
         let read = await runtime.reads.account(owner: address(payer), blockCID: tip)?.balance
-        XCTAssertEqual(read, paid, "the account is read from a peer")
+        XCTAssertEqual(read, paid, "the account is read from this store")
         let response = try await runtime.submitTransaction(SubmitTransactionRequest(
             transaction: try transaction(payer, nonce: 0, moves: [(address(payer), -1)])
         ))
-        XCTAssertEqual(response.mempoolCount, 1, "the transaction is checked against state read from a peer, and pooled")
+        XCTAssertEqual(response.mempoolCount, 1, "the transaction is checked against this store's state, and pooled")
         await runtime.stop()
+    }
+
+    /// What a block replaced goes once the tip is a window above it: on a
+    /// miner on `recent` with a window of 2 whose blocks pay it, the
+    /// account tree block 2 produced, which block 3 replaced and the tip's
+    /// state does not hold, is held while the tip is 4 and gone at 5,
+    /// while the tip's whole state stays.
+    func testRecentLetsGoOfWhatABlockReplacedAWindowLater() async throws {
+        let miner: Key = CryptoUtils.generateKeyPair()
+        let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(miner))])
+        let node = try host(keyByte: 0xdc, state: .recent, stateWindow: 2)
+        let (runtime, storage) = try await start(node)
+        var blocks: [String] = []
+        for _ in 0..<4 { blocks.append(try BlockHeader(node: try await runtime.mineBlock(paid)).rawCID) }
+        let fact = try await storage.store.blockFact(blocks[1], at: ["Nexus"])
+        let state = try await LatticeStateHeader(rawCID: try XCTUnwrap(fact?.postStateCID)).resolve(fetcher: storage.localFetcher)
+        let replaced = try XCTUnwrap(state.node).accountState.rawCID
+        let tipState = try await places(of: blocks[3], in: storage)
+        XCTAssertNil(tipState[replaced], "the tip's state does not hold block 2's account tree")
+        try await eventually("the counts reach 4") { try await self.settled(storage, at: blocks[3]) }
+        var held = await storage.broker.hasVolume(root: replaced)
+        XCTAssertTrue(held, "the tip is 4: block 3 is in the window, and what it replaced is held")
+        let tip = try BlockHeader(node: try await runtime.mineBlock(paid)).rawCID
+        try await eventually("the counts reach 5") { try await self.settled(storage, at: tip) }
+        held = await storage.broker.hasVolume(root: replaced)
+        XCTAssertFalse(held, "the tip is 5: what block 3 replaced went")
+        await runtime.stop()
+        try await assertCountsHold(storage)
+    }
+
+    /// A node that sits in two places of the state stays until both are
+    /// replaced. Keys `ax`, `bx` hold `v`, and `ay`, `by` hold `w`: the
+    /// leaf `x` holding `v` sits under `a` and under `b`. Updating `ax`
+    /// leaves it in one place, and it is held a window later; updating `bx`
+    /// leaves it in none, and it goes a window after that.
+    func testRecentKeepsANodeInTwoPlacesUntilBothAreReplaced() async throws {
+        let miner: Key = CryptoUtils.generateKeyPair()
+        let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(miner))])
+        let node = try host(keyByte: 0xdd, state: .recent, stateWindow: 2)
+        let (runtime, storage) = try await start(node)
+        var nonce: UInt64 = 0
+        @discardableResult
+        func mine(_ actions: [Action] = []) async throws -> String {
+            if !actions.isEmpty {
+                _ = try await runtime.submitTransaction(SubmitTransactionRequest(
+                    transaction: try transaction(miner, nonce: nonce, moves: [(address(miner), -1)], actions: actions)
+                ))
+                nonce += 1
+            }
+            let tip = try BlockHeader(node: try await runtime.mineBlock(paid)).rawCID
+            try await eventually("the counts reach the tip") { try await self.settled(storage, at: tip) }
+            return tip
+        }
+        try await mine()
+        let written = try await mine([
+            Action(key: "ax", oldValue: nil, newValue: "v"), Action(key: "ay", oldValue: nil, newValue: "w"),
+            Action(key: "bx", oldValue: nil, newValue: "v"), Action(key: "by", oldValue: nil, newValue: "w"),
+        ])
+        let leaf = try VolumeRadixHeaderImpl<String>(node: VolumeRadixNodeImpl<String>(prefix: "x", value: "v", children: [:])).rawCID
+        let places = try await places(of: written, in: storage)[leaf]
+        XCTAssertEqual(places, 2, "the leaf sits in two places of block 2's state")
+        try await mine([Action(key: "ax", oldValue: "v", newValue: "v2")])
+        try await mine()
+        try await mine()
+        var count = try await counted(storage).counts[leaf]
+        XCTAssertEqual(count, 1, "in one place still, the leaf is counted once")
+        try await mine([Action(key: "bx", oldValue: "v", newValue: "v2")])
+        try await mine()
+        try await mine()
+        count = try await counted(storage).counts[leaf]
+        XCTAssertNil(count, "in no place, the leaf is not counted")
+        let held = await storage.broker.hasVolume(root: leaf)
+        XCTAssertFalse(held, "in no place, the leaf went")
+        await runtime.stop()
+        try await assertCountsHold(storage)
+    }
+
+    /// A store that lacks part of the current state, as one an earlier
+    /// version kept only a window of (no counts, swept), syncs it from a
+    /// peer at its next start, and keeps it.
+    func testRecentFillsTheCurrentStateItLacksFromAPeer() async throws {
+        let payer: Key = CryptoUtils.generateKeyPair()
+        let (producer, producerRuntime, tip) = try await produceAnAccountPaidOnce(keyByte: 0xda, payer: payer)
+        let node = try host(keyByte: 0xdb, peers: [producer.endpoint], state: .recent, stateWindow: 2, peerSearchInterval: 1)
+        do {
+            let (runtime, storage) = try await start(node)
+            try await eventually("the node executes the producer's blocks") { runtime.published.value?.actOnTip == tip }
+            try await eventually("the counts reach the tip") { try await self.settled(storage, at: tip) }
+            await runtime.stop()
+            try await storage.broker.dropCountedScope(scope: storage.scopes.counted(at: ["Nexus"]))
+            _ = try await storage.broker.sweep()
+            let whole = try await stateNodes(of: tip, in: storage)
+            XCTAssertNil(whole, "the store lacks the payer's account, which no block of the window touched")
+        }
+        do {
+            let (runtime, storage) = try await start(node)
+            try await eventually("the state sync completes and the counts reach the tip") {
+                try await self.settled(storage, at: tip)
+            }
+            await runtime.stop()
+            _ = try await storage.broker.sweep()
+            try await assertCountsHold(storage, "after a state sync read from a peer")
+            let staged = try await storage.broker.retainedRoots(scope: storage.scopes.staging(at: ["Nexus"]))
+            XCTAssertEqual(staged, [], "what the sync read is let go of from staging once counted")
+        }
         await producerRuntime.stop()
     }
 
+    /// Counts left at block 7 of a chain whose every block pays, with what
+    /// blocks 8 and 9 created lost (their windows released, swept): the
+    /// move to the tip finds it missing, heals it from a peer, and moves.
+    func testRecentHealsWhatAMoveFindsMissing() async throws {
+        let (producer, producerRuntime, blocks) = try await produce(0xf4, paying: CryptoUtils.generateKeyPair(), 9)
+        let tip = try XCTUnwrap(blocks.last)
+        let node = try host(keyByte: 0xf5, peers: [producer.endpoint], state: .recent, stateWindow: 2, peerSearchInterval: 1)
+        do {
+            let (runtime, storage) = try await start(node)
+            try await eventually("the node executes the producer's blocks") { runtime.published.value?.actOnTip == tip }
+            try await eventually("the counts reach the tip") { try await self.settled(storage, at: tip) }
+            await runtime.stop()
+            // The counts of block 7's state alone, as if the moves to 8
+            // and 9 had not happened, and what 8 and 9 stored let go of.
+            let (marker, counts) = try await counted(storage)
+            let cursor = try XCTUnwrap(marker?.cursor)
+            var deltas = try await places(of: cursor.cid, in: storage)
+            for (root, count) in counts { deltas[root, default: 0] -= count }
+            try await storage.broker.adjustCountedRoots(
+                scope: storage.scopes.counted(at: ["Nexus"]), deltas: deltas.filter { $0.value != 0 },
+                marker: CountedMarker(cursor: cursor, tip: cursor).text, expectedMarker: marker?.text
+            )
+            for scope in try await storage.broker.retainedScopes(prefix: storage.scopes.windowPrefix(at: ["Nexus"])) {
+                try await storage.release(scope: scope)
+            }
+            _ = try await storage.broker.sweep()
+            let whole = try await stateNodes(of: tip, in: storage)
+            XCTAssertNil(whole, "the store lacks what blocks 8 and 9 created")
+        }
+        let (runtime, storage) = try await start(node)
+        try await eventually("the counts heal and reach the tip") { try await self.settled(storage, at: tip) }
+        await runtime.stop()
+        try await assertCountsHold(storage, "after a heal")
+        let cursor = try await counted(storage).marker?.cursor.height
+        XCTAssertEqual(cursor, 7, "a heal is no state sync: the cursor stays")
+        await producerRuntime.stop()
+    }
+
+    /// Two producers' chains from genesis, a shorter and a longer: each
+    /// block pays `payee`.
+    private func produce(_ keyByte: UInt8, paying payee: Key, _ count: Int) async throws -> (Host, NodeRuntime, [String]) {
+        let producer = try host(keyByte: keyByte)
+        let (runtime, _) = try await start(producer)
+        let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(payee))])
+        var blocks: [String] = []
+        for _ in 0..<count { blocks.append(try BlockHeader(node: try await runtime.mineBlock(paid)).rawCID) }
+        return (producer, runtime, blocks)
+    }
+
+    /// A reorg deeper than the window: a node on `recent` with a window of
+    /// 2 that followed one producer's 4 blocks moves to another's 7 from
+    /// genesis. The cursor's block is no longer on its chain, so a state
+    /// sync replaces the counts: it ends holding that chain's whole current
+    /// state, and none of the state the old counts described.
+    func testAReorgDeeperThanTheWindowResyncs() async throws {
+        let (first, second): (Key, Key) = (CryptoUtils.generateKeyPair(), CryptoUtils.generateKeyPair())
+        let (shorter, shorterRuntime, abandoned) = try await produce(0xde, paying: first, 4)
+        let (longer, longerRuntime, adopted) = try await produce(0xdf, paying: second, 7)
+
+        var node = try host(keyByte: 0xe0, peers: [shorter.endpoint], state: .recent, stateWindow: 2)
+        let counted: String
+        do {
+            let (runtime, storage) = try await start(node)
+            try await eventually("the node follows the shorter chain") { runtime.published.value?.actOnTip == abandoned[3] }
+            try await eventually("the counts reach its tip") { try await self.settled(storage, at: abandoned[3]) }
+            await runtime.stop()
+            let fact = try await storage.store.blockFact(abandoned[3], at: ["Nexus"])
+            let state = try await LatticeStateHeader(rawCID: try XCTUnwrap(fact?.postStateCID)).resolve(fetcher: storage.localFetcher)
+            counted = try XCTUnwrap(state.node).accountState.rawCID
+        }
+        await shorterRuntime.stop()
+        node = try host(
+            keyByte: 0xe0, peers: [longer.endpoint], storageDirectory: node.configuration.storagePath,
+            state: .recent, stateWindow: 2
+        )
+        let (runtime, storage) = try await start(node)
+        try await eventually("the node moves to the longer chain") { runtime.published.value?.actOnTip == adopted[6] }
+        try await eventually("the counts reach its tip") { try await self.settled(storage, at: adopted[6]) }
+        await runtime.stop()
+        await longerRuntime.stop()
+        _ = try await storage.broker.sweep()
+        try await assertCountsHold(storage, "after a reorg deeper than the window")
+        let held = await storage.broker.hasVolume(root: counted)
+        XCTAssertFalse(held, "the shorter chain's state the old counts described went")
+    }
+
+    /// A reorg within the window is undone, not resynced: a node on
+    /// `recent` follows a producer to 3, mines 4' and 5' alone with a
+    /// window of 2 (its cursor reaches 3), then meets the producer's longer
+    /// chain to 9 with a window of 50. Its counts move down to 3 and up the
+    /// other chain, the cursor staying at 3; a state sync would have put it
+    /// 6 below the tip the node then had, which is below 3 until the node
+    /// is at 9.
+    func testAReorgWithinTheWindowIsUndone() async throws {
+        let forked = try await forkedStore(keyBytes: (0xe1, 0xe2), aloneWindow: 2, window: 50)
+        try await assertCountsHold(forked.storage, "after the reorg")
+        let marker = try await counted(forked.storage).marker
+        XCTAssertEqual(marker?.tip.cid, forked.main.last)
+        XCTAssertEqual(marker?.cursor.cid, forked.main[3], "the cursor stays at the fork point")
+    }
+
+    /// One store holding two forks' executed blocks, every node of them
+    /// kept by a window wider than both: a producer's chain `main` (genesis,
+    /// then 9 blocks) and `fork` (4' and 5', from main's 3), which the node
+    /// mined alone (with a window of `aloneWindow`) before meeting the
+    /// producer's longer chain again (with `window`). Both write keys and
+    /// pay. The runtimes are stopped; `remote` reads only this store then.
+    private func forkedStore(
+        keyBytes: (UInt8, UInt8), aloneWindow: UInt64 = 50, window: UInt64
+    ) async throws -> (storage: NodeStorage, remote: IvyRootContentSource, main: [String], fork: [String]) {
+        let miner: Key = CryptoUtils.generateKeyPair()
+        let producer = try host(keyByte: keyBytes.0)
+        let (producerRuntime, _) = try await start(producer)
+        let genesis = try XCTUnwrap(producerRuntime.published.value?.actOnTip)
+        func mine(_ runtime: NodeRuntime, nonce: UInt64?, _ actions: [Action], paying payee: Key) async throws -> String {
+            if let nonce {
+                _ = try await runtime.submitTransaction(SubmitTransactionRequest(transaction: try transaction(
+                    miner, nonce: nonce, moves: [(address(miner), -2), (address(CryptoUtils.generateKeyPair()), 1)], actions: actions
+                )))
+            }
+            return try BlockHeader(node: try await runtime.mineBlock(MiningTemplateRequest(
+                recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(payee))]
+            ))).rawCID
+        }
+        var main = [genesis]
+        main.append(try await mine(producerRuntime, nonce: nil, [], paying: miner))
+        main.append(try await mine(producerRuntime, nonce: 0, [
+            Action(key: "abc", oldValue: nil, newValue: "1"), Action(key: "abd", oldValue: nil, newValue: "1"),
+            Action(key: "xbc", oldValue: nil, newValue: "1"), Action(key: "a", oldValue: nil, newValue: "1"),
+        ], paying: miner))
+        main.append(try await mine(producerRuntime, nonce: 1, [
+            Action(key: "abe", oldValue: nil, newValue: "1"), Action(key: "ab", oldValue: nil, newValue: "1"),
+        ], paying: miner))
+
+        let node = try host(keyByte: keyBytes.1, peers: [producer.endpoint], state: .recent, stateWindow: 50)
+        do {
+            let (runtime, storage) = try await start(node)
+            try await eventually("the node executes the producer's 3 blocks") { runtime.published.value?.actOnTip == main[3] }
+            try await eventually("the counts reach 3") { try await self.settled(storage, at: main[3]) }
+            await runtime.stop()
+        }
+        var fork: [String] = []
+        do {
+            let alone = try host(
+                keyByte: keyBytes.1, storageDirectory: node.configuration.storagePath, state: .recent, stateWindow: aloneWindow
+            )
+            let (runtime, storage) = try await start(alone)
+            fork.append(try await mine(runtime, nonce: 2, [
+                Action(key: "abd", oldValue: "1", newValue: nil), Action(key: "f1", oldValue: nil, newValue: "1"),
+            ], paying: CryptoUtils.generateKeyPair()))
+            fork.append(try await mine(runtime, nonce: 3, [
+                Action(key: "abc", oldValue: "1", newValue: "2"), Action(key: "f2", oldValue: nil, newValue: "1"),
+            ], paying: CryptoUtils.generateKeyPair()))
+            try await eventually("the counts reach 5'") { try await self.settled(storage, at: fork[1]) }
+            await runtime.stop()
+        }
+        main.append(try await mine(producerRuntime, nonce: 2, [
+            Action(key: "abe", oldValue: "1", newValue: nil), Action(key: "abc", oldValue: "1", newValue: nil),
+        ], paying: miner))
+        main.append(try await mine(producerRuntime, nonce: 3, [
+            Action(key: "abc", oldValue: nil, newValue: "1"), Action(key: "xbc", oldValue: "1", newValue: "2"),
+        ], paying: miner))
+        main.append(try await mine(producerRuntime, nonce: 4, [
+            Action(key: "ab", oldValue: "1", newValue: nil), Action(key: "a", oldValue: "1", newValue: nil),
+        ], paying: miner))
+        main.append(try await mine(producerRuntime, nonce: nil, [], paying: miner))
+        main.append(try await mine(producerRuntime, nonce: 5, [Action(key: "abd", oldValue: "1", newValue: "3")], paying: miner))
+        main.append(try await mine(producerRuntime, nonce: nil, [], paying: miner))
+        let rejoined = try host(
+            keyByte: keyBytes.1, peers: [producer.endpoint], storageDirectory: node.configuration.storagePath,
+            state: .recent, stateWindow: window
+        )
+        let (runtime, storage) = try await start(rejoined)
+        try await eventually("the node moves to the producer's chain") { runtime.published.value?.actOnTip == main[9] }
+        try await eventually("the counts reach 9") { try await self.settled(storage, at: main[9]) }
+        await runtime.stop()
+        await producerRuntime.stop()
+        return (storage, IvyRootContentSource(ivy: runtime.ivy, policy: rejoined.configuration.resourcePolicy), main, fork)
+    }
+
+    /// The oracle over every move the counts make, on one store with two
+    /// forks: extending a block at a time, a reorg to the other fork within
+    /// the window, a jump of several blocks, the tip back down to the fork
+    /// point, the window shrinking and growing (as across a restart), a
+    /// settle that wrote nothing (a store failure, or a stop before the
+    /// write: the next one moves from the marker), counts the store refuses
+    /// (a count taken below 0, a stale marker) and a fork below the cursor,
+    /// both answered by a state sync; then a seeded random walk over every
+    /// block and windows of 1 to 6. After each move the counts are the
+    /// places of the tip's state plus what the blocks above the cursor
+    /// replaced.
+    func testTheCountsFollowEveryMoveOfTheTip() async throws {
+        let forked = try await forkedStore(keyBytes: (0xe3, 0xe4), window: 50)
+        let (storage, remote, main, fork) = (forked.storage, forked.remote, forked.main, forked.fork)
+        let nexus = ["Nexus"]
+        func marker() async throws -> String {
+            let marker = try await storage.broker.countedState(scope: storage.scopes.counted(at: nexus)).marker
+            return try XCTUnwrap(marker)
+        }
+        @discardableResult
+        func settle(_ tip: String, _ window: UInt64, line: UInt = #line) async throws -> CountedOutcome {
+            let outcome = await storage.settleCounted(at: nexus, tip: tip, window: window, marker: try await marker())
+            if case .settled = outcome { try await assertCountsHold(storage, "settled at \(tip.suffix(6)) w\(window)", line: line) }
+            return outcome
+        }
+        func resync(_ tip: String, _ window: UInt64, line: UInt = #line) async throws {
+            let block = try await storage.countedSyncBlock(at: nexus, below: tip, window: window)
+            let places = try await storage.syncCountedState(at: nexus, block: block, remote: remote)
+            guard case .settled = await storage.commitCounted(at: nexus, block: block, places: places) else {
+                return XCTFail("the state sync commits", line: line)
+            }
+            await storage.releaseStaging(at: nexus)
+            try await assertCountsHold(storage, "synced at \(block.height)", line: line)
+            guard case .settled = try await settle(tip, window, line: line) else {
+                return XCTFail("the synced counts move to the tip", line: line)
+            }
+        }
+        func isResync(_ outcome: CountedOutcome) -> Bool { if case .resync = outcome { true } else { false } }
+
+        func cursor() async throws -> String? { try await counted(storage).marker?.cursor.cid }
+        // From block 1's state.
+        try await resync(main[1], 1)
+        var at = try await cursor()
+        XCTAssertEqual(at, main[1])
+        // A block at a time.
+        for block in main[2...5] { try await settle(block, 50) }
+        // A reorg within the window, to the other fork.
+        try await settle(fork[1], 50)
+        // A jump of several blocks, back to the first fork.
+        try await settle(main[9], 50)
+        // Back down to the fork point, and up again.
+        try await settle(main[3], 50)
+        try await settle(fork[0], 50)
+        // A window shrunk: the cursor moves to 6.
+        try await settle(main[9], 3)
+        at = try await cursor()
+        XCTAssertEqual(at, main[6])
+        // A window grown: the cursor stays.
+        try await settle(main[8], 50)
+        at = try await cursor()
+        XCTAssertEqual(at, main[6])
+        // A settle to 9 that wrote nothing; the next one, to 9 with a
+        // window of 2, moves from the marker.
+        try await settle(main[9], 2)
+        // A fork below the cursor, and a tip below it: a state sync.
+        var outcome = try await settle(fork[1], 2)
+        XCTAssertTrue(isResync(outcome), "a fork below the cursor")
+        outcome = try await settle(main[5], 2)
+        XCTAssertTrue(isResync(outcome), "a tip below the cursor")
+        try await resync(fork[1], 4)
+        // A stale marker is refused.
+        let stale = try await marker()
+        try await settle(main[9], 4)
+        outcome = await storage.settleCounted(at: nexus, tip: main[8], window: 4, marker: stale)
+        XCTAssertTrue(isResync(outcome), "a stale marker")
+        // A count taken below 0: the state root of the cursor's block,
+        // which the block above it replaced, uncounted behind the node's
+        // back; moving the cursor past that block is refused.
+        let cursorNow = try await cursor()
+        let below = try XCTUnwrap(cursorNow)
+        let fact = try await storage.store.blockFact(below, at: nexus)
+        let root = try XCTUnwrap(fact?.postStateCID)
+        let current = try await marker()
+        try await storage.broker.adjustCountedRoots(
+            scope: storage.scopes.counted(at: nexus), deltas: [root: -1], marker: current, expectedMarker: current
+        )
+        outcome = try await settle(main[9], 2)
+        XCTAssertTrue(isResync(outcome), "a count taken below 0")
+        try await resync(main[9], 2)
+
+        // A seeded random walk.
+        var random = SeededGenerator(seed: 0x5eed)
+        let blocks = main + fork
+        for _ in 0..<40 {
+            let tip = blocks[Int.random(in: 0..<blocks.count, using: &random)]
+            let window = UInt64.random(in: 1...6, using: &random)
+            switch try await settle(tip, window) {
+            case .settled: break
+            case .resync: try await resync(tip, window)
+            case .missing(let roots): XCTFail("every node is held: \(roots)")
+            case .failed(let reason): XCTFail(reason)
+            }
+        }
+    }
+
     /// A child chain behaves as Nexus does: a node hosting Nexus/Alpha on
-    /// `recent` with a window of 2 keeps only Alpha's last 2 heights, and
-    /// after its store is swept answers a read of Alpha state it let go of
-    /// and pools an Alpha transaction spending from it, both read from a
-    /// peer (Alpha's host first).
-    func testAChildChainOnRecentKeepsItsWindowAndReadsTheRestFromAPeer() async throws {
+    /// `recent` with a window of 2 keeps Alpha's last 2 heights and its
+    /// whole current state. After its store is swept, with no peer, it
+    /// answers a read of an account Alpha paid long ago and pools an Alpha
+    /// transaction spending from it. A chain no longer hosted keeps no
+    /// window, counts or staging.
+    func testAChildChainOnRecentKeepsItsWindowAndItsWholeCurrentState() async throws {
         let payer: Key = CryptoUtils.generateKeyPair()
         let producer = try host(keyByte: 0xd5, hosted: true)
         let (producerRuntime, _) = try await start(producer)
@@ -340,27 +804,35 @@ final class StateWindowTests: XCTestCase {
             try await eventually("Alpha's window is its last 2 blocks") {
                 try await self.windowHeights(storage, at: Self.alpha) == [alphaHeight - 1, alphaHeight]
             }
+            try await eventually("Alpha's counts reach its tip") { try await self.settled(storage, at: alphaTip, path: Self.alpha) }
             await runtime.stop()
             _ = try await storage.broker.sweep()
+            try await assertCountsHold(storage, at: Self.alpha)
         }
-        let (runtime, storage) = try await start(node)
-        try await eventually("the node is at Alpha's tip with a peer") {
-            await runtime.levelReads[Self.alpha]?.readSnapshot().tipCID == alphaTip && runtime.peerCount > 0
+        await producerRuntime.stop()
+        let alone = try host(keyByte: 0xd6, storageDirectory: node.configuration.storagePath, state: .recent, stateWindow: 2, hosted: true)
+        let (runtime, storage) = try await start(alone)
+        try await eventually("the node is at Alpha's tip") {
+            await runtime.levelReads[Self.alpha]?.readSnapshot().tipCID == alphaTip
         }
+        XCTAssertEqual(runtime.peerCount, 0)
         let read = await runtime.levelReads[Self.alpha]?.account(owner: address(payer), blockCID: alphaTip)?.balance
-        XCTAssertEqual(read, paid, "Alpha's account is read from a peer")
+        XCTAssertEqual(read, paid, "Alpha's account is read from this store")
         let response = try await runtime.submitTransaction(SubmitTransactionRequest(
             transaction: try transaction(payer, nonce: 0, moves: [(address(payer), -1)], chainPath: Self.alpha)
         ))
-        XCTAssertEqual(response.mempoolCount, 1, "the Alpha transaction is checked against state read from a peer, and pooled")
-        try await eventually("Alpha keeps its window across the restart") {
-            try await !self.windowHeights(storage, at: Self.alpha).isEmpty
-        }
+        XCTAssertEqual(response.mempoolCount, 1, "the Alpha transaction is checked against this store's state, and pooled")
+        try await storage.broker.mergeRetainedRoots(
+            scope: storage.scopes.staging(at: Self.alpha), roots: [node.configuration.nexusGenesisCID]
+        )
         try await runtime.host([])
         let kept = try await windowHeights(storage, at: Self.alpha)
         XCTAssertEqual(kept, [], "a chain no longer hosted keeps no state window")
+        let counts = try await storage.broker.countedScopes(prefix: storage.scopes.counted(at: Self.alpha))
+        XCTAssertEqual(counts, [], "nor counts")
+        let staged = try await storage.broker.retainedRoots(scope: storage.scopes.staging(at: Self.alpha))
+        XCTAssertEqual(staged, [], "nor staging")
         await runtime.stop()
-        await producerRuntime.stop()
     }
 
     /// A start moves what an earlier version kept a hosted chain's tip
@@ -396,6 +868,68 @@ final class StateWindowTests: XCTestCase {
         let counts = try await storage.store.legacyStateCountRows()
         XCTAssertEqual(counts, 0, "the counts are forgotten")
         await runtime.stop()
+    }
+
+    /// A start on `recent` lets go of what an abandoned version kept a
+    /// chain's current state under, the counts of a chain no longer hosted
+    /// with its staging, and the staging of a chain whose counts have a
+    /// marker, and hands the loop that marker.
+    func testAStartLetsGoOfCountsNoLongerNeeded() async throws {
+        let node = try host(keyByte: 0xf6, state: .recent)
+        let genesis = node.configuration.nexusGenesisCID
+        let storage = try await NodeStorage.open(configuration: node.configuration)
+        do {
+            let scopes = storage.scopes
+            try await storage.broker.mergeRetainedRoots(scope: scopes.abandonedCurrentPrefix + "Nexus", roots: [genesis])
+            try await storage.broker.adjustCountedRoots(
+                scope: scopes.counted(at: ["Nexus", "Gone"]), deltas: [genesis: 1], marker: "0 x 0 x", expectedMarker: nil
+            )
+            try await storage.broker.mergeRetainedRoots(scope: scopes.staging(at: ["Nexus", "Gone"]), roots: [genesis])
+            // Counts of Nexus at its genesis, which hold nothing of its
+            // state, but have a marker.
+            try await storage.broker.adjustCountedRoots(
+                scope: scopes.counted(at: ["Nexus"]), deltas: [genesis: 1], marker: "0 \(genesis) 0 \(genesis)",
+                expectedMarker: nil
+            )
+            try await storage.broker.mergeRetainedRoots(scope: scopes.staging(at: ["Nexus"]), roots: [genesis])
+        }
+        let markers = await storage.settleCountedScopes(hosted: [["Nexus"]])
+        XCTAssertEqual(markers, [["Nexus"]: "0 \(genesis) 0 \(genesis)"])
+        let current = try await storage.broker.retainedScopes(prefix: storage.scopes.abandonedCurrentPrefix)
+        XCTAssertEqual(current, [], "what the abandoned version kept goes")
+        let counts = try await storage.broker.countedScopes(prefix: storage.scopes.countedPrefix)
+        XCTAssertEqual(counts, [storage.scopes.counted(at: ["Nexus"])], "the counts of a chain no longer hosted go")
+        let staging = try await storage.broker.retainedScopes(prefix: storage.scopes.stagingPrefix)
+        XCTAssertEqual(staging, [], "with its staging, and the staging of counts with a marker")
+    }
+
+    /// Counts kept on `recent` are kept with the chain on `all`, then
+    /// dropped: the tip's whole state stays after a sweep. On `none` they
+    /// are dropped.
+    func testLeavingRecentDropsTheCounts() async throws {
+        let miner: Key = CryptoUtils.generateKeyPair()
+        let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(miner))])
+        let node = try host(keyByte: 0xf7, state: .recent, stateWindow: 2)
+        var tip = ""
+        do {
+            let (runtime, storage) = try await start(node)
+            for _ in 0..<5 { tip = try BlockHeader(node: try await runtime.mineBlock(paid)).rawCID }
+            try await eventually("the counts reach the tip") { try await self.settled(storage, at: tip) }
+            await runtime.stop()
+        }
+        for state in [StateRetention.all, .none] {
+            let next = try host(keyByte: 0xf7, storageDirectory: node.configuration.storagePath, state: state)
+            let (runtime, storage) = try await start(next)
+            try await eventually("the node is at the tip") { runtime.published.value?.actOnTip == tip }
+            await runtime.stop()
+            let counts = try await storage.broker.countedScopes(prefix: storage.scopes.countedPrefix)
+            XCTAssertEqual(counts, [], "no counts on \(state)")
+            if state == .all {
+                _ = try await storage.broker.sweep()
+                let whole = try await stateNodes(of: tip, in: storage)
+                XCTAssertNotNil(whole, "what the counts kept is kept with the chain")
+            }
+        }
     }
 
     /// The default keeps the state of every block, under no window.
@@ -437,26 +971,35 @@ final class StateWindowTests: XCTestCase {
 }
 
 extension NodeStore {
-    /// The executed block's fact, which names the state it produced.
-    func blockFact(_ blockCID: String, at chainPath: [String]) throws -> ChainBlockFact? {
-        guard let row = try database.row(
-            ImportFactRow.self,
-            "SELECT chain_path, fact_id, payload FROM admission_facts WHERE chain_path = ?1 AND fact_id = ?2",
-            params: [.text(chainPath.joined(separator: "/")), .blob(try Self.encode(ChainFactID.block(blockCID)))]
-        ), case .block(let fact) = try Self.decode(ChainFact.self, from: try row.payload) else { return nil }
-        return fact
-    }
-
-    /// A count as an earlier version kept of a tip's state.
+    /// A count as earlier versions kept of a tip's state, and of a current
+    /// state.
     func writeLegacyStateCount() throws {
         _ = try database.execute("INSERT INTO core_meta (key, value) VALUES ('state_pin:Nexus:x', '1')")
         _ = try database.execute("INSERT INTO core_meta (key, value) VALUES ('state_tip:Nexus', 'x')")
+        _ = try database.execute("INSERT INTO core_meta (key, value) VALUES ('state_count:Nexus:x', '1')")
+        _ = try database.execute("INSERT INTO core_meta (key, value) VALUES ('state_cursor:Nexus', '0 x')")
     }
 
     func legacyStateCountRows() throws -> Int {
         try database.rows(
             ChainFactMetadataRow.self,
-            "SELECT value FROM core_meta WHERE substr(key, 1, 10) IN ('state_pin:', 'state_tip:')"
+            """
+            SELECT value FROM core_meta WHERE substr(key, 1, 10) IN ('state_pin:', 'state_tip:')
+                OR substr(key, 1, 12) = 'state_count:' OR substr(key, 1, 13) = 'state_cursor:'
+            """
         ).count
+    }
+}
+
+/// SplitMix64: the same walk on every run.
+private struct SeededGenerator: RandomNumberGenerator {
+    var state: UInt64
+    init(seed: UInt64) { state = seed }
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
     }
 }

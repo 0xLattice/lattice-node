@@ -144,12 +144,31 @@ another block becomes its chain's tip. When the operator keeps recent
 state (`state: recent`, or `none`, which is a window of one block), what a
 step's executions stored is named by its chain and the height of the
 step's newest block, and is let go of once that height is a state window
-or more below the chain's tip. On `recent` and on `none`, what a block reads
-is named by that block until it executes. Kept state is a cache: whatever
+or more below the chain's tip. On `recent` each chain also has a counted
+scope, the reference counting with delayed deletion of OpenEthereum's journal
+database: the count of each node is the places it holds in the state of the
+chain's act-on tip plus the places the blocks above a cursor, a window below
+the tip, replaced, and the scope's marker names the cursor and the tip. Each
+step moves the counts to the tip in one adjustment, computed from the facts
+of the blocks entering and leaving the act-on chain and of the blocks the
+cursor passes, under a compare-and-swap of the marker, so the counts, the
+cursor and the tip are written together or not at all; the windows are let
+go of only once the counts reached the tip. The store refuses to count a
+node it does not hold, so what the counts name is held. Counts that cannot
+follow (a reorganization below the cursor, a missing fact) or that the store
+refuses are replaced by a state sync, as snap sync does: the state of an
+act-on block a few below the tip is walked off the loop, every node pinned
+under a staging scope as it is visited and read from peers when missing,
+then the difference from the counts is written in one adjustment. A node
+the counts would start counting and the store lacks is healed the same way
+first. On `recent` and on `none`, what a block reads is named by that block
+until it executes. Kept state is a cache: whatever
 reads state the store lacks (execution, a submitted transaction's check, a
 state read) reads it from peers. Pins are in the store and a start leaves
 them as it finds them, but for the scopes earlier versions kept a tip's
-state under, which it lets go of, and sweeps what no scope names. The journal still lists the roots
+state under, which it lets go of, the counts of a chain no longer hosted or
+no longer kept on `recent`, and staging the counts no longer need, and
+sweeps what no scope names. The journal still lists the roots
 each batch stored, and nothing reads that list.
 
 A fact does not depend on its content being held, so a store that lacks
