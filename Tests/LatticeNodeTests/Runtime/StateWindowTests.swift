@@ -287,27 +287,36 @@ final class StateWindowTests: XCTestCase {
         return (state.marker.flatMap(CountedMarker.init), state.counts)
     }
 
-    /// The oracle: the counts are the places of the tip's state, walked
-    /// fresh from this store (so every node of it is held), plus the places
-    /// each block above the cursor replaced, on the tip's chain.
-    private func assertCountsHold(
-        _ storage: NodeStorage, at path: [String] = ["Nexus"], _ message: String = "",
-        file: StaticString = #filePath, line: UInt = #line
-    ) async throws {
+    /// The oracle: the counts, and what they should be: the places of the
+    /// tip's state, walked fresh from this store (so every node of it is
+    /// held), plus the places each block above the cursor replaced, on the
+    /// tip's chain. Throws when a node or fact is missing or the cursor is
+    /// not on the tip's chain.
+    fileprivate func oracle(
+        _ storage: NodeStorage, at path: [String] = ["Nexus"]
+    ) async throws -> (marker: CountedMarker, counts: [String: Int], expected: [String: Int]) {
         let (marker, counts) = try await counted(storage, at: path)
-        let at = try XCTUnwrap(marker, "the counts have a marker", file: file, line: line)
+        let at = try XCTUnwrap(marker, "the counts have a marker")
         var expected = try await places(of: at.tip.cid, in: storage, at: path)
         var block = at.tip.cid
         while true {
             let fact = try await storage.store.blockFact(block, at: path)
-            let held = try XCTUnwrap(fact, file: file, line: line)
+            let held = try XCTUnwrap(fact)
             if held.blockHeight <= at.cursor.height {
-                XCTAssertEqual(block, at.cursor.cid, "the cursor is on the tip's chain", file: file, line: line)
+                guard block == at.cursor.cid else { throw TestWaitError.timedOut("the cursor is not on the tip's chain") }
                 break
             }
             for (cid, count) in NodeStore.net(held.stateDiff).replaced { expected[cid, default: 0] += count }
-            block = try XCTUnwrap(held.parentBlockHash, file: file, line: line)
+            block = try XCTUnwrap(held.parentBlockHash)
         }
+        return (at, counts, expected)
+    }
+
+    fileprivate func assertCountsHold(
+        _ storage: NodeStorage, at path: [String] = ["Nexus"], _ message: String = "",
+        file: StaticString = #filePath, line: UInt = #line
+    ) async throws {
+        let (at, counts, expected) = try await oracle(storage, at: path)
         XCTAssertEqual(counts, expected, "counts at \(at.text) \(message)", file: file, line: line)
     }
 
@@ -449,11 +458,13 @@ final class StateWindowTests: XCTestCase {
 
     /// A store that lacks part of the current state, as one an earlier
     /// version kept only a window of (no counts, swept), syncs it from a
-    /// peer at its next start, and keeps it.
+    /// peer at its next start, and keeps it. The sync that ran before the
+    /// peer connected runs again once it does, not a maintenance pass (10
+    /// minutes here) later.
     func testRecentFillsTheCurrentStateItLacksFromAPeer() async throws {
         let payer: Key = CryptoUtils.generateKeyPair()
         let (producer, producerRuntime, tip) = try await produceAnAccountPaidOnce(keyByte: 0xda, payer: payer)
-        let node = try host(keyByte: 0xdb, peers: [producer.endpoint], state: .recent, stateWindow: 2, peerSearchInterval: 1)
+        let node = try host(keyByte: 0xdb, peers: [producer.endpoint], state: .recent, stateWindow: 2)
         do {
             let (runtime, storage) = try await start(node)
             try await eventually("the node executes the producer's blocks") { runtime.published.value?.actOnTip == tip }
@@ -480,11 +491,12 @@ final class StateWindowTests: XCTestCase {
 
     /// Counts left at block 7 of a chain whose every block pays, with what
     /// blocks 8 and 9 created lost (their windows released, swept): the
-    /// move to the tip finds it missing, heals it from a peer, and moves.
+    /// move to the tip finds it missing, heals it from a peer (again once
+    /// the peer connects, if it was not yet), and moves.
     func testRecentHealsWhatAMoveFindsMissing() async throws {
         let (producer, producerRuntime, blocks) = try await produce(0xf4, paying: CryptoUtils.generateKeyPair(), 9)
         let tip = try XCTUnwrap(blocks.last)
-        let node = try host(keyByte: 0xf5, peers: [producer.endpoint], state: .recent, stateWindow: 2, peerSearchInterval: 1)
+        let node = try host(keyByte: 0xf5, peers: [producer.endpoint], state: .recent, stateWindow: 2)
         do {
             let (runtime, storage) = try await start(node)
             try await eventually("the node executes the producer's blocks") { runtime.published.value?.actOnTip == tip }
@@ -671,96 +683,144 @@ final class StateWindowTests: XCTestCase {
     /// replaced.
     func testTheCountsFollowEveryMoveOfTheTip() async throws {
         let forked = try await forkedStore(keyBytes: (0xe3, 0xe4), window: 50)
-        let (storage, remote, main, fork) = (forked.storage, forked.remote, forked.main, forked.fork)
-        let nexus = ["Nexus"]
-        func marker() async throws -> String {
-            let marker = try await storage.broker.countedState(scope: storage.scopes.counted(at: nexus)).marker
-            return try XCTUnwrap(marker)
-        }
-        @discardableResult
-        func settle(_ tip: String, _ window: UInt64, line: UInt = #line) async throws -> CountedOutcome {
-            let outcome = await storage.settleCounted(at: nexus, tip: tip, window: window, marker: try await marker())
-            if case .settled = outcome { try await assertCountsHold(storage, "settled at \(tip.suffix(6)) w\(window)", line: line) }
-            return outcome
-        }
-        func resync(_ tip: String, _ window: UInt64, line: UInt = #line) async throws {
-            let block = try await storage.countedSyncBlock(at: nexus, below: tip, window: window)
-            let places = try await storage.syncCountedState(at: nexus, block: block, remote: remote)
-            guard case .settled = await storage.commitCounted(at: nexus, block: block, places: places) else {
-                return XCTFail("the state sync commits", line: line)
-            }
-            await storage.releaseStaging(at: nexus)
-            try await assertCountsHold(storage, "synced at \(block.height)", line: line)
-            guard case .settled = try await settle(tip, window, line: line) else {
-                return XCTFail("the synced counts move to the tip", line: line)
-            }
-        }
+        let (main, fork) = (forked.main, forked.fork)
+        let counts = CountsDriver(test: self, storage: forked.storage, remote: forked.remote)
         func isResync(_ outcome: CountedOutcome) -> Bool { if case .resync = outcome { true } else { false } }
+        func isSettled(_ outcome: CountedOutcome) -> Bool { if case .settled = outcome { true } else { false } }
 
-        func cursor() async throws -> String? { try await counted(storage).marker?.cursor.cid }
         // From block 1's state.
-        try await resync(main[1], 1)
-        var at = try await cursor()
+        try await counts.resync(main[1], 1)
+        var at = try await counts.cursor()
         XCTAssertEqual(at, main[1])
         // A block at a time.
-        for block in main[2...5] { try await settle(block, 50) }
+        for block in main[2...5] { try await counts.settle(block, 50) }
         // A reorg within the window, to the other fork.
-        try await settle(fork[1], 50)
+        try await counts.settle(fork[1], 50)
         // A jump of several blocks, back to the first fork.
-        try await settle(main[9], 50)
-        // Back down to the fork point, and up again.
-        try await settle(main[3], 50)
-        try await settle(fork[0], 50)
+        try await counts.settle(main[9], 50)
+        // Back down to the fork point, and up again, walking the counts'
+        // chain again instead of the one the last move left.
+        try await counts.settle(main[3], 50)
+        try await counts.settle(fork[0], 50, forget: true)
         // A window shrunk: the cursor moves to 6.
-        try await settle(main[9], 3)
-        at = try await cursor()
+        try await counts.settle(main[9], 3)
+        at = try await counts.cursor()
         XCTAssertEqual(at, main[6])
         // A window grown: the cursor stays.
-        try await settle(main[8], 50)
-        at = try await cursor()
+        try await counts.settle(main[8], 50)
+        at = try await counts.cursor()
         XCTAssertEqual(at, main[6])
         // A settle to 9 that wrote nothing; the next one, to 9 with a
         // window of 2, moves from the marker.
-        try await settle(main[9], 2)
+        try await counts.settle(main[9], 2)
         // A fork below the cursor, and a tip below it: a state sync.
-        var outcome = try await settle(fork[1], 2)
+        var outcome = try await counts.settle(fork[1], 2)
         XCTAssertTrue(isResync(outcome), "a fork below the cursor")
-        outcome = try await settle(main[5], 2)
+        outcome = try await counts.settle(main[5], 2)
         XCTAssertTrue(isResync(outcome), "a tip below the cursor")
-        try await resync(fork[1], 4)
-        // A stale marker is refused.
-        let stale = try await marker()
-        try await settle(main[9], 4)
-        outcome = await storage.settleCounted(at: nexus, tip: main[8], window: 4, marker: stale)
-        XCTAssertTrue(isResync(outcome), "a stale marker")
+        try await counts.resync(fork[1], 4)
+        // A stale marker: the store's is read again, and the move made
+        // from it.
+        let stale = try await counts.marker()
+        try await counts.settle(main[9], 4)
+        outcome = try await counts.settle(main[8], 4, marker: stale)
+        XCTAssertTrue(isSettled(outcome), "a stale marker is read again from the store")
         // A count taken below 0: the state root of the cursor's block,
         // which the block above it replaced, uncounted behind the node's
         // back; moving the cursor past that block is refused.
-        let cursorNow = try await cursor()
+        try await counts.settle(main[9], 4)
+        let cursorNow = try await counts.cursor()
         let below = try XCTUnwrap(cursorNow)
-        let fact = try await storage.store.blockFact(below, at: nexus)
+        let fact = try await forked.storage.store.blockFact(below, at: ["Nexus"])
         let root = try XCTUnwrap(fact?.postStateCID)
-        let current = try await marker()
-        try await storage.broker.adjustCountedRoots(
-            scope: storage.scopes.counted(at: nexus), deltas: [root: -1], marker: current, expectedMarker: current
+        let current = try await counts.marker()
+        try await forked.storage.broker.adjustCountedRoots(
+            scope: forked.storage.scopes.counted(at: ["Nexus"]), deltas: [root: -1], marker: current, expectedMarker: current
         )
-        outcome = try await settle(main[9], 2)
+        outcome = try await counts.settle(main[9], 2, check: false)
         XCTAssertTrue(isResync(outcome), "a count taken below 0")
-        try await resync(main[9], 2)
+        try await counts.resync(main[9], 2)
 
-        // A seeded random walk.
+        // A seeded random walk, the chain the last move left forgotten now
+        // and then.
         var random = SeededGenerator(seed: 0x5eed)
         let blocks = main + fork
         for _ in 0..<40 {
             let tip = blocks[Int.random(in: 0..<blocks.count, using: &random)]
             let window = UInt64.random(in: 1...6, using: &random)
-            switch try await settle(tip, window) {
+            switch try await counts.settle(tip, window, forget: Bool.random(using: &random)) {
             case .settled: break
-            case .resync: try await resync(tip, window)
+            case .resync: try await counts.resync(tip, window)
             case .missing(let roots): XCTFail("every node is held: \(roots)")
             case .failed(let reason): XCTFail(reason)
             }
         }
+    }
+
+    /// Lattice's case of a diff that was not exact on a radix split: the
+    /// general state holds `aaa` and `aaab`, a block inserts `aab` (which
+    /// splits the node `aaa` and `aaab` share), and the next updates `aaab`.
+    /// The counts follow both blocks without a state sync.
+    func testTheCountsFollowARadixSplit() async throws {
+        try XCTSkipIf(true, "enabled with Lattice 56.1.2, whose diffs are exact on a radix split")
+        let miner: Key = CryptoUtils.generateKeyPair()
+        let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(miner))])
+        let node = try host(keyByte: 0xf8, state: .recent, stateWindow: 50)
+        let (runtime, storage) = try await start(node)
+        var blocks = [try BlockHeader(node: try await runtime.mineBlock(paid)).rawCID]
+        for (nonce, actions) in [
+            [Action(key: "aaa", oldValue: nil, newValue: "1"), Action(key: "aaab", oldValue: nil, newValue: "3")],
+            [Action(key: "aab", oldValue: nil, newValue: "3")],
+            [Action(key: "aaab", oldValue: "3", newValue: "2")],
+        ].enumerated() {
+            _ = try await runtime.submitTransaction(SubmitTransactionRequest(transaction: try transaction(
+                miner, nonce: UInt64(nonce), moves: [(address(miner), -1)], actions: actions
+            )))
+            blocks.append(try BlockHeader(node: try await runtime.mineBlock(paid)).rawCID)
+        }
+        let tip = try XCTUnwrap(blocks.last)
+        try await eventually("the counts reach the tip") { try await self.settled(storage, at: tip) }
+        await runtime.stop()
+        let counts = CountsDriver(
+            test: self, storage: storage,
+            remote: IvyRootContentSource(ivy: runtime.ivy, policy: node.configuration.resourcePolicy)
+        )
+        try await counts.resync(blocks[0], 1)
+        for block in blocks.dropFirst() {
+            let outcome = try await counts.settle(block, 50)
+            guard case .settled = outcome else { return XCTFail("the counts follow \(block): \(outcome)") }
+        }
+    }
+
+    /// At a start the counts are checked against the store: counts that
+    /// count a node once too often (as a rollback, or a fault, may leave
+    /// them) are found, and a state sync replaces them.
+    func testAStartChecksTheCountsAndResyncsWrongOnes() async throws {
+        let miner: Key = CryptoUtils.generateKeyPair()
+        let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(miner))])
+        let node = try host(keyByte: 0xf9, state: .recent, stateWindow: 2)
+        do {
+            let (runtime, storage) = try await start(node)
+            var tip = ""
+            for _ in 0..<4 { tip = try BlockHeader(node: try await runtime.mineBlock(paid)).rawCID }
+            try await eventually("the counts reach the tip") { try await self.settled(storage, at: tip) }
+            await runtime.stop()
+            let fact = try await storage.store.blockFact(tip, at: ["Nexus"])
+            let root = try XCTUnwrap(fact?.postStateCID)
+            let marker = try await counted(storage).marker?.text
+            try await storage.broker.adjustCountedRoots(
+                scope: storage.scopes.counted(at: ["Nexus"]), deltas: [root: 1], marker: try XCTUnwrap(marker), expectedMarker: marker
+            )
+            let wrong = try await oracle(storage)
+            XCTAssertNotEqual(wrong.counts, wrong.expected)
+        }
+        let (runtime, storage) = try await start(node)
+        try await eventually("the check finds the counts wrong and a state sync replaces them") {
+            let now = try await self.oracle(storage)
+            return now.counts == now.expected
+        }
+        await runtime.stop()
+        try await assertCountsHold(storage, "after the start's check")
     }
 
     /// A child chain behaves as Nexus does: a node hosting Nexus/Alpha on
@@ -870,17 +930,15 @@ final class StateWindowTests: XCTestCase {
         await runtime.stop()
     }
 
-    /// A start on `recent` lets go of what an abandoned version kept a
-    /// chain's current state under, the counts of a chain no longer hosted
-    /// with its staging, and the staging of a chain whose counts have a
-    /// marker, and hands the loop that marker.
+    /// A start on `recent` lets go of the counts of a chain no longer
+    /// hosted with its staging, and of the staging of a chain whose counts
+    /// have a marker, and hands the loop that marker.
     func testAStartLetsGoOfCountsNoLongerNeeded() async throws {
         let node = try host(keyByte: 0xf6, state: .recent)
         let genesis = node.configuration.nexusGenesisCID
         let storage = try await NodeStorage.open(configuration: node.configuration)
         do {
             let scopes = storage.scopes
-            try await storage.broker.mergeRetainedRoots(scope: scopes.abandonedCurrentPrefix + "Nexus", roots: [genesis])
             try await storage.broker.adjustCountedRoots(
                 scope: scopes.counted(at: ["Nexus", "Gone"]), deltas: [genesis: 1], marker: "0 x 0 x", expectedMarker: nil
             )
@@ -895,8 +953,6 @@ final class StateWindowTests: XCTestCase {
         }
         let markers = await storage.settleCountedScopes(hosted: [["Nexus"]])
         XCTAssertEqual(markers, [["Nexus"]: "0 \(genesis) 0 \(genesis)"])
-        let current = try await storage.broker.retainedScopes(prefix: storage.scopes.abandonedCurrentPrefix)
-        XCTAssertEqual(current, [], "what the abandoned version kept goes")
         let counts = try await storage.broker.countedScopes(prefix: storage.scopes.countedPrefix)
         XCTAssertEqual(counts, [storage.scopes.counted(at: ["Nexus"])], "the counts of a chain no longer hosted go")
         let staging = try await storage.broker.retainedScopes(prefix: storage.scopes.stagingPrefix)
@@ -971,23 +1027,68 @@ final class StateWindowTests: XCTestCase {
 }
 
 extension NodeStore {
-    /// A count as earlier versions kept of a tip's state, and of a current
-    /// state.
+    /// A count as an earlier version kept of a tip's state.
     func writeLegacyStateCount() throws {
         _ = try database.execute("INSERT INTO core_meta (key, value) VALUES ('state_pin:Nexus:x', '1')")
         _ = try database.execute("INSERT INTO core_meta (key, value) VALUES ('state_tip:Nexus', 'x')")
-        _ = try database.execute("INSERT INTO core_meta (key, value) VALUES ('state_count:Nexus:x', '1')")
-        _ = try database.execute("INSERT INTO core_meta (key, value) VALUES ('state_cursor:Nexus', '0 x')")
     }
 
     func legacyStateCountRows() throws -> Int {
         try database.rows(
             ChainFactMetadataRow.self,
-            """
-            SELECT value FROM core_meta WHERE substr(key, 1, 10) IN ('state_pin:', 'state_tip:')
-                OR substr(key, 1, 12) = 'state_count:' OR substr(key, 1, 13) = 'state_cursor:'
-            """
+            "SELECT value FROM core_meta WHERE substr(key, 1, 10) IN ('state_pin:', 'state_tip:')"
         ).count
+    }
+}
+
+/// Drives a stopped node's counts as its loop does, and checks them
+/// against the oracle after each move that wrote.
+private final class CountsDriver {
+    let test: StateWindowTests
+    let storage: NodeStorage
+    let remote: IvyRootContentSource
+    let path = ["Nexus"]
+    /// The chain the last move left, as the loop keeps it.
+    var known: [String]?
+
+    init(test: StateWindowTests, storage: NodeStorage, remote: IvyRootContentSource) {
+        (self.test, self.storage, self.remote) = (test, storage, remote)
+    }
+
+    func marker() async throws -> String {
+        let marker = try await storage.broker.countedState(scope: storage.scopes.counted(at: path)).marker
+        return try XCTUnwrap(marker)
+    }
+
+    func cursor() async throws -> String? { CountedMarker(try await marker())?.cursor.cid }
+
+    @discardableResult
+    func settle(
+        _ tip: String, _ window: UInt64, forget: Bool = false, marker given: String? = nil, check: Bool = true,
+        file: StaticString = #filePath, line: UInt = #line
+    ) async throws -> CountedOutcome {
+        let marker = if let given { given } else { try await marker() }
+        let outcome = await storage.settleCounted(
+            at: path, tip: tip, window: window, marker: marker, known: forget || given != nil ? nil : known
+        )
+        if case .settled(_, let next) = outcome {
+            known = next
+            if check { try await test.assertCountsHold(storage, "settled at \(tip.suffix(6)) w\(window)", file: file, line: line) }
+        }
+        return outcome
+    }
+
+    /// A state sync of a block a few below `tip`, committed moved to it.
+    func resync(_ tip: String, _ window: UInt64, file: StaticString = #filePath, line: UInt = #line) async throws {
+        let block = try await storage.countedSyncBlock(at: path, below: tip, window: window)
+        let places = try await storage.syncCountedState(at: path, block: block, remote: remote)
+        let outcome = await storage.commitCounted(at: path, block: block, places: places, tip: tip, window: window)
+        guard case .settled(_, let next) = outcome else {
+            return XCTFail("the state sync commits: \(outcome)", file: file, line: line)
+        }
+        known = next
+        await storage.releaseStaging(at: path)
+        try await test.assertCountsHold(storage, "synced at \(block.height), moved to \(tip.suffix(6))", file: file, line: line)
     }
 }
 

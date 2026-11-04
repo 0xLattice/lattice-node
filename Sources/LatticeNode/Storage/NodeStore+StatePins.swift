@@ -21,53 +21,78 @@ extension NodeStore {
     /// act-on block, with the cursor raised to a window below the tip when
     /// that is higher: what the blocks entering the act-on chain created,
     /// less what the blocks leaving it created, less what the blocks the
-    /// cursor passes replaced. Nil when the counts cannot follow: a fact is
-    /// missing, or the cursor's block is not on the tip's chain (the tip is
-    /// below it, or forked from below it). Every block above the cursor on
-    /// the tip's chain is read: a window of them once the cursor moves with
-    /// the tip.
+    /// cursor passes replaced. `known` is the counts' chain, the blocks
+    /// from the cursor up to their tip, as the last change returned it;
+    /// without it (or not matching the marker) it is walked again. Only the
+    /// facts of the blocks entering, leaving and passed are read. Nil when
+    /// the counts cannot follow: a fact is missing, or the cursor's block is
+    /// not on the tip's chain (the tip is below it, or forked from below
+    /// it).
     func countedChange(
-        at chainPath: [String], from marker: CountedMarker, to tip: String, window: UInt64
-    ) throws -> (deltas: [String: Int], marker: CountedMarker)? {
-        // The tip's chain above the cursor, by height.
-        var chain: [UInt64: ChainBlockFact] = [:]
+        at chainPath: [String], from marker: CountedMarker, to tip: String, window: UInt64, known: [String]? = nil
+    ) throws -> CountedChange? {
+        let base = marker.cursor.height
+        var chain: [String]
+        if let known, known.first == marker.cursor.cid, known.last == marker.tip.cid,
+           UInt64(known.count) == marker.tip.height - base + 1 {
+            chain = known
+        } else {
+            guard let walked = try self.chain(from: marker.tip, down: marker.cursor, at: chainPath) else { return nil }
+            chain = walked
+        }
+        // The tip's chain down to where it meets the counts' chain.
+        var entering: [ChainBlockFact] = []
         guard var fact = try blockFact(tip, at: chainPath) else { return nil }
-        let top = CountedMarker.Block(height: fact.blockHeight, cid: tip)
-        while fact.blockHeight > marker.cursor.height {
-            chain[fact.blockHeight] = fact
-            guard let parent = fact.parentBlockHash, let next = try blockFact(parent, at: chainPath) else { return nil }
+        while true {
+            let height = fact.blockHeight
+            if height >= base, height - base < UInt64(chain.count), chain[Int(height - base)] == fact.blockHash { break }
+            guard height > base, let parent = fact.parentBlockHash, let next = try blockFact(parent, at: chainPath) else {
+                return nil
+            }
+            entering.append(fact)
             fact = next
         }
-        guard fact.blockHash == marker.cursor.cid else { return nil }
-        // The blocks the counts' tip had above where the two chains meet.
-        var left: [ChainBlockFact] = []
-        var old = marker.tip
-        while old.height > marker.cursor.height, chain[old.height]?.blockHash != old.cid {
-            guard let fact = try blockFact(old.cid, at: chainPath), let parent = fact.parentBlockHash else { return nil }
-            left.append(fact)
-            old = CountedMarker.Block(height: fact.blockHeight - 1, cid: parent)
-        }
-        guard old.height > marker.cursor.height || old.cid == marker.cursor.cid else { return nil }
-        let height = max(marker.cursor.height, top.height >= window ? top.height - window : 0)
-        var cursor = marker.cursor
-        if height > cursor.height {
-            guard let fact = chain[height] else { return nil }
-            cursor = CountedMarker.Block(height: height, cid: fact.blockHash)
-        }
+        let meet = Int(fact.blockHeight - base)
         var deltas: [String: Int] = [:]
-        for fact in left {
-            for (cid, count) in Self.net(fact.stateDiff).created { deltas[cid, default: 0] -= count }
+        for cid in chain[(meet + 1)...] {
+            guard let left = try blockFact(cid, at: chainPath) else { return nil }
+            for (cid, count) in Self.net(left.stateDiff).created { deltas[cid, default: 0] -= count }
         }
-        for (height, fact) in chain {
-            let net = Self.net(fact.stateDiff)
-            if height > old.height {
-                for (cid, count) in net.created { deltas[cid, default: 0] += count }
-            }
-            if height <= cursor.height {
-                for (cid, count) in net.replaced { deltas[cid, default: 0] -= count }
-            }
+        var facts: [String: ChainBlockFact] = [:]
+        for fact in entering {
+            facts[fact.blockHash] = fact
+            for (cid, count) in Self.net(fact.stateDiff).created { deltas[cid, default: 0] += count }
         }
-        return (deltas.filter { $0.value != 0 }, CountedMarker(cursor: cursor, tip: top))
+        chain = Array(chain[...meet]) + entering.reversed().map(\.blockHash)
+        let top = base + UInt64(chain.count - 1)
+        let passed = Int(max(base, top >= window ? top - window : 0) - base)
+        for cid in chain[1..<(passed + 1)] {
+            guard let crossed = try facts[cid] ?? blockFact(cid, at: chainPath) else { return nil }
+            for (cid, count) in Self.net(crossed.stateDiff).replaced { deltas[cid, default: 0] -= count }
+        }
+        return CountedChange(
+            deltas: deltas.filter { $0.value != 0 },
+            marker: CountedMarker(
+                cursor: CountedMarker.Block(height: base + UInt64(passed), cid: chain[passed]),
+                tip: CountedMarker.Block(height: top, cid: tip)
+            ),
+            known: Array(chain[passed...])
+        )
+    }
+
+    /// The blocks from `bottom` up to `top` on `top`'s chain, lowest first:
+    /// nil when a fact is missing or `bottom` is not below `top`.
+    func chain(from top: CountedMarker.Block, down bottom: CountedMarker.Block, at chainPath: [String]) throws -> [String]? {
+        guard top.height >= bottom.height else { return nil }
+        var chain = [top.cid]
+        while UInt64(chain.count) <= top.height - bottom.height {
+            guard let fact = try blockFact(chain[chain.count - 1], at: chainPath), let parent = fact.parentBlockHash else {
+                return nil
+            }
+            chain.append(parent)
+        }
+        guard chain.last == bottom.cid else { return nil }
+        return chain.reversed()
     }
 
     /// A block's diff netted per node: a block's diff sums its
@@ -90,15 +115,11 @@ extension NodeStore {
         return CountedMarker.Block(height: fact.blockHeight, cid: fact.blockHash)
     }
 
-    /// Drops the counts of a tip's state earlier versions kept, the tips
-    /// they described, and the counts and cursors of a version that kept
-    /// them in state.db.
+    /// Drops the counts of a tip's state earlier versions kept, and the
+    /// tips they described.
     func forgetStateCounts() throws {
         _ = try database.execute(
-            """
-            DELETE FROM core_meta WHERE substr(key, 1, 10) IN ('state_pin:', 'state_tip:')
-                OR substr(key, 1, 12) = 'state_count:' OR substr(key, 1, 13) = 'state_cursor:'
-            """
+            "DELETE FROM core_meta WHERE substr(key, 1, 10) IN ('state_pin:', 'state_tip:')"
         )
     }
 }
@@ -127,4 +148,13 @@ struct CountedMarker: Equatable, Sendable {
     }
 
     var text: String { "\(cursor.height) \(cursor.cid) \(tip.height) \(tip.cid)" }
+}
+
+/// A move of a chain's counts: the deltas, the marker they are written
+/// with, and the blocks from the new cursor up to the tip, which the next
+/// move starts from.
+struct CountedChange: Sendable {
+    let deltas: [String: Int]
+    let marker: CountedMarker
+    let known: [String]
 }

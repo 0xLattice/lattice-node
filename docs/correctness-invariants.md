@@ -84,11 +84,13 @@ set, GHOST, continuity) are the architecture doc's and are checked by
 - **NODE-STORAGE-002.k** — With `state: recent`, once a chain's counts are
   in place, its counted scope counts each node for every place it holds in
   the act-on tip's state plus every place a block above the cursor
-  replaced, the cursor on the tip's chain a window below the tip or higher,
-  never moving down; every node it counts is held. The counts move with the
-  tip in one adjustment under their marker; counts that cannot follow or
-  that the store refuses are replaced whole by a state sync, the old ones
-  serving until then. Pinned by
+  replaced, the cursor on the tip's chain a window below the tip or higher;
+  a move of the tip never lowers the cursor (a state sync may set it lower);
+  every node it counts is held. The counts move with the tip in one
+  adjustment under their marker; counts that cannot follow, that the store
+  refuses, or that a start's check finds do not match the store are
+  replaced whole by a state sync, committed moved to the tip in one
+  adjustment, the old ones serving until then. Pinned by
   `StateWindowTests.testTheCountsFollowEveryMoveOfTheTip` and the other
   `StateWindowTests` that check the counts.
 - **NODE-STORAGE-002.i** — With `state: recent` or `none` what a stored

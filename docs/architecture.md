@@ -159,7 +159,8 @@ follow (a reorganization below the cursor, a missing fact) or that the store
 refuses are replaced by a state sync, as snap sync does: the state of an
 act-on block a few below the tip is walked off the loop, every node pinned
 under a staging scope as it is visited and read from peers when missing,
-then the difference from the counts is written in one adjustment. A node
+then the difference from the counts, moved on to the tip, is written in one
+adjustment. A start checks each chain's counts against the store first. A node
 the counts would start counting and the store lacks is healed the same way
 first. On `recent` and on `none`, what a block reads is named by that block
 until it executes. Kept state is a cache: whatever

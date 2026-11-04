@@ -110,7 +110,8 @@ extension NodeStorage {
     /// Retains the roots this store holds, and returns the ones it lacks.
     /// One it lacks (a body fetched for this step and gone since) is no
     /// fault here: the facts still name it, and whatever reads it next
-    /// fetches it.
+    /// fetches it. A merge refused for a root it lacks is made again with
+    /// only the roots held.
     @discardableResult
     nonisolated func retainHeld(_ roots: [String], scope: String? = nil) async throws -> [String] {
         var roots = Set(roots)
@@ -119,9 +120,13 @@ extension NodeStorage {
             do {
                 try await broker.mergeRetainedRoots(scope: scope ?? retentionScope, roots: roots.sorted())
                 break
-            } catch BrokerError.missingRetainedRoot(let root) {
-                roots.remove(root)
-                lacked.append(root)
+            } catch BrokerError.missingRetainedRoot(let missing) {
+                for root in roots {
+                    let held = root == missing ? false : await broker.hasVolume(root: root)
+                    guard !held else { continue }
+                    roots.remove(root)
+                    lacked.append(root)
+                }
             }
         }
         return lacked

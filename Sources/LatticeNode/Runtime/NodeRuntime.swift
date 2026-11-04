@@ -386,7 +386,7 @@ public final class NodeRuntime: Sendable {
             await storage.letGoOfReads()
             await storage.moveLegacyState(tips: state.core.levels.mapValues(\.snapshot.actOnHeight))
             for (path, marker) in await storage.settleCountedScopes(hosted: Set(state.core.levels.keys)) {
-                state.counted[path] = CountedChain(marker: marker)
+                state.audit(path, marker: marker)
             }
             await state.settleState()
             state.refreshView()
@@ -510,7 +510,15 @@ extension NodeRuntime {
                 // reached no one who still holds it: the pass the next
                 // session starts announces it again.
                 if ready.isEmpty { announcedRoots = announcedRoots.mapValues { _ in 0 } }
-                if ready.count > oldValue.values.filter(\.ready).count { startNetworkMaintenance() }
+                if ready.count > oldValue.values.filter(\.ready).count {
+                    startNetworkMaintenance()
+                    // A state sync or heal that failed, for want of a peer
+                    // most likely, runs again at the next step.
+                    for (path, chain) in counted where chain.waiting {
+                        counted[path]?.waiting = false
+                        stateTips[path] = nil
+                    }
+                }
             }
         }
         var nextSession: UInt64 = 1
@@ -737,10 +745,13 @@ extension NodeRuntime {
                 // not read.
                 operatorPins = configuration.announcePins ? await storage.operatorPins() : []
                 startNetworkMaintenance()
-                // A state sync or heal that failed runs again.
-                let waiting = counted.filter(\.value.waiting).keys
-                if !waiting.isEmpty {
-                    for path in waiting {
+                // Counts behind their tip (a store failure on a chain with no
+                // block since, or a repair that failed) are settled again.
+                if configuration.state == .recent {
+                    for (path, level) in core.levels {
+                        let chain = counted[path]
+                        guard chain?.waiting == true
+                            || chain?.marker.flatMap(CountedMarker.init)?.tip.cid != level.snapshot.actOnTip else { continue }
                         counted[path]?.waiting = false
                         stateTips[path] = nil
                     }
@@ -761,6 +772,10 @@ extension NodeRuntime {
                 switch repair {
                 case .synced(let block, let places): chain.synced = (block, places)
                 case .healed: break
+                case .audited(let known?): chain.known = known
+                case .audited(nil):
+                    SyncTrace.log(chain: path, "counts do not match the store at start: resync")
+                    (chain.marker, chain.known) = (nil, nil)
                 case .failed: chain.waiting = true
                 }
                 counted[path] = chain
@@ -1813,68 +1828,75 @@ extension NodeRuntime {
         }
 
         /// On `recent`: the chain's counts move to its act-on tip, or a
-        /// state sync's counts are committed and then moved. Roots the store
+        /// state sync's counts are committed moved to it. Roots the store
         /// lacks are healed first; counts that cannot follow, or that the
         /// store refuses, are replaced by a state sync, the old ones serving
         /// until it commits; a store failure is tried again at the next
-        /// settle. A heal or state sync runs off the loop, one at a time, and
-        /// settles again when it ends; one that failed waits for the next
-        /// maintenance pass. True when the counts reached the tip, or the
-        /// operator keeps no counts.
+        /// settle or maintenance pass. A check, heal or state sync runs off
+        /// the loop, one at a time, and settles again when it ends; one that
+        /// failed waits for a new peer or the next maintenance pass. True
+        /// when the counts reached the tip, or the operator keeps no counts.
         private mutating func settleCounted(at path: ChainPath, tip: String) async -> Bool {
             guard configuration.state == .recent, let window = configuration.stateWindow(for: path) else { return true }
             var chain = counted[path] ?? CountedChain()
             defer { counted[path] = chain }
             guard chain.repair == nil, !chain.waiting else { return false }
-            while true {
-                let committing = chain.synced != nil
-                let outcome: CountedOutcome
-                if let synced = chain.synced {
-                    outcome = await storage.commitCounted(at: path, block: synced.block, places: synced.places)
-                } else if let marker = chain.marker, !chain.resync {
-                    outcome = await storage.settleCounted(at: path, tip: tip, window: window, marker: marker)
-                } else {
-                    repair(path, &chain) { storage, remote in
-                        let block = try await storage.countedSyncBlock(at: path, below: tip, window: window)
-                        return .synced(block, try await storage.syncCountedState(at: path, block: block, remote: remote))
-                    }
-                    return false
-                }
-                switch outcome {
-                case .settled(let marker):
-                    if chain.staged {
-                        await storage.releaseStaging(at: path)
-                        chain.staged = false
-                    }
-                    (chain.marker, chain.synced, chain.resync) = (marker, nil, false)
-                    // A state sync's counts move on to the tip.
-                    if committing { continue }
-                    return true
-                case .missing(let roots):
-                    SyncTrace.log(chain: path, "counts heal \(roots.count) roots this store lacks")
-                    repair(path, &chain) { storage, remote in
-                        try await storage.healCounted(roots, at: path, remote: remote)
-                        return .healed
-                    }
-                case .resync(let reason):
-                    SyncTrace.log(chain: path, "counts resync: \(reason)")
-                    (chain.synced, chain.resync) = (nil, true)
-                    continue
-                case .failed(let reason):
-                    SyncTrace.log(chain: path, "counts not moved: \(reason)")
-                }
+            let outcome: CountedOutcome
+            if let synced = chain.synced {
+                outcome = await storage.commitCounted(
+                    at: path, block: synced.block, places: synced.places, tip: tip, window: window
+                )
+            } else if let marker = chain.marker {
+                outcome = await storage.settleCounted(at: path, tip: tip, window: window, marker: marker, known: chain.known)
+            } else {
+                stateSync(path, &chain, tip: tip, window: window)
                 return false
+            }
+            switch outcome {
+            case .settled(let marker, let known):
+                let moved = marker != chain.marker
+                (chain.marker, chain.known, chain.synced) = (marker, known, nil)
+                // What a state sync or heal read is counted now.
+                if moved { await storage.releaseStaging(at: path) }
+                return true
+            case .missing(let roots):
+                SyncTrace.log(chain: path, "counts heal \(roots.count) roots this store lacks")
+                repair(path, &chain) { storage, remote in
+                    try await storage.healCounted(roots, at: path, remote: remote)
+                    return .healed
+                }
+            case .resync(let reason):
+                SyncTrace.log(chain: path, "counts resync: \(reason)")
+                (chain.marker, chain.known, chain.synced) = (nil, nil, nil)
+                stateSync(path, &chain, tip: tip, window: window)
+            case .failed(let reason):
+                SyncTrace.log(chain: path, "counts not moved: \(reason)")
+            }
+            return false
+        }
+
+        private mutating func stateSync(_ path: ChainPath, _ chain: inout CountedChain, tip: String, window: UInt64) {
+            repair(path, &chain) { storage, remote in
+                let block = try await storage.countedSyncBlock(at: path, below: tip, window: window)
+                return .synced(block, try await storage.syncCountedState(at: path, block: block, remote: remote))
             }
         }
 
-        /// Runs a heal or state sync of the chain's counts off the loop; it
-        /// posts how it ended.
+        /// At a start: the counts of the chain at `path`, with `marker`,
+        /// are checked against the store off the loop before they move.
+        mutating func audit(_ path: ChainPath, marker: String) {
+            var chain = CountedChain(marker: marker)
+            repair(path, &chain) { storage, _ in .audited(await storage.auditCounted(at: path, marker: marker)) }
+            counted[path] = chain
+        }
+
+        /// Runs a check, heal or state sync of the chain's counts off the
+        /// loop; it posts how it ended.
         private mutating func repair(
             _ path: ChainPath, _ chain: inout CountedChain,
             _ work: @escaping @Sendable (NodeStorage, IvyRootContentSource) async throws -> CountedRepair
         ) {
             nextRepair += 1
-            chain.staged = true
             let (id, storage, remote, inputs) = (nextRepair, storage, remote, inputs)
             chain.repair = (id, Task {
                 let ended: CountedRepair
@@ -1920,24 +1942,27 @@ private final class Handoff<Value>: @unchecked Sendable {
 
 /// The loop's view of one chain's counts on `recent`.
 struct CountedChain {
-    /// The counts' marker, nil before a state sync committed.
+    /// The counts' marker; nil before a state sync committed, or once they
+    /// are in doubt and a state sync is to replace them.
     var marker: String?
-    /// The heal or state sync running off the loop.
+    /// The blocks from the cursor up to the counts' tip, as the last move
+    /// left them: the next move reads only the facts it needs.
+    var known: [String]?
+    /// The check, heal or state sync running off the loop.
     var repair: (id: UInt64, task: Task<Void, Never>)?
     /// A state sync's counts, until committed.
     var synced: (block: CountedMarker.Block, places: [String: Int])?
-    /// The counts are in doubt: a state sync replaces them.
-    var resync = false
-    /// The last repair failed: the next maintenance pass runs it again.
+    /// The last repair failed: a new peer or the next maintenance pass
+    /// runs it again.
     var waiting = false
-    /// The staging scope may hold what a repair read.
-    var staged = false
 }
 
-/// How a heal or state sync of a chain's counts ended.
+/// How a check, heal or state sync of a chain's counts ended.
 enum CountedRepair: Sendable {
     /// The state of `block`, every node with the places it holds there.
     case synced(CountedMarker.Block, [String: Int])
     case healed
+    /// The start's check: the counts' chain when they match the store.
+    case audited([String]?)
     case failed
 }

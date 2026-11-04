@@ -531,10 +531,10 @@ with the cursor and the tip they were moved to in one transaction, so a stop
 never leaves them half moved. As the tip moves, the counts move with it in one
 write: what the blocks entering the chain created is added, what the blocks
 leaving it created is taken away, and what each block the cursor passes
-replaced is taken away, the cursor a window below the tip (it never moves
-down). A node a block replaced is so kept until the tip is a window past that
-block, and a reorganization that does not reach below the cursor is undone
-from the counts.
+replaced is taken away, the cursor a window below the tip (a move of the tip
+never takes it down; a state sync may set it lower). A node a block replaced
+is so kept until the tip is a window past that block, and a reorganization
+that does not reach below the cursor is undone from the counts.
 
 Counts that cannot follow the tip (a reorganization below the cursor, a fact
 missing) or that the store refuses (a count below zero), and a chain with none
@@ -543,11 +543,19 @@ sync: the node walks the state of a block a few below its tip, node by node,
 reading what it lacks from peers, then replaces the counts with that state's
 in one write and moves them on to the tip. A node the counts would start
 counting and the store lacks is read from peers first, then the counts move.
-What a state sync or such a read fetched is held until the counts name it. Until
-the new counts are written the old ones stay, and while the counts are behind
-the tip no window is let go of. A state sync or read that fails runs again at
-the next maintenance pass; a write the store failed runs again when the tip
-next moves.
+What a state sync or such a read fetched is held until the counts name it,
+and a state sync that fails lets go of what it held beyond where it reached.
+Until the new counts are written the old ones stay, and while the counts are
+behind the tip no window is let go of. A state sync or read that fails (at a
+first start, before any peer has connected) runs again when a peer connects,
+or at the next maintenance pass; a write the store failed runs again when the
+tip next moves or at the next maintenance pass. At each start the counts are
+checked against the store, walking the tip's state from the store alone; counts
+that do not match it are replaced by a state sync.
+
+A chain no longer hosted (removed from a running node's hosted chains, or
+left out at a start) loses its counts and what its state sync held; hosting
+it again starts with a state sync.
 
 Kept state is a cache, not a promise: execution, a submitted transaction's
 check, and state reads all read the state this node does not hold from
