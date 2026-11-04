@@ -91,8 +91,9 @@ public enum BlockBodies: String, Sendable, CaseIterable {
 public enum StateRetention: String, Sendable, CaseIterable {
     /// The state of every block it executed.
     case all
-    /// What the executions of a chain's most recent blocks read and created,
-    /// for its state window (`NodeConfiguration.stateWindow(for:)`).
+    /// The whole current state of each chain, and what its most recent
+    /// blocks replaced, for its state window
+    /// (`NodeConfiguration.stateWindow(for:)`).
     case recent
     /// What the last execution read and created, until the next.
     case none

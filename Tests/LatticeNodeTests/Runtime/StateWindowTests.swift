@@ -9,8 +9,10 @@ import cashew
 @testable import LatticeNode
 import LatticeNodeAPI
 
-/// `state: recent` and `none`: a node keeps what its chains' recent
-/// executions read and created, and reads the rest from peers.
+/// `state: recent` and `none`: on `recent` a node keeps the whole current
+/// state of each chain and what its last window of blocks replaced; on
+/// `none` what its last execution read and created. It reads the rest
+/// from peers.
 final class StateWindowTests: XCTestCase {
     private struct Host {
         let configuration: NodeConfiguration
@@ -87,8 +89,10 @@ final class StateWindowTests: XCTestCase {
     /// Every node of the state of `block`, with how many nodes of that
     /// state name it (its root once), read from this store alone: nil when
     /// a node of it is not held.
-    private func stateNodes(of block: String, in storage: NodeStorage) async throws -> [String: Int]? {
-        let fact = try await storage.store.blockFact(block, at: ["Nexus"])
+    private func stateNodes(
+        of block: String, in storage: NodeStorage, at path: [String] = ["Nexus"]
+    ) async throws -> [String: Int]? {
+        let fact = try await storage.store.blockFact(block, at: path)
         let root = try XCTUnwrap(fact?.postStateCID)
         guard let state = try? await LatticeStateHeader(rawCID: root).resolveRecursive(fetcher: storage.localFetcher) else {
             return nil
@@ -259,19 +263,37 @@ final class StateWindowTests: XCTestCase {
         await runtime.stop()
     }
 
-    /// A node on `recent` with a window of 2 lets go of an account's state
-    /// a block paid long ago, and the store is swept. It still answers a
-    /// read of that account and pools a transaction that spends from it:
-    /// both read what the store lacks from a peer.
-    func testRecentAnswersReadsAndChecksOfStateItLetGoOf() async throws {
-        let payer: Key = CryptoUtils.generateKeyPair()
-        let producer = try host(keyByte: 0xd1)
-        let (producerRuntime, _) = try await start(producer)
-        _ = try await producerRuntime.mineBlock(MiningTemplateRequest(
+    /// A producer keeping all state whose first block pays `payer` and
+    /// whose next 8 pay no one: the payer's account is written at height 1
+    /// and no later block touches it. Returns the producer, its runtime,
+    /// and its tip.
+    private func produceAnAccountPaidOnce(
+        keyByte: UInt8, payer: Key
+    ) async throws -> (host: Host, runtime: NodeRuntime, tip: String) {
+        let producer = try host(keyByte: keyByte)
+        let (runtime, _) = try await start(producer)
+        _ = try await runtime.mineBlock(MiningTemplateRequest(
             recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(payer))]
         ))
         var tip = ""
-        for _ in 0..<8 { tip = try BlockHeader(node: try await producerRuntime.mineBlock()).rawCID }
+        for _ in 0..<8 { tip = try BlockHeader(node: try await runtime.mineBlock()).rawCID }
+        return (producer, runtime, tip)
+    }
+
+    /// The height of the block whose state the chain's current scope
+    /// holds.
+    private func currentHeight(_ storage: NodeStorage, at path: [String] = ["Nexus"]) async -> UInt64? {
+        await storage.currentStateCursor(at: path)?.height
+    }
+
+    /// A node on `recent` with a window of 2 keeps the whole current state:
+    /// an account paid at height 1 and untouched by the 8 blocks after is
+    /// still held, its block far below the window, after the store is
+    /// swept. With no peer at all, the node answers a read of that account
+    /// and pools a transaction that spends from it.
+    func testRecentKeepsStateNoRecentBlockTouchedAndServesItWithNoPeers() async throws {
+        let payer: Key = CryptoUtils.generateKeyPair()
+        let (producer, producerRuntime, tip) = try await produceAnAccountPaidOnce(keyByte: 0xd1, payer: payer)
         let produced = await producerRuntime.reads.account(owner: address(payer), blockCID: tip)?.balance
         let paid = try XCTUnwrap(produced)
         XCTAssertGreaterThan(paid, 0)
@@ -281,31 +303,194 @@ final class StateWindowTests: XCTestCase {
             let (runtime, storage) = try await start(node)
             try await eventually("the node executes the producer's blocks") { runtime.published.value?.actOnTip == tip }
             try await eventually("the window is the last 2 blocks") { try await self.windowHeights(storage) == [8, 9] }
+            try await eventually("the current state is the block's a window below the tip") {
+                await self.currentHeight(storage) == 7
+            }
             await runtime.stop()
             _ = try await storage.broker.sweep()
             let whole = try await stateNodes(of: tip, in: storage)
-            XCTAssertNil(whole, "the tip's state is not all held: the payer's account went with its block")
+            XCTAssertNotNil(whole, "the tip's whole state is held, the payer's account with it")
         }
-        let (runtime, _) = try await start(node)
-        try await eventually("the node is at the tip with a peer") {
-            runtime.published.value?.actOnTip == tip && runtime.peerCount > 0
-        }
+        await producerRuntime.stop()
+        let alone = try host(keyByte: 0xd2, storageDirectory: node.configuration.storagePath, state: .recent, stateWindow: 2)
+        let (runtime, _) = try await start(alone)
+        try await eventually("the node is at the tip") { runtime.published.value?.actOnTip == tip }
+        XCTAssertEqual(runtime.peerCount, 0)
         let read = await runtime.reads.account(owner: address(payer), blockCID: tip)?.balance
-        XCTAssertEqual(read, paid, "the account is read from a peer")
+        XCTAssertEqual(read, paid, "the account is read from this store")
         let response = try await runtime.submitTransaction(SubmitTransactionRequest(
             transaction: try transaction(payer, nonce: 0, moves: [(address(payer), -1)])
         ))
-        XCTAssertEqual(response.mempoolCount, 1, "the transaction is checked against state read from a peer, and pooled")
+        XCTAssertEqual(response.mempoolCount, 1, "the transaction is checked against this store's state, and pooled")
         await runtime.stop()
+    }
+
+    /// A store that lacks part of the current state, as one an earlier
+    /// version kept only a window of (no counts, no current scope, swept),
+    /// reads it from a peer at its next start and keeps it.
+    func testRecentFillsTheCurrentStateItLacksFromAPeer() async throws {
+        let payer: Key = CryptoUtils.generateKeyPair()
+        let (producer, producerRuntime, tip) = try await produceAnAccountPaidOnce(keyByte: 0xda, payer: payer)
+        let node = try host(keyByte: 0xdb, peers: [producer.endpoint], state: .recent, stateWindow: 2)
+        do {
+            let (runtime, storage) = try await start(node)
+            try await eventually("the node executes the producer's blocks") { runtime.published.value?.actOnTip == tip }
+            try await eventually("the current state is the block's a window below the tip") {
+                await self.currentHeight(storage) == 7
+            }
+            await runtime.stop()
+            try await storage.store.forgetCurrentState(at: ["Nexus"])
+            try await storage.release(scope: storage.scopes.current(at: ["Nexus"]))
+            _ = try await storage.broker.sweep()
+            let whole = try await stateNodes(of: tip, in: storage)
+            XCTAssertNil(whole, "the store lacks the payer's account, which no block of the window touched")
+        }
+        do {
+            let (runtime, storage) = try await start(node)
+            try await eventually("the node is at the tip with a peer") {
+                runtime.published.value?.actOnTip == tip && runtime.peerCount > 0
+            }
+            // A walk that found no peer yet is tried again as the tip moves.
+            let next = try BlockHeader(node: try await producerRuntime.mineBlock()).rawCID
+            try await eventually("the node executes the next block") { runtime.published.value?.actOnTip == next }
+            try await eventually("the whole current state is held again") {
+                let height = await self.currentHeight(storage)
+                return try await self.stateNodes(of: next, in: storage) != nil && height == 8
+            }
+            await runtime.stop()
+            _ = try await storage.broker.sweep()
+            let whole = try await stateNodes(of: next, in: storage)
+            XCTAssertNotNil(whole, "what was read from the peer is kept")
+        }
         await producerRuntime.stop()
     }
 
+    /// What a block replaced goes once the tip is a window above it: on a
+    /// miner on `recent` with a window of 2, the state block 2 produced,
+    /// which block 3 replaced, is held while the tip is 4 and gone at 5.
+    func testRecentLetsGoOfWhatABlockReplacedAWindowLater() async throws {
+        let miner: Key = CryptoUtils.generateKeyPair()
+        let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(miner))])
+        let node = try host(keyByte: 0xdc, state: .recent, stateWindow: 2)
+        let (runtime, storage) = try await start(node)
+        var blocks: [String] = []
+        for _ in 0..<4 { blocks.append(try BlockHeader(node: try await runtime.mineBlock(paid)).rawCID) }
+        let fact = try await storage.store.blockFact(blocks[1], at: ["Nexus"])
+        let replaced = try XCTUnwrap(fact?.postStateCID)
+        let stateOf3 = try await storage.store.blockFact(blocks[2], at: ["Nexus"])?.postStateCID
+        XCTAssertNotEqual(replaced, stateOf3, "block 3 replaced the state block 2 produced")
+        try await eventually("the current state is block 2's") { await self.currentHeight(storage) == 2 }
+        var held = await storage.broker.hasVolume(root: replaced)
+        XCTAssertTrue(held, "the tip is 4: block 3 is in the window, and what it replaced is held")
+        _ = try await runtime.mineBlock(paid)
+        try await eventually("the current state is block 3's") { await self.currentHeight(storage) == 3 }
+        held = await storage.broker.hasVolume(root: replaced)
+        XCTAssertFalse(held, "the tip is 5: what block 3 replaced went")
+        await runtime.stop()
+    }
+
+    /// A node that sits in two places of the state stays until both are
+    /// replaced. Keys `ax`, `bx` hold `v`, and `ay`, `by` hold `w`: the
+    /// leaf `x` holding `v` sits under `a` and under `b`. Updating `ax`
+    /// leaves it in one place, and it is held a window later; updating `bx`
+    /// leaves it in none, and it goes a window after that.
+    func testRecentKeepsANodeInTwoPlacesUntilBothAreReplaced() async throws {
+        let miner: Key = CryptoUtils.generateKeyPair()
+        let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(miner))])
+        let node = try host(keyByte: 0xdd, state: .recent, stateWindow: 2)
+        let (runtime, storage) = try await start(node)
+        var nonce: UInt64 = 0
+        @discardableResult
+        func mine(_ actions: [Action] = []) async throws -> String {
+            if !actions.isEmpty {
+                _ = try await runtime.submitTransaction(SubmitTransactionRequest(
+                    transaction: try transaction(miner, nonce: nonce, moves: [(address(miner), -1)], actions: actions)
+                ))
+                nonce += 1
+            }
+            return try BlockHeader(node: try await runtime.mineBlock(paid)).rawCID
+        }
+        try await mine()
+        let written = try await mine([
+            Action(key: "ax", oldValue: nil, newValue: "v"), Action(key: "ay", oldValue: nil, newValue: "w"),
+            Action(key: "bx", oldValue: nil, newValue: "v"), Action(key: "by", oldValue: nil, newValue: "w"),
+        ])
+        let leaf = try VolumeRadixHeaderImpl<String>(node: VolumeRadixNodeImpl<String>(prefix: "x", value: "v", children: [:])).rawCID
+        let places = try await stateNodes(of: written, in: storage)?[leaf]
+        XCTAssertEqual(places, 2, "the leaf sits in two places of block 2's state")
+        try await mine([Action(key: "ax", oldValue: "v", newValue: "v2")])
+        try await mine()
+        try await mine()
+        try await eventually("the current state is block 3's") { await self.currentHeight(storage) == 3 }
+        var held = try await storage.broker.retainedRoots(scope: storage.scopes.current(at: ["Nexus"])).contains(leaf)
+        XCTAssertTrue(held, "in one place still, the leaf is in the current state")
+        try await mine([Action(key: "bx", oldValue: "v", newValue: "v2")])
+        try await mine()
+        try await mine()
+        try await eventually("the current state is block 6's") { await self.currentHeight(storage) == 6 }
+        held = await storage.broker.hasVolume(root: leaf)
+        XCTAssertFalse(held, "in no place, the leaf went")
+        await runtime.stop()
+    }
+
+    /// A reorg deeper than the window: a node on `recent` with a window of
+    /// 2 that followed one producer's 4 blocks moves to another's 7 from
+    /// genesis. The block its counts describe is no longer on its chain,
+    /// so it walks the new chain's state: it ends holding that chain's
+    /// whole current state, and none of the state its counts described.
+    func testAReorgDeeperThanTheWindowWalksTheNewChainsState() async throws {
+        let (first, second): (Key, Key) = (CryptoUtils.generateKeyPair(), CryptoUtils.generateKeyPair())
+        func produce(_ keyByte: UInt8, paying payee: Key, _ count: Int) async throws -> (Host, NodeRuntime, [String]) {
+            let producer = try host(keyByte: keyByte)
+            let (runtime, _) = try await start(producer)
+            let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(payee))])
+            var blocks: [String] = []
+            for _ in 0..<count { blocks.append(try BlockHeader(node: try await runtime.mineBlock(paid)).rawCID) }
+            return (producer, runtime, blocks)
+        }
+        let (shorter, shorterRuntime, abandoned) = try await produce(0xde, paying: first, 4)
+        let (longer, longerRuntime, adopted) = try await produce(0xdf, paying: second, 7)
+
+        var node = try host(keyByte: 0xe0, peers: [shorter.endpoint], state: .recent, stateWindow: 2)
+        let counted: String
+        do {
+            let (runtime, storage) = try await start(node)
+            try await eventually("the node follows the shorter chain") { runtime.published.value?.actOnTip == abandoned[3] }
+            try await eventually("the current state is the shorter chain's block 2's") {
+                await storage.currentStateCursor(at: ["Nexus"])?.block == abandoned[1]
+            }
+            await runtime.stop()
+            let fact = try await storage.store.blockFact(abandoned[1], at: ["Nexus"])
+            let root = try XCTUnwrap(fact?.postStateCID)
+            let state = try await LatticeStateHeader(rawCID: root).resolve(fetcher: storage.localFetcher)
+            counted = try XCTUnwrap(state.node).accountState.rawCID
+        }
+        await shorterRuntime.stop()
+        node = try host(
+            keyByte: 0xe0, peers: [longer.endpoint], storageDirectory: node.configuration.storagePath,
+            state: .recent, stateWindow: 2
+        )
+        let (runtime, storage) = try await start(node)
+        try await eventually("the node moves to the longer chain") { runtime.published.value?.actOnTip == adopted[6] }
+        try await eventually("the current state is the longer chain's block 5's") {
+            await storage.currentStateCursor(at: ["Nexus"])?.block == adopted[4]
+        }
+        await runtime.stop()
+        await longerRuntime.stop()
+        _ = try await storage.broker.sweep()
+        let whole = try await stateNodes(of: adopted[6], in: storage)
+        XCTAssertNotNil(whole, "the longer chain's whole current state is held")
+        let held = await storage.broker.hasVolume(root: counted)
+        XCTAssertFalse(held, "the shorter chain's state the counts described went")
+    }
+
     /// A child chain behaves as Nexus does: a node hosting Nexus/Alpha on
-    /// `recent` with a window of 2 keeps only Alpha's last 2 heights, and
-    /// after its store is swept answers a read of Alpha state it let go of
-    /// and pools an Alpha transaction spending from it, both read from a
-    /// peer (Alpha's host first).
-    func testAChildChainOnRecentKeepsItsWindowAndReadsTheRestFromAPeer() async throws {
+    /// `recent` with a window of 2 keeps Alpha's last 2 heights and its
+    /// whole current state. After its store is swept, with no peer, it
+    /// answers a read of an account Alpha paid long ago and pools an Alpha
+    /// transaction spending from it. A chain no longer hosted keeps
+    /// neither.
+    func testAChildChainOnRecentKeepsItsWindowAndItsWholeCurrentState() async throws {
         let payer: Key = CryptoUtils.generateKeyPair()
         let producer = try host(keyByte: 0xd5, hosted: true)
         let (producerRuntime, _) = try await start(producer)
@@ -340,33 +525,45 @@ final class StateWindowTests: XCTestCase {
             try await eventually("Alpha's window is its last 2 blocks") {
                 try await self.windowHeights(storage, at: Self.alpha) == [alphaHeight - 1, alphaHeight]
             }
+            try await eventually("Alpha's current state is its block's a window below its tip") {
+                await self.currentHeight(storage, at: Self.alpha) == alphaHeight - 2
+            }
             await runtime.stop()
             _ = try await storage.broker.sweep()
+            let whole = try await stateNodes(of: alphaTip, in: storage, at: Self.alpha)
+            XCTAssertNotNil(whole, "Alpha's tip's whole state is held")
         }
-        let (runtime, storage) = try await start(node)
-        try await eventually("the node is at Alpha's tip with a peer") {
-            await runtime.levelReads[Self.alpha]?.readSnapshot().tipCID == alphaTip && runtime.peerCount > 0
+        await producerRuntime.stop()
+        let alone = try host(
+            keyByte: 0xd6, storageDirectory: node.configuration.storagePath, state: .recent, stateWindow: 2, hosted: true
+        )
+        let (runtime, storage) = try await start(alone)
+        try await eventually("the node is at Alpha's tip") {
+            await runtime.levelReads[Self.alpha]?.readSnapshot().tipCID == alphaTip
         }
         let read = await runtime.levelReads[Self.alpha]?.account(owner: address(payer), blockCID: alphaTip)?.balance
-        XCTAssertEqual(read, paid, "Alpha's account is read from a peer")
+        XCTAssertEqual(read, paid, "Alpha's account is read from this store")
         let response = try await runtime.submitTransaction(SubmitTransactionRequest(
             transaction: try transaction(payer, nonce: 0, moves: [(address(payer), -1)], chainPath: Self.alpha)
         ))
-        XCTAssertEqual(response.mempoolCount, 1, "the Alpha transaction is checked against state read from a peer, and pooled")
+        XCTAssertEqual(response.mempoolCount, 1, "the Alpha transaction is checked against this store's state, and pooled")
         try await eventually("Alpha keeps its window across the restart") {
             try await !self.windowHeights(storage, at: Self.alpha).isEmpty
         }
         try await runtime.host([])
         let kept = try await windowHeights(storage, at: Self.alpha)
         XCTAssertEqual(kept, [], "a chain no longer hosted keeps no state window")
+        let current = try await storage.broker.retainedScopes(prefix: storage.scopes.current(at: Self.alpha))
+        let height = await currentHeight(storage, at: Self.alpha)
+        XCTAssertEqual(current, [], "nor its current state")
+        XCTAssertNil(height, "and forgets its counts")
         await runtime.stop()
-        await producerRuntime.stop()
     }
 
     /// A start moves what an earlier version kept a hosted chain's tip
     /// state under into the chain's window at its tip's height, and forgets
-    /// that version's counts. What either kept for a chain no longer hosted
-    /// goes.
+    /// that version's counts. What any kept for a chain no longer hosted
+    /// goes: its windows, and its current state and counts.
     func testAStartMovesWhatEarlierVersionsKeptIntoTheWindow() async throws {
         let node = try host(keyByte: 0xd3, state: .recent)
         do {
@@ -379,6 +576,10 @@ final class StateWindowTests: XCTestCase {
             try await storage.broker.mergeRetainedRoots(
                 scope: storage.scopes.window(at: ["Nexus", "Gone"], height: 5), roots: [genesis]
             )
+            try await storage.broker.mergeRetainedRoots(
+                scope: storage.scopes.current(at: ["Nexus", "Gone"]), roots: [genesis]
+            )
+            try await storage.store.writeCurrentState(at: ["Nexus", "Gone"], counts: [genesis: 1], cursor: (5, genesis))
             try await storage.store.writeLegacyStateCount()
         }
         let (runtime, storage) = try await start(node)
@@ -393,6 +594,10 @@ final class StateWindowTests: XCTestCase {
         XCTAssertEqual(window, [node.configuration.nexusGenesisCID], "what they named is in the window at the tip's height")
         let gone = try await windowHeights(storage, at: ["Nexus", "Gone"])
         XCTAssertEqual(gone, [], "nothing is kept for a chain no longer hosted")
+        let current = try await storage.broker.retainedScopes(prefix: storage.scopes.current(at: ["Nexus", "Gone"]))
+        XCTAssertEqual(current, [], "nor its current state")
+        let cursor = await currentHeight(storage, at: ["Nexus", "Gone"])
+        XCTAssertNil(cursor, "whose counts are forgotten")
         let counts = try await storage.store.legacyStateCountRows()
         XCTAssertEqual(counts, 0, "the counts are forgotten")
         await runtime.stop()
@@ -437,16 +642,6 @@ final class StateWindowTests: XCTestCase {
 }
 
 extension NodeStore {
-    /// The executed block's fact, which names the state it produced.
-    func blockFact(_ blockCID: String, at chainPath: [String]) throws -> ChainBlockFact? {
-        guard let row = try database.row(
-            ImportFactRow.self,
-            "SELECT chain_path, fact_id, payload FROM admission_facts WHERE chain_path = ?1 AND fact_id = ?2",
-            params: [.text(chainPath.joined(separator: "/")), .blob(try Self.encode(ChainFactID.block(blockCID)))]
-        ), case .block(let fact) = try Self.decode(ChainFact.self, from: try row.payload) else { return nil }
-        return fact
-    }
-
     /// A count as an earlier version kept of a tip's state.
     func writeLegacyStateCount() throws {
         _ = try database.execute("INSERT INTO core_meta (key, value) VALUES ('state_pin:Nexus:x', '1')")
