@@ -31,8 +31,8 @@ extension NodeStore {
         cursorPrefix + chainPath.joined(separator: "/")
     }
 
-    /// The block whose state the chain's counts describe: nil before the
-    /// first walk of it.
+    /// The block whose state the chain's counts describe: nil before a
+    /// state sync of it completed.
     func currentStateCursor(at chainPath: [String]) throws -> (height: UInt64, block: String)? {
         guard let value = try database.row(
             ChainFactMetadataRow.self, "SELECT value FROM core_meta WHERE key = ?1",

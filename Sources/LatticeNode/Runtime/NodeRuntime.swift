@@ -135,9 +135,9 @@ public final class NodeRuntime: Sendable {
         case host(NodeConfiguration, CheckedContinuation<Void, any Error>)
         /// A level's throttled fee projection is due.
         case reproject(ChainPath)
-        /// A walk of a chain's current state ended (`walk` names it): done,
-        /// or failed and waited out its backoff, to be tried again.
-        case currentStateWalked(ChainPath, walk: UInt64, done: Bool)
+        /// A chain's state sync ended (`sync` names it): done, or failed and
+        /// to be tried again at the next maintenance pass.
+        case stateSynced(ChainPath, sync: UInt64, done: Bool)
         /// A job's read of the live levels (`LiveLevels`).
         case read(@Sendable ([ChainPath: ChainCore]?) -> Void)
         case stop
@@ -407,9 +407,9 @@ public final class NodeRuntime: Sendable {
                 job.cancel()
                 await job.value
             }
-            for walk in state.currentWalks.values {
-                walk.task.cancel()
-                await walk.task.value
+            for sync in state.stateSyncs.values {
+                sync.task.cancel()
+                await sync.task.value
             }
         }
     }
@@ -600,13 +600,12 @@ extension NodeRuntime {
         /// executed or found invalid this step, whose reads go after it.
         var stateTips: [ChainPath: String] = [:]
         var readsDone: [BodyKey] = []
-        /// On `recent`: each chain whose current state is being walked, the
-        /// walk's number and its task; and how long the next walk of a chain
-        /// waits after failing, from 10 seconds, doubling up to the
-        /// maintenance cadence, until a walk completes.
-        var currentWalks: [ChainPath: (id: UInt64, task: Task<Void, Never>)] = [:]
-        var nextWalk: UInt64 = 0
-        var walkBackoff: [ChainPath: UInt64] = [:]
+        /// On `recent`: each chain whose state sync runs, the sync's number
+        /// and its task; and the chains whose sync failed, which wait for the
+        /// next maintenance pass.
+        var stateSyncs: [ChainPath: (id: UInt64, task: Task<Void, Never>)] = [:]
+        var nextSync: UInt64 = 0
+        var failedSyncs: Set<ChainPath> = []
 
         struct BodyKey: Hashable {
             let path: ChainPath
@@ -738,6 +737,12 @@ extension NodeRuntime {
                 // not read.
                 operatorPins = configuration.announcePins ? await storage.operatorPins() : []
                 startNetworkMaintenance()
+                // A state sync that failed runs again.
+                if !failedSyncs.isEmpty {
+                    for path in failedSyncs { stateTips[path] = nil }
+                    failedSyncs.removeAll()
+                    await settleState()
+                }
                 return true
             case .currentPeers(let current):
                 currentPeers = current
@@ -747,12 +752,14 @@ extension NodeRuntime {
                 reprojections.remove(path)
                 refreshView(path)
                 return true
-            case .currentStateWalked(let path, let id, let done):
-                guard currentWalks[path]?.id == id else { return true }
-                currentWalks[path] = nil
-                if done { walkBackoff[path] = nil }
-                // Done: the windows the walk held go, and the state moves on
-                // from the block it walked. Failed: walked again.
+            case .stateSynced(let path, let id, let done):
+                guard stateSyncs[path]?.id == id else { return true }
+                stateSyncs[path] = nil
+                guard done else {
+                    failedSyncs.insert(path)
+                    return true
+                }
+                // The counts move on from the block the sync counted.
                 stateTips[path] = nil
                 await settleState()
                 return true
@@ -800,11 +807,11 @@ extension NodeRuntime {
                 guard await step(.unhost(path)) else { throw NodeRuntimeError.stopped }
                 stateTips[path] = nil
                 await storage.letGoOfWindows(at: path)
-                if let walk = currentWalks.removeValue(forKey: path) {
-                    walk.task.cancel()
-                    await walk.task.value
+                if let sync = stateSyncs.removeValue(forKey: path) {
+                    sync.task.cancel()
+                    await sync.task.value
                 }
-                walkBackoff[path] = nil
+                failedSyncs.remove(path)
                 await storage.letGoOfCurrentState(at: path)
             }
             var failure: (any Error)?
@@ -1787,55 +1794,58 @@ extension NodeRuntime {
             }
         }
 
-        /// With a state window: as each level's tip moves, what executions
-        /// stored a window or more below it goes; on `recent` only as far as
-        /// the chain's counts have reached, once they have moved with it.
+        /// With a state window: as each level's tip moves, its counts move
+        /// with it on `recent`, then what executions stored more than a
+        /// window below it goes.
         mutating func settleState() async {
             guard configuration.state != .all else { return }
             for (path, level) in core.levels where stateTips[path] != level.snapshot.actOnTip {
                 stateTips[path] = level.snapshot.actOnTip
-                guard !level.snapshot.actOnTip.isEmpty, let window = configuration.stateWindow(for: path) else { continue }
-                let height = level.snapshot.actOnHeight
-                let below = height >= window ? height - window : nil
-                let reached = configuration.state == .recent
-                    ? await keepCurrentState(at: path, level, below: below ?? 0) : below
-                if let below, let reached { await storage.letGoOfState(at: path, through: min(below, reached)) }
+                guard !level.snapshot.actOnTip.isEmpty else { continue }
+                await keepCurrentState(at: path, level)
+                await storage.letGoOfState(at: path, below: level.snapshot.actOnHeight)
             }
         }
 
-        /// On `recent`: the chain's current state is the state of an act-on
-        /// block at or below `below`, a window below the tip (genesis while
-        /// the chain is shorter). Returns the height the counts have
-        /// reached, nil while a walk runs or must. Counts of a block still
-        /// on the act-on chain move up to `below`, or wait for the tip when
-        /// they are at or above it (the window grew, the tip moved down).
-        /// With none, counts of a block no longer on the act-on chain (a
-        /// reorg deeper than the window), or counts in doubt, the state of
-        /// the block at `below` is walked off the loop instead.
-        private mutating func keepCurrentState(at path: ChainPath, _ level: ChainCore, below: UInt64) async -> UInt64? {
-            guard currentWalks[path] == nil else { return nil }
+        /// On `recent`: the counts of a chain's current state move up the
+        /// act-on chain to the block a window below the tip, and wait when
+        /// they are above it (the window grew, the tip moved down). Counts
+        /// of a block no longer on the act-on chain (a reorg deeper than the
+        /// window), or a move that fails, are reset. With no counts, and no
+        /// sync waiting for maintenance, a state sync of the tip's state runs
+        /// off the loop.
+        private mutating func keepCurrentState(at path: ChainPath, _ level: ChainCore) async {
+            guard configuration.state == .recent, stateSyncs[path] == nil,
+                  let window = configuration.stateWindow(for: path) else { return }
+            let height = level.snapshot.actOnHeight
+            let below = height >= window ? height - window : 0
             let cursor = await storage.currentStateCursor(at: path)
-            let reach = cursor.flatMap { $0.height <= level.snapshot.actOnHeight ? $0.height : nil }
-            let lowest = min(reach ?? below, below)
+            let lowest = min(cursor.map { min($0.height, height) } ?? below, below)
             guard let blocks = NodeRuntime.actOnBlocks(level, from: lowest) else {
                 SyncTrace.log(chain: path, "current state not kept: no act-on block at \(lowest)")
-                return nil
+                return
             }
-            if let cursor, let reach, blocks[Int(reach - lowest)] == cursor.block {
-                guard reach < below else { return reach }
-                let up = Array(blocks[Int(reach - lowest + 1)...Int(below - lowest)])
-                if await storage.moveCurrentState(at: path, up: up, from: cursor) { return below }
+            if let cursor {
+                if cursor.height <= height, blocks[Int(cursor.height - lowest)] == cursor.block {
+                    guard cursor.height < below else { return }
+                    let up = Array(blocks[Int(cursor.height - lowest + 1)...Int(below - lowest)])
+                    if await storage.moveCurrentState(at: path, up: up, from: cursor) { return }
+                }
+                // Reset: the counts are forgotten; the current scope stays
+                // until the next sync replaces it.
+                try? await storage.store.forgetCurrentState(at: path)
             }
-            let (block, delay) = (blocks[Int(below - lowest)], walkBackoff[path] ?? 10)
-            walkBackoff[path] = min(delay * 2, max(10, UInt64(configuration.maintenanceCadence)))
-            nextWalk += 1
-            let (id, storage, remote, inputs) = (nextWalk, storage, remote, inputs)
-            currentWalks[path] = (id, Task {
-                let done = await storage.walkCurrentState(at: path, block: block, height: below, remote: remote)
-                if !done { _ = await Timers.sleep(nanoseconds: delay * 1_000_000_000) }
-                inputs.yield(.currentStateWalked(path, walk: id, done: done))
+            guard !failedSyncs.contains(path) else { return }
+            // The tip's state: the windows hold what each block after it
+            // creates until the counts move past it, a window later, so a
+            // sync shorter than a window of blocks is never undone.
+            let block = level.snapshot.actOnTip
+            nextSync += 1
+            let (id, storage, remote, inputs) = (nextSync, storage, remote, inputs)
+            stateSyncs[path] = (id, Task {
+                let done = await storage.syncCurrentState(at: path, block: block, height: height, remote: remote)
+                inputs.yield(.stateSynced(path, sync: id, done: done))
             })
-            return nil
         }
 
         /// ChainEffect work off the loop: it only posts events back, and a post

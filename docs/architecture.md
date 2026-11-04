@@ -145,9 +145,11 @@ state (`state: recent`, or `none`, which is a window of one block), what a
 step's executions stored is named by its chain and the height of the
 step's newest block, and is let go of once that height is a state window
 or more below the chain's tip. On `recent` the chain's current scope names
-the whole state of the block a window below the tip: counts of the places
-each node holds move by each block's state diff as it leaves the window,
-so the store holds the whole current state and what the window replaced.
+the whole state its counts describe: counts of the places each node holds
+move by each block's state diff as it leaves the window, so the store holds
+the whole current state and what the window replaced. A chain with no
+counts, or counts in doubt (reset), runs a state sync of its tip's state,
+reading from peers what the store lacks.
 On `recent` and on `none`, what a block reads is named by that block until
 it executes. Kept state is a cache: whatever reads state the store lacks
 (execution, a submitted transaction's check, a state read) reads it from
