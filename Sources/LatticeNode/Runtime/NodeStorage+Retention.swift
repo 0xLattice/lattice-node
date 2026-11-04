@@ -195,6 +195,17 @@ extension NodeStorage {
         }
     }
 
+    /// When the chain at `path` is no longer hosted: every state window it
+    /// kept goes.
+    nonisolated func letGoOfWindows(at path: ChainPath) async {
+        guard let listed = try? await broker.retainedScopes(prefix: scopes.windowPrefix(at: path)) else { return }
+        for scope in listed { await letGoOfWindow(scope) }
+    }
+
+    private nonisolated func letGoOfWindow(_ scope: String) async {
+        do { try await release(scope: scope) } catch { syncTrace("\(scope) not released: \(error)") }
+    }
+
     /// At a start, with `tips` the hosted chains' tip heights: what an
     /// earlier version kept a hosted chain's tip state under moves to the
     /// chain's window at its tip's height, or to the chain on `all`, and
@@ -207,27 +218,37 @@ extension NodeStorage {
         func path(_ scope: String, after prefix: String) -> ChainPath {
             scope.dropFirst(prefix.count).split(separator: "/").map(String.init)
         }
-        do {
-            for scope in try await broker.retainedScopes(prefix: scopes.windowsPrefix) {
-                guard let colon = scope.lastIndex(of: ":") else { continue }
-                let chain = path(String(scope[..<colon]), after: scopes.windowsPrefix)
-                if tips[chain] == nil { try await release(scope: scope) }
+        // Each scope on its own: one that fails stays for the next start,
+        // and the rest move.
+        func each(_ prefix: String, _ move: (String) async throws -> Void) async {
+            guard let listed = try? await broker.retainedScopes(prefix: prefix) else { return }
+            for scope in listed {
+                do { try await move(scope) } catch { syncTrace("\(scope) not moved at start: \(error)") }
             }
-            for prefix in scopes.legacyStatePrefixes {
-                for scope in try await broker.retainedScopes(prefix: prefix) {
-                    let path = path(scope, after: prefix)
-                    let roots = try await broker.retainedRoots(scope: scope)
-                    if !roots.isEmpty, let tip = tips[path] {
-                        let kept = configuration.stateWindow(for: path) == nil
-                            ? retentionScope : scopes.window(at: path, height: tip)
-                        try await broker.mergeRetainedRoots(scope: kept, roots: roots)
-                    }
-                    try await release(scope: scope)
-                }
-            }
-            try await store.forgetStateCounts()
-        } catch {
-            syncTrace("earlier state not moved at start: \(error)")
         }
+        await each(scopes.windowsPrefix) { scope in
+            guard let colon = scope.lastIndex(of: ":") else { return }
+            if tips[path(String(scope[..<colon]), after: scopes.windowsPrefix)] == nil {
+                await letGoOfWindow(scope)
+            }
+        }
+        for prefix in scopes.legacyStatePrefixes {
+            await each(prefix) { scope in
+                let path = path(scope, after: prefix)
+                if let tip = tips[path] {
+                    // What this store no longer holds is not kept: it is
+                    // read again, as any state let go of is.
+                    var held: [String] = []
+                    for root in try await broker.retainedRoots(scope: scope) where await broker.hasVolume(root: root) {
+                        held.append(root)
+                    }
+                    let kept = configuration.stateWindow(for: path) == nil
+                        ? retentionScope : scopes.window(at: path, height: tip)
+                    if !held.isEmpty { try await broker.mergeRetainedRoots(scope: kept, roots: held) }
+                }
+                try await release(scope: scope)
+            }
+        }
+        do { try await store.forgetStateCounts() } catch { syncTrace("earlier counts not forgotten: \(error)") }
     }
 }

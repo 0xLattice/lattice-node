@@ -215,6 +215,9 @@ public struct Topology: Codable, Sendable {
         if let state, StateRetention(named: state) == nil {
             throw CtlError("state is all, recent or none, not \(state)")
         }
+        if stateWindow != nil || !(stateWindows ?? [:]).isEmpty, StateRetention(named: state ?? "all") != .recent {
+            throw CtlError("a state window applies to state recent only")
+        }
         if stateWindow == 0 || (stateWindows ?? [:]).values.contains(0) {
             throw CtlError("a state window is at least 1 block")
         }

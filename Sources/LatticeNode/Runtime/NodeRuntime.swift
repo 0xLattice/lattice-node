@@ -774,6 +774,8 @@ extension NodeRuntime {
             let listed = Set(next.hostedChildren)
             for path in core.ordered where path != core.rootPath && !listed.contains(path) {
                 guard await step(.unhost(path)) else { throw NodeRuntimeError.stopped }
+                stateTips[path] = nil
+                await storage.letGoOfWindows(at: path)
             }
             var failure: (any Error)?
             for path in next.hostedChildren where core.levels[path] == nil {

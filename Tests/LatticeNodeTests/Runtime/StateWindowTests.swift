@@ -343,7 +343,7 @@ final class StateWindowTests: XCTestCase {
             await runtime.stop()
             _ = try await storage.broker.sweep()
         }
-        let (runtime, _) = try await start(node)
+        let (runtime, storage) = try await start(node)
         try await eventually("the node is at Alpha's tip with a peer") {
             await runtime.levelReads[Self.alpha]?.readSnapshot().tipCID == alphaTip && runtime.peerCount > 0
         }
@@ -353,6 +353,12 @@ final class StateWindowTests: XCTestCase {
             transaction: try transaction(payer, nonce: 0, moves: [(address(payer), -1)], chainPath: Self.alpha)
         ))
         XCTAssertEqual(response.mempoolCount, 1, "the Alpha transaction is checked against state read from a peer, and pooled")
+        try await eventually("Alpha keeps its window across the restart") {
+            try await !self.windowHeights(storage, at: Self.alpha).isEmpty
+        }
+        try await runtime.host([])
+        let kept = try await windowHeights(storage, at: Self.alpha)
+        XCTAssertEqual(kept, [], "a chain no longer hosted keeps no state window")
         await runtime.stop()
         await producerRuntime.stop()
     }

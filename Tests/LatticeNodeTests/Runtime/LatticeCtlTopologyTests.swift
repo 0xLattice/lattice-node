@@ -162,7 +162,10 @@ final class LatticeCtlTopologyTests: XCTestCase {
             ["--state", "recent", "--state-window", "32", "--state-window", "Nexus/Alpha=500"]
         )
         XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"state":"recent","stateWindow":0}"#))
-        XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"stateWindows":{"Alpha":5}}"#))
+        XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"state":"recent","stateWindows":{"Alpha":5}}"#))
+        // A window says how much recent state to keep: on all or none it says nothing.
+        XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"stateWindow":32}"#))
+        XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"state":"none","stateWindows":{"Nexus/Alpha":5}}"#))
         XCTAssertEqual(
             try load(#"{"listen":4001,"rpc":4003,"state":"none"}"#).contentServingArguments, ["--state", "none"]
         )

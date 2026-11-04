@@ -519,8 +519,10 @@ their own reason to run one. Keep `all` on a node an explorer reads.
   (`--state-window`, counting the tip) read and created. 64 blocks unless
   set; `stateWindows` (or `--state-window Nexus/Alpha=500`) sets one chain.
   `tip`, the earlier name, means `recent`.
-- `none`: what the last execution read and created, until the next one, and
-  what a block reads, until it has executed.
+- `none`: a window of 1: what the executions at each chain's tip height read
+  and created (and of side blocks above it, until the tip passes them), and
+  what a block reads, until it has executed. `--state-window` applies to
+  `recent` only; set with `all` or `none` it is refused.
 
 Kept state is a cache, not a promise: execution, a submitted transaction's
 check, and state reads all read the state this node does not hold from
