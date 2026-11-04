@@ -76,10 +76,24 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   stored is named by its chain and the height of the step's newest block,
   and is let go of once the chain's tip is a state window or more above it
   (`--state-window`, 64 blocks unless the operator sets one, per chain or
-  for every chain); `none` is a window of one block. A start lets go of the
-  scopes and counts earlier versions kept a tip's state under. State the
-  store lacks is read from peers by execution, preflight and state reads
-  alike. Pinned by `StateWindowTests`.
+  for every chain); `none` is a window of one block, and on `recent` a
+  window is let go of only once the chain's counts reached the tip. A start
+  lets go of the scopes and counts earlier versions kept a tip's state
+  under. State the store lacks is read from peers by execution, preflight
+  and state reads alike. Pinned by `StateWindowTests`.
+- **NODE-STORAGE-002.k** — With `state: recent`, once a chain's counts are
+  in place, its counted scope counts each node for every place it holds in
+  the act-on tip's state plus every place a block above the cursor
+  replaced, the cursor on the tip's chain a window below the tip or higher;
+  a move of the tip never lowers the cursor (a state sync may set it lower);
+  every node it counts is held. The counts move with the tip in one
+  adjustment under their marker; counts that cannot follow, that the store
+  refuses, or that a check (at a start, and at a maintenance pass once they
+  moved) finds do not match the store are
+  replaced whole by a state sync, committed moved to the tip in one
+  adjustment, the old ones serving until then. Pinned by
+  `StateWindowTests.testTheCountsFollowEveryMoveOfTheTip` and the other
+  `StateWindowTests` that check the counts.
 - **NODE-STORAGE-002.i** — With `state: recent` or `none` what a stored
   block reads is named by that block until it executes or is found invalid
   (a start lets go of what an executed block's scope still names). Pinned

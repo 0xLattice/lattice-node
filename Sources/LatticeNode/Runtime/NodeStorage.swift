@@ -13,6 +13,8 @@ public enum NodeStorageError: Error, Equatable, Sendable {
     case invalidVolume(String)
     /// A body's content is past this node's byte budget for one fetch.
     case bodyExceedsLocalBudget(bytes: Int)
+    /// No executed block's fact names this block.
+    case missingBlockFact(String)
 }
 
 public enum ChainPhase: String, Sendable {

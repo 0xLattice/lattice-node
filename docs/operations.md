@@ -515,23 +515,61 @@ their own reason to run one. Keep `all` on a node an explorer reads.
 `state` in `lattice.json` (`--state`) says which state it keeps:
 
 - `all`, the default: the state of every block it executed.
-- `recent`: what the executions of each chain's last `stateWindow` blocks
-  (`--state-window`, counting the tip) read and created. 64 blocks unless
-  set; `stateWindows` (or `--state-window Nexus/Alpha=500`) sets one chain.
-  `tip`, the earlier name, means `recent`.
+- `recent`: the whole current state of each chain, and what its last
+  `stateWindow` blocks (`--state-window`, counting the tip) replaced. 64
+  blocks unless set; `stateWindows` (or `--state-window Nexus/Alpha=500`)
+  sets one chain. `tip`, the earlier name, means `recent`.
 - `none`: a window of 1: what the executions at each chain's tip height read
   and created (and of side blocks above it, until the tip passes them), and
   what a block reads, until it has executed. `--state-window` applies to
   `recent` only; set with `all` or `none` it is refused.
+
+On `recent` a node counts, for each chain, the places each node holds in the
+state of the chain's tip, plus the places the blocks above a cursor replaced,
+and keeps every node it counts: the counts are kept in `volumes.db`, written
+with the cursor and the tip they were moved to in one transaction, so a stop
+never leaves them half moved. As the tip moves, the counts move with it in one
+write: what the blocks entering the chain created is added, what the blocks
+leaving it created is taken away, and what each block the cursor passes
+replaced is taken away, the cursor a window below the tip (a move of the tip
+never takes it down; a state sync may set it lower). A node a block replaced
+is so kept until the tip is a window past that block, and a reorganization
+that does not reach below the cursor is undone from the counts.
+
+Counts that cannot follow the tip (a reorganization below the cursor, a fact
+missing) or that the store refuses (a count below zero), and a chain with none
+(the first start on `recent`, a chain newly hosted), are replaced by a state
+sync: the node walks the state of a block a few below its tip, node by node,
+reading what it lacks from peers, then replaces the counts with that state's
+in one write and moves them on to the tip. A node the counts would start
+counting and the store lacks is read from peers first, then the counts move.
+What a state sync or such a read fetched is held until the counts name it,
+and a state sync that fails lets go of what it held beyond where it reached.
+Until the new counts are written the old ones stay, and while the counts are
+behind the tip no window is let go of. A state sync or read that fails (at a
+first start, before any peer has connected) runs again when a peer connects,
+or at the next maintenance pass; a write the store failed runs again when the
+tip next moves or at the next maintenance pass. A state sync whose counts the
+store refuses waits for a new peer or the next maintenance pass before it runs
+again. At each start, and at each maintenance pass for a chain whose counts
+moved since they were last checked, the counts are checked against the store,
+walking the tip's state from the store alone; counts that do not match it (as
+facts an older version wrote with an inexact diff may leave them) are replaced
+by a state sync.
+
+A chain no longer hosted (removed from a running node's hosted chains, or
+left out at a start) loses its counts and what its state sync held; hosting
+it again starts with a state sync.
 
 Kept state is a cache, not a promise: execution, a submitted transaction's
 check, and state reads all read the state this node does not hold from
 peers, so `recent` and `none` answer what `all` answers, and a read of state
 they let go of costs a fetch. A submitted transaction is first checked
 against what this node holds, and only one that passes those checks (its
-signatures, chain, fee and size) reads further state from peers. A
-reorganization within the window, and blocks that touch recent state, run
-without fetching. Block bodies (a block's transactions and children) and
+signatures, chain, fee and size) reads further state from peers. On `recent`
+blocks, transactions and reads of the current state run without fetching once
+a chain's counts are in place, as does a reorganization within the window; on
+`none` blocks that touch recent state do. Block bodies (a block's transactions and children) and
 anything asked for by CID are answered from this node's store alone: which
 bodies it keeps is `blockBodies`, and a reader cannot make it fetch whatever
 it names.
@@ -539,7 +577,9 @@ it names.
 A start after a version that kept exactly the tip's state (`tip`) moves that
 state into each chain's window at its tip, so it goes a window later like
 any state, and forgets its counts. What a node kept for a chain it no longer
-hosts goes at its next start.
+hosts goes at its next start, and its counts go when it stops hosting it.
+Switching from `recent` to `all` keeps what the counts held with the chain;
+switching to `none` lets it go.
 
 A node that is the only holder of a state and lets it go has lost it, so a
 network needs nodes on `all`. Switching to `recent` or `none` applies to state
