@@ -762,7 +762,6 @@ final class StateWindowTests: XCTestCase {
     /// splits the node `aaa` and `aaab` share), and the next updates `aaab`.
     /// The counts follow both blocks without a state sync.
     func testTheCountsFollowARadixSplit() async throws {
-        try XCTSkipIf(true, "enabled with Lattice 56.1.2, whose diffs are exact on a radix split")
         let miner: Key = CryptoUtils.generateKeyPair()
         let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(miner))])
         let node = try host(keyByte: 0xf8, state: .recent, stateWindow: 50)
