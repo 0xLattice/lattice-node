@@ -533,21 +533,28 @@ they let go of costs a fetch. A submitted transaction is first checked
 against what this node holds, and only one that passes those checks (its
 signatures, chain, fee and size) reads further state from peers. On
 `recent` a read of the current state is answered from this node's store,
-and a reorganization within the window runs without fetching. Block bodies
-(a block's transactions and children) and anything asked for by CID are answered from this node's store alone: which
+and a reorganization no deeper than the blocks above the counted block
+(the window, unless the window was just raised or the tip moved down) runs
+without fetching. Block bodies (a block's transactions and children) and
+anything asked for by CID are answered from this node's store alone: which
 bodies it keeps is `blockBodies`, and a reader cannot make it fetch whatever
 it names.
 
 On `recent` a node counts how many places each node of a chain's state
 holds, as of the block a window below the tip. As a block leaves the
 window its state diff moves the counts: what it created is kept, and what
-it replaced goes once no place holds it. A start with no counts for a
-chain (the first start on this version, or a store a run that kept only
-the window left) walks the state of the block a window below the tip,
-reads from peers what the store lacks, and keeps all of it. Until that walk
-completes the node keeps only the window, and a walk no peer could serve is
-tried again later. A reorganization deeper than the window walks the new
-chain's state the same way.
+it replaced goes once no place holds it. A window goes only once the
+counts have moved past it. Counts above the height a window below the tip
+(the window was raised, or the tip moved down) wait for the tip to pass
+them. A start with no counts for a chain (the first start on this version,
+or a store a run that kept only the window left) walks the state of the
+block a window below the tip, reads from peers what the store lacks, and
+keeps all of it. Until that walk completes the node lets go of no window.
+A walk no peer could complete keeps what it reached and is tried again
+after 10 seconds, then after twice as long each time, up to the
+maintenance cadence. A reorganization deeper than the window, or counts in
+doubt (a count that would go below 0, a node joining that is not held),
+walk the state the same way.
 
 A start after a version that kept exactly the tip's state (`tip`) moves that
 state into each chain's window at its tip, so it goes a window later like

@@ -190,17 +190,13 @@ extension NodeStorage {
 
     // MARK: - State: recent
 
-    /// With a state window: what executions stored at heights more than a
-    /// window below `height`, the tip's, goes. On `recent` what of it is
-    /// still in the state is in the chain's current scope by then; on
-    /// `none` it is read from peers when something reads it. While the
-    /// state at `walking` is walked, every window above it stays: the walk
-    /// counts on them for what came after.
-    nonisolated func letGoOfState(at path: ChainPath, below height: UInt64, walking: UInt64? = nil) async {
-        guard let window = configuration.stateWindow(for: path) else { return }
-        guard height >= window else { return }
-        var kept = scopes.window(at: path, height: height - window + 1)
-        if let walking { kept = min(kept, scopes.window(at: path, height: walking + 1)) }
+    /// With a state window: what executions stored at `height` or below
+    /// goes, the caller saying how far: a window below the tip, and on
+    /// `recent` no further than the chain's counts have reached, so what of
+    /// it is still in the state is in the current scope by then. On `none`
+    /// it is read from peers when something reads it.
+    nonisolated func letGoOfState(at path: ChainPath, through height: UInt64) async {
+        let kept = scopes.window(at: path, height: height + 1)
         do {
             for scope in try await broker.retainedScopes(prefix: scopes.windowPrefix(at: path)) where scope < kept {
                 try await release(scope: scope)
@@ -240,17 +236,20 @@ extension NodeStorage {
     /// count of each node's places, a node whose count was 0 joins the
     /// current scope (its window still holds it), and one whose count
     /// reaches 0 goes from it. The pins first, then the counts and the
-    /// cursor: a stop between them is repaired by doing it again.
+    /// cursor: a stop between them is repaired by doing it again. False,
+    /// writing no counts, when the counts are in doubt: a fact is missing,
+    /// a count would go below 0, a node joining is not held, or the store
+    /// failed. The caller walks the state then.
     nonisolated func moveCurrentState(
         at path: ChainPath, up blocks: [String], from cursor: (height: UInt64, block: String)
-    ) async {
-        guard let last = blocks.last else { return }
+    ) async -> Bool {
+        guard let last = blocks.last else { return true }
         do {
             var change: [String: Int] = [:]
             for block in blocks {
                 guard let fact = try await store.blockFact(block, at: path) else {
                     syncTrace("current state of \(path) not moved: no fact of \(block)")
-                    return
+                    return false
                 }
                 for (cid, count) in fact.stateDiff.created { change[cid, default: 0] += count }
                 for (cid, count) in fact.stateDiff.replaced { change[cid, default: 0] -= count }
@@ -258,59 +257,79 @@ extension NodeStorage {
             let held = try await store.currentStateCounts(change.keys.filter { change[$0] != 0 }, at: path)
             var (counts, entered, left): ([String: Int], [String], [String]) = ([:], [], [])
             for (cid, was) in held {
-                let now = max(0, was + change[cid, default: 0])
+                let now = was + change[cid, default: 0]
+                guard now >= 0 else {
+                    syncTrace("current state of \(path) not moved: \(cid) would hold \(now) places")
+                    return false
+                }
                 counts[cid] = now
                 if was == 0, now > 0 { entered.append(cid) }
                 if was > 0, now == 0 { left.append(cid) }
             }
             let scope = scopes.current(at: path)
-            try await retainHeld(entered, scope: scope)
+            let missed = try await retainHeld(entered, scope: scope)
+            guard missed.isEmpty else {
+                syncTrace("current state of \(path) not moved: \(missed.count) joining nodes not held")
+                return false
+            }
             if !left.isEmpty { try await broker.releaseRetainedRoots(scope: scope, roots: left) }
             try await store.writeCurrentState(
                 at: path, counts: counts, cursor: (cursor.height + UInt64(blocks.count), last)
             )
+            return true
         } catch {
             syncTrace("current state of \(path) not moved past \(cursor.height): \(error)")
+            return false
         }
     }
 
     /// Makes the state of `block`, the act-on chain's at `height`, the
     /// chain's current state: every node reachable from its post-state,
-    /// each place it holds counted. What this store lacks is read through
-    /// the node's own reads and stored as its own Volume, as an execution
-    /// stores what it loaded. Each node is pinned under the chain's
-    /// current scope as it is reached; what the scope named outside that
-    /// state goes, then the counts and the block are written. True when
-    /// done; when a node could not be read, false, and what was stored
-    /// stays for the next walk.
+    /// each place it holds counted. The counts are forgotten first, so
+    /// none are trusted until the walk completes. What this store lacks is
+    /// read through peers, not kept in memory, and stored as its own
+    /// Volume, as an execution stores what it loaded. Each node is pinned
+    /// under the chain's current scope as it is reached, and what the
+    /// scope named that this walk did not reach goes. True when every node
+    /// was reached and the counts and the block are written; false when a
+    /// node could not be read, its subtree left for the next walk.
     nonisolated func walkCurrentState(
         at path: ChainPath, block: String, height: UInt64, remote: IvyRootContentSource
     ) async -> Bool {
         let scope = scopes.current(at: path)
         do {
+            try await store.forgetCurrentState(at: path)
             guard let bytes = await blockNodeBytes(block), let root = Block(data: bytes)?.postState.rawCID else {
                 syncTrace("current state of \(path) not walked: \(block) is not held")
                 return false
             }
             let hosts = ChainHosts.of(path, nexusGenesisCID: configuration.nexusGenesisCID)
             var counts: [String: Int] = [:]
-            var named: [String: [any Header]] = [:]
-            // One depth at a time, a node once for each place it holds.
-            var places: [any Header] = [LatticeStateHeader(rawCID: root)]
-            while !places.isEmpty {
-                var unseen: [any Header] = []
-                for header in places {
-                    counts[header.rawCID, default: 0] += 1
-                    if counts[header.rawCID] == 1 { unseen.append(header) }
+            var whole = true
+            // One depth at a time: each node at it, with the places it holds
+            // there.
+            var depth: [String: (header: any Header, places: Int)] = [root: (LatticeStateHeader(rawCID: root), 1)]
+            while !depth.isEmpty {
+                let nodes = Array(depth.values)
+                depth = [:]
+                for start in stride(from: 0, to: nodes.count, by: 256) {
+                    try Task.checkCancellation()
+                    let batch = nodes[start..<min(start + 256, nodes.count)]
+                    let (named, read) = try await walk(batch.map(\.header), of: root, hosts: hosts, remote: remote, scope: scope)
+                    whole = whole && read
+                    for (header, places) in batch {
+                        guard let children = named[header.rawCID] else { continue }
+                        counts[header.rawCID, default: 0] += places
+                        for child in children { depth[child.rawCID, default: (child, 0)].places += places }
+                    }
                 }
-                for start in stride(from: 0, to: unseen.count, by: 256) {
-                    let batch = Array(unseen[start..<min(start + 256, unseen.count)])
-                    named.merge(try await walk(batch, of: root, hosts: hosts, remote: remote, scope: scope)) { $1 }
-                }
-                places = places.flatMap { named[$0.rawCID] ?? [] }
             }
             let stale = try await broker.retainedRoots(scope: scope).filter { counts[$0] == nil }
             if !stale.isEmpty { try await broker.releaseRetainedRoots(scope: scope, roots: stale) }
+            guard whole else {
+                syncTrace("current state of \(path) at \(height) not walked whole")
+                return false
+            }
             try await store.writeCurrentState(at: path, counts: counts, cursor: (height, block), replacing: true)
             return true
         } catch {
@@ -321,30 +340,31 @@ extension NodeStorage {
 
     /// One batch of a walk, in one session: what this store holds is
     /// pinned under `scope` first, so nothing lets go of it meanwhile; the
-    /// rest is read, stored and pinned. Returns the nodes each one names.
+    /// rest is read and stored, and then every node read is pinned.
+    /// Returns the nodes each pinned node names, and whether every node of
+    /// the batch was read and pinned.
     private nonisolated func walk(
         _ batch: [any Header], of root: String, hosts: ChainHosts?, remote: IvyRootContentSource, scope: String
-    ) async throws -> [String: [any Header]] {
+    ) async throws -> (named: [String: [any Header]], whole: Bool) {
         try await retainHeld(batch.map(\.rawCID), scope: scope)
-        return try await remote.withRootTracing(
-            root, bundle: false, hosts: hosts, reserving: Int(IvyConfig.defaultProtocolMaxFrameSize)
-        ) { session in
-            let fetcher = ownReads(through: session)
-            let resolved = try await withThrowingTaskGroup(of: (any Header).self) { group in
-                for header in batch { group.addTask { try await header.resolve(fetcher: fetcher) } }
-                return try await group.reduce(into: [any Header]()) { $0.append($1) }
+        return try await remote.withRootTracing(root, bundle: false, hosts: hosts) { session in
+            let fetcher = readersReads(through: session)
+            let resolved = await withTaskGroup(of: (any Header)?.self) { group in
+                for header in batch { group.addTask { try? await header.resolve(fetcher: fetcher) } }
+                return await group.reduce(into: [any Header]()) { if let header = $1 { $0.append(header) } }
             }
             let storage = NodeImportStorage(storage: broker)
-            var named: [String: [any Header]] = [:]
             for header in resolved {
-                named[header.rawCID] = Self.children(of: header)
-                if await !broker.hasVolume(root: header.rawCID), let volume = header as? any Volume {
-                    try await volume.store(storer: storage)
-                }
+                guard await !broker.hasVolume(root: header.rawCID), let volume = header as? any Volume else { continue }
+                try await volume.store(storer: storage)
             }
             try await storage.commit()
-            try await retainHeld(await storage.takeStoredVolumeRoots(), scope: scope)
-            return named
+            let missed = Set(try await retainHeld(resolved.map(\.rawCID), scope: scope))
+            var named: [String: [any Header]] = [:]
+            for header in resolved where !missed.contains(header.rawCID) {
+                named[header.rawCID] = Self.children(of: header)
+            }
+            return (named, resolved.count == batch.count && missed.isEmpty)
         }.value
     }
 

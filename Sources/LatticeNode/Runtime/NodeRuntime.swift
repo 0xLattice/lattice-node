@@ -136,7 +136,7 @@ public final class NodeRuntime: Sendable {
         /// A level's throttled fee projection is due.
         case reproject(ChainPath)
         /// A walk of a chain's current state ended (`walk` names it): done,
-        /// or failed, to be tried again.
+        /// or failed and waited out its backoff, to be tried again.
         case currentStateWalked(ChainPath, walk: UInt64, done: Bool)
         /// A job's read of the live levels (`LiveLevels`).
         case read(@Sendable ([ChainPath: ChainCore]?) -> Void)
@@ -600,13 +600,13 @@ extension NodeRuntime {
         /// executed or found invalid this step, whose reads go after it.
         var stateTips: [ChainPath: String] = [:]
         var readsDone: [BodyKey] = []
-        /// On `recent`: each chain whose current state is being walked,
-        /// the walk's number, the height of the block it walks and its
-        /// task; and the chains whose walk failed, walked again when the
-        /// chain's tip next moves or at the next maintenance pass.
-        var currentWalks: [ChainPath: (id: UInt64, height: UInt64, task: Task<Void, Never>)] = [:]
+        /// On `recent`: each chain whose current state is being walked, the
+        /// walk's number and its task; and how long the next walk of a chain
+        /// waits after failing, from 10 seconds, doubling up to the
+        /// maintenance cadence, until a walk completes.
+        var currentWalks: [ChainPath: (id: UInt64, task: Task<Void, Never>)] = [:]
         var nextWalk: UInt64 = 0
-        var failedWalks: Set<ChainPath> = []
+        var walkBackoff: [ChainPath: UInt64] = [:]
 
         struct BodyKey: Hashable {
             let path: ChainPath
@@ -738,12 +738,6 @@ extension NodeRuntime {
                 // not read.
                 operatorPins = configuration.announcePins ? await storage.operatorPins() : []
                 startNetworkMaintenance()
-                // A walk that failed is tried again.
-                if !failedWalks.isEmpty {
-                    for path in failedWalks { stateTips[path] = nil }
-                    failedWalks.removeAll()
-                    await settleState()
-                }
                 return true
             case .currentPeers(let current):
                 currentPeers = current
@@ -756,14 +750,11 @@ extension NodeRuntime {
             case .currentStateWalked(let path, let id, let done):
                 guard currentWalks[path]?.id == id else { return true }
                 currentWalks[path] = nil
-                if done {
-                    // The windows the walk held go, and the state moves on
-                    // from the block it walked.
-                    stateTips[path] = nil
-                    await settleState()
-                } else {
-                    failedWalks.insert(path)
-                }
+                if done { walkBackoff[path] = nil }
+                // Done: the windows the walk held go, and the state moves on
+                // from the block it walked. Failed: walked again.
+                stateTips[path] = nil
+                await settleState()
                 return true
             case .read(let read):
                 read(core.levels)
@@ -813,7 +804,7 @@ extension NodeRuntime {
                     walk.task.cancel()
                     await walk.task.value
                 }
-                failedWalks.remove(path)
+                walkBackoff[path] = nil
                 await storage.letGoOfCurrentState(at: path)
             }
             var failure: (any Error)?
@@ -1796,60 +1787,55 @@ extension NodeRuntime {
             }
         }
 
-        /// With a state window: as each level's tip moves, its current
-        /// state moves with it on `recent`, then what executions stored
-        /// more than a window below it goes.
+        /// With a state window: as each level's tip moves, what executions
+        /// stored a window or more below it goes; on `recent` only as far as
+        /// the chain's counts have reached, once they have moved with it.
         mutating func settleState() async {
             guard configuration.state != .all else { return }
             for (path, level) in core.levels where stateTips[path] != level.snapshot.actOnTip {
                 stateTips[path] = level.snapshot.actOnTip
-                guard !level.snapshot.actOnTip.isEmpty else { continue }
-                await keepCurrentState(at: path, level)
-                await storage.letGoOfState(
-                    at: path, below: level.snapshot.actOnHeight, walking: currentWalks[path]?.height
-                )
+                guard !level.snapshot.actOnTip.isEmpty, let window = configuration.stateWindow(for: path) else { continue }
+                let height = level.snapshot.actOnHeight
+                let below = height >= window ? height - window : nil
+                let reached = configuration.state == .recent
+                    ? await keepCurrentState(at: path, level, below: below ?? 0) : below
+                if let below, let reached { await storage.letGoOfState(at: path, through: min(below, reached)) }
             }
         }
 
-        /// On `recent`: the chain's current state is the state of its
-        /// act-on block a window below the tip (genesis while the chain is
-        /// shorter). The counts move up the act-on chain's blocks from the
-        /// block they describe; with none, or when that block is no longer
-        /// the act-on chain's at its height (a reorg deeper than the
-        /// window), the state of the block a window below the tip is walked
-        /// off the loop instead.
-        private mutating func keepCurrentState(at path: ChainPath, _ level: ChainCore) async {
-            guard configuration.state == .recent, currentWalks[path] == nil,
-                  let window = configuration.stateWindow(for: path) else { return }
-            let height = level.snapshot.actOnHeight
-            let below = height >= window ? height - window : 0
+        /// On `recent`: the chain's current state is the state of an act-on
+        /// block at or below `below`, a window below the tip (genesis while
+        /// the chain is shorter). Returns the height the counts have
+        /// reached, nil while a walk runs or must. Counts of a block still
+        /// on the act-on chain move up to `below`, or wait for the tip when
+        /// they are at or above it (the window grew, the tip moved down).
+        /// With none, counts of a block no longer on the act-on chain (a
+        /// reorg deeper than the window), or counts in doubt, the state of
+        /// the block at `below` is walked off the loop instead.
+        private mutating func keepCurrentState(at path: ChainPath, _ level: ChainCore, below: UInt64) async -> UInt64? {
+            guard currentWalks[path] == nil else { return nil }
             let cursor = await storage.currentStateCursor(at: path)
-            // The act-on chain's blocks from the cursor's height up to
-            // `below`, lowest first.
-            let lowest = min(cursor?.height ?? below, below)
-            var blocks: [String] = []
-            var (cid, at) = (level.snapshot.actOnTip, height)
-            while true {
-                if at <= below { blocks.append(cid) }
-                guard at > lowest, let parent = level.tree.parent(of: cid) else { break }
-                (cid, at) = (parent, at - 1)
-            }
-            blocks.reverse()
-            guard at == lowest, let walked = blocks.last else {
+            let reach = cursor.flatMap { $0.height <= level.snapshot.actOnHeight ? $0.height : nil }
+            let lowest = min(reach ?? below, below)
+            guard let blocks = NodeRuntime.actOnBlocks(level, from: lowest) else {
                 SyncTrace.log(chain: path, "current state not kept: no act-on block at \(lowest)")
-                return
+                return nil
             }
-            if let cursor, cursor.height == lowest, blocks.first == cursor.block {
-                await storage.moveCurrentState(at: path, up: Array(blocks.dropFirst()), from: cursor)
-                return
+            if let cursor, let reach, blocks[Int(reach - lowest)] == cursor.block {
+                guard reach < below else { return reach }
+                let up = Array(blocks[Int(reach - lowest + 1)...Int(below - lowest)])
+                if await storage.moveCurrentState(at: path, up: up, from: cursor) { return below }
             }
+            let (block, delay) = (blocks[Int(below - lowest)], walkBackoff[path] ?? 10)
+            walkBackoff[path] = min(delay * 2, max(10, UInt64(configuration.maintenanceCadence)))
             nextWalk += 1
-            failedWalks.remove(path)
             let (id, storage, remote, inputs) = (nextWalk, storage, remote, inputs)
-            currentWalks[path] = (id, below, Task {
-                let done = await storage.walkCurrentState(at: path, block: walked, height: below, remote: remote)
+            currentWalks[path] = (id, Task {
+                let done = await storage.walkCurrentState(at: path, block: block, height: below, remote: remote)
+                if !done { _ = await Timers.sleep(nanoseconds: delay * 1_000_000_000) }
                 inputs.yield(.currentStateWalked(path, walk: id, done: done))
             })
+            return nil
         }
 
         /// ChainEffect work off the loop: it only posts events back, and a post
@@ -1879,5 +1865,20 @@ private final class Handoff<Value>: @unchecked Sendable {
 
     func take() -> Value {
         value.take()!
+    }
+}
+
+extension NodeRuntime {
+    /// The act-on chain's blocks from height `lowest` up to its tip, lowest
+    /// first; nil when the tree lacks one of them.
+    static func actOnBlocks(_ level: ChainCore, from lowest: UInt64) -> [String]? {
+        var blocks = [level.snapshot.actOnTip]
+        var height = level.snapshot.actOnHeight
+        while height > lowest {
+            guard let parent = level.tree.parent(of: blocks[blocks.count - 1]) else { return nil }
+            blocks.append(parent)
+            height -= 1
+        }
+        return blocks.reversed()
     }
 }

@@ -81,10 +81,14 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   block a window below the tip, counted per place: a block's state diff
   moves the counts as the block leaves the window, before its window goes,
   so a node it created is still held when it joins, and a node goes when
-  no place holds it. With no counts, or counts of a block no longer on the
-  act-on chain, that state is walked off the loop, what the store lacks
-  read from peers and stored, and the windows above it stay until the walk
-  ends. A start lets go of the scopes and counts earlier versions kept a
+  no place holds it. A window goes only once the counts have moved past
+  its height; counts at or above the height a window below the tip wait
+  for the tip. With no counts, counts of a block no longer on the act-on
+  chain, or a move in doubt (a count below 0, a joining node not held, a
+  fact or the store failing), no counts are written: that state is walked
+  off the loop, what the store lacks read from peers and stored, and no
+  window goes until the walk ends. A walk writes counts only when it
+  reached every node, and keeps pinned only what it reached. A start lets go of the scopes and counts earlier versions kept a
   tip's state under, and of the current state of a chain no longer hosted
   or on `none`. State the store lacks is read from peers by execution,
   preflight and state reads alike. Pinned by `StateWindowTests`.

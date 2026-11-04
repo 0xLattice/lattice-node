@@ -107,18 +107,24 @@ extension NodeStorage {
         try await store.stageNodeFacts(durable, logID: logID)
     }
 
-    /// Retains the roots this store holds. One it lacks (a body fetched for
-    /// this step and gone since) is no fault: the facts still name it, and
-    /// whatever reads it next fetches it.
-    nonisolated func retainHeld(_ roots: [String], scope: String? = nil) async throws {
+    /// Retains the roots this store holds, and returns the ones it lacks.
+    /// One it lacks (a body fetched for this step and gone since) is no
+    /// fault here: the facts still name it, and whatever reads it next
+    /// fetches it.
+    @discardableResult
+    nonisolated func retainHeld(_ roots: [String], scope: String? = nil) async throws -> [String] {
         var roots = Set(roots)
+        var missing: [String] = []
         while !roots.isEmpty {
             do {
-                return try await broker.mergeRetainedRoots(scope: scope ?? retentionScope, roots: roots.sorted())
+                try await broker.mergeRetainedRoots(scope: scope ?? retentionScope, roots: roots.sorted())
+                return missing
             } catch BrokerError.missingRetainedRoot(let root) {
                 roots.remove(root)
+                missing.append(root)
             }
         }
+        return missing
     }
 
     /// How the operator's own work reads: this store, a block's header
