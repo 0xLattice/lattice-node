@@ -549,9 +549,13 @@ Until the new counts are written the old ones stay, and while the counts are
 behind the tip no window is let go of. A state sync or read that fails (at a
 first start, before any peer has connected) runs again when a peer connects,
 or at the next maintenance pass; a write the store failed runs again when the
-tip next moves or at the next maintenance pass. At each start the counts are
-checked against the store, walking the tip's state from the store alone; counts
-that do not match it are replaced by a state sync.
+tip next moves or at the next maintenance pass. A state sync whose counts the
+store refuses waits for a new peer or the next maintenance pass before it runs
+again. At each start, and at each maintenance pass for a chain whose counts
+moved since they were last checked, the counts are checked against the store,
+walking the tip's state from the store alone; counts that do not match it (as
+facts an older version wrote with an inexact diff may leave them) are replaced
+by a state sync.
 
 A chain no longer hosted (removed from a running node's hosted chains, or
 left out at a start) loses its counts and what its state sync held; hosting

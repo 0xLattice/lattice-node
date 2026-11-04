@@ -386,7 +386,8 @@ public final class NodeRuntime: Sendable {
             await storage.letGoOfReads()
             await storage.moveLegacyState(tips: state.core.levels.mapValues(\.snapshot.actOnHeight))
             for (path, marker) in await storage.settleCountedScopes(hosted: Set(state.core.levels.keys)) {
-                state.audit(path, marker: marker)
+                state.counted[path] = CountedChain(marker: marker)
+                state.audit(path)
             }
             await state.settleState()
             state.refreshView()
@@ -756,6 +757,12 @@ extension NodeRuntime {
                         stateTips[path] = nil
                     }
                     await settleState()
+                    // Counts that moved since they were last checked are
+                    // checked against the store again.
+                    for (path, chain) in counted
+                    where chain.marker != nil && chain.marker != chain.audited && chain.repair == nil && !chain.waiting {
+                        audit(path)
+                    }
                 }
                 return true
             case .currentPeers(let current):
@@ -772,10 +779,10 @@ extension NodeRuntime {
                 switch repair {
                 case .synced(let block, let places): chain.synced = (block, places)
                 case .healed: break
-                case .audited(let known?): chain.known = known
-                case .audited(nil):
-                    SyncTrace.log(chain: path, "counts do not match the store at start: resync")
-                    (chain.marker, chain.known) = (nil, nil)
+                case .audited(let marker, let known?): (chain.audited, chain.known) = (marker, known)
+                case .audited(_, nil):
+                    SyncTrace.log(chain: path, "counts do not match the store: resync")
+                    (chain.marker, chain.known, chain.audited) = (nil, nil, nil)
                 case .failed: chain.waiting = true
                 }
                 counted[path] = chain
@@ -1855,6 +1862,8 @@ extension NodeRuntime {
             switch outcome {
             case .settled(let marker, let known):
                 let moved = marker != chain.marker
+                // A state sync's counts are checked anew.
+                if chain.synced != nil { chain.audited = nil }
                 (chain.marker, chain.known, chain.synced) = (marker, known, nil)
                 // What a state sync or heal read is counted now.
                 if moved { await storage.releaseStaging(at: path) }
@@ -1867,8 +1876,11 @@ extension NodeRuntime {
                 }
             case .resync(let reason):
                 SyncTrace.log(chain: path, "counts resync: \(reason)")
+                // A state sync's commit refused: the next waits for a new
+                // peer or the next maintenance pass, not run back to back.
+                chain.waiting = chain.synced != nil
                 (chain.marker, chain.known, chain.synced) = (nil, nil, nil)
-                stateSync(path, &chain, tip: tip, window: window)
+                if !chain.waiting { stateSync(path, &chain, tip: tip, window: window) }
             case .failed(let reason):
                 SyncTrace.log(chain: path, "counts not moved: \(reason)")
             }
@@ -1882,11 +1894,12 @@ extension NodeRuntime {
             }
         }
 
-        /// At a start: the counts of the chain at `path`, with `marker`,
-        /// are checked against the store off the loop before they move.
-        mutating func audit(_ path: ChainPath, marker: String) {
-            var chain = CountedChain(marker: marker)
-            repair(path, &chain) { storage, _ in .audited(await storage.auditCounted(at: path, marker: marker)) }
+        /// The counts of the chain at `path` are checked against the store
+        /// off the loop, as they are now: at a start, before they move, and
+        /// at a maintenance pass when they moved since the last check.
+        mutating func audit(_ path: ChainPath) {
+            guard var chain = counted[path], let marker = chain.marker else { return }
+            repair(path, &chain) { storage, _ in .audited(marker, await storage.auditCounted(at: path, marker: marker)) }
             counted[path] = chain
         }
 
@@ -1948,6 +1961,8 @@ struct CountedChain {
     /// The blocks from the cursor up to the counts' tip, as the last move
     /// left them: the next move reads only the facts it needs.
     var known: [String]?
+    /// The marker of the counts the last check found matching the store.
+    var audited: String?
     /// The check, heal or state sync running off the loop.
     var repair: (id: UInt64, task: Task<Void, Never>)?
     /// A state sync's counts, until committed.
@@ -1962,7 +1977,8 @@ enum CountedRepair: Sendable {
     /// The state of `block`, every node with the places it holds there.
     case synced(CountedMarker.Block, [String: Int])
     case healed
-    /// The start's check: the counts' chain when they match the store.
-    case audited([String]?)
+    /// A check of the counts with this marker: their chain when they match
+    /// the store.
+    case audited(String, [String]?)
     case failed
 }

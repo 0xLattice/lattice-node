@@ -88,7 +88,8 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   a move of the tip never lowers the cursor (a state sync may set it lower);
   every node it counts is held. The counts move with the tip in one
   adjustment under their marker; counts that cannot follow, that the store
-  refuses, or that a start's check finds do not match the store are
+  refuses, or that a check (at a start, and at a maintenance pass once they
+  moved) finds do not match the store are
   replaced whole by a state sync, committed moved to the tip in one
   adjustment, the old ones serving until then. Pinned by
   `StateWindowTests.testTheCountsFollowEveryMoveOfTheTip` and the other

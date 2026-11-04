@@ -238,8 +238,8 @@ extension NodeStorage {
     nonisolated func settleCounted(
         at path: ChainPath, tip: String, window: UInt64, marker: String, known: [String]?
     ) async -> CountedOutcome {
-        var (marker, known) = (marker, known)
-        for retry in [false, true] {
+        var (marker, known, retry) = (marker, known, false)
+        while true {
             guard let counted = CountedMarker(marker) else { return .resync("marker \(marker) unreadable") }
             let change: CountedChange
             do {
@@ -261,7 +261,7 @@ extension NodeStorage {
                     guard let stored = try await broker.countedState(scope: scopes.counted(at: path)).marker else {
                         return .resync("no marker")
                     }
-                    (marker, known) = (stored, nil)
+                    (marker, known, retry) = (stored, nil, true)
                 } catch {
                     return .failed("\(error)")
                 }
@@ -269,7 +269,6 @@ extension NodeStorage {
                 return Self.outcome(of: error)
             }
         }
-        return .resync("the marker changed again")
     }
 
     /// Makes the counts of the chain at `path` those of the state of
@@ -314,7 +313,7 @@ extension NodeStorage {
         }
     }
 
-    /// At a start, the check of a chain's counts against the store: the
+    /// The check of a chain's counts against the store: the
     /// places of the state of the marker's tip, walked from this store
     /// alone, plus what the blocks above the cursor replaced. Returns the
     /// counts' chain when they match; nil when they do not, a node of the

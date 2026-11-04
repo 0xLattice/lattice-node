@@ -791,6 +791,35 @@ final class StateWindowTests: XCTestCase {
         }
     }
 
+    /// A block inside the window whose stored fact carries a wrong diff
+    /// (as facts older binaries wrote may): it names nothing replaced, so
+    /// the counts would keep what it replaced once the cursor passes it.
+    /// A maintenance pass checks counts that moved since their last check,
+    /// finds them wrong, and a state sync replaces them; once the block is
+    /// below the cursor the counts are exact.
+    func testAMaintenancePassChecksTheCountsAndResyncsWrongOnes() async throws {
+        let miner: Key = CryptoUtils.generateKeyPair()
+        let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(miner))])
+        let node = try host(keyByte: 0xfa, state: .recent, stateWindow: 4, peerSearchInterval: 1)
+        let (runtime, storage) = try await start(node)
+        var tip = ""
+        for _ in 0..<3 { tip = try BlockHeader(node: try await runtime.mineBlock(paid)).rawCID }
+        try await eventually("the counts reach the tip") { try await self.settled(storage, at: tip) }
+        let fact = try await storage.store.blockFact(tip, at: ["Nexus"])
+        var diff = try XCTUnwrap(fact?.stateDiff)
+        XCTAssertFalse(NodeStore.net(diff).replaced.isEmpty, "the block replaced something")
+        diff.replaced = [:]
+        try await storage.store.rewriteStateDiff(of: tip, at: ["Nexus"], to: diff)
+        for _ in 0..<6 { tip = try BlockHeader(node: try await runtime.mineBlock(paid)).rawCID }
+        try await eventually("a maintenance pass finds the counts wrong and a state sync replaces them") {
+            guard try await self.settled(storage, at: tip) else { return false }
+            let now = try await self.oracle(storage)
+            return now.counts == now.expected
+        }
+        await runtime.stop()
+        try await assertCountsHold(storage, "after the maintenance check")
+    }
+
     /// At a start the counts are checked against the store: counts that
     /// count a node once too often (as a rollback, or a fault, may leave
     /// them) are found, and a state sync replaces them.
@@ -1030,6 +1059,26 @@ extension NodeStore {
     func writeLegacyStateCount() throws {
         _ = try database.execute("INSERT INTO core_meta (key, value) VALUES ('state_pin:Nexus:x', '1')")
         _ = try database.execute("INSERT INTO core_meta (key, value) VALUES ('state_tip:Nexus', 'x')")
+    }
+
+    /// Rewrites the stored fact of `block` to carry `diff`, as a fact an
+    /// older binary wrote with an inexact diff.
+    func rewriteStateDiff(of block: String, at chainPath: [String], to diff: StateDiff) throws {
+        let old = try XCTUnwrap(try blockFact(block, at: chainPath))
+        let fact = ChainBlockFact(
+            blockHash: old.blockHash, parentBlockHash: old.parentBlockHash, blockHeight: old.blockHeight,
+            postStateCID: old.postStateCID, prevStateCID: old.prevStateCID, parentStateCID: old.parentStateCID,
+            specCID: old.specCID, target: old.target, nextTarget: old.nextTarget, timestamp: old.timestamp,
+            stateDiff: diff, childCommitments: old.childCommitments
+        )
+        let changed = try database.execute(
+            "UPDATE admission_facts SET payload = ?3 WHERE chain_path = ?1 AND fact_id = ?2",
+            params: [
+                .text(chainPath.joined(separator: "/")), .blob(try Self.encode(ChainFactID.block(block))),
+                .blob(try Self.encode(ChainFact.block(fact))),
+            ]
+        )
+        XCTAssertEqual(changed, 1)
     }
 
     func legacyStateCountRows() throws -> Int {
