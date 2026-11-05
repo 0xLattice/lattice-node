@@ -156,6 +156,21 @@ final class TemplateSubscriptionTests: XCTestCase {
         XCTAssertEqual(pushed.map(\.clean), [true, false])
     }
 
+    /// A first build that fails refuses the subscribers it was for; a later
+    /// subscriber starts a build of its own.
+    func testAFailedFirstBuildRefusesItsSubscribers() async throws {
+        var mining = MiningState(tipCID: "A", spec: testSpec())
+        let job = jobs(mining.step(.templateSubscribed(subscriberID: 1, plan), now: 0))[0]
+        let failed = mining.step(.templateBuilt(job, nil), now: 0)
+        let refused = failed.compactMap {
+            if case .subscriptionRefused(let id, let error) = $0 { (id, error) } else { nil }
+        }
+        XCTAssertEqual(refused.map(\.0), [1])
+        XCTAssertEqual(refused.map(\.1), [.buildFailed])
+        XCTAssertEqual(mining.templateSubscribers, 0)
+        XCTAssertEqual(jobs(mining.step(.templateSubscribed(subscriberID: 2, plan), now: 0)).count, 1)
+    }
+
     func testUnsubscribedPlansStopBuilding() {
         var mining = MiningState(tipCID: "A", spec: testSpec())
         _ = mining.step(.templateSubscribed(subscriberID: 1, plan), now: 0)

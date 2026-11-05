@@ -69,6 +69,9 @@ public struct BoundedSpawnResult: Sendable {
 /// a child. It is the step between two signals, not a bound on how long any
 /// caller may run, which is why it is not an operator knob.
 private let terminationGrace = Duration.milliseconds(200)
+/// How long a cancelled wait waits for the termination callback after the
+/// group was signalled (and, past `terminationGrace`, killed).
+private let cancelledWaitBound = Duration.seconds(2)
 
 /// The teardown target for one child, CAPTURED AT SPAWN while the child is
 /// still definitively alive.
@@ -308,7 +311,9 @@ public final class BoundedProcessWait: @unchecked Sendable {
 
     /// Waits for exit or the deadline, whichever comes first. On task
     /// cancellation the group is signalled, preserving the prompt-reap
-    /// behaviour the mining worker relies on.
+    /// behaviour the mining worker relies on, and the wait ends within a
+    /// grace even without a deadline: a lost termination callback (#62)
+    /// must not park a cancelled caller.
     public func wait() async -> ProcessWaitOutcome {
         let result = await withTaskCancellationHandler {
             await withCheckedContinuation {
@@ -323,6 +328,10 @@ public final class BoundedProcessWait: @unchecked Sendable {
                 terminateProcessGroup(captured) { code in
                     self.recordTeardownSignalFailure(code)
                 }
+            }
+            Task.detached { [weak self] in
+                try? await Task.sleep(for: cancelledWaitBound)
+                self?.settle(.deadlineExceeded)
             }
         }
         timer?.cancel()

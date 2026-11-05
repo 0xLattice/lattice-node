@@ -273,6 +273,26 @@ final class BoundedProcessWaitTests: XCTestCase {
     /// helper fails here. `testDeadlineKillsTheWholeProcessGroup` cannot
     /// catch that regression: it drives `runBounded` directly and bypasses
     /// this path entirely.
+    /// #62 without a deadline: a cancelled wait whose termination callback
+    /// never comes still ends.
+    func testACancelledWaitEndsWithoutItsTerminationCallback() throws {
+        let stub = try script("sleep 60")
+        defer { try? FileManager.default.removeItem(at: stub) }
+        let process = Process()
+        process.executableURL = stub
+        let handle = try runBounded(process, deadline: nil)
+        // The callback is lost: nothing will report the exit.
+        process.terminationHandler = nil
+
+        withinDeadline(20, "a cancelled wait with no callback") {
+            let waiting = Task { await handle.wait() }
+            try? await Task.sleep(for: .milliseconds(100))
+            waiting.cancel()
+            let outcome = await waiting.value
+            XCTAssertEqual(outcome, .deadlineExceeded)
+        }
+    }
+
     func testSpawnReturnsWhenTheChildNeverExits() throws {
         let stub = try script("sleep 60")
         defer { try? FileManager.default.removeItem(at: stub) }

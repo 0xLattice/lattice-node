@@ -467,7 +467,8 @@ Issued work never expires on a clock: proof-of-work arrivals are memoryless,
 so the time spent on a template says nothing about when the next tip comes.
 Every template issued on the current Nexus tip stays valid; the tip moving
 retires all of them (Stratum's `clean_jobs`). A pool or child change never
-retires earlier work.
+retires earlier work; only past 512 templates on one tip are the least
+recently issued dropped.
 
 ### `POST /mining/templates/subscribe`
 
@@ -487,13 +488,15 @@ the pool or a hosted level moved (earlier work stays valid). A comment line
 `: keepalive` every 15 seconds only shows the connection is alive; a quiet
 chain sends nothing else.
 
-The stream ends with `event: end` and the reason as `data`:
+The node ends a subscription with `event: end` and the reason as `data`:
 
 - `hostedChainsChanged` — the operator changed the hosted chains
   (`POST /hosted-chains`). A template carries every hosted level, so the
   plan is stale; subscribe again with the new one.
 - `busy` — the node has its fill of subscribers.
-- `stopped` — the node is stopping.
+- `buildFailed` — the subscriber's first template could not be built.
+
+A node shutting down closes the stream without an `end` event.
 
 Losing the stream says nothing about the chain: work already issued stays
 valid until the Nexus tip moves, and the node judges any solution submitted

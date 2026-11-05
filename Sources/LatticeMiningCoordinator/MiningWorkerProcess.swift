@@ -92,8 +92,9 @@ public struct MiningWorkerProcessClient: Sendable {
         }
 
         // Work stays valid until the tip moves: the stale probe or the
-        // batch's end cancels this search, never a clock. Routed through the shared bounded wait so a
-        // lost termination callback cannot park the coordinator (#62).
+        // batch's end cancels this search, never a clock. A cancelled wait
+        // ends within a grace even if the termination callback is lost
+        // (#62).
         let handle = try runBounded(process, deadline: nil)
         let waitOutcome = await handle.wait()
         if waitOutcome == .deadlineExceeded {

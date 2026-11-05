@@ -840,7 +840,20 @@ public struct MiningState: Sendable {
             for entry in waiting.replies {
                 turn.replies.append(.templateRefused(replyID: entry.replyID, .buildFailed))
             }
-            if let subscription { rebuildIfMoved(subscription, &turn) }
+            guard let subscription else { return }
+            // Subscribers no template has reached are refused like a pull;
+            // the others keep the work they hold.
+            let first = subscriptions[subscription].waiting
+            for subscriberID in first.sorted() {
+                turn.replies.append(.subscriptionRefused(subscriberID: subscriberID, .buildFailed))
+            }
+            subscriptions[subscription].waiting = []
+            subscriptions[subscription].subscribers.removeAll { first.contains($0) }
+            if subscriptions[subscription].subscribers.isEmpty {
+                subscriptions.remove(at: subscription)
+            } else {
+                rebuildIfMoved(subscription, &turn)
+            }
             return
         }
         let issued = templates.issue(WorkTemplate(
