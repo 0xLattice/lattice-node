@@ -1269,12 +1269,14 @@ extension NodeRuntime {
             view.poolVersion = pool.version
             // The root's digest covers every hosted level: a child's tip or
             // pool moving changes the template a miner should fetch.
-            if path == core.rootPath, view.templateDigest != digest { templateDigest.publish(digest) }
+            let digestChanged = path == core.rootPath && view.templateDigest != digest
             view.templateDigest = digest
             view.peers = peers
             view.waiting = waiting
             views[path] = view
             output.view.publish(view)
+            // After the view: a client told of a digest finds it in status.
+            if digestChanged { templateDigest.publish(digest) }
         }
 
         // MARK: - Network → events

@@ -62,7 +62,7 @@ some of them is `childOnly`: the coordinator submits it, the node keeps the
 work open, and the coordinator invokes the worker again over the rest of its
 range (`--start-nonce` just past the hit) with `--target` set to the easiest
 target still uncleared. That repeats until the hardest target is hit, the range
-is exhausted, or the template expires.
+is exhausted, or the work goes stale (the Nexus tip moved).
 
 Each invocation is still one immutable prefix, target, and range, but merged
 work adds two requirements:

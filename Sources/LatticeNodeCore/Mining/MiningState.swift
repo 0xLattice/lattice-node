@@ -352,7 +352,7 @@ public struct MiningState: Sendable {
         case .templateRequested(let replyID, let request):
             requestTemplate(request, waiting: [Waiting(replyID: replyID)], &turn)
         case .templateBuilt(let job, let build):
-            built(job, build, now: now, &turn)
+            built(job, build, &turn)
         case .policyRefused(let refusedOn, let cids):
             if refusedOn == tipCID { departed(mempool.remove(cids), &turn) }
         case .submitWork(let replyID, let workID, let nonce):
@@ -777,7 +777,7 @@ public struct MiningState: Sendable {
         turn.jobs.append(.buildTemplate(job))
     }
 
-    private mutating func built(_ job: TemplateJob, _ build: TemplateBuild?, now: Int64, _ turn: inout Turn) {
+    private mutating func built(_ job: TemplateJob, _ build: TemplateBuild?, _ turn: inout Turn) {
         // A build for an old tip epoch is dropped: the move issued it again.
         guard job.tipEpoch == tipEpoch, let waiting = builds.removeValue(forKey: job.id) else { return }
         guard let build else {

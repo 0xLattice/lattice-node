@@ -451,11 +451,22 @@ final class NodeRuntimeTests: XCTestCase {
         let lastEvent = await events.next()
         var last = try XCTUnwrap(lastEvent)
         XCTAssertEqual(last, runtime.readView.value?.templateDigest)
+        // One action may change the digest more than once: read until the
+        // event names what status now names, each differing from the last.
         func changed(_ what: String) async throws {
-            let event = await events.next()
-            let next = try XCTUnwrap(event, what)
-            XCTAssertNotEqual(next, last, what)
-            last = next
+            var target = await runtime.status().templateDigest
+            let deadline = ContinuousClock.now + .seconds(10)
+            while target == last, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+                target = await runtime.status().templateDigest
+            }
+            XCTAssertNotEqual(target, last, what)
+            while last != target {
+                let event = await events.next()
+                let next = try XCTUnwrap(event, what)
+                XCTAssertNotEqual(next, last, what)
+                last = next
+            }
         }
 
         _ = try await runtime.mineBlock()
@@ -476,8 +487,6 @@ final class NodeRuntimeTests: XCTestCase {
         )
         _ = try await runtime.submitTransaction(SubmitTransactionRequest(transaction: transaction))
         try await changed("the pool changed the next block")
-        let status = await runtime.status()
-        XCTAssertEqual(last, status.templateDigest, "the event names what status names")
 
         await runtime.stop()
         while await events.next() != nil {}

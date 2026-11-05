@@ -22,16 +22,18 @@ public final class PublishedValue<Value: Sendable>: Sendable {
     }
 
     func publish(_ value: Value) {
-        let watchers = current.withLock { state in
+        // Yielded under the lock, so a watcher registering meanwhile never
+        // gets an older value after this one. A yield never runs a
+        // termination handler, which takes the lock.
+        let ended = current.withLock { state -> [UInt64] in
             state.value = value
-            return state.watchers
-        }
-        // Outside the lock: a watcher ending runs its termination handler,
-        // which takes the lock again.
-        for (id, watcher) in watchers {
-            if case .terminated = watcher.yield(value) {
-                current.withLock { _ = $0.watchers.removeValue(forKey: id) }
+            return state.watchers.compactMap { id, watcher in
+                if case .terminated = watcher.yield(value) { id } else { nil }
             }
+        }
+        guard !ended.isEmpty else { return }
+        current.withLock { state in
+            for id in ended { state.watchers.removeValue(forKey: id) }
         }
     }
 
@@ -40,21 +42,23 @@ public final class PublishedValue<Value: Sendable>: Sendable {
     /// one value. Ends when the publisher `finish`es.
     public func updates() -> AsyncStream<Value> {
         let (stream, continuation) = AsyncStream<Value>.makeStream(bufferingPolicy: .bufferingNewest(1))
-        let registered = current.withLock { state -> (id: UInt64, value: Value?)? in
+        let id = current.withLock { state -> UInt64? in
             guard !state.finished else { return nil }
             let id = state.nextWatcher
             state.nextWatcher += 1
             state.watchers[id] = continuation
-            return (id, state.value)
+            // Under the lock, so no publish lands between this and the
+            // registration and is then overwritten by an older value.
+            if let value = state.value { continuation.yield(value) }
+            return id
         }
-        guard let registered else {
+        guard let id else {
             continuation.finish()
             return stream
         }
         continuation.onTermination = { [weak self] _ in
-            self?.current.withLock { _ = $0.watchers.removeValue(forKey: registered.id) }
+            self?.current.withLock { _ = $0.watchers.removeValue(forKey: id) }
         }
-        if let value = registered.value { continuation.yield(value) }
         return stream
     }
 

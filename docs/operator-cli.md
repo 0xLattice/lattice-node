@@ -264,7 +264,8 @@ floor on template spacing and releases itself when rounds run longer.
 The mining loop starts once the node answers a template request
 (`mine.templateTimeoutSeconds`) and places a deadline around each coordinator
 process group: 600 seconds until a round completes, then the longest
-completed round (counted up to 600 seconds) times `mine.roundDeadlineMultiplier`.
+completed round (counted up to 600 seconds) times `mine.roundDeadlineMultiplier`,
+never less than 600 seconds.
 It only catches a hung coordinator; work itself never expires on a clock. A
 timeout is logged loudly and the next round retries.
 
