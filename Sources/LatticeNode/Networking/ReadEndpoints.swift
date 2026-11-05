@@ -127,18 +127,24 @@ struct ReadEndpointResponseV2Message: CanonicalJSONMessage, Equatable, Sendable 
 /// running at once: distinct names neither coalesce nor hit the cache, so
 /// under that pressure a request gets nothing rather than starting another.
 ///
-/// A lookup that finds nothing where one before found hosts answers with
-/// those, while they are under `lastFoundSeconds` old: a search that missed
-/// its deadline (a slow walk, a far provider's dial) is no news that the
-/// hosts went away. Only a lookup that found hosts is kept, so what made-up
-/// names cost stays bounded as before; the answers are unverified claims
-/// either way, which a reader checks before it uses one.
+/// A lookup answers `searchGrace` after its first URL but keeps collecting
+/// until its deadline: a host that answers later (a far region, a slow
+/// dial) goes into the cached result, so the next request lists it.
+///
+/// Every URL found is kept for `lastFoundSeconds` after it was last seen,
+/// and a lookup answers with what it found and what is kept: a host that
+/// missed one lookup's grace or deadline is no news that it went away.
+/// Only URLs found are kept, at most `maximumKept` per path (the newest), so
+/// what made-up names cost stays bounded as before; the answers are
+/// unverified claims either way, which a reader checks before it uses one.
 actor ReadEndpointDirectory {
     static let maximumAsked = 8
     static let perResponderCap = 2
     static let emptyCacheSeconds = 5.0
     static let lastFoundSeconds = 600.0
     static let maximumConcurrentLookups = 16
+    /// What one lookup can find: the most kept per path.
+    static let maximumKept = maximumAsked * perResponderCap
     /// At most this many of the asked are connected providers: their
     /// records can be referred by any peer, so the rest is kept for the
     /// providers the search finds.
@@ -156,8 +162,9 @@ actor ReadEndpointDirectory {
     private let clock: @Sendable () -> Double
 
     private var cache: [[String]: (until: Double, urls: [DeclaredReadEndpoint])] = [:]
-    /// The last lookup of each path that found hosts.
-    private var lastFound: [[String]: (at: Double, urls: [DeclaredReadEndpoint])] = [:]
+    /// The URLs found for each path, newest first, each with when it was
+    /// last seen.
+    private var lastFound: [[String]: [(at: Double, endpoint: DeclaredReadEndpoint)]] = [:]
     private var inFlight: [[String]: Task<[DeclaredReadEndpoint], Never>] = [:]
     private var lookups: [UInt64: Lookup] = [:]
     /// Each request in flight: its lookup and the peer it was sent to.
@@ -176,10 +183,14 @@ actor ReadEndpointDirectory {
         var searching = true
         var graceStarted = false
         var graceOver = false
-        var done: Bool { graceOver || (!searching && unanswered.isEmpty) }
+        /// The waiter has its answer; what comes in now goes to the cache.
+        var answered = false
         var urls: [DeclaredReadEndpoint] = []
         var perResponder: [String: Int] = [:]
         var asks: [Task<Void, Never>] = []
+        /// The search and the deadline: stopped when the lookup closes.
+        var discovery: Task<Void, Never>?
+        var timer: Task<Void, Never>?
         /// Sessions dialed only for this lookup: closed when it ends.
         var dialed: [PeerEndpoint] = []
         var waiter: CheckedContinuation<[DeclaredReadEndpoint], Never>?
@@ -207,35 +218,38 @@ actor ReadEndpointDirectory {
     func lookup(_ chainPath: [String]) async -> [DeclaredReadEndpoint] {
         if let cached = cache[chainPath], clock() < cached.until { return cached.urls }
         if let running = inFlight[chainPath] { return await running.value }
-        // Under pressure: the hosts found last, or nothing; nothing cached.
-        guard inFlight.count < Self.maximumConcurrentLookups else { return kept(chainPath) ?? [] }
+        // Under pressure: the hosts kept, or nothing; nothing cached. A
+        // lookup still collecting after its answer counts as running.
+        let running = inFlight.count + lookups.values.filter(\.answered).count
+        guard running < Self.maximumConcurrentLookups else { return remember([], for: chainPath, at: clock()) }
         let task = Task { await self.run(chainPath) }
         inFlight[chainPath] = task
         let found = await task.value
         inFlight[chainPath] = nil
         let now = clock()
-        let urls: [DeclaredReadEndpoint]
-        if !found.isEmpty {
-            lastFound[chainPath] = (now, found)
-            urls = found
-            cache[chainPath] = (now + cacheSeconds, urls)
-        } else {
-            // Nothing found is looked for again soon, whether or not the
-            // hosts found last stand in for it.
-            urls = kept(chainPath) ?? []
-            cache[chainPath] = (now + min(cacheSeconds, Self.emptyCacheSeconds), urls)
-        }
+        let urls = remember(found, for: chainPath, at: now)
+        // Nothing found is looked for again soon, whether or not the hosts
+        // kept stand in for it.
+        cache[chainPath] = (now + (found.isEmpty ? min(cacheSeconds, Self.emptyCacheSeconds) : cacheSeconds), urls)
         // Expired entries go when the next lookup lands, so the cache holds
         // at most the paths asked for within one window.
         cache = cache.filter { now < $0.value.until }
-        lastFound = lastFound.filter { now - $0.value.at < Self.lastFoundSeconds }
+        lastFound = lastFound.compactMapValues { entries in
+            let fresh = entries.filter { now - $0.at < Self.lastFoundSeconds }
+            return fresh.isEmpty ? nil : fresh
+        }
         return urls
     }
 
-    /// The hosts the last lookup of `chainPath` found, while kept.
-    private func kept(_ chainPath: [String]) -> [DeclaredReadEndpoint]? {
-        guard let found = lastFound[chainPath], clock() - found.at < Self.lastFoundSeconds else { return nil }
-        return found.urls
+    /// Record `found` as seen `now` for `chainPath` and return it with the
+    /// URLs kept from before: each kept until `lastFoundSeconds` after it was
+    /// last seen, the newest `maximumKept`.
+    private func remember(_ found: [DeclaredReadEndpoint], for chainPath: [String], at now: Double) -> [DeclaredReadEndpoint] {
+        let seen = Set(found.map(\.url))
+        let older = (lastFound[chainPath] ?? []).filter { !seen.contains($0.endpoint.url) && now - $0.at < Self.lastFoundSeconds }
+        let entries = Array((found.map { (at: now, endpoint: $0) } + older).prefix(Self.maximumKept))
+        lastFound[chainPath] = entries.isEmpty ? nil : entries
+        return entries.map(\.endpoint)
     }
 
     /// A response from an authenticated peer: counted only as the answer to
@@ -257,29 +271,40 @@ actor ReadEndpointDirectory {
     ) {
         guard let request = requests[requestID], request.peerKey == peerKey,
               var lookup = lookups[request.lookup], lookup.chainPath == chainPath else { return }
+        var news: DeclaredReadEndpoint?
         if let index = lookup.urls.firstIndex(where: { $0.url == url }) {
             if acceptsSubmit, !lookup.urls[index].acceptsSubmit {
                 lookup.urls[index] = DeclaredReadEndpoint(url: url, acceptsSubmit: true)
+                news = lookup.urls[index]
             }
-        } else {
-            guard lookup.perResponder[peerKey, default: 0] < Self.perResponderCap else { return }
+        } else if lookup.perResponder[peerKey, default: 0] < Self.perResponderCap {
             lookup.perResponder[peerKey, default: 0] += 1
             lookup.urls.append(DeclaredReadEndpoint(url: url, acceptsSubmit: acceptsSubmit))
+            news = lookup.urls.last
+        } else {
+            return
         }
         lookup.unanswered.remove(requestID)
         // The first URL in: the rest get a grace, not the whole deadline.
         let graceStarts = !lookup.graceStarted && !lookup.urls.isEmpty
         if graceStarts { lookup.graceStarted = true }
         lookups[request.lookup] = lookup
-        if lookup.done { return finish(request.lookup) }
+        // An answer after the waiter's goes where the next request finds it.
+        if lookup.answered, let news {
+            let now = clock()
+            let urls = remember([news], for: chainPath, at: now)
+            if let cached = cache[chainPath], now < cached.until { cache[chainPath] = (cached.until, urls) }
+        }
         if graceStarts { startGrace(request.lookup) }
+        settle(request.lookup)
     }
 
     /// One lookup under one deadline, provider discovery included: the
     /// providers this node is connected to are asked at once, those the
     /// search finds as it returns, and the lookup answers with what came in
     /// `searchGrace` after the first URL, or at the deadline, as DHT
-    /// provider searches stop once they have enough.
+    /// provider searches stop once they have enough. It keeps collecting
+    /// until the deadline, unless nothing is left outstanding before.
     private func run(_ chainPath: [String]) async -> [DeclaredReadEndpoint] {
         let lookupID = nextID
         nextID += 1
@@ -294,15 +319,14 @@ actor ReadEndpointDirectory {
         let nanoseconds = UInt64(max(0, seconds)) * 1_000_000_000 + UInt64(max(0, attoseconds) / 1_000_000_000)
         let timer = Task {
             _ = await Timers.sleep(nanoseconds: nanoseconds)
-            self.finish(lookupID)
+            self.close(lookupID)
         }
-        let urls = await withCheckedContinuation { continuation in
+        lookups[lookupID]?.discovery = discovery
+        lookups[lookupID]?.timer = timer
+        return await withCheckedContinuation { continuation in
             lookups[lookupID]?.waiter = continuation
-            if lookups[lookupID]?.done == true { finish(lookupID) }
+            settle(lookupID)
         }
-        timer.cancel()
-        discovery.cancel()
-        return urls
     }
 
     /// Ask the providers not asked yet, up to `maximumAsked` in all and
@@ -331,7 +355,7 @@ actor ReadEndpointDirectory {
         }
         if !connected { lookup.searching = false }
         lookups[lookupID] = lookup
-        if lookup.done { finish(lookupID) }
+        settle(lookupID)
     }
 
     private func startGrace(_ lookupID: UInt64) {
@@ -346,7 +370,7 @@ actor ReadEndpointDirectory {
     private func graceEnded(_ lookupID: UInt64) {
         guard lookups[lookupID] != nil else { return }
         lookups[lookupID]?.graceOver = true
-        finish(lookupID)
+        settle(lookupID)
     }
 
     private func dialed(_ lookupID: UInt64, _ provider: PeerEndpoint) async {
@@ -384,17 +408,31 @@ actor ReadEndpointDirectory {
         )
     }
 
-    /// End a lookup: answer its waiter, stop its asks, and close the
+    /// Close a lookup with nothing left outstanding; answer one whose grace
+    /// is over and keep it collecting.
+    private func settle(_ lookupID: UInt64) {
+        guard let lookup = lookups[lookupID], lookup.waiter != nil || lookup.answered else { return }
+        if !lookup.searching && lookup.unanswered.isEmpty { return close(lookupID) }
+        if lookup.graceOver, !lookup.answered, let waiter = lookup.waiter {
+            lookups[lookupID]?.waiter = nil
+            lookups[lookupID]?.answered = true
+            waiter.resume(returning: lookup.urls)
+        }
+    }
+
+    /// End a lookup: answer its waiter if still waiting, drop its requests
+    /// (a later answer is ignored), stop its asks and search, and close the
     /// sessions it dialed.
-    private func finish(_ lookupID: UInt64) {
-        guard let lookup = lookups[lookupID], let waiter = lookup.waiter else { return }
-        lookups[lookupID] = nil
+    private func close(_ lookupID: UInt64) {
+        guard let lookup = lookups.removeValue(forKey: lookupID) else { return }
         requests = requests.filter { $0.value.lookup != lookupID }
         for ask in lookup.asks { ask.cancel() }
+        lookup.discovery?.cancel()
+        lookup.timer?.cancel()
         let dialed = lookup.dialed
         if !dialed.isEmpty {
             Task { for provider in dialed { await self.drop(provider) } }
         }
-        waiter.resume(returning: lookup.urls)
+        lookup.waiter?.resume(returning: lookup.urls)
     }
 }
