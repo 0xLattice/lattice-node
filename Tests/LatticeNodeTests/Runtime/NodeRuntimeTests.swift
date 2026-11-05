@@ -451,17 +451,20 @@ final class NodeRuntimeTests: XCTestCase {
         let lastEvent = await events.next()
         var last = try XCTUnwrap(lastEvent)
         XCTAssertEqual(last, runtime.readView.value?.templateDigest)
-        // One action may change the digest more than once: read until the
-        // event names what status now names, each differing from the last.
+        // One action may change the digest more than once: read events
+        // until one names what status names now. Status is published before
+        // each event, so while they differ a newer event is always coming.
         func changed(_ what: String) async throws {
-            var target = await runtime.status().templateDigest
+            let before = last
             let deadline = ContinuousClock.now + .seconds(10)
-            while target == last, ContinuousClock.now < deadline {
-                try await Task.sleep(for: .milliseconds(10))
-                target = await runtime.status().templateDigest
-            }
-            XCTAssertNotEqual(target, last, what)
-            while last != target {
+            while true {
+                let current = await runtime.status().templateDigest
+                if current != before, current == last { return }
+                guard ContinuousClock.now < deadline else { return XCTFail("no new digest: \(what)") }
+                if current == before {
+                    try await Task.sleep(for: .milliseconds(10))
+                    continue
+                }
                 let event = await events.next()
                 let next = try XCTUnwrap(event, what)
                 XCTAssertNotEqual(next, last, what)
