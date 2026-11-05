@@ -11,19 +11,17 @@ import LatticeMinerCore
 extension HTTPMiningCoordinatorNodeClient {
     /// The node's templates as it builds them, reconnecting when the
     /// connection drops. A reconnect's first push is clean: what moved while
-    /// it was down is unknown. Ends on an unauthorized or missing route, or
-    /// a refused subscription.
+    /// it was down is unknown. Ends on an unauthorized or missing route.
     public func templates() -> AsyncThrowingStream<MiningCoordinatorPush, any Error>? {
         AsyncThrowingStream { continuation in
             let task = Task {
                 var backoff = Duration.milliseconds(250)
                 while !Task.isCancelled {
                     do {
-                        for try await event in self.templateEvents() {
-                            // The node refused the subscription (busy, or
-                            // the chain is gone): fetch instead.
-                            if event.name == "end" { throw MiningCoordinatorNodeClientError.subscriptionUnavailable }
-                            guard event.name == "template" else { continue }
+                        // `event: end` (the node stopped, or had its fill of
+                        // subscribers) is followed by the connection's close,
+                        // and a reconnect after the backoff.
+                        for try await event in self.templateEvents() where event.name == "template" {
                             let work = try JSONDecoder().decode(TemplateResponse.self, from: event.data)
                             struct Clean: Decodable { let clean: Bool? }
                             guard let pushed = MiningCoordinatorWork(template: work) else { continue }

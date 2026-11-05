@@ -147,14 +147,14 @@ final class TemplatePushTests: XCTestCase {
         let connections = [
             try event("a", clean: true) + ": keepalive\n\n" + (try event("b", clean: false)),
             try event("c", clean: nil),
-            // A refused subscription: the client stops and the coordinator fetches.
+            // A refused subscription: the connection ends and the client reconnects.
             "event: end\ndata: busy\n\n",
+            try event("d", clean: false),
         ]
         let served = Counter()
         StubTemplateURLProtocol.responder = { request in
             XCTAssertEqual(request.url?.path, "/api/mining/templates/subscribe")
             let index = served.next()
-            XCTAssertLessThan(index, connections.count, "no reconnect after a refusal")
             return index < connections.count ? (200, Data(connections[index].utf8)) : (404, Data())
         }
         defer { StubTemplateURLProtocol.responder = nil }
@@ -168,13 +168,13 @@ final class TemplatePushTests: XCTestCase {
         var pushes: [MiningCoordinatorPush] = []
         do {
             for try await push in client.templates()! { pushes.append(push) }
-            XCTFail("the stream ends when the subscription is refused")
+            XCTFail("the stream ends when the route is missing")
         } catch let error as MiningCoordinatorNodeClientError {
             XCTAssertEqual(error, .subscriptionUnavailable)
         }
-        XCTAssertEqual(pushes.map(\.work.workId), ["a", "b", "c"])
-        XCTAssertEqual(pushes.map(\.clean), [true, false, true])
-        XCTAssertEqual(pushes.map(\.work.staleToken), ["d-a", "d-b", "d-c"])
+        XCTAssertEqual(pushes.map(\.work.workId), ["a", "b", "c", "d"])
+        XCTAssertEqual(pushes.map(\.clean), [true, false, true, false])
+        XCTAssertEqual(pushes.map(\.work.staleToken), ["d-a", "d-b", "d-c", "d-d"])
     }
 
     /// Before the first push a batch fetches; the subscriber's first push is

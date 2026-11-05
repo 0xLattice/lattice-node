@@ -317,9 +317,11 @@ public actor MiningCoordinator {
         // batch ends it; one that is not waits for the next batch, since the
         // work in hand stays valid. Until the first push the batch fetches,
         // so a node that answers but cannot yet build backs off as before.
-        let pushedSince: UInt64? = feedUnavailable ? nil : pushCount
+        // Pushed work is retired by the next clean push; fetched work, until
+        // a push arrives, by the status probe.
+        let pushedSince: UInt64? = !feedUnavailable && latestPush != nil ? pushCount : nil
         let work: MiningCoordinatorWork
-        if !feedUnavailable, let latestPush {
+        if pushedSince != nil, let latestPush {
             work = latestPush
         } else {
             do {
@@ -390,7 +392,9 @@ public actor MiningCoordinator {
 
             if let pushedSince {
                 group.addTask { [self] in
-                    await self.cleanPush(after: pushedSince, off: work) ? .stale : .ended
+                    // A feed that ends mid-batch leaves the work's freshness
+                    // unknown: start again from what the next batch finds.
+                    await self.cleanPush(after: pushedSince, off: work) || !Task.isCancelled ? .stale : .ended
                 }
             } else if staleProbeEnabled {
                 probing = true
@@ -619,6 +623,7 @@ public actor MiningCoordinator {
         feed?.cancel()
         feed = nil
         latestPush = nil
+        feedUnavailable = false
         feedGeneration += 1
         wakeFeedWaiters()
     }
@@ -641,8 +646,8 @@ public actor MiningCoordinator {
             // the next batch fetches, reports it, and subscribes again.
             resetFeed()
         } else {
-            // A node without the route, a refused subscription, or a stream
-            // that ended: fetch and probe from here on.
+            // A node without the route, or a stream that ended: fetch and
+            // probe until the coordinator is restarted.
             feedUnavailable = true
             wakeFeedWaiters()
         }

@@ -481,12 +481,13 @@ data: {"workID": "...", ..., "templateDigest": "...", "clean": true}
 ```
 
 `data` is the `POST /mining/templates` response plus `clean`: `true` when the
-template builds on a different tip than the previous one sent (earlier work is
+tip moved since the previous one sent (earlier work is
 gone, and a subscriber's first template is always clean), `false` when only
 the pool or a hosted level moved (earlier work stays valid). A comment line
 `: keepalive` every 15 seconds only shows the connection is alive; a quiet
-chain sends nothing else. A refused subscription (too many subscribers) ends
-with `event: end`.
+chain sends nothing else. A refused subscription (too many subscribers) or a
+stopping node ends the stream with `event: end`; clients reconnect after a
+backoff.
 
 ## Submit mining work
 

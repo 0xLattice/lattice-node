@@ -95,22 +95,38 @@ final class TemplateSubscriptionTests: XCTestCase {
             workIDs.append(pushed[0].template.workID)
             job = jobs(mining.step(.templateContextChanged, now: 0))[0]
         }
-        _ = mining.step(.tipMoved(TipMove(tipCID: "B")), now: 0)
+        let moved = jobs(mining.step(.tipMoved(TipMove(tipCID: "B")), now: 0))
         for workID in workIDs {
             let effects = mining.step(.submitWork(replyID: 200, workID: workID, nonce: 0), now: 0)
             guard case .workRefused(_, .unknownWork)? = effects.first else {
                 return XCTFail("work on the old tip accepted: \(effects)")
             }
         }
-        // The move's own build (dropped: it ran on the old tip), then the
-        // shell's context change builds on B; then descendant moves.
-        guard let onB = jobs(mining.step(.templateContextChanged, now: 0)).first else { return XCTFail() }
+        // The move itself builds on B: the work was flushed whatever the
+        // shell's digest says. Then descendant moves.
+        guard let onB = moved.first else { return XCTFail("a tip move rebuilds for subscribers") }
         XCTAssertEqual(onB.tipCID, "B")
         let afterMove = pushes(mining.step(.templateBuilt(onB, try await build(30, digest: "b1")), now: 0))
         XCTAssertEqual(afterMove.map(\.clean), [true], "the first push on a new tip is clean")
         let child = jobs(mining.step(.templateContextChanged, now: 0))[0]
         let childBuild = try await build(31, digest: "b2")
         XCTAssertEqual(pushes(mining.step(.templateBuilt(child, childBuild), now: 0)).map(\.clean), [false])
+    }
+
+    /// A tip that moves away and back flushes the work in between, so the
+    /// template on the returned tip is pushed clean, even when it is the
+    /// same template as before.
+    func testATipThatComesBackIsStillClean() async throws {
+        var mining = MiningState(tipCID: "A", spec: testSpec())
+        let onA = try await build(1, digest: "a")
+        let first = jobs(mining.step(.templateSubscribed(subscriberID: 1, plan), now: 0))[0]
+        XCTAssertEqual(pushes(mining.step(.templateBuilt(first, onA), now: 0)).map(\.clean), [true])
+        _ = mining.step(.tipMoved(TipMove(tipCID: "B")), now: 0)
+        let back = jobs(mining.step(.tipMoved(TipMove(tipCID: "A")), now: 0))
+        XCTAssertEqual(back.count, 1)
+        let pushed = pushes(mining.step(.templateBuilt(back[0], onA), now: 0))
+        XCTAssertEqual(pushed.map(\.clean), [true], "the earlier work on A was flushed")
+        XCTAssertNotNil(mining.templates.template(pushed[0].template.workID))
     }
 
     func testALateSubscriberGetsTheCurrentTemplateAtOnce() async throws {

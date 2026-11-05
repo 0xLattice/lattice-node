@@ -349,7 +349,7 @@ public struct MiningState: Sendable {
         var subscribers: [UInt64]
         /// Subscribers no template has reached yet: their first is clean.
         var waiting: Set<UInt64> = []
-        var pushed: (template: WorkTemplate, contextVersion: UInt64)?
+        var pushed: (template: WorkTemplate, contextVersion: UInt64, tipEpoch: UInt64)?
         var rebuild = false
     }
 
@@ -776,6 +776,10 @@ public struct MiningState: Sendable {
             }
             if !again.isEmpty { requestTemplate(entry.job.request, waiting: again, &turn) }
         }
+        // Subscribers' work was just flushed: build on the new tip whether
+        // or not the shell's digest reports a change (it may have moved
+        // before this tip did).
+        for index in subscriptions.indices { refresh(subscription: index, &turn) }
     }
 
     /// An origin waiting on an RPC answer.
@@ -855,17 +859,21 @@ public struct MiningState: Sendable {
         guard let subscription else { return }
         // Pushed even when the context moved during the build: it is valid
         // work on the current tip, and the rebuild follows.
-        let last = subscriptions[subscription].pushed?.template
+        let last = subscriptions[subscription].pushed
+        let moved = last?.tipEpoch != job.tipEpoch
         let first = subscriptions[subscription].waiting
         if !first.isEmpty {
             turn.replies.append(.templatePushed(subscribers: first.sorted(), issued, clean: true))
             subscriptions[subscription].waiting = []
         }
         let others = subscriptions[subscription].subscribers.filter { !first.contains($0) }
-        if !others.isEmpty, last?.digest != issued.digest || last?.workID != issued.workID {
-            turn.replies.append(.templatePushed(subscribers: others, issued, clean: last?.tipCID != issued.tipCID))
+        if !others.isEmpty,
+           moved || last?.template.digest != issued.digest || last?.template.workID != issued.workID {
+            // Clean when a tip move came between: every earlier template was
+            // flushed, even when the tip came back to the same block.
+            turn.replies.append(.templatePushed(subscribers: others, issued, clean: moved))
         }
-        subscriptions[subscription].pushed = (issued, job.contextVersion)
+        subscriptions[subscription].pushed = (issued, job.contextVersion, job.tipEpoch)
         rebuildIfMoved(subscription, &turn)
     }
 
@@ -886,7 +894,7 @@ public struct MiningState: Sendable {
         }
         // The plan's last template, while nothing has moved since its build.
         if let pushed = subscriptions[index].pushed, pushed.contextVersion == contextVersion,
-           pushed.template.tipCID == tipCID {
+           pushed.tipEpoch == tipEpoch {
             turn.replies.append(.templatePushed(subscribers: [subscriberID], pushed.template, clean: true))
         } else {
             subscriptions[index].waiting.insert(subscriberID)
