@@ -242,6 +242,10 @@ public actor MiningCoordinator {
     private var cleanPushCount: UInt64 = 0
     private var feedUnavailable = false
     private var feedGeneration: UInt64 = 0
+    /// After a connection ends without a push, the next subscription waits
+    /// out a backoff (transport pacing only; batches fetch meanwhile).
+    private var feedRetryAt: ContinuousClock.Instant?
+    private var feedBackoff = Duration.milliseconds(250)
     private var feedWaiters: [UInt64: CheckedContinuation<Void, Never>] = [:]
     private var nextFeedWaiter: UInt64 = 0
 
@@ -567,6 +571,9 @@ public actor MiningCoordinator {
     /// With pushed work, whether a clean push came after `pushedSince`;
     /// otherwise what the status digest says.
     private func isStale(_ work: MiningCoordinatorWork, pushedSince: UInt64?) async -> Bool {
+        // Only the node retiring the work (a clean push) makes it stale; a
+        // dropped connection says nothing about the chain, so a solution
+        // found on it is still submitted and the node judges it.
         if let pushedSince { return cleanPushCount > pushedSince }
         guard let latest = try? await nodeClient.fetchStaleToken() else { return false }
         return latest != work.staleToken
@@ -576,6 +583,7 @@ public actor MiningCoordinator {
 
     private func startFeed() {
         guard feed == nil, !feedUnavailable else { return }
+        if let feedRetryAt, ContinuousClock.now < feedRetryAt { return }
         guard let templates = nodeClient.templates() else {
             feedUnavailable = true
             return
@@ -616,6 +624,7 @@ public actor MiningCoordinator {
     private func received(_ push: MiningCoordinatorPush, generation: UInt64) {
         guard generation == feedGeneration else { return }
         pushCount += 1
+        feedBackoff = .milliseconds(250)
         if push.clean { cleanPushCount = pushCount }
         latestPush = push.work
         wakeFeedWaiters()
@@ -627,6 +636,7 @@ public actor MiningCoordinator {
             // Refused credentials, perhaps a cookie the node is rewriting:
             // the next batch fetches, reports it, and subscribes again.
             resetFeed()
+            retryFeedLater()
         } else if case .subscriptionUnavailable? = error as? MiningCoordinatorNodeClientError {
             // A node without the route: fetch and probe until restarted.
             feedUnavailable = true
@@ -635,7 +645,13 @@ public actor MiningCoordinator {
             // The connection ended: its pushed work may be gone unseen. The
             // next batch fetches and probes, and subscribes again.
             resetFeed()
+            retryFeedLater()
         }
+    }
+
+    private func retryFeedLater() {
+        feedRetryAt = ContinuousClock.now + feedBackoff
+        feedBackoff = min(feedBackoff * 2, .seconds(5))
     }
 
     private func wakeFeedWaiters() {

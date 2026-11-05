@@ -184,9 +184,9 @@ final class TemplatePushTests: XCTestCase {
         }
     }
 
-    /// Before the first push a batch fetches and probes; the subscriber's
-    /// first push does not cancel the fetched work.
-    func testAFirstPushOnTheSameTipKeepsFetchedWork() async {
+    /// Before the first push a batch fetches and probes; a push during it
+    /// does not cancel the fetched work.
+    func testAPushDoesNotCancelFetchedWork() async {
         let node = PushingNode(fetched: work("w1"))
         let searches = Searches()
         let worker = MiningCoordinatorWorker(id: "grinder") { work, _ in
