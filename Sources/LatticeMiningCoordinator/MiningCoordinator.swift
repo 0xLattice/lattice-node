@@ -242,6 +242,8 @@ public actor MiningCoordinator {
     private var cleanPushCount: UInt64 = 0
     private var feedUnavailable = false
     private var feedGeneration: UInt64 = 0
+    /// The tip the latest clean push builds on.
+    private var cleanTip: String?
     private var feedWaiters: [UInt64: CheckedContinuation<Void, Never>] = [:]
     private var nextFeedWaiter: UInt64 = 0
 
@@ -388,7 +390,7 @@ public actor MiningCoordinator {
 
             if let pushedSince {
                 group.addTask { [self] in
-                    await self.cleanPush(after: pushedSince) ? .stale : .ended
+                    await self.cleanPush(after: pushedSince, off: work) ? .stale : .ended
                 }
             } else if staleProbeEnabled {
                 probing = true
@@ -563,7 +565,7 @@ public actor MiningCoordinator {
     /// With pushed work, whether a clean push came after `pushedSince`;
     /// otherwise what the status digest says.
     private func isStale(_ work: MiningCoordinatorWork, pushedSince: UInt64?) async -> Bool {
-        if let pushedSince { return cleanPushCount > pushedSince }
+        if let pushedSince { return movedPast(work, since: pushedSince) }
         guard let latest = try? await nodeClient.fetchStaleToken() else { return false }
         return latest != work.staleToken
     }
@@ -598,6 +600,19 @@ public actor MiningCoordinator {
         }
     }
 
+    /// The tip `work` builds on: its block's parent, or the work itself
+    /// when that cannot be read.
+    private static func tip(of work: MiningCoordinatorWork) -> String {
+        Data(hex: work.blockHex).flatMap { Block(data: $0) }?.parent?.rawCID ?? work.workId
+    }
+
+    /// Whether a clean push after `count` pushes moved off `work`'s tip. A
+    /// clean push on the same tip (a subscriber's first, after a fetch)
+    /// leaves the work valid.
+    private func movedPast(_ work: MiningCoordinatorWork, since count: UInt64) -> Bool {
+        cleanPushCount > count && cleanTip != Self.tip(of: work)
+    }
+
     /// Drop the subscription and what it pushed; the next batch subscribes
     /// again.
     private func resetFeed() {
@@ -611,7 +626,10 @@ public actor MiningCoordinator {
     private func received(_ push: MiningCoordinatorPush, generation: UInt64) {
         guard generation == feedGeneration else { return }
         pushCount += 1
-        if push.clean { cleanPushCount = pushCount }
+        if push.clean {
+            cleanPushCount = pushCount
+            cleanTip = Self.tip(of: push.work)
+        }
         latestPush = push.work
         wakeFeedWaiters()
     }
@@ -657,10 +675,10 @@ public actor MiningCoordinator {
         feedWaiters.removeValue(forKey: id)?.resume()
     }
 
-    /// True once a clean push arrives after `count` pushes; false when the
-    /// feed ends or the wait is cancelled first.
-    private func cleanPush(after count: UInt64) async -> Bool {
-        while cleanPushCount <= count {
+    /// True once a clean push after `count` pushes moves off `work`'s tip;
+    /// false when the feed ends or the wait is cancelled first.
+    private func cleanPush(after count: UInt64, off work: MiningCoordinatorWork) async -> Bool {
+        while !movedPast(work, since: count) {
             guard feed != nil, !feedUnavailable, !Task.isCancelled else { return false }
             await nextFeedEvent()
         }

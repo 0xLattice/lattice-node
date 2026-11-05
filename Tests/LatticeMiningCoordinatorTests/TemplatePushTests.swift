@@ -13,10 +13,12 @@ import UInt256
 private actor PushingNode: MiningCoordinatorNodeClient {
     private let stream: AsyncThrowingStream<MiningCoordinatorPush, any Error>
     private let feed: AsyncThrowingStream<MiningCoordinatorPush, any Error>.Continuation
+    private let fetched: MiningCoordinatorWork?
     private(set) var polls = 0
 
-    init() {
+    init(fetched: MiningCoordinatorWork? = nil) {
         (stream, feed) = AsyncThrowingStream.makeStream()
+        self.fetched = fetched
     }
 
     nonisolated func templates() -> AsyncThrowingStream<MiningCoordinatorPush, any Error>? { stream }
@@ -27,7 +29,7 @@ private actor PushingNode: MiningCoordinatorNodeClient {
 
     func fetchWork() async throws -> MiningCoordinatorWork? {
         polls += 1
-        return nil
+        return fetched
     }
 
     func fetchStaleToken() async throws -> String? {
@@ -173,6 +175,28 @@ final class TemplatePushTests: XCTestCase {
         XCTAssertEqual(pushes.map(\.work.workId), ["a", "b", "c"])
         XCTAssertEqual(pushes.map(\.clean), [true, false, true])
         XCTAssertEqual(pushes.map(\.work.staleToken), ["d-a", "d-b", "d-c"])
+    }
+
+    /// Before the first push a batch fetches; the subscriber's first push is
+    /// clean, but on the same tip it leaves the fetched work running.
+    func testAFirstPushOnTheSameTipKeepsFetchedWork() async {
+        let node = PushingNode(fetched: work("w1"))
+        let searches = Searches()
+        let worker = MiningCoordinatorWorker(id: "grinder") { work, _ in
+            await searches.record(work.workId)
+            try? await Task.sleep(for: .milliseconds(300))
+            if Task.isCancelled { await searches.recordCancel() }
+            return nil
+        }
+        let coordinator = MiningCoordinator(nodeClient: node, workers: [worker], totalBatchSize: 1)
+        let batch = Task { await coordinator.runBatch() }
+        while await searches.workIDs.isEmpty { await Task.yield() }
+        node.push(work("w1"), clean: true)
+
+        let result = await batch.value
+        XCTAssertEqual(result, .noSolution(workId: "w1"))
+        let cancelled = await searches.cancelled
+        XCTAssertEqual(cancelled, 0)
     }
 
     /// Against a node without the route, the coordinator fetches and probes.

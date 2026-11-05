@@ -2,6 +2,7 @@ import ArgumentParser
 import Crypto
 import Foundation
 import Hummingbird
+import ServiceLifecycle
 import Ivy
 import Lattice
 import LatticeNode
@@ -1431,14 +1432,15 @@ private func serviceCall<Value: Encodable, Context: RequestContext>(
 
 /// Write each pushed template as a server-sent event, with a comment line
 /// whenever `keepalive` passes without one, until the subscription ends.
+private enum TemplateEvent: Sendable { case push(MiningTemplateResponse), keepalive, ended(String?) }
+
 private func templateEvents(
     _ pushes: AsyncThrowingStream<MiningTemplateResponse, any Error>,
     to writer: inout any ResponseBodyWriter,
     keepalive: Duration = .seconds(15)
 ) async throws {
     let encoder = JSONEncoder()
-    enum Next: Sendable { case push(MiningTemplateResponse), keepalive, ended(String?) }
-    let (events, sink) = AsyncStream<Next>.makeStream()
+    let (events, sink) = AsyncStream<TemplateEvent>.makeStream()
     let reader = Task {
         do {
             for try await push in pushes { sink.yield(.push(push)) }
@@ -1458,6 +1460,20 @@ private func templateEvents(
         reader.cancel()
         ticker.cancel()
     }
+    // The server waits for open responses when it shuts down, and this one
+    // would run until the runtime stops after it: end it with the server.
+    try await withGracefulShutdownHandler {
+        try await writeTemplateEvents(events, to: &writer, encoder: encoder)
+    } onGracefulShutdown: {
+        sink.yield(.ended(nil))
+    }
+}
+
+private func writeTemplateEvents(
+    _ events: AsyncStream<TemplateEvent>,
+    to writer: inout any ResponseBodyWriter,
+    encoder: JSONEncoder
+) async throws {
     for await next in events {
         switch next {
         case .push(let template):

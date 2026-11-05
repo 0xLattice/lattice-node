@@ -50,6 +50,7 @@ let package = Package(
         // Lattice's own UInt256, declared for the core's and simulator's direct imports.
         .package(url: "https://github.com/0xLattice/UInt256.git", from: "1.1.0"),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
+        .package(url: "https://github.com/swift-server/swift-service-lifecycle.git", from: "2.0.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
     ],
@@ -115,6 +116,7 @@ let package = Package(
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "Ivy", package: "Ivy2"),
                 .product(name: "Hummingbird", package: "hummingbird"),
+                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "VolumeBroker", package: "VolumeBroker"),
