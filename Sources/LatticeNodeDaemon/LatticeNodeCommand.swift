@@ -1434,7 +1434,7 @@ private func serviceCall<Value: Encodable, Context: RequestContext>(
 /// whenever `keepalive` passes without one, until the subscription ends.
 private enum TemplateEvent: Sendable { case push(MiningTemplateResponse), keepalive, ended(String?) }
 
-private func templateEvents(
+func templateEvents(
     _ pushes: AsyncThrowingStream<MiningTemplateResponse, any Error>,
     to writer: inout any ResponseBodyWriter,
     keepalive: Duration = .seconds(15)

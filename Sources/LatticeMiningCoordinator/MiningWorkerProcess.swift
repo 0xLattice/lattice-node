@@ -91,8 +91,8 @@ public struct MiningWorkerProcessClient: Sendable {
             try? FileManager.default.removeItem(at: stderrURL)
         }
 
-        // Work stays valid until the tip moves, which cancels this search;
-        // no clock bounds it. Routed through the shared bounded wait so a
+        // Work stays valid until the tip moves: the stale probe or the
+        // batch's end cancels this search, never a clock. Routed through the shared bounded wait so a
         // lost termination callback cannot park the coordinator (#62).
         let handle = try runBounded(process, deadline: nil)
         let waitOutcome = await handle.wait()

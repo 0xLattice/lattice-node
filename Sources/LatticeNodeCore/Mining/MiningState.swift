@@ -349,7 +349,7 @@ public struct MiningState: Sendable {
         var subscribers: [UInt64]
         /// Subscribers no template has reached yet: their first is clean.
         var waiting: Set<UInt64> = []
-        var pushed: (template: WorkTemplate, contextVersion: UInt64, tipEpoch: UInt64)?
+        var pushed: (template: WorkTemplate, tipEpoch: UInt64)?
         var rebuild = false
     }
 
@@ -873,7 +873,7 @@ public struct MiningState: Sendable {
             // flushed, even when the tip came back to the same block.
             turn.replies.append(.templatePushed(subscribers: others, issued, clean: moved))
         }
-        subscriptions[subscription].pushed = (issued, job.contextVersion, job.tipEpoch)
+        subscriptions[subscription].pushed = (issued, job.tipEpoch)
         rebuildIfMoved(subscription, &turn)
     }
 
@@ -892,14 +892,10 @@ public struct MiningState: Sendable {
             subscriptions.append(Subscription(request: request, subscribers: [subscriberID]))
             index = subscriptions.count - 1
         }
-        // The plan's last template, while nothing has moved since its build.
-        if let pushed = subscriptions[index].pushed, pushed.contextVersion == contextVersion,
-           pushed.tipEpoch == tipEpoch {
-            turn.replies.append(.templatePushed(subscribers: [subscriberID], pushed.template, clean: true))
-        } else {
-            subscriptions[index].waiting.insert(subscriberID)
-            refresh(subscription: index, &turn)
-        }
+        // Its first template comes from a build, clean; a build already
+        // running for the plan serves it.
+        subscriptions[index].waiting.insert(subscriberID)
+        refresh(subscription: index, &turn)
     }
 
     /// Build the plan on the current context, unless that build is already

@@ -471,9 +471,9 @@ retires earlier work.
 
 ### `POST /mining/templates/subscribe`
 
-The same request body. The response is a `text/event-stream` that sends the
-template at once and then each new one the node builds for the plan as the
-Nexus tip, its pool, or any hosted level moves:
+The same request body. The response is a `text/event-stream` that sends a
+template built for the plan and then each new one as the Nexus tip, its pool,
+or any hosted level moves:
 
 ```
 event: template
@@ -485,10 +485,19 @@ tip moved since the previous one sent (earlier work is
 gone, and a subscriber's first template is always clean), `false` when only
 the pool or a hosted level moved (earlier work stays valid). A comment line
 `: keepalive` every 15 seconds only shows the connection is alive; a quiet
-chain sends nothing else. A refused subscription (too many subscribers) or a
-stopping node ends the stream with `event: end`. Losing the stream says
-nothing about the chain: a client keeps its work, subscribes again after a
-backoff, and lets the node judge any solution it finds.
+chain sends nothing else.
+
+The stream ends with `event: end` and the reason as `data`:
+
+- `hostedChainsChanged` — the operator changed the hosted chains
+  (`POST /hosted-chains`). A template carries every hosted level, so the
+  plan is stale; subscribe again with the new one.
+- `busy` — the node has its fill of subscribers.
+- `stopped` — the node is stopping.
+
+Losing the stream says nothing about the chain: work already issued stays
+valid until the Nexus tip moves, and the node judges any solution submitted
+for it.
 
 ## Submit mining work
 

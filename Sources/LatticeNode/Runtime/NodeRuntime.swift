@@ -14,6 +14,9 @@ public enum NodeRuntimeError: Error, Equatable, Sendable {
     case unknownChain
     /// This node's content budget is full for now; asking again may work.
     case busy
+    /// The hosted chains changed: a template subscription's plan is stale,
+    /// and the subscriber subscribes again with its new one.
+    case hostedChainsChanged
 }
 
 /// The production shell around the sans-IO `LatticeNodeCore.NodeCore`.
@@ -920,6 +923,14 @@ extension NodeRuntime {
             levelReads.publish(reads)
             let hostedBefore = hosted.value
             hosted.publish(Set(core.levels.keys))
+            if hostedBefore != hosted.value {
+                // Templates carry every hosted level: each subscriber's plan
+                // changed with them. Its stream ends, and its termination
+                // handler unsubscribes it.
+                for entry in subscribers.values {
+                    entry.pushes.finish(throwing: NodeRuntimeError.hostedChainsChanged)
+                }
+            }
             refreshView()
             // Open sessions learn what is hosted now from a hello sent again,
             // where they said they take one.

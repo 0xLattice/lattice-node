@@ -1232,10 +1232,7 @@ final class MiningCoordinatorTests: XCTestCase {
     /// that stops the mining loop. Driven through the real HTTP client.
     func testHTTPFetchWorkTreats503AsTransientBackoffNotFatal() async throws {
         StubTemplateURLProtocol.responder = { request in
-            XCTAssertTrue(
-                ["/api/mining/templates", "/api/mining/templates/subscribe"].contains(request.url?.path ?? ""),
-                "\(request.url?.path ?? "")"
-            )
+            XCTAssertEqual(request.url?.path, "/api/mining/templates")
             XCTAssertEqual(request.httpMethod, "POST")
             let payload = requestBodyData(request).flatMap {
                 try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
@@ -1262,7 +1259,6 @@ final class MiningCoordinatorTests: XCTestCase {
         let coordinator = MiningCoordinator(nodeClient: client, workers: [], totalBatchSize: 1)
         let result = await coordinator.runBatch()
         XCTAssertEqual(result, .backoff, "a 503 cycle must back off and retry, not stop the loop")
-        await coordinator.stop()
     }
 
     /// Contrast: 401/403 ARE fatal (`unauthorized`) — only auth failures may
@@ -1409,8 +1405,8 @@ final class MiningCoordinatorTests: XCTestCase {
     }
 
     /// The tip can move long after the batch's first freshness probe. The
-    /// round must notice and stop, not grind dead work until the template
-    /// expires or a hard-target hit finally reaches the node.
+    /// round must notice and stop, not grind dead work until a hard-target
+    /// hit finally reaches the node.
     func testTipChangeMidRoundAbandonsTheBatch() async {
         let work = MiningCoordinatorWork(
             workId: "work-1",

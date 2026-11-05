@@ -189,7 +189,6 @@ let package = Package(
                 "LatticeProcessWait",
                 "LatticeNodeDaemon",
                 "LatticeMinerCore",
-                "LatticeMiningCoordinator",
                 "LatticeNodeSim",
                 "LatticeNodeCore",
                 "CSQLite",

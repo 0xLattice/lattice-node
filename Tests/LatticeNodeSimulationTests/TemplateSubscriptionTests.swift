@@ -129,15 +129,18 @@ final class TemplateSubscriptionTests: XCTestCase {
         XCTAssertNotNil(mining.templates.template(pushed[0].template.workID))
     }
 
-    func testALateSubscriberGetsTheCurrentTemplateAtOnce() async throws {
+    /// A late subscriber starts a build (no replay of an earlier template);
+    /// its first push is clean while the plan's others get it unclean.
+    func testALateSubscriberGetsACleanTemplateFromABuild() async throws {
         var mining = MiningState(tipCID: "A", spec: testSpec())
         let job = jobs(mining.step(.templateSubscribed(subscriberID: 1, plan), now: 0))[0]
-        let first = pushes(mining.step(.templateBuilt(job, try await build(1, digest: "d1")), now: 0))[0].template
+        _ = mining.step(.templateBuilt(job, try await build(1, digest: "d1")), now: 0)
         let late = mining.step(.templateSubscribed(subscriberID: 2, plan), now: 0)
-        XCTAssertTrue(jobs(late).isEmpty)
-        XCTAssertEqual(pushes(late).map(\.subscribers), [[2]])
-        XCTAssertEqual(pushes(late).first?.template.workID, first.workID)
-        XCTAssertEqual(pushes(late).first?.clean, true)
+        XCTAssertTrue(pushes(late).isEmpty)
+        guard let again = jobs(late).first else { return XCTFail("a new subscriber builds") }
+        let pushed = pushes(mining.step(.templateBuilt(again, try await build(2, digest: "d2")), now: 0))
+        XCTAssertEqual(pushed.map(\.subscribers), [[2], [1]])
+        XCTAssertEqual(pushed.map(\.clean), [true, false])
     }
 
     /// One who subscribes while a build runs gets a clean first push even

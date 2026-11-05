@@ -126,6 +126,27 @@ final class HostChainsRuntimeTests: XCTestCase {
         }
     }
 
+    /// A template carries every hosted level, so a change to what is hosted
+    /// ends each subscription; its subscriber subscribes again with its new
+    /// plan.
+    func testHostedChainsChangingEndsTemplateSubscriptions() async throws {
+        let node = try await start(keyByte: 0x84, hosted: [Self.alpha])
+        var pushes = try node.runtime.templateSubscription(MiningTemplateRequest()).makeAsyncIterator()
+        let first = try await pushes.next()
+        XCTAssertNotNil(first, "subscribed")
+
+        try await node.runtime.host([])
+        do {
+            while try await pushes.next() != nil {}
+            XCTFail("the subscription outlived the change")
+        } catch let error as NodeRuntimeError {
+            XCTAssertEqual(error, .hostedChainsChanged)
+        }
+        var again = try node.runtime.templateSubscription(MiningTemplateRequest()).makeAsyncIterator()
+        let renewed = try await again.next()
+        XCTAssertNotNil(renewed, "a new subscription is served")
+    }
+
     private static func hostedChains(_ client: some TestClientProtocol, _ chains: [String]) async throws {
         try await client.execute(
             uri: "/hosted-chains", method: .post,
