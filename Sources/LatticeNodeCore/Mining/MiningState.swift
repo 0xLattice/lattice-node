@@ -238,7 +238,6 @@ public struct MiningConfig: Sendable {
     /// Template requests waiting on a build.
     public var maxWaitingTemplateRequests: Int
     public var mempool: MempoolLimits
-    public var templateLifetime: Int64
     public var templateCapacity: Int
 
     public init(
@@ -249,8 +248,7 @@ public struct MiningConfig: Sendable {
         maxReissues: Int = 3,
         maxWaitingTemplateRequests: Int = 64,
         mempool: MempoolLimits = MempoolLimits(),
-        templateLifetime: Int64 = 30_000,
-        templateCapacity: Int = 16
+        templateCapacity: Int = 512
     ) {
         self.maxPendingPeerAdmissions = maxPendingPeerAdmissions
         self.maxPendingPerPeer = maxPendingPerPeer
@@ -259,7 +257,6 @@ public struct MiningConfig: Sendable {
         self.maxReissues = maxReissues
         self.maxWaitingTemplateRequests = maxWaitingTemplateRequests
         self.mempool = mempool
-        self.templateLifetime = templateLifetime
         self.templateCapacity = templateCapacity
     }
 }
@@ -326,7 +323,7 @@ public struct MiningState: Sendable {
         self.spec = spec
         self.config = config
         self.mempool = Mempool(limits: config.mempool)
-        self.templates = WorkTemplateBook(lifetime: config.templateLifetime, capacity: config.templateCapacity)
+        self.templates = WorkTemplateBook(capacity: config.templateCapacity)
     }
 
     public var pendingAdmissions: Int { admissions.count }
@@ -355,12 +352,12 @@ public struct MiningState: Sendable {
         case .templateRequested(let replyID, let request):
             requestTemplate(request, waiting: [Waiting(replyID: replyID)], &turn)
         case .templateBuilt(let job, let build):
-            built(job, build, now: now, &turn)
+            built(job, build, &turn)
         case .policyRefused(let refusedOn, let cids):
             if refusedOn == tipCID { departed(mempool.remove(cids), &turn) }
         case .submitWork(let replyID, let workID, let nonce):
             do {
-                let block = try templates.submission(workID: workID, nonce: nonce, now: now)
+                let block = try templates.submission(workID: workID, nonce: nonce)
                 // A grind that clears only child targets leaves the work open,
                 // so the miner keeps searching it toward the root's target.
                 if ChainTree.rootWork(of: block) != nil {
@@ -671,6 +668,9 @@ public struct MiningState: Sendable {
     private mutating func tipMoved(_ move: TipMove, _ turn: inout Turn) {
         tipCID = move.tipCID
         tipEpoch &+= 1
+        // Work on the old tip is gone (Stratum's `clean_jobs`); a pool or
+        // descendant change never flushes it.
+        templates.invalidateAll()
         confirm(move.confirmed, &turn)
         // A local submit that has waited through too many moves is answered
         // with a retriable refusal; the admission goes on for any other origin.
@@ -777,7 +777,7 @@ public struct MiningState: Sendable {
         turn.jobs.append(.buildTemplate(job))
     }
 
-    private mutating func built(_ job: TemplateJob, _ build: TemplateBuild?, now: Int64, _ turn: inout Turn) {
+    private mutating func built(_ job: TemplateJob, _ build: TemplateBuild?, _ turn: inout Turn) {
         // A build for an old tip epoch is dropped: the move issued it again.
         guard job.tipEpoch == tipEpoch, let waiting = builds.removeValue(forKey: job.id) else { return }
         guard let build else {
@@ -793,10 +793,9 @@ public struct MiningState: Sendable {
             targets: build.targets,
             tipCID: job.tipCID,
             poolVersion: job.poolVersion,
-            expiresAt: now + templates.lifetime,
             digest: build.digest,
             chains: build.chains
-        ), now: now)
+        ))
         for entry in waiting.replies {
             turn.replies.append(.templateIssued(replyID: entry.replyID, issued))
         }

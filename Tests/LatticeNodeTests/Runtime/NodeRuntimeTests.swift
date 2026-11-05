@@ -437,6 +437,98 @@ final class NodeRuntimeTests: XCTestCase {
         }
     }
 
+    /// `miningEvents()` sends the status digest at once, then a new one when
+    /// the root tip moves and when the pool changes what the next block
+    /// carries; never the same digest twice in a row. It ends with the
+    /// runtime.
+    func testMiningEventsFollowTheTemplateDigest() async throws {
+        let node = try host(keyByte: 0x36)
+        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let runtime = try await NodeRuntime.start(
+            storage: storage, configuration: node.configuration, overlay: node.overlay
+        )
+        var events = runtime.miningEvents().makeAsyncIterator()
+        let lastEvent = await events.next()
+        var last = try XCTUnwrap(lastEvent)
+        XCTAssertEqual(last, runtime.readView.value?.templateDigest)
+        // One action may change the digest more than once: read events
+        // until one names what status names now. Status is published before
+        // each event, so while they differ a newer event is always coming.
+        func changed(_ what: String) async throws {
+            let before = last
+            let deadline = ContinuousClock.now + .seconds(10)
+            while true {
+                let current = await runtime.status().templateDigest
+                if current != before, current == last { return }
+                guard ContinuousClock.now < deadline else { return XCTFail("no new digest: \(what)") }
+                if current == before {
+                    try await Task.sleep(for: .milliseconds(10))
+                    continue
+                }
+                let event = await events.next()
+                let next = try XCTUnwrap(event, what)
+                XCTAssertNotEqual(next, last, what)
+                last = next
+            }
+        }
+
+        _ = try await runtime.mineBlock()
+        try await changed("the root tip moved")
+
+        let key = CryptoUtils.generateKeyPair()
+        let bodyHeader = try HeaderImpl(node: TransactionBody(
+            accountActions: [], actions: [Action(key: "k", oldValue: nil, newValue: "v")],
+            depositActions: [], receiptActions: [], withdrawalActions: [],
+            signers: [CryptoUtils.createAddress(from: key.publicKey)],
+            nonce: 0, chainPath: ["Nexus"]
+        ))
+        let transaction = Transaction(
+            signatures: [key.publicKey: try XCTUnwrap(TransactionSigning.sign(
+                bodyHeader: bodyHeader, privateKeyHex: key.privateKey
+            ))],
+            body: bodyHeader
+        )
+        _ = try await runtime.submitTransaction(SubmitTransactionRequest(transaction: transaction))
+        try await changed("the pool changed the next block")
+
+        await runtime.stop()
+        while await events.next() != nil {}
+    }
+
+    /// The digest names each hosted level by path, tip and next block: a
+    /// descendant's tip moving changes it with the root's unmoved, and so
+    /// does the hosted set changing even between levels in the same state.
+    func testTheTemplateDigestCoversDescendantsAndTheHostedSet() {
+        let alpha = ["Nexus", "Alpha"], beta = ["Nexus", "Beta"]
+        func digest(_ levels: [(path: ChainPath, actOn: String, best: String, transactions: [String])]) -> String {
+            NodeRuntime.templateDigest(tip: "root", transactions: [], levels: levels)
+        }
+        let before = digest([(alpha, "a1", "a1", [])])
+        XCTAssertNotEqual(before, digest([(alpha, "a2", "a2", [])]), "a descendant's tip moved")
+        XCTAssertNotEqual(before, digest([(beta, "a1", "a1", [])]), "a different hosted level")
+        XCTAssertNotEqual(before, digest([]), "a level unhosted")
+        XCTAssertNotEqual(before, digest([(alpha, "a1", "a1", []), (beta, "", "", [])]), "a level hosted")
+    }
+
+    /// A watcher that stops reading holds one value, the newest: it skips
+    /// to the latest when it reads again.
+    func testPublishedValueWatchersSkipToTheNewest() async {
+        let value = PublishedValue<String>("0")
+        var updates = value.updates().makeAsyncIterator()
+        for next in ["1", "2", "3"] { value.publish(next) }
+        let newest = await updates.next()
+        XCTAssertEqual(newest, "3")
+        value.publish("4")
+        let after = await updates.next()
+        XCTAssertEqual(after, "4")
+        value.finish()
+        let ended = await updates.next()
+        XCTAssertNil(ended)
+        var late = value.updates().makeAsyncIterator()
+        let none = await late.next()
+        XCTAssertNil(none, "a watcher after finish ends at once")
+    }
+
     /// The pool admits nothing a block cannot carry: its largest transaction
     /// is mined, and the transaction behind it after.
     func testTheLargestTransactionThePoolAdmitsIsMined() async throws {

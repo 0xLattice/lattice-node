@@ -77,7 +77,6 @@ public struct MiningTemplate: Sendable {
     public let block: Block
     public let searchTarget: UInt256
     public let chainPath: [String]
-    public let expiresAt: ContinuousClock.Instant
     let childCandidates: [DirectChildCandidate]
     let searchWitness: ChildSchedulingWitness?
     /// The search threshold of this block and of each direct child's block —
@@ -111,28 +110,12 @@ public struct MiningTemplate: Sendable {
     private static let emptyChildrenCID = try? HeaderImpl<FlatDictionary<BlockHeader>>(
         node: FlatDictionary<BlockHeader>()
     ).rawCID
-
-    var remainingLifetimeMilliseconds: UInt64 {
-        let components = ContinuousClock.now.duration(to: expiresAt).components
-        guard components.seconds >= 0, components.attoseconds >= 0 else {
-            return 0
-        }
-        let seconds = UInt64(components.seconds)
-        let milliseconds = UInt64(
-            components.attoseconds / 1_000_000_000_000_000
-        )
-        let scaled = seconds.multipliedReportingOverflow(by: 1_000)
-        guard !scaled.overflow else { return .max }
-        let total = scaled.partialValue.addingReportingOverflow(milliseconds)
-        return total.overflow ? .max : total.partialValue
-    }
 }
 
 public enum MiningTemplateError: Error, Equatable {
     case invalidChildDirectory
     case duplicateChildDirectory
     case unknownWork
-    case expired
     case missesSearchTarget
 }
 
@@ -147,7 +130,6 @@ struct FittingMiningTemplate {
 enum MiningTemplateAssembly {
     static func assemble(
         chainPath: [String],
-        lifetime: Duration,
         previous: Block,
         transactions: [Transaction],
         children: [DirectChildCandidate],
@@ -261,7 +243,6 @@ enum MiningTemplateAssembly {
             block: candidate,
             searchTarget: scheduling.searchTarget,
             chainPath: chainPath,
-            expiresAt: ContinuousClock.now + lifetime,
             childCandidates: children,
             searchWitness: scheduling.searchWitness,
             thresholds: scheduling.thresholds
@@ -478,7 +459,6 @@ enum MiningTemplateAssembly {
     /// this node hosts.
     static func fit(
         chainPath: [String],
-        lifetime: Duration,
         previous: Block,
         pooled: [Transaction],
         provided: [DirectChildCandidate],
@@ -503,7 +483,6 @@ enum MiningTemplateAssembly {
         while true {
             let provisional = try await assemble(
                 chainPath: chainPath,
-                lifetime: lifetime,
                 previous: previous,
                 transactions: pooled,
                 children: [],
@@ -548,7 +527,6 @@ enum MiningTemplateAssembly {
             let selectedChildCount = optionalChildren.count
             var template = try await assemble(
                 chainPath: chainPath,
-                lifetime: lifetime,
                 previous: previous,
                 transactions: selectedTransactions,
                 children: optionalChildren.prefix(selectedChildCount)
@@ -572,7 +550,6 @@ enum MiningTemplateAssembly {
                 let minimumChildCount = poolLimit == 0 ? 0 : 1
                 let minimumTemplate = try await assemble(
                 chainPath: chainPath,
-                lifetime: lifetime,
                     previous: previous,
                     transactions: selectedTransactions,
                     children: optionalChildren.prefix(minimumChildCount)
@@ -597,7 +574,6 @@ enum MiningTemplateAssembly {
                             + (failingLimit - fittingLimit) / 2
                         let probe = try await assemble(
                 chainPath: chainPath,
-                lifetime: lifetime,
                             previous: previous,
                             transactions: selectedTransactions,
                             children: optionalChildren.prefix(probeLimit)

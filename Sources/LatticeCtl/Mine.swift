@@ -139,7 +139,7 @@ struct Mine: AsyncParsableCommand {
             // Measured, not assumed: a wedged round never completes, so it
             // can never widen the bound that would have caught it.
             var longestCompletedRound = Duration.zero
-            var templateExpiry: Duration?
+            var nodeAnswered = false
             var unusableTemplateSince: ContinuousClock.Instant?
             let templateRequestBody = try MiningTemplateRequestBody.make(
                 recipients: settings.mine.recipientEntries,
@@ -153,35 +153,33 @@ struct Mine: AsyncParsableCommand {
                 let outcome: CoordinatorOutcome
                 let started = ContinuousClock.now
                 do {
-                    if templateExpiry == nil {
+                    if !nodeAnswered {
                         // Marked BEFORE the attempt: an attempt can itself take
                         // the full timeout, so stamping it afterwards would
                         // report ~0 elapsed in the very line that says the node
                         // did not answer for that long.
                         unusableTemplateSince = unusableTemplateSince
                             ?? ContinuousClock.now
-                        // Template lifetime is node-wide, but the node
-                        // adopts each request's plan for its descendants, so
-                        // the probe sends the coordinator's own body: any
-                        // other would churn their candidates.
-                        templateExpiry = await observedTemplateExpiry(
+                        // The node adopts each request's plan for its
+                        // descendants, so the probe sends the coordinator's
+                        // own body: any other would churn their candidates.
+                        nodeAnswered = await nodeAnswersTemplates(
                             settings.rpc,
                             body: templateRequestBody,
                             timeoutSeconds: templateTimeout
                         )
                     }
-                    guard let expiry = templateExpiry else {
-                        // No observation, no derived bound -- and an
-                        // unbounded round is the defect itself. But say so as
-                        // the standstill it is: this retries forever, and the
-                        // old wording read like a passing hiccup while the
-                        // miner produced nothing for as long as it lasted.
+                    guard nodeAnswered else {
+                        // Say so as the standstill it is: this retries
+                        // forever, and a passing-hiccup wording would hide
+                        // that the miner produced nothing for as long as it
+                        // lasted.
                         //
                         // State the OBSERVATION, not a cause: no usable answer
                         // covers a timeout, a transport failure, a non-200
                         // (the node answers 409 while bootstrapping and 503
                         // when the mempool or parent is unavailable -- both
-                        // fast), and a reply carrying no expiry. Naming any one
+                        // fast). Naming any one
                         // of them would send an operator after the wrong thing.
                         // Elapsed, not an attempt count: an attempt here spans
                         // anywhere from milliseconds (a fast non-200) to the
@@ -193,13 +191,12 @@ struct Mine: AsyncParsableCommand {
                         // exists to carry.
                         let downFor = (unusableTemplateSince ?? ContinuousClock.now)
                             .duration(to: ContinuousClock.now)
-                        log("NOT MINING: no usable template answer from the node (no reply within \(templateTimeout)s, a non-200, or a reply with no expiry), so no round deadline can be derived. Stopped for \(downFor.components.seconds)s so far; check `POST /mining/templates` on this node.")
+                        log("NOT MINING: no usable template answer from the node (no reply within \(templateTimeout)s, or a non-200). Stopped for \(downFor.components.seconds)s so far; check `POST /mining/templates` on this node.")
                         try? await Task.sleep(for: .seconds(5))
                         continue
                     }
                     unusableTemplateSince = nil
                     let deadline = MiningRoundDeadline.deadline(
-                        templateExpiry: expiry,
                         longestCompletedRound: longestCompletedRound,
                         multiplier: multiplier
                     )
@@ -421,27 +418,17 @@ func runCoordinatorOnce(
     )
 }
 
-/// The round bound the NODE itself advertises: `expiresInMilliseconds` from
-/// a template request. Observed, never assumed -- the mining round deadline
-/// is derived from this plus measured batch time, so no template lifetime is
-/// hardcoded on this side of the RPC.
-func observedTemplateExpiry(
+/// Whether the node answers a template request at all: mining starts only
+/// once it does. Nothing in the answer is read.
+func nodeAnswersTemplates(
     _ rpc: NodeRPC, body: Data, timeoutSeconds: UInt64
-) async -> Duration? {
-    guard var request = try? rpc.request("mining/templates") else { return nil }
+) async -> Bool {
+    guard var request = try? rpc.request("mining/templates") else { return false }
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = body
     request.timeoutInterval = TimeInterval(timeoutSeconds)
-    guard let (data, response) = try? await URLSession.shared.data(
-        for: request
-    ), let http = response as? HTTPURLResponse, http.statusCode == 200,
-       let object = try? JSONSerialization.jsonObject(
-           with: data
-       ) as? [String: Any],
-       let milliseconds = (object["expiresInMilliseconds"] as? NSNumber)?
-           .int64Value, milliseconds > 0 else {
-        return nil
-    }
-    return .milliseconds(milliseconds)
+    guard let (_, response) = try? await URLSession.shared.data(for: request),
+          let http = response as? HTTPURLResponse else { return false }
+    return http.statusCode == 200
 }

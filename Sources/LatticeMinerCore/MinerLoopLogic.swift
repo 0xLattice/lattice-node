@@ -16,7 +16,6 @@ public struct TemplateResponse: Decodable, Sendable, Equatable {
     /// Every target this work can clear, easiest first (`searchTarget` leads).
     public let targets: [String]
     public let chainPath: [String]
-    public let expiresInMilliseconds: UInt64
     public let staleToken: String
 
     public init(
@@ -25,7 +24,6 @@ public struct TemplateResponse: Decodable, Sendable, Equatable {
         searchTarget: String,
         targets: [String]? = nil,
         chainPath: [String] = ["Nexus"],
-        expiresInMilliseconds: UInt64 = 30_000,
         staleToken: String? = nil
     ) {
         self.workID = workID
@@ -34,7 +32,6 @@ public struct TemplateResponse: Decodable, Sendable, Equatable {
         self.searchTarget = searchTarget
         self.targets = targets ?? [searchTarget]
         self.chainPath = chainPath
-        self.expiresInMilliseconds = expiresInMilliseconds
         self.staleToken = staleToken ?? workID
     }
 
@@ -52,7 +49,6 @@ public struct TemplateResponse: Decodable, Sendable, Equatable {
         case searchTarget
         case targets
         case chainPath
-        case expiresInMilliseconds
         case templateDigest
     }
 
@@ -77,10 +73,6 @@ public struct TemplateResponse: Decodable, Sendable, Equatable {
         targets = try container.decode([UInt256].self, forKey: .targets)
             .map { $0.toHexString() }
         chainPath = try container.decode([String].self, forKey: .chainPath)
-        expiresInMilliseconds = try container.decode(
-            UInt64.self,
-            forKey: .expiresInMilliseconds
-        )
         // The digest changes whenever a template built now would differ — a
         // child's candidate as much as Nexus's tip — and `/status` serves the
         // same value.

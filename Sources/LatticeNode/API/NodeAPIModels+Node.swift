@@ -7,7 +7,6 @@ import LatticeNodeCore
 extension MiningTemplateResponse {
     init(
         template: MiningTemplate,
-        maximumLifetimeMilliseconds: UInt64,
         templateDigest: String
     ) {
         self.init(
@@ -16,10 +15,6 @@ extension MiningTemplateResponse {
             searchTarget: template.searchTarget,
             targets: template.targets,
             chainPath: template.chainPath,
-            expiresInMilliseconds: min(
-                maximumLifetimeMilliseconds,
-                template.remainingLifetimeMilliseconds
-            ),
             templateDigest: templateDigest,
             chains: []
         )

@@ -126,6 +126,23 @@ final class HostChainsRuntimeTests: XCTestCase {
         }
     }
 
+    /// The hosted set changing sends a new digest at once: a template
+    /// carries every hosted level, so a miner fetches again with its plan.
+    func testHostedChainsChangingSendsAMiningEvent() async throws {
+        let node = try await start(keyByte: 0x84, hosted: [Self.alpha])
+        var events = node.runtime.miningEvents().makeAsyncIterator()
+        let hostingEvent = await events.next()
+        let hosting = try XCTUnwrap(hostingEvent)
+        try await node.runtime.host([])
+        let unhostedEvent = await events.next()
+        let unhosted = try XCTUnwrap(unhostedEvent)
+        XCTAssertNotEqual(unhosted, hosting)
+        try await node.runtime.host([Self.alpha])
+        let rehostedEvent = await events.next()
+        let rehosted = try XCTUnwrap(rehostedEvent)
+        XCTAssertNotEqual(rehosted, unhosted)
+    }
+
     private static func hostedChains(_ client: some TestClientProtocol, _ chains: [String]) async throws {
         try await client.execute(
             uri: "/hosted-chains", method: .post,

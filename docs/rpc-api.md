@@ -49,7 +49,7 @@ nonces and amounts, `rewardCredited`, `minRelayFee`, `finalityWindow`, and the c
 numbers. Targets are hex strings. An absent optional field is omitted, never
 `null`.
 
-The mining routes (`/mining/templates`, `/mining/work`) are the miner's
+The mining routes (`/mining/templates`, `/mining/events`, `/mining/work`) are the miner's
 protocol, not this read/submit contract, and are unchanged: their `block` is
 the consensus block's own encoding.
 
@@ -455,12 +455,43 @@ The response contains:
   level, constrained by the request's minimum-work plan;
 - `targets` — thresholds useful to the worker;
 - `chainPath` — `['Nexus']`;
-- `expiresInMilliseconds` — remaining lifetime;
+- `expiresInMilliseconds` — always 30000, kept for clients that require the
+  field; it is not a validity bound;
 - `templateDigest` — fingerprint of the complete hosted tree's template
   inputs.
 
 A change to what the next block at any hosted level would carry, or a new
 candidate, changes the digest, even if the Nexus tip did not move.
+
+Issued work never expires on a clock: proof-of-work arrivals are memoryless,
+so the time spent on a template says nothing about when the next tip comes.
+Every template issued on the current Nexus tip stays valid; the tip moving
+retires all of them (Stratum's `clean_jobs`). A pool or child change never
+retires earlier work; only past 512 templates on one tip are the least
+recently issued dropped.
+
+### `GET /mining/events`
+
+A `text/event-stream` of the template digest: the current one at once, then
+each time it changes.
+
+```
+data: 3f2a...
+
+: keepalive
+```
+
+The digest is the one `/status` and every template carry. It changes when a
+hosted level's act-on tip moves, when what any hosted level's next block
+would carry changes, and when the hosted chains change (`POST /hosted-chains`).
+A client fetches a template (`POST /mining/templates`) when it sees a new
+digest; work it already holds stays valid until the Nexus tip moves.
+
+A client that reads slowly skips to the latest digest: the node holds only
+the newest one for it, never a queue. A comment line `: keepalive` every 15
+seconds only shows the connection is alive; a quiet chain sends nothing else.
+The stream closes when the node stops. Losing it says nothing about the
+chain.
 
 ## Submit mining work
 

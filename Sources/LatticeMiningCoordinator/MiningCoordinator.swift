@@ -19,8 +19,6 @@ public struct MiningCoordinatorWork: Sendable, Equatable {
     /// only some of them is submitted and the search continues toward the
     /// rest over the same nonce range; one entry means the first hit ends it.
     public let targets: [UInt256]
-    /// Template lifetime left when the work was fetched; nil never expires.
-    public let expiresInMilliseconds: UInt64?
     public let staleToken: String
 
     public init(workId: String, blockHex: String, targetHex: String, staleToken: String? = nil) {
@@ -30,7 +28,6 @@ public struct MiningCoordinatorWork: Sendable, Equatable {
             prefixHex: TemplateResponse.derivePrefixHex(blockHex: blockHex),
             targetHex: targetHex,
             targets: MinerLoopLogic.parseTarget(targetHex).map { [$0] } ?? [],
-            expiresInMilliseconds: nil,
             staleToken: staleToken
         )
     }
@@ -41,7 +38,6 @@ public struct MiningCoordinatorWork: Sendable, Equatable {
         prefixHex: String,
         targetHex: String,
         targets: [UInt256],
-        expiresInMilliseconds: UInt64?,
         staleToken: String?
     ) {
         self.workId = workId
@@ -49,7 +45,6 @@ public struct MiningCoordinatorWork: Sendable, Equatable {
         self.prefixHex = prefixHex
         self.targetHex = targetHex
         self.targets = targets
-        self.expiresInMilliseconds = expiresInMilliseconds
         self.staleToken = staleToken ?? workId
     }
 
@@ -70,7 +65,6 @@ public struct MiningCoordinatorWork: Sendable, Equatable {
             targets: Set(targets + [searchTarget])
                 .filter { $0 <= searchTarget }
                 .sorted(by: >),
-            expiresInMilliseconds: template.expiresInMilliseconds,
             staleToken: template.staleToken
         )
     }
@@ -83,7 +77,6 @@ public struct MiningCoordinatorWork: Sendable, Equatable {
             prefixHex: prefixHex,
             targetHex: target.toHexString(),
             targets: targets,
-            expiresInMilliseconds: expiresInMilliseconds,
             staleToken: staleToken
         )
     }
@@ -313,7 +306,6 @@ public actor MiningCoordinator {
             case stale
             /// A background task ended with the batch; nothing to act on.
             case ended
-            case expired
             case searched
             case workerFailed(workerId: String, error: String)
             case solution(MiningWorkerResult, worker: Int, range: NonceSearchRange)
@@ -376,17 +368,6 @@ public actor MiningCoordinator {
                 }
             }
 
-            if let lifetime = work.expiresInMilliseconds {
-                // The node refuses nonces for expired work: searching past the
-                // lifetime spends effort no submission can use.
-                let (nanoseconds, overflow) = lifetime.multipliedReportingOverflow(by: 1_000_000)
-                group.addTask {
-                    // Cancelled only once the batch is over, when no one reads it.
-                    try? await Task.sleep(nanoseconds: overflow ? .max : nanoseconds)
-                    return .expired
-                }
-            }
-
             // The easiest target no submitted hit has cleared yet.
             var openTarget = work.targets.first
             var lastChildOnly: MiningCoordinatorCycleResult?
@@ -401,11 +382,6 @@ public actor MiningCoordinator {
                     searching -= 1
                 case .stale:
                     group.cancelAll()
-                    metricsState.staleAbortCount += 1
-                    return .stale(workId: work.workId)
-                case .expired:
-                    group.cancelAll()
-                    if let lastChildOnly { return lastChildOnly }
                     metricsState.staleAbortCount += 1
                     return .stale(workId: work.workId)
                 case .workerFailed(let workerId, let error):
@@ -738,7 +714,7 @@ public final class HTTPMiningCoordinatorNodeClient: MiningCoordinatorNodeClient 
             let error: Reason
         }
         guard let response = try? JSONDecoder().decode(Response.self, from: data) else {
-            // A 4xx refusal (unknown or expired work, a missed target) is the
+            // A 4xx refusal (unknown work, a missed target) is the
             // node's final answer: retrying it cannot land the block. The
             // daemon names the refusal in the body.
             if http.statusCode >= 400,

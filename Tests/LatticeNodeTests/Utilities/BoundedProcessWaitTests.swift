@@ -176,75 +176,47 @@ final class BoundedProcessWaitTests: XCTestCase {
         }
     }
 
-    /// The deadline derives from the round's own parameters: what the node
-    /// advertised as template expiry, plus the longest round that actually
-    /// completed, times the operator's headroom.
-    func testDeadlineDerivesFromObservedRoundParameters() {
-        XCTAssertEqual(
-            MiningRoundDeadline.deadline(
-                templateExpiry: .seconds(30),
-                longestCompletedRound: .zero,
-                multiplier: 10
-            ),
-            .seconds(300)
-        )
+    /// The deadline is the first-round allowance until a round completes,
+    /// then the longest completed round times the operator's headroom. No
+    /// template lifetime enters it.
+    func testDeadlineDerivesFromMeasuredRounds() {
+        let allowance = MiningRoundDeadline.firstRoundAllowance
+        XCTAssertEqual(MiningRoundDeadline.deadline(longestCompletedRound: .zero, multiplier: 10), allowance)
+        // Short rounds never shrink it below the allowance.
+        XCTAssertEqual(MiningRoundDeadline.deadline(longestCompletedRound: .seconds(20), multiplier: 10), allowance)
         // A host whose rounds legitimately run long widens its own bound.
         XCTAssertEqual(
-            MiningRoundDeadline.deadline(
-                templateExpiry: .seconds(30),
-                longestCompletedRound: .seconds(20),
-                multiplier: 10
-            ),
-            .seconds(500)
+            MiningRoundDeadline.deadline(longestCompletedRound: .seconds(120), multiplier: 10),
+            .seconds(1200)
         )
-        // Operator headroom is honoured.
+        // Operator headroom is honoured; a zero multiplier is floored.
         XCTAssertEqual(
-            MiningRoundDeadline.deadline(
-                templateExpiry: .seconds(30),
-                longestCompletedRound: .zero,
-                multiplier: 2
-            ),
-            .seconds(60)
+            MiningRoundDeadline.deadline(longestCompletedRound: .seconds(400), multiplier: 2),
+            .seconds(800)
         )
-        // A zero multiplier would kill every healthy round; the floor holds.
-        XCTAssertEqual(
-            MiningRoundDeadline.deadline(
-                templateExpiry: .seconds(30),
-                longestCompletedRound: .zero,
-                multiplier: 0
-            ),
-            .seconds(30)
-        )
+        XCTAssertEqual(MiningRoundDeadline.deadline(longestCompletedRound: .seconds(400), multiplier: 0), allowance)
+        // A huge multiplier saturates rather than trapping, at a cap a timer
+        // can still add to the clock (`Task.sleep` traps past it).
+        for multiplier in [Int.max, 23_058_430_092_136_939] {
+            let huge = MiningRoundDeadline.deadline(longestCompletedRound: .seconds(400), multiplier: multiplier)
+            XCTAssertGreaterThan(huge, .seconds(1_000_000))
+            XCTAssertLessThanOrEqual(huge, .seconds(MiningRoundDeadline.maximumSeconds))
+        }
     }
 
     /// A completed round is bounded only by the PREVIOUS deadline, so feeding
-    /// it back unclamped ratchets the bound by the multiplier every time --
-    /// 300s, 3300s, 33300s -- and a few slow-but-completing rounds would
-    /// recreate the multi-day freeze the bound exists to stop.
+    /// it back unclamped ratchets the bound by the multiplier every time and
+    /// a few slow-but-completing rounds would recreate the multi-day freeze
+    /// the bound exists to stop.
     func testMeasuredRoundCannotRatchetTheBound() {
-        let first = MiningRoundDeadline.deadline(
-            templateExpiry: .seconds(30),
-            longestCompletedRound: .zero,
-            multiplier: 10
-        )
-        XCTAssertEqual(first, .seconds(300))
-        // A round that completed just inside that deadline must not widen it
-        // beyond the clamp.
-        let second = MiningRoundDeadline.deadline(
-            templateExpiry: .seconds(30),
-            longestCompletedRound: first,
-            multiplier: 10
-        )
-        XCTAssertEqual(second, .seconds(600))
-        // And that is a fixed point: no sequence of rounds climbs past it.
-        XCTAssertEqual(
-            MiningRoundDeadline.deadline(
-                templateExpiry: .seconds(30),
-                longestCompletedRound: second,
-                multiplier: 10
-            ),
-            .seconds(600)
-        )
+        let ceiling = MiningRoundDeadline.firstRoundAllowance * 10
+        var deadline = MiningRoundDeadline.deadline(longestCompletedRound: .zero, multiplier: 10)
+        for _ in 0..<5 {
+            // A round that completed just inside the deadline.
+            deadline = MiningRoundDeadline.deadline(longestCompletedRound: deadline, multiplier: 10)
+            XCTAssertLessThanOrEqual(deadline, ceiling)
+        }
+        XCTAssertEqual(deadline, ceiling, "a fixed point no sequence of rounds climbs past")
     }
 
     /// A second wait on a settled handle must return the same answer at once.
@@ -273,6 +245,26 @@ final class BoundedProcessWaitTests: XCTestCase {
     /// helper fails here. `testDeadlineKillsTheWholeProcessGroup` cannot
     /// catch that regression: it drives `runBounded` directly and bypasses
     /// this path entirely.
+    /// #62 without a deadline: a cancelled wait whose termination callback
+    /// never comes still ends.
+    func testACancelledWaitEndsWithoutItsTerminationCallback() throws {
+        let stub = try script("sleep 60")
+        defer { try? FileManager.default.removeItem(at: stub) }
+        let process = Process()
+        process.executableURL = stub
+        let handle = try runBounded(process, deadline: nil)
+        // The callback is lost: nothing will report the exit.
+        process.terminationHandler = nil
+
+        withinDeadline(20, "a cancelled wait with no callback") {
+            let waiting = Task { await handle.wait() }
+            try? await Task.sleep(for: .milliseconds(100))
+            waiting.cancel()
+            let outcome = await waiting.value
+            XCTAssertEqual(outcome, .deadlineExceeded)
+        }
+    }
+
     func testSpawnReturnsWhenTheChildNeverExits() throws {
         let stub = try script("sleep 60")
         defer { try? FileManager.default.removeItem(at: stub) }

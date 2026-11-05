@@ -276,11 +276,11 @@ public struct Topology: Codable, Sendable {
             throw CtlError("mining configuration names unhosted chain \(path)")
         }
         if let timeout = mine?.templateTimeoutSeconds, timeout < 1 {
-            throw CtlError("mine.templateTimeoutSeconds must be at least 1; a zero timeout can never observe a template expiry, so no round deadline could be derived and the miner would never mine")
+            throw CtlError("mine.templateTimeoutSeconds must be at least 1; a zero timeout can never see the node answer a template request, so the miner would never mine")
         }
         if let timeout = mine?.templateTimeoutSeconds,
            timeout > TopologyMine.maximumTemplateTimeoutSeconds {
-            throw CtlError("mine.templateTimeoutSeconds must be at most \(TopologyMine.maximumTemplateTimeoutSeconds); the coordinator's own template fetch is fixed at that, so a longer probe would observe expiries for rounds that then die fetching the same template")
+            throw CtlError("mine.templateTimeoutSeconds must be at most \(TopologyMine.maximumTemplateTimeoutSeconds); the coordinator's own template fetch is fixed at that, so a longer probe would start rounds that then die fetching the same template")
         }
         if let multiplier = mine?.roundDeadlineMultiplier, multiplier < 1 {
             throw CtlError("mine.roundDeadlineMultiplier must be at least 1; a round deadline shorter than the round's own bound would kill every healthy round")
@@ -348,20 +348,19 @@ public struct TopologyMine: Codable, Sendable {
     /// and leaves the work to the schedule. Absent = produce blocks as fast as
     /// they solve.
     public var minBlockIntervalSeconds: UInt64?
-    /// How long to wait for the node to ANSWER a template request, in seconds.
-    /// This bounds how long the node takes to BUILD a template, which is a
-    /// different quantity from the template lifetime the answer reports and is
-    /// not bounded by it. Set it above what `POST /mining/templates` costs
-    /// on this host: if it is lower, no round deadline can be derived and the
-    /// miner will not mine at all (#153, where a 15s compiled-in value sat
-    /// under a 16.6s build). Keep it at or below the coordinator's own request
-    /// timeout, since a probe that tolerates more than the mining path does
-    /// will observe an expiry for rounds that cannot then run. Absent = 60s.
+    /// How long to wait for the node to ANSWER a template request, in seconds,
+    /// before mining starts. This bounds how long the node takes to BUILD a
+    /// template. Set it above what `POST /mining/templates` costs on this
+    /// host: if it is lower, the miner will not mine at all (#153, where a
+    /// 15s compiled-in value sat under a 16.6s build). Keep it at or below
+    /// the coordinator's own request timeout, since a probe that tolerates
+    /// more than the mining path does starts rounds that cannot then run.
+    /// Absent = 60s.
     public var templateTimeoutSeconds: UInt64?
-    /// Headroom multiplier on the mining round deadline. The loop measures a
-    /// round's own bound — the node's advertised template expiry plus the
-    /// longest round that has actually completed — and refuses to wait longer
-    /// than that times this. It exists because a supervisor that trusts a
+    /// Headroom multiplier on the mining round deadline. The loop measures
+    /// the longest round that has actually completed and refuses to wait
+    /// longer than that times this (and never less than the first-round
+    /// allowance). It exists because a supervisor that trusts a
     /// child's exit signal can wait forever (#62). Raise it on a host whose
     /// rounds legitimately run long; lower it to notice a wedge sooner.
     /// Absent = the default headroom.
@@ -428,14 +427,14 @@ public struct TopologyMine: Codable, Sendable {
     /// that the coordinator's own template fetch runs under, having set no
     /// timeout of its own. An operator may raise this for a host whose
     /// templates cost more to build, but raising it past what the coordinator
-    /// tolerates buys nothing -- the probe would observe an expiry for rounds
-    /// that then fail fetching the same template.
+    /// tolerates buys nothing -- the probe would start rounds that then fail
+    /// fetching the same template.
     public static let defaultTemplateTimeoutSeconds: UInt64 = 60
 
     /// The ceiling, and it is the SAME constant for the same reason: above the
     /// coordinator's own fetch timeout there is no legal value at all. The
-    /// probe would observe an expiry and every round would then die fetching
-    /// the same template. So this setting is usefully adjustable DOWNWARD
+    /// probe would pass and every round would then die fetching the same
+    /// template. So this setting is usefully adjustable DOWNWARD
     /// only -- a host that needs longer than this to build a template cannot
     /// be fixed here, because the coordinator's side is not settable at all.
     ///

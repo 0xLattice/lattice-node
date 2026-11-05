@@ -269,6 +269,9 @@ public struct MiningTemplateResponse: Codable, Sendable {
     /// Every target this work can clear, easiest first (`searchTarget` leads).
     public let targets: [UInt256]
     public let chainPath: [String]
+    /// Kept for clients that require the field: always
+    /// `pullRefreshMilliseconds`. The node never refuses work on a clock;
+    /// work is valid until the tip moves.
     public let expiresInMilliseconds: UInt64
     /// A miner compares this with the status route's digest to learn its work
     /// is stale.
@@ -277,13 +280,16 @@ public struct MiningTemplateResponse: Codable, Sendable {
     /// from older nodes.
     public let chains: [TemplateChainBlock]?
 
+    /// What `expiresInMilliseconds` carries, for decoders that still
+    /// require the field. Not a validity bound.
+    public static let pullRefreshMilliseconds: UInt64 = 30_000
+
     public init(
         workID: String,
         block: Block,
         searchTarget: UInt256,
         targets: [UInt256],
         chainPath: [String],
-        expiresInMilliseconds: UInt64,
         templateDigest: String,
         chains: [TemplateChainBlock]
     ) {
@@ -292,7 +298,7 @@ public struct MiningTemplateResponse: Codable, Sendable {
         self.searchTarget = searchTarget
         self.targets = targets
         self.chainPath = chainPath
-        self.expiresInMilliseconds = expiresInMilliseconds
+        self.expiresInMilliseconds = Self.pullRefreshMilliseconds
         self.templateDigest = templateDigest
         self.chains = chains
     }

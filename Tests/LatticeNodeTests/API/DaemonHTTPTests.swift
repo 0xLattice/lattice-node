@@ -4,6 +4,7 @@ import HummingbirdTesting
 import Lattice
 import LatticeLightClient
 import UInt256
+import Synchronization
 import XCTest
 import cashew
 @testable import LatticeNode
@@ -220,6 +221,39 @@ final class DaemonHTTPTests: XCTestCase {
                 XCTAssertEqual(response.status, .ok)
             }
         }
+    }
+
+    /// `GET /mining/events` framing: each digest as `data: <digest>`, and
+    /// the body finished when the stream ends.
+    func testMiningEventsFraming() async throws {
+        let (digests, feed) = AsyncStream<String>.makeStream()
+        feed.yield("a")
+        feed.yield("b")
+        feed.finish()
+        let body = RecordingWriter(holdFirstWrite: false)
+        var writer: any ResponseBodyWriter = body
+        try await miningEvents(digests, to: &writer)
+        XCTAssertEqual(body.text, "data: a\n\ndata: b\n\n")
+        XCTAssertTrue(body.finished)
+    }
+
+    /// A client that stops reading holds one digest, the newest: when it
+    /// reads again it skips straight to the latest.
+    func testMiningEventsSkipToTheNewestDigest() async throws {
+        let (digests, feed) = AsyncStream<String>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let body = RecordingWriter(holdFirstWrite: true)
+        let serving = Task {
+            var writer: any ResponseBodyWriter = body
+            try await miningEvents(digests, to: &writer)
+        }
+        feed.yield("1")
+        while !body.blocked { await Task.yield() }
+        for digest in ["2", "3", "4"] { feed.yield(digest) }
+        body.release()
+        feed.finish()
+        try await serving.value
+        XCTAssertEqual(body.text, "data: 1\n\ndata: 4\n\n")
+        XCTAssertTrue(body.finished)
     }
 
     /// The operator pins a Volume the node holds, lists it, and unpins it;
@@ -1274,4 +1308,53 @@ private actor CompletionFlag {
     private(set) var isDone = false
 
     func markDone() { isDone = true }
+}
+
+/// A response body writer that records what it is given. With
+/// `holdFirstWrite`, its first write does not return until released, like a
+/// client that stopped reading.
+private final class RecordingWriter: ResponseBodyWriter, Sendable {
+    private struct State {
+        var bytes: [UInt8] = []
+        var finished = false
+        var blocked = false
+        var released: Bool
+        var waiter: CheckedContinuation<Void, Never>?
+    }
+
+    private let state: Mutex<State>
+
+    init(holdFirstWrite: Bool) {
+        state = Mutex(State(released: !holdFirstWrite))
+    }
+
+    var text: String { state.withLock { String(decoding: $0.bytes, as: UTF8.self) } }
+    var finished: Bool { state.withLock { $0.finished } }
+    var blocked: Bool { state.withLock { $0.blocked } }
+
+    func write(_ buffer: ByteBuffer) async throws {
+        await withCheckedContinuation { continuation in
+            let hold = state.withLock { state -> Bool in
+                state.bytes += buffer.readableBytesView
+                guard !state.released, !state.blocked else { return false }
+                state.blocked = true
+                state.waiter = continuation
+                return true
+            }
+            if !hold { continuation.resume() }
+        }
+    }
+
+    func finish(_ trailingHeaders: HTTPFields?) async throws {
+        state.withLock { $0.finished = true }
+    }
+
+    func release() {
+        let waiter = state.withLock { state in
+            state.released = true
+            defer { state.waiter = nil }
+            return state.waiter
+        }
+        waiter?.resume()
+    }
 }

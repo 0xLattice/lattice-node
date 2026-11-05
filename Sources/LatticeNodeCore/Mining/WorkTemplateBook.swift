@@ -15,8 +15,6 @@ public struct WorkTemplate: Sendable {
     public let tipCID: String
     /// The pool version the job read its transactions from.
     public let poolVersion: UInt64
-    /// Milliseconds since the epoch.
-    public let expiresAt: Int64
     /// What the build read (its tip and pool): see `TemplateBuild.digest`.
     public let digest: String
     /// See `TemplateBuild.chains`.
@@ -29,7 +27,6 @@ public struct WorkTemplate: Sendable {
         targets: [UInt256],
         tipCID: String,
         poolVersion: UInt64,
-        expiresAt: Int64,
         digest: String = "",
         chains: [TemplateChain] = []
     ) {
@@ -39,7 +36,6 @@ public struct WorkTemplate: Sendable {
         self.targets = targets
         self.tipCID = tipCID
         self.poolVersion = poolVersion
-        self.expiresAt = expiresAt
         self.digest = digest
         self.chains = chains
     }
@@ -47,7 +43,6 @@ public struct WorkTemplate: Sendable {
 
 public enum TemplateError: Error, Sendable, Equatable {
     case unknownWork
-    case expired
     case missesSearchTarget
     /// The template job could not build a block on the tip.
     case buildFailed
@@ -58,18 +53,22 @@ public enum TemplateError: Error, Sendable, Equatable {
     case contextChanged
 }
 
-/// The bounded work cache for external miners. It never searches a nonce.
-/// Capacity is least-recently-issued first out, and a live template keeps its
-/// work ID against a later one with the same ID.
+/// The work cache for external miners. It never searches a nonce. An issued
+/// template keeps its work ID against a later one with the same ID.
+///
+/// Work never expires on a clock: proof-of-work arrivals are memoryless, so
+/// time spent on a template says nothing about when the next tip comes.
+/// Every template issued on the current tip is kept, so a pool or hosted
+/// descendant change never makes earlier work unknown; the tip moving
+/// flushes them all (`invalidateAll`, Stratum's `clean_jobs`). `capacity` is
+/// only a backstop, least-recently-issued first out.
 public struct WorkTemplateBook: Sendable {
-    public let lifetime: Int64
     public let capacity: Int
     private var templates: [String: WorkTemplate] = [:]
     private var order: [String] = []
 
-    public init(lifetime: Int64 = 30_000, capacity: Int = 16) {
-        precondition(capacity > 0 && lifetime > 0)
-        self.lifetime = lifetime
+    public init(capacity: Int = 512) {
+        precondition(capacity > 0)
         self.capacity = capacity
     }
 
@@ -77,13 +76,13 @@ public struct WorkTemplateBook: Sendable {
 
     public func template(_ workID: String) -> WorkTemplate? { templates[workID] }
 
-    /// Issue `template`, or the live one already issued under its work ID,
-    /// and mark it most recently issued.
+    /// Issue `template`, or the one already issued under its work ID, and
+    /// mark it most recently issued.
     @discardableResult
-    public mutating func issue(_ template: WorkTemplate, now: Int64) -> WorkTemplate {
+    public mutating func issue(_ template: WorkTemplate) -> WorkTemplate {
         order.removeAll { $0 == template.workID }
         order.append(template.workID)
-        if let existing = templates[template.workID], now < existing.expiresAt {
+        if let existing = templates[template.workID] {
             return existing
         }
         templates[template.workID] = template
@@ -99,13 +98,9 @@ public struct WorkTemplateBook: Sendable {
     }
 
     /// The block a miner's nonce makes of `workID`'s template, if the grind
-    /// clears the template's search target. An expired template is dropped.
-    public mutating func submission(workID: String, nonce: UInt64, now: Int64) throws -> Block {
+    /// clears the template's search target.
+    public func submission(workID: String, nonce: UInt64) throws -> Block {
         guard let template = templates[workID] else { throw TemplateError.unknownWork }
-        guard now < template.expiresAt else {
-            discard(workID: workID)
-            throw TemplateError.expired
-        }
         let candidate = template.block.replacingNonce(nonce)
         // Lattice's proof-of-work predicate, against the search target: a
         // zero target is met by no hash (`Block.validateProofOfWork`).

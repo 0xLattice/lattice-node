@@ -66,7 +66,7 @@ final class TransactionChildCommitmentTemplateTests: XCTestCase {
         let resolved = try await fixture.genesis.spec.resolve(fetcher: fixture.cas).node
         let spec = try XCTUnwrap(resolved)
         return try await MiningTemplateAssembly.fit(
-            chainPath: Self.nexus, lifetime: .seconds(30), previous: fixture.genesis,
+            chainPath: Self.nexus, previous: fixture.genesis,
             pooled: pooled, provided: provided, hosted: hosted.union(provided.map(\.directory)), parentCarrier: nil,
             timestamp: fixture.timestamp, rewardRecipient: nil, minimumWork: [:], difficultyAnchor: nil,
             spec: spec, fetcher: fetcher ?? fixture.cas

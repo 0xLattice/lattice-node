@@ -2,6 +2,7 @@ import ArgumentParser
 import Crypto
 import Foundation
 import Hummingbird
+import ServiceLifecycle
 import Ivy
 import Lattice
 import LatticeNode
@@ -469,6 +470,7 @@ private func parseEndpoint(_ value: String) throws -> (key: String, host: String
 protocol OperatorWrites: Sendable {
     func submitTransaction(_ request: SubmitTransactionRequest) async throws -> SubmitTransactionResponse
     func miningTemplate(_ request: MiningTemplateRequest) async throws -> MiningTemplateResponse
+    func miningEvents() -> AsyncStream<String>
     func submitWork(_ request: SubmitWorkRequest) async throws -> SubmitWorkResponse
     func submitChildBlock(_ request: SubmitChildBlockRequest) async throws -> SubmitChildBlockResponse
     func buildChildBlock(_ request: BuildChildBlockRequest) async throws -> BuildChildBlockResponse
@@ -1188,6 +1190,20 @@ private func addOperatorWriteRoutes(
             try await service.miningTemplate(input)
         }
     }
+    // Server-sent events: the template digest now (`data: <digest>`), then
+    // each time it changes. A client fetches a template when it does. A
+    // comment line every `keepalive` only tells the client the connection
+    // lives; a quiet chain sends nothing else.
+    router.get("mining/events") { _, _ in
+        let digests = service.miningEvents()
+        return Response(
+            status: .ok,
+            headers: [.contentType: "text/event-stream", .cacheControl: "no-store"],
+            body: ResponseBody { writer in
+                try await miningEvents(digests, to: &writer)
+            }
+        )
+    }
     router.post("mining/work") { request, context in
         let input: SubmitWorkRequest = try await decode(request, context: context)
         return try await serviceCall(request: request, context: context) {
@@ -1400,6 +1416,66 @@ private func serviceCall<Value: Encodable, Context: RequestContext>(
         throw HTTPError(.serviceUnavailable, message: reason(error))
     } catch let error as ServingLedgerError {
         throw HTTPError(.badRequest, message: reason(error))
+    }
+}
+
+/// Write each digest as a server-sent event, with a comment line whenever
+/// `keepalive` passes without one, until the stream ends.
+private enum MiningStreamEvent: Sendable { case digest(String), keepalive, ended }
+
+func miningEvents(
+    _ digests: AsyncStream<String>,
+    to writer: inout any ResponseBodyWriter,
+    keepalive: Duration = .seconds(15)
+) async throws {
+    let (events, sink) = AsyncStream<MiningStreamEvent>.makeStream()
+    let (written, ack) = AsyncStream<Void>.makeStream()
+    let reader = Task {
+        // One digest in flight at a time: the source keeps only the newest,
+        // so a client that stops reading skips to the latest instead of
+        // queueing every one here.
+        var acks = written.makeAsyncIterator()
+        for await digest in digests {
+            sink.yield(.digest(digest))
+            guard await acks.next() != nil else { break }
+        }
+        sink.yield(.ended)
+    }
+    let ticker = Task {
+        while !Task.isCancelled {
+            try? await Task.sleep(for: keepalive)
+            sink.yield(.keepalive)
+        }
+    }
+    defer {
+        reader.cancel()
+        ticker.cancel()
+    }
+    // The server waits for open responses when it shuts down, and this one
+    // would run until the runtime stops after it: end it with the server.
+    try await withGracefulShutdownHandler {
+        try await writeMiningEvents(events, to: &writer, written: ack)
+    } onGracefulShutdown: {
+        sink.yield(.ended)
+    }
+}
+
+private func writeMiningEvents(
+    _ events: AsyncStream<MiningStreamEvent>,
+    to writer: inout any ResponseBodyWriter,
+    written: AsyncStream<Void>.Continuation
+) async throws {
+    for await next in events {
+        switch next {
+        case .digest(let digest):
+            try await writer.write(ByteBuffer(string: "data: \(digest)\n\n"))
+            written.yield()
+        case .keepalive:
+            try await writer.write(ByteBuffer(string: ": keepalive\n\n"))
+        case .ended:
+            try await writer.finish(nil)
+            return
+        }
     }
 }
 

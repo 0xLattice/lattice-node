@@ -65,6 +65,9 @@ enum SessionClose: Equatable {
 public final class NodeRuntime: Sendable {
     public let published: PublishedValue<ChainSnapshot>
     let readView: PublishedValue<NodeReadView>
+    /// The root's template digest, published as it changes: see
+    /// `miningEvents()`.
+    let templateDigest: PublishedValue<String>
     /// The RPC read surface, over `published` and the view.
     public let reads: ChainReads
     /// Each hosted child level's read surface, over its own published
@@ -283,6 +286,8 @@ public final class NodeRuntime: Sendable {
         let readView = PublishedValue<NodeReadView>()
         self.published = published
         self.readView = readView
+        let templateDigest = PublishedValue<String>()
+        self.templateDigest = templateDigest
         self.configuration = configuration
         self.storage = storage
         let remote = IvyRootContentSource(ivy: ivy, policy: configuration.resourcePolicy)
@@ -369,6 +374,7 @@ public final class NodeRuntime: Sendable {
             outputs: outputs,
             levelReads: publishedLevelReads,
             hosted: hosted,
+            templateDigest: templateDigest,
             inputs: inputs,
             gate: gate,
             helloTimeout: helloTimeout,
@@ -432,6 +438,7 @@ public final class NodeRuntime: Sendable {
         inputs.yield(.stop)
         inputs.finish()
         await loop.value
+        templateDigest.finish()
     }
 
     /// The content layer retries until the body is held or the core no longer
@@ -491,6 +498,7 @@ extension NodeRuntime {
         /// when the operator changes them.
         let levelReads: PublishedValue<[ChainPath: ChainReads]>
         let hosted: PublishedValue<Set<ChainPath>>
+        let templateDigest: PublishedValue<String>
         let inputs: AsyncStream<Input>.Continuation
         let gate: NodeRuntimeInputGate
         let helloTimeout: Duration
@@ -642,6 +650,7 @@ extension NodeRuntime {
             outputs: [ChainPath: LevelOutput],
             levelReads: PublishedValue<[ChainPath: ChainReads]>,
             hosted: PublishedValue<Set<ChainPath>>,
+            templateDigest: PublishedValue<String>,
             inputs: AsyncStream<Input>.Continuation,
             gate: NodeRuntimeInputGate,
             helloTimeout: Duration,
@@ -663,6 +672,7 @@ extension NodeRuntime {
             self.outputs = outputs
             self.levelReads = levelReads
             self.hosted = hosted
+            self.templateDigest = templateDigest
             self.inputs = inputs
             self.remote = remote
             self.workers = workers
@@ -1177,18 +1187,21 @@ extension NodeRuntime {
             }.count
             let pool = level.mining.mempool
             let children = path == core.rootPath
-                ? core.ordered.dropFirst().compactMap { core.levels[$0] }
+                ? core.ordered.dropFirst().compactMap { child in core.levels[child].map { (path: child, level: $0) } }
                 : []
-            let key = ([(tip.hash, "", pool.version)] + children.map {
-                ($0.snapshot.actOnTip, $0.snapshot.bestHeaderTip, $0.mining.mempool.version)
-            }).map { "\($0.0)/\($0.1)/\($0.2)" }.joined(separator: "\n")
+            let key = ([("", tip.hash, "", pool.version)] + children.map {
+                ($0.path.joined(separator: "/"), $0.level.snapshot.actOnTip, $0.level.snapshot.bestHeaderTip,
+                 $0.level.mining.mempool.version)
+            }).map { "\($0.0):\($0.1)/\($0.2)/\($0.3)" }.joined(separator: "\n")
             let digest: String
             if let cached = digests[path], cached.key == key {
                 digest = cached.digest
             } else {
                 digest = NodeRuntime.templateDigest(
                     tip: tip.hash, carrying: level.mining.nextBlock,
-                    levels: children.map { ($0.snapshot.actOnTip, $0.snapshot.bestHeaderTip, $0.mining.nextBlock) }
+                    levels: children.map {
+                        ($0.path, $0.level.snapshot.actOnTip, $0.level.snapshot.bestHeaderTip, $0.level.mining.nextBlock)
+                    }
                 )
                 digests[path] = (key, digest)
             }
@@ -1256,11 +1269,14 @@ extension NodeRuntime {
             view.poolVersion = pool.version
             // The root's digest covers every hosted level: a child's tip or
             // pool moving changes the template a miner should fetch.
+            let digestChanged = path == core.rootPath && view.templateDigest != digest
             view.templateDigest = digest
             view.peers = peers
             view.waiting = waiting
             views[path] = view
             output.view.publish(view)
+            // After the view: a client told of a digest finds it in status.
+            if digestChanged { templateDigest.publish(digest) }
         }
 
         // MARK: - Network → events

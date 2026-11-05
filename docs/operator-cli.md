@@ -261,9 +261,13 @@ recipient; an omitted path burns that payout. `mine.minWork` is a local search
 filter, not a committed consensus target. `mine.minBlockIntervalSeconds` is a
 floor on template spacing and releases itself when rounds run longer.
 
-The mining loop probes the node for the template expiry and places a deadline
-around each coordinator process group. A timeout is logged loudly and the next
-round retries.
+The mining loop starts once the node answers a template request
+(`mine.templateTimeoutSeconds`) and places a deadline around each coordinator
+process group: 600 seconds until a round completes, then the longest
+completed round (counted up to 600 seconds) times `mine.roundDeadlineMultiplier`,
+never less than 600 seconds.
+It only catches a hung coordinator; work itself never expires on a clock. A
+timeout is logged loudly and the next round retries.
 
 ## Spending keys and transactions
 
