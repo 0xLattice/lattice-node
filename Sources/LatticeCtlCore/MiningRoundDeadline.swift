@@ -37,9 +37,15 @@ public enum MiningRoundDeadline {
         let measured = min(longestCompletedRound, firstRoundAllowance)
         let headroom = Int64(clamping: max(multiplier, 1))
         // Whole seconds, saturating: `Duration * Int` traps on overflow, and
-        // a huge multiplier means "effectively never", not a crash.
+        // a huge multiplier means "effectively never", not a crash. The cap
+        // sits well below Int64.max seconds because the timer adds the
+        // deadline to the clock's own reading, which must not overflow.
         let (seconds, overflow) = measured.components.seconds
             .multipliedReportingOverflow(by: headroom)
-        return max(firstRoundAllowance, .seconds(overflow ? .max : seconds))
+        return max(firstRoundAllowance, .seconds(overflow ? maximumSeconds : min(seconds, maximumSeconds)))
     }
+
+    /// The largest deadline, in seconds: effectively never, yet safe to add
+    /// to any clock reading.
+    public static let maximumSeconds = Int64.max / 2
 }
