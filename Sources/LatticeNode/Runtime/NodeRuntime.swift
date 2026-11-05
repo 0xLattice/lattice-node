@@ -2,7 +2,6 @@ import Foundation
 import Ivy
 import IvyWebSocket
 import Lattice
-import LatticeNodeAPI
 import LatticeNodeCore
 import cashew
 
@@ -15,12 +14,6 @@ public enum NodeRuntimeError: Error, Equatable, Sendable {
     case unknownChain
     /// This node's content budget is full for now; asking again may work.
     case busy
-    /// The hosted chains changed: a template subscription's plan is stale,
-    /// and the subscriber subscribes again with its new one.
-    case hostedChainsChanged
-    /// A template subscriber fell `templatePushBuffer` pushes behind; it
-    /// subscribes again and starts from a clean template.
-    case slowConsumer
 }
 
 /// The production shell around the sans-IO `LatticeNodeCore.NodeCore`.
@@ -72,6 +65,9 @@ enum SessionClose: Equatable {
 public final class NodeRuntime: Sendable {
     public let published: PublishedValue<ChainSnapshot>
     let readView: PublishedValue<NodeReadView>
+    /// The root's template digest, published as it changes: see
+    /// `miningEvents()`.
+    let templateDigest: PublishedValue<String>
     /// The RPC read surface, over `published` and the view.
     public let reads: ChainReads
     /// Each hosted child level's read surface, over its own published
@@ -128,10 +124,6 @@ public final class NodeRuntime: Sendable {
         case request(ChainPath, @Sendable (UInt64) -> MiningEvent, CheckedContinuation<NodeRuntimeReply, any Error>)
         /// An RPC answered outside a step (the shell could not run its part).
         case answer(UInt64, Result<NodeRuntimeReply, any Error>)
-        /// A template subscription: pushes go to the continuation until it
-        /// terminates (`unsubscribe`).
-        case subscribe(ChainPath, TemplateRequest, AsyncThrowingStream<MiningTemplateResponse, any Error>.Continuation)
-        case unsubscribe(UInt64)
         /// An announced transaction's fetch ended: the transaction, or nil.
         case transactionFetched(cid: String, NodeEvent?)
         /// Periodic provider announcement and stalled-peer search.
@@ -294,6 +286,8 @@ public final class NodeRuntime: Sendable {
         let readView = PublishedValue<NodeReadView>()
         self.published = published
         self.readView = readView
+        let templateDigest = PublishedValue<String>()
+        self.templateDigest = templateDigest
         self.configuration = configuration
         self.storage = storage
         let remote = IvyRootContentSource(ivy: ivy, policy: configuration.resourcePolicy)
@@ -380,6 +374,7 @@ public final class NodeRuntime: Sendable {
             outputs: outputs,
             levelReads: publishedLevelReads,
             hosted: hosted,
+            templateDigest: templateDigest,
             inputs: inputs,
             gate: gate,
             helloTimeout: helloTimeout,
@@ -410,8 +405,6 @@ public final class NodeRuntime: Sendable {
                     running = await state.handle(input)
                 } else if case .request(_, _, let reply) = input {
                     reply.resume(throwing: NodeRuntimeError.stopped)
-                } else if case .subscribe(_, _, let pushes) = input {
-                    pushes.finish(throwing: NodeRuntimeError.stopped)
                 } else if case .host(_, let reply) = input {
                     reply.resume(throwing: NodeRuntimeError.stopped)
                 } else if case .read(let read) = input {
@@ -445,6 +438,7 @@ public final class NodeRuntime: Sendable {
         inputs.yield(.stop)
         inputs.finish()
         await loop.value
+        templateDigest.finish()
     }
 
     /// The content layer retries until the body is held or the core no longer
@@ -504,6 +498,7 @@ extension NodeRuntime {
         /// when the operator changes them.
         let levelReads: PublishedValue<[ChainPath: ChainReads]>
         let hosted: PublishedValue<Set<ChainPath>>
+        let templateDigest: PublishedValue<String>
         let inputs: AsyncStream<Input>.Continuation
         let gate: NodeRuntimeInputGate
         let helloTimeout: Duration
@@ -553,11 +548,6 @@ extension NodeRuntime {
         /// RPCs waiting on their answer, by reply ID.
         var replies: [UInt64: (path: ChainPath, reply: CheckedContinuation<NodeRuntimeReply, any Error>)] = [:]
         var nextReply: UInt64 = 1
-        /// Template subscribers, under IDs from `nextReply`.
-        var subscribers: [UInt64: (path: ChainPath, pushes: AsyncThrowingStream<MiningTemplateResponse, any Error>.Continuation)] = [:]
-        /// Each level's template digest its pool last heard of
-        /// (`MiningEvent.templateContextChanged`).
-        var templateContexts: [ChainPath: String] = [:]
         /// Announced transactions being fetched, by CID.
         var transactionFetches: Set<String> = []
         /// Transactions recently fetched, not refetched until a hosted chain's
@@ -660,6 +650,7 @@ extension NodeRuntime {
             outputs: [ChainPath: LevelOutput],
             levelReads: PublishedValue<[ChainPath: ChainReads]>,
             hosted: PublishedValue<Set<ChainPath>>,
+            templateDigest: PublishedValue<String>,
             inputs: AsyncStream<Input>.Continuation,
             gate: NodeRuntimeInputGate,
             helloTimeout: Duration,
@@ -681,6 +672,7 @@ extension NodeRuntime {
             self.outputs = outputs
             self.levelReads = levelReads
             self.hosted = hosted
+            self.templateDigest = templateDigest
             self.inputs = inputs
             self.remote = remote
             self.workers = workers
@@ -753,20 +745,6 @@ extension NodeRuntime {
             case .answer(let id, let result):
                 answer(id, result)
                 return true
-            case .subscribe(let path, let request, let pushes):
-                guard core.levels[path] != nil else {
-                    pushes.finish(throwing: NodeRuntimeError.unknownChain)
-                    return true
-                }
-                let id = nextReply
-                nextReply += 1
-                subscribers[id] = (path, pushes)
-                let inputs = inputs
-                pushes.onTermination = { _ in inputs.yield(.unsubscribe(id)) }
-                return await step(.level(path, .mining(.templateSubscribed(subscriberID: id, request))))
-            case .unsubscribe(let id):
-                guard let path = subscribers.removeValue(forKey: id)?.path, core.levels[path] != nil else { return true }
-                return await step(.level(path, .mining(.templateUnsubscribed(subscriberID: id))))
             case .transactionFetched(let cid, let event):
                 transactionFetches.remove(cid)
                 recentlyFetched.insert(cid)
@@ -886,7 +864,6 @@ extension NodeRuntime {
                 outputs[path] = nil
                 views[path] = nil
                 digests[path] = nil
-                templateContexts[path] = nil
                 currentPeers[path] = nil
             }
             // A stopped level's body fetches would retry for good: no
@@ -901,10 +878,6 @@ extension NodeRuntime {
             for (id, entry) in replies where core.levels[entry.path] == nil {
                 replies[id] = nil
                 entry.reply.resume(throwing: NodeRuntimeError.unknownChain)
-            }
-            for (id, entry) in subscribers where core.levels[entry.path] == nil {
-                subscribers[id] = nil
-                entry.pushes.finish(throwing: NodeRuntimeError.unknownChain)
             }
             try configuration.host(
                 next.hostedChildren.filter { core.levels[$0] != nil },
@@ -927,14 +900,6 @@ extension NodeRuntime {
             levelReads.publish(reads)
             let hostedBefore = hosted.value
             hosted.publish(Set(core.levels.keys))
-            if hostedBefore != hosted.value {
-                // Templates carry every hosted level: each subscriber's plan
-                // changed with them. Its stream ends, and its termination
-                // handler unsubscribes it.
-                for entry in subscribers.values {
-                    entry.pushes.finish(throwing: NodeRuntimeError.hostedChainsChanged)
-                }
-            }
             refreshView()
             // Open sessions learn what is hosted now from a hello sent again,
             // where they said they take one.
@@ -1222,28 +1187,23 @@ extension NodeRuntime {
             }.count
             let pool = level.mining.mempool
             let children = path == core.rootPath
-                ? core.ordered.dropFirst().compactMap { core.levels[$0] }
+                ? core.ordered.dropFirst().compactMap { child in core.levels[child].map { (path: child, level: $0) } }
                 : []
-            let key = ([(tip.hash, "", pool.version)] + children.map {
-                ($0.snapshot.actOnTip, $0.snapshot.bestHeaderTip, $0.mining.mempool.version)
-            }).map { "\($0.0)/\($0.1)/\($0.2)" }.joined(separator: "\n")
+            let key = ([("", tip.hash, "", pool.version)] + children.map {
+                ($0.path.joined(separator: "/"), $0.level.snapshot.actOnTip, $0.level.snapshot.bestHeaderTip,
+                 $0.level.mining.mempool.version)
+            }).map { "\($0.0):\($0.1)/\($0.2)/\($0.3)" }.joined(separator: "\n")
             let digest: String
             if let cached = digests[path], cached.key == key {
                 digest = cached.digest
             } else {
                 digest = NodeRuntime.templateDigest(
                     tip: tip.hash, carrying: level.mining.nextBlock,
-                    levels: children.map { ($0.snapshot.actOnTip, $0.snapshot.bestHeaderTip, $0.mining.nextBlock) }
+                    levels: children.map {
+                        ($0.path, $0.level.snapshot.actOnTip, $0.level.snapshot.bestHeaderTip, $0.level.mining.nextBlock)
+                    }
                 )
                 digests[path] = (key, digest)
-            }
-            // A template built now would differ: the level's subscribers
-            // get one built on it.
-            if templateContexts[path] != digest {
-                templateContexts[path] = digest
-                if level.mining.templateSubscribers > 0 {
-                    inputs.yield(.event(.level(path, .mining(.templateContextChanged))))
-                }
             }
             // Status names the wait of the block after the act-on tip, its
             // heaviest child the window asks for. A block the window left
@@ -1309,6 +1269,7 @@ extension NodeRuntime {
             view.poolVersion = pool.version
             // The root's digest covers every hosted level: a child's tip or
             // pool moving changes the template a miner should fetch.
+            if path == core.rootPath, view.templateDigest != digest { templateDigest.publish(digest) }
             view.templateDigest = digest
             view.peers = peers
             view.waiting = waiting
@@ -1761,28 +1722,6 @@ extension NodeRuntime {
                 answer(replyID, .failure(error))
             case .templateIssued(let replyID, let template):
                 answer(replyID, .success(.template(template)))
-            case .templatePushed(let ids, let template, let clean):
-                let push = NodeRuntime.templateResponse(template, chainPath: configuration.chainPath, clean: clean)
-                for id in ids {
-                    guard let pushes = subscribers[id]?.pushes else { continue }
-                    switch pushes.yield(push) {
-                    case .enqueued:
-                        break
-                    case .dropped:
-                        // A subscriber that stops reading would otherwise
-                        // hold every template built for it. Its buffered
-                        // pushes still drain; finishing unsubscribes it.
-                        pushes.finish(throwing: NodeRuntimeError.slowConsumer)
-                    case .terminated:
-                        // A stream that ended before its termination handler
-                        // was set never runs it: drop it on the push instead.
-                        inputs.yield(.unsubscribe(id))
-                    @unknown default:
-                        break
-                    }
-                }
-            case .subscriptionRefused(let id, let error):
-                subscribers.removeValue(forKey: id)?.pushes.finish(throwing: error)
             case .templateRefused(let replyID, let error), .workRefused(let replyID, let error):
                 answer(replyID, .failure(error))
             case .announceTransaction(let cid):
@@ -2008,8 +1947,6 @@ extension NodeRuntime {
         mutating func cancelAll() {
             for entry in replies.values { entry.reply.resume(throwing: NodeRuntimeError.stopped) }
             replies.removeAll()
-            for entry in subscribers.values { entry.pushes.finish(throwing: NodeRuntimeError.stopped) }
-            subscribers.removeAll()
             wake?.task.cancel()
             for task in bodies.values { task.cancel() }
             bodies.removeAll()

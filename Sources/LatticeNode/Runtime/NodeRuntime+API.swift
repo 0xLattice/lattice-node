@@ -426,46 +426,11 @@ extension NodeRuntime {
     public func miningTemplate(
         _ request: MiningTemplateRequest
     ) async throws -> MiningTemplateResponse {
-        let plan = try templatePlan(request)
-        guard case .template(let template) = try await ask({
-            .templateRequested(replyID: $0, plan)
-        }) else { throw NodeRuntimeError.stopped }
-        return response(template)
-    }
-
-    /// `request`'s template now, then each new one the node builds for it
-    /// as its tip, its pool or a hosted descendant moves, until the stream is
-    /// dropped. Each carries `clean` (see `MiningTemplateResponse.clean`).
-    /// Ends with `TemplateError.busy` when the node has its fill of
-    /// subscribers, with `NodeRuntimeError.slowConsumer` when the reader
-    /// falls `templatePushBuffer` pushes behind, and with
-    /// `NodeRuntimeError.stopped` when it stops. Nothing between the node and
-    /// the reader buffers more: a reader that wants keepalives alongside
-    /// must not read ahead of what it delivers.
-    public func templateSubscription(
-        _ request: MiningTemplateRequest
-    ) throws -> AsyncThrowingStream<MiningTemplateResponse, any Error> {
-        let plan = try templatePlan(request)
-        let (pushes, continuation) = AsyncThrowingStream<MiningTemplateResponse, any Error>.makeStream(
-            bufferingPolicy: .bufferingOldest(Self.templatePushBuffer)
-        )
-        if case .terminated = inputs.yield(.subscribe(configuration.chainPath, plan, continuation)) {
-            continuation.finish(throwing: NodeRuntimeError.stopped)
-        }
-        return pushes
-    }
-
-    /// Pushes a subscriber may fall behind before its subscription ends with
-    /// `slowConsumer`. Each push replaces the last, so a reader this far
-    /// behind holds only stale work; its reconnect gets a clean template.
-    static let templatePushBuffer = 8
-
-    /// One plan for every level the template carries: each hosted child's
-    /// recipient and minimum work by path.
-    private func templatePlan(_ request: MiningTemplateRequest) throws -> TemplateRequest {
         let chainPath = configuration.chainPath
+        // One plan for every level the template carries: each hosted
+        // child's recipient and minimum work by path.
         let recipients = try MiningPlan.validatedRecipientPlan(request.recipients, chainPath: chainPath)
-        return TemplateRequest(
+        let plan = TemplateRequest(
             rewardRecipient: recipients.current,
             minimumWork: try MiningPlan.validatedMinimumWorkPlan(
                 request.minimumWork, chainPath: chainPath
@@ -474,25 +439,26 @@ extension NodeRuntime {
                 recipients.descendants.map { ($0.chainPath, $0.address) }, uniquingKeysWith: { first, _ in first }
             )
         )
-    }
-
-    private func response(_ template: WorkTemplate) -> MiningTemplateResponse {
-        Self.templateResponse(template, chainPath: configuration.chainPath, clean: nil)
-    }
-
-    static func templateResponse(
-        _ template: WorkTemplate, chainPath: ChainPath, clean: Bool?
-    ) -> MiningTemplateResponse {
-        MiningTemplateResponse(
+        guard case .template(let template) = try await ask({
+            .templateRequested(replyID: $0, plan)
+        }) else { throw NodeRuntimeError.stopped }
+        return MiningTemplateResponse(
             workID: template.workID,
             block: template.block,
             searchTarget: template.searchTarget,
             targets: template.targets,
             chainPath: chainPath,
             templateDigest: template.digest,
-            chains: template.chains.map(TemplateChainBlock.init),
-            clean: clean
+            chains: template.chains.map(TemplateChainBlock.init)
         )
+    }
+
+    /// The root's template digest now, then each time it changes: a hosted
+    /// level's act-on tip or next-block transactions, or the hosted set.
+    /// Newest only, so a slow reader skips to the latest. Ends when the
+    /// runtime stops.
+    public func miningEvents() -> AsyncStream<String> {
+        templateDigest.updates()
     }
 
     public func submitWork(_ request: SubmitWorkRequest) async throws -> SubmitWorkResponse {
@@ -944,7 +910,7 @@ extension NodeRuntime {
             targets: template.targets,
             digest: templateDigest(
                 tip: job.tipCID, carrying: job.transactions,
-                levels: children.map { ($0.tipCID ?? "", $0.bestHeaderTip, $0.transactions) }
+                levels: children.map { ($0.path, $0.tipCID ?? "", $0.bestHeaderTip, $0.transactions) }
             ),
             chains: MiningTemplateAssembly.committedChains(root: template.block, chainPath: chainPath)
         )
@@ -1214,27 +1180,30 @@ extension NodeRuntime {
     }
 
     /// The digest of the template a build on `tip` carrying these (each
-    /// level's `nextBlock`) would give: status names it, so a miner sees its
-    /// template go stale.
+    /// level's `nextBlock`) would give: status and `GET /mining/events` name
+    /// it, so a miner sees its template go stale. Each hosted level is named
+    /// by path, so the hosted set changing changes it too.
     static func templateDigest(
-        tip: String, carrying: [Transaction], levels: [(actOn: String, best: String, carrying: [Transaction])] = []
+        tip: String, carrying: [Transaction],
+        levels: [(path: ChainPath, actOn: String, best: String, carrying: [Transaction])] = []
     ) -> String {
         templateDigest(
             tip: tip,
             transactions: carrying.compactMap { try? Mempool.cid(of: $0) },
-            levels: levels.map { ($0.actOn, $0.best, $0.carrying.compactMap { try? Mempool.cid(of: $0) }) }
+            levels: levels.map { ($0.path, $0.actOn, $0.best, $0.carrying.compactMap { try? Mempool.cid(of: $0) }) }
         )
     }
 
     static func templateDigest(
         tip: String,
         transactions: [String],
-        levels: [(actOn: String, best: String, transactions: [String])]
+        levels: [(path: ChainPath, actOn: String, best: String, transactions: [String])]
     ) -> String {
         let own = templateDigest(tip: tip, transactions: transactions)
         guard !levels.isEmpty else { return own }
         let lines = [own] + levels.map {
-            "\($0.actOn)/\($0.best)/" + templateDigest(tip: $0.actOn, transactions: $0.transactions)
+            "\($0.path.joined(separator: "/")):\($0.actOn)/\($0.best)/"
+                + templateDigest(tip: $0.actOn, transactions: $0.transactions)
         }
         return SHA256.hash(data: Data(lines.joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined()
     }

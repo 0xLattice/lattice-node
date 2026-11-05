@@ -25,4 +25,3 @@ Sources/LatticeNode/Content/AcquisitionBudget.swift|private final class Waiter: 
 Sources/LatticeNode/Runtime/NodeRuntime.swift|private final class Handoff<Value>: @unchecked Sendable {|Written once in init before the loop Task is created (Task creation orders it), then taken exactly once by that Task; no other access.
 Tests/LatticeNodeSimulationTests/DerivedGrindTrace.swift|final class GrindTracer: @unchecked Sendable {|Test-only trace recorder; each tracer is owned by one test host and mutated serially within that test.
 Tests/LatticeNodeSimulationTests/DerivedGrindTrace.swift|nonisolated(unsafe) static var open: [GrindTracer] = []|The open tracer list is read and replaced only while holding its static NSLock.
-Tests/LatticeNodeTests/API/DaemonHTTPTests.swift|private final class CollectedBody: @unchecked Sendable {|Test-only response body sink; its bytes and finished flag are read and written only under its NSLock.

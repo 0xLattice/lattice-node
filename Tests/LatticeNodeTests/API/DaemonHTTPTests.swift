@@ -223,71 +223,37 @@ final class DaemonHTTPTests: XCTestCase {
         }
     }
 
-    /// The subscription route's framing: each template as an `event:
-    /// template` whose data is the template JSON with `clean`, and the
-    /// reason the stream ended as `event: end`.
-    func testTemplateEventsFraming() async throws {
-        let block = try await BlockBuilder.buildGenesis(
-            spec: ChainSpec(
-                maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
-                targetBlockTime: 1_000, initialReward: 1_024, halvingInterval: 10_000, halfLife: 10
-            ),
-            timestamp: 1, target: UInt256.max, fetcher: InMemoryContentSource([:])
-        )
-        let template = MiningTemplateResponse(
-            workID: "w", block: block, searchTarget: .max, targets: [.max],
-            chainPath: ["Nexus"], templateDigest: "d", chains: [], clean: true
-        )
-        let (pushes, feed) = AsyncThrowingStream<MiningTemplateResponse, any Error>.makeStream()
-        feed.yield(template)
-        feed.finish(throwing: NodeRuntimeError.hostedChainsChanged)
-        let collected = CollectedBody()
-        var writer: any ResponseBodyWriter = CollectingWriter(body: collected)
-        try await templateEvents(pushes, to: &writer)
-
-        let text = collected.text
-        let events = text.components(separatedBy: "\n\n").filter { !$0.isEmpty }
-        XCTAssertEqual(events.count, 2, text)
-        XCTAssertTrue(events[0].hasPrefix("event: template\ndata: {"))
-        let data = Data(events[0].dropFirst("event: template\ndata: ".count).utf8)
-        let decoded = try JSONDecoder().decode(MiningTemplateResponse.self, from: data)
-        XCTAssertEqual(decoded.workID, "w")
-        XCTAssertEqual(decoded.clean, true)
-        XCTAssertEqual(events[1], "event: end\ndata: hostedChainsChanged")
-        XCTAssertTrue(collected.finished)
+    /// `GET /mining/events` framing: each digest as `data: <digest>`, and
+    /// the body finished when the stream ends.
+    func testMiningEventsFraming() async throws {
+        let (digests, feed) = AsyncStream<String>.makeStream()
+        feed.yield("a")
+        feed.yield("b")
+        feed.finish()
+        let body = RecordingWriter(holdFirstWrite: false)
+        var writer: any ResponseBodyWriter = body
+        try await miningEvents(digests, to: &writer)
+        XCTAssertEqual(body.text, "data: a\n\ndata: b\n\n")
+        XCTAssertTrue(body.finished)
     }
 
-    /// The writer takes one push at a time: a client that stops reading
-    /// leaves the backlog in the subscription's own bounded buffer, not here.
-    func testTemplateEventsReadNoFurtherAheadThanTheWriter() async throws {
-        let block = try await BlockBuilder.buildGenesis(
-            spec: ChainSpec(
-                maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
-                targetBlockTime: 1_000, initialReward: 1_024, halvingInterval: 10_000, halfLife: 10
-            ),
-            timestamp: 1, target: UInt256.max, fetcher: InMemoryContentSource([:])
-        )
-        let template = MiningTemplateResponse(
-            workID: "w", block: block, searchTarget: .max, targets: [.max],
-            chainPath: ["Nexus"], templateDigest: "d", chains: [], clean: true
-        )
-        let (pushes, feed) = AsyncThrowingStream<MiningTemplateResponse, any Error>.makeStream(
-            bufferingPolicy: .bufferingOldest(2)
-        )
-        let stuck = StuckWriter()
+    /// A client that stops reading holds one digest, the newest: when it
+    /// reads again it skips straight to the latest.
+    func testMiningEventsSkipToTheNewestDigest() async throws {
+        let (digests, feed) = AsyncStream<String>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let body = RecordingWriter(holdFirstWrite: true)
         let serving = Task {
-            var writer: any ResponseBodyWriter = stuck
-            try await templateEvents(pushes, to: &writer)
+            var writer: any ResponseBodyWriter = body
+            try await miningEvents(digests, to: &writer)
         }
-        // The writer is blocked on the first push; at most one more is taken.
-        feed.yield(template)
-        while !stuck.blocked { await Task.yield() }
-        var outcomes: [String] = []
-        for _ in 0..<4 { outcomes.append("\(feed.yield(template))") }
-        XCTAssertTrue(outcomes.contains { $0.hasPrefix("dropped") }, "\(outcomes)")
-        serving.cancel()
-        stuck.release()
-        _ = await serving.result
+        feed.yield("1")
+        while !body.blocked { await Task.yield() }
+        for digest in ["2", "3", "4"] { feed.yield(digest) }
+        body.release()
+        feed.finish()
+        try await serving.value
+        XCTAssertEqual(body.text, "data: 1\n\ndata: 4\n\n")
+        XCTAssertTrue(body.finished)
     }
 
     /// The operator pins a Volume the node holds, lists it, and unpins it;
@@ -1344,47 +1310,51 @@ private actor CompletionFlag {
     func markDone() { isDone = true }
 }
 
-private final class CollectedBody: @unchecked Sendable {
-    private let lock = NSLock()
-    private var bytes: [UInt8] = []
-    private var done = false
-    func append(_ buffer: ByteBuffer) { lock.withLock { bytes += buffer.readableBytesView } }
-    func finish() { lock.withLock { done = true } }
-    var text: String { lock.withLock { String(decoding: bytes, as: UTF8.self) } }
-    var finished: Bool { lock.withLock { done } }
-}
-
-/// A body writer whose first write does not return until released, like a
+/// A response body writer that records what it is given. With
+/// `holdFirstWrite`, its first write does not return until released, like a
 /// client that stopped reading.
-private final class StuckWriter: ResponseBodyWriter, Sendable {
-    private let state = Mutex<(blocked: Bool, release: CheckedContinuation<Void, Never>?, released: Bool)>(
-        (false, nil, false)
-    )
+private final class RecordingWriter: ResponseBodyWriter, Sendable {
+    private struct State {
+        var bytes: [UInt8] = []
+        var finished = false
+        var blocked = false
+        var released: Bool
+        var waiter: CheckedContinuation<Void, Never>?
+    }
+
+    private let state: Mutex<State>
+
+    init(holdFirstWrite: Bool) {
+        state = Mutex(State(released: !holdFirstWrite))
+    }
+
+    var text: String { state.withLock { String(decoding: $0.bytes, as: UTF8.self) } }
+    var finished: Bool { state.withLock { $0.finished } }
     var blocked: Bool { state.withLock { $0.blocked } }
+
     func write(_ buffer: ByteBuffer) async throws {
         await withCheckedContinuation { continuation in
-            let resume = state.withLock { state -> Bool in
-                if state.released || state.blocked { return true }
+            let hold = state.withLock { state -> Bool in
+                state.bytes += buffer.readableBytesView
+                guard !state.released, !state.blocked else { return false }
                 state.blocked = true
-                state.release = continuation
-                return false
+                state.waiter = continuation
+                return true
             }
-            if resume { continuation.resume() }
+            if !hold { continuation.resume() }
         }
     }
-    func finish(_ trailingHeaders: HTTPFields?) async throws {}
-    func release() {
-        let continuation = state.withLock { state in
-            state.released = true
-            defer { state.release = nil }
-            return state.release
-        }
-        continuation?.resume()
-    }
-}
 
-private struct CollectingWriter: ResponseBodyWriter {
-    let body: CollectedBody
-    mutating func write(_ buffer: ByteBuffer) async throws { body.append(buffer) }
-    consuming func finish(_ trailingHeaders: HTTPFields?) async throws { body.finish() }
+    func finish(_ trailingHeaders: HTTPFields?) async throws {
+        state.withLock { $0.finished = true }
+    }
+
+    func release() {
+        let waiter = state.withLock { state in
+            state.released = true
+            defer { state.waiter = nil }
+            return state.waiter
+        }
+        waiter?.resume()
+    }
 }

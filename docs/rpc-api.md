@@ -49,7 +49,7 @@ nonces and amounts, `rewardCredited`, `minRelayFee`, `finalityWindow`, and the c
 numbers. Targets are hex strings. An absent optional field is omitted, never
 `null`.
 
-The mining routes (`/mining/templates`, `/mining/work`) are the miner's
+The mining routes (`/mining/templates`, `/mining/events`, `/mining/work`) are the miner's
 protocol, not this read/submit contract, and are unchanged: their `block` is
 the consensus block's own encoding.
 
@@ -470,41 +470,28 @@ retires all of them (Stratum's `clean_jobs`). A pool or child change never
 retires earlier work; only past 512 templates on one tip are the least
 recently issued dropped.
 
-### `POST /mining/templates/subscribe`
+### `GET /mining/events`
 
-The same request body. The response is a `text/event-stream` that sends a
-template built for the plan and then each new one as the Nexus tip, its pool,
-or any hosted level moves:
+A `text/event-stream` of the template digest: the current one at once, then
+each time it changes.
 
 ```
-event: template
-data: {"workID": "...", ..., "templateDigest": "...", "clean": true}
+data: 3f2a...
+
+: keepalive
 ```
 
-`data` is the `POST /mining/templates` response plus `clean`: `true` when the
-tip moved since the previous one sent (earlier work is
-gone, and a subscriber's first template is always clean), `false` when only
-the pool or a hosted level moved (earlier work stays valid). A comment line
-`: keepalive` every 15 seconds only shows the connection is alive; a quiet
-chain sends nothing else.
+The digest is the one `/status` and every template carry. It changes when a
+hosted level's act-on tip moves, when what any hosted level's next block
+would carry changes, and when the hosted chains change (`POST /hosted-chains`).
+A client fetches a template (`POST /mining/templates`) when it sees a new
+digest; work it already holds stays valid until the Nexus tip moves.
 
-The node ends a subscription with `event: end` and the reason as `data`:
-
-- `hostedChainsChanged` — the operator changed the hosted chains
-  (`POST /hosted-chains`). A template carries every hosted level, so the
-  plan is stale; subscribe again with the new one.
-- `busy` — the node has its fill of subscribers.
-- `buildFailed` — the subscriber's first template could not be built.
-- `slowConsumer` — the client fell 8 templates behind. Each template
-  supersedes the last, so a backlog is only stale work, and the node will not
-  hold an unbounded one for a client that stopped reading. Subscribe again;
-  the first template is clean.
-
-A node shutting down closes the stream without an `end` event.
-
-Losing the stream says nothing about the chain: work already issued stays
-valid until the Nexus tip moves, and the node judges any solution submitted
-for it.
+A client that reads slowly skips to the latest digest: the node holds only
+the newest one for it, never a queue. A comment line `: keepalive` every 15
+seconds only shows the connection is alive; a quiet chain sends nothing else.
+The stream closes when the node stops. Losing it says nothing about the
+chain.
 
 ## Submit mining work
 

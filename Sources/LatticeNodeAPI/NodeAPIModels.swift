@@ -279,14 +279,9 @@ public struct MiningTemplateResponse: Codable, Sendable {
     /// Every block a nonce for this work commits, the root first. Absent
     /// from older nodes.
     public let chains: [TemplateChainBlock]?
-    /// Only on a subscription push: true when the template builds on a
-    /// different tip than the previous push, so work on earlier templates is
-    /// gone (Stratum's `clean_jobs`); false when only the pool or a hosted
-    /// descendant changed and earlier work stays valid.
-    public let clean: Bool?
 
-    /// What `expiresInMilliseconds` carries: how long a client that polls
-    /// may keep an answer before asking again. Subscribers ignore it.
+    /// What `expiresInMilliseconds` carries, for decoders that still
+    /// require the field. Not a validity bound.
     public static let pullRefreshMilliseconds: UInt64 = 30_000
 
     public init(
@@ -296,8 +291,7 @@ public struct MiningTemplateResponse: Codable, Sendable {
         targets: [UInt256],
         chainPath: [String],
         templateDigest: String,
-        chains: [TemplateChainBlock],
-        clean: Bool? = nil
+        chains: [TemplateChainBlock]
     ) {
         self.workID = workID
         self.block = block
@@ -307,7 +301,6 @@ public struct MiningTemplateResponse: Codable, Sendable {
         self.expiresInMilliseconds = Self.pullRefreshMilliseconds
         self.templateDigest = templateDigest
         self.chains = chains
-        self.clean = clean
     }
 }
 

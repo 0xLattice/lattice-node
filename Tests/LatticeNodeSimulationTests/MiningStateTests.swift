@@ -613,6 +613,26 @@ final class MiningStateTests: XCTestCase {
         XCTAssertNotNil(mining.templates.template("w"))
     }
 
+    /// A pool or hosted-descendant change only rebuilds on the same tip:
+    /// every template issued on that tip stays submittable. The tip moving
+    /// flushes them all (Stratum's `clean_jobs`), with no clock involved.
+    func testEveryTemplateOnATipIsKeptUntilTheTipMoves() async throws {
+        var mining = MiningState(tipCID: "A", spec: testSpec())
+        var workIDs: [String] = []
+        for replyID in UInt64(1)...20 {
+            let block = try await candidateBlock(timestamp: Int64(replyID))
+            let workID = "w\(replyID)"
+            try issue(block, as: workID, replyID: replyID, &mining)
+            workIDs.append(workID)
+        }
+        for workID in workIDs { XCTAssertNotNil(mining.templates.template(workID), workID) }
+
+        _ = mining.step(.tipMoved(TipMove(tipCID: "B")), now: Int64.max)
+        XCTAssertEqual(mining.templates.count, 0)
+        let refused = mining.step(.submitWork(replyID: 99, workID: workIDs[0], nonce: 0), now: Int64.max)
+        guard case .workRefused(99, .unknownWork)? = refused.first else { return XCTFail("\(refused)") }
+    }
+
     func testAFailedBuildRefusesItsRequests() {
         var mining = MiningState(tipCID: "A", spec: testSpec())
         guard case .buildTemplate(let job)? = mining.step(
