@@ -244,8 +244,11 @@ public actor MiningCoordinator {
     private var feedGeneration: UInt64 = 0
     /// After a connection ends without a push, the next subscription waits
     /// out a backoff (transport pacing only; batches fetch meanwhile).
-    private var feedRetryAt: ContinuousClock.Instant?
     private var feedBackoff = Duration.milliseconds(250)
+    /// The work the latest clean push carried: a reconnect's first push is
+    /// clean, and when it repeats the work in hand that work stays valid.
+    private var cleanWorkID: String?
+    private var reconnect: Task<Void, Never>?
     private var feedWaiters: [UInt64: CheckedContinuation<Void, Never>] = [:]
     private var nextFeedWaiter: UInt64 = 0
 
@@ -319,8 +322,9 @@ public actor MiningCoordinator {
         // batch ends it; one that is not waits for the next batch, since the
         // work in hand stays valid. Until the first push the batch fetches,
         // so a node that answers but cannot yet build backs off as before.
-        // Pushed work is retired by the next clean push; fetched work, until
-        // a push arrives, by the status probe.
+        // Pushed work is retired by a clean push (across reconnects) or a
+        // definitive answer on it; fetched work, until a push arrives, by
+        // the status probe.
         let pushedSince: UInt64? = !feedUnavailable && latestPush != nil ? pushCount : nil
         let work: MiningCoordinatorWork
         if pushedSince != nil, let latestPush {
@@ -394,9 +398,7 @@ public actor MiningCoordinator {
 
             if let pushedSince {
                 group.addTask { [self] in
-                    // A feed that ends mid-batch leaves the work's freshness
-                    // unknown: start again from what the next batch finds.
-                    await self.cleanPush(after: pushedSince) || !Task.isCancelled ? .stale : .ended
+                    await self.cleanPush(after: pushedSince, retiring: work) ? .stale : .ended
                 }
             } else if staleProbeEnabled {
                 probing = true
@@ -466,6 +468,7 @@ public actor MiningCoordinator {
                             return .stale(workId: work.workId)
                         }
                         let outcome = await submitWithRetry(work: work, result: result, pushedSince: pushedSince)
+                        settle(outcome)
                         // Only a childOnly share leaves the work open, and only a known
                         // hash names the targets it left uncleared.
                         guard case .submitted(_, _, let submission) = outcome,
@@ -574,7 +577,7 @@ public actor MiningCoordinator {
         // Only the node retiring the work (a clean push) makes it stale; a
         // dropped connection says nothing about the chain, so a solution
         // found on it is still submitted and the node judges it.
-        if let pushedSince { return cleanPushCount > pushedSince }
+        if let pushedSince { return retired(work, since: pushedSince) }
         guard let latest = try? await nodeClient.fetchStaleToken() else { return false }
         return latest != work.staleToken
     }
@@ -582,8 +585,7 @@ public actor MiningCoordinator {
     // MARK: - Pushed templates
 
     private func startFeed() {
-        guard feed == nil, !feedUnavailable else { return }
-        if let feedRetryAt, ContinuousClock.now < feedRetryAt { return }
+        guard feed == nil, reconnect == nil, !feedUnavailable else { return }
         guard let templates = nodeClient.templates() else {
             feedUnavailable = true
             return
@@ -615,6 +617,8 @@ public actor MiningCoordinator {
     private func resetFeed() {
         feed?.cancel()
         feed = nil
+        reconnect?.cancel()
+        reconnect = nil
         latestPush = nil
         feedUnavailable = false
         feedGeneration += 1
@@ -625,33 +629,50 @@ public actor MiningCoordinator {
         guard generation == feedGeneration else { return }
         pushCount += 1
         feedBackoff = .milliseconds(250)
-        if push.clean { cleanPushCount = pushCount }
+        if push.clean {
+            cleanPushCount = pushCount
+            cleanWorkID = push.work.workId
+        }
         latestPush = push.work
         wakeFeedWaiters()
     }
 
     private func feedEnded(_ error: (any Error)?, generation: UInt64) {
         guard generation == feedGeneration else { return }
-        if let error, Self.isFatalNodeClientError(error) {
-            // Refused credentials, perhaps a cookie the node is rewriting:
-            // the next batch fetches, reports it, and subscribes again.
-            resetFeed()
-            retryFeedLater()
-        } else if case .subscriptionUnavailable? = error as? MiningCoordinatorNodeClientError {
+        feed = nil
+        if case .subscriptionUnavailable? = error as? MiningCoordinatorNodeClientError {
             // A node without the route: fetch and probe until restarted.
             feedUnavailable = true
             wakeFeedWaiters()
-        } else {
-            // The connection ended: its pushed work may be gone unseen. The
-            // next batch fetches and probes, and subscribes again.
-            resetFeed()
-            retryFeedLater()
+            return
+        }
+        // The connection ended. That says nothing about the chain: the
+        // pushed work stays valid until the node retires it, so the search
+        // goes on while the coordinator subscribes again after a backoff.
+        let delay = feedBackoff
+        feedBackoff = min(feedBackoff * 2, .seconds(5))
+        reconnect = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            await self?.resubscribe(generation: generation)
         }
     }
 
-    private func retryFeedLater() {
-        feedRetryAt = ContinuousClock.now + feedBackoff
-        feedBackoff = min(feedBackoff * 2, .seconds(5))
+    private func resubscribe(generation: UInt64) {
+        guard generation == feedGeneration else { return }
+        reconnect = nil
+        startFeed()
+    }
+
+    /// A definitive answer on `workId` ends pushed work with it: accepted,
+    /// the tip moved; refused, the node no longer holds it. Only a share
+    /// that cleared a child alone leaves it open; a transport failure says
+    /// nothing.
+    private func settle(_ outcome: MiningCoordinatorCycleResult) {
+        guard case .submitted(let workId, _, let submission) = outcome,
+              submission.disposition != "childOnly", submission.disposition != "submitFailed",
+              latestPush?.workId == workId else { return }
+        latestPush = nil
     }
 
     private func wakeFeedWaiters() {
@@ -681,11 +702,17 @@ public actor MiningCoordinator {
         feedWaiters.removeValue(forKey: id)?.resume()
     }
 
-    /// True once a clean push arrives after `count` pushes; false when the
-    /// feed ends or the wait is cancelled first.
-    private func cleanPush(after count: UInt64) async -> Bool {
-        while cleanPushCount <= count {
-            guard feed != nil, !feedUnavailable, !Task.isCancelled else { return false }
+    /// Whether a clean push after `count` pushes carried other work than
+    /// `work`: the node flushed it.
+    private func retired(_ work: MiningCoordinatorWork, since count: UInt64) -> Bool {
+        cleanPushCount > count && cleanWorkID != work.workId
+    }
+
+    /// True once `work` is retired, across reconnects; false when the route
+    /// is gone or the wait is cancelled.
+    private func cleanPush(after count: UInt64, retiring work: MiningCoordinatorWork) async -> Bool {
+        while !retired(work, since: count) {
+            guard !feedUnavailable, !Task.isCancelled else { return false }
             await nextFeedEvent()
         }
         return true

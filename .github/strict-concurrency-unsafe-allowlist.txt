@@ -27,3 +27,4 @@ Tests/LatticeNodeSimulationTests/DerivedGrindTrace.swift|final class GrindTracer
 Tests/LatticeNodeSimulationTests/DerivedGrindTrace.swift|nonisolated(unsafe) static var open: [GrindTracer] = []|The open tracer list is read and replaced only while holding its static NSLock.
 Sources/LatticeMiningCoordinator/TemplateSubscription.swift|private final class ServerSentEventsDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {|URLSession delegate; its event parser is read and written only under its NSLock, and the continuation is Sendable.
 Tests/LatticeMiningCoordinatorTests/TemplatePushTests.swift|private final class Counter: @unchecked Sendable {|Test-only connection counter; its value is read and written only under its NSLock.
+Tests/LatticeMiningCoordinatorTests/TemplatePushTests.swift|private final class Feeds: @unchecked Sendable {|Test-only stand-in for the node's connections; its continuations are read and written only under its NSLock.

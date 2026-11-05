@@ -9,24 +9,28 @@ import cashew
 import LatticeMinerCore
 import UInt256
 
-/// A node that pushes templates when told to and counts any poll.
+/// A node that pushes templates when told to and counts any poll. Each
+/// subscription is a new connection; `drop()` ends the current one.
 private actor PushingNode: MiningCoordinatorNodeClient {
-    private let stream: AsyncThrowingStream<MiningCoordinatorPush, any Error>
-    private let feed: AsyncThrowingStream<MiningCoordinatorPush, any Error>.Continuation
+    private let feeds = Feeds()
     private let fetched: MiningCoordinatorWork?
+    private let refusal: String?
     private(set) var polls = 0
+    private(set) var submitted: [String] = []
 
-    init(fetched: MiningCoordinatorWork? = nil) {
-        (stream, feed) = AsyncThrowingStream.makeStream()
+    init(fetched: MiningCoordinatorWork? = nil, refusal: String? = nil) {
         self.fetched = fetched
+        self.refusal = refusal
     }
 
-    nonisolated func templates() -> AsyncThrowingStream<MiningCoordinatorPush, any Error>? { stream }
+    nonisolated func templates() -> AsyncThrowingStream<MiningCoordinatorPush, any Error>? { feeds.open() }
 
-    nonisolated func drop() { feed.finish() }
+    nonisolated var subscriptions: Int { feeds.count }
+
+    nonisolated func drop() { feeds.current?.finish() }
 
     nonisolated func push(_ work: MiningCoordinatorWork, clean: Bool) {
-        feed.yield(MiningCoordinatorPush(work: work, clean: clean))
+        feeds.current?.yield(MiningCoordinatorPush(work: work, clean: clean))
     }
 
     func fetchWork() async throws -> MiningCoordinatorWork? {
@@ -40,7 +44,34 @@ private actor PushingNode: MiningCoordinatorNodeClient {
     }
 
     func submit(workId: String, nonce: UInt64) async throws -> MiningSolutionSubmission {
-        MiningSolutionSubmission(accepted: true, disposition: "canonicalized")
+        submitted.append(workId)
+        if let refusal { return MiningSolutionSubmission(accepted: false, disposition: refusal) }
+        return MiningSolutionSubmission(accepted: true, disposition: "canonicalized")
+    }
+}
+
+private final class Feeds: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuations: [AsyncThrowingStream<MiningCoordinatorPush, any Error>.Continuation] = []
+
+    func open() -> AsyncThrowingStream<MiningCoordinatorPush, any Error> {
+        let (stream, continuation) = AsyncThrowingStream<MiningCoordinatorPush, any Error>.makeStream()
+        lock.lock()
+        continuations.append(continuation)
+        lock.unlock()
+        return stream
+    }
+
+    var current: AsyncThrowingStream<MiningCoordinatorPush, any Error>.Continuation? {
+        lock.lock()
+        defer { lock.unlock() }
+        return continuations.last
+    }
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return continuations.count
     }
 }
 
@@ -67,8 +98,10 @@ final class TemplatePushTests: XCTestCase {
             return nil
         }
         let coordinator = MiningCoordinator(nodeClient: node, workers: [worker], totalBatchSize: 1)
+        let subscribed = Task { await coordinator.awaitPush() }
+        while node.subscriptions < 1 { await Task.yield() }
         node.push(work("w1"), clean: true)
-        await coordinator.awaitPush()
+        await subscribed.value
         let batch = Task { await coordinator.runBatch() }
         while await searches.workIDs.isEmpty { await Task.yield() }
         node.push(work("w2"), clean: true)
@@ -95,8 +128,10 @@ final class TemplatePushTests: XCTestCase {
             return nil
         }
         let coordinator = MiningCoordinator(nodeClient: node, workers: [worker], totalBatchSize: 1)
+        let subscribed = Task { await coordinator.awaitPush() }
+        while node.subscriptions < 1 { await Task.yield() }
         node.push(work("w1"), clean: true)
-        await coordinator.awaitPush()
+        await subscribed.value
         let batch = Task { await coordinator.runBatch() }
         while await searches.workIDs.isEmpty { await Task.yield() }
         node.push(work("w2"), clean: false)
@@ -206,30 +241,66 @@ final class TemplatePushTests: XCTestCase {
         XCTAssertEqual(cancelled, 0)
     }
 
-    /// A dropped connection retires pushed work: the batch ends, and the next
-    /// one fetches until it subscribes again.
-    func testADroppedFeedEndsPushedWork() async {
-        let node = PushingNode(fetched: work("fetched"))
+    /// A dropped connection says nothing about the chain: the search on
+    /// pushed work goes on while the coordinator subscribes again, and ends
+    /// when the new connection pushes a clean template.
+    func testTheSearchGoesOnAcrossADisconnect() async {
+        let node = PushingNode()
         let searches = Searches()
         let worker = MiningCoordinatorWorker(id: "grinder") { work, _ in
             await searches.record(work.workId)
-            try? await Task.sleep(for: .seconds(10))
+            try? await Task.sleep(for: .seconds(30))
+            if Task.isCancelled { await searches.recordCancel() }
             return nil
         }
         let coordinator = MiningCoordinator(nodeClient: node, workers: [worker], totalBatchSize: 1)
+        let first = Task { await coordinator.awaitPush() }
+        while node.subscriptions < 1 { await Task.yield() }
         node.push(work("w1"), clean: true)
-        await coordinator.awaitPush()
+        await first.value
         let batch = Task { await coordinator.runBatch() }
         while await searches.workIDs.isEmpty { await Task.yield() }
+
         node.drop()
+        while node.subscriptions < 2 { await Task.yield() }
+        let cancelledAcrossTheDrop = await searches.cancelled
+        XCTAssertEqual(cancelledAcrossTheDrop, 0, "the search outlives the connection")
+        // The reconnect's first push is clean; repeating w1, it keeps w1.
+        node.push(work("w1"), clean: true)
+        node.push(work("w2"), clean: true)
 
         let result = await batch.value
         XCTAssertEqual(result, .stale(workId: "w1"))
-        let next = Task { await coordinator.runBatch() }
-        while await searches.workIDs.count < 2 { await Task.yield() }
-        let searched = await searches.workIDs
-        XCTAssertEqual(searched, ["w1", "fetched"])
-        next.cancel()
+        let cancelled = await searches.cancelled
+        XCTAssertEqual(cancelled, 1)
+        let polls = await node.polls
+        XCTAssertEqual(polls, 0, "nothing fetched or probed")
+        await coordinator.stop()
+    }
+
+    /// The node refusing a solution on pushed work retires that work: the
+    /// next batch fetches instead of searching it again.
+    func testARefusedSubmissionRetiresPushedWork() async {
+        let node = PushingNode(fetched: work("fetched"), refusal: "unknownWork")
+        let searches = Searches()
+        let worker = MiningCoordinatorWorker(id: "grinder") { work, _ in
+            await searches.record(work.workId)
+            if work.workId == "w1" {
+                return MiningWorkerResult(workerId: "grinder", workId: work.workId, nonce: 0)
+            }
+            return nil
+        }
+        let coordinator = MiningCoordinator(nodeClient: node, workers: [worker], totalBatchSize: 1)
+        let first = Task { await coordinator.awaitPush() }
+        while node.subscriptions < 1 { await Task.yield() }
+        node.push(work("w1"), clean: true)
+        await first.value
+
+        _ = await coordinator.runBatch()
+        let submitted = await node.submitted
+        XCTAssertEqual(submitted, ["w1"], "the solution goes to the node")
+        let next = await coordinator.runBatch()
+        XCTAssertEqual(next, .noSolution(workId: "fetched"))
         await coordinator.stop()
     }
 
