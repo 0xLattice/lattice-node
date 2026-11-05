@@ -424,8 +424,12 @@ actor ReadEndpointDirectory {
             lookup.discovery?.cancel()
             lookups[lookupID] = lookup
             waiter.resume(returning: lookup.urls)
-            collecting.append(lookupID)
-            if collecting.count > Self.maximumConcurrentLookups { close(collecting[0]) }
+            // Only one that stays open for late answers counts toward the
+            // bound; one with nothing outstanding closes below.
+            if !lookup.unanswered.isEmpty {
+                collecting.append(lookupID)
+                if collecting.count > Self.maximumConcurrentLookups { close(collecting[0]) }
+            }
         }
         if !lookup.searching && lookup.unanswered.isEmpty { close(lookupID) }
     }

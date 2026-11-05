@@ -560,6 +560,18 @@ final class ReadEndpointTests: XCTestCase {
         let releasedAtBound = await script.released
         XCTAssertFalse(releasedAtBound.contains(oldestFast.publicKey), "at the bound, the oldest stays open")
 
+        // A lookup answered with nothing outstanding closes itself: it does
+        // not take the oldest's place.
+        await script.connect([Self.endpoint(13)])
+        await script.slowDiscovery(30_000_000_000)
+        let settled = await directory.lookup(["Nexus", "All-answered"]).map(\.url)
+        XCTAssertEqual(settled, ["https://20013.example"])
+        try await alwaysDuring("the oldest still collects", .milliseconds(200)) {
+            !(await script.released.contains(oldestFast.publicKey))
+        }
+        await script.connect([])
+        await script.slowDiscovery(0)
+
         await script.provide([newestFast, slow])
         let newest = ["Nexus", "Newest"]
         _ = await directory.lookup(newest)
