@@ -117,8 +117,10 @@ alone, and one that closes its connection while it waits gives up its place.
 A reader that waited 30 seconds without a place is answered 503 with
 `Retry-After: 30`; one whose read found the budget or the node's pending peer
 requests with no room, 503 with `Retry-After: 1`. Neither is 404: a reader
-should ask again. The connection of a request read from peers is closed
-after its answer. Behind a
+should ask again. A request read from peers is answered with
+`Connection: close` (200, 404 and 503 alike) and its connection is closed
+after the answer; a request pipelined behind it on that connection is dropped
+with it, and a client sends it again on a new one. Behind a
 proxy that presents every client as one address, all clients share these
 reads. `--public-read-fetches 0` serves only what the node holds. A Volume no
 peer served within the caps above is 404. The immutable response is billed to the

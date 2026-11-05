@@ -114,6 +114,7 @@ final class PublicVolumeFetchTests: XCTestCase {
             try await client.execute(uri: "/volumes/\(root)", method: .get) { response in
                 XCTAssertEqual(response.status, .serviceUnavailable)
                 XCTAssertEqual(response.headers[.retryAfter], "1")
+                XCTAssertEqual(response.headers[.connection], "close")
             }
         }
     }
@@ -149,6 +150,7 @@ final class PublicVolumeFetchTests: XCTestCase {
                     try await client.execute(uri: "/volumes/\(root)", method: .get) { response in
                         XCTAssertEqual(response.status, .serviceUnavailable)
                         XCTAssertEqual(response.headers[.retryAfter], "2", "ask again after about the wait")
+                        XCTAssertEqual(response.headers[.connection], "close")
                     }
                 }
             } else {
@@ -168,6 +170,46 @@ final class PublicVolumeFetchTests: XCTestCase {
             _ = await held.value
             let roots = await reads.roots
             XCTAssertEqual(roots, [first], "the waiter's CID is never read")
+        }
+    }
+
+    /// Over a real connection, a Volume read from peers is answered 200
+    /// with its archive, and the answer says the connection closes after
+    /// it; so does one no peer serves (404).
+    func testAPeerReadOverAConnectionIsServedAndSaysItCloses() async throws {
+        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-public-fetch-live-\(UUID().uuidString)"
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
+        let storage = try await NodeStorage.open(configuration: NodeConfiguration(
+            chainPath: ["Nexus"], storagePath: storageDirectory,
+            privateKeyHex: String(repeating: "01", count: 32)
+        ))
+        let service = try await startRuntime(storage)
+        let volume = try spec(501)
+        let serialized = try await serializedVolume(volume)
+        let fetches = PublicVolumeFetches(limit: 1) { root in
+            try await Task.sleep(for: .milliseconds(100))
+            return root == volume.rawCID ? serialized : nil
+        }
+        let unserved = try spec(502).rawCID
+        let app = makePublicReadApplication(service: service, host: "127.0.0.1", port: 0, fetches: fetches)
+        try await app.test(.live) { client in
+            let port = try XCTUnwrap(client.port)
+            for (root, served) in [(volume.rawCID, true), (unserved, false)] {
+                let reader = TestClient(host: "localhost", port: port, configuration: .init(timeout: .seconds(20)))
+                reader.connect()
+                let response = try await reader.get("/volumes/\(root)")
+                XCTAssertEqual(response.status, served ? .ok : .notFound)
+                XCTAssertEqual(response.headers[.connection], "close")
+                if served {
+                    XCTAssertEqual(
+                        Data(response.body?.readableBytesView ?? ByteBuffer().readableBytesView),
+                        encodeCompleteVolumeArchive(serialized)
+                    )
+                }
+                try? await reader.shutdown()
+            }
         }
     }
 
