@@ -242,8 +242,6 @@ public actor MiningCoordinator {
     private var cleanPushCount: UInt64 = 0
     private var feedUnavailable = false
     private var feedGeneration: UInt64 = 0
-    /// The tip the latest clean push builds on.
-    private var cleanTip: String?
     private var feedWaiters: [UInt64: CheckedContinuation<Void, Never>] = [:]
     private var nextFeedWaiter: UInt64 = 0
 
@@ -394,7 +392,7 @@ public actor MiningCoordinator {
                 group.addTask { [self] in
                     // A feed that ends mid-batch leaves the work's freshness
                     // unknown: start again from what the next batch finds.
-                    await self.cleanPush(after: pushedSince, off: work) || !Task.isCancelled ? .stale : .ended
+                    await self.cleanPush(after: pushedSince) || !Task.isCancelled ? .stale : .ended
                 }
             } else if staleProbeEnabled {
                 probing = true
@@ -569,7 +567,7 @@ public actor MiningCoordinator {
     /// With pushed work, whether a clean push came after `pushedSince`;
     /// otherwise what the status digest says.
     private func isStale(_ work: MiningCoordinatorWork, pushedSince: UInt64?) async -> Bool {
-        if let pushedSince { return movedPast(work, since: pushedSince) }
+        if let pushedSince { return cleanPushCount > pushedSince }
         guard let latest = try? await nodeClient.fetchStaleToken() else { return false }
         return latest != work.staleToken
     }
@@ -604,19 +602,6 @@ public actor MiningCoordinator {
         }
     }
 
-    /// The tip `work` builds on: its block's parent, or the work itself
-    /// when that cannot be read.
-    private static func tip(of work: MiningCoordinatorWork) -> String {
-        Data(hex: work.blockHex).flatMap { Block(data: $0) }?.parent?.rawCID ?? work.workId
-    }
-
-    /// Whether a clean push after `count` pushes moved off `work`'s tip. A
-    /// clean push on the same tip (a subscriber's first, after a fetch)
-    /// leaves the work valid.
-    private func movedPast(_ work: MiningCoordinatorWork, since count: UInt64) -> Bool {
-        cleanPushCount > count && cleanTip != Self.tip(of: work)
-    }
-
     /// Drop the subscription and what it pushed; the next batch subscribes
     /// again.
     private func resetFeed() {
@@ -631,10 +616,7 @@ public actor MiningCoordinator {
     private func received(_ push: MiningCoordinatorPush, generation: UInt64) {
         guard generation == feedGeneration else { return }
         pushCount += 1
-        if push.clean {
-            cleanPushCount = pushCount
-            cleanTip = Self.tip(of: push.work)
-        }
+        if push.clean { cleanPushCount = pushCount }
         latestPush = push.work
         wakeFeedWaiters()
     }
@@ -645,11 +627,14 @@ public actor MiningCoordinator {
             // Refused credentials, perhaps a cookie the node is rewriting:
             // the next batch fetches, reports it, and subscribes again.
             resetFeed()
-        } else {
-            // A node without the route, or a stream that ended: fetch and
-            // probe until the coordinator is restarted.
+        } else if case .subscriptionUnavailable? = error as? MiningCoordinatorNodeClientError {
+            // A node without the route: fetch and probe until restarted.
             feedUnavailable = true
             wakeFeedWaiters()
+        } else {
+            // The connection ended: its pushed work may be gone unseen. The
+            // next batch fetches and probes, and subscribes again.
+            resetFeed()
         }
     }
 
@@ -680,10 +665,10 @@ public actor MiningCoordinator {
         feedWaiters.removeValue(forKey: id)?.resume()
     }
 
-    /// True once a clean push after `count` pushes moves off `work`'s tip;
-    /// false when the feed ends or the wait is cancelled first.
-    private func cleanPush(after count: UInt64, off work: MiningCoordinatorWork) async -> Bool {
-        while !movedPast(work, since: count) {
+    /// True once a clean push arrives after `count` pushes; false when the
+    /// feed ends or the wait is cancelled first.
+    private func cleanPush(after count: UInt64) async -> Bool {
+        while cleanPushCount <= count {
             guard feed != nil, !feedUnavailable, !Task.isCancelled else { return false }
             await nextFeedEvent()
         }

@@ -23,6 +23,8 @@ private actor PushingNode: MiningCoordinatorNodeClient {
 
     nonisolated func templates() -> AsyncThrowingStream<MiningCoordinatorPush, any Error>? { stream }
 
+    nonisolated func drop() { feed.finish() }
+
     nonisolated func push(_ work: MiningCoordinatorWork, clean: Bool) {
         feed.yield(MiningCoordinatorPush(work: work, clean: clean))
     }
@@ -118,9 +120,9 @@ final class TemplatePushTests: XCTestCase {
         XCTAssertEqual(events.last?.data, Data("busy".utf8))
     }
 
-    /// The HTTP client reads the event stream, marks a reconnect's first
-    /// push clean, and reconnects when the connection ends.
-    func testHTTPClientStreamsTemplatesAndReconnects() async throws {
+    /// The HTTP client reads one connection's event stream: it ends with the
+    /// connection or a refusal, and throws on a missing route.
+    func testHTTPClientStreamsOneConnectionsTemplates() async throws {
         let block = try await BlockBuilder.buildGenesis(
             spec: ChainSpec(
                 maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
@@ -147,7 +149,7 @@ final class TemplatePushTests: XCTestCase {
         let connections = [
             try event("a", clean: true) + ": keepalive\n\n" + (try event("b", clean: false)),
             try event("c", clean: nil),
-            // A refused subscription: the connection ends and the client reconnects.
+            // A refused subscription: the connection ends with nothing pushed.
             "event: end\ndata: busy\n\n",
             try event("d", clean: false),
         ]
@@ -165,20 +167,25 @@ final class TemplatePushTests: XCTestCase {
             session: URLSession(configuration: config)
         )
 
-        var pushes: [MiningCoordinatorPush] = []
-        do {
+        var read: [[MiningCoordinatorPush]] = []
+        for _ in 0..<4 {
+            var pushes: [MiningCoordinatorPush] = []
             for try await push in client.templates()! { pushes.append(push) }
-            XCTFail("the stream ends when the route is missing")
+            read.append(pushes)
+        }
+        XCTAssertEqual(read.map { $0.map { $0.work.workId } }, [["a", "b"], ["c"], [], ["d"]])
+        XCTAssertEqual(read.flatMap { $0.map { $0.clean } }, [true, false, true, false])
+        XCTAssertEqual(read.flatMap { $0.map { $0.work.staleToken } }, ["d-a", "d-b", "d-c", "d-d"])
+        do {
+            for try await _ in client.templates()! {}
+            XCTFail("the stream throws when the route is missing")
         } catch let error as MiningCoordinatorNodeClientError {
             XCTAssertEqual(error, .subscriptionUnavailable)
         }
-        XCTAssertEqual(pushes.map(\.work.workId), ["a", "b", "c", "d"])
-        XCTAssertEqual(pushes.map(\.clean), [true, false, true, false])
-        XCTAssertEqual(pushes.map(\.work.staleToken), ["d-a", "d-b", "d-c", "d-d"])
     }
 
-    /// Before the first push a batch fetches; the subscriber's first push is
-    /// clean, but on the same tip it leaves the fetched work running.
+    /// Before the first push a batch fetches and probes; the subscriber's
+    /// first push does not cancel the fetched work.
     func testAFirstPushOnTheSameTipKeepsFetchedWork() async {
         let node = PushingNode(fetched: work("w1"))
         let searches = Searches()
@@ -191,12 +198,39 @@ final class TemplatePushTests: XCTestCase {
         let coordinator = MiningCoordinator(nodeClient: node, workers: [worker], totalBatchSize: 1)
         let batch = Task { await coordinator.runBatch() }
         while await searches.workIDs.isEmpty { await Task.yield() }
-        node.push(work("w1"), clean: true)
+        node.push(work("w2"), clean: true)
 
         let result = await batch.value
         XCTAssertEqual(result, .noSolution(workId: "w1"))
         let cancelled = await searches.cancelled
         XCTAssertEqual(cancelled, 0)
+    }
+
+    /// A dropped connection retires pushed work: the batch ends, and the next
+    /// one fetches until it subscribes again.
+    func testADroppedFeedEndsPushedWork() async {
+        let node = PushingNode(fetched: work("fetched"))
+        let searches = Searches()
+        let worker = MiningCoordinatorWorker(id: "grinder") { work, _ in
+            await searches.record(work.workId)
+            try? await Task.sleep(for: .seconds(10))
+            return nil
+        }
+        let coordinator = MiningCoordinator(nodeClient: node, workers: [worker], totalBatchSize: 1)
+        node.push(work("w1"), clean: true)
+        await coordinator.awaitPush()
+        let batch = Task { await coordinator.runBatch() }
+        while await searches.workIDs.isEmpty { await Task.yield() }
+        node.drop()
+
+        let result = await batch.value
+        XCTAssertEqual(result, .stale(workId: "w1"))
+        let next = Task { await coordinator.runBatch() }
+        while await searches.workIDs.count < 2 { await Task.yield() }
+        let searched = await searches.workIDs
+        XCTAssertEqual(searched, ["w1", "fetched"])
+        next.cancel()
+        await coordinator.stop()
     }
 
     /// Against a node without the route, the coordinator fetches and probes.

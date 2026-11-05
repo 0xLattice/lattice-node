@@ -486,8 +486,9 @@ gone, and a subscriber's first template is always clean), `false` when only
 the pool or a hosted level moved (earlier work stays valid). A comment line
 `: keepalive` every 15 seconds only shows the connection is alive; a quiet
 chain sends nothing else. A refused subscription (too many subscribers) or a
-stopping node ends the stream with `event: end`; clients reconnect after a
-backoff.
+stopping node ends the stream with `event: end`. A client that loses the
+stream no longer knows whether its work is current, so it fetches until it
+subscribes again.
 
 ## Submit mining work
 

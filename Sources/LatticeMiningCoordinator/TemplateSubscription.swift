@@ -9,40 +9,26 @@ import LatticeMinerCore
 // Linux as well.
 
 extension HTTPMiningCoordinatorNodeClient {
-    /// The node's templates as it builds them, reconnecting when the
-    /// connection drops. A reconnect's first push is clean: what moved while
-    /// it was down is unknown. Ends on an unauthorized or missing route.
+    /// The node's templates as it builds them, over one connection: the
+    /// stream ends when the connection does (the node stopped, refused the
+    /// subscription with `event: end`, or the transport failed), and the
+    /// coordinator fetches and probes until it subscribes again. Throws on
+    /// an unauthorized or missing route.
     public func templates() -> AsyncThrowingStream<MiningCoordinatorPush, any Error>? {
         AsyncThrowingStream { continuation in
             let task = Task {
-                var backoff = Duration.milliseconds(250)
-                while !Task.isCancelled {
-                    do {
-                        // `event: end` (the node stopped, or had its fill of
-                        // subscribers) is followed by the connection's close,
-                        // and a reconnect after the backoff.
-                        for try await event in self.templateEvents() where event.name == "template" {
-                            let work = try JSONDecoder().decode(TemplateResponse.self, from: event.data)
-                            struct Clean: Decodable { let clean: Bool? }
-                            guard let pushed = MiningCoordinatorWork(template: work) else { continue }
-                            let clean = (try? JSONDecoder().decode(Clean.self, from: event.data).clean) ?? true
-                            continuation.yield(MiningCoordinatorPush(work: pushed, clean: clean))
-                            backoff = .milliseconds(250)
-                        }
-                    } catch let error as MiningCoordinatorNodeClientError {
-                        switch error {
-                        case .unauthorized, .subscriptionUnavailable:
-                            continuation.finish(throwing: error)
-                            return
-                        case .nonHTTPResponse, .invalidSubmissionResponse:
-                            break
-                        }
-                    } catch {}
-                    // The connection ended: a transport matter, retried.
-                    try? await Task.sleep(for: backoff)
-                    backoff = min(backoff * 2, .seconds(5))
+                do {
+                    for try await event in self.templateEvents() where event.name == "template" {
+                        let work = try JSONDecoder().decode(TemplateResponse.self, from: event.data)
+                        struct Clean: Decodable { let clean: Bool? }
+                        guard let pushed = MiningCoordinatorWork(template: work) else { continue }
+                        let clean = (try? JSONDecoder().decode(Clean.self, from: event.data).clean) ?? true
+                        continuation.yield(MiningCoordinatorPush(work: pushed, clean: clean))
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
                 }
-                continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }
         }
