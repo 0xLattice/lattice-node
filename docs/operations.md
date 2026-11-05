@@ -242,6 +242,18 @@ zero only behind a proxy that supplies its own per-client and global limits
 (`--public-submit-rate` is a fourth ceiling; it bounds only `POST /transactions`).
 The example Fly read replica uses nginx as the public boundary.
 
+A Volume a public reader asks for that the node does not hold is read from
+peers, at most `--public-read-fetches` at once (fewer when half of
+`--serving-max-in-flight-volume-bytes` does not fit that many 64 MiB archives;
+the node prints the number at start). Past that, readers wait in arrival
+order for a read to end, and readers of the same Volume share one read. A
+waiting reader holds no archive memory, so the memory these reads take stays
+at the number at once times 64 MiB. A reader that closes its connection
+leaves the queue; one still waiting after 30 seconds (a proxy in front may
+hold a connection its client closed), or whose read found the node's own
+content budget full, gets 503 with `Retry-After` (see
+[`GET /volumes/:cid`](rpc-api.md#read-routes)).
+
 ## Discovery and peer health
 
 Every peer follows Nexus on the same overlay, so every open session is a

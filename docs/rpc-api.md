@@ -111,9 +111,16 @@ caps how many are read at once. No more run than fit, at the 64 MiB cap
 each, in half of the node's in-flight content budget
 (`--serving-max-in-flight-volume-bytes`), so its own sync keeps the other half;
 at least one always runs. At the default budget (128 MiB) that is one at a
-time; the node prints the number at start. Past the limit, or while the budget
-or the node's pending peer requests have no room, the answer is 503 with
-`Retry-After`, not 404, and a reader should ask again. Behind a
+time; the node prints the number at start. Past the limit a reader waits,
+first come first served, for a read to end; it is never refused for that
+alone, and one that closes its connection while it waits gives up its place.
+A reader that waited 30 seconds without a place is answered 503 with
+`Retry-After: 30`; one whose read found the budget or the node's pending peer
+requests with no room, 503 with `Retry-After: 1`. Neither is 404: a reader
+should ask again. A request read from peers is answered with
+`Connection: close` (200, 404 and 503 alike) and its connection is closed
+after the answer; a request pipelined behind it on that connection is dropped
+with it, and a client sends it again on a new one. Behind a
 proxy that presents every client as one address, all clients share these
 reads. `--public-read-fetches 0` serves only what the node holds. A Volume no
 peer served within the caps above is 404. The immutable response is billed to the
