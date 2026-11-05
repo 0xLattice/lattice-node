@@ -117,6 +117,12 @@ struct PolicyRefusal: Sendable, Equatable {
     let cids: [String]
 }
 
+/// One template pushed to a subscriber; see `MiningEffect.templatePushed`.
+struct TemplatePush: Sendable {
+    let template: WorkTemplate
+    let clean: Bool
+}
+
 struct ChildTemplateInput: Sendable {
     let path: ChainPath
     let tipCID: String?
@@ -426,11 +432,47 @@ extension NodeRuntime {
     public func miningTemplate(
         _ request: MiningTemplateRequest
     ) async throws -> MiningTemplateResponse {
+        let plan = try templatePlan(request)
+        guard case .template(let template) = try await ask({
+            .templateRequested(replyID: $0, plan)
+        }) else { throw NodeRuntimeError.stopped }
+        return response(template)
+    }
+
+    /// `request`'s template now, then each new one the node builds for it
+    /// as its tip, its pool or a hosted descendant moves, until the stream is
+    /// dropped. Each carries `clean` (see `MiningTemplateResponse.clean`).
+    /// Ends with `TemplateError.busy` when the node has its fill of
+    /// subscribers, and with `NodeRuntimeError.stopped` when it stops.
+    public func templateSubscription(
+        _ request: MiningTemplateRequest
+    ) throws -> AsyncThrowingStream<MiningTemplateResponse, any Error> {
+        let plan = try templatePlan(request)
+        let (pushes, continuation) = AsyncThrowingStream<TemplatePush, any Error>.makeStream()
+        if case .terminated = inputs.yield(.subscribe(configuration.chainPath, plan, continuation)) {
+            continuation.finish(throwing: NodeRuntimeError.stopped)
+        }
+        return AsyncThrowingStream { output in
+            let task = Task {
+                do {
+                    for try await push in pushes {
+                        output.yield(response(push.template, clean: push.clean))
+                    }
+                    output.finish()
+                } catch {
+                    output.finish(throwing: error)
+                }
+            }
+            output.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// One plan for every level the template carries: each hosted child's
+    /// recipient and minimum work by path.
+    private func templatePlan(_ request: MiningTemplateRequest) throws -> TemplateRequest {
         let chainPath = configuration.chainPath
-        // One plan for every level the template carries: each hosted
-        // child's recipient and minimum work by path.
         let recipients = try MiningPlan.validatedRecipientPlan(request.recipients, chainPath: chainPath)
-        let plan = TemplateRequest(
+        return TemplateRequest(
             rewardRecipient: recipients.current,
             minimumWork: try MiningPlan.validatedMinimumWorkPlan(
                 request.minimumWork, chainPath: chainPath
@@ -439,20 +481,18 @@ extension NodeRuntime {
                 recipients.descendants.map { ($0.chainPath, $0.address) }, uniquingKeysWith: { first, _ in first }
             )
         )
-        guard case .template(let template) = try await ask({
-            .templateRequested(replyID: $0, plan)
-        }) else { throw NodeRuntimeError.stopped }
-        let remaining = template.expiresAt - NodeRuntime.now()
-        guard remaining > 0 else { throw MiningTemplateError.expired }
-        return MiningTemplateResponse(
+    }
+
+    private func response(_ template: WorkTemplate, clean: Bool? = nil) -> MiningTemplateResponse {
+        MiningTemplateResponse(
             workID: template.workID,
             block: template.block,
             searchTarget: template.searchTarget,
             targets: template.targets,
-            chainPath: chainPath,
-            expiresInMilliseconds: UInt64(remaining),
+            chainPath: configuration.chainPath,
             templateDigest: template.digest,
-            chains: template.chains.map(TemplateChainBlock.init)
+            chains: template.chains.map(TemplateChainBlock.init),
+            clean: clean
         )
     }
 
@@ -886,7 +926,6 @@ extension NodeRuntime {
         )
         guard let template = try? await MiningTemplateAssembly.fit(
             chainPath: chainPath,
-            lifetime: .seconds(30),
             previous: previous,
             pooled: pooled,
             provided: provided,
@@ -1073,7 +1112,7 @@ extension NodeRuntime {
                 )
                 if !refusedHere.isEmpty { refused.append(PolicyRefusal(path: input.path, tipCID: tipCID, cids: refusedHere)) }
                 block = try? await MiningTemplateAssembly.fit(
-                    chainPath: input.path, lifetime: .seconds(30), previous: previous,
+                    chainPath: input.path, previous: previous,
                     pooled: pooled, provided: grandchildren,
                     hosted: directories(below: input.path, among: inputs), parentCarrier: carrier,
                     timestamp: time, rewardRecipient: request.childRecipients[input.path],

@@ -269,6 +269,9 @@ public struct MiningTemplateResponse: Codable, Sendable {
     /// Every target this work can clear, easiest first (`searchTarget` leads).
     public let targets: [UInt256]
     public let chainPath: [String]
+    /// Kept for clients that require the field: always
+    /// `pullRefreshMilliseconds`. The node never refuses work on a clock;
+    /// work is valid until the tip moves.
     public let expiresInMilliseconds: UInt64
     /// A miner compares this with the status route's digest to learn its work
     /// is stale.
@@ -276,6 +279,15 @@ public struct MiningTemplateResponse: Codable, Sendable {
     /// Every block a nonce for this work commits, the root first. Absent
     /// from older nodes.
     public let chains: [TemplateChainBlock]?
+    /// Only on a subscription push: true when the template builds on a
+    /// different tip than the previous push, so work on earlier templates is
+    /// gone (Stratum's `clean_jobs`); false when only the pool or a hosted
+    /// descendant changed and earlier work stays valid.
+    public let clean: Bool?
+
+    /// What `expiresInMilliseconds` carries: how long a client that polls
+    /// may keep an answer before asking again. Subscribers ignore it.
+    public static let pullRefreshMilliseconds: UInt64 = 30_000
 
     public init(
         workID: String,
@@ -283,18 +295,19 @@ public struct MiningTemplateResponse: Codable, Sendable {
         searchTarget: UInt256,
         targets: [UInt256],
         chainPath: [String],
-        expiresInMilliseconds: UInt64,
         templateDigest: String,
-        chains: [TemplateChainBlock]
+        chains: [TemplateChainBlock],
+        clean: Bool? = nil
     ) {
         self.workID = workID
         self.block = block
         self.searchTarget = searchTarget
         self.targets = targets
         self.chainPath = chainPath
-        self.expiresInMilliseconds = expiresInMilliseconds
+        self.expiresInMilliseconds = Self.pullRefreshMilliseconds
         self.templateDigest = templateDigest
         self.chains = chains
+        self.clean = clean
     }
 }
 

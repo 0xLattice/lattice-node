@@ -126,7 +126,6 @@ private struct MergedWork: Sendable {
             prefixHex: prefix.map { String(format: "%02x", $0) }.joined(),
             targetHex: childTarget.toHexString(),
             targets: [childTarget, parentTarget],
-            expiresInMilliseconds: nil,
             staleToken: "tip"
         )
     }
@@ -1233,7 +1232,10 @@ final class MiningCoordinatorTests: XCTestCase {
     /// that stops the mining loop. Driven through the real HTTP client.
     func testHTTPFetchWorkTreats503AsTransientBackoffNotFatal() async throws {
         StubTemplateURLProtocol.responder = { request in
-            XCTAssertEqual(request.url?.path, "/api/mining/templates")
+            XCTAssertTrue(
+                ["/api/mining/templates", "/api/mining/templates/subscribe"].contains(request.url?.path ?? ""),
+                "\(request.url?.path ?? "")"
+            )
             XCTAssertEqual(request.httpMethod, "POST")
             let payload = requestBodyData(request).flatMap {
                 try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
@@ -1260,6 +1262,7 @@ final class MiningCoordinatorTests: XCTestCase {
         let coordinator = MiningCoordinator(nodeClient: client, workers: [], totalBatchSize: 1)
         let result = await coordinator.runBatch()
         XCTAssertEqual(result, .backoff, "a 503 cycle must back off and retry, not stop the loop")
+        await coordinator.stop()
     }
 
     /// Contrast: 401/403 ARE fatal (`unauthorized`) — only auth failures may
@@ -1405,8 +1408,6 @@ final class MiningCoordinatorTests: XCTestCase {
         XCTAssertEqual(searches.count, 1)
     }
 
-    /// The node refuses nonces for expired work, so the batch stops searching
-    /// once the template's lifetime has passed.
     /// The tip can move long after the batch's first freshness probe. The
     /// round must notice and stop, not grind dead work until the template
     /// expires or a hard-target hit finally reaches the node.
@@ -1440,41 +1441,6 @@ final class MiningCoordinatorTests: XCTestCase {
         XCTAssertTrue(cancelled)
         let probes = await node.probes
         XCTAssertGreaterThan(probes, 1)
-    }
-
-    func testSearchStopsWhenTemplateExpires() async {
-        let work = MiningCoordinatorWork(
-            workId: "work-1",
-            blockHex: "00",
-            prefixHex: "",
-            targetHex: "ff",
-            targets: [UInt256(255)],
-            expiresInMilliseconds: 50,
-            staleToken: nil
-        )
-        let flag = CancellationFlag()
-        let worker = MiningCoordinatorWorker(id: "slow") { _, _ in
-            try? await Task.sleep(for: .seconds(10))
-            await flag.record(Task.isCancelled)
-            return nil
-        }
-        let node = StubNodeClient(workResponses: [work])
-        let coordinator = MiningCoordinator(
-            nodeClient: node,
-            workers: [worker],
-            totalBatchSize: 1,
-            staleProbeEnabled: false
-        )
-
-        let started = ContinuousClock.now
-        let result = await coordinator.runBatch()
-
-        XCTAssertEqual(result, .stale(workId: "work-1"))
-        XCTAssertLessThan(ContinuousClock.now - started, .seconds(5))
-        let cancelled = await flag.cancelled
-        XCTAssertTrue(cancelled)
-        let submissionCount = await node.submissionCount()
-        XCTAssertEqual(submissionCount, 0)
     }
 
     func testHTTPFetchStaleTokenUsesChainInfoTipWithoutTemplateFetch() async throws {

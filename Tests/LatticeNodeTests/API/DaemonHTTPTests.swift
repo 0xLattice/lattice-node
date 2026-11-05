@@ -9,6 +9,7 @@ import cashew
 @testable import LatticeNode
 @testable import LatticeNodeDaemon
 import LatticeNodeAPI
+import LatticeMiningCoordinator
 
 final class DaemonHTTPTests: XCTestCase {
     func testCompleteVolumeRouteServesTheLocalIvyArchive() async throws {
@@ -219,6 +220,56 @@ final class DaemonHTTPTests: XCTestCase {
             ) { response in
                 XCTAssertEqual(response.status, .ok)
             }
+        }
+    }
+
+    /// The subscription route streams server-sent templates the
+    /// coordinator's client reads: the first at once, a clean one when the
+    /// tip moves.
+    func testTemplateSubscriptionStreamsToTheCoordinatorClient() async throws {
+        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-http-subscribe-\(UUID().uuidString)"
+        )
+        let cookie = storageDirectory.appendingPathComponent("cookie")
+        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
+        let storage = try await NodeStorage.open(configuration: NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: storageDirectory,
+            privateKeyHex: String(repeating: "01", count: 32)
+        ))
+        try Data("__cookie__:test-cookie".utf8).write(to: cookie)
+        let service = try await startRuntime(storage)
+        let app = makeApplication(service: service, host: "127.0.0.1", port: 0)
+
+        try await app.test(.live) { client in
+            let node = HTTPMiningCoordinatorNodeClient(
+                apiBaseURL: URL(string: "http://localhost:\(try XCTUnwrap(client.port))")!,
+                cookieFile: cookie
+            )
+            func parent(_ push: MiningCoordinatorPush) -> String? {
+                Data(hex: push.work.blockHex).flatMap { Block(data: $0) }?.parent?.rawCID
+            }
+            let reader = Task { () -> (first: MiningCoordinatorPush, moved: MiningCoordinatorPush)? in
+                var pushes = try XCTUnwrap(node.templates()).makeAsyncIterator()
+                guard let first = try await pushes.next() else { return nil }
+                let mined = try await service.mineBlock()
+                let cid = try BlockHeader(node: mined).rawCID
+                while let next = try await pushes.next() {
+                    if parent(next) == cid { return (first, next) }
+                }
+                return nil
+            }
+            let watchdog = Task {
+                try await Task.sleep(for: .seconds(60))
+                reader.cancel()
+            }
+            let pushed = try await reader.value
+            watchdog.cancel()
+            let result = try XCTUnwrap(pushed, "no push on the new tip")
+            XCTAssertTrue(result.first.clean)
+            XCTAssertTrue(result.moved.clean, "the tip moved")
+            // The stream ends with the runtime, so the server can shut down.
+            await service.stop()
         }
     }
 

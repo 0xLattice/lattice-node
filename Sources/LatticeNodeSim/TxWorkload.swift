@@ -493,6 +493,9 @@ public struct TxWorkload {
             )))
         case .templateRefused(let replyID, _), .workRefused(let replyID, _):
             try answer(replyID)
+        case .templatePushed, .subscriptionRefused:
+            // The workload never subscribes.
+            break
         case .mined(let replyID, let block):
             try answer(replyID)
             try await mined(block)
@@ -744,6 +747,12 @@ public struct TxWorkload {
             "policy refused \(tipCID) \(cids)"
         case .submitWork(let replyID, let workID, let nonce):
             "work \(replyID) \(workID) \(nonce)"
+        case .templateContextChanged:
+            "context"
+        case .templateSubscribed(let id, _):
+            "subscribe \(id)"
+        case .templateUnsubscribed(let id):
+            "unsubscribe \(id)"
         }
     }
 }

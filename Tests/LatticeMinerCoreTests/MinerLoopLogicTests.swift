@@ -51,7 +51,6 @@ final class MinerLoopLogicTests: XCTestCase {
         XCTAssertEqual(decoded.searchTarget, UInt256(255).toHexString())
         XCTAssertEqual(decoded.targets, [UInt256(255).toHexString()])
         XCTAssertEqual(decoded.chainPath, ["Nexus"])
-        XCTAssertEqual(decoded.expiresInMilliseconds, 30_000)
         XCTAssertEqual(decoded.staleToken, "digest")
         XCTAssertEqual(Data(hex: decoded.blockHex), block.toData())
     }

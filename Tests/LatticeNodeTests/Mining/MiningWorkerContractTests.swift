@@ -58,12 +58,10 @@ final class MiningWorkerContractTests: XCTestCase {
                 block: genesis.block,
                 searchTarget: .max,
                 chainPath: ["Nexus"],
-                expiresAt: ContinuousClock.now + .seconds(30),
                 childCandidates: [],
                 searchWitness: nil,
                 thresholds: [.max]
             ),
-            maximumLifetimeMilliseconds: 30_000,
             templateDigest: "digest"
         )
         let decoded = try JSONDecoder().decode(

@@ -437,6 +437,44 @@ final class NodeRuntimeTests: XCTestCase {
         }
     }
 
+    /// A subscriber gets the template at once and a clean one when the tip
+    /// moves, with no request of its own; the stream ends when the runtime
+    /// stops.
+    func testTemplateSubscriptionPushesOnTipMoves() async throws {
+        let node = try host(keyByte: 0x35)
+        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let runtime = try await NodeRuntime.start(
+            storage: storage, configuration: node.configuration, overlay: node.overlay
+        )
+        let genesis = try XCTUnwrap(runtime.published.value?.actOnTip)
+        var pushes = try runtime.templateSubscription(MiningTemplateRequest()).makeAsyncIterator()
+
+        let firstPushed = try await pushes.next()
+
+        let first = try XCTUnwrap(firstPushed)
+        XCTAssertEqual(first.block.parent?.rawCID, genesis)
+        XCTAssertEqual(first.clean, true)
+        let mined = try await runtime.mine(first)
+        let cid = try BlockHeader(node: mined).rawCID
+
+        let nextPushed = try await pushes.next()
+
+        var next = try XCTUnwrap(nextPushed)
+        while next.block.parent?.rawCID != cid {
+            let again = try await pushes.next()
+            next = try XCTUnwrap(again)
+        }
+        XCTAssertEqual(next.clean, true, "the tip moved: earlier work is gone")
+
+        await runtime.stop()
+        do {
+            while try await pushes.next() != nil {}
+            XCTFail("the stream outlived the runtime")
+        } catch let error as NodeRuntimeError {
+            XCTAssertEqual(error, .stopped)
+        }
+    }
+
     /// The pool admits nothing a block cannot carry: its largest transaction
     /// is mined, and the transaction behind it after.
     func testTheLargestTransactionThePoolAdmitsIsMined() async throws {

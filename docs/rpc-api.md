@@ -455,12 +455,38 @@ The response contains:
   level, constrained by the request's minimum-work plan;
 - `targets` — thresholds useful to the worker;
 - `chainPath` — `['Nexus']`;
-- `expiresInMilliseconds` — remaining lifetime;
+- `expiresInMilliseconds` — always 30000, kept for clients that require the
+  field; it is not a validity bound;
 - `templateDigest` — fingerprint of the complete hosted tree's template
   inputs.
 
 A change to what the next block at any hosted level would carry, or a new
 candidate, changes the digest, even if the Nexus tip did not move.
+
+Issued work never expires on a clock: proof-of-work arrivals are memoryless,
+so the time spent on a template says nothing about when the next tip comes.
+Every template issued on the current Nexus tip stays valid; the tip moving
+retires all of them (Stratum's `clean_jobs`). A pool or child change never
+retires earlier work.
+
+### `POST /mining/templates/subscribe`
+
+The same request body. The response is a `text/event-stream` that sends the
+template at once and then each new one the node builds for the plan as the
+Nexus tip, its pool, or any hosted level moves:
+
+```
+event: template
+data: {"workID": "...", ..., "templateDigest": "...", "clean": true}
+```
+
+`data` is the `POST /mining/templates` response plus `clean`: `true` when the
+template builds on a different tip than the previous one sent (earlier work is
+gone, and a subscriber's first template is always clean), `false` when only
+the pool or a hosted level moved (earlier work stays valid). A comment line
+`: keepalive` every 15 seconds only shows the connection is alive; a quiet
+chain sends nothing else. A refused subscription (too many subscribers) ends
+with `event: end`.
 
 ## Submit mining work
 

@@ -125,6 +125,7 @@ The API has one unversioned route set. There are no `/v1` aliases.
 | `/status` | GET | Operator status for the hosted tree |
 | `/transactions` | POST | Submit a signed transaction |
 | `/mining/templates` | POST | Build merged-mining work |
+| `/mining/templates/subscribe` | POST | Stream merged-mining work as it changes |
 | `/mining/work` | POST | Submit a nonce for issued work |
 | `/pins` | GET, POST, `DELETE /pins/:cid` | Volumes the operator keeps |
 | `/fetch/:cid` | GET | Read a Volume from peers, not stored |

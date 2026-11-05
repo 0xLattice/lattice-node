@@ -122,6 +122,8 @@ public struct TemplateJob: Sendable {
     public let tipCID: String
     public let tipEpoch: UInt64
     public let poolVersion: UInt64
+    /// `MiningState.contextVersion` when the job was issued.
+    public let contextVersion: UInt64
     public let transactions: [Transaction]
     public let request: TemplateRequest
 }
@@ -182,6 +184,14 @@ public enum MiningEvent: Sendable {
     /// them. Applied only while `tipCID` is still the tip.
     case policyRefused(tipCID: String, cids: [String])
     case submitWork(replyID: UInt64, workID: String, nonce: UInt64)
+    /// A template built now would differ from one built before: this
+    /// level's tip or pool, or a hosted descendant's, moved. The shell sends
+    /// it when the template digest changes.
+    case templateContextChanged
+    /// Push `request`'s template to `subscriberID` now and on every context
+    /// change that alters it.
+    case templateSubscribed(subscriberID: UInt64, TemplateRequest)
+    case templateUnsubscribed(subscriberID: UInt64)
 }
 
 /// The pool's durable side of one step. The shell applies it before any later
@@ -202,6 +212,13 @@ public enum MiningEffect: Sendable {
     case announceTransaction(String)
     case templateIssued(replyID: UInt64, WorkTemplate)
     case templateRefused(replyID: UInt64, TemplateError)
+    /// A subscribed plan's new template, for these subscribers. `clean`:
+    /// it builds on a different tip than the last one pushed to them, so
+    /// their earlier work is gone (Stratum's `clean_jobs`); otherwise only
+    /// the pool or a hosted descendant moved and earlier work stays valid.
+    case templatePushed(subscribers: [UInt64], WorkTemplate, clean: Bool)
+    /// The subscription is refused (`.busy`); nothing more is pushed to it.
+    case subscriptionRefused(subscriberID: UInt64, TemplateError)
     /// A grind cleared the search target: insert the block (and the carried
     /// blocks it secures) as one subtree, then answer `replyID`.
     case mined(replyID: UInt64, Block)
@@ -237,8 +254,9 @@ public struct MiningConfig: Sendable {
     public var maxReissues: Int
     /// Template requests waiting on a build.
     public var maxWaitingTemplateRequests: Int
+    /// Template subscribers, over every plan.
+    public var maxTemplateSubscribers: Int
     public var mempool: MempoolLimits
-    public var templateLifetime: Int64
     public var templateCapacity: Int
 
     public init(
@@ -248,9 +266,9 @@ public struct MiningConfig: Sendable {
         maxPendingSubmitted: Int = 256,
         maxReissues: Int = 3,
         maxWaitingTemplateRequests: Int = 64,
+        maxTemplateSubscribers: Int = 64,
         mempool: MempoolLimits = MempoolLimits(),
-        templateLifetime: Int64 = 30_000,
-        templateCapacity: Int = 16
+        templateCapacity: Int = 512
     ) {
         self.maxPendingPeerAdmissions = maxPendingPeerAdmissions
         self.maxPendingPerPeer = maxPendingPerPeer
@@ -258,8 +276,8 @@ public struct MiningConfig: Sendable {
         self.maxPendingSubmitted = maxPendingSubmitted
         self.maxReissues = maxReissues
         self.maxWaitingTemplateRequests = maxWaitingTemplateRequests
+        self.maxTemplateSubscribers = maxTemplateSubscribers
         self.mempool = mempool
-        self.templateLifetime = templateLifetime
         self.templateCapacity = templateCapacity
     }
 }
@@ -278,6 +296,9 @@ public struct MiningState: Sendable {
     public private(set) var tipCID: String
     /// Moves on every tip move: what makes a job stale (see `PreflightJob`).
     public private(set) var tipEpoch: UInt64 = 0
+    /// Moves on every `templateContextChanged`: a running build issued
+    /// before it no longer answers a new request.
+    public private(set) var contextVersion: UInt64 = 0
     /// The spec of the tip's genesis root; nil while the level executed no
     /// root, when the pool admits nothing.
     public internal(set) var spec: ChainSpec?
@@ -321,12 +342,26 @@ public struct MiningState: Sendable {
     private var builds: [UInt64: (job: TemplateJob, replies: [Waiting])] = [:]
     private var nextJobID: UInt64 = 1
 
+    /// One subscribed plan: who it pushes to, what it pushed last, and
+    /// whether the context moved while its build ran.
+    private struct Subscription {
+        let request: TemplateRequest
+        var subscribers: [UInt64]
+        /// Subscribers no template has reached yet: their first is clean.
+        var waiting: Set<UInt64> = []
+        var pushed: (template: WorkTemplate, contextVersion: UInt64)?
+        var rebuild = false
+    }
+
+    private var subscriptions: [Subscription] = []
+    public var templateSubscribers: Int { subscriptions.reduce(0) { $0 + $1.subscribers.count } }
+
     public init(tipCID: String, spec: ChainSpec?, config: MiningConfig = MiningConfig()) {
         self.tipCID = tipCID
         self.spec = spec
         self.config = config
         self.mempool = Mempool(limits: config.mempool)
-        self.templates = WorkTemplateBook(lifetime: config.templateLifetime, capacity: config.templateCapacity)
+        self.templates = WorkTemplateBook(capacity: config.templateCapacity)
     }
 
     public var pendingAdmissions: Int { admissions.count }
@@ -360,7 +395,7 @@ public struct MiningState: Sendable {
             if refusedOn == tipCID { departed(mempool.remove(cids), &turn) }
         case .submitWork(let replyID, let workID, let nonce):
             do {
-                let block = try templates.submission(workID: workID, nonce: nonce, now: now)
+                let block = try templates.submission(workID: workID, nonce: nonce)
                 // A grind that clears only child targets leaves the work open,
                 // so the miner keeps searching it toward the root's target.
                 if ChainTree.rootWork(of: block) != nil {
@@ -370,6 +405,17 @@ public struct MiningState: Sendable {
             } catch {
                 turn.replies.append(.workRefused(replyID: replyID, error as? TemplateError ?? .unknownWork))
             }
+        case .templateContextChanged:
+            contextVersion &+= 1
+            for index in subscriptions.indices { refresh(subscription: index, &turn) }
+        case .templateSubscribed(let subscriberID, let request):
+            subscribe(subscriberID, request, &turn)
+        case .templateUnsubscribed(let subscriberID):
+            for index in subscriptions.indices {
+                subscriptions[index].subscribers.removeAll { $0 == subscriberID }
+                subscriptions[index].waiting.remove(subscriberID)
+            }
+            subscriptions.removeAll { $0.subscribers.isEmpty }
         }
         return turn.effects
     }
@@ -671,6 +717,9 @@ public struct MiningState: Sendable {
     private mutating func tipMoved(_ move: TipMove, _ turn: inout Turn) {
         tipCID = move.tipCID
         tipEpoch &+= 1
+        // Work on the old tip is gone (Stratum's `clean_jobs`); a pool or
+        // descendant change never flushes it.
+        templates.invalidateAll()
         confirm(move.confirmed, &turn)
         // A local submit that has waited through too many moves is answered
         // with a retriable refusal; the admission goes on for any other origin.
@@ -752,10 +801,11 @@ public struct MiningState: Sendable {
     // MARK: - Templates
 
     private mutating func requestTemplate(_ request: TemplateRequest, waiting: [Waiting], _ turn: inout Turn) {
-        // A build of this plan on this tip from this pool is already running.
+        // A build of this plan on this tip from this pool, with the hosted
+        // levels as they are, is already running.
         if let (id, _) = builds.first(where: {
             $0.value.job.tipEpoch == tipEpoch && $0.value.job.poolVersion == mempool.version
-                && $0.value.job.request == request
+                && $0.value.job.contextVersion == contextVersion && $0.value.job.request == request
         }) {
             builds[id]?.replies += waiting
             return
@@ -769,6 +819,7 @@ public struct MiningState: Sendable {
             tipCID: tipCID,
             tipEpoch: tipEpoch,
             poolVersion: mempool.version,
+            contextVersion: contextVersion,
             transactions: nextBlock,
             request: request
         )
@@ -780,10 +831,12 @@ public struct MiningState: Sendable {
     private mutating func built(_ job: TemplateJob, _ build: TemplateBuild?, now: Int64, _ turn: inout Turn) {
         // A build for an old tip epoch is dropped: the move issued it again.
         guard job.tipEpoch == tipEpoch, let waiting = builds.removeValue(forKey: job.id) else { return }
+        let subscription = subscriptions.firstIndex { $0.request == job.request }
         guard let build else {
             for entry in waiting.replies {
                 turn.replies.append(.templateRefused(replyID: entry.replyID, .buildFailed))
             }
+            if let subscription { rebuildIfMoved(subscription, &turn) }
             return
         }
         let issued = templates.issue(WorkTemplate(
@@ -793,12 +846,75 @@ public struct MiningState: Sendable {
             targets: build.targets,
             tipCID: job.tipCID,
             poolVersion: job.poolVersion,
-            expiresAt: now + templates.lifetime,
             digest: build.digest,
             chains: build.chains
-        ), now: now)
+        ))
         for entry in waiting.replies {
             turn.replies.append(.templateIssued(replyID: entry.replyID, issued))
         }
+        guard let subscription else { return }
+        // Pushed even when the context moved during the build: it is valid
+        // work on the current tip, and the rebuild follows.
+        let last = subscriptions[subscription].pushed?.template
+        let first = subscriptions[subscription].waiting
+        if !first.isEmpty {
+            turn.replies.append(.templatePushed(subscribers: first.sorted(), issued, clean: true))
+            subscriptions[subscription].waiting = []
+        }
+        let others = subscriptions[subscription].subscribers.filter { !first.contains($0) }
+        if !others.isEmpty, last?.digest != issued.digest || last?.workID != issued.workID {
+            turn.replies.append(.templatePushed(subscribers: others, issued, clean: last?.tipCID != issued.tipCID))
+        }
+        subscriptions[subscription].pushed = (issued, job.contextVersion)
+        rebuildIfMoved(subscription, &turn)
+    }
+
+    // MARK: - Subscriptions
+
+    private mutating func subscribe(_ subscriberID: UInt64, _ request: TemplateRequest, _ turn: inout Turn) {
+        guard templateSubscribers < config.maxTemplateSubscribers else {
+            turn.replies.append(.subscriptionRefused(subscriberID: subscriberID, .busy))
+            return
+        }
+        let index: Int
+        if let existing = subscriptions.firstIndex(where: { $0.request == request }) {
+            index = existing
+            subscriptions[index].subscribers.append(subscriberID)
+        } else {
+            subscriptions.append(Subscription(request: request, subscribers: [subscriberID]))
+            index = subscriptions.count - 1
+        }
+        // The plan's last template, while nothing has moved since its build.
+        if let pushed = subscriptions[index].pushed, pushed.contextVersion == contextVersion,
+           pushed.template.tipCID == tipCID {
+            turn.replies.append(.templatePushed(subscribers: [subscriberID], pushed.template, clean: true))
+        } else {
+            subscriptions[index].waiting.insert(subscriberID)
+            refresh(subscription: index, &turn)
+        }
+    }
+
+    /// Build the plan on the current context, unless that build is already
+    /// running. A build on an older context that is still running is
+    /// followed by exactly one more when it ends, however many changes
+    /// arrive meanwhile.
+    private mutating func refresh(subscription index: Int, _ turn: inout Turn) {
+        let request = subscriptions[index].request
+        let running = builds.values.filter { $0.job.request == request && $0.job.tipEpoch == tipEpoch }
+        if running.contains(where: {
+            $0.job.contextVersion == contextVersion && $0.job.poolVersion == mempool.version
+        }) { return }
+        if !running.isEmpty {
+            subscriptions[index].rebuild = true
+            return
+        }
+        subscriptions[index].rebuild = false
+        requestTemplate(request, waiting: [], &turn)
+    }
+
+    private mutating func rebuildIfMoved(_ index: Int, _ turn: inout Turn) {
+        guard subscriptions[index].rebuild else { return }
+        subscriptions[index].rebuild = false
+        refresh(subscription: index, &turn)
     }
 }

@@ -91,16 +91,10 @@ public struct MiningWorkerProcessClient: Sendable {
             try? FileManager.default.removeItem(at: stderrURL)
         }
 
-        // The worker's own bound, derived from the work the node issued:
-        // past template expiry no nonce it finds can be submitted. Routed
-        // through the shared bounded wait so a lost termination callback
-        // cannot park the coordinator (#62).
-        let handle = try runBounded(
-            process,
-            deadline: work.expiresInMilliseconds.map {
-                .milliseconds(Int64(clamping: $0))
-            }
-        )
+        // Work stays valid until the tip moves, which cancels this search;
+        // no clock bounds it. Routed through the shared bounded wait so a
+        // lost termination callback cannot park the coordinator (#62).
+        let handle = try runBounded(process, deadline: nil)
         let waitOutcome = await handle.wait()
         if waitOutcome == .deadlineExceeded {
             // handle.isTeardownDegraded is NOT consumed here, and that is a
@@ -136,11 +130,7 @@ public struct MiningWorkerProcessClient: Sendable {
         // holds the write end -- which is exactly what must stay bounded.
         let read = readToEndBounded(
             fileDescriptor: stdout.fileHandleForReading.fileDescriptor,
-            deadline: ContinuousClock.now + (
-                work.expiresInMilliseconds.map {
-                    Duration.milliseconds(Int64(clamping: $0))
-                } ?? .seconds(5)
-            )
+            deadline: ContinuousClock.now + .seconds(5)
         )
         try? stdout.fileHandleForReading.close()
         // A truncated read is NAMED, never silently decoded as garbage.

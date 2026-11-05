@@ -469,6 +469,9 @@ private func parseEndpoint(_ value: String) throws -> (key: String, host: String
 protocol OperatorWrites: Sendable {
     func submitTransaction(_ request: SubmitTransactionRequest) async throws -> SubmitTransactionResponse
     func miningTemplate(_ request: MiningTemplateRequest) async throws -> MiningTemplateResponse
+    func templateSubscription(
+        _ request: MiningTemplateRequest
+    ) throws -> AsyncThrowingStream<MiningTemplateResponse, any Error>
     func submitWork(_ request: SubmitWorkRequest) async throws -> SubmitWorkResponse
     func submitChildBlock(_ request: SubmitChildBlockRequest) async throws -> SubmitChildBlockResponse
     func buildChildBlock(_ request: BuildChildBlockRequest) async throws -> BuildChildBlockResponse
@@ -1188,6 +1191,29 @@ private func addOperatorWriteRoutes(
             try await service.miningTemplate(input)
         }
     }
+    // Server-sent events: the template now, then each new one as the tip,
+    // the pool or a hosted descendant moves (`event: template`, `data:` the
+    // template JSON with `clean`). A comment line every `keepalive` only
+    // tells the client the connection lives; a quiet chain sends nothing
+    // else, since nothing about its work changed.
+    router.post("mining/templates/subscribe") { request, context in
+        let input: MiningTemplateRequest = try await decode(request, context: context)
+        let pushes: AsyncThrowingStream<MiningTemplateResponse, any Error>
+        do {
+            pushes = try service.templateSubscription(input)
+        } catch let error as NodeAPIError {
+            throw HTTPError(.badRequest, message: reason(error))
+        } catch let error as ValidationError {
+            throw HTTPError(.badRequest, message: error.message)
+        }
+        return Response(
+            status: .ok,
+            headers: [.contentType: "text/event-stream", .cacheControl: "no-store"],
+            body: ResponseBody { writer in
+                try await templateEvents(pushes, to: &writer)
+            }
+        )
+    }
     router.post("mining/work") { request, context in
         let input: SubmitWorkRequest = try await decode(request, context: context)
         return try await serviceCall(request: request, context: context) {
@@ -1400,6 +1426,55 @@ private func serviceCall<Value: Encodable, Context: RequestContext>(
         throw HTTPError(.serviceUnavailable, message: reason(error))
     } catch let error as ServingLedgerError {
         throw HTTPError(.badRequest, message: reason(error))
+    }
+}
+
+/// Write each pushed template as a server-sent event, with a comment line
+/// whenever `keepalive` passes without one, until the subscription ends.
+private func templateEvents(
+    _ pushes: AsyncThrowingStream<MiningTemplateResponse, any Error>,
+    to writer: inout any ResponseBodyWriter,
+    keepalive: Duration = .seconds(15)
+) async throws {
+    let encoder = JSONEncoder()
+    enum Next: Sendable { case push(MiningTemplateResponse), keepalive, ended(String?) }
+    let (events, sink) = AsyncStream<Next>.makeStream()
+    let reader = Task {
+        do {
+            for try await push in pushes { sink.yield(.push(push)) }
+            sink.yield(.ended(nil))
+        } catch {
+            sink.yield(.ended(reason(error)))
+        }
+        sink.finish()
+    }
+    let ticker = Task {
+        while !Task.isCancelled {
+            try? await Task.sleep(for: keepalive)
+            sink.yield(.keepalive)
+        }
+    }
+    defer {
+        reader.cancel()
+        ticker.cancel()
+    }
+    for await next in events {
+        switch next {
+        case .push(let template):
+            let data = try encoder.encode(template)
+            var buffer = ByteBuffer(string: "event: template\ndata: ")
+            buffer.writeBytes(data)
+            buffer.writeString("\n\n")
+            try await writer.write(buffer)
+        case .keepalive:
+            try await writer.write(ByteBuffer(string: ": keepalive\n\n"))
+        case .ended(let error):
+            if let error {
+                try await writer.write(ByteBuffer(string: "event: end\ndata: \(error)\n\n"))
+            }
+            try await writer.finish(nil)
+            return
+        }
     }
 }
 

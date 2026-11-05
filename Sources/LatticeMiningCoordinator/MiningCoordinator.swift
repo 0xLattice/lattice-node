@@ -19,8 +19,6 @@ public struct MiningCoordinatorWork: Sendable, Equatable {
     /// only some of them is submitted and the search continues toward the
     /// rest over the same nonce range; one entry means the first hit ends it.
     public let targets: [UInt256]
-    /// Template lifetime left when the work was fetched; nil never expires.
-    public let expiresInMilliseconds: UInt64?
     public let staleToken: String
 
     public init(workId: String, blockHex: String, targetHex: String, staleToken: String? = nil) {
@@ -30,7 +28,6 @@ public struct MiningCoordinatorWork: Sendable, Equatable {
             prefixHex: TemplateResponse.derivePrefixHex(blockHex: blockHex),
             targetHex: targetHex,
             targets: MinerLoopLogic.parseTarget(targetHex).map { [$0] } ?? [],
-            expiresInMilliseconds: nil,
             staleToken: staleToken
         )
     }
@@ -41,7 +38,6 @@ public struct MiningCoordinatorWork: Sendable, Equatable {
         prefixHex: String,
         targetHex: String,
         targets: [UInt256],
-        expiresInMilliseconds: UInt64?,
         staleToken: String?
     ) {
         self.workId = workId
@@ -49,7 +45,6 @@ public struct MiningCoordinatorWork: Sendable, Equatable {
         self.prefixHex = prefixHex
         self.targetHex = targetHex
         self.targets = targets
-        self.expiresInMilliseconds = expiresInMilliseconds
         self.staleToken = staleToken ?? workId
     }
 
@@ -70,7 +65,6 @@ public struct MiningCoordinatorWork: Sendable, Equatable {
             targets: Set(targets + [searchTarget])
                 .filter { $0 <= searchTarget }
                 .sorted(by: >),
-            expiresInMilliseconds: template.expiresInMilliseconds,
             staleToken: template.staleToken
         )
     }
@@ -83,7 +77,6 @@ public struct MiningCoordinatorWork: Sendable, Equatable {
             prefixHex: prefixHex,
             targetHex: target.toHexString(),
             targets: targets,
-            expiresInMilliseconds: expiresInMilliseconds,
             staleToken: staleToken
         )
     }
@@ -121,17 +114,41 @@ public enum MiningCoordinatorNodeClientError: Error, Sendable, Equatable {
     case nonHTTPResponse
     case unauthorized(statusCode: Int)
     case invalidSubmissionResponse(statusCode: Int)
+    /// The node has no template subscription route.
+    case subscriptionUnavailable
 }
 
 public protocol MiningCoordinatorNodeClient: Sendable {
     func fetchWork() async throws -> MiningCoordinatorWork?
     func fetchStaleToken() async throws -> String?
     func submit(workId: String, nonce: UInt64) async throws -> MiningSolutionSubmission
+    /// The node's templates as it builds them, the first at once; nil when
+    /// this client cannot subscribe, and the coordinator fetches and probes
+    /// instead. The stream ends with
+    /// `MiningCoordinatorNodeClientError.subscriptionUnavailable` against a
+    /// node without the subscription route.
+    func templates() -> AsyncThrowingStream<MiningCoordinatorPush, any Error>?
 }
 
 public extension MiningCoordinatorNodeClient {
     func fetchStaleToken() async throws -> String? {
         try await fetchWork()?.staleToken
+    }
+
+    func templates() -> AsyncThrowingStream<MiningCoordinatorPush, any Error>? { nil }
+}
+
+/// One template the node pushed.
+public struct MiningCoordinatorPush: Sendable, Equatable {
+    public let work: MiningCoordinatorWork
+    /// The tip moved since the previous push, so work on earlier templates
+    /// is gone (Stratum's `clean_jobs`). False when only the pool or a hosted
+    /// descendant moved: earlier work stays valid until the next clean push.
+    public let clean: Bool
+
+    public init(work: MiningCoordinatorWork, clean: Bool) {
+        self.work = work
+        self.clean = clean
     }
 }
 
@@ -215,6 +232,19 @@ public actor MiningCoordinator {
     private var loopTask: Task<Void, Never>?
     private var metricsState = MiningCoordinatorMetrics()
 
+    // The node's pushed templates (`MiningCoordinatorNodeClient.templates`):
+    // the latest, how many have come, the count at the last clean one, and
+    // whoever waits for the next. Without a subscription (`feedUnavailable`)
+    // the coordinator fetches work and probes the status digest.
+    private var feed: Task<Void, Never>?
+    private var latestPush: MiningCoordinatorWork?
+    private var pushCount: UInt64 = 0
+    private var cleanPushCount: UInt64 = 0
+    private var feedUnavailable = false
+    private var feedGeneration: UInt64 = 0
+    private var feedWaiters: [UInt64: CheckedContinuation<Void, Never>] = [:]
+    private var nextFeedWaiter: UInt64 = 0
+
     public init(
         nodeClient: any MiningCoordinatorNodeClient,
         workers: [MiningCoordinatorWorker],
@@ -251,6 +281,7 @@ public actor MiningCoordinator {
     }
 
     public func stop() async {
+        resetFeed()
         guard let task = loopTask else { return }
         task.cancel()
         await task.value
@@ -279,19 +310,29 @@ public actor MiningCoordinator {
     }
 
     public func runBatch() async -> MiningCoordinatorCycleResult {
+        startFeed()
+        // Pushed work: the latest template. A push marked clean during the
+        // batch ends it; one that is not waits for the next batch, since the
+        // work in hand stays valid. Until the first push the batch fetches,
+        // so a node that answers but cannot yet build backs off as before.
+        let pushedSince: UInt64? = feedUnavailable ? nil : pushCount
         let work: MiningCoordinatorWork
-        do {
-            guard let fetched = try await nodeClient.fetchWork() else {
+        if !feedUnavailable, let latestPush {
+            work = latestPush
+        } else {
+            do {
+                guard let fetched = try await nodeClient.fetchWork() else {
+                    metricsState.retryBackoffCount += 1
+                    return .backoff
+                }
+                work = fetched
+            } catch {
                 metricsState.retryBackoffCount += 1
+                if Self.isFatalNodeClientError(error) {
+                    return .nodeFailed(error: String(describing: error))
+                }
                 return .backoff
             }
-            work = fetched
-        } catch {
-            metricsState.retryBackoffCount += 1
-            if Self.isFatalNodeClientError(error) {
-                return .nodeFailed(error: String(describing: error))
-            }
-            return .backoff
         }
 
         metricsState.currentWorkId = work.workId
@@ -313,7 +354,6 @@ public actor MiningCoordinator {
             case stale
             /// A background task ended with the batch; nothing to act on.
             case ended
-            case expired
             case searched
             case workerFailed(workerId: String, error: String)
             case solution(MiningWorkerResult, worker: Int, range: NonceSearchRange)
@@ -346,7 +386,11 @@ public actor MiningCoordinator {
                 search(index, work, range)
             }
 
-            if staleProbeEnabled {
+            if let pushedSince {
+                group.addTask { [self] in
+                    await self.cleanPush(after: pushedSince) ? .stale : .ended
+                }
+            } else if staleProbeEnabled {
                 probing = true
                 group.addTask { [nodeClient] in
                     // Best-effort freshness probe only; work submission remains the
@@ -376,17 +420,6 @@ public actor MiningCoordinator {
                 }
             }
 
-            if let lifetime = work.expiresInMilliseconds {
-                // The node refuses nonces for expired work: searching past the
-                // lifetime spends effort no submission can use.
-                let (nanoseconds, overflow) = lifetime.multipliedReportingOverflow(by: 1_000_000)
-                group.addTask {
-                    // Cancelled only once the batch is over, when no one reads it.
-                    try? await Task.sleep(nanoseconds: overflow ? .max : nanoseconds)
-                    return .expired
-                }
-            }
-
             // The easiest target no submitted hit has cleared yet.
             var openTarget = work.targets.first
             var lastChildOnly: MiningCoordinatorCycleResult?
@@ -401,11 +434,6 @@ public actor MiningCoordinator {
                     searching -= 1
                 case .stale:
                     group.cancelAll()
-                    metricsState.staleAbortCount += 1
-                    return .stale(workId: work.workId)
-                case .expired:
-                    group.cancelAll()
-                    if let lastChildOnly { return lastChildOnly }
                     metricsState.staleAbortCount += 1
                     return .stale(workId: work.workId)
                 case .workerFailed(let workerId, let error):
@@ -424,12 +452,12 @@ public actor MiningCoordinator {
                         alreadyCleared = hash > openTarget && hash <= searchTarget
                     }
                     if !alreadyCleared {
-                        if staleProbeEnabled, await isStale(work) {
+                        if pushedSince != nil || staleProbeEnabled, await isStale(work, pushedSince: pushedSince) {
                             group.cancelAll()
                             metricsState.staleAbortCount += 1
                             return .stale(workId: work.workId)
                         }
-                        let outcome = await submitWithRetry(work: work, result: result)
+                        let outcome = await submitWithRetry(work: work, result: result, pushedSince: pushedSince)
                         // Only a childOnly share leaves the work open, and only a known
                         // hash names the targets it left uncleared.
                         guard case .submitted(_, _, let submission) = outcome,
@@ -473,7 +501,8 @@ public actor MiningCoordinator {
     /// retried; a fatal auth failure (401/403) abandons immediately.
     private func submitWithRetry(
         work: MiningCoordinatorWork,
-        result: MiningWorkerResult
+        result: MiningWorkerResult,
+        pushedSince: UInt64?
     ) async -> MiningCoordinatorCycleResult {
         var attempt = 0
         while true {
@@ -523,7 +552,7 @@ public actor MiningCoordinator {
                     )
                 }
                 // Abandon the moment the solution is superseded (tip moved on).
-                if await isStale(work) {
+                if await isStale(work, pushedSince: pushedSince) {
                     metricsState.staleAbortCount += 1
                     return .stale(workId: work.workId)
                 }
@@ -531,9 +560,111 @@ public actor MiningCoordinator {
         }
     }
 
-    private func isStale(_ work: MiningCoordinatorWork) async -> Bool {
+    /// With pushed work, whether a clean push came after `pushedSince`;
+    /// otherwise what the status digest says.
+    private func isStale(_ work: MiningCoordinatorWork, pushedSince: UInt64?) async -> Bool {
+        if let pushedSince { return cleanPushCount > pushedSince }
         guard let latest = try? await nodeClient.fetchStaleToken() else { return false }
         return latest != work.staleToken
+    }
+
+    // MARK: - Pushed templates
+
+    private func startFeed() {
+        guard feed == nil, !feedUnavailable else { return }
+        guard let templates = nodeClient.templates() else {
+            feedUnavailable = true
+            return
+        }
+        let generation = feedGeneration
+        feed = Task { [weak self] in
+            do {
+                for try await push in templates {
+                    await self?.received(push, generation: generation)
+                }
+                await self?.feedEnded(nil, generation: generation)
+            } catch {
+                await self?.feedEnded(error, generation: generation)
+            }
+        }
+    }
+
+    /// Subscribe if not yet, then wait for a pushed template or the feed's
+    /// end. For tests, which need the first batch to start from a push.
+    func awaitPush() async {
+        startFeed()
+        while latestPush == nil, feed != nil, !feedUnavailable, !Task.isCancelled {
+            await nextFeedEvent()
+        }
+    }
+
+    /// Drop the subscription and what it pushed; the next batch subscribes
+    /// again.
+    private func resetFeed() {
+        feed?.cancel()
+        feed = nil
+        latestPush = nil
+        feedGeneration += 1
+        wakeFeedWaiters()
+    }
+
+    private func received(_ push: MiningCoordinatorPush, generation: UInt64) {
+        guard generation == feedGeneration else { return }
+        pushCount += 1
+        if push.clean { cleanPushCount = pushCount }
+        latestPush = push.work
+        wakeFeedWaiters()
+    }
+
+    private func feedEnded(_ error: (any Error)?, generation: UInt64) {
+        guard generation == feedGeneration else { return }
+        if let error, Self.isFatalNodeClientError(error) {
+            // Refused credentials, perhaps a cookie the node is rewriting:
+            // the next batch fetches, reports it, and subscribes again.
+            resetFeed()
+        } else {
+            // A node without the route, a refused subscription, or a stream
+            // that ended: fetch and probe from here on.
+            feedUnavailable = true
+            wakeFeedWaiters()
+        }
+    }
+
+    private func wakeFeedWaiters() {
+        let waiters = feedWaiters
+        feedWaiters.removeAll()
+        for waiter in waiters.values { waiter.resume() }
+    }
+
+    /// Wait for the feed's next push or end, or for cancellation.
+    private func nextFeedEvent() async {
+        let id = nextFeedWaiter
+        nextFeedWaiter += 1
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (waiter: CheckedContinuation<Void, Never>) in
+                if Task.isCancelled {
+                    waiter.resume()
+                } else {
+                    feedWaiters[id] = waiter
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelFeedWaiter(id) }
+        }
+    }
+
+    private func cancelFeedWaiter(_ id: UInt64) {
+        feedWaiters.removeValue(forKey: id)?.resume()
+    }
+
+    /// True once a clean push arrives after `count` pushes; false when the
+    /// feed ends or the wait is cancelled first.
+    private func cleanPush(after count: UInt64) async -> Bool {
+        while cleanPushCount <= count {
+            guard feed != nil, !feedUnavailable, !Task.isCancelled else { return false }
+            await nextFeedEvent()
+        }
+        return true
     }
 
     private static func isFatalNodeClientError(_ error: Error) -> Bool {
@@ -541,7 +672,7 @@ public actor MiningCoordinator {
         switch error {
         case .unauthorized:
             return true
-        case .nonHTTPResponse, .invalidSubmissionResponse:
+        case .nonHTTPResponse, .invalidSubmissionResponse, .subscriptionUnavailable:
             return false
         }
     }
@@ -622,8 +753,8 @@ public func rpcCookieAuthorization(file: URL) -> String? {
 
 public final class HTTPMiningCoordinatorNodeClient: MiningCoordinatorNodeClient {
     private let apiBaseURL: URL
-    private let templateRequestBody: Data
-    private let session: URLSession
+    let templateRequestBody: Data
+    let session: URLSession
     private let cookieFile: URL?
 
     public init(
@@ -638,7 +769,7 @@ public final class HTTPMiningCoordinatorNodeClient: MiningCoordinatorNodeClient 
         self.cookieFile = cookieFile
     }
 
-    private func request(_ path: String) -> URLRequest {
+    func request(_ path: String) -> URLRequest {
         var request = URLRequest(url: apiBaseURL.appendingPathComponent(path))
         if let authorization = cookieFile.flatMap(rpcCookieAuthorization(file:)) {
             request.setValue(authorization, forHTTPHeaderField: "Authorization")
