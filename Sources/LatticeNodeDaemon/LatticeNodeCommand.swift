@@ -1441,9 +1441,17 @@ func templateEvents(
 ) async throws {
     let encoder = JSONEncoder()
     let (events, sink) = AsyncStream<TemplateEvent>.makeStream()
+    let (written, ack) = AsyncStream<Void>.makeStream()
     let reader = Task {
+        // One push in flight at a time: the subscription's own bounded
+        // buffer is then the only backlog, so a client that stops reading
+        // fills it and is ended `slowConsumer` instead of growing this.
+        var acks = written.makeAsyncIterator()
         do {
-            for try await push in pushes { sink.yield(.push(push)) }
+            for try await push in pushes {
+                sink.yield(.push(push))
+                guard await acks.next() != nil else { break }
+            }
             sink.yield(.ended(nil))
         } catch {
             sink.yield(.ended(reason(error)))
@@ -1463,7 +1471,7 @@ func templateEvents(
     // The server waits for open responses when it shuts down, and this one
     // would run until the runtime stops after it: end it with the server.
     try await withGracefulShutdownHandler {
-        try await writeTemplateEvents(events, to: &writer, encoder: encoder)
+        try await writeTemplateEvents(events, to: &writer, encoder: encoder, written: ack)
     } onGracefulShutdown: {
         sink.yield(.ended(nil))
     }
@@ -1472,7 +1480,8 @@ func templateEvents(
 private func writeTemplateEvents(
     _ events: AsyncStream<TemplateEvent>,
     to writer: inout any ResponseBodyWriter,
-    encoder: JSONEncoder
+    encoder: JSONEncoder,
+    written: AsyncStream<Void>.Continuation
 ) async throws {
     for await next in events {
         switch next {
@@ -1482,6 +1491,7 @@ private func writeTemplateEvents(
             buffer.writeBytes(data)
             buffer.writeString("\n\n")
             try await writer.write(buffer)
+            written.yield()
         case .keepalive:
             try await writer.write(ByteBuffer(string: ": keepalive\n\n"))
         case .ended(let error):

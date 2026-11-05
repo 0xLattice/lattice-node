@@ -4,6 +4,7 @@ import HummingbirdTesting
 import Lattice
 import LatticeLightClient
 import UInt256
+import Synchronization
 import XCTest
 import cashew
 @testable import LatticeNode
@@ -254,6 +255,39 @@ final class DaemonHTTPTests: XCTestCase {
         XCTAssertEqual(decoded.clean, true)
         XCTAssertEqual(events[1], "event: end\ndata: hostedChainsChanged")
         XCTAssertTrue(collected.finished)
+    }
+
+    /// The writer takes one push at a time: a client that stops reading
+    /// leaves the backlog in the subscription's own bounded buffer, not here.
+    func testTemplateEventsReadNoFurtherAheadThanTheWriter() async throws {
+        let block = try await BlockBuilder.buildGenesis(
+            spec: ChainSpec(
+                maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
+                targetBlockTime: 1_000, initialReward: 1_024, halvingInterval: 10_000, halfLife: 10
+            ),
+            timestamp: 1, target: UInt256.max, fetcher: InMemoryContentSource([:])
+        )
+        let template = MiningTemplateResponse(
+            workID: "w", block: block, searchTarget: .max, targets: [.max],
+            chainPath: ["Nexus"], templateDigest: "d", chains: [], clean: true
+        )
+        let (pushes, feed) = AsyncThrowingStream<MiningTemplateResponse, any Error>.makeStream(
+            bufferingPolicy: .bufferingOldest(2)
+        )
+        let stuck = StuckWriter()
+        let serving = Task {
+            var writer: any ResponseBodyWriter = stuck
+            try await templateEvents(pushes, to: &writer)
+        }
+        // The writer is blocked on the first push; at most one more is taken.
+        feed.yield(template)
+        while !stuck.blocked { await Task.yield() }
+        var outcomes: [String] = []
+        for _ in 0..<4 { outcomes.append("\(feed.yield(template))") }
+        XCTAssertTrue(outcomes.contains { $0.hasPrefix("dropped") }, "\(outcomes)")
+        serving.cancel()
+        stuck.release()
+        _ = await serving.result
     }
 
     /// The operator pins a Volume the node holds, lists it, and unpins it;
@@ -1318,6 +1352,35 @@ private final class CollectedBody: @unchecked Sendable {
     func finish() { lock.withLock { done = true } }
     var text: String { lock.withLock { String(decoding: bytes, as: UTF8.self) } }
     var finished: Bool { lock.withLock { done } }
+}
+
+/// A body writer whose first write does not return until released, like a
+/// client that stopped reading.
+private final class StuckWriter: ResponseBodyWriter, Sendable {
+    private let state = Mutex<(blocked: Bool, release: CheckedContinuation<Void, Never>?, released: Bool)>(
+        (false, nil, false)
+    )
+    var blocked: Bool { state.withLock { $0.blocked } }
+    func write(_ buffer: ByteBuffer) async throws {
+        await withCheckedContinuation { continuation in
+            let resume = state.withLock { state -> Bool in
+                if state.released || state.blocked { return true }
+                state.blocked = true
+                state.release = continuation
+                return false
+            }
+            if resume { continuation.resume() }
+        }
+    }
+    func finish(_ trailingHeaders: HTTPFields?) async throws {}
+    func release() {
+        let continuation = state.withLock { state in
+            state.released = true
+            defer { state.release = nil }
+            return state.release
+        }
+        continuation?.resume()
+    }
 }
 
 private struct CollectingWriter: ResponseBodyWriter {

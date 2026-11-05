@@ -475,6 +475,35 @@ final class NodeRuntimeTests: XCTestCase {
         }
     }
 
+    /// A subscriber that stops reading holds at most `templatePushBuffer`
+    /// pushes: past that its stream ends `slowConsumer` after what it holds,
+    /// and the node serves a new subscription.
+    func testAStalledSubscriberEndsSlowConsumer() async throws {
+        let node = try host(keyByte: 0x36)
+        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let runtime = try await NodeRuntime.start(
+            storage: storage, configuration: node.configuration, overlay: node.overlay
+        )
+        let stalled = try runtime.templateSubscription(MiningTemplateRequest())
+        // Every tip move pushes at least once; this is more than the buffer.
+        for _ in 0...NodeRuntime.templatePushBuffer {
+            _ = try await runtime.mineBlock()
+        }
+        var held = 0
+        do {
+            for try await _ in stalled { held += 1 }
+            XCTFail("the stalled stream did not end")
+        } catch let error as NodeRuntimeError {
+            XCTAssertEqual(error, .slowConsumer)
+        }
+        XCTAssertEqual(held, NodeRuntime.templatePushBuffer)
+
+        var again = try runtime.templateSubscription(MiningTemplateRequest()).makeAsyncIterator()
+        let fresh = try await again.next()
+        XCTAssertEqual(fresh?.clean, true)
+        await runtime.stop()
+    }
+
     /// The pool admits nothing a block cannot carry: its largest transaction
     /// is mined, and the transaction behind it after.
     func testTheLargestTransactionThePoolAdmitsIsMined() async throws {

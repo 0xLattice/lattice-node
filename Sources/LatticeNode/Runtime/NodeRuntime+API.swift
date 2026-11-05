@@ -117,12 +117,6 @@ struct PolicyRefusal: Sendable, Equatable {
     let cids: [String]
 }
 
-/// One template pushed to a subscriber; see `MiningEffect.templatePushed`.
-struct TemplatePush: Sendable {
-    let template: WorkTemplate
-    let clean: Bool
-}
-
 struct ChildTemplateInput: Sendable {
     let path: ChainPath
     let tipCID: String?
@@ -443,29 +437,28 @@ extension NodeRuntime {
     /// as its tip, its pool or a hosted descendant moves, until the stream is
     /// dropped. Each carries `clean` (see `MiningTemplateResponse.clean`).
     /// Ends with `TemplateError.busy` when the node has its fill of
-    /// subscribers, and with `NodeRuntimeError.stopped` when it stops.
+    /// subscribers, with `NodeRuntimeError.slowConsumer` when the reader
+    /// falls `templatePushBuffer` pushes behind, and with
+    /// `NodeRuntimeError.stopped` when it stops. Nothing between the node and
+    /// the reader buffers more: a reader that wants keepalives alongside
+    /// must not read ahead of what it delivers.
     public func templateSubscription(
         _ request: MiningTemplateRequest
     ) throws -> AsyncThrowingStream<MiningTemplateResponse, any Error> {
         let plan = try templatePlan(request)
-        let (pushes, continuation) = AsyncThrowingStream<TemplatePush, any Error>.makeStream()
+        let (pushes, continuation) = AsyncThrowingStream<MiningTemplateResponse, any Error>.makeStream(
+            bufferingPolicy: .bufferingOldest(Self.templatePushBuffer)
+        )
         if case .terminated = inputs.yield(.subscribe(configuration.chainPath, plan, continuation)) {
             continuation.finish(throwing: NodeRuntimeError.stopped)
         }
-        return AsyncThrowingStream { output in
-            let task = Task {
-                do {
-                    for try await push in pushes {
-                        output.yield(response(push.template, clean: push.clean))
-                    }
-                    output.finish()
-                } catch {
-                    output.finish(throwing: error)
-                }
-            }
-            output.onTermination = { _ in task.cancel() }
-        }
+        return pushes
     }
+
+    /// Pushes a subscriber may fall behind before its subscription ends with
+    /// `slowConsumer`. Each push replaces the last, so a reader this far
+    /// behind holds only stale work; its reconnect gets a clean template.
+    static let templatePushBuffer = 8
 
     /// One plan for every level the template carries: each hosted child's
     /// recipient and minimum work by path.
@@ -483,13 +476,19 @@ extension NodeRuntime {
         )
     }
 
-    private func response(_ template: WorkTemplate, clean: Bool? = nil) -> MiningTemplateResponse {
+    private func response(_ template: WorkTemplate) -> MiningTemplateResponse {
+        Self.templateResponse(template, chainPath: configuration.chainPath, clean: nil)
+    }
+
+    static func templateResponse(
+        _ template: WorkTemplate, chainPath: ChainPath, clean: Bool?
+    ) -> MiningTemplateResponse {
         MiningTemplateResponse(
             workID: template.workID,
             block: template.block,
             searchTarget: template.searchTarget,
             targets: template.targets,
-            chainPath: configuration.chainPath,
+            chainPath: chainPath,
             templateDigest: template.digest,
             chains: template.chains.map(TemplateChainBlock.init),
             clean: clean

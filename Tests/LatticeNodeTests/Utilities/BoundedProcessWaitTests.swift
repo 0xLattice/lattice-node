@@ -176,75 +176,40 @@ final class BoundedProcessWaitTests: XCTestCase {
         }
     }
 
-    /// The deadline derives from the round's own parameters: what the node
-    /// advertised as template expiry, plus the longest round that actually
-    /// completed, times the operator's headroom.
-    func testDeadlineDerivesFromObservedRoundParameters() {
-        XCTAssertEqual(
-            MiningRoundDeadline.deadline(
-                templateExpiry: .seconds(30),
-                longestCompletedRound: .zero,
-                multiplier: 10
-            ),
-            .seconds(300)
-        )
+    /// The deadline is the first-round allowance until a round completes,
+    /// then the longest completed round times the operator's headroom. No
+    /// template lifetime enters it.
+    func testDeadlineDerivesFromMeasuredRounds() {
+        let allowance = MiningRoundDeadline.firstRoundAllowance
+        XCTAssertEqual(MiningRoundDeadline.deadline(longestCompletedRound: .zero, multiplier: 10), allowance)
+        // Short rounds never shrink it below the allowance.
+        XCTAssertEqual(MiningRoundDeadline.deadline(longestCompletedRound: .seconds(20), multiplier: 10), allowance)
         // A host whose rounds legitimately run long widens its own bound.
         XCTAssertEqual(
-            MiningRoundDeadline.deadline(
-                templateExpiry: .seconds(30),
-                longestCompletedRound: .seconds(20),
-                multiplier: 10
-            ),
-            .seconds(500)
+            MiningRoundDeadline.deadline(longestCompletedRound: .seconds(120), multiplier: 10),
+            .seconds(1200)
         )
-        // Operator headroom is honoured.
+        // Operator headroom is honoured; a zero multiplier is floored.
         XCTAssertEqual(
-            MiningRoundDeadline.deadline(
-                templateExpiry: .seconds(30),
-                longestCompletedRound: .zero,
-                multiplier: 2
-            ),
-            .seconds(60)
+            MiningRoundDeadline.deadline(longestCompletedRound: .seconds(400), multiplier: 2),
+            .seconds(800)
         )
-        // A zero multiplier would kill every healthy round; the floor holds.
-        XCTAssertEqual(
-            MiningRoundDeadline.deadline(
-                templateExpiry: .seconds(30),
-                longestCompletedRound: .zero,
-                multiplier: 0
-            ),
-            .seconds(30)
-        )
+        XCTAssertEqual(MiningRoundDeadline.deadline(longestCompletedRound: .seconds(400), multiplier: 0), allowance)
     }
 
     /// A completed round is bounded only by the PREVIOUS deadline, so feeding
-    /// it back unclamped ratchets the bound by the multiplier every time --
-    /// 300s, 3300s, 33300s -- and a few slow-but-completing rounds would
-    /// recreate the multi-day freeze the bound exists to stop.
+    /// it back unclamped ratchets the bound by the multiplier every time and
+    /// a few slow-but-completing rounds would recreate the multi-day freeze
+    /// the bound exists to stop.
     func testMeasuredRoundCannotRatchetTheBound() {
-        let first = MiningRoundDeadline.deadline(
-            templateExpiry: .seconds(30),
-            longestCompletedRound: .zero,
-            multiplier: 10
-        )
-        XCTAssertEqual(first, .seconds(300))
-        // A round that completed just inside that deadline must not widen it
-        // beyond the clamp.
-        let second = MiningRoundDeadline.deadline(
-            templateExpiry: .seconds(30),
-            longestCompletedRound: first,
-            multiplier: 10
-        )
-        XCTAssertEqual(second, .seconds(600))
-        // And that is a fixed point: no sequence of rounds climbs past it.
-        XCTAssertEqual(
-            MiningRoundDeadline.deadline(
-                templateExpiry: .seconds(30),
-                longestCompletedRound: second,
-                multiplier: 10
-            ),
-            .seconds(600)
-        )
+        let ceiling = MiningRoundDeadline.firstRoundAllowance * 10
+        var deadline = MiningRoundDeadline.deadline(longestCompletedRound: .zero, multiplier: 10)
+        for _ in 0..<5 {
+            // A round that completed just inside the deadline.
+            deadline = MiningRoundDeadline.deadline(longestCompletedRound: deadline, multiplier: 10)
+            XCTAssertLessThanOrEqual(deadline, ceiling)
+        }
+        XCTAssertEqual(deadline, ceiling, "a fixed point no sequence of rounds climbs past")
     }
 
     /// A second wait on a settled handle must return the same answer at once.

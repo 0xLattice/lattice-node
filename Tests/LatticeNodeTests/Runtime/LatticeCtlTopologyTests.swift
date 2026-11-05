@@ -352,7 +352,7 @@ final class LatticeCtlTopologyTests: XCTestCase {
         ).validated()) { error in
             XCTAssertEqual(
                 (error as? CtlError)?.description,
-                "mine.templateTimeoutSeconds must be at least 1; a zero timeout can never observe a template expiry, so no round deadline could be derived and the miner would never mine"
+                "mine.templateTimeoutSeconds must be at least 1; a zero timeout can never see the node answer a template request, so the miner would never mine"
             )
         }
     }
@@ -377,7 +377,7 @@ final class LatticeCtlTopologyTests: XCTestCase {
         )).validated()) { error in
             XCTAssertEqual(
                 (error as? CtlError)?.description,
-                "mine.templateTimeoutSeconds must be at most \(TopologyMine.maximumTemplateTimeoutSeconds); the coordinator's own template fetch is fixed at that, so a longer probe would observe expiries for rounds that then die fetching the same template"
+                "mine.templateTimeoutSeconds must be at most \(TopologyMine.maximumTemplateTimeoutSeconds); the coordinator's own template fetch is fixed at that, so a longer probe would start rounds that then die fetching the same template"
             )
         }
         XCTAssertNoThrow(try topology(mine: TopologyMine(

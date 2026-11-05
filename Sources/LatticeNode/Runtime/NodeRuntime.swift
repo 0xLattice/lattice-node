@@ -2,6 +2,7 @@ import Foundation
 import Ivy
 import IvyWebSocket
 import Lattice
+import LatticeNodeAPI
 import LatticeNodeCore
 import cashew
 
@@ -17,6 +18,9 @@ public enum NodeRuntimeError: Error, Equatable, Sendable {
     /// The hosted chains changed: a template subscription's plan is stale,
     /// and the subscriber subscribes again with its new one.
     case hostedChainsChanged
+    /// A template subscriber fell `templatePushBuffer` pushes behind; it
+    /// subscribes again and starts from a clean template.
+    case slowConsumer
 }
 
 /// The production shell around the sans-IO `LatticeNodeCore.NodeCore`.
@@ -126,7 +130,7 @@ public final class NodeRuntime: Sendable {
         case answer(UInt64, Result<NodeRuntimeReply, any Error>)
         /// A template subscription: pushes go to the continuation until it
         /// terminates (`unsubscribe`).
-        case subscribe(ChainPath, TemplateRequest, AsyncThrowingStream<TemplatePush, any Error>.Continuation)
+        case subscribe(ChainPath, TemplateRequest, AsyncThrowingStream<MiningTemplateResponse, any Error>.Continuation)
         case unsubscribe(UInt64)
         /// An announced transaction's fetch ended: the transaction, or nil.
         case transactionFetched(cid: String, NodeEvent?)
@@ -550,7 +554,7 @@ extension NodeRuntime {
         var replies: [UInt64: (path: ChainPath, reply: CheckedContinuation<NodeRuntimeReply, any Error>)] = [:]
         var nextReply: UInt64 = 1
         /// Template subscribers, under IDs from `nextReply`.
-        var subscribers: [UInt64: (path: ChainPath, pushes: AsyncThrowingStream<TemplatePush, any Error>.Continuation)] = [:]
+        var subscribers: [UInt64: (path: ChainPath, pushes: AsyncThrowingStream<MiningTemplateResponse, any Error>.Continuation)] = [:]
         /// Each level's template digest its pool last heard of
         /// (`MiningEvent.templateContextChanged`).
         var templateContexts: [ChainPath: String] = [:]
@@ -1758,11 +1762,23 @@ extension NodeRuntime {
             case .templateIssued(let replyID, let template):
                 answer(replyID, .success(.template(template)))
             case .templatePushed(let ids, let template, let clean):
+                let push = NodeRuntime.templateResponse(template, chainPath: configuration.chainPath, clean: clean)
                 for id in ids {
-                    // A stream that ended before its termination handler
-                    // was set never runs it: drop it on the push instead.
-                    if case .terminated = subscribers[id]?.pushes.yield(TemplatePush(template: template, clean: clean)) {
+                    guard let pushes = subscribers[id]?.pushes else { continue }
+                    switch pushes.yield(push) {
+                    case .enqueued:
+                        break
+                    case .dropped:
+                        // A subscriber that stops reading would otherwise
+                        // hold every template built for it. Its buffered
+                        // pushes still drain; finishing unsubscribes it.
+                        pushes.finish(throwing: NodeRuntimeError.slowConsumer)
+                    case .terminated:
+                        // A stream that ended before its termination handler
+                        // was set never runs it: drop it on the push instead.
                         inputs.yield(.unsubscribe(id))
+                    @unknown default:
+                        break
                     }
                 }
             case .subscriptionRefused(let id, let error):

@@ -495,6 +495,10 @@ The node ends a subscription with `event: end` and the reason as `data`:
   plan is stale; subscribe again with the new one.
 - `busy` — the node has its fill of subscribers.
 - `buildFailed` — the subscriber's first template could not be built.
+- `slowConsumer` — the client fell 8 templates behind. Each template
+  supersedes the last, so a backlog is only stale work, and the node will not
+  hold an unbounded one for a client that stopped reading. Subscribe again;
+  the first template is clean.
 
 A node shutting down closes the stream without an `end` event.
 
