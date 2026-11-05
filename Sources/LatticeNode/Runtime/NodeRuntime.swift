@@ -833,6 +833,7 @@ extension NodeRuntime {
                 guard await step(.unhost(path)) else { throw NodeRuntimeError.stopped }
                 stateTips[path] = nil
                 await storage.letGoOfWindows(at: path)
+                await storage.letGoOfRules(at: path)
                 if let repair = counted.removeValue(forKey: path)?.repair {
                     repair.task.cancel()
                     await repair.task.value

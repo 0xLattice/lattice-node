@@ -9,6 +9,9 @@ import cashew
 ///
 /// - The chain scope holds what every level's executions read and created
 ///   (state, specs, policy modules) and the Nexus genesis block.
+/// - When the operator does not keep all state, a chain's rules scope holds
+///   its spec and the policy modules the spec names, which every block of
+///   the chain reads, until it is no longer hosted.
 /// - When the operator keeps recent state, a chain's window scopes hold
 ///   what its last executions stored, and its counted scope (counted
 ///   roots, not retained ones) every node of its current state and what
@@ -54,6 +57,12 @@ struct RetentionScopes: Sendable {
 
     var readsPrefix: String { chain + ":reads:" }
 
+    /// The spec and policy modules of the chain at `path`, when the
+    /// operator does not keep all state.
+    func rules(at path: ChainPath) -> String { rulesPrefix + path.joined(separator: "/") }
+
+    var rulesPrefix: String { chain + ":rules:" }
+
     /// What a block reads, until it executes, when the operator does not
     /// keep all state.
     func reads(_ blockCID: String, at path: ChainPath) -> String {
@@ -85,16 +94,41 @@ extension NodeStorage {
     /// Pins what storing a block wrote: its `body`, the block's own Volume
     /// and its transactions', under the block's name, and the rest, the
     /// state its execution reads, its spec and its policy modules, with
-    /// the chain, or with the block until it executes when the operator
-    /// does not keep all state. A body root this store lacks refuses the
-    /// pin whole.
+    /// the chain. When the operator does not keep all state, the spec and
+    /// policy modules are kept with the chain at `path` while it is hosted,
+    /// and the state with the block until it executes. A body root this
+    /// store lacks refuses the pin whole.
     nonisolated func retainStored(
         _ roots: [String], body: [String], ofBlock blockCID: String, at path: ChainPath = ["Nexus"]
     ) async throws {
         let named = Set(body)
         try await broker.mergeRetainedRoots(scope: scopes.body(blockCID, at: path), roots: named.sorted())
-        let scope = configuration.state == .all ? retentionScope : scopes.reads(blockCID, at: path)
-        try await retainHeld(roots.filter { !named.contains($0) }, scope: scope)
+        let rest = roots.filter { !named.contains($0) }
+        guard configuration.state != .all else {
+            try await retainHeld(rest)
+            return
+        }
+        let rules = rest.isEmpty ? [] : await rules(ofBlock: blockCID)
+        try await retainHeld(rest.filter(rules.contains), scope: scopes.rules(at: path))
+        try await retainHeld(rest.filter { !rules.contains($0) }, scope: scopes.reads(blockCID, at: path))
+    }
+
+    /// The spec a stored block names and the policy modules that spec
+    /// names, read from this store.
+    private nonisolated func rules(ofBlock blockCID: String) async -> Set<String> {
+        guard let block = await chainHeader(blockCID)?.block,
+              let spec = try? await block.spec.resolve(fetcher: localFetcher).node else { return [] }
+        return Set([block.spec.rawCID] + spec.wasmPolicies.map(\.moduleCID))
+    }
+
+    /// When the chain at `path` is no longer hosted: its spec and policy
+    /// modules go.
+    nonisolated func letGoOfRules(at path: ChainPath) async {
+        do {
+            try await release(scope: scopes.rules(at: path))
+        } catch {
+            syncTrace("rules of \(path) not released: \(error)")
+        }
     }
 
     /// At a start: what a block read goes when the block has executed (a
@@ -522,7 +556,7 @@ extension NodeStorage {
     /// counts it kept are forgotten. The state windows of a run that kept
     /// recent state stay: they go by height as the tips move, or are kept
     /// with everything else on `all`. What either kept for a chain no
-    /// longer hosted goes.
+    /// longer hosted goes, as do its spec and policy modules.
     nonisolated func moveLegacyState(tips: [ChainPath: UInt64]) async {
         func path(_ scope: String, after prefix: String) -> ChainPath {
             scope.dropFirst(prefix.count).split(separator: "/").map(String.init)
@@ -540,6 +574,9 @@ extension NodeStorage {
             if tips[path(String(scope[..<colon]), after: scopes.windowsPrefix)] == nil {
                 await letGoOfWindow(scope)
             }
+        }
+        await each(scopes.rulesPrefix) { scope in
+            if tips[path(scope, after: scopes.rulesPrefix)] == nil { try await release(scope: scope) }
         }
         for prefix in scopes.legacyStatePrefixes {
             await each(prefix) { scope in

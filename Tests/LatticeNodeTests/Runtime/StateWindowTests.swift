@@ -28,7 +28,8 @@ final class StateWindowTests: XCTestCase {
 
     private func host(
         keyByte: UInt8, peers: [PeerEndpoint] = [], storageDirectory reused: URL? = nil, state: StateRetention = .all,
-        stateWindow: UInt64? = nil, hosted: Bool = false, peerSearchInterval: TimeInterval = 600
+        stateWindow: UInt64? = nil, hosted: Bool = false, peerSearchInterval: TimeInterval = 600,
+        alphaSpec: ChainSpec = alphaSpec, policyModules: [Data] = []
     ) throws -> Host {
         let storageDirectory = reused ?? FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-node-state-\(UUID().uuidString)", isDirectory: true
@@ -45,7 +46,8 @@ final class StateWindowTests: XCTestCase {
             peerSearchInterval: peerSearchInterval,
             state: state,
             hostedChildren: hosted ? [Self.alpha] : [],
-            childSpecs: hosted ? [Self.alpha: Self.alphaSpec] : [:],
+            childSpecs: hosted ? [Self.alpha: alphaSpec] : [:],
+            policyModules: policyModules,
             stateWindows: FinalityWindows(all: stateWindow)
         )
         return Host(
@@ -921,6 +923,82 @@ final class StateWindowTests: XCTestCase {
         let staged = try await storage.broker.retainedRoots(scope: storage.scopes.staging(at: Self.alpha))
         XCTAssertEqual(staged, [], "nor staging")
         await runtime.stop()
+    }
+
+    /// A node on `recent` keeps the spec and the policy module of a child
+    /// chain it read them for while it hosts the chain, not only while one
+    /// block executes: with no peer they are still held. A chain no longer
+    /// hosted lets them go.
+    func testRecentKeepsAChildsSpecAndPolicyModulesWhileItIsHosted() async throws {
+        let module = Self.acceptingPolicyModule()
+        let moduleCID = try WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: module)).rawCID
+        let spec = ChainSpec(
+            maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
+            targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10,
+            wasmPolicies: [WasmPolicyRef(moduleCID: moduleCID, scope: .transaction)]
+        )
+        let specCID = try VolumeImpl<ChainSpec>(node: spec).rawCID
+        let producer = try host(keyByte: 0xd7, hosted: true, alphaSpec: spec, policyModules: [module])
+        let (producerRuntime, _) = try await start(producer)
+        for _ in 0..<5 {
+            let before = await producerRuntime.levelReads[Self.alpha]?.readSnapshot().height
+            _ = try await producerRuntime.mineBlock(MiningTemplateRequest(recipients: [
+                MiningRecipient(chainPath: ["Nexus"], address: address(CryptoUtils.generateKeyPair())),
+                MiningRecipient(chainPath: Self.alpha, address: address(CryptoUtils.generateKeyPair())),
+            ]))
+            try await eventually("the producer's Alpha executes the block it carried") {
+                let height = await producerRuntime.levelReads[Self.alpha]?.readSnapshot().height
+                return height.map { h in before.map { h > $0 } ?? true } ?? false
+            }
+        }
+        let produced = await producerRuntime.levelReads[Self.alpha]?.readSnapshot()
+        let alphaTip = try XCTUnwrap(produced?.tipCID)
+
+        // The node is told Alpha's spec, not given its module.
+        let node = try host(keyByte: 0xd8, peers: [producer.endpoint], state: .recent, stateWindow: 2, hosted: true, alphaSpec: spec)
+        let (runtime, storage) = try await start(node)
+        try await eventually("the node executes Alpha's tip") {
+            await runtime.levelReads[Self.alpha]?.readSnapshot().tipCID == alphaTip
+        }
+        try await eventually("nothing a block read is held once it has executed") {
+            (try? await storage.broker.retainedScopes(prefix: storage.scopes.readsPrefix))?.isEmpty == true
+        }
+        await producerRuntime.stop()
+        _ = try await storage.broker.sweep()
+        let rules = try await storage.broker.retainedRoots(scope: storage.scopes.rules(at: Self.alpha))
+        XCTAssertTrue(rules.contains(moduleCID), "the policy module is kept with the chain")
+        XCTAssertTrue(rules.contains(specCID), "and its spec")
+        let held = await storage.broker.hasVolume(root: moduleCID)
+        XCTAssertTrue(held, "the module is held with no peer")
+        let nexusRules = try await storage.broker.retainedRoots(scope: storage.scopes.rules(at: ["Nexus"]))
+        XCTAssertFalse(nexusRules.isEmpty, "Nexus keeps its spec too")
+
+        try await runtime.host([])
+        let left = try await storage.broker.retainedRoots(scope: storage.scopes.rules(at: Self.alpha))
+        XCTAssertEqual(left, [], "a chain no longer hosted keeps no rules")
+        _ = try await storage.broker.sweep()
+        let kept = await storage.broker.hasVolume(root: moduleCID)
+        XCTAssertFalse(kept, "its policy module goes")
+        await runtime.stop()
+    }
+
+    /// A WASM policy module that accepts every transaction.
+    private static func acceptingPolicyModule() -> Data {
+        func section(_ id: UInt8, _ body: [UInt8]) -> [UInt8] { [id, UInt8(body.count)] + body }
+        func export(_ name: String, kind: UInt8, index: UInt8) -> [UInt8] {
+            [UInt8(name.utf8.count)] + Array(name.utf8) + [kind, index]
+        }
+        var exports: [UInt8] = [0x03]
+        exports += export("memory", kind: 2, index: 0)
+        exports += export("lattice_alloc", kind: 0, index: 0)
+        exports += export("lattice_validate_transaction", kind: 0, index: 1)
+        var module: [UInt8] = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]
+        module += section(1, [0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f])
+        module += section(3, [0x02, 0x00, 0x01])
+        module += section(5, [0x01, 0x00, 0x01])
+        module += section(7, exports)
+        module += section(10, [0x02, 0x05, 0x00, 0x41, 0x80, 0x08, 0x0b, 0x04, 0x00, 0x41, 0x01, 0x0b])
+        return Data(module)
     }
 
     /// A start moves what an earlier version kept a hosted chain's tip

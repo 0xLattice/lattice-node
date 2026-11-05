@@ -524,6 +524,10 @@ their own reason to run one. Keep `all` on a node an explorer reads.
   what a block reads, until it has executed. `--state-window` applies to
   `recent` only; set with `all` or `none` it is refused.
 
+On `recent` and `none` a node keeps each chain's spec and the policy modules
+the spec names for as long as it hosts the chain, as `all` does: every block
+of the chain reads them, so they are not state that a window lets go of.
+
 On `recent` a node counts, for each chain, the places each node holds in the
 state of the chain's tip, plus the places the blocks above a cursor replaced,
 and keeps every node it counts: the counts are kept in `volumes.db`, written
@@ -558,8 +562,8 @@ facts an older version wrote with an inexact diff may leave them) are replaced
 by a state sync.
 
 A chain no longer hosted (removed from a running node's hosted chains, or
-left out at a start) loses its counts and what its state sync held; hosting
-it again starts with a state sync.
+left out at a start) loses its counts, what its state sync held, and its
+spec and policy modules; hosting it again starts with a state sync.
 
 Kept state is a cache, not a promise: execution, a submitted transaction's
 check, and state reads all read the state this node does not hold from
