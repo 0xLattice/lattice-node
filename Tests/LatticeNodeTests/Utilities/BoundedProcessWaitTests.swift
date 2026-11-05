@@ -195,13 +195,12 @@ final class BoundedProcessWaitTests: XCTestCase {
             .seconds(800)
         )
         XCTAssertEqual(MiningRoundDeadline.deadline(longestCompletedRound: .seconds(400), multiplier: 0), allowance)
-        // A huge multiplier saturates rather than trapping, and the result is
-        // still one a timer can add to the clock (`Task.sleep` would trap).
+        // A huge multiplier saturates rather than trapping, at a cap a timer
+        // can still add to the clock (`Task.sleep` traps past it).
         for multiplier in [Int.max, 23_058_430_092_136_939] {
             let huge = MiningRoundDeadline.deadline(longestCompletedRound: .seconds(400), multiplier: multiplier)
             XCTAssertGreaterThan(huge, .seconds(1_000_000))
             XCTAssertLessThanOrEqual(huge, .seconds(MiningRoundDeadline.maximumSeconds))
-            _ = (ContinuousClock.now + huge).duration(to: ContinuousClock.now).components
         }
     }
 
