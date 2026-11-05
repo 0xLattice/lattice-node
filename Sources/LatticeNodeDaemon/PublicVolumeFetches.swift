@@ -6,8 +6,9 @@ import VolumeBroker
 /// peers, checked against their CIDs, served, and not kept. Readers asking
 /// for one CID share one read and one archive buffer, and at most `limit`
 /// CIDs are read at once (the operator's `--public-read-fetches`); past
-/// that, or when the node's own content budget is full, a read is busy,
-/// never reported absent.
+/// that a reader waits, first come first served, for a place. A read is
+/// busy, never reported absent, when the node's own content budget is full
+/// or its reader waited `maximumWait` without a place.
 actor PublicVolumeFetches {
     enum Answer: Sendable {
         case archive(ByteBuffer)
@@ -25,15 +26,31 @@ actor PublicVolumeFetches {
         return max(1, min(requested, inFlightVolumeBytes / 2 / maximumCompleteVolumeArchiveBytes))
     }
 
+    private struct Waiter {
+        let id: UInt64
+        let root: String
+        let resume: CheckedContinuation<Task<Answer, Never>?, Never>
+    }
+
     private let limit: Int
+    private let maximumWait: Duration
     private let fetch: @Sendable (String) async throws -> SerializedVolume?
     private var inFlight: [String: Task<Answer, Never>] = [:]
+    /// Readers waiting for a place, oldest first. Only while every place is
+    /// taken: a freed place goes straight to the oldest.
+    private var waiting: [Waiter] = []
+    private var nextWaiter: UInt64 = 0
 
     /// `fetch` answers nil when no peer serves the Volume within the
     /// archive caps, and throws when the node had no room to read it or is
-    /// stopping.
-    init(limit: Int, fetch: @escaping @Sendable (String) async throws -> SerializedVolume?) {
+    /// stopping. `limit` is at least one.
+    init(
+        limit: Int,
+        maximumWait: Duration = .seconds(30),
+        fetch: @escaping @Sendable (String) async throws -> SerializedVolume?
+    ) {
         self.limit = limit
+        self.maximumWait = maximumWait
         self.fetch = fetch
     }
 
@@ -41,21 +58,65 @@ actor PublicVolumeFetches {
         let task: Task<Answer, Never>
         if let shared = inFlight[root] {
             task = shared
+        } else if inFlight.count < limit {
+            task = start(root)
         } else {
-            guard inFlight.count < limit else { return .busy }
-            let fetch = fetch
-            task = Task {
-                do {
-                    return try await fetch(root).flatMap(encodeCompleteVolumeArchive).map { .archive(ByteBuffer(bytes: $0)) } ?? .notServed
-                } catch {
-                    // The node's budget was full, or it is stopping.
-                    return .busy
-                }
-            }
-            inFlight[root] = task
+            guard let started = await place(for: root) else { return .busy }
+            task = started
         }
         let answer = await task.value
-        if inFlight[root] == task { inFlight[root] = nil }
+        if inFlight[root] == task {
+            inFlight[root] = nil
+            if !waiting.isEmpty { start(waiting.removeFirst()) }
+        }
         return answer
+    }
+
+    private func start(_ root: String) -> Task<Answer, Never> {
+        let fetch = fetch
+        let task = Task<Answer, Never> {
+            do {
+                return try await fetch(root).flatMap(encodeCompleteVolumeArchive).map { .archive(ByteBuffer(bytes: $0)) } ?? .notServed
+            } catch {
+                // The node's budget was full, or it is stopping.
+                return .busy
+            }
+        }
+        inFlight[root] = task
+        return task
+    }
+
+    /// The oldest waiter's read takes the freed place, and every reader
+    /// waiting for the same CID shares it.
+    private func start(_ next: Waiter) {
+        let task = start(next.root)
+        let sharing = waiting.filter { $0.root == next.root }
+        waiting.removeAll { $0.root == next.root }
+        for waiter in [next] + sharing { waiter.resume.resume(returning: task) }
+    }
+
+    /// Waits for a place: the read started there, or nil when the reader
+    /// was cancelled or waited `maximumWait`.
+    private func place(for root: String) async -> Task<Answer, Never>? {
+        let id = nextWaiter
+        nextWaiter += 1
+        let timeout = Task { [maximumWait] in
+            guard (try? await Task.sleep(for: maximumWait)) != nil else { return }
+            await self.leave(id)
+        }
+        defer { timeout.cancel() }
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled else { return continuation.resume(returning: nil) }
+                waiting.append(Waiter(id: id, root: root, resume: continuation))
+            }
+        } onCancel: {
+            Task { await self.leave(id) }
+        }
+    }
+
+    private func leave(_ id: UInt64) {
+        guard let index = waiting.firstIndex(where: { $0.id == id }) else { return }
+        waiting.remove(at: index).resume.resume(returning: nil)
     }
 }

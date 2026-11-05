@@ -96,8 +96,8 @@ final class PublicVolumeFetchTests: XCTestCase {
         await holder.stop()
     }
 
-    /// Past the operator's limit the read is busy (503), never absent.
-    func testAReadPastTheLimitIsBusyNotAbsent() async throws {
+    /// A read the node had no room for is busy (503), never absent.
+    func testAReadTheNodeHadNoRoomForIsBusyNotAbsent() async throws {
         let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-public-fetch-busy-\(UUID().uuidString)"
         )
@@ -107,8 +107,8 @@ final class PublicVolumeFetchTests: XCTestCase {
             privateKeyHex: String(repeating: "01", count: 32)
         ))
         let service = try await startRuntime(storage)
-        let none = PublicVolumeFetches(limit: 0) { _ in XCTFail("no read past the limit"); return nil }
-        let app = makePublicReadApplication(service: service, host: "127.0.0.1", port: 8081, fetches: none)
+        let full = PublicVolumeFetches(limit: 1) { _ in throw NodeRuntimeError.busy }
+        let app = makePublicReadApplication(service: service, host: "127.0.0.1", port: 8081, fetches: full)
         let root = try spec(77).rawCID
         try await app.test(.router) { client in
             try await client.execute(uri: "/volumes/\(root)", method: .get) { response in
@@ -130,40 +130,139 @@ final class PublicVolumeFetchTests: XCTestCase {
         XCTAssertEqual(PublicVolumeFetches.limit(requested: .max, inFlightVolumeBytes: .max), Int.max / 2 / cap)
     }
 
-    /// A read the node had no room for is busy, not absent.
-    func testAReadTheNodeHadNoRoomForIsBusy() async {
-        let fetches = PublicVolumeFetches(limit: 4) { _ in throw NodeRuntimeError.busy }
-        guard case .busy = await fetches.archive("full") else { return XCTFail("no room is busy") }
-    }
-
-    /// While the limit's reads are in flight another CID is busy; once one
-    /// ends, its place is free again.
-    func testALimitPlaceFreesWhenItsReadEnds() async throws {
+    /// While the limit's reads are in flight another CID waits, and is
+    /// read once one of them ends.
+    func testAReadPastTheLimitWaitsForAPlace() async throws {
         let volume = try spec(99)
-        let captured = CapturedSerializedVolumes()
-        try await volume.store(storer: captured)
-        let volumes = await captured.volumes
-        let serialized = try XCTUnwrap(volumes.first { $0.root == volume.rawCID })
+        let serialized = try await serializedVolume(volume)
         let gate = AsyncStream<Void>.makeStream()
         let reads = ReadCount()
         let fetches = PublicVolumeFetches(limit: 1) { root in
-            await reads.add()
+            await reads.add(root)
             if root == volume.rawCID { for await _ in gate.stream { break } }
             return root == volume.rawCID ? serialized : nil
         }
         let first = Task { await fetches.archive(volume.rawCID) }
         try await eventually("the first read started") { await reads.count == 1 }
-        guard case .busy = await fetches.archive("other") else { return XCTFail("another CID past the limit is busy") }
+        let other = Task { await fetches.archive("other") }
+        try await Task.sleep(for: .milliseconds(100))
+        let whileFull = await reads.count
+        XCTAssertEqual(whileFull, 1, "another CID past the limit waits, not read")
         gate.continuation.yield()
         guard case .archive(let got) = await first.value else { return XCTFail("the reader gets the Volume") }
         XCTAssertEqual(Data(got.readableBytesView), encodeCompleteVolumeArchive(serialized))
-        guard case .notServed = await fetches.archive("other") else { return XCTFail("the place is free again") }
+        guard case .notServed = await other.value else { return XCTFail("the waiter is read once the place frees") }
+    }
+
+    /// A burst many times the limit is all served, none busy, and never more
+    /// than the limit read at once.
+    func testABurstPastTheLimitIsAllServedWithinTheLimit() async throws {
+        let volume = try spec(101)
+        let serialized = try await serializedVolume(volume)
+        let reads = ReadCount()
+        let fetches = PublicVolumeFetches(limit: 2) { _ in
+            await reads.begin()
+            try await Task.sleep(for: .milliseconds(20))
+            await reads.end()
+            return serialized
+        }
+        let answers = await withTaskGroup(of: PublicVolumeFetches.Answer.self) { group in
+            for n in 0..<12 { group.addTask { await fetches.archive("cid-\(n)") } }
+            return await group.reduce(into: []) { $0.append($1) }
+        }
+        XCTAssertEqual(answers.count, 12)
+        for answer in answers {
+            guard case .archive = answer else { return XCTFail("every reader in the burst is served") }
+        }
+        let peak = await reads.peak
+        XCTAssertEqual(peak, 2, "at most the limit read at once")
+    }
+
+    /// A waiting reader that is cancelled leaves the queue: it is busy, its
+    /// CID is never read, and the reader behind it takes the place.
+    func testACancelledWaiterGivesUpItsPlace() async throws {
+        let gate = AsyncStream<Void>.makeStream()
+        let reads = ReadCount()
+        let fetches = PublicVolumeFetches(limit: 1) { root in
+            await reads.add(root)
+            if root == "first" { for await _ in gate.stream { break } }
+            return nil
+        }
+        let first = Task { await fetches.archive("first") }
+        try await eventually("the first read started") { await reads.count == 1 }
+        let cancelled = Task { await fetches.archive("cancelled") }
+        try await Task.sleep(for: .milliseconds(50))
+        let behind = Task { await fetches.archive("behind") }
+        try await Task.sleep(for: .milliseconds(50))
+        cancelled.cancel()
+        guard case .busy = await cancelled.value else { return XCTFail("a cancelled waiter is busy") }
+        gate.continuation.yield()
+        _ = await first.value
+        guard case .notServed = await behind.value else { return XCTFail("the reader behind is read") }
+        let roots = await reads.roots
+        XCTAssertEqual(roots, ["first", "behind"], "the cancelled CID is never read")
+    }
+
+    /// A reader that waits longer than the bound is busy, and its CID is
+    /// never read.
+    func testAWaitLongerThanTheBoundIsBusy() async throws {
+        let gate = AsyncStream<Void>.makeStream()
+        let reads = ReadCount()
+        let fetches = PublicVolumeFetches(limit: 1, maximumWait: .milliseconds(50)) { root in
+            await reads.add(root)
+            for await _ in gate.stream { break }
+            return nil
+        }
+        let first = Task { await fetches.archive("first") }
+        try await eventually("the first read started") { await reads.count == 1 }
+        guard case .busy = await fetches.archive("late") else { return XCTFail("past the bound is busy") }
+        gate.continuation.yield()
+        _ = await first.value
+        let roots = await reads.roots
+        XCTAssertEqual(roots, ["first"])
+    }
+
+    /// Readers asking for one CID share one read, whether it is in flight
+    /// or still waiting for a place.
+    func testReadersOfOneCIDShareOneReadWhileWaiting() async throws {
+        let volume = try spec(103)
+        let serialized = try await serializedVolume(volume)
+        let gate = AsyncStream<Void>.makeStream()
+        let reads = ReadCount()
+        let fetches = PublicVolumeFetches(limit: 1) { root in
+            await reads.add(root)
+            if root == "first" { for await _ in gate.stream { break } }
+            return serialized
+        }
+        let first = Task { await fetches.archive("first") }
+        try await eventually("the first read started") { await reads.count == 1 }
+        let waiters = (0..<3).map { _ in Task { await fetches.archive(volume.rawCID) } }
+        try await Task.sleep(for: .milliseconds(100))
+        gate.continuation.yield()
+        _ = await first.value
+        for waiter in waiters {
+            guard case .archive = await waiter.value else { return XCTFail("every waiter gets the Volume") }
+        }
+        let roots = await reads.roots
+        XCTAssertEqual(roots, ["first", volume.rawCID], "one read for the waiters of one CID")
+    }
+
+    private func serializedVolume(_ volume: VolumeImpl<ChainSpec>) async throws -> SerializedVolume {
+        let captured = CapturedSerializedVolumes()
+        try await volume.store(storer: captured)
+        let volumes = await captured.volumes
+        return try XCTUnwrap(volumes.first { $0.root == volume.rawCID })
     }
 }
 
 private actor ReadCount {
-    private(set) var count = 0
-    func add() { count += 1 }
+    private(set) var roots: [String] = []
+    private(set) var peak = 0
+    private var running = 0
+    var count: Int { roots.count }
+    func add(_ root: String) { roots.append(root) }
+    func begin() { running += 1; peak = max(peak, running) }
+    func end() { running -= 1 }
 }
 
 private actor CapturedSerializedVolumes: VolumeStorer {
