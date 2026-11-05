@@ -748,11 +748,16 @@ private func addPublicReadRoutes<Context: RequestContext>(
             return volumeArchiveResponse(ByteBuffer(bytes: archive))
         }
         // One this node does not hold, read from peers when the operator
-        // allows it (`--public-read-fetches`).
-        switch await fetches?.archive(cid) {
+        // allows it (`--public-read-fetches`). A reader that goes away
+        // while it waits for a place gives the place up.
+        guard let fetches else { throw HTTPError(.notFound) }
+        switch try await request.body.consumeWithCancellationOnInboundClose({ _ in await fetches.archive(cid) }) {
         case .archive(let read): return volumeArchiveResponse(read)
         case .busy: throw HTTPError(.serviceUnavailable, headers: [.retryAfter: "1"], message: "busy")
-        case .notServed, nil: throw HTTPError(.notFound)
+        case .waited:
+            let wait = String(fetches.maximumWait.components.seconds)
+            throw HTTPError(.serviceUnavailable, headers: [.retryAfter: wait], message: "busy")
+        case .notServed: throw HTTPError(.notFound)
         }
     }
     // Many Volumes in one request, for a client walking content it already

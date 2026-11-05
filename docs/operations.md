@@ -248,9 +248,11 @@ peers, at most `--public-read-fetches` at once (fewer when half of
 the node prints the number at start). Past that, readers wait in arrival
 order for a read to end, and readers of the same Volume share one read. A
 waiting reader holds no archive memory, so the memory these reads take stays
-at the number at once times 64 MiB. A reader still waiting after 30 seconds,
-or whose read found the node's own content budget full, gets 503 with
-`Retry-After` (see [`GET /volumes/:cid`](rpc-api.md#read-routes)).
+at the number at once times 64 MiB. A reader that closes its connection
+leaves the queue; one still waiting after 30 seconds (a proxy in front may
+hold a connection its client closed), or whose read found the node's own
+content budget full, gets 503 with `Retry-After` (see
+[`GET /volumes/:cid`](rpc-api.md#read-routes)).
 
 ## Discovery and peer health
 

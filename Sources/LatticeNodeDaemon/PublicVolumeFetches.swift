@@ -7,13 +7,16 @@ import VolumeBroker
 /// for one CID share one read and one archive buffer, and at most `limit`
 /// CIDs are read at once (the operator's `--public-read-fetches`); past
 /// that a reader waits, first come first served, for a place. A read is
-/// busy, never reported absent, when the node's own content budget is full
-/// or its reader waited `maximumWait` without a place.
+/// busy, never reported absent, when the node's own content budget is full,
+/// and a reader that waited `maximumWait` without a place is answered so.
 actor PublicVolumeFetches {
     enum Answer: Sendable {
         case archive(ByteBuffer)
         case notServed
+        /// The node's own content budget had no room, or it is stopping.
         case busy
+        /// The reader waited `maximumWait`, or was cancelled, without a place.
+        case waited
     }
 
     /// How many reads run at once: what the operator asked for, but no
@@ -33,13 +36,15 @@ actor PublicVolumeFetches {
     }
 
     private let limit: Int
-    private let maximumWait: Duration
+    let maximumWait: Duration
     private let fetch: @Sendable (String) async throws -> SerializedVolume?
     private var inFlight: [String: Task<Answer, Never>] = [:]
     /// Readers waiting for a place, oldest first. Only while every place is
     /// taken: a freed place goes straight to the oldest.
     private var waiting: [Waiter] = []
     private var nextWaiter: UInt64 = 0
+
+    var waitingCount: Int { waiting.count }
 
     /// `fetch` answers nil when no peer serves the Volume within the
     /// archive caps, and throws when the node had no room to read it or is
@@ -49,6 +54,7 @@ actor PublicVolumeFetches {
         maximumWait: Duration = .seconds(30),
         fetch: @escaping @Sendable (String) async throws -> SerializedVolume?
     ) {
+        precondition(limit > 0, "a node that reads none for its public port has no PublicVolumeFetches")
         self.limit = limit
         self.maximumWait = maximumWait
         self.fetch = fetch
@@ -61,7 +67,7 @@ actor PublicVolumeFetches {
         } else if inFlight.count < limit {
             task = start(root)
         } else {
-            guard let started = await place(for: root) else { return .busy }
+            guard let started = await place(for: root) else { return .waited }
             task = started
         }
         let answer = await task.value
@@ -102,7 +108,7 @@ actor PublicVolumeFetches {
         nextWaiter += 1
         let timeout = Task { [maximumWait] in
             guard (try? await Task.sleep(for: maximumWait)) != nil else { return }
-            await self.leave(id)
+            self.leave(id)
         }
         defer { timeout.cancel() }
         return await withTaskCancellationHandler {

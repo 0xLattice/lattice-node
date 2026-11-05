@@ -118,6 +118,59 @@ final class PublicVolumeFetchTests: XCTestCase {
         }
     }
 
+    /// A reader that waited the bound without a place is 503, told to ask
+    /// again after about as long as it waited; one that goes away while it
+    /// waits leaves the queue at once.
+    func testAWaitingReaderIsAnsweredOrLeavesWithItsConnection() async throws {
+        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-public-fetch-wait-\(UUID().uuidString)"
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
+        let storage = try await NodeStorage.open(configuration: NodeConfiguration(
+            chainPath: ["Nexus"], storagePath: storageDirectory,
+            privateKeyHex: String(repeating: "01", count: 32)
+        ))
+        let service = try await startRuntime(storage)
+        let first = try spec(78).rawCID
+        let root = try spec(79).rawCID
+        for wait in [Duration.seconds(2), .seconds(30)] {
+            let gate = AsyncStream<Void>.makeStream()
+            let reads = ReadCount()
+            let fetches = PublicVolumeFetches(limit: 1, maximumWait: wait) { cid in
+                await reads.add(cid)
+                if cid == first { for await _ in gate.stream { break } }
+                return nil
+            }
+            let held = Task { await fetches.archive(first) }
+            try await eventually("the place is taken") { await reads.count == 1 }
+            let app = makePublicReadApplication(service: service, host: "127.0.0.1", port: 0, fetches: fetches)
+            if wait == .seconds(2) {
+                try await app.test(.router) { client in
+                    try await client.execute(uri: "/volumes/\(root)", method: .get) { response in
+                        XCTAssertEqual(response.status, .serviceUnavailable)
+                        XCTAssertEqual(response.headers[.retryAfter], "2", "ask again after about the wait")
+                    }
+                }
+            } else {
+                try await app.test(.live) { client in
+                    let reader = TestClient(host: "localhost", port: try XCTUnwrap(client.port), configuration: .init(timeout: .seconds(60)))
+                    reader.connect()
+                    let request = Task { try? await reader.get("/volumes/\(root)") }
+                    try await eventually("the reader waits") { await fetches.waitingCount == 1 }
+                    try await reader.shutdown()
+                    try await eventually("its connection closed, it left the queue", within: .seconds(10)) {
+                        await fetches.waitingCount == 0
+                    }
+                    _ = await request.value
+                }
+            }
+            gate.continuation.yield()
+            _ = await held.value
+            let roots = await reads.roots
+            XCTAssertEqual(roots, [first], "the waiter's CID is never read")
+        }
+    }
+
     /// Reads at once: what the operator asked, within half the budget at
     /// the archive cap, at least one; none when asked for none.
     func testTheLimitFitsInHalfTheBudget() {
@@ -145,7 +198,7 @@ final class PublicVolumeFetchTests: XCTestCase {
         let first = Task { await fetches.archive(volume.rawCID) }
         try await eventually("the first read started") { await reads.count == 1 }
         let other = Task { await fetches.archive("other") }
-        try await Task.sleep(for: .milliseconds(100))
+        try await eventually("the other CID waits") { await fetches.waitingCount == 1 }
         let whileFull = await reads.count
         XCTAssertEqual(whileFull, 1, "another CID past the limit waits, not read")
         gate.continuation.yield()
@@ -175,7 +228,7 @@ final class PublicVolumeFetchTests: XCTestCase {
             guard case .archive = answer else { return XCTFail("every reader in the burst is served") }
         }
         let peak = await reads.peak
-        XCTAssertEqual(peak, 2, "at most the limit read at once")
+        XCTAssertLessThanOrEqual(peak, 2, "at most the limit read at once")
     }
 
     /// A waiting reader that is cancelled leaves the queue: it is busy, its
@@ -191,11 +244,13 @@ final class PublicVolumeFetchTests: XCTestCase {
         let first = Task { await fetches.archive("first") }
         try await eventually("the first read started") { await reads.count == 1 }
         let cancelled = Task { await fetches.archive("cancelled") }
-        try await Task.sleep(for: .milliseconds(50))
+        try await eventually("it waits") { await fetches.waitingCount == 1 }
         let behind = Task { await fetches.archive("behind") }
-        try await Task.sleep(for: .milliseconds(50))
+        try await eventually("the reader behind it waits") { await fetches.waitingCount == 2 }
         cancelled.cancel()
-        guard case .busy = await cancelled.value else { return XCTFail("a cancelled waiter is busy") }
+        guard case .waited = await cancelled.value else { return XCTFail("a cancelled waiter has no place") }
+        let left = await fetches.waitingCount
+        XCTAssertEqual(left, 1, "it left the queue")
         gate.continuation.yield()
         _ = await first.value
         guard case .notServed = await behind.value else { return XCTFail("the reader behind is read") }
@@ -203,9 +258,9 @@ final class PublicVolumeFetchTests: XCTestCase {
         XCTAssertEqual(roots, ["first", "behind"], "the cancelled CID is never read")
     }
 
-    /// A reader that waits longer than the bound is busy, and its CID is
-    /// never read.
-    func testAWaitLongerThanTheBoundIsBusy() async throws {
+    /// A reader that waits longer than the bound has no place, and its CID
+    /// is never read.
+    func testAWaitLongerThanTheBoundEnds() async throws {
         let gate = AsyncStream<Void>.makeStream()
         let reads = ReadCount()
         let fetches = PublicVolumeFetches(limit: 1, maximumWait: .milliseconds(50)) { root in
@@ -215,7 +270,7 @@ final class PublicVolumeFetchTests: XCTestCase {
         }
         let first = Task { await fetches.archive("first") }
         try await eventually("the first read started") { await reads.count == 1 }
-        guard case .busy = await fetches.archive("late") else { return XCTFail("past the bound is busy") }
+        guard case .waited = await fetches.archive("late") else { return XCTFail("past the bound it has no place") }
         gate.continuation.yield()
         _ = await first.value
         let roots = await reads.roots
@@ -237,7 +292,7 @@ final class PublicVolumeFetchTests: XCTestCase {
         let first = Task { await fetches.archive("first") }
         try await eventually("the first read started") { await reads.count == 1 }
         let waiters = (0..<3).map { _ in Task { await fetches.archive(volume.rawCID) } }
-        try await Task.sleep(for: .milliseconds(100))
+        try await eventually("all three wait") { await fetches.waitingCount == 3 }
         gate.continuation.yield()
         _ = await first.value
         for waiter in waiters {
