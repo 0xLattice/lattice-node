@@ -195,6 +195,11 @@ final class BoundedProcessWaitTests: XCTestCase {
             .seconds(800)
         )
         XCTAssertEqual(MiningRoundDeadline.deadline(longestCompletedRound: .seconds(400), multiplier: 0), allowance)
+        // A huge multiplier saturates rather than trapping.
+        XCTAssertGreaterThan(
+            MiningRoundDeadline.deadline(longestCompletedRound: .seconds(400), multiplier: .max),
+            .seconds(1_000_000)
+        )
     }
 
     /// A completed round is bounded only by the PREVIOUS deadline, so feeding

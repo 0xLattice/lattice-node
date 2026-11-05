@@ -36,6 +36,10 @@ public enum MiningRoundDeadline {
     ) -> Duration {
         let measured = min(longestCompletedRound, firstRoundAllowance)
         let headroom = Int64(clamping: max(multiplier, 1))
-        return max(firstRoundAllowance, measured * headroom)
+        // Whole seconds, saturating: `Duration * Int` traps on overflow, and
+        // a huge multiplier means "effectively never", not a crash.
+        let (seconds, overflow) = measured.components.seconds
+            .multipliedReportingOverflow(by: headroom)
+        return max(firstRoundAllowance, .seconds(overflow ? .max : seconds))
     }
 }
