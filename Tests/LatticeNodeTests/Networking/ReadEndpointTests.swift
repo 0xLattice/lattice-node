@@ -27,6 +27,8 @@ final class ReadEndpointTests: XCTestCase {
         var lookups = 0
         var asked: [String] = []
         var released: [String] = []
+        /// Held asks that have delivered their answers.
+        var lateDelivered = 0
         var discoveryDelay: UInt64 = 0
         var providers: [PeerEndpoint]
         /// Providers this node has a session with: not what the search returns.
@@ -85,13 +87,15 @@ final class ReadEndpointTests: XCTestCase {
         /// Every ask "dials": a session the directory must release.
         func ask(_ provider: PeerEndpoint, _ request: ReadEndpointRequestMessage) async -> Bool {
             asked.append(provider.publicKey)
-            if late.contains(provider.publicKey) { await withCheckedContinuation { lateWaiting.append($0) } }
+            let wasLate = late.contains(provider.publicKey)
+            if wasLate { await withCheckedContinuation { lateWaiting.append($0) } }
             for (from, response) in respondV2(provider, request) {
                 await directory?.receive(response, from: from)
             }
             for (from, response) in respond(provider, request) {
                 await directory?.receive(response, from: from)
             }
+            if wasLate { lateDelivered += 1 }
             return true
         }
 
@@ -502,8 +506,9 @@ final class ReadEndpointTests: XCTestCase {
     }
 
     /// A lookup that answered and waits only on a late host holds no slot:
-    /// with every slot's lookup answered, another path still runs; and a
-    /// session the late ask dialed is released when its lookup closes.
+    /// with every slot's lookup answered, another path still runs. The late
+    /// ask's session, dialed once its answer closed the lookup, is released
+    /// at once (`dialed` finds no lookup and drops it).
     func testAnsweredLookupsStillCollectingDoNotHoldASlot() async throws {
         let fast = Self.endpoint(1)
         let slow = Self.endpoint(2)
@@ -526,9 +531,50 @@ final class ReadEndpointTests: XCTestCase {
         let releasedBefore = await script.released
         XCTAssertFalse(releasedBefore.contains(slow.publicKey), "the late ask is still open")
         await script.answer()
-        try await eventually("the late host's session is released when its lookups close") {
+        try await eventually("the late host's session is released once its ask returns") {
             await script.released.contains(slow.publicKey)
         }
+    }
+
+    /// At most `maximumConcurrentLookups` answered lookups stay open: one
+    /// more answering closes the oldest, whose sessions are released and
+    /// whose late answer is dropped, while the newest still collects.
+    func testOneAnsweredLookupTooManyClosesTheOldest() async throws {
+        let slow = Self.endpoint(2)
+        let oldestFast = Self.endpoint(10)
+        let newestFast = Self.endpoint(11)
+        let script = Script(providers: [oldestFast, slow]) { provider, request in
+            [Self.answer(provider, request, url: "https://\(provider.port).example")]
+        }
+        await script.holdAnswers(from: [slow])
+        let directory = await directory(script, deadline: .seconds(20))
+        let cap = ReadEndpointDirectory.maximumConcurrentLookups
+        let oldest = ["Nexus", "Oldest"]
+        let first = await directory.lookup(oldest).map(\.url)
+        XCTAssertEqual(first, ["https://20010.example"])
+
+        await script.provide([Self.endpoint(12), slow])
+        _ = await withTaskGroup(of: Void.self) { group in
+            for n in 1..<cap { group.addTask { _ = await directory.lookup(["Nexus", "Child-\(n)"]) } }
+        }
+        let releasedAtBound = await script.released
+        XCTAssertFalse(releasedAtBound.contains(oldestFast.publicKey), "at the bound, the oldest stays open")
+
+        await script.provide([newestFast, slow])
+        let newest = ["Nexus", "Newest"]
+        _ = await directory.lookup(newest)
+        try await eventually("the oldest lookup is closed and its session released") {
+            await script.released.contains(oldestFast.publicKey)
+        }
+        let releasedNewest = await script.released
+        XCTAssertFalse(releasedNewest.contains(newestFast.publicKey), "the newest still collects")
+
+        await script.answer()
+        try await eventually("every held ask delivered") { await script.lateDelivered == cap + 1 }
+        let newestURLs = Set(await directory.lookup(newest).map(\.url))
+        XCTAssertEqual(newestURLs, ["https://20011.example", "https://20002.example"])
+        let oldestURLs = await directory.lookup(oldest).map(\.url)
+        XCTAssertEqual(oldestURLs, ["https://20010.example"], "the closed lookup's late answer is dropped")
     }
 
     /// A node answers only for a level it hosts, and only with a declared URL.

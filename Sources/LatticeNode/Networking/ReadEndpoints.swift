@@ -130,7 +130,9 @@ struct ReadEndpointResponseV2Message: CanonicalJSONMessage, Equatable, Sendable 
 /// A lookup answers `searchGrace` after its first URL, stops its search,
 /// and keeps the asks already sent open until its deadline: a host that
 /// answers later (a far region, a slow dial) goes into the cached result,
-/// so the next request lists it.
+/// so the next request lists it. At most `maximumConcurrentLookups` answered
+/// lookups stay open: one more closes the oldest, whose late answers are
+/// then no longer collected. No request is refused or delayed for it.
 ///
 /// Every URL found is kept for `lastFoundSeconds` after it was last seen,
 /// and a lookup answers with what it found and what is kept: a host that
@@ -168,6 +170,8 @@ actor ReadEndpointDirectory {
     private var lastFound: [[String]: [(at: Double, endpoint: DeclaredReadEndpoint)]] = [:]
     private var inFlight: [[String]: Task<[DeclaredReadEndpoint], Never>] = [:]
     private var lookups: [UInt64: Lookup] = [:]
+    /// Answered lookups still open for late answers, oldest answer first.
+    private var collecting: [UInt64] = []
     /// Each request in flight: its lookup and the peer it was sent to.
     private var requests: [UInt64: (lookup: UInt64, peerKey: String)] = [:]
     private var nextID: UInt64 = 1
@@ -420,6 +424,8 @@ actor ReadEndpointDirectory {
             lookup.discovery?.cancel()
             lookups[lookupID] = lookup
             waiter.resume(returning: lookup.urls)
+            collecting.append(lookupID)
+            if collecting.count > Self.maximumConcurrentLookups { close(collecting[0]) }
         }
         if !lookup.searching && lookup.unanswered.isEmpty { close(lookupID) }
     }
@@ -429,6 +435,7 @@ actor ReadEndpointDirectory {
     /// sessions it dialed.
     private func close(_ lookupID: UInt64) {
         guard let lookup = lookups.removeValue(forKey: lookupID) else { return }
+        collecting.removeAll { $0 == lookupID }
         requests = requests.filter { $0.value.lookup != lookupID }
         for ask in lookup.asks { ask.cancel() }
         lookup.discovery?.cancel()
