@@ -127,9 +127,10 @@ struct ReadEndpointResponseV2Message: CanonicalJSONMessage, Equatable, Sendable 
 /// running at once: distinct names neither coalesce nor hit the cache, so
 /// under that pressure a request gets nothing rather than starting another.
 ///
-/// A lookup answers `searchGrace` after its first URL but keeps collecting
-/// until its deadline: a host that answers later (a far region, a slow
-/// dial) goes into the cached result, so the next request lists it.
+/// A lookup answers `searchGrace` after its first URL, stops its search,
+/// and keeps the asks already sent open until its deadline: a host that
+/// answers later (a far region, a slow dial) goes into the cached result,
+/// so the next request lists it.
 ///
 /// Every URL found is kept for `lastFoundSeconds` after it was last seen,
 /// and a lookup answers with what it found and what is kept: a host that
@@ -219,9 +220,9 @@ actor ReadEndpointDirectory {
         if let cached = cache[chainPath], clock() < cached.until { return cached.urls }
         if let running = inFlight[chainPath] { return await running.value }
         // Under pressure: the hosts kept, or nothing; nothing cached. A
-        // lookup still collecting after its answer counts as running.
-        let running = inFlight.count + lookups.values.filter(\.answered).count
-        guard running < Self.maximumConcurrentLookups else { return remember([], for: chainPath, at: clock()) }
+        // lookup collecting after its answer holds no slot: it only waits on
+        // asks already sent, and its deadline ends it.
+        guard inFlight.count < Self.maximumConcurrentLookups else { return remember([], for: chainPath, at: clock()) }
         let task = Task { await self.run(chainPath) }
         inFlight[chainPath] = task
         let found = await task.value
@@ -303,8 +304,8 @@ actor ReadEndpointDirectory {
     /// providers this node is connected to are asked at once, those the
     /// search finds as it returns, and the lookup answers with what came in
     /// `searchGrace` after the first URL, or at the deadline, as DHT
-    /// provider searches stop once they have enough. It keeps collecting
-    /// until the deadline, unless nothing is left outstanding before.
+    /// provider searches stop once they have enough. The asks already sent
+    /// stay open until the deadline, unless all are answered before.
     private func run(_ chainPath: [String]) async -> [DeclaredReadEndpoint] {
         let lookupID = nextID
         nextID += 1
@@ -333,7 +334,7 @@ actor ReadEndpointDirectory {
     /// `maximumConnectedAsked` of the `connected`, unless the lookup already
     /// ended. The search's providers (not `connected`) are the last to come.
     private func ask(_ lookupID: UInt64, _ providers: [PeerEndpoint], connected: Bool) {
-        guard var lookup = lookups[lookupID] else { return }
+        guard var lookup = lookups[lookupID], !lookup.answered else { return }
         // This node's own key is in `asked` from the start, never asked.
         let room = connected ? Self.maximumConnectedAsked : Self.maximumAsked - (lookup.asked.count - 1)
         var fresh: [(PeerEndpoint, String)] = []
@@ -409,15 +410,18 @@ actor ReadEndpointDirectory {
     }
 
     /// Close a lookup with nothing left outstanding; answer one whose grace
-    /// is over and keep it collecting.
+    /// is over, stop its search, and keep its asks open for late answers.
     private func settle(_ lookupID: UInt64) {
-        guard let lookup = lookups[lookupID], lookup.waiter != nil || lookup.answered else { return }
-        if !lookup.searching && lookup.unanswered.isEmpty { return close(lookupID) }
+        guard var lookup = lookups[lookupID], lookup.waiter != nil || lookup.answered else { return }
         if lookup.graceOver, !lookup.answered, let waiter = lookup.waiter {
-            lookups[lookupID]?.waiter = nil
-            lookups[lookupID]?.answered = true
+            lookup.waiter = nil
+            lookup.answered = true
+            lookup.searching = false
+            lookup.discovery?.cancel()
+            lookups[lookupID] = lookup
             waiter.resume(returning: lookup.urls)
         }
+        if !lookup.searching && lookup.unanswered.isEmpty { close(lookupID) }
     }
 
     /// End a lookup: answer its waiter if still waiting, drop its requests
