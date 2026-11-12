@@ -311,7 +311,8 @@ extension NodeStorage {
 
     /// The child blocks a mined root carries at hosted levels, outermost
     /// first, each stored and with its proof from this root: only those the
-    /// grind's work meets (a verified contribution).
+    /// grind's work meets (a verified contribution), at any depth below
+    /// carriers it misses.
     nonisolated func carriedGrinds(
         of root: Block, hosted: Set<ChainPath>, remote: IvyRootContentSource? = nil
     ) async throws -> [MinedGrind.Carried] {
@@ -339,14 +340,18 @@ extension NodeStorage {
                 guard let proof = try await ChildBlockProof.extending(
                     proofToCarrier.map { [$0] }, by: BlockHeader(node: carrier), into: directory, fetcher: localFetcher
                 ).first else { continue }
-                // Only a block the grind's work meets is stored and walked.
-                guard case .success(let evidence) = await proof.verifySecuringWork(child: block, chainPath: childPath),
-                      evidence.contribution != nil else { continue }
+                guard case .success(let evidence) = await proof.verifySecuringWork(child: block, chainPath: childPath)
+                else { continue }
+                // A block the grind's work misses is still walked: a carrier
+                // need not meet its own target, so a descendant with an easier
+                // one can be met through it. Only a met block (a verified
+                // contribution) is stored and carried.
+                frontier.append((block, childPath, proof))
+                guard evidence.contribution != nil else { continue }
                 let roots = try await storingAndRetaining(child.rawCID, at: childPath, from: localFetcher) { storage in
                     try await child.storeBlock(fetcher: localFetcher, storer: storage)
                 }
                 bundles.record(root: child.rawCID, roots: roots)
-                frontier.append((block, childPath, proof))
                 guard let grandchildren = try await block.children.resolve(fetcher: localFetcher).node else { continue }
                 carried.append(MinedGrind.Carried(
                     path: childPath, block: block, children: grandchildren, proof: proof, evidence: evidence

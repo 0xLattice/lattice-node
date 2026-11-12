@@ -1075,6 +1075,11 @@ extension NodeRuntime {
                 timestamp: timestamp, rewardRecipient: nil, nonce: 0
             )
             let block: Block?
+            // A child's own template schedules its subtree: the block its
+            // search target names below it, and every threshold there. Kept,
+            // a grandchild's easier target reaches the root's search.
+            var searchWitness: ChildSchedulingWitness?
+            var subtreeThresholds: [UInt256]?
             if let tipCID = input.tipCID {
                 // Building below the act-on tip: the block carries neither
                 // the pool, which is kept on the act-on tip, nor children.
@@ -1095,7 +1100,7 @@ extension NodeRuntime {
                     spec: spec, fetcher: fetcher
                 )
                 if !refusedHere.isEmpty { refused.append(PolicyRefusal(path: input.path, tipCID: tipCID, cids: refusedHere)) }
-                block = try? await MiningTemplateAssembly.fit(
+                let template = try? await MiningTemplateAssembly.fit(
                     chainPath: input.path, previous: previous,
                     pooled: pooled, provided: grandchildren,
                     hosted: directories(below: input.path, among: inputs), parentCarrier: carrier,
@@ -1103,7 +1108,10 @@ extension NodeRuntime {
                     minimumWork: request.minimumWork,
                     difficultyAnchor: below ? anchorBelow : input.anchor,
                     spec: spec, fetcher: fetcher
-                ).block
+                )
+                block = template?.block
+                searchWitness = template?.searchWitness
+                subtreeThresholds = template?.subtreeThresholds
             } else if let spec = input.genesisSpec {
                 // A genesis carries no children: a nested genesis commits its
                 // carrier's entering state, and a genesis enters the empty
@@ -1117,7 +1125,12 @@ extension NodeRuntime {
             } else {
                 block = nil
             }
-            if let block { candidates.append(DirectChildCandidate(directory: input.path[input.path.count - 1], block: block)) }
+            if let block {
+                candidates.append(DirectChildCandidate(
+                    directory: input.path[input.path.count - 1], block: block,
+                    searchWitness: searchWitness, subtreeThresholds: subtreeThresholds
+                ))
+            }
         }
         return candidates
     }
