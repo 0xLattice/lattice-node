@@ -67,10 +67,11 @@ struct ReadEndpointTransport: Sendable {
     var connectedProviders: @Sendable (String) async -> [PeerEndpoint] = { _ in [] }
     /// Provider endpoints announced under a key.
     let providers: @Sendable (String) async -> [PeerEndpoint]
-    /// Connect when needed, then send the request; true when it dialed a
-    /// session for this request, nil when it sent nothing (the dial failed):
-    /// a request never sent is never answered, so it is not waited for.
-    let ask: @Sendable (PeerEndpoint, ReadEndpointRequestMessage) async -> Bool?
+    /// Connect when needed, then send the request: whether the request was
+    /// sent (a request never sent is never answered, so it is not waited
+    /// for) and whether a session was dialed for it (closed when its lookup
+    /// ends, sent or not).
+    let ask: @Sendable (PeerEndpoint, ReadEndpointRequestMessage) async -> (sent: Bool, dialed: Bool)
     /// Close a session `ask` dialed, once its lookup is over.
     let release: @Sendable (PeerEndpoint) async -> Void
 
@@ -87,15 +88,17 @@ struct ReadEndpointTransport: Sendable {
             providers: { await ivy.discoverProviders(rootCID: $0) },
             ask: { provider, request in
                 guard let key = try? PeerKey(provider.publicKey),
-                      let payload = try? request.encoded() else { return nil }
+                      let payload = try? request.encoded() else { return (false, false) }
                 let peer = PeerID(publicKey: key.hex)
                 var dialed = false
                 if !(await ivy.connectedPeers).contains(peer) {
-                    guard !Task.isCancelled, (try? await ivy.connect(to: provider)) != nil else { return nil }
+                    guard !Task.isCancelled, (try? await ivy.connect(to: provider)) != nil else { return (false, false) }
                     dialed = true
                 }
-                _ = await ivy.sendMessage(to: peer, topic: ReadEndpointTopic.request, payload: payload)
-                return dialed
+                guard case .enqueued = await ivy.sendMessage(
+                    to: peer, topic: ReadEndpointTopic.request, payload: payload
+                ) else { return (false, dialed) }
+                return (true, dialed)
             },
             release: { provider in
                 guard let key = try? PeerKey(provider.publicKey), !keep.contains(key.hex) else { return }
@@ -356,11 +359,9 @@ actor ReadEndpointDirectory {
             lookup.unanswered.insert(requestID)
             let message = ReadEndpointRequestMessage(chainPath: lookup.chainPath, requestID: requestID)
             lookup.asks.append(Task {
-                switch await transport.ask(provider, message) {
-                case true?: await self.dialed(lookupID, provider)
-                case false?: break
-                case nil: self.unsent(requestID)
-                }
+                let outcome = await transport.ask(provider, message)
+                if outcome.dialed { await self.dialed(lookupID, provider) }
+                if !outcome.sent { self.unsent(requestID) }
             })
         }
         if !connected { lookup.searching = false }

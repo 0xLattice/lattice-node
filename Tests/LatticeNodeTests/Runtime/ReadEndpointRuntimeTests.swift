@@ -274,13 +274,13 @@ final class ReadEndpointRuntimeTests: XCTestCase {
             privateKeyHex: String(repeating: "3a", count: 32)
         )
         let storage = try await NodeStorage.open(configuration: configuration)
-        let tip = Mutex("tip-1")
+        let tip = Mutex((cid: "tip-1", height: UInt64(500)))
         let visited = Mutex(0)
         let reads = ChainReads(
             storage: storage,
             tip: { ChainStatus(
                 phase: .active, chainPath: ["Nexus"], nexusGenesisCID: configuration.nexusGenesisCID,
-                tipCID: tip.withLock { $0 }, height: 500, revision: nil
+                tipCID: tip.withLock { $0.cid }, height: tip.withLock { $0.height }, revision: nil
             ) },
             canonicalCID: { _ in
                 visited.withLock { $0 += 1 }
@@ -296,8 +296,15 @@ final class ReadEndpointRuntimeTests: XCTestCase {
         XCTAssertNil(missed)
         XCTAssertEqual(visited.withLock { $0 }, Int(ChainReads.committedChildDepth), "one walk for every name")
 
-        tip.withLock { $0 = "tip-2" }
+        tip.withLock { $0 = (cid: "tip-2", height: 501) }
         _ = await reads.committedChild(directory: "Made-up-0")
         XCTAssertEqual(visited.withLock { $0 }, 2 * Int(ChainReads.committedChildDepth), "a new tip walks again")
+
+        // A caller that read an older tip neither walks nor evicts the newer one.
+        tip.withLock { $0 = (cid: "tip-1", height: 500) }
+        _ = await reads.committedChild(directory: "Made-up-0")
+        tip.withLock { $0 = (cid: "tip-2", height: 501) }
+        _ = await reads.committedChild(directory: "Made-up-0")
+        XCTAssertEqual(visited.withLock { $0 }, 2 * Int(ChainReads.committedChildDepth), "the newer record is kept")
     }
 }

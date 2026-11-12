@@ -437,7 +437,7 @@ public struct ChainReads: Sendable {
     public func committedChild(directory: String) async -> String? {
         let status = await tip()
         guard let tipCID = status.tipCID, let top = status.height else { return nil }
-        return await committedChildren.at(tipCID) { [self] in
+        return await committedChildren.at(tipCID, height: top) { [self] in
             var newest: [String: String] = [:]
             var height = top
             while top - height < Self.committedChildDepth {
@@ -907,14 +907,18 @@ extension ExplorerProjectedBlock {
 
 /// The directories the blocks below one tip commit, each with its newest
 /// child block: built once for the newest tip asked about, concurrent askers
-/// sharing the build. One tip is held; a new tip replaces it.
+/// sharing the build. One tip is held; a new tip replaces it, but a lower
+/// one (a caller that read the tip before it moved) is answered from the
+/// newer record rather than walking again and evicting it.
 private actor CommittedChildren {
-    private var latest: (tip: String, build: Task<[String: String], Never>)?
+    private var latest: (tip: String, height: UInt64, build: Task<[String: String], Never>)?
 
-    func at(_ tip: String, build: @escaping @Sendable () async -> [String: String]) async -> [String: String] {
-        if let latest, latest.tip == tip { return await latest.build.value }
+    func at(
+        _ tip: String, height: UInt64, build: @escaping @Sendable () async -> [String: String]
+    ) async -> [String: String] {
+        if let latest, latest.tip == tip || height < latest.height { return await latest.build.value }
         let task = Task { await build() }
-        latest = (tip, task)
+        latest = (tip, height, task)
         return await task.value
     }
 }
