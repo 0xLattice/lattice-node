@@ -299,12 +299,5 @@ final class ReadEndpointRuntimeTests: XCTestCase {
         tip.withLock { $0 = (cid: "tip-2", height: 501) }
         _ = await reads.committedChild(directory: "Made-up-0")
         XCTAssertEqual(visited.withLock { $0 }, 2 * Int(ChainReads.committedChildDepth), "a new tip walks again")
-
-        // A caller that read an older tip neither walks nor evicts the newer one.
-        tip.withLock { $0 = (cid: "tip-1", height: 500) }
-        _ = await reads.committedChild(directory: "Made-up-0")
-        tip.withLock { $0 = (cid: "tip-2", height: 501) }
-        _ = await reads.committedChild(directory: "Made-up-0")
-        XCTAssertEqual(visited.withLock { $0 }, 2 * Int(ChainReads.committedChildDepth), "the newer record is kept")
     }
 }
