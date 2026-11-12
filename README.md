@@ -115,6 +115,8 @@ Every grind is checked against every hosted target. Configure a recipient for
 each chain whose rewards and fees should be paid; an omitted recipient burns
 that chain's payout.
 
+To solo-mine Nexus with a GPU, see [lattice.build/mine](https://lattice.build/mine/).
+
 ## HTTP API
 
 The API has one unversioned route set. There are no `/v1` aliases.
@@ -175,3 +177,7 @@ Published at [lattice.build/docs](https://lattice.build/docs/):
 
 `Package.swift` and `Package.resolved` are the authority for dependency
 versions.
+
+## Community
+
+Questions and proposals: [GitHub Discussions](https://github.com/0xLattice/lattice-node/discussions). Announcements: [X (@0xLattice)](https://x.com/0xLattice).
