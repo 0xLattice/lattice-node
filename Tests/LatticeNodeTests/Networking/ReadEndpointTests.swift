@@ -57,6 +57,13 @@ final class ReadEndpointTests: XCTestCase {
 
         func connect(_ providers: [PeerEndpoint]) { connected = providers }
 
+        /// Providers whose dial fails: nothing is sent to them.
+        var unreachable: Set<String> = []
+        func unreach(_ providers: [PeerEndpoint]) { unreachable = Set(providers.map(\.publicKey)) }
+        /// Providers dialed whose send is refused (backpressure, a closed session).
+        var refusing: Set<String> = []
+        func refuse(_ providers: [PeerEndpoint]) { refusing = Set(providers.map(\.publicKey)) }
+
         /// While held, discovery waits until `release` opens the gate.
         private var held = false
         private var waiting: [CheckedContinuation<Void, Never>] = []
@@ -85,8 +92,10 @@ final class ReadEndpointTests: XCTestCase {
         }
 
         /// Every ask "dials": a session the directory must release.
-        func ask(_ provider: PeerEndpoint, _ request: ReadEndpointRequestMessage) async -> Bool {
+        func ask(_ provider: PeerEndpoint, _ request: ReadEndpointRequestMessage) async -> (sent: Bool, dialed: Bool) {
             asked.append(provider.publicKey)
+            if unreachable.contains(provider.publicKey) { return (false, false) }
+            if refusing.contains(provider.publicKey) { return (false, true) }
             let wasLate = late.contains(provider.publicKey)
             if wasLate { await withCheckedContinuation { lateWaiting.append($0) } }
             for (from, response) in respondV2(provider, request) {
@@ -96,7 +105,7 @@ final class ReadEndpointTests: XCTestCase {
                 await directory?.receive(response, from: from)
             }
             if wasLate { lateDelivered += 1 }
-            return true
+            return (true, true)
         }
 
         func release(_ provider: PeerEndpoint) { released.append(provider.publicKey) }
@@ -177,6 +186,39 @@ final class ReadEndpointTests: XCTestCase {
         let urls = await directory.lookup(Self.path).map(\.url)
         XCTAssertEqual(urls, ["https://talker.example"])
         XCTAssertLessThan(ContinuousClock.now - start, .seconds(2))
+    }
+
+    /// A provider whose dial fails was sent nothing and will never answer:
+    /// once every ask has failed, the lookup ends, not at its deadline.
+    func testFailedDialsEndTheLookupBeforeItsDeadline() async throws {
+        let providers = (1...3).map(Self.endpoint)
+        let script = Script(providers: providers) { _, _ in [] }
+        await script.unreach(providers)
+        let directory = await directory(script, deadline: .seconds(30))
+        let start = ContinuousClock.now
+        let urls = await directory.lookup(Self.path)
+        XCTAssertEqual(urls, [])
+        XCTAssertLessThan(ContinuousClock.now - start, .seconds(10))
+        let asked = await script.asked
+        XCTAssertEqual(Set(asked), Set(providers.map(\.publicKey)))
+        let released = await script.released
+        XCTAssertEqual(released, [], "no session was dialed")
+    }
+
+    /// A request dialed but refused on send is not waited for either, and
+    /// the session dialed for it is still released.
+    func testARefusedSendEndsTheLookupAndReleasesItsSession() async throws {
+        let providers = (1...3).map(Self.endpoint)
+        let script = Script(providers: providers) { _, _ in [] }
+        await script.refuse(providers)
+        let directory = await directory(script, deadline: .seconds(30))
+        let start = ContinuousClock.now
+        let urls = await directory.lookup(Self.path)
+        XCTAssertEqual(urls, [])
+        XCTAssertLessThan(ContinuousClock.now - start, .seconds(10))
+        try await eventually("every dialed session is released") {
+            Set(await script.released) == Set(providers.map(\.publicKey))
+        }
     }
 
     /// A provider lookup that never returns is inside the deadline too.
