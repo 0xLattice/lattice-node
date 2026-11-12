@@ -69,6 +69,8 @@ public struct ChainReads: Sendable {
     let accepted: @Sendable (String) async -> Bool
     /// This chain's current peers: the open sessions that serve it.
     public let peerCount: @Sendable () -> Int
+    /// `committedChild`'s walk, done once per tip for every name.
+    private let committedChildren = CommittedChildren()
 
     init(
         storage: NodeStorage,
@@ -428,21 +430,31 @@ public struct ChainReads: Sendable {
     }
 
     /// The newest child block this chain's canonical blocks commit under
-    /// `directory`, looking back at most `depth` blocks from the tip.
-    public func committedChild(directory: String, depth: UInt64 = 64) async -> String? {
-        guard let top = await tip().height else { return nil }
-        var height = top
-        while top - height < depth {
-            if let cid = await canonicalCID(height), let block = await block(cid: cid),
-               let index = (try? await block.children.resolve(fetcher: storage))?.node,
-               let child = index.entries[directory] {
-                return child.rawCID
+    /// `directory`, looking back at most `committedChildDepth` blocks from
+    /// the tip. A public read names any directory, so the walk is not per
+    /// name: one walk per tip records every directory the window commits,
+    /// and a name it lacks, made up or not, costs a lookup in that record.
+    public func committedChild(directory: String) async -> String? {
+        let status = await tip()
+        guard let tipCID = status.tipCID, let top = status.height else { return nil }
+        return await committedChildren.at(tipCID) { [self] in
+            var newest: [String: String] = [:]
+            var height = top
+            while top - height < Self.committedChildDepth {
+                if let cid = await canonicalCID(height), let block = await block(cid: cid),
+                   let index = (try? await block.children.resolve(fetcher: storage))?.node {
+                    for (name, child) in index.entries where newest[name] == nil {
+                        newest[name] = child.rawCID
+                    }
+                }
+                guard height > 0 else { break }
+                height -= 1
             }
-            guard height > 0 else { return nil }
-            height -= 1
-        }
-        return nil
+            return newest
+        }[directory]
     }
+
+    static let committedChildDepth: UInt64 = 64
 
     /// Up to `limit` of the child directories this chain's executed blocks
     /// have committed, after `after`, in order.
@@ -890,5 +902,19 @@ extension ExplorerProjectedBlock {
             lowestFee: block.lowestFee.uint64Value ?? .max, lowestFeeBytes: block.lowestFeeBytes,
             lowestFeeWeight: block.lowestFeeWeight, full: block.full
         )
+    }
+}
+
+/// The directories the blocks below one tip commit, each with its newest
+/// child block: built once for the newest tip asked about, concurrent askers
+/// sharing the build. One tip is held; a new tip replaces it.
+private actor CommittedChildren {
+    private var latest: (tip: String, build: Task<[String: String], Never>)?
+
+    func at(_ tip: String, build: @escaping @Sendable () async -> [String: String]) async -> [String: String] {
+        if let latest, latest.tip == tip { return await latest.build.value }
+        let task = Task { await build() }
+        latest = (tip, task)
+        return await task.value
     }
 }

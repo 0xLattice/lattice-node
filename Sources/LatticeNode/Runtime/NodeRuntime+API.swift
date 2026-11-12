@@ -548,15 +548,34 @@ extension NodeRuntime {
         let parent = Array(chainPath.dropLast())
         guard let parentReads = parent == reads.chainPath ? reads : levelReads[parent] else { return nil }
         let hostsChild = levelReads[chainPath] != nil
-        let committed = await parentReads.committedChild(directory: chainPath[chainPath.count - 1])
-        var declared = hostsChild
+        let own = hostsChild
             ? configuration.publicReadURL.map {
                 [DeclaredReadEndpoint(url: $0, acceptsSubmit: configuration.publicSubmit)]
             } ?? []
             : []
-        for endpoint in await readEndpoints.lookup(chainPath) where !declared.contains(where: { $0.url == endpoint.url }) {
+        let readEndpoints = readEndpoints
+        return await Self.chainEndpoints(
+            chainPath, hostsChild: hostsChild, own: own,
+            committed: { await parentReads.committedChild(directory: chainPath[chainPath.count - 1]) },
+            found: { await readEndpoints.lookup(chainPath) }
+        )
+    }
+
+    /// The parent's commitment and the hosts' answers are independent
+    /// reads: asked at once, a request waits for the slower, not both.
+    static func chainEndpoints(
+        _ chainPath: [String],
+        hostsChild: Bool,
+        own: [DeclaredReadEndpoint],
+        committed: @escaping @Sendable () async -> String?,
+        found: @escaping @Sendable () async -> [DeclaredReadEndpoint]
+    ) async -> ExplorerChainEndpoints? {
+        async let committedBlock = committed()
+        var declared = own
+        for endpoint in await found() where !declared.contains(where: { $0.url == endpoint.url }) {
             declared.append(endpoint)
         }
+        let committed = await committedBlock
         guard committed != nil || hostsChild || !declared.isEmpty else { return nil }
         return ExplorerChainEndpoints(
             chainPath: chainPath,

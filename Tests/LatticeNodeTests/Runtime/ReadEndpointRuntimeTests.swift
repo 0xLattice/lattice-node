@@ -3,6 +3,7 @@ import Hummingbird
 import HummingbirdTesting
 import Ivy
 import Lattice
+import Synchronization
 import XCTest
 @testable import LatticeNode
 @testable import LatticeNodeDaemon
@@ -237,5 +238,66 @@ final class ReadEndpointRuntimeTests: XCTestCase {
                 }
             }
         }
+    }
+
+    /// The parent's commitment and the hosts' answers are asked at once:
+    /// each read here answers only once it sees the other one started, so
+    /// asked one after the other, the first gives up and the result shows it.
+    func testTheCommitmentAndTheHostsAreAskedAtOnce() async throws {
+        let started = Mutex<Set<String>>([])
+        @Sendable func start(_ me: String, thenSee other: String) async -> Bool {
+            started.withLock { _ = $0.insert(me) }
+            for _ in 0..<500 {
+                if started.withLock({ $0.contains(other) }) { return true }
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            return false
+        }
+        let found = await NodeRuntime.chainEndpoints(
+            Self.beta, hostsChild: false, own: [],
+            committed: { await start("committed", thenSee: "found") ? "bafy-committed" : nil },
+            found: {
+                await start("found", thenSee: "committed")
+                    ? [DeclaredReadEndpoint(url: "https://host.example", acceptsSubmit: false)] : []
+            }
+        )
+        XCTAssertEqual(found?.committedBlock, "bafy-committed")
+        XCTAssertEqual(found?.endpoints, ["https://host.example"])
+    }
+
+    /// A public caller names any directory: the walk of the parent's recent
+    /// blocks is done once per tip, whatever the name, made up or not.
+    func testTheCommittedChildWalkIsDoneOncePerTipForEveryName() async throws {
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"],
+            storagePath: temporaryDirectory(prefix: "lattice-committed-child"),
+            privateKeyHex: String(repeating: "3a", count: 32)
+        )
+        let storage = try await NodeStorage.open(configuration: configuration)
+        let tip = Mutex("tip-1")
+        let visited = Mutex(0)
+        let reads = ChainReads(
+            storage: storage,
+            tip: { ChainStatus(
+                phase: .active, chainPath: ["Nexus"], nexusGenesisCID: configuration.nexusGenesisCID,
+                tipCID: tip.withLock { $0 }, height: 500, revision: nil
+            ) },
+            canonicalCID: { _ in
+                visited.withLock { $0 += 1 }
+                return nil
+            },
+            mempool: { _ in ChainReads.MempoolListing(count: 0, bytes: 0, cids: []) }
+        )
+        await withTaskGroup(of: String?.self) { group in
+            for n in 0..<20 { group.addTask { await reads.committedChild(directory: "Made-up-\(n)") } }
+            for await child in group { XCTAssertNil(child) }
+        }
+        let missed = await reads.committedChild(directory: "Made-up-again")
+        XCTAssertNil(missed)
+        XCTAssertEqual(visited.withLock { $0 }, Int(ChainReads.committedChildDepth), "one walk for every name")
+
+        tip.withLock { $0 = "tip-2" }
+        _ = await reads.committedChild(directory: "Made-up-0")
+        XCTAssertEqual(visited.withLock { $0 }, 2 * Int(ChainReads.committedChildDepth), "a new tip walks again")
     }
 }

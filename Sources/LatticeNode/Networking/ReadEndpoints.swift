@@ -68,8 +68,9 @@ struct ReadEndpointTransport: Sendable {
     /// Provider endpoints announced under a key.
     let providers: @Sendable (String) async -> [PeerEndpoint]
     /// Connect when needed, then send the request; true when it dialed a
-    /// session for this request.
-    let ask: @Sendable (PeerEndpoint, ReadEndpointRequestMessage) async -> Bool
+    /// session for this request, nil when it sent nothing (the dial failed):
+    /// a request never sent is never answered, so it is not waited for.
+    let ask: @Sendable (PeerEndpoint, ReadEndpointRequestMessage) async -> Bool?
     /// Close a session `ask` dialed, once its lookup is over.
     let release: @Sendable (PeerEndpoint) async -> Void
 
@@ -86,11 +87,11 @@ struct ReadEndpointTransport: Sendable {
             providers: { await ivy.discoverProviders(rootCID: $0) },
             ask: { provider, request in
                 guard let key = try? PeerKey(provider.publicKey),
-                      let payload = try? request.encoded() else { return false }
+                      let payload = try? request.encoded() else { return nil }
                 let peer = PeerID(publicKey: key.hex)
                 var dialed = false
                 if !(await ivy.connectedPeers).contains(peer) {
-                    guard !Task.isCancelled, (try? await ivy.connect(to: provider)) != nil else { return false }
+                    guard !Task.isCancelled, (try? await ivy.connect(to: provider)) != nil else { return nil }
                     dialed = true
                 }
                 _ = await ivy.sendMessage(to: peer, topic: ReadEndpointTopic.request, payload: payload)
@@ -355,7 +356,11 @@ actor ReadEndpointDirectory {
             lookup.unanswered.insert(requestID)
             let message = ReadEndpointRequestMessage(chainPath: lookup.chainPath, requestID: requestID)
             lookup.asks.append(Task {
-                if await transport.ask(provider, message) { await self.dialed(lookupID, provider) }
+                switch await transport.ask(provider, message) {
+                case true?: await self.dialed(lookupID, provider)
+                case false?: break
+                case nil: self.unsent(requestID)
+                }
             })
         }
         if !connected { lookup.searching = false }
@@ -385,6 +390,14 @@ actor ReadEndpointDirectory {
         } else {
             await drop(provider)
         }
+    }
+
+    /// A request that was never sent: no answer is coming, so its lookup
+    /// stops waiting for one and may settle before its deadline.
+    private func unsent(_ requestID: UInt64) {
+        guard let request = requests.removeValue(forKey: requestID) else { return }
+        lookups[request.lookup]?.unanswered.remove(requestID)
+        settle(request.lookup)
     }
 
     /// One lookup's hold on a dialed session ends; the last one closes it.
