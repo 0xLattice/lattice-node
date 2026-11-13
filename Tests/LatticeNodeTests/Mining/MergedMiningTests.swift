@@ -903,6 +903,93 @@ final class MergedMiningTests: XCTestCase {
         await restarted.stop()
     }
 
+    /// A grandchild whose target is easier than its parent's reaches the
+    /// root's search: the template searches for Beta's threshold and still
+    /// lists Alpha's and Nexus's, so a hit that clears only Beta's is
+    /// submitted and the miner keeps searching. That share advances Beta
+    /// alone, through an Alpha block that missed its own target.
+    func testAGrandchildsEasierTargetReachesTheRootSearch() async throws {
+        let beta = Self.alpha + ["Beta"]
+        // Beta's blocks always come later than its 1 ms schedule, so its
+        // target stays the maximum while Nexus and Alpha harden.
+        let betaSpec = ChainSpec(
+            maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
+            targetBlockTime: 1, initialReward: 10, halvingInterval: 10_000, halfLife: 10
+        )
+        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-grandchild-\(UUID().uuidString)", isDirectory: true
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
+        let port = NetworkTransportTestPorts.allocate()
+        let configuration = try NodeConfiguration(
+            chainPath: ["Nexus"], storagePath: storageDirectory, privateKeyHex: String(repeating: "4f", count: 32),
+            listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
+            hostedChildren: [Self.alpha, beta], childSpecs: [Self.alpha: Self.alphaSpec, beta: betaSpec]
+        )
+        let overlay = IvyConfig(
+            signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: [],
+            requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
+            mode: .overlay
+        )
+        let storage = try await NodeStorage.open(configuration: configuration)
+        let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration, overlay: overlay)
+        let betaReads = try XCTUnwrap(runtime.levelReads[beta])
+        let recipient = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
+        let request = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: Self.alpha, address: recipient)])
+
+        // Fast blocks harden Nexus and Alpha; Beta's genesis is mined once
+        // Alpha executes.
+        func blocks(_ template: MiningTemplateResponse) -> (alpha: Block, beta: Block)? {
+            guard let alpha = template.block.children.node?.entries["Alpha"]?.node,
+                  let beta = alpha.children.node?.entries["Beta"]?.node else { return nil }
+            return (alpha, beta)
+        }
+        var template = try await runtime.miningTemplate(request)
+        var mined = 0
+        while mined < 128 {
+            if let carried = blocks(template), template.block.target < .max,
+               carried.alpha.target < .max, carried.beta.target > carried.alpha.target,
+               (await betaReads.readSnapshot().height ?? 0) >= 1 { break }
+            _ = try await runtime.mineBlock(request)
+            mined += 1
+            try await eventually("block \(mined) executes") { runtime.published.value?.actOnHeight == UInt64(mined) }
+            template = try await runtime.miningTemplate(request)
+        }
+        let carried = try XCTUnwrap(blocks(template), "the template carries Alpha and Beta")
+        XCTAssertLessThan(carried.alpha.target, UInt256.max, "Alpha mines at a hard scheduled target")
+        XCTAssertGreaterThan(carried.beta.target, carried.alpha.target, "Beta's target is easier than Alpha's")
+
+        XCTAssertEqual(template.searchTarget, carried.beta.target, "the root searches for Beta's threshold")
+        XCTAssertEqual(template.targets.first, carried.beta.target)
+        XCTAssertTrue(template.targets.contains(carried.alpha.target), "Alpha's threshold stays open")
+        XCTAssertTrue(template.targets.contains(template.block.target), "Nexus's threshold stays open")
+
+        // A hit that clears Beta's target but misses Alpha's (and Nexus's)
+        // advances Beta alone. As in the first run, a template read while Beta settles may
+        // carry a Beta block on a tip it is leaving, so it is retried.
+        let nexusBefore = runtime.published.value?.actOnHeight ?? 0
+        var advanced = false
+        for _ in 0..<8 where !advanced {
+            let betaBefore = await betaReads.readSnapshot().height ?? 0
+            template = try await runtime.miningTemplate(request)
+            let current = try XCTUnwrap(blocks(template))
+            var nonce: UInt64 = 0
+            while true {
+                let hash = template.block.replacingNonce(nonce).proofOfWorkHash()
+                if hash > current.alpha.target, hash > template.block.target, hash <= current.beta.target { break }
+                nonce += 1
+            }
+            let share = try await runtime.submitWork(SubmitWorkRequest(workID: template.workID, nonce: nonce))
+            XCTAssertEqual(share.disposition, .childOnly)
+            advanced = (try? await eventually("the share advances Beta alone", within: .seconds(3)) {
+                (await betaReads.readSnapshot().height ?? 0) > betaBefore
+            }) != nil
+        }
+        XCTAssertTrue(advanced, "a share that misses Alpha's target advances Beta")
+        XCTAssertEqual(runtime.published.value?.actOnHeight, nexusBefore, "a share never enters Nexus")
+        await runtime.stop()
+    }
+
     private func mineNestedFirstRun(
         _ configuration: NodeConfiguration,
         _ overlay: IvyConfig,

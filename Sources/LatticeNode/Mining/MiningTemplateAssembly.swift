@@ -15,15 +15,28 @@ public struct DirectChildCandidate: Sendable {
     public let directory: String
     public let block: Block
     let searchWitness: ChildSchedulingWitness?
+    /// Every threshold a nonce can clear in this candidate's subtree, its own
+    /// first, when this node assembled the whole subtree (the candidate's own
+    /// template's `subtreeThresholds`); nil when some descendant's is unknown.
+    let subtreeThresholds: [UInt256]?
 
     public init(
         directory: String,
         block: Block,
-        searchWitness: ChildSchedulingWitness? = nil
+        searchWitness: ChildSchedulingWitness? = nil,
+        subtreeThresholds: [UInt256]? = nil
     ) {
         self.directory = directory
         self.block = block
         self.searchWitness = searchWitness
+        self.subtreeThresholds = subtreeThresholds
+    }
+
+    /// Every threshold below this candidate is known here: it carries no
+    /// children, or its subtree was assembled on this node.
+    var subtreeKnown: Bool {
+        subtreeThresholds != nil
+            || (MiningTemplate.emptyChildrenCID.map { block.children.rawCID == $0 } ?? false)
     }
 }
 
@@ -88,26 +101,30 @@ public struct MiningTemplate: Sendable {
     /// Every distinct threshold a nonce for this work can clear, easiest
     /// first, so the first is `searchTarget`. A carrier leaves the work open
     /// and the miner keeps searching toward the rest, skipping hits between
-    /// them, so the list must be complete. It is only when every direct child
-    /// is a leaf: a child carrying children of its own can clear descendant
-    /// thresholds this node never sees, so such work advertises `searchTarget`
-    /// alone and the miner stops at its first hit.
+    /// them, so the list must be complete. It is only when every direct
+    /// child's subtree is known here: a leaf, or a subtree this node
+    /// assembled, whose descendants' thresholds `thresholds` already holds. A
+    /// child carrying children this node never assembled can clear descendant
+    /// thresholds it never sees, so such work advertises `searchTarget` alone
+    /// and the miner stops at its first hit.
     var targets: [UInt256] {
-        guard let emptyChildren = Self.emptyChildrenCID,
-              childCandidates.allSatisfy({
-                  $0.block.children.rawCID == emptyChildren
-              }) else {
-            return [searchTarget]
-        }
+        guard subtreeThresholds != nil else { return [searchTarget] }
         return Set(thresholds + [searchTarget])
             .filter { $0 <= searchTarget }
             .sorted(by: >)
     }
 
+    /// Every threshold a nonce for this work can clear, this block's first,
+    /// when every child's subtree is known here; nil otherwise. A parent
+    /// carrying this block as a child folds them into its own `targets`.
+    var subtreeThresholds: [UInt256]? {
+        childCandidates.allSatisfy(\.subtreeKnown) ? thresholds : nil
+    }
+
     /// The canonical empty index. A candidate whose index bytes are not
     /// canonical has a different CID and is treated as carrying children,
     /// which only makes its work advertise the search target alone.
-    private static let emptyChildrenCID = try? HeaderImpl<FlatDictionary<BlockHeader>>(
+    static let emptyChildrenCID = try? HeaderImpl<FlatDictionary<BlockHeader>>(
         node: FlatDictionary<BlockHeader>()
     ).rawCID
 }
@@ -357,7 +374,9 @@ enum MiningTemplateAssembly {
                 proof: direct,
                 terminal: child.block
             )
-            thresholds.append(own.target)
+            // A subtree assembled here lists its descendants' thresholds too,
+            // so the miner keeps searching past a hit that clears only theirs.
+            thresholds.append(contentsOf: child.subtreeThresholds ?? [own.target])
             bind(own, ownWitness)
             var childThreshold = own
             var childWitness = ownWitness
