@@ -506,6 +506,9 @@ extension NodeRuntime {
         let workers: Int
         let failStop: @Sendable (any Error) -> Void
         let peerMemory: PeerMemory?
+        /// Each hosted child level's last template block, reused while
+        /// nothing it was built from changes (`ChildTemplateCache`).
+        let childTemplates = ChildTemplateCache()
 
         /// One overlay session per peer key; the core sees `(key, id)`.
         /// Every change publishes what the open sessions' hellos advertised.
@@ -1768,7 +1771,8 @@ extension NodeRuntime {
                 guard let basis = core.levels[path].flatMap({ NodeRuntime.miningBasis(effect, tree: $0.tree) }) else { break }
                 miningJobs.append(NodeRuntime.miningJob(
                     effect, at: path, basis: basis, storage: storage, remote: remote,
-                    children: childTemplateInputs(below: path), levels: LiveLevels(inputs: inputs)
+                    children: childTemplateInputs(below: path), levels: LiveLevels(inputs: inputs),
+                    cache: childTemplates
                 ))
                 startJobs()
             case .returnTransactions:

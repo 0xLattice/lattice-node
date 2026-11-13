@@ -682,7 +682,8 @@ extension NodeRuntime {
         storage: NodeStorage,
         remote: IvyRootContentSource? = nil,
         children: [ChildTemplateInput] = [],
-        levels: LiveLevels = .none
+        levels: LiveLevels = .none,
+        cache: ChildTemplateCache? = nil
     ) -> RuntimeJob {
         let fetcher = storage.workFetcher
         switch effect {
@@ -734,7 +735,7 @@ extension NodeRuntime {
                     var refused: [PolicyRefusal] = []
                     let built = await buildTemplate(
                         job, difficultyAnchor: basis?.anchor, fetcher: fetcher, chainPath: path,
-                        children: children, levels: levels, refused: &refused
+                        children: children, levels: levels, cache: cache, refused: &refused
                     )
                     return (built, refused)
                 }
@@ -888,6 +889,7 @@ extension NodeRuntime {
         chainPath: [String],
         children: [ChildTemplateInput] = [],
         levels: LiveLevels = .none,
+        cache: ChildTemplateCache? = nil,
         refused: inout [PolicyRefusal]
     ) async -> TemplateBuild? {
         guard job.request.parentCarrier == nil,
@@ -906,7 +908,7 @@ extension NodeRuntime {
         if !refusedHere.isEmpty { refused.append(PolicyRefusal(path: chainPath, tipCID: job.tipCID, cids: refusedHere)) }
         let provided = await childCandidates(
             of: chainPath, among: children, entering: previous.postState, timestamp: timestamp,
-            request: job.request, levels: levels, fetcher: fetcher, refused: &refused
+            request: job.request, levels: levels, fetcher: fetcher, cache: cache, refused: &refused
         )
         guard let template = try? await MiningTemplateAssembly.fit(
             chainPath: chainPath,
@@ -1063,6 +1065,7 @@ extension NodeRuntime {
         request: TemplateRequest,
         levels: LiveLevels,
         fetcher: any Fetcher,
+        cache: ChildTemplateCache? = nil,
         refused: inout [PolicyRefusal]
     ) async -> [DirectChildCandidate] {
         var candidates: [DirectChildCandidate] = []
@@ -1093,25 +1096,48 @@ extension NodeRuntime {
                 let below = tip != tipCID
                 let grandchildren = below ? [] : await childCandidates(
                     of: input.path, among: inputs, entering: previous.postState, timestamp: time,
-                    request: request, levels: levels, fetcher: fetcher, refused: &refused
+                    request: request, levels: levels, fetcher: fetcher, cache: cache, refused: &refused
                 )
-                let (pooled, refusedHere) = below ? ([], []) : await MiningPlan.policyAcceptedTransactions(
-                    input.transactions, chainPath: input.path, previous: previous, timestamp: time,
-                    spec: spec, fetcher: fetcher
+                let hosted = directories(below: input.path, among: inputs)
+                // Built from exactly this before: the block is reused, and
+                // nothing here is judged or assembled again.
+                let key = ChildTemplateCache.Key(
+                    tipCID: tip, actOnTipCID: tipCID, enteringCID: entering.rawCID,
+                    transactions: below ? [] : input.transactions.compactMap { try? Mempool.cid(of: $0) },
+                    anchor: below ? anchorBelow : input.anchor, request: request, hosted: hosted.sorted(),
+                    children: grandchildren.map { "\($0.directory)=\((try? BlockHeader(node: $0.block).rawCID) ?? "")" }
                 )
-                if !refusedHere.isEmpty { refused.append(PolicyRefusal(path: input.path, tipCID: tipCID, cids: refusedHere)) }
-                let template = try? await MiningTemplateAssembly.fit(
-                    chainPath: input.path, previous: previous,
-                    pooled: pooled, provided: grandchildren,
-                    hosted: directories(below: input.path, among: inputs), parentCarrier: carrier,
-                    timestamp: time, rewardRecipient: request.childRecipients[input.path],
-                    minimumWork: request.minimumWork,
-                    difficultyAnchor: below ? anchorBelow : input.anchor,
-                    spec: spec, fetcher: fetcher
-                )
-                block = template?.block
-                searchWitness = template?.searchWitness
-                subtreeThresholds = template?.subtreeThresholds
+                if let cached = cache?.block(at: input.path, for: key) {
+                    block = cached.block
+                    searchWitness = cached.searchWitness
+                    subtreeThresholds = cached.subtreeThresholds
+                } else {
+                    let (pooled, refusedHere) = below ? ([], []) : await MiningPlan.policyAcceptedTransactions(
+                        input.transactions, chainPath: input.path, previous: previous, timestamp: time,
+                        spec: spec, fetcher: fetcher
+                    )
+                    if !refusedHere.isEmpty { refused.append(PolicyRefusal(path: input.path, tipCID: tipCID, cids: refusedHere)) }
+                    let template = try? await MiningTemplateAssembly.fit(
+                        chainPath: input.path, previous: previous,
+                        pooled: pooled, provided: grandchildren,
+                        hosted: hosted, parentCarrier: carrier,
+                        timestamp: time, rewardRecipient: request.childRecipients[input.path],
+                        minimumWork: request.minimumWork,
+                        difficultyAnchor: below ? anchorBelow : input.anchor,
+                        spec: spec, fetcher: fetcher
+                    )
+                    block = template?.block
+                    searchWitness = template?.searchWitness
+                    subtreeThresholds = template?.subtreeThresholds
+                    // Refused transactions leave the pool, which changes the
+                    // key, so a block built while refusing is never reused.
+                    if let template, refusedHere.isEmpty {
+                        cache?.keep(ChildTemplateCache.Entry(
+                            key: key, builtAt: .now, block: template.block,
+                            searchWitness: template.searchWitness, subtreeThresholds: template.subtreeThresholds
+                        ), at: input.path)
+                    }
+                }
             } else if let spec = input.genesisSpec {
                 // A genesis carries no children: a nested genesis commits its
                 // carrier's entering state, and a genesis enters the empty
