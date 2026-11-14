@@ -63,7 +63,7 @@ struct Mine: AsyncParsableCommand {
 
         func run() async throws {
             let mining: MiningStatusResponse
-            if let rpc = try target.running() {
+            if let rpc = try await target.running() {
                 mining = try JSONDecoder().decode(MiningStatusResponse.self, from: try await send(rpc: rpc, "GET", "mining"))
             } else {
                 let mine = try Topology.load(root: target.layout.root).mine

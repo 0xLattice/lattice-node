@@ -97,7 +97,7 @@ struct Child: AsyncParsableCommand {
                 throw CtlError("\(path) is not a child chain's path")
             }
             let parent = components.dropLast().joined(separator: "/")
-            let rpc = try target.runningNode()
+            let rpc = try await target.runningNode()
             let tx = try TxOptions.parse(
                 ["--chain", parent, "--key", key] + (target.rootOption.root.map { ["--root", $0] } ?? [])
                     + (target.node.map { ["--node", $0] } ?? []) + (target.tokenFile.map { ["--token-file", $0] } ?? [])

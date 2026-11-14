@@ -263,7 +263,7 @@ struct TxOptions: ParsableArguments {
         // A child chain is a level of the one process: its reads and
         // writes go to the Nexus RPC, by chain path; the node answers 404
         // for a chain it does not host.
-        let rpc = try target.runningNode()
+        let rpc = try await target.runningNode()
         let path = chain.components(separatedBy: "/")
         let signerNonce: UInt64
         if let nonce {

@@ -315,7 +315,7 @@ struct Status: AsyncParsableCommand {
     @OptionGroup var target: NodeTarget
 
     func run() async throws {
-        guard let rpc = try target.running() else {
+        guard let rpc = try await target.running() else {
             let topology = try Topology.load(root: target.layout.root).validated()
             for path in hostedPaths(topology) { print("\(path): down") }
             return
@@ -356,7 +356,7 @@ struct Wipe: AsyncParsableCommand {
     @OptionGroup var target: NodeTarget
 
     func run() async throws {
-        if let rpc = try target.running() {
+        if let rpc = try await target.running() {
             try await send(rpc: rpc, "POST", "wipe", json: Data("{}".utf8))
             print("wiping: the node restarts on empty storage")
             try await waitForRestart(rpc)

@@ -24,7 +24,7 @@ struct Config: AsyncParsableCommand {
 
         func run() async throws {
             var value: Any
-            if let rpc = try target.running() {
+            if let rpc = try await target.running() {
                 let data = try await send(rpc: rpc, "GET", "config")
                 let response = try JSONDecoder().decode(ConfigResponse.self, from: data)
                 value = try response.config.jsonObject()
@@ -103,7 +103,7 @@ struct Restart: AsyncParsableCommand {
     @OptionGroup var target: NodeTarget
 
     func run() async throws {
-        let rpc = try target.runningNode()
+        let rpc = try await target.runningNode()
         try await send(rpc: rpc, "POST", "restart", json: Data("{}".utf8))
         print("restarting")
         try await waitForRestart(rpc)
@@ -123,7 +123,7 @@ struct Logs: AsyncParsableCommand {
 
     func run() async throws {
         let name = miner ? "mine" : "node"
-        if let rpc = try target.running() {
+        if let rpc = try await target.running() {
             let data = try await send(rpc: rpc, "GET", "logs?file=\(name)&tail=\(tail)")
             FileHandle.standardOutput.write(data)
         } else {
@@ -145,7 +145,7 @@ struct Pins: AsyncParsableCommand {
         @OptionGroup var target: NodeTarget
 
         func run() async throws {
-            let data = try await send(rpc: try target.runningNode(), "GET", "pins")
+            let data = try await send(rpc: try await target.runningNode(), "GET", "pins")
             for pin in try JSONDecoder().decode(PinList.self, from: data).pins { print(pin) }
         }
     }
@@ -160,7 +160,7 @@ struct Pins: AsyncParsableCommand {
         var fetch = false
 
         func run() async throws {
-            let rpc = try target.runningNode()
+            let rpc = try await target.runningNode()
             let body = fetch
                 ? try await send(rpc: rpc, "GET", "fetch/\(cid)")
                 : try JSONSerialization.data(withJSONObject: ["cid": cid])
@@ -175,7 +175,7 @@ struct Pins: AsyncParsableCommand {
         @Argument var cid: String
 
         func run() async throws {
-            try await send(rpc: try target.runningNode(), "DELETE", "pins/\(cid)")
+            try await send(rpc: try await target.runningNode(), "DELETE", "pins/\(cid)")
             print("unpinned \(cid)")
         }
     }
@@ -194,7 +194,7 @@ struct Tokens: AsyncParsableCommand {
         @OptionGroup var target: NodeTarget
 
         func run() async throws {
-            let data = try await send(rpc: try target.runningNode(), "GET", "tokens")
+            let data = try await send(rpc: try await target.runningNode(), "GET", "tokens")
             for token in try JSONDecoder().decode(TokensResponse.self, from: data).tokens {
                 print("\(token.name): \(token.role ?? (token.routes ?? []).joined(separator: ", "))")
             }
@@ -217,7 +217,7 @@ struct Tokens: AsyncParsableCommand {
         func run() async throws {
             guard (role == nil) == !route.isEmpty else { throw ValidationError("give --role or --route") }
             let data = try await send(
-                rpc: try target.runningNode(), "POST", "tokens",
+                rpc: try await target.runningNode(), "POST", "tokens",
                 json: JSONEncoder().encode(CreateTokenRequest(name: name, role: role, routes: route.isEmpty ? nil : route))
             )
             let token = try JSONDecoder().decode(CreateTokenResponse.self, from: data).token
@@ -235,7 +235,7 @@ struct Tokens: AsyncParsableCommand {
         @Argument var name: String
 
         func run() async throws {
-            try await send(rpc: try target.runningNode(), "DELETE", "tokens/\(name)")
+            try await send(rpc: try await target.runningNode(), "DELETE", "tokens/\(name)")
             print("revoked \(name)")
         }
     }

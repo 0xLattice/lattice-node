@@ -111,15 +111,15 @@ struct NodeTarget: ParsableArguments {
     }
 
     /// The node to ask: the remote one, or the local one while it runs.
-    func running() throws -> NodeRPC? {
+    func running() async throws -> NodeRPC? {
         if let remote = try remote() { return remote }
         guard localNodeRunning(layout) else { return nil }
-        return NodeRPC(try Topology.load(root: layout.root), layout)
+        return try await answering(NodeRPC(try Topology.load(root: layout.root), layout))
     }
 
     /// The running node to ask; an error when the local node is stopped.
-    func runningNode() throws -> NodeRPC {
-        guard let rpc = try running() else { throw CtlError("the node is not running; `lattice up` first") }
+    func runningNode() async throws -> NodeRPC {
+        guard let rpc = try await running() else { throw CtlError("the node is not running; `lattice up` first") }
         return rpc
     }
 
@@ -142,8 +142,26 @@ struct NodeTarget: ParsableArguments {
             _ = lock
             return nil
         }
-        if let local { try await api(local) }
+        if let local { try await api(try await answering(local)) }
     }
+}
+
+/// The local node once it answers: a node `lattice up` just started opens
+/// its storage and listener only after a while.
+private func answering(_ rpc: NodeRPC) async throws -> NodeRPC {
+    let deadline = ContinuousClock.now + .seconds(180)
+    var said = false
+    while await health(rpc: rpc) == nil {
+        guard ContinuousClock.now < deadline else {
+            throw CtlError("the node runs but does not answer on its RPC port; see `lattice logs`")
+        }
+        if !said {
+            FileHandle.standardError.write(Data("waiting for the node to answer\n".utf8))
+            said = true
+        }
+        try await Task.sleep(for: .milliseconds(250))
+    }
+    return rpc
 }
 
 /// Whether a node holds the local tree's storage.
@@ -162,6 +180,9 @@ enum LocalNode {
 /// The local node, by its storage lock. Callers that edit hold the spawn
 /// lock too, so no `up` starts a node meanwhile.
 func localNode(_ layout: HostLayout) -> LocalNode {
+    // A node `lattice up` started may not hold its storage lock yet; taking
+    // it here would keep that node from starting.
+    if runningPid(layout, hostProcessName) != nil { return .running }
     let directory = layout.chainDirectory(for: ChainAddress.nexus)
     guard FileManager.default.fileExists(atPath: directory.path) else { return .stopped(nil) }
     do {
