@@ -102,7 +102,21 @@ remember it, and never in a URL. A request whose `Origin` is the listener's
 own address (the page it served) is not treated as cross-origin; any other
 origin still needs `operatorAllowedOrigins` (or `rpcAllowedOrigins`). The
 page can also watch other nodes: each must list the page's origin in its
-`operatorAllowedOrigins`.
+`operatorAllowedOrigins`. Their tokens stay in the tab too unless the operator
+asks the page to remember that node.
+
+The page runs on the node's own origin, so a remembered token lives in that
+origin's local storage, readable by anything that origin serves. Serve the
+operator listener only on a private network or behind TLS: over plain HTTP on
+an open network, a token typed into the page can be read in transit.
+"Sign out of all nodes" removes every token and snapshot the page kept.
+
+Same origin is decided from the `Origin` header and the request's host
+(`Host`, or the HTTP/2 authority): every host the request names must equal
+the origin's. Behind a reverse proxy, pass the client's `Host` through
+unchanged, or list the public origin (e.g. `https://ops.example`) in
+`operatorAllowedOrigins`; otherwise the page loads and reads work, but each
+write is refused with 403.
 
 ## Integer encoding
 

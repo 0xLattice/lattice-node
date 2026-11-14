@@ -247,8 +247,10 @@ final class OperatorListenerTests: XCTestCase {
                 for asset in ["/dashboard.js", "/dashboard.css"] {
                     try await client.execute(uri: asset, method: .get) { XCTAssertEqual($0.status, .ok, asset) }
                 }
+                // Only GET of exactly those paths is open.
                 for (uri, method) in [
                     ("/status", HTTPRequest.Method.get), ("/config", .get), ("/tokens", .get), ("/restart", .post),
+                    ("/", .head), ("/", .post), ("/dashboard.js/", .get), ("/Dashboard.js", .get),
                 ] {
                     try await client.execute(uri: uri, method: method) {
                         XCTAssertEqual($0.status, .unauthorized, "\(remote ? "remote" : "loopback") \(uri)")
@@ -261,17 +263,26 @@ final class OperatorListenerTests: XCTestCase {
     /// The page a listener served calls back with its own origin, which
     /// needs no listing; any other origin is still refused.
     func testTheDashboardsOwnOriginIsNotCrossOrigin() async throws {
-        let app = try await node().app
-        try await app.test(.router) { client in
-            // The test client names the listener "localhost".
-            let own: HTTPFields = [.authorization: "Bearer \(Self.reader)", .origin: "http://localhost"]
-            try await client.execute(uri: "/status", method: .get, headers: own) { XCTAssertEqual($0.status, .ok) }
-            let other: HTTPFields = [.authorization: "Bearer \(Self.reader)", .origin: "http://elsewhere.example"]
-            try await client.execute(uri: "/status", method: .get, headers: other) { XCTAssertEqual($0.status, .forbidden) }
-            // A Host that disagrees with the origin is not the same origin.
-            var rebound = own
-            rebound.append(.init(name: .init("Host")!, value: "10.0.0.5:8090"))
-            try await client.execute(uri: "/status", method: .get, headers: rebound) { XCTAssertEqual($0.status, .forbidden) }
+        for remote in [true, false] {
+            let app = try await node(remote: remote).app
+            let credential = remote ? "Bearer \(Self.reader)" : testOperatorAuthorization
+            let mode = remote ? "remote" : "loopback"
+            try await app.test(.router) { client in
+                // The test client names the listener "localhost".
+                let own: HTTPFields = [.authorization: credential, .origin: "http://localhost"]
+                try await client.execute(uri: "/status", method: .get, headers: own) { XCTAssertEqual($0.status, .ok, mode) }
+                let other: HTTPFields = [.authorization: credential, .origin: "http://elsewhere.example"]
+                try await client.execute(uri: "/status", method: .get, headers: other) { XCTAssertEqual($0.status, .forbidden, mode) }
+                // A Host that disagrees with the origin is not the same origin,
+                // nor is a second Host beside one that agrees.
+                var rebound = own
+                rebound.append(.init(name: .init("Host")!, value: "10.0.0.5:8090"))
+                try await client.execute(uri: "/status", method: .get, headers: rebound) { XCTAssertEqual($0.status, .forbidden, mode) }
+                var doubled = own
+                doubled.append(.init(name: .init("Host")!, value: "localhost"))
+                doubled.append(.init(name: .init("Host")!, value: "evil.example"))
+                try await client.execute(uri: "/status", method: .get, headers: doubled) { XCTAssertEqual($0.status, .forbidden, mode) }
+            }
         }
     }
 
