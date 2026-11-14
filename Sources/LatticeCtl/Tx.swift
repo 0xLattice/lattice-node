@@ -209,7 +209,7 @@ struct SwapOptions: ParsableArguments {
 }
 
 struct TxOptions: ParsableArguments {
-    @OptionGroup var rootOption: RootOption
+    @OptionGroup var target: NodeTarget
 
     @Option(name: .long, help: "Absolute chain path in the tree (e.g. Nexus/Market).")
     var chain: String
@@ -258,22 +258,12 @@ struct TxOptions: ParsableArguments {
         actions generalActions: [Action] = [],
         depositActions: [DepositAction] = [],
         receiptActions: [ReceiptAction] = [],
-        withdrawalActions: [WithdrawalAction] = [],
-        remote: NodeRPC? = nil
+        withdrawalActions: [WithdrawalAction] = []
     ) async throws {
         // A child chain is a level of the one process: its reads and
-        // writes go to the Nexus RPC, by chain path. A remote node checks
-        // the chain itself.
-        let rpc: NodeRPC
-        if let remote {
-            rpc = remote
-        } else {
-            let topology = try Topology.load(root: rootOption.layout.root).validated()
-            guard chain == ChainAddress.nexus || (topology.hostedChains ?? []).contains(chain) else {
-                throw CtlError("\(chain) is not in the tree")
-            }
-            rpc = NodeRPC(topology, rootOption.layout)
-        }
+        // writes go to the Nexus RPC, by chain path; the node answers 404
+        // for a chain it does not host.
+        let rpc = try target.runningNode()
         let path = chain.components(separatedBy: "/")
         let signerNonce: UInt64
         if let nonce {

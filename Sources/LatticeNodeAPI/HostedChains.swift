@@ -1,11 +1,14 @@
 import Foundation
 import Lattice
 
-/// One hosted child chain inline: its path and, to mine its genesis, the
-/// spec, the premine's recipient, the signed transactions the genesis
-/// carries (each what `POST /transactions` takes) and the WASM modules the
-/// spec names (base64): what `--host-chain path=spec.json`, `--premine-to`,
-/// `--genesis-transactions` and `--policy-module` give from files.
+/// `POST /hosted-chains` on a node that keeps its configuration (`--root`):
+/// one child chain to host, by path. A chain created here carries its spec
+/// and, to mine its genesis, the premine's recipient, the signed
+/// transactions the genesis carries (each what `POST /transactions` takes)
+/// and the WASM modules the spec names (base64). The node keeps these under
+/// its `specs/` directory, as `lattice child create` keeps them, and lists
+/// the path in its configuration; a chain with a path alone is synced from
+/// its peers.
 public struct HostedChain: Codable, Sendable {
     public let path: String
     public var spec: ChainSpec?
@@ -22,31 +25,5 @@ public struct HostedChain: Codable, Sendable {
         self.premineTo = premineTo
         self.genesisTransactions = genesisTransactions
         self.policyModules = policyModules
-    }
-}
-
-/// The child chains a node hosts, inline, as it keeps them: what the last
-/// accepted `POST /hosted-chains` set, saved in its data directory
-/// (`hosted-chains.json`) and returned by `GET /hosted-chains` as `saved`.
-/// It is itself a `POST /hosted-chains` body, so a client changes it by
-/// reading it, changing it and posting it back.
-public struct SavedHostedChains: Codable, Sendable {
-    public var chains: [HostedChain]
-    /// `--chain-peer` seeds: chain-path=public-key@host:port.
-    public var chainPeer: [String]?
-
-    public init(chains: [HostedChain], chainPeer: [String]? = nil) {
-        self.chains = chains
-        self.chainPeer = chainPeer
-    }
-
-    /// These chains with `chain` and its seeds added after them, the others
-    /// unchanged; nil when `chain` is already listed.
-    public func adding(_ chain: HostedChain, peers: [String] = []) -> SavedHostedChains? {
-        guard !chains.contains(where: { $0.path == chain.path }) else { return nil }
-        var next = self
-        next.chains.append(chain)
-        if !peers.isEmpty { next.chainPeer = (chainPeer ?? []) + peers }
-        return next
     }
 }

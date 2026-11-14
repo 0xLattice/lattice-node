@@ -231,30 +231,80 @@ final class LatticeCtlTopologyTests: XCTestCase {
     }
 
     /// The remote operator listener: both keys or neither, the token file
-    /// under the root when relative.
+    /// under the root when relative, a port of its own.
     func testOperatorListenerLoadsFromConfigAndProducesNodeFlags() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ctl-operator-listener-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
+        let layout = HostLayout(root: root.path)
         let file = root.appendingPathComponent(Topology.fileName)
-        try Data(#"{"listen":4001,"rpc":4003,"operatorListen":"0.0.0.0:8090","operatorTokens":"tokens.json"}"#.utf8).write(to: file)
-        let loaded = try Topology.load(root: root).validated()
-        XCTAssertEqual(loaded.operatorArguments(root: root), [
-            "--operator-listen", "0.0.0.0:8090",
-            "--operator-tokens", root.appendingPathComponent("tokens.json").path,
+        func flags(_ json: String) throws -> [String] {
+            try Data(json.utf8).write(to: file)
+            return try Topology.load(root: root).validated().nodeArguments(layout: layout)
+        }
+        let listening = try flags(#"{"listen":4001,"rpc":4003,"operatorListen":"0.0.0.0:8090","operatorTokens":"tokens.json","operatorAllowedOrigins":["https://d.example"]}"#)
+        XCTAssertTrue(listening.joined(separator: " ").contains(
+            "--operator-listen 0.0.0.0:8090 --operator-tokens \(root.appendingPathComponent("tokens.json").path) --operator-allowed-origin https://d.example"
+        ))
+        let absolute = try flags(#"{"listen":4001,"rpc":4003,"operatorListen":"0.0.0.0:8090","operatorTokens":"/etc/lattice/tokens.json"}"#)
+        XCTAssertTrue(absolute.contains("/etc/lattice/tokens.json"))
+        XCTAssertFalse(try flags(#"{"listen":4001,"rpc":4003}"#).contains("--operator-listen"))
+
+        for refused in [
+            #"{"listen":4001,"rpc":4003,"operatorListen":"0.0.0.0:8090"}"#,
+            #"{"listen":4001,"rpc":4003,"operatorTokens":"tokens.json"}"#,
+            #"{"listen":4001,"rpc":4003,"operatorListen":"0.0.0.0:4003","operatorTokens":"t.json"}"#,
+            #"{"listen":4001,"rpc":4003,"webSocket":8090,"operatorListen":"0.0.0.0:8090","operatorTokens":"t.json"}"#,
+            #"{"listen":4001,"rpc":4003,"operatorListen":"8090","operatorTokens":"t.json"}"#,
+            #"{"listen":4001,"rpc":4003,"operatorAllowedOrigins":["https://d.example"]}"#,
+        ] {
+            try Data(refused.utf8).write(to: file)
+            XCTAssertThrowsError(try Topology.load(root: root).validated(), refused)
+        }
+    }
+
+    /// A configuration change is an RFC 7396 merge patch: members replace,
+    /// null removes, an unknown key is refused.
+    func testAMergePatchChangesOnlyWhatItNames() throws {
+        let topology = try Topology.load(data: Data(
+            #"{"listen":4001,"rpc":4003,"hostedChains":["Nexus/A"],"mine":{"workers":2,"recipients":{"Nexus":"x","Nexus/A":"y"}}}"#.utf8
+        ))
+        let next = try topology.applying(mergePatch: Data(
+            #"{"mine":{"enabled":true,"recipients":{"Nexus/A":null}},"stateWindow":null,"listen":5001}"#.utf8
+        ))
+        XCTAssertEqual(next.listen, 5001)
+        XCTAssertEqual(next.mine?.enabled, true)
+        XCTAssertEqual(next.mine?.workers, 2)
+        XCTAssertEqual(next.mine?.recipients, ["Nexus": "x"])
+        XCTAssertEqual(next.hostedChains, ["Nexus/A"])
+        XCTAssertThrowsError(try topology.applying(mergePatch: Data(#"{"nope":1}"#.utf8)))
+        XCTAssertThrowsError(try topology.applying(mergePatch: Data("[1]".utf8)))
+        XCTAssertEqual(try next.restartRequired(comparedTo: topology), ["listen"])
+        XCTAssertEqual(try next.changedKeys(from: topology), ["listen", "mine"])
+        // A chain's removal takes what requires it hosted with it.
+        let removed = topology.removingChains(["Nexus/A"])
+        XCTAssertEqual(removed.hostedChains, [])
+        XCTAssertEqual(removed.mine?.recipients, ["Nexus": "x"])
+        XCTAssertNoThrow(try removed.validated())
+    }
+
+    /// `lattice config set a.b=value`: the value is JSON when it parses as
+    /// JSON, a string otherwise.
+    func testConfigAssignmentsBuildAMergePatch() throws {
+        let patch = try ConfigAssignment.patch(setting: [
+            "mine.recipients.Nexus/Alpha=abc", "stateWindow=128", "mine.enabled=true", "peers=[]",
         ])
-        var absolute = loaded
-        absolute.operatorTokens = "/etc/lattice/tokens.json"
-        XCTAssertEqual(absolute.operatorArguments(root: root).last, "/etc/lattice/tokens.json")
-
-        try Data(#"{"listen":4001,"rpc":4003}"#.utf8).write(to: file)
-        XCTAssertEqual(try Topology.load(root: root).validated().operatorArguments(root: root), [])
-
-        try Data(#"{"listen":4001,"rpc":4003,"operatorListen":"0.0.0.0:8090"}"#.utf8).write(to: file)
-        XCTAssertThrowsError(try Topology.load(root: root).validated())
-        try Data(#"{"listen":4001,"rpc":4003,"operatorTokens":"tokens.json"}"#.utf8).write(to: file)
-        XCTAssertThrowsError(try Topology.load(root: root).validated())
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: patch) as? [String: Any])
+        let mine = try XCTUnwrap(object["mine"] as? [String: Any])
+        XCTAssertEqual((mine["recipients"] as? [String: String])?["Nexus/Alpha"], "abc")
+        XCTAssertEqual(mine["enabled"] as? Bool, true)
+        XCTAssertEqual(object["stateWindow"] as? Int, 128)
+        XCTAssertEqual((object["peers"] as? [Any])?.count, 0)
+        let unset = try ConfigAssignment.patch(unsetting: ["mine.recipients.Nexus"])
+        XCTAssertEqual(String(decoding: unset, as: UTF8.self), #"{"mine":{"recipients":{"Nexus":null}}}"#)
+        XCTAssertThrowsError(try ConfigAssignment.patch(setting: ["novalue"]))
+        XCTAssertThrowsError(try ConfigAssignment.patch(setting: ["a..b=1"]))
     }
 
     /// `peers` is a list per chain. An array is Nexus's list, as in every

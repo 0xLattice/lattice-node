@@ -33,7 +33,8 @@ extension XCTestCase {
 /// The daemon's loopback application over a runtime, as `runNodeRuntime` builds it.
 func makeApplication(
     service runtime: NodeRuntime, host: String, port: Int,
-    auth: OperatorAccess = .loopback(testOperatorAuth)
+    auth: OperatorAccess = .loopback(testOperatorAuth),
+    control: OperatorControl = OperatorControl()
 ) -> Application<RouterResponder<BasicRequestContext>> {
     makeApplication(
         reads: runtime.reads,
@@ -46,7 +47,8 @@ func makeApplication(
         peers: { ExplorerPeersResponse(count: runtime.peerCount, peers: []) },
         processStartTime: Date(),
         auth: auth,
-        endpoints: { await runtime.chainEndpoints($0) }
+        endpoints: { await runtime.chainEndpoints($0) },
+        control: control
     )
 }
 

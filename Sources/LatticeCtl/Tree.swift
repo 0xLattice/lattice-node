@@ -1,8 +1,8 @@
 // Tree lifecycle: one lattice-node process hosts the whole topology. `up`
-// spawns it and exits (its pidfile + loopback health are the record), and
-// restarts it when lattice.json lists other chains than it hosts; `down`
-// stops it by pidfile; `status` reads only local loopback RPC —
-// it never claims fleet truth. `wipe` removes chain state, never identity.
+// spawns `lattice-node --root`, which reads lattice.json and owns it while it
+// runs, and exits (its pidfile + loopback health are the record); `down`
+// stops it by pidfile; `status` asks the node. `wipe` removes chain state,
+// never identity.
 
 import Foundation
 #if canImport(FoundationNetworking)
@@ -148,8 +148,8 @@ func health(rpc: NodeRPC, chain: String = "Nexus") async -> [String: Any]? {
 /// The pidfile and log name of the one daemon hosting the whole tree.
 let hostProcessName = "lattice-node"
 
-/// Starts the one `lattice-node` for the configured hosted tree. The chain
-/// set it starts with is recorded beside its pidfile.
+/// Starts the one `lattice-node` for the hosted tree: `lattice-node --root`,
+/// which reads lattice.json itself and owns it while it runs.
 func spawnHost(layout: HostLayout) throws {
     let manager = FileManager.default
     for directory in [
@@ -160,35 +160,10 @@ func spawnHost(layout: HostLayout) throws {
             at: directory, withIntermediateDirectories: true
         )
     }
-    let topology = try Topology.load(root: layout.root).validated()
-    try recordHostedChains(layout, hostedPaths(topology))
+    _ = try Topology.load(root: layout.root).validated()
     let process = Process()
     process.executableURL = try nodeBinary()
-    var arguments = [
-        "--data-directory", layout.chainDirectory(for: "Nexus").path,
-        "--identity-key", layout.identityKey(for: "Nexus").path,
-        "--listen-port", String(topology.listen),
-        "--rpc-port", String(topology.rpc),
-    ]
-    arguments += topology.peerArguments
-    if let port = topology.webSocket { arguments += ["--websocket-port", String(port)] }
-    if let port = topology.publicRead { arguments += ["--public-read-port", String(port)] }
-    if let host = topology.externalAddress { arguments += ["--external-address", host] }
-    if let rate = topology.publicReadRate { arguments += ["--public-read-rate", String(rate)] }
-    if let rate = topology.publicReadExpensiveRate { arguments += ["--public-read-expensive-rate", String(rate)] }
-    if let rate = topology.publicReadMaxRate { arguments += ["--public-read-max-rate", String(rate)] }
-    if let fetches = topology.publicReadFetches { arguments += ["--public-read-fetches", String(fetches)] }
-    if let url = topology.publicReadURL { arguments += ["--public-read-url", url] }
-    arguments += topology.publicSubmissionArguments
-    arguments += topology.contentServingArguments
-    for origin in topology.rpcAllowedOrigins ?? [] { arguments += ["--rpc-allowed-origin", origin] }
-    arguments += topology.operatorArguments(root: layout.root)
-    let hosted = hostedChainsRequest(layout, topology)
-    arguments += hosted.hostChain.flatMap { ["--host-chain", $0] }
-    arguments += hosted.premineTo.flatMap { ["--premine-to", $0] }
-    arguments += hosted.genesisTransactions.flatMap { ["--genesis-transactions", $0] }
-    arguments += hosted.policyModule.flatMap { ["--policy-module", $0] }
-    process.arguments = arguments
+    process.arguments = ["--root", layout.root.path]
     let log = layout.logFile(for: hostProcessName)
     _ = manager.createFile(atPath: log.path, contents: nil)
     let handle = try FileHandle(forWritingTo: log)
@@ -202,130 +177,9 @@ func spawnHost(layout: HostLayout) throws {
     )
 }
 
-/// The child chains `lattice.json` lists, as the node's flags name them:
-/// what `POST /hosted-chains` takes, and what a start passes.
-struct HostedChainsRequest: Codable {
-    var hostChain: [String] = []
-    var premineTo: [String] = []
-    var genesisTransactions: [String] = []
-    var chainPeer: [String] = []
-    var policyModule: [String] = []
-}
-
-struct HostedChainsResponse: Codable {
-    let chains: [String]
-    /// What the node keeps of its hosted chains; nil before any change.
-    let saved: SavedHostedChains?
-}
-
-/// Where the node keeps its hosted chains once a `POST /hosted-chains` set
-/// them. From then on it hosts what this file lists, and `lattice.json`'s
-/// `hostedChains` (the flags `up` passes) only seeded its first start.
-func savedHostedChainsFile(_ layout: HostLayout) -> URL {
-    layout.chainDirectory(for: ChainAddress.nexus).appendingPathComponent("hosted-chains.json")
-}
-
-/// `path` inline, from what `lattice child create` wrote for it; a chain
-/// with no spec is its path alone.
-func inlineHostedChain(_ layout: HostLayout, _ path: String) throws -> HostedChain {
-    let manager = FileManager.default
-    let specFile = layout.childSpec(for: path)
-    guard manager.fileExists(atPath: specFile.path) else { return HostedChain(path: path) }
-    var chain = HostedChain(
-        path: path, spec: try JSONDecoder().decode(ChainSpec.self, from: Data(contentsOf: specFile))
-    )
-    if let recipient = (try? String(contentsOf: layout.premineRecipient(for: path), encoding: .utf8))?
-        .trimmingCharacters(in: .whitespacesAndNewlines), !recipient.isEmpty {
-        chain.premineTo = recipient
-    }
-    let genesis = layout.genesisTransactions(for: path)
-    if manager.fileExists(atPath: genesis.path) {
-        chain.genesisTransactions = try JSONDecoder().decode(
-            [SubmitTransactionRequest].self, from: Data(contentsOf: genesis)
-        )
-    }
-    let modules = ((try? manager.contentsOfDirectory(
-        at: layout.policyModules(for: path), includingPropertiesForKeys: nil
-    )) ?? []).sorted(by: { $0.path < $1.path })
-    if !modules.isEmpty { chain.policyModules = try modules.map { try Data(contentsOf: $0) } }
-    return chain
-}
-
-/// Adds `path` to what the host hosts, every other chain left as the node
-/// keeps it. A running host is read (`GET /hosted-chains`), and sent its
-/// saved chains with this one added; one with none saved yet is sent
-/// `lattice.json`'s list, which seeds them. A stopped host's saved file gets
-/// the chain, so its next start hosts it; with no saved file the flags `up`
-/// passes name it. The caller holds the spawn lock; returns whether a
-/// running host now runs `path`.
-func addHostedChainLocked(_ layout: HostLayout, _ path: String) async throws -> Bool {
-    let topology = try Topology.load(root: layout.root).validated()
-    let chain = try inlineHostedChain(layout, path)
-    let peers = (topology.peers?.byChain[path] ?? []).map { "\(path)=\($0)" }
-    guard runningPid(layout, hostProcessName) != nil else {
-        let file = savedHostedChainsFile(layout)
-        guard FileManager.default.fileExists(atPath: file.path) else { return false }
-        let saved = try JSONDecoder().decode(SavedHostedChains.self, from: Data(contentsOf: file))
-        if let next = saved.adding(chain, peers: peers) {
-            try JSONEncoder().encode(next).write(to: file, options: .atomic)
-        }
-        return false
-    }
-    let rpc = NodeRPC(topology, layout)
-    let current: HostedChainsResponse = try await get(rpc: rpc, path: "hosted-chains", chain: ChainAddress.nexus)
-    guard let saved = current.saved else { return try await updateHostIfRunningLocked(layout) }
-    if let next = saved.adding(chain, peers: peers) {
-        let _: HostedChainsResponse = try await post(rpc: rpc, path: "hosted-chains", body: next)
-    }
-    return true
-}
-
-func hostedChainsRequest(_ layout: HostLayout, _ topology: Topology) -> HostedChainsRequest {
-    let manager = FileManager.default
-    var request = HostedChainsRequest()
-    for child in topology.hostedChains ?? [] {
-        let spec = layout.childSpec(for: child)
-        request.hostChain.append(manager.fileExists(atPath: spec.path) ? "\(child)=\(spec.path)" : child)
-        // The recipient goes with the spec its genesis is built from.
-        if manager.fileExists(atPath: spec.path),
-           let recipient = (try? String(contentsOf: layout.premineRecipient(for: child), encoding: .utf8))?
-               .trimmingCharacters(in: .whitespacesAndNewlines), !recipient.isEmpty {
-            request.premineTo.append("\(child)=\(recipient)")
-        }
-        let genesis = layout.genesisTransactions(for: child)
-        if manager.fileExists(atPath: spec.path), manager.fileExists(atPath: genesis.path) {
-            request.genesisTransactions.append("\(child)=\(genesis.path)")
-        }
-        let modules = (try? manager.contentsOfDirectory(
-            at: layout.policyModules(for: child), includingPropertiesForKeys: nil
-        )) ?? []
-        request.policyModule += modules.sorted(by: { $0.path < $1.path }).map(\.path)
-        for peer in topology.peers?.byChain[child] ?? [] { request.chainPeer.append("\(child)=\(peer)") }
-    }
-    return request
-}
-
 /// Every chain path the one process hosts: Nexus and its listed children.
 func hostedPaths(_ topology: Topology) -> [String] {
     [ChainAddress.nexus] + (topology.hostedChains ?? [])
-}
-
-private func hostedChainsFile(_ layout: HostLayout) -> URL {
-    layout.pidFile(for: hostProcessName).deletingPathExtension()
-        .appendingPathExtension("chains")
-}
-
-private func recordHostedChains(_ layout: HostLayout, _ chains: [String]) throws {
-    try Data(chains.joined(separator: "\n").utf8).write(to: hostedChainsFile(layout), options: .atomic)
-}
-
-/// The chains the running host was started with or last told; nil when
-/// unrecorded.
-private func hostedChains(_ layout: HostLayout) -> Set<String>? {
-    guard let text = try? String(
-        contentsOf: hostedChainsFile(layout), encoding: .utf8
-    ) else { return nil }
-    return Set(text.split(separator: "\n").map(String.init))
 }
 
 /// Stops a process by pidfile: SIGTERM, then SIGKILL if it lingers, then
@@ -364,29 +218,9 @@ func stopProcess(
     return true
 }
 
-/// Tells the running host to serve the chains `lattice.json` lists now,
-/// without a restart; a host that cannot (an older build, a chain that
-/// would not start) is restarted instead. The caller holds the spawn lock;
-/// returns false, touching nothing, when no host is running.
-func updateHostIfRunningLocked(_ layout: HostLayout) async throws -> Bool {
-    guard runningPid(layout, hostProcessName) != nil else { return false }
-    let topology = try Topology.load(root: layout.root).validated()
-    do {
-        let _: HostedChainsResponse = try await post(
-            rpc: NodeRPC(topology, layout), path: "hosted-chains", body: hostedChainsRequest(layout, topology)
-        )
-        try recordHostedChains(layout, hostedPaths(topology))
-    } catch {
-        print("the host could not change its chains while running (\(error)); restarting it")
-        try await stopProcess(layout, hostProcessName)
-        try spawnHost(layout: layout)
-    }
-    return true
-}
-
 struct Up: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Start the one process hosting every chain in the tree. lattice.json's chains seed the host; once it keeps its own (hosted-chains.json), it hosts those."
+        abstract: "Start the one process hosting every chain in the tree, as lattice.json says; the node owns that file while it runs."
     )
 
     @OptionGroup var rootOption: RootOption
@@ -441,16 +275,10 @@ struct Up: AsyncParsableCommand {
         topology: Topology
     ) async throws {
         try await withSpawnLock(layout) {
+            // A running node owns lattice.json: changes go through it
+            // (`lattice config set`, `child create`, ...), not a restart here.
             if let pid = runningPid(layout, hostProcessName) {
-                // A host that keeps its own chains hosts them: lattice.json
-                // only seeded its first start.
-                guard hostedChains(layout) != Set(hostedPaths(topology)),
-                      !FileManager.default.fileExists(atPath: savedHostedChainsFile(layout).path) else {
-                    print("already running (pid \(pid))")
-                    return
-                }
-                _ = try await updateHostIfRunningLocked(layout)
-                print("now hosting \(hostedPaths(topology).count) chain(s) (pid \(runningPid(layout, hostProcessName) ?? -1))")
+                print("already running (pid \(pid))")
                 return
             }
             try spawnHost(layout: layout)
@@ -481,21 +309,22 @@ struct Down: AsyncParsableCommand {
 
 struct Status: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "One table across the tree, from local loopback RPC only."
+        abstract: "One line per hosted chain, mining, and what waits for a restart."
     )
 
-    @OptionGroup var rootOption: RootOption
+    @OptionGroup var target: NodeTarget
 
     func run() async throws {
-        let layout = rootOption.layout
-        let topology = try Topology.load(root: layout.root).validated()
-        let running = runningPid(layout, hostProcessName) != nil
-        for path in hostedPaths(topology) {
-            guard running else {
-                print("\(path): down")
-                continue
-            }
-            guard let health = await health(rpc: NodeRPC(topology, layout), chain: path) else {
+        guard let rpc = try target.running() else {
+            let topology = try Topology.load(root: target.layout.root).validated()
+            for path in hostedPaths(topology) { print("\(path): down") }
+            return
+        }
+        let hosted = try JSONDecoder().decode(
+            HostedChainsResponse.self, from: try await send(rpc: rpc, "GET", "hosted-chains")
+        )
+        for path in [ChainAddress.nexus] + hosted.chains {
+            guard let health = await health(rpc: rpc, chain: path) else {
                 print("\(path): running, rpc unreachable")
                 continue
             }
@@ -505,25 +334,39 @@ struct Status: AsyncParsableCommand {
             let mempool = health["mempoolCount"] as? Int ?? 0
             print("\(path): \(phase) height=\(height) tip=\(tip)… mempool=\(mempool)")
         }
+        for path in (hosted.configured ?? []) where !hosted.chains.contains(path) {
+            print("\(path): configured, not running")
+        }
+        if let data = try? await send(rpc: rpc, "GET", "mining"),
+           let mining = try? JSONDecoder().decode(MiningStatusResponse.self, from: data) {
+            print("mining: \(mining.enabled ? (mining.running ? "on" : "on, loop not running") : "off")")
+        }
+        if let data = try? await send(rpc: rpc, "GET", "config"),
+           let config = try? JSONDecoder().decode(ConfigResponse.self, from: data), !config.restartRequired.isEmpty {
+            print("waiting for a restart: \(config.restartRequired.joined(separator: ", "))")
+        }
     }
 }
 
 struct Wipe: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Remove the hosted tree's complete storage; identity and configuration are preserved."
+        abstract: "Remove the hosted tree's complete storage; identity and configuration are preserved. A running node wipes it as it restarts."
     )
 
-    @OptionGroup var rootOption: RootOption
+    @OptionGroup var target: NodeTarget
 
     func run() async throws {
-        let layout = rootOption.layout
+        if let rpc = try target.running() {
+            try await send(rpc: rpc, "POST", "wipe", json: Data("{}".utf8))
+            print("wiping: the node restarts on empty storage")
+            try await waitForRestart(rpc)
+            return
+        }
+        let layout = target.layout
         // Under the spawn lock, so no `up` or restart starts the tree while
         // its chain state is being removed.
         try await withSpawnLock(layout) {
             _ = try Topology.load(root: layout.root).validated()
-            guard runningPid(layout, hostProcessName) == nil else {
-                throw CtlError("the tree is running; `lattice down` first")
-            }
             let directory = layout.chainDirectory(for: ChainAddress.nexus)
                 .standardizedFileURL
             let container = layout.root.appendingPathComponent("chains")
@@ -547,4 +390,22 @@ struct Wipe: AsyncParsableCommand {
             print("hosted tree storage wiped; identity and lattice.json preserved")
         }
     }
+}
+
+/// Waits until the node behind `rpc` went away and answers again: a
+/// restart it was asked for.
+func waitForRestart(_ rpc: NodeRPC) async throws {
+    let gone = ContinuousClock.now + .seconds(60)
+    while await health(rpc: rpc) != nil, ContinuousClock.now < gone {
+        try await Task.sleep(for: .milliseconds(250))
+    }
+    let back = ContinuousClock.now + .seconds(180)
+    while ContinuousClock.now < back {
+        if await health(rpc: rpc) != nil {
+            print("the node is back")
+            return
+        }
+        try await Task.sleep(for: .milliseconds(500))
+    }
+    throw CtlError("the node did not answer within 180s of its restart; see `lattice logs`")
 }

@@ -39,49 +39,54 @@ included, and still needs the cookie.
 
 ## Remote operator listener
 
-A client on another machine (a hosting seller, a child-block author) reaches
-the operator routes through a second listener, off by default:
+A client on another machine (an operator's laptop, a hosting seller, a
+dashboard) reaches the operator routes through a second listener, off by
+default. In `lattice.json`:
 
-```bash
-lattice-node ... --operator-listen 10.0.0.5:8090 --operator-tokens /etc/lattice/operator-tokens.json
+```json
+{"operatorListen": "10.0.0.5:8090", "operatorTokens": "operator-tokens.json",
+ "operatorAllowedOrigins": ["https://dash.example"]}
 ```
 
-It serves the operator listener's routes (the same handlers), but:
+(`--operator-listen`, `--operator-tokens`, `--operator-allowed-origin` on a
+node started with flags). Its port must differ from `listen`, `rpc`,
+`publicRead` and `webSocket`. It serves the operator listener's routes (the
+same handlers), but:
 
 - Every request, `/health` included, carries `Authorization: Bearer <token>`
   for a token in the file. No known token: `401`. The cookie is not a token
   here.
-- Each token may use only the routes its entry lists: anything else, an
-  unknown path included, is `403`. A route is the method and the path as the
-  node registers it, a parameter in braces: `GET /api/state/account/{addr}`,
-  `GET /fetch/{cid}`. `?chainPath=` is not part of a route; a token reaches
-  every chain the node hosts.
-- No field may name a file on the node's disk: `POST /hosted-chains` with a
-  `hostChain` spec path (`path=spec.json`), `genesisTransactions` or
-  `policyModule` is `400`. Send them inline in `chains`
-  ([`POST /hosted-chains`](#post-hosted-chains)).
+- Each token has a role or a route list. `admin` may use every route; `read`
+  every `GET`/`HEAD` except `/tokens`; a route list only the routes it names.
+  Anything else, an unknown path included, is `403`. A route is the method
+  and the path as the node registers it, a parameter in braces:
+  `GET /api/state/account/{addr}`, `GET /fetch/{cid}`. `?chainPath=` is not
+  part of a route; a token reaches every chain the node hosts. Only `admin`
+  reaches `/tokens`.
+- No field may name a file on the node's disk: the flag form of
+  `POST /hosted-chains` is `409`, and `PATCH /config` that changes
+  `mine.worker` or `operatorTokens` is `400`. Those are set beside the node.
+- A request with an `Origin` header is `403` unless `operatorAllowedOrigins`
+  lists that exact origin; a listed one gets CORS preflight answers and
+  `Access-Control-Allow-Origin`, and still needs a token.
 - The loopback `Host` check does not apply (a bearer token is not a
-  credential a browser sends on its own); POSTs still need
-  `Content-Type: application/json`.
+  credential a browser sends on its own).
 
 The token file is a JSON array; it holds each token's SHA-256, never the
-token, and is read at start:
+token. Entries carry `role` or `routes` (a file of `routes` entries only, as
+earlier nodes read, still reads):
 
 ```json
-[{"name": "seller",
-  "sha256": "<hex SHA-256 of the token>",
-  "routes": ["GET /hosted-chains", "POST /hosted-chains"]}]
+[{"name": "ops", "sha256": "<hex SHA-256 of the token>", "role": "admin"},
+ {"name": "seller", "sha256": "<hex>", "routes": ["GET /hosted-chains", "POST /hosted-chains"]}]
 ```
 
-To make a token:
+Tokens are made and revoked through the API ([Tokens](#tokens)); a change
+applies from the next request.
 
-```bash
-token=$(openssl rand -hex 32)
-printf %s "$token" | shasum -a 256   # the "sha256" entry; give $token to the client
-```
-
-The listener is plain HTTP: put it on a private network, or behind a proxy
-that terminates TLS. `--rpc-bind` stays loopback-only.
+The listener is plain HTTP: put it on a private network (a VPN, a private
+subnet), or behind a proxy that terminates TLS, and never on a public
+address without one. `--rpc-bind` stays loopback-only.
 
 ## Integer encoding
 
@@ -664,27 +669,89 @@ next block enters. `value` is `child/X` there, read as the build route reads
 `unknownChain`, and `404` `notHeld` when the parent has no executed tip or
 its state is not readable here.
 
-## Hosted chains
+## Operator control
 
-The child chains the node hosts change while it runs. These routes are on the
-operator port only.
+A node started as `lattice-node --root <root>` (what `lattice up` runs) takes
+every setting from `<root>/lattice.json` and is that file's only writer while
+it runs. These routes change it, on the operator port and the remote
+listener. A node started with flags has no configuration of its own:
+`GET`/`PATCH /config` answer `409` there, and `POST /hosted-chains` keeps its
+earlier whole-set form (below).
+
+Every change is applied one at a time, in arrival order: checked (the
+resulting file must be valid, a recipient must name a hosted chain, a spec
+must parse, a module must load), applied to the running node, then written
+atomically, and answered:
+
+```json
+{"config": {"...": "lattice.json as now written"},
+ "applied": ["hostedChains", "mine"],
+ "failed": [{"key": "hostedChains", "chain": "Nexus/Beta", "error": "..."}],
+ "restartRequired": ["listen"]}
+```
+
+`400` when the change does not check (nothing was applied or written);
+`409` when `lattice.json` was edited by hand since the node last wrote it
+(stop the node to edit it, or `lattice restart` to load the edit); `200`
+when all of it took effect; `500` with the same body when part of it failed:
+what failed is left out of what is written (a chain that did not start is not
+listed, nor are the recipients, peers and minimum work that name it).
+
+Live keys apply at once: `hostedChains`, `peers` for child chains, and
+`mine` (on/off, recipients, minimum work; the node restarts its mining loop).
+Every other key (ports, `peers.Nexus`, retention, listeners, serving limits,
+relay fee, ...) is written and listed in `restartRequired` until
+[`POST /restart`](#post-restart).
+
+### `GET /config`
+
+`{"config": {...}, "restartRequired": [...]}`: the configuration as written,
+and the keys written since start that wait for a restart. Specs, genesis
+transactions and modules are files under `<root>/specs/`, named by path, not
+sent here.
+
+### `PATCH /config`
+
+An [RFC 7396](https://www.rfc-editor.org/rfc/rfc7396) merge patch of
+`lattice.json` (`Content-Type: application/merge-patch+json` or
+`application/json`): a member replaces, `null` removes, an object merges.
+
+```json
+{"mine": {"enabled": true, "recipients": {"Nexus/Alpha": "<address>", "Nexus/Beta": null}},
+ "announceLifetime": 900}
+```
 
 ### `GET /hosted-chains`
 
 ```json
-{"chains": ["Nexus/Alpha"],
- "saved": {"chains": [{"path": "Nexus/Alpha", "spec": {"...": "..."}, "premineTo": "<address>"}],
-           "chainPeer": ["Nexus/Alpha=<public-key>@host:port"]}}
+{"chains": ["Nexus/Alpha"], "configured": ["Nexus/Alpha", "Nexus/Beta"]}
 ```
 
-The hosted child chains, parent first, and `saved`: what the node keeps of
-them inline (below), or `null` before any `POST /hosted-chains`, when it
-hosts what its flags name. `saved` is itself a `POST /hosted-chains` body: to
-add or remove one chain, a client reads it, changes that chain and posts it
-back, and every other chain keeps its spec, recipient, transactions, modules
-and seeds.
+The child chains running, parent first, and those configured
+(`hostedChains`); a configured chain not running failed to start.
+`configured` is absent on a node started with flags.
 
 ### `POST /hosted-chains`
+
+One chain:
+
+```json
+{"path": "Nexus/Beta",
+ "spec": {"...": "a ChainSpec, as in a spec file"},
+ "premineTo": "<address>",
+ "genesisTransactions": [{"transaction": {"...": "as POST /transactions takes"}}],
+ "policyModules": ["<base64 WASM module>"]}
+```
+
+Only `path` is required: a chain named by path is synced from the node's
+peers. The rest creates a new chain, whose genesis the node mines from it:
+the node keeps them under `<root>/specs/` (as `lattice child create` does)
+and adds the path to `hostedChains`. Sent again with the same spec it
+changes nothing (`applied: []`); with another spec it is `409`: a child chain
+is created once. Its parent must be hosted. Answers as a configuration change.
+
+On a node started with flags the body is the whole set, each entry read as
+the start flag of the same name, whose files are on the node's disk:
 
 ```json
 {"hostChain": ["Nexus/Alpha", "Nexus/Beta=/path/to/spec.json"],
@@ -693,49 +760,81 @@ and seeds.
  "policyModule": ["/path/to/module.wasm"]}
 ```
 
-The node hosts these chains and only these, from now on. Each entry reads as
-the start flag of the same name (`--host-chain`, ...), whose specs, genesis
-transactions and policy modules are files on the node's disk.
+It hosts those and only those until the next start. A chain left out stops
+with every chain below it; what it stored stays. A `hostChain` body sent to a
+node started with `--root` is `400` (update `lattice`).
 
-A client that cannot write files there (the
-[remote operator listener](#remote-operator-listener) accepts only this form)
-sends the chains inline in `chains`, hosted after those in `hostChain`:
+### `DELETE /hosted-chains?chainPath=Nexus/Beta`
 
-```json
-{"chains": [
-  {"path": "Nexus/Alpha"},
-  {"path": "Nexus/Beta",
-   "spec": {"...": "a ChainSpec, as in a spec file"},
-   "premineTo": "<address>",
-   "genesisTransactions": [{"transaction": {"...": "as POST /transactions takes"}}],
-   "policyModules": ["<base64 WASM module>"]}],
- "chainPeer": ["Nexus/Alpha=<public-key>@host:port"]}
-```
-
-Only `path` is required; the rest mines a new chain's genesis, as
-`--host-chain path=spec.json`, `--premine-to`, `--genesis-transactions` and
-`--policy-module` do, and is checked the same way. The request must name
-`hostChain` or `chains` (an empty list hosts no child chain); `{}` is `400`.
-
-The node keeps the chains it accepted: it writes them, inline (specs,
-recipients, genesis transactions, policy modules and `chainPeer` seeds
-embedded, no file paths), to `<data-directory>/hosted-chains.json`, replacing
-the file atomically, and hosts what that file lists at every later start. The
-`--host-chain`, `--premine-to`, `--genesis-transactions`, `--policy-module`
-and `--chain-peer` flags apply only until the first accepted
-`POST /hosted-chains`; after that the node ignores them and says so at start.
-Deleting the file returns it to its flags. `POST /hosted-chains` answers as
-`GET /hosted-chains`, `saved` included. A newly listed chain starts as it would at start and syncs from the
-node's peers; a chain left out stops with every chain below it, and what it
-stored stays, so listing it again resumes it. Answers as `GET
-/hosted-chains`. `400` when the list does not hold together (a child before
-its parent, a flag value that does not parse); `404` (`notHeld`,
-`unknownChain`) when a chain could not start from what it stored.
+Stops hosting the chain and removes it from the configuration, with the
+recipient, peers and minimum work that name it. `409` while a chain below it
+is hosted. What it stored stays: hosting it again resumes it.
 
 A peer that connects afterwards is told the new list in the hello. A peer
 already connected learns a newly hosted chain from its provider record, and a
 peer that asks for a stopped one is answered as by any node that does not
 host it.
+
+### `GET /mining`
+
+```json
+{"enabled": true, "running": true, "pid": 4242, "restarts": 0,
+ "lastExit": "exit 1", "recipients": {"Nexus/Alpha": "<address>"}}
+```
+
+The node runs the mining loop (`lattice mine run`) as its child while
+`mine.enabled` is true, restarts it 5 s after it exits, and stops it when
+mining is turned off, on restart and on shutdown. Its output goes to
+`<root>/log/mine.log`.
+
+### `GET /logs?file=node|mine&tail=N`
+
+The last `N` lines (default 200, at most 10000) of the node's log
+(`<root>/log/lattice-node.log`, written under `lattice up`) or the mining
+loop's, as `text/plain`. `404` for a node whose log goes to its standard
+output.
+
+### `GET /disk`
+
+```json
+{"storage": "/var/lib/lattice/chains/Nexus",
+ "stores": [{"name": "state.db", "bytes": 7352320}, {"name": "volumes.db", "bytes": 1744896}],
+ "totalBytes": 15183872, "freeBytes": 112642072576}
+```
+
+Bytes per store in the data directory, and the free bytes on its volume.
+
+### `POST /restart`
+
+`202 {"restarting": true}`, then the node stops (its mining loop first) and
+starts again in the same process: it replaces itself with its own binary and
+arguments (`execv`), so its pid, its supervisor (systemd, a container, `lattice
+up`) and its pidfile do not change, and it reads `lattice.json` afresh.
+Clients wait for `/health` to answer again.
+
+### `POST /wipe`
+
+`202 {"restarting": true, "wiping": true}`; root mode only. The node restarts
+and, before it opens its storage, deletes every chain's data (`<root>/chains`);
+identity, `lattice.json`, specs, tokens and logs stay. Nexus syncs again from
+its peers, and hosted chains from theirs. Per-chain wipes are not offered:
+chains share one store.
+
+### Tokens
+
+`GET /tokens` → `{"tokens": [{"name": "ops", "role": "admin"}, {"name": "seller", "routes": ["GET /status"]}]}`.
+
+`POST /tokens` `{"name": "dash", "role": "read"}` (or `"routes": [...]`) →
+`{"name": "dash", "token": "<64 hex>"}`. The token is shown this once; the
+file keeps its SHA-256 (written atomically, mode `0600`, created on first
+use). `409` for a name in use; `400` for an unknown role, or both a role and
+routes.
+
+`DELETE /tokens/{name}` revokes it; `404` for an unknown name.
+
+The cookie (on the operator port) and `admin` tokens (on the remote listener)
+reach these routes. `409` when the node has no token file
+(`operatorTokens`).
 
 ## Operator pins
 

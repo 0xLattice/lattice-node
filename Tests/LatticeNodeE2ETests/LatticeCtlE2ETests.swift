@@ -371,12 +371,7 @@ final class LatticeCtlE2ETests: XCTestCase {
         let sponsorKey = try await makeKey(scratch, "sponsor")
         let host = try await bringUpMiningHost(miner: nil, minRelayFee: 5)
         _ = try await runCtl(["child", "create", alpha, "--block-time", "1000", "--reward", "100"], root: host.root)
-        var topology = try Topology.load(root: host.root)
-        topology.mine?.recipients = [alpha: sponsorKey.address]
-        try topology.validated().save(root: host.root)
-        try await waitFor("Nexus active after the restart") {
-            await self.health(host.nexusRPC)?["phase"] as? String == "active"
-        }
+        _ = try await runCtl(["config", "set", "mine.recipients.\(alpha)=\(sponsorKey.address)"], root: host.root)
         _ = try await runCtl(["mine", "start"], root: host.root)
         try await waitFor("sponsor funded by Alpha rewards", seconds: 180) {
             await self.balance(host, sponsorKey.address, chain: alpha) >= 50
@@ -571,12 +566,7 @@ final class LatticeCtlE2ETests: XCTestCase {
         _ = try await runCtl(["child", "create", alpha, "--block-time", "1000", "--reward", "100"], root: host.root)
         let again = try await runCtl(["child", "create", alpha], root: host.root, expectFailure: true)
         XCTAssertTrue(again.contains("already exists"), "a second create is refused: \(again)")
-        var topology = try Topology.load(root: host.root)
-        topology.mine?.recipients = [alpha: miner.address]
-        try topology.validated().save(root: host.root)
-        try await waitFor("Nexus active after the restart") {
-            await self.health(host.nexusRPC)?["phase"] as? String == "active"
-        }
+        _ = try await runCtl(["config", "set", "mine.recipients.\(alpha)=\(miner.address)"], root: host.root)
         _ = try await runCtl(["mine", "start"], root: host.root)
         try await waitFor("Alpha mined by merged mining", seconds: 180) {
             await self.height(host.nexusRPC, chain: alpha) >= 2
@@ -703,12 +693,7 @@ final class LatticeCtlE2ETests: XCTestCase {
             root: host.root
         )
 
-        var topology = try Topology.load(root: host.root)
-        topology.mine?.recipients = [alpha: miner.address]
-        try topology.validated().save(root: host.root)
-        try await waitFor("Nexus active after the restart") {
-            await self.health(host.nexusRPC)?["phase"] as? String == "active"
-        }
+        _ = try await runCtl(["config", "set", "mine.recipients.\(alpha)=\(miner.address)"], root: host.root)
         _ = try await runCtl(["mine", "start"], root: host.root)
         try await waitFor("Alpha mined by merged mining", seconds: 180) {
             await self.height(host.nexusRPC, chain: alpha) >= 2
@@ -934,50 +919,102 @@ private func e2eScaled(_ timeout: Duration) -> Duration {
     timeout * e2eTimeScale
 }
 
-/// The node keeps its hosted chains: a change through `POST /hosted-chains`
-/// outlives `lattice up` and restarts, lattice.json only seeding the first
-/// start, and `child create` / `child host` add one chain to what it keeps,
-/// running or stopped.
+/// A node operated from elsewhere: everything through `lattice --node
+/// --token-file` against its operator listener, nothing on its disk.
 extension LatticeCtlE2ETests {
-    private struct KeptChains: Decodable {
-        let chains: [String]
-        let saved: SavedHostedChains?
-    }
-
-    private func keptChains(_ host: CtlHost) async throws -> KeptChains {
-        let (data, response) = try await URLSession.shared.data(for: try Self.operatorRequest(host, "hosted-chains"))
-        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200, String(decoding: data, as: UTF8.self))
-        return try JSONDecoder().decode(KeptChains.self, from: data)
-    }
-
-    func testTheNodeKeepsTheChainsSetThroughItsAPI() async throws {
-        let host = try await bringUpMiningHost(miner: nil)
-        var post = try Self.operatorRequest(host, "hosted-chains")
-        post.httpMethod = "POST"
-        post.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        post.httpBody = try JSONEncoder().encode(SavedHostedChains(chains: [HostedChain(path: "Nexus/Remote")]))
-        let (body, response) = try await URLSession.shared.data(for: post)
-        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200, String(decoding: body, as: UTF8.self))
-
-        // lattice.json lists no child; `up` leaves the node's own list alone.
-        _ = try await runCtl(["up"], root: host.root)
-        let afterUp = try await keptChains(host)
-        XCTAssertEqual(afterUp.chains, ["Nexus/Remote"])
-
-        // Running: create adds Alpha, Remote stays.
-        _ = try await runCtl(["child", "create", "Nexus/Alpha", "--block-time", "1000", "--reward", "100"], root: host.root)
-        let created = try await keptChains(host)
-        XCTAssertEqual(Set(created.chains), ["Nexus/Remote", "Nexus/Alpha"])
-        XCTAssertNotNil(created.saved?.chains.first { $0.path == "Nexus/Alpha" }?.spec, "Alpha kept with its spec")
-
-        // Stopped: host adds Beta to the kept file; a start hosts all three.
-        _ = try await runCtl(["down"], root: host.root)
-        _ = try await runCtl(["child", "host", "Nexus/Beta"], root: host.root)
-        _ = try await runCtl(["up"], root: host.root)
-        try await waitFor("Nexus active after the restart") {
-            await self.health(host.nexusRPC)?["phase"] as? String == "active"
+    private func runRemote(
+        _ arguments: [String], _ url: String, _ tokenFile: URL, expectFailure: Bool = false
+    ) async throws -> String {
+        let process = Process()
+        process.executableURL = try binary("E2E_CTL_BIN", "lattice")
+        process.arguments = arguments + ["--node", url, "--token-file", tokenFile.path]
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stdout
+        try process.run()
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let output = String(decoding: data, as: UTF8.self)
+        if !expectFailure, process.terminationStatus != 0 {
+            throw CtlE2EError("lattice \(arguments.joined(separator: " ")) (remote) failed: \(output)")
         }
-        let restarted = try await keptChains(host)
-        XCTAssertEqual(Set(restarted.chains), ["Nexus/Remote", "Nexus/Alpha", "Nexus/Beta"])
+        if expectFailure, process.terminationStatus == 0 {
+            throw CtlE2EError("lattice \(arguments.joined(separator: " ")) (remote) succeeded: \(output)")
+        }
+        return output
+    }
+
+    func testANodeIsOperatedRemotelyThroughItsOperatorListener() async throws {
+        let alpha = "Nexus/Alpha"
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lattice-node-e2e-remote-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let first = try await makeKey(scratch, "first")
+        let second = try await makeKey(scratch, "second")
+        let operatorPort = randomPorts(1)[0]
+        let host = try await bringUpMiningHost(miner: nil) {
+            $0.operatorListen = "127.0.0.1:\(operatorPort)"
+            $0.operatorTokens = "operator-tokens.json"
+        }
+        let url = "http://127.0.0.1:\(operatorPort)"
+        // The first admin token is made beside the node, with its cookie.
+        let adminFile = scratch.appendingPathComponent("admin.token")
+        _ = try await runCtl(["tokens", "create", "ops", "--role", "admin", "--out", adminFile.path], root: host.root)
+        let remote = { (arguments: [String]) in try await self.runRemote(arguments, url, adminFile) }
+
+        let status = try await remote(["status"])
+        XCTAssertTrue(status.contains("Nexus: active"), status)
+
+        // A chain created, mined and paid, its recipient changed, all remotely.
+        _ = try await remote(["child", "create", alpha, "--block-time", "1000", "--reward", "100"])
+        _ = try await remote(["config", "set", "mine.recipients.\(alpha)=\(first.address)"])
+        _ = try await remote(["mine", "start"])
+        try await waitFor("Alpha mined", seconds: 180) {
+            await self.height(host.nexusRPC, chain: alpha) >= 2
+        }
+        try await waitFor("the first recipient is paid", seconds: 180) {
+            await self.balance(host, first.address, chain: alpha) > 0
+        }
+        _ = try await remote(["config", "set", "mine.recipients.\(alpha)=\(second.address)"])
+        try await waitFor("the changed recipient is paid", seconds: 240) {
+            await self.balance(host, second.address, chain: alpha) > 0
+        }
+        let mining = try await remote(["mine", "status"])
+        XCTAssertTrue(mining.contains("mining: on"), mining)
+
+        // A key that takes a restart waits for one; the restart keeps all.
+        let set = try await remote(["config", "set", "announceLifetime=900"])
+        XCTAssertTrue(set.contains("announceLifetime"), set)
+        let before = await height(host.nexusRPC, chain: alpha)
+        _ = try await remote(["restart"])
+        let config = try await remote(["config", "get"])
+        XCTAssertTrue(config.contains(alpha) && config.contains(second.address) && config.contains("900"), config)
+        let restarted = try await remote(["status"])
+        XCTAssertFalse(restarted.contains("waiting for a restart"), restarted)
+        try await waitFor("Alpha advances after the restart", seconds: 180) {
+            await self.height(host.nexusRPC, chain: alpha) > before
+        }
+        let logs = try await remote(["logs", "--tail", "50"])
+        XCTAssertTrue(logs.contains("lattice-node"), logs)
+
+        // Tokens: a read token reads and changes nothing; revoked, it is refused.
+        let readFile = scratch.appendingPathComponent("read.token")
+        _ = try await remote(["tokens", "create", "viewer", "--role", "read", "--out", readFile.path])
+        _ = try await runRemote(["status"], url, readFile)
+        let refused = try await runRemote(["mine", "stop"], url, readFile, expectFailure: true)
+        XCTAssertTrue(refused.contains("403"), refused)
+        _ = try await remote(["tokens", "revoke", "viewer"])
+        let revoked = try await runRemote(["status"], url, readFile, expectFailure: true)
+        XCTAssertTrue(revoked.contains("401"), revoked)
+
+        // A wipe: storage goes, configuration and identity stay.
+        _ = try await remote(["mine", "stop"])
+        let height = await self.height(host.nexusRPC, chain: "Nexus")
+        _ = try await remote(["wipe"])
+        let after = await self.height(host.nexusRPC, chain: "Nexus")
+        XCTAssertLessThan(after, height, "Nexus starts again from genesis")
+        let hosted = try await remote(["config", "get", "hostedChains"])
+        XCTAssertTrue(hosted.contains(alpha), hosted)
     }
 }

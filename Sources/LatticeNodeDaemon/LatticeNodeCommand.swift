@@ -10,6 +10,7 @@ import LatticeNodeCore
 import UInt256
 import VolumeBroker
 import LatticeNodeAPI
+import LatticeCtlCore
 
 @main
 struct LatticeNodeCommand: AsyncParsableCommand {
@@ -17,6 +18,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         commandName: "lattice-node",
         abstract: "Run one Nexus-rooted hosted tree"
     )
+
+    @Option(help: "A host root made by `lattice init`: the node runs as <root>/lattice.json says (storage, identity, ports, hosted chains, mining...) and is that file's only writer while it runs, changing it through its operator API (GET/PATCH /config) and applying each change live or at the next restart. Give no other flag with it.")
+    var root: String?
 
     @Option(help: "Hosted-tree storage directory; defaults to ~/.lattice/chains/Nexus")
     var dataDirectory: String?
@@ -55,11 +59,14 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(name: .customLong("rpc-allowed-origin"), help: "A browser origin allowed on the loopback RPC port, exactly as the browser sends it, e.g. chrome-extension://<id> (repeatable). Requests with any other Origin are refused; an allowed origin gets CORS preflight answers and still needs the cookie.")
     var rpcAllowedOrigins: [String] = []
 
-    @Option(name: .customLong("operator-listen"), help: "host:port of an operator listener for clients on other machines, e.g. 10.0.0.5:8090. It serves the loopback API's routes, each request carrying Authorization: Bearer <token> for a token in --operator-tokens that lists the route; the cookie is not accepted there, and a request naming a file on this node's disk (POST /hosted-chains with a spec, genesis-transactions or policy-module path) is refused: send it inline. Plain HTTP: put it on a private network or behind a TLS proxy. Requires --operator-tokens.")
+    @Option(name: .customLong("operator-listen"), help: "host:port of an operator listener for clients on other machines, e.g. 10.0.0.5:8090. It serves the loopback API's routes, each request carrying Authorization: Bearer <token> for a token in --operator-tokens allowed that route; the cookie is not accepted there, and nothing sent there may name a file on this node's disk. Plain HTTP: put it on a private network or behind a TLS proxy. Requires --operator-tokens.")
     var operatorListen: String?
 
-    @Option(name: .customLong("operator-tokens"), help: "The --operator-listen tokens: a JSON array of {\"name\", \"sha256\": hex SHA-256 of the token, \"routes\": [\"POST /hosted-chains\", ...]}. Read at start.")
+    @Option(name: .customLong("operator-tokens"), help: "The --operator-listen tokens: a JSON array of {\"name\", \"sha256\": hex SHA-256 of the token, and \"role\": \"admin\" or \"read\", or \"routes\": [\"POST /hosted-chains\", ...]}. Created by the first POST /tokens when absent; changed through /tokens while the node runs.")
     var operatorTokens: String?
+
+    @Option(name: .customLong("operator-allowed-origin"), help: "A browser origin allowed on the --operator-listen listener, exactly as the browser sends it, e.g. https://dashboard.example (repeatable). Requests with any other Origin are refused; an allowed origin gets CORS answers and still needs a token.")
+    var operatorAllowedOrigins: [String] = []
 
     @Option(parsing: .upToNextOption, help: "Overlay peer as public-key@host:port. Any peer given here REPLACES the built-in default bootstrap peers; the two are never merged.")
     var peer: [String] = []
@@ -146,6 +153,31 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     var externalAddress: String?
 
     mutating func run() async throws {
+        guard let root else {
+            try await start(owner: nil)
+            return
+        }
+        // Only `--root` (and its value) on the command line: everything else
+        // comes from lattice.json.
+        let given = CommandLine.arguments.dropFirst()
+        guard given.allSatisfy({ !$0.hasPrefix("-") || $0 == "--root" || $0.hasPrefix("--root=") }) else {
+            throw ValidationError("--root takes every setting from lattice.json; give no other flag with it")
+        }
+        let layout = HostLayout(root: root)
+        let topology: Topology
+        do {
+            topology = try Topology.load(root: layout.root).validated()
+        } catch {
+            throw ValidationError("\(layout.root.appendingPathComponent(Topology.fileName).path): \(error). The node starts only from a valid configuration; fix the file by hand while the node is stopped (`lattice config set` edits it then too).")
+        }
+        try performRequestedWipe(layout)
+        var command = try LatticeNodeCommand.parse(topology.nodeArguments(layout: layout))
+        try await command.start(owner: (layout, topology))
+    }
+
+    /// Runs the node with these flags; `owner` is the host root and the
+    /// configuration it was started from, when it runs under `--root`.
+    mutating func start(owner: (layout: HostLayout, topology: Topology)?) async throws {
         let processStartTime = Date()
         let address = ChainAddress([ChainAddress.nexus])!
         guard ["127.0.0.1", "::1", "localhost"].contains(rpcBind.lowercased()) else {
@@ -172,20 +204,20 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         guard (operatorListen == nil) == (operatorTokens == nil) else {
             throw ValidationError("--operator-listen and --operator-tokens go together")
         }
+        guard operatorAllowedOrigins.isEmpty || operatorListen != nil else {
+            throw ValidationError("--operator-allowed-origin requires --operator-listen")
+        }
         let operatorListener = try operatorListen.map { listen -> OperatorListener in
-            guard let colon = listen.lastIndex(of: ":"), let port = UInt16(listen[listen.index(after: colon)...]),
-                  port != 0 else {
+            guard let (host, port) = Topology.hostPort(listen) else {
                 throw ValidationError("--operator-listen must be host:port")
             }
-            var host = String(listen[..<colon])
-            if host.first == "[", host.last == "]" { host = String(host.dropFirst().dropLast()) }
-            guard !host.isEmpty else { throw ValidationError("--operator-listen must be host:port") }
-            guard port != rpcPort, port != publicReadPort else {
+            guard port != rpcPort, port != publicReadPort, port != listenPort, port != webSocketPort else {
                 throw ValidationError("--operator-listen must use a port of its own")
             }
             return OperatorListener(
                 host: host, port: Int(port),
-                tokens: try OperatorTokens.load(file: URL(fileURLWithPath: operatorTokens!))
+                tokens: try TokenStore(file: URL(fileURLWithPath: operatorTokens!)),
+                allowedOrigins: Set(operatorAllowedOrigins)
             )
         }
         if publicSubmit, publicReadPort == nil {
@@ -241,18 +273,10 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         let fixedSeedPeers = seedPeers.isEmpty ? [] : DefaultBootstrapPeers.nexusFixed
         let overlayPeers = configuredPeers ?? []
 
-        // The hosted chains the operator last set through POST /hosted-chains,
-        // kept by the node; the flags only until the first such change.
-        let hosted: HostedChildren
-        if let saved = try HostedChildren.saved(in: storage) {
-            hosted = saved
-            print("hosted chains: \(HostedChildren.savedFile(in: storage).path) (the --host-chain, --premine-to, --genesis-transactions, --chain-peer and --policy-module flags apply only before the first POST /hosted-chains)")
-        } else {
-            hosted = try HostedChildren(
-                hostChain: hostChain, premineTo: premineTo, genesisTransactions: genesisTransactions,
-                chainPeer: chainPeer, policyModule: policyModule
-            )
-        }
+        let hosted = try HostedChildren(
+            hostChain: hostChain, premineTo: premineTo, genesisTransactions: genesisTransactions,
+            chainPeer: chainPeer, policyModule: policyModule
+        )
         let configuration = try NodeConfiguration(
             chainPath: address.components,
             storagePath: storage,
@@ -297,6 +321,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             configuration: configuration,
             cookieFile: cookieFile,
             operatorListener: operatorListener,
+            owner: owner,
             publicReadLimits: publicReadLimits,
             processStartTime: processStartTime
         )
@@ -358,9 +383,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
 /// The child chains `--host-chain`, `--premine-to`, `--genesis-transactions`,
 /// `--chain-peer` and `--policy-module` name: read the same at start and when
 /// the operator changes them on a running node (`POST /hosted-chains`). Each
-/// spec file is read once, so the paths and specs agree. `chains` names more,
-/// after them, inline: what a client that cannot write files on this node
-/// sends, checked as the flags are.
+/// spec file is read once, so the paths and specs agree.
 struct HostedChildren {
     var children: [[String]] = []
     var specs: [[String]: ChainSpec] = [:]
@@ -371,10 +394,9 @@ struct HostedChildren {
 
     init(
         hostChain: [String], premineTo: [String], genesisTransactions genesisFiles: [String] = [],
-        chainPeer: [String], policyModule: [String], chains: [HostedChain] = []
+        chainPeer: [String], policyModule: [String]
     ) throws {
         policyModules = try policyModule.map { try Data(contentsOf: URL(fileURLWithPath: $0)) }
-            + chains.flatMap { $0.policyModules ?? [] }
         for entry in hostChain {
             let parts = entry.split(separator: "=", maxSplits: 1).map(String.init)
             guard let first = parts.first else {
@@ -386,14 +408,6 @@ struct HostedChildren {
             guard specs[path] == nil else { continue }
             let data = try Data(contentsOf: URL(fileURLWithPath: parts[1]))
             specs[path] = try JSONDecoder().decode(ChainSpec.self, from: data)
-        }
-        for chain in chains {
-            let path = chain.path.split(separator: "/").map(String.init)
-            guard !children.contains(path) else {
-                throw ValidationError("chains names \(chain.path) twice")
-            }
-            children.append(path)
-            specs[path] = chain.spec
         }
         for entry in chainPeer {
             let parts = entry.split(separator: "=", maxSplits: 1).map(String.init)
@@ -411,117 +425,42 @@ struct HostedChildren {
             guard parts.count == 2, !parts[1].isEmpty else {
                 throw ValidationError("--premine-to must use chain-path=address")
             }
-            try premine(parts[0].split(separator: "/").map(String.init), to: parts[1], option: "--premine-to", entry: entry)
-        }
-        for chain in chains {
-            guard let recipient = chain.premineTo else { continue }
-            try premine(chain.path.split(separator: "/").map(String.init), to: recipient, option: "premineTo", entry: chain.path)
+            let path = parts[0].split(separator: "/").map(String.init)
+            guard let spec = specs[path] else {
+                throw ValidationError("--premine-to names \(parts[0]), which is not a hosted chain with a spec")
+            }
+            do {
+                try NodeRuntime.checkPremine(spec: spec, to: parts[1], on: path, modules: policyModules)
+            } catch {
+                throw ValidationError("--premine-to \(entry): \(error)")
+            }
+            premineRecipients[path] = parts[1]
         }
         for entry in genesisFiles {
             let parts = entry.split(separator: "=", maxSplits: 1).map(String.init)
             guard parts.count == 2, !parts[1].isEmpty else {
                 throw ValidationError("--genesis-transactions must use chain-path=file.json")
             }
-            try genesis(parts[0].split(separator: "/").map(String.init), option: "--genesis-transactions", entry: entry) {
-                try JSONDecoder().decode(
+            let path = parts[0].split(separator: "/").map(String.init)
+            guard let spec = specs[path] else {
+                throw ValidationError("--genesis-transactions names \(parts[0]), which is not a hosted chain with a spec")
+            }
+            guard genesisTransactions[path] == nil else {
+                throw ValidationError("--genesis-transactions names \(parts[0]) twice")
+            }
+            let transactions: [Transaction]
+            do {
+                transactions = try JSONDecoder().decode(
                     [SubmitTransactionRequest].self, from: Data(contentsOf: URL(fileURLWithPath: parts[1]))
                 ).map(\.transaction)
+                try NodeRuntime.checkPremine(
+                    spec: spec, to: premineRecipients[path], transactions: transactions, on: path, modules: policyModules
+                )
+            } catch {
+                throw ValidationError("--genesis-transactions \(entry): \(error)")
             }
+            genesisTransactions[path] = transactions
         }
-        for chain in chains {
-            guard let transactions = chain.genesisTransactions else { continue }
-            try genesis(chain.path.split(separator: "/").map(String.init), option: "genesisTransactions", entry: chain.path) {
-                transactions.map(\.transaction)
-            }
-        }
-    }
-
-    /// Where the node keeps the hosted chains last set through `POST
-    /// /hosted-chains`.
-    static func savedFile(in storage: URL) -> URL {
-        storage.appendingPathComponent("hosted-chains.json")
-    }
-
-    /// The hosted chains saved in `storage`, or nil when none were ever set
-    /// through the API.
-    static func saved(in storage: URL) throws -> HostedChildren? {
-        let file = savedFile(in: storage)
-        guard FileManager.default.fileExists(atPath: file.path) else { return nil }
-        let request: SavedHostedChains
-        do {
-            request = try JSONDecoder().decode(SavedHostedChains.self, from: Data(contentsOf: file))
-        } catch {
-            throw ValidationError("\(file.path): \(error)")
-        }
-        return try HostedChildren(
-            hostChain: [], premineTo: [], chainPeer: request.chainPeer ?? [], policyModule: [],
-            chains: request.chains
-        )
-    }
-
-    /// Saves these chains in `storage`, inline (no file they were read from
-    /// is needed again), replacing the earlier ones at once.
-    func save(in storage: URL) throws {
-        try JSONEncoder().encode(inlineRequest).write(to: Self.savedFile(in: storage), options: .atomic)
-    }
-
-    /// These chains inline. Each chain carries the policy modules its spec
-    /// names.
-    var inlineRequest: SavedHostedChains {
-        var modules: [String: Data] = [:]
-        for bytes in policyModules {
-            if let cid = try? WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: bytes)).rawCID { modules[cid] = bytes }
-        }
-        let chains = children.map { path in
-            let spec = specs[path]
-            let named = spec.map { Array(Set($0.wasmPolicies.map(\.moduleCID))).sorted().compactMap { modules[$0] } } ?? []
-            return HostedChain(
-                path: path.joined(separator: "/"), spec: spec, premineTo: premineRecipients[path],
-                genesisTransactions: genesisTransactions[path]?.map { SubmitTransactionRequest(transaction: $0) },
-                policyModules: named.isEmpty ? nil : named
-            )
-        }
-        let peers = children.flatMap { path in
-            (seedPeers[path] ?? []).map { peer in
-                let host = peer.host.contains(":") ? "[\(peer.host)]" : peer.host
-                return "\(path.joined(separator: "/"))=\(peer.publicKey)@\(host):\(peer.port)"
-            }
-        }
-        return SavedHostedChains(chains: chains, chainPeer: peers.isEmpty ? nil : peers)
-    }
-
-    private mutating func premine(_ path: [String], to recipient: String, option: String, entry: String) throws {
-        guard let spec = specs[path] else {
-            throw ValidationError("\(option) names \(path.joined(separator: "/")), which is not a hosted chain with a spec")
-        }
-        do {
-            try NodeRuntime.checkPremine(spec: spec, to: recipient, on: path, modules: policyModules)
-        } catch {
-            throw ValidationError("\(option) \(entry): \(error)")
-        }
-        premineRecipients[path] = recipient
-    }
-
-    private mutating func genesis(
-        _ path: [String], option: String, entry: String, transactions read: () throws -> [Transaction]
-    ) throws {
-        let name = path.joined(separator: "/")
-        guard let spec = specs[path] else {
-            throw ValidationError("\(option) names \(name), which is not a hosted chain with a spec")
-        }
-        guard genesisTransactions[path] == nil else {
-            throw ValidationError("\(option) names \(name) twice")
-        }
-        let transactions: [Transaction]
-        do {
-            transactions = try read()
-            try NodeRuntime.checkPremine(
-                spec: spec, to: premineRecipients[path], transactions: transactions, on: path, modules: policyModules
-            )
-        } catch {
-            throw ValidationError("\(option) \(entry): \(error)")
-        }
-        genesisTransactions[path] = transactions
     }
 }
 
@@ -601,42 +540,20 @@ protocol OperatorWrites: Sendable {
     func pinnedVolumes() async -> [String]
     func hostChains(_ request: HostedChainsRequest) async throws
     var hostedChildren: [[String]] { get }
-    /// What the node keeps of its hosted chains, or nil before any change.
-    var savedHostedChains: SavedHostedChains? { get }
     var servingLedger: ServingLedger { get }
 }
 
-/// `POST /hosted-chains`: the child chains the node hosts from now on, in the
-/// shape of the flags that name them at start (`--host-chain`, ...), and
-/// inline in `chains`, after them. A chain left out stops; its data stays.
+/// `POST /hosted-chains` on a node started with flags: the child chains it
+/// hosts from now on, in the shape of the flags that name them at start
+/// (`--host-chain`, ...), until its next start. A chain left out stops; its
+/// data stays. (Under `--root` the node keeps its chains in its
+/// configuration; see `OperatorConfig`.)
 struct HostedChainsRequest: Codable, Sendable {
-    let hostChain: [String]?
+    let hostChain: [String]
     let premineTo: [String]?
     let genesisTransactions: [String]?
     let chainPeer: [String]?
     let policyModule: [String]?
-    var chains: [HostedChain]?
-
-    /// Whether the request names its chains at all: `{}` is refused rather
-    /// than read as "host none" (an empty list says that).
-    var namesChains: Bool { hostChain != nil || chains != nil }
-
-    /// Whether a field names a file on the node's disk: a spec, genesis
-    /// transactions or a policy module. The remote operator listener refuses
-    /// those; its clients send them inline.
-    var namesFiles: Bool {
-        (hostChain ?? []).contains { $0.contains("=") }
-            || !(genesisTransactions ?? []).isEmpty || !(policyModule ?? []).isEmpty
-    }
-}
-
-
-/// The child chains the node hosts, parent first, as `Nexus/Alpha`, and
-/// what it keeps of them inline (nil until a `POST /hosted-chains`; the
-/// node then hosts what its flags name).
-struct HostedChainsResponse: Codable, Sendable {
-    let chains: [String]
-    let saved: SavedHostedChains?
 }
 
 /// `POST /pins`: the Volume an operator pins, by its root CID.
@@ -659,25 +576,11 @@ struct PinsResponse: Codable, Sendable {
 
 extension NodeRuntime: OperatorWrites {
     func hostChains(_ request: HostedChainsRequest) async throws {
-        let hosted = try HostedChildren(
-            hostChain: request.hostChain ?? [], premineTo: request.premineTo ?? [],
+        try await host(try HostedChildren(
+            hostChain: request.hostChain, premineTo: request.premineTo ?? [],
             genesisTransactions: request.genesisTransactions ?? [],
-            chainPeer: request.chainPeer ?? [], policyModule: request.policyModule ?? [],
-            chains: request.chains ?? []
-        )
-        try await host(
-            hosted.children, childSpecs: hosted.specs, childPremineRecipients: hosted.premineRecipients,
-            childGenesisTransactions: hosted.genesisTransactions,
-            childSeedPeers: hosted.seedPeers, policyModules: hosted.policyModules
-        )
-        // Kept: what the node hosts after a restart, in place of its flags.
-        try hosted.save(in: storagePath)
-    }
-
-    var savedHostedChains: SavedHostedChains? {
-        try? JSONDecoder().decode(
-            SavedHostedChains.self, from: Data(contentsOf: HostedChildren.savedFile(in: storagePath))
-        )
+            chainPeer: request.chainPeer ?? [], policyModule: request.policyModule ?? []
+        ))
     }
 }
 
@@ -699,6 +602,7 @@ func makeApplication(
     processStartTime: Date,
     auth: OperatorAccess,
     endpoints: @escaping ChainEndpointsLookup = { _ in nil },
+    control: OperatorControl = OperatorControl(),
     configure: (Router<BasicRequestContext>) -> Void = { _ in }
 ) -> Application<RouterResponder<BasicRequestContext>> {
     let router = Router()
@@ -708,8 +612,8 @@ func makeApplication(
     switch auth {
     case .loopback(let cookie):
         router.add(middleware: LoopbackRPCAuthMiddleware(auth: cookie))
-    case .remote(let tokens):
-        router.add(middleware: OperatorTokenMiddleware(tokens: tokens))
+    case .remote(let tokens, let origins):
+        router.add(middleware: OperatorTokenMiddleware(tokens: tokens, allowedOrigins: origins))
     }
     addPublicReadRoutes(
         to: router,
@@ -739,6 +643,7 @@ func makeApplication(
         )
     }
     addOperatorWriteRoutes(to: router, writes: writes, remote: auth.isRemote)
+    addOperatorControlRoutes(to: router, control: control, writes: writes, remote: auth.isRemote)
     configure(router)
     return Application(
         responder: router.buildResponder(),
@@ -750,7 +655,7 @@ func makeApplication(
 /// remote operator listener's scoped bearer tokens.
 enum OperatorAccess: Sendable {
     case loopback(LoopbackRPCAuth)
-    case remote(OperatorTokens)
+    case remote(TokenStore, allowedOrigins: Set<String>)
 
     var isRemote: Bool {
         if case .remote = self { return true }
@@ -762,7 +667,8 @@ enum OperatorAccess: Sendable {
 struct OperatorListener: Sendable {
     let host: String
     let port: Int
-    let tokens: OperatorTokens
+    let tokens: TokenStore
+    let allowedOrigins: Set<String>
 }
 
 /// The public read application: exactly the bounded, non-mutating GET routes
@@ -1429,30 +1335,6 @@ private func addOperatorWriteRoutes(
             return PinRequest(cid: volume.root, entries: volume.entries)
         }
     }
-    // The child chains this node hosts, changed without a restart.
-    router.get("hosted-chains") { request, context in
-        try json(
-            HostedChainsResponse(
-                chains: service.hostedChildren.map { $0.joined(separator: "/") }, saved: service.savedHostedChains
-            ),
-            request: request, context: context
-        )
-    }
-    router.post("hosted-chains") { request, context in
-        let input: HostedChainsRequest = try await decode(request, context: context, remote: remote)
-        guard input.namesChains else {
-            throw HTTPError(.badRequest, message: "name the chains in hostChain or chains; an empty list hosts none")
-        }
-        if remote, input.namesFiles {
-            throw HTTPError(.badRequest, message: "the operator listener takes no file paths: send specs, genesis transactions and policy modules inline in chains")
-        }
-        return try await serviceCall(request: request, context: context) {
-            try await service.hostChains(input)
-            return HostedChainsResponse(
-                chains: service.hostedChildren.map { $0.joined(separator: "/") }, saved: service.savedHostedChains
-            )
-        }
-    }
     router.post("pins") { request, context in
         let input: PinRequest = try await decode(request, context: context, remote: remote)
         guard isPlausibleCID(input.cid) else { throw HTTPError(.badRequest, message: "invalidCID") }
@@ -1518,7 +1400,7 @@ private func decode<Value: Decodable>(
 /// DNS-rebinding page reaching this listener under a hostname it controls) —
 /// except on the remote operator listener, which no page reaches with a
 /// credential it holds on its own.
-private func decode<Value: Decodable, Context: RequestContext>(
+func decode<Value: Decodable, Context: RequestContext>(
     _ request: Request,
     context: Context,
     remote: Bool
@@ -1532,7 +1414,7 @@ private func decode<Value: Decodable, Context: RequestContext>(
     }
 }
 
-private func requireJSON(_ request: Request) throws {
+func requireJSON(_ request: Request) throws {
     let mediaType = request.headers[.contentType]?
         .split(separator: ";").first?
         .trimmingCharacters(in: .whitespaces).lowercased()
@@ -1541,7 +1423,7 @@ private func requireJSON(_ request: Request) throws {
     }
 }
 
-private func requireLoopbackHost(_ request: Request) throws {
+func requireLoopbackHost(_ request: Request) throws {
     let hosts = [request.head.authority].compactMap { $0 }
         + request.headers.filter { $0.name.canonicalName == "host" }.map(\.value)
     for host in hosts where !isLoopbackAuthority(host) {
@@ -1560,7 +1442,7 @@ private func isLoopbackAuthority(_ authority: String) -> Bool {
     return ["127.0.0.1", "localhost", "::1"].contains(String(host))
 }
 
-private func serviceCall<Value: Encodable, Context: RequestContext>(
+func serviceCall<Value: Encodable, Context: RequestContext>(
     request: Request,
     context: Context,
     operation: () async throws -> Value
@@ -1679,7 +1561,7 @@ private func reason(_ error: some Error) -> String {
     String(describing: error)
 }
 
-private func json<Value: Encodable, Context: RequestContext>(
+func json<Value: Encodable, Context: RequestContext>(
     _ value: Value,
     request: Request,
     context: Context

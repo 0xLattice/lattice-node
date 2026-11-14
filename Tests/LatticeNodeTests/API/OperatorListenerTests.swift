@@ -3,23 +3,26 @@ import Foundation
 import Hummingbird
 import HummingbirdTesting
 import Lattice
+import LatticeCtlCore
 import XCTest
 @testable import LatticeNode
 @testable import LatticeNodeDaemon
 import LatticeNodeAPI
 
-/// The remote operator listener (`--operator-listen`): scoped bearer tokens,
-/// no cookie, no file paths; and the inline `POST /hosted-chains` form its
-/// clients send.
+/// The remote operator listener (`--operator-listen`): bearer tokens with a
+/// role or a route list, no cookie, no file paths, an origin allowlist; and
+/// tokens made and revoked through the API.
 final class OperatorListenerTests: XCTestCase {
     private static let token = "seller-token"
-    private static let alpha = ["Nexus", "Alpha"]
+    private static let admin = "admin-token"
+    private static let reader = "read-token"
 
-    private func remote() async throws -> Application<RouterResponder<BasicRequestContext>> {
-        try await node(remote: true).app
+    private struct Node {
+        let app: Application<RouterResponder<BasicRequestContext>>
+        let tokens: TokenStore
     }
 
-    private func node(remote: Bool) async throws -> (app: Application<RouterResponder<BasicRequestContext>>, directory: URL) {
+    private func node(remote: Bool = true, origins: Set<String> = []) async throws -> Node {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-operator-listener-\(UUID().uuidString)"
         )
@@ -30,46 +33,41 @@ final class OperatorListenerTests: XCTestCase {
             privateKeyHex: String(repeating: "02", count: 32)
         ))
         let service = try await startRuntime(storage)
-        let hash = SHA256.hash(data: Data(Self.token.utf8)).map { String(format: "%02x", $0) }.joined()
-        let tokens = try OperatorTokens([
-            .init(name: "seller", sha256: hash, routes: ["GET /hosted-chains", "post /hosted-chains", "GET /api/state/account/{addr}"]),
-        ])
+        let tokens = TokenStore(try OperatorTokens([
+            .init(name: "seller", sha256: OperatorTokens.hash(Self.token), routes: [
+                "GET /hosted-chains", "post /hosted-chains", "GET /api/state/account/{addr}", "POST /tokens",
+            ]),
+            .init(name: "ops", sha256: OperatorTokens.hash(Self.admin), role: "admin"),
+            .init(name: "viewer", sha256: OperatorTokens.hash(Self.reader), role: "read"),
+        ]), file: directory.appendingPathComponent("tokens.json"))
+        let control = OperatorControl(tokens: tokens, storagePath: directory)
         let app = remote
-            ? makeApplication(service: service, host: "10.0.0.5", port: 8090, auth: .remote(tokens))
-            : makeApplication(service: service, host: "127.0.0.1", port: 8080)
-        return (app, directory)
+            ? makeApplication(
+                service: service, host: "10.0.0.5", port: 8090,
+                auth: .remote(tokens, allowedOrigins: origins), control: control
+            )
+            : makeApplication(service: service, host: "127.0.0.1", port: 8080, control: control)
+        return Node(app: app, tokens: tokens)
     }
 
-    private static func hostedChains(_ request: HostedChainsRequest) throws -> ByteBuffer {
-        ByteBuffer(bytes: try JSONEncoder().encode(request))
-    }
+    private static func bearer(_ token: String) -> HTTPFields { [.authorization: "Bearer \(token)"] }
 
     func testAListedRouteAnswersItsToken() async throws {
-        let app = try await remote()
+        let app = try await node().app
         try await app.test(.router) { client in
-            try await client.execute(
-                uri: "/hosted-chains", method: .get, headers: [.authorization: "Bearer \(Self.token)"]
-            ) { XCTAssertEqual($0.status, .ok, String(buffer: $0.body)) }
+            try await client.execute(uri: "/hosted-chains", method: .get, headers: Self.bearer(Self.token)) {
+                XCTAssertEqual($0.status, .ok, String(buffer: $0.body))
+            }
             // A route with a parameter is listed as registered.
             try await client.execute(
                 uri: "/api/state/account/\(String(repeating: "a", count: 40))", method: .get,
-                headers: [.authorization: "Bearer \(Self.token)"]
+                headers: Self.bearer(Self.token)
             ) { XCTAssertNotEqual($0.status, .forbidden) }
-            // A write from another host: no loopback Host is required here.
-            var headers: HTTPFields = [.authorization: "Bearer \(Self.token)", .contentType: "application/json"]
-            headers.append(.init(name: .init("Host")!, value: "10.0.0.5:8090"))
-            try await client.execute(
-                uri: "/hosted-chains", method: .post,
-                headers: headers,
-                body: try Self.hostedChains(HostedChainsRequest(
-                    hostChain: nil, premineTo: nil, genesisTransactions: nil, chainPeer: nil, policyModule: nil, chains: []
-                ))
-            ) { XCTAssertEqual($0.status, .ok, String(buffer: $0.body)) }
         }
     }
 
     func testNoOrUnknownTokenIsUnauthorized() async throws {
-        let app = try await remote()
+        let app = try await node().app
         try await app.test(.router) { client in
             for headers: HTTPFields in [[:], [.authorization: "Bearer not-a-token"], [.authorization: "Token \(Self.token)"]] {
                 try await client.execute(uri: "/hosted-chains", method: .get, headers: headers) {
@@ -82,20 +80,47 @@ final class OperatorListenerTests: XCTestCase {
     }
 
     func testARouteOutsideTheTokensListIsForbidden() async throws {
-        let app = try await remote()
+        let app = try await node().app
         try await app.test(.router) { client in
             for (uri, method) in [
                 ("/status", HTTPRequest.Method.get), ("/pins", .get), ("/health", .get), ("/no-such-route", .get),
+                // Only admin manages tokens, whatever a list names.
+                ("/tokens", .post),
             ] {
-                try await client.execute(uri: uri, method: method, headers: [.authorization: "Bearer \(Self.token)"]) {
+                try await client.execute(uri: uri, method: method, headers: Self.bearer(Self.token)) {
                     XCTAssertEqual($0.status, .forbidden, uri)
                 }
             }
         }
     }
 
+    /// `read` reaches every GET and nothing else; `admin` reaches all.
+    func testRolesScopeTheirTokens() async throws {
+        let app = try await node().app
+        try await app.test(.router) { client in
+            for uri in ["/status", "/pins", "/hosted-chains", "/disk", "/mining"] {
+                try await client.execute(uri: uri, method: .get, headers: Self.bearer(Self.reader)) {
+                    XCTAssertEqual($0.status, .ok, "\(uri): \(String(buffer: $0.body))")
+                }
+            }
+            for (uri, method) in [("/restart", HTTPRequest.Method.post), ("/config", .patch), ("/tokens", .get)] {
+                try await client.execute(uri: uri, method: method, headers: Self.bearer(Self.reader)) {
+                    XCTAssertEqual($0.status, .forbidden, uri)
+                }
+            }
+            try await client.execute(uri: "/tokens", method: .get, headers: Self.bearer(Self.admin)) {
+                XCTAssertEqual($0.status, .ok)
+            }
+            // Admin passes the token check to a route's own answer: 409, not
+            // 403, for a configuration this node does not own.
+            try await client.execute(uri: "/config", method: .get, headers: Self.bearer(Self.admin)) {
+                XCTAssertEqual($0.status, .conflict)
+            }
+        }
+    }
+
     func testTheCookieIsRefused() async throws {
-        let app = try await remote()
+        let app = try await node().app
         let basic = "Basic " + Data("__cookie__:test-cookie".utf8).base64EncodedString()
         try await app.test(.router) { client in
             for authorization in [testOperatorAuthorization, basic] {
@@ -106,171 +131,115 @@ final class OperatorListenerTests: XCTestCase {
         }
     }
 
-    func testFilePathsAreRefused() async throws {
-        let app = try await remote()
-        let requests = [
-            HostedChainsRequest(hostChain: ["Nexus/Alpha=/etc/spec.json"], premineTo: nil, genesisTransactions: nil, chainPeer: nil, policyModule: nil),
-            HostedChainsRequest(hostChain: ["Nexus/Alpha"], premineTo: nil, genesisTransactions: ["Nexus/Alpha=/tmp/g.json"], chainPeer: nil, policyModule: nil),
-            HostedChainsRequest(hostChain: [], premineTo: nil, genesisTransactions: nil, chainPeer: nil, policyModule: ["/tmp/p.wasm"]),
-        ]
+    /// A node started with flags takes no chains from the remote listener:
+    /// their flag form names files on its disk.
+    func testFlagFormHostedChainsAreRefusedRemotely() async throws {
+        let app = try await node().app
         try await app.test(.router) { client in
-            for request in requests {
-                try await client.execute(
-                    uri: "/hosted-chains", method: .post,
-                    headers: [.authorization: "Bearer \(Self.token)", .contentType: "application/json"],
-                    body: try Self.hostedChains(request)
-                ) { response in
-                    XCTAssertEqual(response.status, .badRequest)
-                    XCTAssertTrue(String(buffer: response.body).contains("no file paths"), String(buffer: response.body))
-                }
-            }
+            try await client.execute(
+                uri: "/hosted-chains", method: .post,
+                headers: [.authorization: "Bearer \(Self.token)", .contentType: "application/json"],
+                body: ByteBuffer(string: #"{"hostChain":["Nexus/Alpha=/etc/spec.json"]}"#)
+            ) { XCTAssertEqual($0.status, .conflict, String(buffer: $0.body)) }
         }
     }
 
-    /// A change through the API is what the node hosts after a restart, in
-    /// place of its flags; `{}` changes nothing.
-    func testAPostedChangeIsSavedAndReplacesTheFlags() async throws {
-        let (app, directory) = try await node(remote: false)
-        let post: HTTPFields = [.authorization: testOperatorAuthorization, .contentType: "application/json"]
-        try await app.test(.router) { client in
-            try await client.execute(uri: "/hosted-chains", method: .post, headers: post, body: ByteBuffer(string: "{}")) {
-                XCTAssertEqual($0.status, .badRequest)
+    /// Tokens made through the API work from the next request, the secret
+    /// shown once and only its hash kept; a revoked one is refused.
+    func testTokensAreMadeAndRevokedLive() async throws {
+        let node = try await node()
+        try await node.app.test(.router) { client in
+            var made: CreateTokenResponse?
+            try await client.execute(
+                uri: "/tokens", method: .post,
+                headers: [.authorization: "Bearer \(Self.admin)", .contentType: "application/json"],
+                body: ByteBuffer(bytes: try JSONEncoder().encode(CreateTokenRequest(name: "dash", role: "read")))
+            ) { response in
+                XCTAssertEqual(response.status, .ok, String(buffer: response.body))
+                made = try JSONDecoder().decode(CreateTokenResponse.self, from: Data(buffer: response.body))
             }
-            XCTAssertNil(try HostedChildren.saved(in: directory), "a refused request saves nothing")
-            try await client.execute(uri: "/hosted-chains", method: .get, headers: post) { response in
-                let answer = try JSONDecoder().decode(HostedChainsResponse.self, from: Data(buffer: response.body))
-                XCTAssertNil(answer.saved, "nothing kept before a change")
+            let secret = try XCTUnwrap(made?.token)
+            let file = try String(contentsOf: node.tokens.file, encoding: .utf8)
+            XCTAssertFalse(file.contains(secret), "the file keeps only the hash")
+            XCTAssertTrue(file.contains(OperatorTokens.hash(secret)))
+            let mode = try FileManager.default.attributesOfItem(atPath: node.tokens.file.path)[.posixPermissions] as? NSNumber
+            XCTAssertEqual(mode?.intValue, 0o600)
+            try await client.execute(uri: "/status", method: .get, headers: Self.bearer(secret)) {
+                XCTAssertEqual($0.status, .ok)
+            }
+            // The same name twice, an unknown role, both role and routes: refused.
+            for body in [
+                CreateTokenRequest(name: "dash", role: "read"), CreateTokenRequest(name: "x", role: "root"),
+                CreateTokenRequest(name: "y", role: "read", routes: ["GET /status"]),
+            ] {
+                try await client.execute(
+                    uri: "/tokens", method: .post,
+                    headers: [.authorization: "Bearer \(Self.admin)", .contentType: "application/json"],
+                    body: ByteBuffer(bytes: try JSONEncoder().encode(body))
+                ) { XCTAssertTrue([.conflict, .badRequest].contains($0.status), "\(body.name): \($0.status)") }
+            }
+            try await client.execute(uri: "/tokens/dash", method: .delete, headers: Self.bearer(Self.admin)) {
+                XCTAssertEqual($0.status, .ok)
+            }
+            try await client.execute(uri: "/status", method: .get, headers: Self.bearer(secret)) {
+                XCTAssertEqual($0.status, .unauthorized)
+            }
+            try await client.execute(uri: "/tokens/dash", method: .delete, headers: Self.bearer(Self.admin)) {
+                XCTAssertEqual($0.status, .notFound)
+            }
+        }
+        // What the file says is what a restart reads.
+        let reloaded = try TokenStore(file: node.tokens.file)
+        XCTAssertEqual(reloaded.list().tokens.map(\.name), ["seller", "ops", "viewer"])
+    }
+
+    /// The loopback cookie manages tokens too.
+    func testTheCookieManagesTokensOnLoopback() async throws {
+        let app = try await node(remote: false).app
+        try await app.test(.router) { client in
+            try await client.execute(
+                uri: "/tokens", method: .post,
+                headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
+                body: ByteBuffer(bytes: try JSONEncoder().encode(CreateTokenRequest(name: "ops2", role: "admin")))
+            ) { XCTAssertEqual($0.status, .ok, String(buffer: $0.body)) }
+        }
+    }
+
+    /// Browsers: an unlisted origin is refused, a listed one gets CORS and
+    /// still needs a token.
+    func testBrowserOriginsAreAllowlisted() async throws {
+        let app = try await node(origins: ["https://dash.example"]).app
+        try await app.test(.router) { client in
+            try await client.execute(
+                uri: "/status", method: .get, headers: [.authorization: "Bearer \(Self.reader)", .origin: "https://evil.example"]
+            ) { XCTAssertEqual($0.status, .forbidden) }
+            try await client.execute(uri: "/status", method: .options, headers: [.origin: "https://dash.example"]) {
+                XCTAssertEqual($0.status, .noContent)
+                XCTAssertEqual($0.headers[.accessControlAllowOrigin], "https://dash.example")
+            }
+            try await client.execute(uri: "/status", method: .get, headers: [.origin: "https://dash.example"]) {
+                XCTAssertEqual($0.status, .unauthorized)
+                XCTAssertEqual($0.headers[.accessControlAllowOrigin], "https://dash.example")
             }
             try await client.execute(
-                uri: "/hosted-chains", method: .post, headers: post,
-                body: try Self.hostedChains(HostedChainsRequest(
-                    hostChain: nil, premineTo: nil, genesisTransactions: nil, chainPeer: nil, policyModule: nil,
-                    chains: [HostedChain(path: "Nexus/Alpha")]
-                ))
-            ) { XCTAssertEqual($0.status, .ok, String(buffer: $0.body)) }
-            // GET returns what is kept, inline, for a client to change and post back.
-            try await client.execute(uri: "/hosted-chains", method: .get, headers: post) { response in
-                let answer = try JSONDecoder().decode(HostedChainsResponse.self, from: Data(buffer: response.body))
-                XCTAssertEqual(answer.chains, ["Nexus/Alpha"])
-                XCTAssertEqual(answer.saved?.chains.map(\.path), ["Nexus/Alpha"])
-            }
+                uri: "/status", method: .get, headers: [.authorization: "Bearer \(Self.reader)", .origin: "https://dash.example"]
+            ) { XCTAssertEqual($0.status, .ok) }
         }
-        let saved = try XCTUnwrap(try HostedChildren.saved(in: directory))
-        XCTAssertEqual(saved.children, [Self.alpha])
-    }
-
-    /// Adding a chain to the kept set (what `lattice child create` and
-    /// `child host` send) leaves every other chain as it was.
-    func testAddingAChainLeavesTheOthers() throws {
-        let spec = ChainSpec(
-            maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 5,
-            targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
-        )
-        let recipient = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
-        let peer = "Nexus/Alpha=\(String(repeating: "ab", count: 32))@node.example:4001"
-        let kept = SavedHostedChains(
-            chains: [HostedChain(path: "Nexus/Alpha", spec: spec, premineTo: recipient)], chainPeer: [peer]
-        )
-        let added = try XCTUnwrap(kept.adding(HostedChain(path: "Nexus/Beta"), peers: ["Nexus/Beta=k@b.example:4001"]))
-        XCTAssertEqual(added.chains.map(\.path), ["Nexus/Alpha", "Nexus/Beta"])
-        XCTAssertEqual(try JSONEncoder().encode(added.chains[0].spec), try JSONEncoder().encode(spec))
-        XCTAssertEqual(added.chains[0].premineTo, recipient)
-        XCTAssertEqual(added.chainPeer, [peer, "Nexus/Beta=k@b.example:4001"])
-        XCTAssertNil(added.adding(HostedChain(path: "Nexus/Beta")), "a listed chain is not added again")
-    }
-
-    /// The saved form is inline: a chain read from files comes back from it
-    /// with its spec, premine recipient and seeds, the files no longer read.
-    func testSavedChainsNeedNoFiles() throws {
-        let spec = ChainSpec(
-            maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 5,
-            targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
-        )
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-saved-hosted-\(UUID().uuidString)", isDirectory: true
-        )
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
-        let specFile = directory.appendingPathComponent("spec.json")
-        try JSONEncoder().encode(spec).write(to: specFile)
-        let recipient = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
-        let peer = "Nexus/Alpha=\(String(repeating: "ab", count: 32))@[::1]:4001"
-        let flags = try HostedChildren(
-            hostChain: ["Nexus/Alpha=\(specFile.path)", "Nexus/Alpha/Beta"], premineTo: ["Nexus/Alpha=\(recipient)"],
-            chainPeer: [peer], policyModule: []
-        )
-        try flags.save(in: directory)
-        try FileManager.default.removeItem(at: specFile)
-        let saved = try XCTUnwrap(try HostedChildren.saved(in: directory))
-        XCTAssertEqual(saved.children, flags.children)
-        XCTAssertEqual(try JSONEncoder().encode(saved.specs[Self.alpha]), try JSONEncoder().encode(spec))
-        XCTAssertEqual(saved.premineRecipients, flags.premineRecipients)
-        XCTAssertEqual(saved.seedPeers, flags.seedPeers)
     }
 
     func testTokenFileEntriesAreChecked() throws {
-        XCTAssertThrowsError(try OperatorTokens([.init(name: "a", sha256: "abc", routes: [])]))
         let hash = String(repeating: "ab", count: 32)
+        XCTAssertThrowsError(try OperatorTokens([.init(name: "a", sha256: "abc", routes: [])]))
         XCTAssertThrowsError(try OperatorTokens([.init(name: "a", sha256: hash, routes: ["hosted-chains"])]))
+        XCTAssertThrowsError(try OperatorTokens([.init(name: "a", sha256: hash)]), "a role or routes")
+        XCTAssertThrowsError(try OperatorTokens([.init(name: "a", sha256: hash, role: "owner")]))
         XCTAssertThrowsError(try OperatorTokens([
             .init(name: "a", sha256: hash, routes: []), .init(name: "b", sha256: hash.uppercased(), routes: []),
         ]))
-    }
-
-    /// Inline chains go through the same checks as the file form: the same
-    /// spec and recipient are accepted or refused alike.
-    func testInlineChainsAreCheckedAsTheFileFormIs() throws {
-        let spec = ChainSpec(
-            maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 5,
-            targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
+        // The earlier file form, routes only, still reads.
+        let entries = try JSONDecoder().decode(
+            [OperatorTokens.Entry].self, from: Data(#"[{"name":"s","sha256":"\#(hash)","routes":["GET /status"]}]"#.utf8)
         )
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-inline-hosted-\(UUID().uuidString)", isDirectory: true
-        )
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
-        let specFile = directory.appendingPathComponent("spec.json")
-        try JSONEncoder().encode(spec).write(to: specFile)
-        let recipient = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
-
-        func fromFiles(_ to: String) throws -> HostedChildren {
-            try HostedChildren(
-                hostChain: ["Nexus/Alpha=\(specFile.path)"], premineTo: ["Nexus/Alpha=\(to)"],
-                chainPeer: [], policyModule: []
-            )
-        }
-        func inline(_ to: String?, spec: ChainSpec? = spec) throws -> HostedChildren {
-            try HostedChildren(
-                hostChain: [], premineTo: [], chainPeer: [], policyModule: [],
-                chains: [HostedChain(path: "Nexus/Alpha", spec: spec, premineTo: to)]
-            )
-        }
-
-        let files = try fromFiles(recipient)
-        let sent = try inline(recipient)
-        XCTAssertEqual(sent.children, files.children)
-        XCTAssertEqual(try JSONEncoder().encode(sent.specs[Self.alpha]), try JSONEncoder().encode(files.specs[Self.alpha]))
-        XCTAssertEqual(sent.premineRecipients, [Self.alpha: recipient])
-        XCTAssertEqual(sent.premineRecipients, files.premineRecipients)
-
-        XCTAssertThrowsError(try fromFiles("not-an-address"))
-        XCTAssertThrowsError(try inline("not-an-address"))
-        // A recipient needs a spec to pay it from.
-        XCTAssertThrowsError(try inline(recipient, spec: nil))
-        // One chain is named once.
-        XCTAssertThrowsError(try HostedChildren(
-            hostChain: ["Nexus/Alpha"], premineTo: [], chainPeer: [], policyModule: [],
-            chains: [HostedChain(path: "Nexus/Alpha")]
-        ))
-        // The inline form round-trips as JSON, specs and all.
-        let decoded = try JSONDecoder().decode(
-            HostedChainsRequest.self,
-            from: JSONEncoder().encode(HostedChainsRequest(
-                hostChain: nil, premineTo: nil, genesisTransactions: nil, chainPeer: nil, policyModule: nil,
-                chains: [HostedChain(path: "Nexus/Alpha", spec: spec, premineTo: recipient, policyModules: [Data([1, 2])])]
-            ))
-        )
-        XCTAssertEqual(try JSONEncoder().encode(decoded.chains?.first?.spec), try JSONEncoder().encode(spec))
-        XCTAssertFalse(decoded.namesFiles)
+        XCTAssertNoThrow(try OperatorTokens(entries))
     }
 }

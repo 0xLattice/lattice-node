@@ -8,8 +8,8 @@ import LatticeNodeAPI
 /// Child chains this host runs as levels of its one process.
 struct Child: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Create, host and commit child chains.",
-        subcommands: [Create.self, Host.self, Commit.self]
+        abstract: "Create, host, unhost and commit child chains.",
+        subcommands: [Create.self, Host.self, Unhost.self, Commit.self]
     )
 
     /// Host a child chain that already exists: the running host syncs it
@@ -19,23 +19,51 @@ struct Child: AsyncParsableCommand {
             abstract: "Host an existing child chain; it is synced from its peers."
         )
 
-        @OptionGroup var rootOption: RootOption
+        @OptionGroup var target: NodeTarget
 
         @Argument(help: "The child chain's path, e.g. Nexus/Alpha.")
         var path: String
 
         func run() async throws {
-            let layout = rootOption.layout
-            var topology = try Topology.load(root: layout.root)
-            guard !(topology.hostedChains ?? []).contains(path) else {
-                throw CtlError("\(path) is already hosted")
-            }
-            topology.hostedChains = (topology.hostedChains ?? []) + [path]
-            _ = try topology.validated()
-            try topology.save(root: layout.root)
-            let updated = try await withSpawnLock(layout) { try await addHostedChainLocked(layout, path) }
-            print("\(path): hosted; synced from its peers")
-            if updated { print("the host now runs \(path)") }
+            try await target.changeConfig(api: { rpc in
+                try await sendChange(rpc: rpc, "POST", "hosted-chains", json: JSONEncoder().encode(HostedChain(path: path)))
+                print("\(path): hosted; synced from its peers")
+            }, stopped: { topology in
+                if !(topology.hostedChains ?? []).contains(path) {
+                    topology.hostedChains = (topology.hostedChains ?? []) + [path]
+                }
+                print("\(path): hosted from the next start; synced from its peers")
+            })
+        }
+    }
+
+    /// Stop hosting a child chain; what it stored stays.
+    struct Unhost: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Stop hosting a child chain, and drop its peers and mining entries; its data stays."
+        )
+
+        @OptionGroup var target: NodeTarget
+
+        @Argument(help: "The child chain's path, e.g. Nexus/Alpha.")
+        var path: String
+
+        func run() async throws {
+            try await target.changeConfig(api: { rpc in
+                guard let query = path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else {
+                    throw CtlError("bad chain path")
+                }
+                try await sendChange(rpc: rpc, "DELETE", "hosted-chains?chainPath=\(query)")
+                print("\(path): no longer hosted")
+            }, stopped: { topology in
+                let hosted = topology.hostedChains ?? []
+                guard hosted.contains(path) else { throw CtlError("\(path) is not hosted") }
+                if let child = hosted.first(where: { $0.hasPrefix(path + "/") }) {
+                    throw CtlError("\(child) is hosted under \(path); unhost it first")
+                }
+                topology = topology.removingChains([path])
+                print("\(path): not hosted from the next start")
+            })
         }
     }
 
@@ -52,7 +80,7 @@ struct Child: AsyncParsableCommand {
             abstract: "Build a hosted child chain's next block, commit it on its parent, and push it until it is weighed."
         )
 
-        @OptionGroup var rootOption: RootOption
+        @OptionGroup var target: NodeTarget
 
         @Argument(help: "The hosted child chain's path, e.g. Nexus/Alpha.")
         var path: String
@@ -63,31 +91,16 @@ struct Child: AsyncParsableCommand {
         @Option(name: .long, help: "The commit's fee; defaults to the parent's relay floor (minRelayFee).")
         var fee: UInt64?
 
-        @Option(name: .long, help: "A remote node's operator listener (its --operator-listen), e.g. http://10.0.0.5:8090, instead of the local host under --root. Requires --token-file.")
-        var node: String?
-
-        @Option(name: .long, help: "A file holding the bearer token for --node. Its routes must include GET /health, GET /api/fees, GET /api/state/account/{addr}, GET /api/mempool, GET /api/transaction/{cid}, POST /transactions, GET /child-blocks/commitment, POST /child-blocks/build and POST /child-blocks.")
-        var tokenFile: String?
-
         func run() async throws {
             let components = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
             guard components.count > 1, let directory = components.last else {
                 throw CtlError("\(path) is not a child chain's path")
             }
             let parent = components.dropLast().joined(separator: "/")
-            guard (node == nil) == (tokenFile == nil) else {
-                throw CtlError("--node and --token-file go together")
-            }
-            let remote = try node.map { url in
-                let token = try String(contentsOf: URL(fileURLWithPath: tokenFile!), encoding: .utf8)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !token.isEmpty else { throw CtlError("--token-file \(tokenFile!) is empty") }
-                return NodeRPC(url: url, token: token)
-            }
-            let layout = rootOption.layout
-            let rpc = try remote ?? NodeRPC(try Topology.load(root: layout.root).validated(), layout)
+            let rpc = try target.runningNode()
             let tx = try TxOptions.parse(
-                ["--chain", parent, "--key", key] + (rootOption.root.map { ["--root", $0] } ?? [])
+                ["--chain", parent, "--key", key] + (target.rootOption.root.map { ["--root", $0] } ?? [])
+                    + (target.node.map { ["--node", $0] } ?? []) + (target.tokenFile.map { ["--token-file", $0] } ?? [])
                     + (fee.map { ["--fee", String($0)] } ?? [])
             )
             let signer = try tx.signer()
@@ -97,7 +110,7 @@ struct Child: AsyncParsableCommand {
                 try await tx.submit(signer: signer, actions: [Tx.CommitChild.action(
                     directory: directory, block: block.blockCID,
                     parentState: block.parentState, previous: block.previous
-                )], remote: remote)
+                )])
                 accepted = true
             }
             while true {
@@ -150,7 +163,7 @@ struct Child: AsyncParsableCommand {
             abstract: "Write a child chain's spec and host it; its genesis is mined by merged mining."
         )
 
-        @OptionGroup var rootOption: RootOption
+        @OptionGroup var target: NodeTarget
 
         @Argument(help: "The child chain's path, e.g. Nexus/Alpha (its parent is Nexus or a hosted child; a nested genesis is mined once its parent has executed a block).")
         var path: String
@@ -177,8 +190,7 @@ struct Child: AsyncParsableCommand {
         var genesisTransactions: String?
 
         func run() async throws {
-            let layout = rootOption.layout
-            var topology = try Topology.load(root: layout.root)
+            let layout = target.layout
             let chainSpec: ChainSpec
             if let spec {
                 chainSpec = try JSONDecoder().decode(ChainSpec.self, from: Data(contentsOf: URL(fileURLWithPath: spec)))
@@ -235,39 +247,50 @@ struct Child: AsyncParsableCommand {
             } catch {
                 throw CtlError(genesis == nil ? "--premine-to: \(error)" : "the genesis: \(error)")
             }
-            // A chain is created once: its spec fixes its genesis.
-            guard !(topology.hostedChains ?? []).contains(path),
-                  !FileManager.default.fileExists(atPath: layout.childSpec(for: path).path) else {
-                throw CtlError("\(path) already exists; a child chain is created once")
-            }
-            topology.hostedChains = (topology.hostedChains ?? []) + [path]
-            _ = try topology.validated()
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-            let file = layout.childSpec(for: path)
-            try FileManager.default.createDirectory(
-                at: file.deletingLastPathComponent(), withIntermediateDirectories: true
+            // Running (or remote): the node keeps the spec and hosts the
+            // chain. Stopped: written here, and hosted from the next start.
+            let inline = HostedChain(
+                path: path, spec: chainSpec, premineTo: premineTo,
+                genesisTransactions: try genesisTransactions.map {
+                    try JSONDecoder().decode([SubmitTransactionRequest].self, from: Data(contentsOf: URL(fileURLWithPath: $0)))
+                },
+                policyModules: modules.isEmpty ? nil : modules.keys.sorted().compactMap { modules[$0] }
             )
-            // The recipient first: the spec marks the chain created, so a spec
-            // never stands without the recipient its genesis pays.
-            if let premineTo {
-                try Data(premineTo.utf8).write(to: layout.premineRecipient(for: path), options: .atomic)
-            }
-            if let genesis {
-                try genesis.bytes.write(to: layout.genesisTransactions(for: path), options: .atomic)
-            }
-            try encoder.encode(chainSpec).write(to: file, options: .atomic)
-            if !modules.isEmpty {
-                let directory = layout.policyModules(for: path)
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                for (cid, bytes) in modules {
-                    try bytes.write(to: directory.appendingPathComponent(cid + ".wasm"), options: .atomic)
+            try await target.changeConfig(api: { rpc in
+                try await sendChange(rpc: rpc, "POST", "hosted-chains", json: JSONEncoder().encode(inline))
+                print("\(path): created; genesis mined from its spec in the next template that carries it")
+            }, stopped: { topology in
+                // A chain is created once: its spec fixes its genesis.
+                guard !(topology.hostedChains ?? []).contains(path),
+                      !FileManager.default.fileExists(atPath: layout.childSpec(for: path).path) else {
+                    throw CtlError("\(path) already exists; a child chain is created once")
                 }
-            }
-            try topology.save(root: layout.root)
-            let updated = try await withSpawnLock(layout) { try await addHostedChainLocked(layout, path) }
-            print("\(path): spec \(file.path); genesis mined from it in the next template that carries it")
-            if updated { print("the host now runs \(path)") }
+                topology.hostedChains = (topology.hostedChains ?? []) + [path]
+                _ = try topology.validated()
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+                let file = layout.childSpec(for: path)
+                try FileManager.default.createDirectory(
+                    at: file.deletingLastPathComponent(), withIntermediateDirectories: true
+                )
+                // The recipient first: the spec marks the chain created, so a
+                // spec never stands without the recipient its genesis pays.
+                if let premineTo {
+                    try Data(premineTo.utf8).write(to: layout.premineRecipient(for: path), options: .atomic)
+                }
+                if let genesis {
+                    try genesis.bytes.write(to: layout.genesisTransactions(for: path), options: .atomic)
+                }
+                try encoder.encode(chainSpec).write(to: file, options: .atomic)
+                if !modules.isEmpty {
+                    let directory = layout.policyModules(for: path)
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    for (cid, bytes) in modules {
+                        try bytes.write(to: directory.appendingPathComponent(cid + ".wasm"), options: .atomic)
+                    }
+                }
+                print("\(path): spec \(file.path); genesis mined from it in the next template that carries it")
+            })
         }
     }
 }
