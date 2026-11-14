@@ -32,6 +32,25 @@ final class MinerSupervisorTests: XCTestCase {
         return (HostLayout(root: root.path), loop)
     }
 
+    /// Running, not gone and not a zombie (a container's init may not reap
+    /// an orphan at once).
+    private func alive(_ pid: Int32) throws -> Bool {
+        if let stat = try? String(contentsOfFile: "/proc/\(pid)/stat", encoding: .utf8) {
+            return stat[(stat.lastIndex(of: ")") ?? stat.startIndex)...].split(separator: " ").dropFirst().first != "Z"
+        }
+        guard kill(pid, 0) == 0 else { return false }
+        let ps = Process()
+        ps.executableURL = URL(fileURLWithPath: "/bin/ps")
+        ps.arguments = ["-o", "stat=", "-p", String(pid)]
+        let out = Pipe()
+        ps.standardOutput = out
+        try ps.run()
+        let state = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        ps.waitUntilExit()
+        return !state.isEmpty && !state.hasPrefix("Z")
+    }
+
     private func waitFor(_ label: String, _ condition: () async -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(20)
         while ContinuousClock.now < deadline {
@@ -54,7 +73,7 @@ final class MinerSupervisorTests: XCTestCase {
         let started = ContinuousClock.now
         await supervisor.stop()
         XCTAssertLessThan(started.duration(to: .now), .seconds(8))
-        XCTAssertNotEqual(kill(coordinator, 0), 0, "the coordinator is gone")
+        XCTAssertFalse(try alive(coordinator), "the coordinator is gone")
         let status = await supervisor.status()
         XCTAssertFalse(status.running)
     }

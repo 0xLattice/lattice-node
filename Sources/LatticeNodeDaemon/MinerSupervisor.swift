@@ -214,14 +214,23 @@ actor MinerSupervisor {
             .flatMap { Int32($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
     }
 
-    /// A live process's parent and command line, read with `ps`.
+    /// A live process's parent and command line: from /proc where there is
+    /// one (a container may have no `ps`), else from `ps`.
     private func processInfo(_ pid: Int32) async -> (parent: Int32, command: String)? {
-        guard pid > 0, kill(pid, 0) == 0,
-              let result = try? await spawnCollectingOutput(
-                  executable: URL(fileURLWithPath: "/bin/ps"),
-                  arguments: ["-o", "ppid=", "-o", "args=", "-p", String(pid)],
-                  deadline: .seconds(5)
-              ) else { return nil }
+        guard pid > 0, kill(pid, 0) == 0 else { return nil }
+        if let stat = try? String(contentsOfFile: "/proc/\(pid)/stat", encoding: .utf8),
+           let cmdline = try? Data(contentsOf: URL(fileURLWithPath: "/proc/\(pid)/cmdline")) {
+            // pid (comm) state ppid ...: comm may hold spaces, so after its ")".
+            let fields = stat[(stat.lastIndex(of: ")") ?? stat.startIndex)...].split(separator: " ")
+            guard fields.count > 2, fields[1] != "Z", let parent = Int32(fields[2]) else { return nil }
+            let command = String(decoding: cmdline, as: UTF8.self).replacingOccurrences(of: "\0", with: " ")
+            return (parent, command.trimmingCharacters(in: .whitespaces))
+        }
+        guard let result = try? await spawnCollectingOutput(
+            executable: URL(fileURLWithPath: "/bin/ps"),
+            arguments: ["-o", "ppid=", "-o", "args=", "-p", String(pid)],
+            deadline: .seconds(5)
+        ) else { return nil }
         let line = String(decoding: result.output, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
         guard let space = line.firstIndex(of: " "), let parent = Int32(line[..<space]) else { return nil }
         return (parent, String(line[space...]).trimmingCharacters(in: .whitespaces))
