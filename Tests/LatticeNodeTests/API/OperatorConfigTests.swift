@@ -347,6 +347,8 @@ final class OperatorConfigTests: XCTestCase {
         for refused in [
             #"{"operatorListen":"ops.example:9000","operatorTokens":"t.json"}"#,
             #"{"operatorListen":"[::1]:\#(port)","operatorTokens":"t.json"}"#,
+            // localhost may be either loopback: both must be free.
+            #"{"operatorListen":"localhost:\#(port)","operatorTokens":"t.json"}"#,
         ] {
             do {
                 _ = try await config.patch(patch(refused), remote: false)
