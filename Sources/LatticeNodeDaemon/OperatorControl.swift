@@ -59,15 +59,39 @@ actor OperatorConfig {
     private(set) var saved: Topology
     private let runtime: any HostingRuntime
     private let mining: any MiningControl
+    /// Whether a configuration would start: the start's own checks (as
+    /// `LatticeNodeCommand.plan`) and a listener port it newly names being
+    /// free. Checked before a change is kept and before a restart.
+    private let startCheck: @Sendable (Topology, HostLayout, Topology) throws -> Void
     private var busy = false
     private var waiting: [CheckedContinuation<Void, Never>] = []
 
-    init(layout: HostLayout, started: Topology, runtime: any HostingRuntime, mining: any MiningControl) {
+    init(
+        layout: HostLayout, started: Topology, runtime: any HostingRuntime, mining: any MiningControl,
+        startCheck: @escaping @Sendable (Topology, HostLayout, Topology) throws -> Void = checkStarts
+    ) {
         self.layout = layout
         self.started = started
         self.saved = started
         self.runtime = runtime
         self.mining = mining
+        self.startCheck = startCheck
+    }
+
+    /// Refuses a restart the configuration on disk would not survive: a
+    /// node that cannot start is out of reach of this API.
+    func checkRestart() throws {
+        let onDisk: Topology
+        do {
+            onDisk = try Topology.load(root: layout.root).validated()
+        } catch {
+            throw OperatorConfigError.conflict("\(Topology.fileName) would not start the node: \(error); fix it before restarting")
+        }
+        do {
+            try startCheck(onDisk, layout, started)
+        } catch {
+            throw OperatorConfigError.conflict("\(Topology.fileName) would not start the node: \(error); fix it before restarting")
+        }
     }
 
     func current() throws -> ConfigResponse {
@@ -100,8 +124,9 @@ actor OperatorConfig {
             guard let address = ChainAddress(string: chain.path), address.key == chain.path, !address.isNexus else {
                 throw OperatorConfigError.invalid("\(chain.path) is not a child chain's path")
             }
+            var files: ChainFiles?
             if chain.spec != nil {
-                try writeSpec(chain)
+                files = try prepare(chain)
             } else if chain.premineTo != nil || chain.genesisTransactions != nil || chain.policyModules != nil {
                 throw OperatorConfigError.invalid("premineTo, genesisTransactions and policyModules come with a spec")
             }
@@ -109,7 +134,7 @@ actor OperatorConfig {
             if !(next.hostedChains ?? []).contains(chain.path) {
                 next.hostedChains = (next.hostedChains ?? []) + [chain.path]
             }
-            return try await apply(next)
+            return try await apply(next, creating: files)
         }
     }
 
@@ -139,21 +164,28 @@ actor OperatorConfig {
         return try await body()
     }
 
-    private func apply(_ proposed: Topology) async throws -> ConfigChangeResponse {
+    /// Applies `proposed`; `creating` is a new chain's files, written only
+    /// once the rest checks and removed again unless the chain started.
+    private func apply(_ proposed: Topology, creating: ChainFiles? = nil) async throws -> ConfigChangeResponse {
         try requireUnedited()
         let next: Topology
         let hosted: HostedChildren
         do {
             next = try proposed.validated()
-            try mining.check(next.mine)
+            if try next.changedKeys(from: saved).contains("mine") { try mining.check(next.mine) }
+        } catch {
+            throw OperatorConfigError.invalid("\(error)")
+        }
+        do {
+            try creating?.write()
+            try startCheck(next, layout, started)
             let files = HostedChainFiles(layout, next)
             hosted = try HostedChildren(
                 hostChain: files.hostChain, premineTo: files.premineTo, genesisTransactions: files.genesisTransactions,
                 chainPeer: files.chainPeer, policyModule: files.policyModule
             )
-        } catch let error as OperatorConfigError {
-            throw error
         } catch {
+            creating?.remove()
             throw OperatorConfigError.invalid("\(error)")
         }
         var effective = next
@@ -167,6 +199,7 @@ actor OperatorConfig {
             }
             let running = Set(runtime.hostedChildren.map { $0.joined(separator: "/") })
             let missing = (next.hostedChains ?? []).filter { !running.contains($0) }
+            if let creating, missing.contains(creating.path) { creating.remove() }
             if !missing.isEmpty {
                 effective = next.removingChains(Set(missing))
                 failed += missing.map { ConfigFailure(key: "hostedChains", chain: $0, error: reason ?? "did not start") }
@@ -203,22 +236,33 @@ actor OperatorConfig {
         }
     }
 
-    /// Keeps a chain's inline spec, premine recipient, genesis transactions
-    /// and modules under `specs/`, checked first as `lattice child create`
-    /// checks them. A chain is created once: the same spec again is kept as
-    /// it is, a different one refused.
-    private func writeSpec(_ chain: HostedChain) throws {
-        guard let spec = chain.spec else { return }
+    /// A new chain's inline spec, premine recipient, genesis transactions
+    /// and modules, checked as `lattice child create` checks them, as the
+    /// files `specs/` keeps; nil when the chain was created with exactly
+    /// these. A chain is created once: anything else for it is refused.
+    private func prepare(_ chain: HostedChain) throws -> ChainFiles? {
+        guard let spec = chain.spec else { return nil }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
         let specData = try encoder.encode(spec)
-        let file = layout.childSpec(for: chain.path)
-        if let existing = try? Data(contentsOf: file) {
-            let decoded = try? encoder.encode(JSONDecoder().decode(ChainSpec.self, from: existing))
-            guard decoded == specData else {
-                throw OperatorConfigError.conflict("\(chain.path) already exists with another spec; a child chain is created once")
+        let specFile = layout.childSpec(for: chain.path)
+        let premineFile = layout.premineRecipient(for: chain.path)
+        let genesisFile = layout.genesisTransactions(for: chain.path)
+        let genesisData = try chain.genesisTransactions.map { try encoder.encode($0) }
+        if let existing = try? Data(contentsOf: specFile) {
+            // Modules are named by CID in the spec: the same spec, the same modules.
+            let sameSpec = (try? encoder.encode(JSONDecoder().decode(ChainSpec.self, from: existing))) == specData
+            let premine = (try? String(contentsOf: premineFile, encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let genesis = (try? Data(contentsOf: genesisFile)).flatMap {
+                try? encoder.encode(JSONDecoder().decode([SubmitTransactionRequest].self, from: $0))
             }
-            return
+            guard sameSpec, premine == chain.premineTo, genesis == genesisData else {
+                throw OperatorConfigError.conflict(
+                    "\(chain.path) already exists with another spec, premine recipient or genesis transactions; a child chain is created once"
+                )
+            }
+            return nil
         }
         var modules: [String: Data] = [:]
         for bytes in chain.policyModules ?? [] {
@@ -247,23 +291,86 @@ actor OperatorConfig {
         } catch {
             throw OperatorConfigError.invalid("\(chain.path): \(error)")
         }
-        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        var files: [(URL, Data)] = []
+        if let premineTo = chain.premineTo { files.append((premineFile, Data(premineTo.utf8))) }
+        if let genesisData { files.append((genesisFile, genesisData)) }
+        let directory = layout.policyModules(for: chain.path)
+        for (cid, bytes) in modules.sorted(by: { $0.key < $1.key }) {
+            files.append((directory.appendingPathComponent(cid + ".wasm"), bytes))
+        }
         // The spec last: it marks the chain created, so it never stands
         // without what its genesis is built from.
-        if let premineTo = chain.premineTo {
-            try Data(premineTo.utf8).write(to: layout.premineRecipient(for: chain.path), options: .atomic)
+        files.append((specFile, specData))
+        return ChainFiles(path: chain.path, files: files, moduleDirectory: modules.isEmpty ? nil : directory)
+    }
+}
+
+/// A chain's files under `specs/`, written for a chain being created and
+/// removed again when it is not kept.
+struct ChainFiles: Sendable {
+    let path: String
+    let files: [(URL, Data)]
+    let moduleDirectory: URL?
+
+    func write() throws {
+        for (file, data) in files {
+            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: file, options: .atomic)
         }
-        if let transactions = chain.genesisTransactions {
-            try JSONEncoder().encode(transactions).write(to: layout.genesisTransactions(for: chain.path), options: .atomic)
+    }
+
+    /// The spec first: without it the chain counts as never created.
+    func remove() {
+        for (file, _) in files.reversed() { try? FileManager.default.removeItem(at: file) }
+        if let moduleDirectory { try? FileManager.default.removeItem(at: moduleDirectory) }
+    }
+}
+
+/// Whether `topology` would start the node (`--root` at `layout`): its
+/// flags parse and pass the start's own checks, and every listener port
+/// it names that the running node (started from `started`) does not hold
+/// can be bound now.
+func checkStarts(_ topology: Topology, layout: HostLayout, started: Topology) throws {
+    _ = try LatticeNodeCommand.parse(topology.nodeArguments(layout: layout)).plan()
+    let held = Set(listeners(started).map { "\($0.host):\($0.port)" })
+    for listener in listeners(topology) where !held.contains("\(listener.host):\(listener.port)") {
+        guard canBind(host: listener.host, port: listener.port) else {
+            throw CtlError("\(listener.host):\(listener.port) (\(listener.key)) cannot be bound: in use, or not an address of this host")
         }
-        if !modules.isEmpty {
-            let directory = layout.policyModules(for: chain.path)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            for (cid, bytes) in modules {
-                try bytes.write(to: directory.appendingPathComponent(cid + ".wasm"), options: .atomic)
-            }
+    }
+}
+
+private func listeners(_ topology: Topology) -> [(key: String, host: String, port: UInt16)] {
+    var result: [(key: String, host: String, port: UInt16)] = [
+        ("listen", "0.0.0.0", topology.listen), ("rpc", "127.0.0.1", topology.rpc),
+    ]
+    if let port = topology.publicRead { result.append(("publicRead", "0.0.0.0", port)) }
+    if let port = topology.webSocket, port != 0 { result.append(("webSocket", "0.0.0.0", port)) }
+    if let listen = topology.operatorListen, let (host, port) = Topology.hostPort(listen) {
+        result.append(("operatorListen", host, port))
+    }
+    return result
+}
+
+/// Whether a TCP listener could bind `host:port` (an IPv4 address or
+/// `localhost`) now.
+private func canBind(host: String, port: UInt16) -> Bool {
+    #if canImport(Darwin)
+    let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+    #else
+    let descriptor = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+    #endif
+    guard descriptor >= 0 else { return false }
+    defer { _ = close(descriptor) }
+    var address = sockaddr_in()
+    address.sin_family = sa_family_t(AF_INET)
+    address.sin_port = port.bigEndian
+    let ipv4 = host == "localhost" ? "127.0.0.1" : host
+    guard inet_pton(AF_INET, ipv4, &address.sin_addr) == 1 else { return true }  // a name or IPv6: left to the start
+    return withUnsafePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
         }
-        try specData.write(to: file, options: .atomic)
     }
 }
 
@@ -287,8 +394,15 @@ final class NodeLifecycle: @unchecked Sendable {
     private let stream: AsyncStream<Void>
     private let continuation: AsyncStream<Void>.Continuation
 
+    /// The binary to run again, as it was named when this process started:
+    /// a later look (`/proc/self/exe`) can name a file an upgrade replaced.
+    private let executable: String
+
     init() {
         (stream, continuation) = AsyncStream.makeStream()
+        executable = Bundle.main.executablePath.map {
+            $0.hasSuffix(" (deleted)") ? String($0.dropLast(" (deleted)".count)) : $0
+        } ?? CommandLine.arguments[0]
     }
 
     var restartRequested: Bool { lock.withLock { requested } }
@@ -307,7 +421,7 @@ final class NodeLifecycle: @unchecked Sendable {
     /// Replaces this process with its own binary, run with the same
     /// arguments. Every descriptor but the standard three is closed on the
     /// way, so the new image finds its ports, storage lock and files free.
-    static func reexec() -> Never {
+    func reexec() -> Never {
         // Every open output stream, without naming the C globals (not
         // concurrency-safe under strict checking).
         fflush(nil)
@@ -315,12 +429,12 @@ final class NodeLifecycle: @unchecked Sendable {
         for name in (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? [] {
             if let fd = Int32(name), fd > 2 { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) }
         }
-        let path = Bundle.main.executablePath ?? CommandLine.arguments[0]
         var argv: [UnsafeMutablePointer<CChar>?] = CommandLine.arguments.map { strdup($0) }
         argv.append(nil)
-        execv(path, argv)
-        print("restart failed: exec \(path): \(String(cString: strerror(errno)))")
-        exit(1)
+        execv(executable, argv)
+        // Not silently: a supervisor restarts a process that exits nonzero.
+        FileHandle.standardError.write(Data("restart failed: exec \(executable): \(String(cString: strerror(errno)))\n".utf8))
+        exit(75)
     }
 }
 
@@ -502,6 +616,7 @@ func addOperatorControlRoutes(
     router.post("restart") { request, context in
         if !remote { try requireLoopbackHost(request) }
         guard let lifecycle = control.lifecycle else { throw HTTPError(.notFound) }
+        try await checkRestart(control)
         Task {
             // Answered first: the restart begins once this reply is on its way.
             try? await Task.sleep(for: .milliseconds(200))
@@ -514,6 +629,7 @@ func addOperatorControlRoutes(
         guard let lifecycle = control.lifecycle, let layout = control.config?.layout else {
             throw HTTPError(.conflict, message: "a wipe needs a node started with --root, which keeps identity and configuration outside its storage")
         }
+        try await checkRestart(control)
         try FileManager.default.createDirectory(at: layout.wipeRequest.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data().write(to: layout.wipeRequest)
         Task {
@@ -541,6 +657,15 @@ func addOperatorControlRoutes(
         let name = context.parameters.get("name") ?? ""
         guard try tokens.revoke(name) else { throw HTTPError(.notFound, message: "no token named \(name)") }
         return try json(tokens.list(), request: request, context: context)
+    }
+}
+
+/// A restart the node would not come back from is refused (409).
+private func checkRestart(_ control: OperatorControl) async throws {
+    do {
+        try await control.config?.checkRestart()
+    } catch let error as OperatorConfigError {
+        throw HTTPError(.conflict, message: error.description)
     }
 }
 

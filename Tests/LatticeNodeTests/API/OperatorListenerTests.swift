@@ -213,6 +213,11 @@ final class OperatorListenerTests: XCTestCase {
             try await client.execute(
                 uri: "/status", method: .get, headers: [.authorization: "Bearer \(Self.reader)", .origin: "https://evil.example"]
             ) { XCTAssertEqual($0.status, .forbidden) }
+            // A preflight from an unlisted origin gets no CORS answer.
+            try await client.execute(uri: "/status", method: .options, headers: [.origin: "https://evil.example"]) {
+                XCTAssertEqual($0.status, .forbidden)
+                XCTAssertNil($0.headers[.accessControlAllowOrigin])
+            }
             try await client.execute(uri: "/status", method: .options, headers: [.origin: "https://dash.example"]) {
                 XCTAssertEqual($0.status, .noContent)
                 XCTAssertEqual($0.headers[.accessControlAllowOrigin], "https://dash.example")

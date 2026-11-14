@@ -147,13 +147,15 @@ extension LatticeNodeCommand {
         } catch {
             result = .failure(error)
         }
-        await control.mining?.stop()
+        // Side by side: the node's own stop has a grace of its own to keep.
+        async let miningStopped: Void? = control.mining?.stop()
         await runtime.stop()
+        _ = await miningStopped
         try result.get()
         if lifecycle.restartRequested {
             print("restarting as asked")
             try? FileManager.default.removeItem(at: cookieFile)
-            NodeLifecycle.reexec()
+            lifecycle.reexec()
         }
     }
 }

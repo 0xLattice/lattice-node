@@ -54,6 +54,13 @@ extension Topology {
         return host.isEmpty ? nil : (host, port)
     }
 
+    /// A peer as `public-key@host:port`, as the node reads `--peer`.
+    public static func peerEndpoint(_ value: String) -> (key: String, host: String, port: UInt16)? {
+        guard let at = value.firstIndex(of: "@"), at != value.startIndex,
+              let (host, port) = hostPort(String(value[value.index(after: at)...])) else { return nil }
+        return (String(value[..<at]), host, port)
+    }
+
     /// This configuration with `patch` (an RFC 7396 JSON merge patch: an
     /// object's members replace, `null` removes, anything else replaces the
     /// whole value) applied. Not validated.
@@ -371,4 +378,16 @@ public struct TokensResponse: Codable, Sendable {
     public init(tokens: [Token]) {
         self.tokens = tokens
     }
+}
+
+/// Writes `data` to a new file at `path`, created mode 0600 (never readable
+/// by others, not even for a moment); refuses a file already there.
+public func writePrivateFile(_ data: Data, to path: String) throws {
+    let descriptor = open(path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+    guard descriptor >= 0 else {
+        throw CtlError("could not create \(path): \(String(cString: strerror(errno)))")
+    }
+    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+    try handle.write(contentsOf: data)
+    try handle.close()
 }

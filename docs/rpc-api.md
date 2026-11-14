@@ -62,7 +62,9 @@ same handlers), but:
   and the path as the node registers it, a parameter in braces:
   `GET /api/state/account/{addr}`, `GET /fetch/{cid}`. `?chainPath=` is not
   part of a route; a token reaches every chain the node hosts. Only `admin`
-  reaches `/tokens`.
+  reaches `/tokens`. A token allowed `PATCH /config`, `POST /restart` or
+  `POST /wipe` controls the node as fully as `admin` does, short of tokens:
+  give those routes only where `admin` would do.
 - No field may name a file on the node's disk: the flag form of
   `POST /hosted-chains` is `409`, and `PATCH /config` that changes
   `mine.worker` or `operatorTokens` is `400`. Those are set beside the node.
@@ -690,7 +692,10 @@ atomically, and answered:
  "restartRequired": ["listen"]}
 ```
 
-`400` when the change does not check (nothing was applied or written);
+`400` when the change does not check (nothing was applied or written),
+including a configuration the node would not start from: its start-time
+checks are run on it (flags, peers, windows, listeners), and a listener port
+it newly names must be free now;
 `409` when `lattice.json` was edited by hand since the node last wrote it
 (stop the node to edit it, or `lattice restart` to load the edit); `200`
 when all of it took effect; `500` with the same body when part of it failed:
@@ -783,9 +788,13 @@ host it.
 ```
 
 The node runs the mining loop (`lattice mine run`) as its child while
-`mine.enabled` is true, restarts it 5 s after it exits, and stops it when
-mining is turned off, on restart and on shutdown. Its output goes to
-`<root>/log/mine.log`.
+`mine.enabled` is true and stops it when mining is turned off, when `mine`
+changes, on restart and on shutdown; a stop ends the round in flight. A loop
+that exits on its own is started again after 5 s, the pause doubling (to
+5 minutes) while it keeps exiting within a minute; `lastExit` says how it
+exited and when it starts again. Its output is appended to
+`<root>/log/mine.log`. At its start the node stops a loop an earlier
+`lattice mine start` ran on its own (`run/mine.pid`).
 
 ### `GET /logs?file=node|mine&tail=N`
 
@@ -806,11 +815,13 @@ Bytes per store in the data directory, and the free bytes on its volume.
 
 ### `POST /restart`
 
-`202 {"restarting": true}`, then the node stops (its mining loop first) and
+`409` when `lattice.json` as it is on disk would not start the node (it is
+read and checked as a start would). Otherwise `202 {"restarting": true}`,
+then the node stops (its mining loop first) and
 starts again in the same process: it replaces itself with its own binary and
 arguments (`execv`), so its pid, its supervisor (systemd, a container, `lattice
 up`) and its pidfile do not change, and it reads `lattice.json` afresh.
-Clients wait for `/health` to answer again.
+Clients wait until `process_start_time_seconds` in `GET /metrics` changes.
 
 ### `POST /wipe`
 

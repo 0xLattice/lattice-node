@@ -31,7 +31,9 @@ the one under `--root` (loopback and its cookie). Only `init`, `identity`,
 
 A running node applies hosted chains, child-chain peers and mining at once;
 it writes every other key and lists it as waiting for a restart until
-`lattice restart`. A change to a stopped node is written to `lattice.json`
+`lattice restart` (refused while `lattice.json` would not start the node). A
+change the node would not start from (a peer that does not parse, a port in
+use) is refused before it is kept. A change to a stopped node is written to `lattice.json`
 directly, checked first, under the spawn lock. A running node refuses a
 change when `lattice.json` was edited by hand since it last wrote it: stop it
 to edit the file by hand, or `lattice restart` to load the edit. A file that
@@ -356,7 +358,8 @@ The node supervises the loop (`lattice mine run --root <root>` as its child,
 output in `log/mine.log`): it starts it while `mine.enabled` is true, starts
 it again 5 seconds after it exits, restarts it when `mine` changes (new
 recipients apply to the next round), and stops it on `mine stop`, restart and
-shutdown. The loop exits if its node does. So mining follows the node's
+shutdown, ending the round in flight. A loop that keeps exiting is started
+again after a pause that doubles to 5 minutes. The loop exits if its node does. So mining follows the node's
 configuration across restarts, and recipients are checked against the chains
 that node hosts. `lattice mine start` on a host where an earlier `lattice`
 ran the loop itself stops that loop first.
@@ -426,6 +429,11 @@ own mining loop, so there is no mining unit):
 lattice emit-systemd --root /var/lib/lattice \
   > /etc/systemd/system/lattice.generated.units
 ```
+
+A host that ran mining as its own unit (`lattice-mine.service`, from an
+earlier `emit-systemd`) stops and removes it: `systemctl disable --now
+lattice-mine.service`. The node stops a loop it finds that an earlier
+`lattice mine start` ran.
 
 For a node started with flags rather than `--root`, the checked-in examples
 are [deploy/lattice-node.service](../deploy/lattice-node.service)

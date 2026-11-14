@@ -103,10 +103,7 @@ struct Restart: AsyncParsableCommand {
     @OptionGroup var target: NodeTarget
 
     func run() async throws {
-        let rpc = try await target.runningNode()
-        try await send(rpc: rpc, "POST", "restart", json: Data("{}".utf8))
-        print("restarting")
-        try await waitForRestart(rpc)
+        try await restartNode(try await target.runningNode(), "restart")
     }
 }
 
@@ -222,9 +219,7 @@ struct Tokens: AsyncParsableCommand {
             )
             let token = try JSONDecoder().decode(CreateTokenResponse.self, from: data).token
             guard let out else { return print(token) }
-            guard FileManager.default.createFile(
-                atPath: out, contents: Data((token + "\n").utf8), attributes: [.posixPermissions: 0o600]
-            ) else { throw CtlError("could not write \(out)") }
+            try writePrivateFile(Data((token + "\n").utf8), to: out)
             print("token \(name) written to \(out)")
         }
     }

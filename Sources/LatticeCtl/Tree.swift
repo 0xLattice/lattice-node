@@ -279,6 +279,15 @@ struct Up: AsyncParsableCommand {
             // (`lattice config set`, `child create`, ...), not a restart here.
             if let pid = runningPid(layout, hostProcessName) {
                 print("already running (pid \(pid))")
+                if let data = try? await send(rpc: NodeRPC(topology, layout), "GET", "config"),
+                   let held = try? JSONDecoder().decode(ConfigResponse.self, from: data).config,
+                   (try? held.canonicalData()) != (try? topology.canonicalData()) {
+                    print("""
+                    \(Topology.fileName) differs from the configuration the node runs: it was edited by hand. \
+                    `lattice restart` loads the edit (the node refuses changes until then); \
+                    `lattice config set` changes the running node.
+                    """)
+                }
                 return
             }
             try spawnHost(layout: layout)
@@ -357,10 +366,7 @@ struct Wipe: AsyncParsableCommand {
 
     func run() async throws {
         if let rpc = try await target.running() {
-            try await send(rpc: rpc, "POST", "wipe", json: Data("{}".utf8))
-            print("wiping: the node restarts on empty storage")
-            try await waitForRestart(rpc)
-            return
+            return try await restartNode(rpc, "wipe")
         }
         let layout = target.layout
         // Under the spawn lock, so no `up` or restart starts the tree while
@@ -392,20 +398,35 @@ struct Wipe: AsyncParsableCommand {
     }
 }
 
-/// Waits until the node behind `rpc` went away and answers again: a
-/// restart it was asked for.
-func waitForRestart(_ rpc: NodeRPC) async throws {
-    let gone = ContinuousClock.now + .seconds(60)
-    while await health(rpc: rpc) != nil, ContinuousClock.now < gone {
-        try await Task.sleep(for: .milliseconds(250))
-    }
+/// Asks the node behind `rpc` to restart (`POST /restart` or `/wipe`) and
+/// waits until the new process answers: one whose start time
+/// (`process_start_time_seconds` in `/metrics`) is not the old one's, so the
+/// old process answering on its way out is not taken for the new one.
+func restartNode(_ rpc: NodeRPC, _ route: String) async throws {
+    let before = await startTime(rpc)
+    try await send(rpc: rpc, "POST", route, json: Data("{}".utf8))
+    print(route == "wipe" ? "wiping: the node restarts on empty storage" : "restarting")
     let back = ContinuousClock.now + .seconds(180)
     while ContinuousClock.now < back {
-        if await health(rpc: rpc) != nil {
-            print("the node is back")
-            return
+        if let before {
+            if let now = await startTime(rpc), now != before { return print("the node is back") }
+        } else if await health(rpc: rpc) == nil {
+            // No start time to compare (a token without GET /metrics):
+            // gone first, then back.
+            while await health(rpc: rpc) == nil, ContinuousClock.now < back {
+                try await Task.sleep(for: .milliseconds(500))
+            }
+            if ContinuousClock.now < back { return print("the node is back") }
         }
-        try await Task.sleep(for: .milliseconds(500))
+        try await Task.sleep(for: .milliseconds(250))
     }
     throw CtlError("the node did not answer within 180s of its restart; see `lattice logs`")
+}
+
+/// The node process's start time, from its metrics.
+private func startTime(_ rpc: NodeRPC) async -> String? {
+    guard let data = try? await send(rpc: rpc, "GET", "metrics") else { return nil }
+    return String(decoding: data, as: UTF8.self).split(separator: "\n")
+        .first { $0.hasPrefix("process_start_time_seconds") }
+        .flatMap { $0.split(separator: " ").last.map(String.init) }
 }

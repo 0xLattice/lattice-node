@@ -180,6 +180,102 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     mutating func start(owner: (layout: HostLayout, topology: Topology)?) async throws {
         let processStartTime = Date()
         let address = ChainAddress([ChainAddress.nexus])!
+        let plan = try plan()
+        let storage = try storageURL(for: address)
+        let keyURL = identityKey.map { URL(fileURLWithPath: $0) }
+            ?? storage.appendingPathComponent("storage.key")
+        let privateKeyHex = try loadOrCreateIdentity(at: keyURL)
+        // An operator peer source is authoritative: a supplied list replaces
+        // the built-in defaults, and --no-default-peers expresses the empty
+        // one. Only "nothing configured at all" falls back to the defaults.
+        let configuredPeers = plan.explicitPeers.isEmpty && !noDefaultPeers ? nil : plan.explicitPeers
+        if DefaultBootstrapPeers.forbidden(
+            configured: configuredPeers,
+            environment: ProcessInfo.processInfo.environment
+        ) {
+            throw ValidationError(
+                "\(DefaultBootstrapPeers.forbidEnvironmentKey)=1: pass --peer or --no-default-peers"
+            )
+        }
+        // The operator's own peers are configured: dialled from the start and
+        // kept. With none configured, the built-in peers are seeds: tried
+        // only while the node has too few peers after the ones it remembers.
+        let seedPeers = configuredPeers == nil
+            ? DefaultBootstrapPeers.resolved(chainPath: address.components, configured: nil)
+            : []
+        // Behind the seeds by name, the same seeds at fixed addresses.
+        let fixedSeedPeers = seedPeers.isEmpty ? [] : DefaultBootstrapPeers.nexusFixed
+        let overlayPeers = configuredPeers ?? []
+        let hosted = plan.hosted
+        let webSocket = plan.webSocket, blockBodies = plan.blockBodies, state = plan.state
+        let publicReadLimits = plan.publicReadLimits, operatorListener = plan.operatorListener
+        let configuration = try NodeConfiguration(
+            chainPath: address.components,
+            storagePath: storage,
+            privateKeyHex: privateKeyHex,
+            listenPort: listenPort,
+            rpcPort: rpcPort,
+            webSocket: webSocket,
+            bootstrapPeers: overlayPeers,
+            seedPeers: seedPeers,
+            fixedSeedPeers: fixedSeedPeers,
+            childSeedPeers: hosted.seedPeers,
+            peerTarget: peerTarget,
+            peersBeforeSeeds: peersBeforeSeeds,
+            minPeerKeyBits: minimumPeerKeyBits,
+            overlayMaxConnectionsPerNetgroup: overlayMaxConnectionsPerNetgroup,
+            contentServing: ContentServingLimits(
+                maxConcurrent: servingMaxConcurrent,
+                maxInFlightVolumeBytes: servingMaxInFlightVolumeBytes
+            ),
+            externalAddress: externalAddress,
+            peerSearchInterval: peerSearchInterval,
+            announceLifetime: announceLifetime,
+            announcePins: announcePins,
+            providerWalkSessions: providerWalkSessions,
+            resourcePolicy: NodeResourcePolicy(maximumAcquisitionBytes: maxAcquisitionBytes),
+            blockBodies: blockBodies,
+            state: state,
+            hostedChildren: hosted.children,
+            childSpecs: hosted.specs,
+            childPremineRecipients: hosted.premineRecipients,
+            childGenesisTransactions: hosted.genesisTransactions,
+            policyModules: hosted.policyModules,
+            publicReadURL: publicReadUrl,
+            publicSubmit: publicSubmit,
+            minRelayFee: minRelayFee,
+            finality: plan.finality,
+            stateWindows: plan.stateWindows
+        )
+        let cookieFile = rpcCookieFile.map { URL(fileURLWithPath: $0) }
+            ?? storage.appendingPathComponent(".cookie")
+        try await runNodeRuntime(
+            configuration: configuration,
+            cookieFile: cookieFile,
+            operatorListener: operatorListener,
+            owner: owner,
+            publicReadLimits: publicReadLimits,
+            processStartTime: processStartTime
+        )
+    }
+
+
+    /// What a start makes of its flags, checked without touching storage,
+    /// identity or ports: what `start` runs from, and what a configuration
+    /// change or restart is checked against before it is taken.
+    struct StartPlan {
+        let webSocket: WebSocketListener
+        let operatorListener: OperatorListener?
+        let blockBodies: BlockBodies
+        let state: StateRetention
+        let publicReadLimits: PublicReadRateLimits
+        let explicitPeers: [PeerEndpoint]
+        let finality: FinalityWindows
+        let stateWindows: FinalityWindows
+        let hosted: HostedChildren
+    }
+
+    func plan() throws -> StartPlan {
         guard ["127.0.0.1", "::1", "localhost"].contains(rpcBind.lowercased()) else {
             throw ValidationError("the operator HTTP API may bind only to loopback")
         }
@@ -246,84 +342,17 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             submitRate: publicSubmitRate
         )
 
-        let storage = try storageURL(for: address)
-        let keyURL = identityKey.map { URL(fileURLWithPath: $0) }
-            ?? storage.appendingPathComponent("storage.key")
-        let privateKeyHex = try loadOrCreateIdentity(at: keyURL)
         let explicitPeers = try peer.map(parsePeerEndpoint)
-        // An operator peer source is authoritative: a supplied list replaces
-        // the built-in defaults, and --no-default-peers expresses the empty
-        // one. Only "nothing configured at all" falls back to the defaults.
-        let configuredPeers = explicitPeers.isEmpty && !noDefaultPeers ? nil : explicitPeers
-        if DefaultBootstrapPeers.forbidden(
-            configured: configuredPeers,
-            environment: ProcessInfo.processInfo.environment
-        ) {
-            throw ValidationError(
-                "\(DefaultBootstrapPeers.forbidEnvironmentKey)=1: pass --peer or --no-default-peers"
-            )
-        }
-        // The operator's own peers are configured: dialled from the start and
-        // kept. With none configured, the built-in peers are seeds: tried
-        // only while the node has too few peers after the ones it remembers.
-        let seedPeers = configuredPeers == nil
-            ? DefaultBootstrapPeers.resolved(chainPath: address.components, configured: nil)
-            : []
-        // Behind the seeds by name, the same seeds at fixed addresses.
-        let fixedSeedPeers = seedPeers.isEmpty ? [] : DefaultBootstrapPeers.nexusFixed
-        let overlayPeers = configuredPeers ?? []
-
         let hosted = try HostedChildren(
             hostChain: hostChain, premineTo: premineTo, genesisTransactions: genesisTransactions,
             chainPeer: chainPeer, policyModule: policyModule
         )
-        let configuration = try NodeConfiguration(
-            chainPath: address.components,
-            storagePath: storage,
-            privateKeyHex: privateKeyHex,
-            listenPort: listenPort,
-            rpcPort: rpcPort,
-            webSocket: webSocket,
-            bootstrapPeers: overlayPeers,
-            seedPeers: seedPeers,
-            fixedSeedPeers: fixedSeedPeers,
-            childSeedPeers: hosted.seedPeers,
-            peerTarget: peerTarget,
-            peersBeforeSeeds: peersBeforeSeeds,
-            minPeerKeyBits: minimumPeerKeyBits,
-            overlayMaxConnectionsPerNetgroup: overlayMaxConnectionsPerNetgroup,
-            contentServing: ContentServingLimits(
-                maxConcurrent: servingMaxConcurrent,
-                maxInFlightVolumeBytes: servingMaxInFlightVolumeBytes
-            ),
-            externalAddress: externalAddress,
-            peerSearchInterval: peerSearchInterval,
-            announceLifetime: announceLifetime,
-            announcePins: announcePins,
-            providerWalkSessions: providerWalkSessions,
-            resourcePolicy: NodeResourcePolicy(maximumAcquisitionBytes: maxAcquisitionBytes),
-            blockBodies: blockBodies,
-            state: state,
-            hostedChildren: hosted.children,
-            childSpecs: hosted.specs,
-            childPremineRecipients: hosted.premineRecipients,
-            childGenesisTransactions: hosted.genesisTransactions,
-            policyModules: hosted.policyModules,
-            publicReadURL: publicReadUrl,
-            publicSubmit: publicSubmit,
-            minRelayFee: minRelayFee,
+        return StartPlan(
+            webSocket: webSocket, operatorListener: operatorListener, blockBodies: blockBodies, state: state,
+            publicReadLimits: publicReadLimits, explicitPeers: explicitPeers,
             finality: try windows(finalityWindow, option: "--finality-window", zeroIsOff: true),
-            stateWindows: try windows(stateWindow, option: "--state-window", zeroIsOff: false)
-        )
-        let cookieFile = rpcCookieFile.map { URL(fileURLWithPath: $0) }
-            ?? storage.appendingPathComponent(".cookie")
-        try await runNodeRuntime(
-            configuration: configuration,
-            cookieFile: cookieFile,
-            operatorListener: operatorListener,
-            owner: owner,
-            publicReadLimits: publicReadLimits,
-            processStartTime: processStartTime
+            stateWindows: try windows(stateWindow, option: "--state-window", zeroIsOff: false),
+            hosted: hosted
         )
     }
 
@@ -503,26 +532,10 @@ func parsePeerEndpoint(_ value: String) throws -> PeerEndpoint {
 }
 
 private func parseEndpoint(_ value: String) throws -> (key: String, host: String, port: UInt16) {
-    guard let separator = value.firstIndex(of: "@"),
-          separator != value.startIndex else {
+    guard let parsed = Topology.peerEndpoint(value) else {
         throw ValidationError("endpoint must use public-key@host:port")
     }
-    let key = String(value[..<separator])
-    let address = String(value[value.index(after: separator)...])
-    guard let colon = address.lastIndex(of: ":"),
-          let port = UInt16(address[address.index(after: colon)...]),
-          port != 0 else {
-        throw ValidationError("endpoint must use public-key@host:port")
-    }
-    var host = String(address[..<colon])
-    if host.first == "[", host.last == "]" {
-        host.removeFirst()
-        host.removeLast()
-    }
-    guard !host.isEmpty else {
-        throw ValidationError("endpoint host must be nonempty")
-    }
-    return (key, host, port)
+    return parsed
 }
 
 /// The loopback operator writes: the node runtime's RPC events.

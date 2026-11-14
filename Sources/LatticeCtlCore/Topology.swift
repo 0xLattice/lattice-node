@@ -232,6 +232,11 @@ public struct Topology: Codable, Sendable {
         for chain in (peers?.byChain ?? [:]).keys where !listed.contains(chain) {
             throw CtlError("peers are listed for \(chain), which is not a hosted chain")
         }
+        for (chain, list) in peers?.byChain ?? [:] {
+            for peer in list where Self.peerEndpoint(peer) == nil {
+                throw CtlError("peer \(peer) for \(chain) is not public-key@host:port")
+            }
+        }
         if let blockBodies, blockBodies != "all", blockBodies != "none" {
             throw CtlError("blockBodies is all or none, not \(blockBodies)")
         }

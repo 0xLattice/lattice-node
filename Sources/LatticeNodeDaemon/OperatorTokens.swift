@@ -181,9 +181,8 @@ final class TokenStore: @unchecked Sendable {
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         let temporary = file.appendingPathExtension("tmp")
         try? FileManager.default.removeItem(at: temporary)
-        guard FileManager.default.createFile(
-            atPath: temporary.path, contents: try encoder.encode(next.entries), attributes: [.posixPermissions: 0o600]
-        ), rename(temporary.path, file.path) == 0 else {
+        guard (try? writePrivateFile(try encoder.encode(next.entries), to: temporary.path)) != nil,
+              rename(temporary.path, file.path) == 0 else {
             throw HTTPError(.internalServerError, message: "could not write \(file.path)")
         }
         tokens = next
