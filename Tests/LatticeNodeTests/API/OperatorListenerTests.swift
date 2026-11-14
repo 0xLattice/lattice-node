@@ -16,6 +16,10 @@ final class OperatorListenerTests: XCTestCase {
     private static let alpha = ["Nexus", "Alpha"]
 
     private func remote() async throws -> Application<RouterResponder<BasicRequestContext>> {
+        try await node(remote: true).app
+    }
+
+    private func node(remote: Bool) async throws -> (app: Application<RouterResponder<BasicRequestContext>>, directory: URL) {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-operator-listener-\(UUID().uuidString)"
         )
@@ -30,7 +34,10 @@ final class OperatorListenerTests: XCTestCase {
         let tokens = try OperatorTokens([
             .init(name: "seller", sha256: hash, routes: ["GET /hosted-chains", "post /hosted-chains", "GET /api/state/account/{addr}"]),
         ])
-        return makeApplication(service: service, host: "10.0.0.5", port: 8090, auth: .remote(tokens))
+        let app = remote
+            ? makeApplication(service: service, host: "10.0.0.5", port: 8090, auth: .remote(tokens))
+            : makeApplication(service: service, host: "127.0.0.1", port: 8080)
+        return (app, directory)
     }
 
     private static func hostedChains(_ request: HostedChainsRequest) throws -> ByteBuffer {
@@ -118,6 +125,57 @@ final class OperatorListenerTests: XCTestCase {
                 }
             }
         }
+    }
+
+    /// A change through the API is what the node hosts after a restart, in
+    /// place of its flags; `{}` changes nothing.
+    func testAPostedChangeIsSavedAndReplacesTheFlags() async throws {
+        let (app, directory) = try await node(remote: false)
+        let post: HTTPFields = [.authorization: testOperatorAuthorization, .contentType: "application/json"]
+        try await app.test(.router) { client in
+            try await client.execute(uri: "/hosted-chains", method: .post, headers: post, body: ByteBuffer(string: "{}")) {
+                XCTAssertEqual($0.status, .badRequest)
+            }
+            XCTAssertNil(try HostedChildren.saved(in: directory), "a refused request saves nothing")
+            try await client.execute(
+                uri: "/hosted-chains", method: .post, headers: post,
+                body: try Self.hostedChains(HostedChainsRequest(
+                    hostChain: nil, premineTo: nil, genesisTransactions: nil, chainPeer: nil, policyModule: nil,
+                    chains: [HostedChain(path: "Nexus/Alpha")]
+                ))
+            ) { XCTAssertEqual($0.status, .ok, String(buffer: $0.body)) }
+        }
+        let saved = try XCTUnwrap(try HostedChildren.saved(in: directory))
+        XCTAssertEqual(saved.children, [Self.alpha])
+    }
+
+    /// The saved form is inline: a chain read from files comes back from it
+    /// with its spec, premine recipient and seeds, the files no longer read.
+    func testSavedChainsNeedNoFiles() throws {
+        let spec = ChainSpec(
+            maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 5,
+            targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
+        )
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lattice-saved-hosted-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let specFile = directory.appendingPathComponent("spec.json")
+        try JSONEncoder().encode(spec).write(to: specFile)
+        let recipient = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
+        let peer = "Nexus/Alpha=\(String(repeating: "ab", count: 32))@[::1]:4001"
+        let flags = try HostedChildren(
+            hostChain: ["Nexus/Alpha=\(specFile.path)", "Nexus/Alpha/Beta"], premineTo: ["Nexus/Alpha=\(recipient)"],
+            chainPeer: [peer], policyModule: []
+        )
+        try flags.save(in: directory)
+        try FileManager.default.removeItem(at: specFile)
+        let saved = try XCTUnwrap(try HostedChildren.saved(in: directory))
+        XCTAssertEqual(saved.children, flags.children)
+        XCTAssertEqual(try JSONEncoder().encode(saved.specs[Self.alpha]), try JSONEncoder().encode(spec))
+        XCTAssertEqual(saved.premineRecipients, flags.premineRecipients)
+        XCTAssertEqual(saved.seedPeers, flags.seedPeers)
     }
 
     func testTokenFileEntriesAreChecked() throws {

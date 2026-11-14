@@ -241,10 +241,18 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         let fixedSeedPeers = seedPeers.isEmpty ? [] : DefaultBootstrapPeers.nexusFixed
         let overlayPeers = configuredPeers ?? []
 
-        let hosted = try HostedChildren(
-            hostChain: hostChain, premineTo: premineTo, genesisTransactions: genesisTransactions,
-            chainPeer: chainPeer, policyModule: policyModule
-        )
+        // The hosted chains the operator last set through POST /hosted-chains,
+        // kept by the node; the flags only until the first such change.
+        let hosted: HostedChildren
+        if let saved = try HostedChildren.saved(in: storage) {
+            hosted = saved
+            print("hosted chains: \(HostedChildren.savedFile(in: storage).path) (the --host-chain, --premine-to, --genesis-transactions, --chain-peer and --policy-module flags apply only before the first POST /hosted-chains)")
+        } else {
+            hosted = try HostedChildren(
+                hostChain: hostChain, premineTo: premineTo, genesisTransactions: genesisTransactions,
+                chainPeer: chainPeer, policyModule: policyModule
+            )
+        }
         let configuration = try NodeConfiguration(
             chainPath: address.components,
             storagePath: storage,
@@ -428,6 +436,63 @@ struct HostedChildren {
         }
     }
 
+    /// Where the node keeps the hosted chains last set through `POST
+    /// /hosted-chains`.
+    static func savedFile(in storage: URL) -> URL {
+        storage.appendingPathComponent("hosted-chains.json")
+    }
+
+    /// The hosted chains saved in `storage`, or nil when none were ever set
+    /// through the API.
+    static func saved(in storage: URL) throws -> HostedChildren? {
+        let file = savedFile(in: storage)
+        guard FileManager.default.fileExists(atPath: file.path) else { return nil }
+        let request: HostedChainsRequest
+        do {
+            request = try JSONDecoder().decode(HostedChainsRequest.self, from: Data(contentsOf: file))
+        } catch {
+            throw ValidationError("\(file.path): \(error)")
+        }
+        return try HostedChildren(
+            hostChain: [], premineTo: [], chainPeer: request.chainPeer ?? [], policyModule: [],
+            chains: request.chains ?? []
+        )
+    }
+
+    /// Saves these chains in `storage`, inline (no file they were read from
+    /// is needed again), replacing the earlier ones at once.
+    func save(in storage: URL) throws {
+        try JSONEncoder().encode(inlineRequest).write(to: Self.savedFile(in: storage), options: .atomic)
+    }
+
+    /// These chains as an inline `POST /hosted-chains` body. Each chain
+    /// carries the policy modules its spec names.
+    var inlineRequest: HostedChainsRequest {
+        var modules: [String: Data] = [:]
+        for bytes in policyModules {
+            if let cid = try? WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: bytes)).rawCID { modules[cid] = bytes }
+        }
+        let chains = children.map { path in
+            let spec = specs[path]
+            let named = spec.map { Array(Set($0.wasmPolicies.map(\.moduleCID))).sorted().compactMap { modules[$0] } } ?? []
+            return HostedChain(
+                path: path.joined(separator: "/"), spec: spec, premineTo: premineRecipients[path],
+                genesisTransactions: genesisTransactions[path]?.map { SubmitTransactionRequest(transaction: $0) },
+                policyModules: named.isEmpty ? nil : named
+            )
+        }
+        let peers = children.flatMap { path in
+            (seedPeers[path] ?? []).map { peer in
+                let host = peer.host.contains(":") ? "[\(peer.host)]" : peer.host
+                return "\(path.joined(separator: "/"))=\(peer.publicKey)@\(host):\(peer.port)"
+            }
+        }
+        return HostedChainsRequest(
+            hostChain: nil, premineTo: nil, genesisTransactions: nil,
+            chainPeer: peers.isEmpty ? nil : peers, policyModule: nil, chains: chains
+        )
+    }
+
     private mutating func premine(_ path: [String], to recipient: String, option: String, entry: String) throws {
         guard let spec = specs[path] else {
             throw ValidationError("\(option) names \(path.joined(separator: "/")), which is not a hosted chain with a spec")
@@ -553,6 +618,10 @@ struct HostedChainsRequest: Codable, Sendable {
     let policyModule: [String]?
     var chains: [HostedChain]?
 
+    /// Whether the request names its chains at all: `{}` is refused rather
+    /// than read as "host none" (an empty list says that).
+    var namesChains: Bool { hostChain != nil || chains != nil }
+
     /// Whether a field names a file on the node's disk: a spec, genesis
     /// transactions or a policy module. The remote operator listener refuses
     /// those; its clients send them inline.
@@ -611,6 +680,8 @@ extension NodeRuntime: OperatorWrites {
             childGenesisTransactions: hosted.genesisTransactions,
             childSeedPeers: hosted.seedPeers, policyModules: hosted.policyModules
         )
+        // Kept: what the node hosts after a restart, in place of its flags.
+        try hosted.save(in: storagePath)
     }
 }
 
@@ -1371,6 +1442,9 @@ private func addOperatorWriteRoutes(
     }
     router.post("hosted-chains") { request, context in
         let input: HostedChainsRequest = try await decode(request, context: context, remote: remote)
+        guard input.namesChains else {
+            throw HTTPError(.badRequest, message: "name the chains in hostChain or chains; an empty list hosts none")
+        }
         if remote, input.namesFiles {
             throw HTTPError(.badRequest, message: "the operator listener takes no file paths: send specs, genesis transactions and policy modules inline in chains")
         }

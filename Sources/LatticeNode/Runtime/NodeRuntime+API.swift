@@ -277,6 +277,9 @@ extension NodeRuntime {
         }
     }
 
+    /// The directory this node stores in.
+    public var storagePath: URL { configuration.storagePath }
+
     /// The child chains this node hosts now, parent first.
     public var hostedChildren: [ChainPath] {
         levelReads.keys.sorted { $0.count != $1.count ? $0.count < $1.count : $0.joined(separator: "/") < $1.joined(separator: "/") }

@@ -707,8 +707,17 @@ sends the chains inline in `chains`, hosted after those in `hostChain`:
 
 Only `path` is required; the rest mines a new chain's genesis, as
 `--host-chain path=spec.json`, `--premine-to`, `--genesis-transactions` and
-`--policy-module` do, and is checked the same way. Every field of the request
-is optional. A newly listed chain starts as it would at start and syncs from the
+`--policy-module` do, and is checked the same way. The request must name
+`hostChain` or `chains` (an empty list hosts no child chain); `{}` is `400`.
+
+The node keeps the chains it accepted: it writes them, inline (specs,
+recipients, genesis transactions, policy modules and `chainPeer` seeds
+embedded, no file paths), to `<data-directory>/hosted-chains.json`, replacing
+the file atomically, and hosts what that file lists at every later start. The
+`--host-chain`, `--premine-to`, `--genesis-transactions`, `--policy-module`
+and `--chain-peer` flags apply only until the first accepted
+`POST /hosted-chains`; after that the node ignores them and says so at start.
+Deleting the file returns it to its flags. A newly listed chain starts as it would at start and syncs from the
 node's peers; a chain left out stops with every chain below it, and what it
 stored stays, so listing it again resumes it. Answers as `GET
 /hosted-chains`. `400` when the list does not hold together (a child before

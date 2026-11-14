@@ -198,6 +198,11 @@ It is added to `hostedChains`, and a running host is told over
 [`POST /hosted-chains`](rpc-api.md#post-hosted-chains), as `child create`
 does. The chain syncs from the node's peers.
 
+The node keeps the list it was last sent and hosts it after a restart, in
+place of its start flags. So that `lattice.json` still decides on a host
+`lattice` runs, `lattice up` sends its list again once a host it starts
+answers.
+
 ### Committing a child block on its parent
 
 A hosted child's block can be carried by the parent's miners that do not

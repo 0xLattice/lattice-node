@@ -313,9 +313,34 @@ func updateHostIfRunningLocked(_ layout: HostLayout) async throws -> Bool {
     } catch {
         print("the host could not change its chains while running (\(error)); restarting it")
         try await stopProcess(layout, hostProcessName)
-        try spawnHost(layout: layout)
+        try await spawnHostWithTopologyChains(layout)
     }
     return true
+}
+
+/// Starts the host, then tells it the chains `lattice.json` lists once its
+/// RPC answers. A node hosts the chains it saved from its last `POST
+/// /hosted-chains` in place of its flags, and `lattice.json` may have
+/// changed while it was stopped. The caller holds the spawn lock.
+func spawnHostWithTopologyChains(_ layout: HostLayout) async throws {
+    try spawnHost(layout: layout)
+    let topology = try Topology.load(root: layout.root).validated()
+    var failure: (any Error)?
+    for _ in 0..<120 {
+        guard runningPid(layout, hostProcessName) != nil else {
+            throw CtlError("the host exited; see \(layout.logFile(for: hostProcessName).path)")
+        }
+        do {
+            let _: HostedChainsResponse = try await post(
+                rpc: NodeRPC(topology, layout), path: "hosted-chains", body: hostedChainsRequest(layout, topology)
+            )
+            return
+        } catch {
+            failure = error
+        }
+        try await Task.sleep(for: .milliseconds(500))
+    }
+    print("the host did not take lattice.json's chains (\(failure.map { "\($0)" } ?? "no answer")); it hosts the ones it saved")
 }
 
 struct Up: AsyncParsableCommand {
@@ -384,7 +409,7 @@ struct Up: AsyncParsableCommand {
                 print("now hosting \(hostedPaths(topology).count) chain(s) (pid \(runningPid(layout, hostProcessName) ?? -1))")
                 return
             }
-            try spawnHost(layout: layout)
+            try await spawnHostWithTopologyChains(layout)
             print("started \(hostedPaths(topology).count) chain(s) (pid \(runningPid(layout, hostProcessName) ?? -1))")
         }
     }
