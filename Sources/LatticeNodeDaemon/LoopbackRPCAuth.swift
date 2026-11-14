@@ -90,7 +90,8 @@ struct LoopbackRPCAuthMiddleware<Context: RequestContext>: RouterMiddleware {
         context: Context,
         next: (Request, Context) async throws -> Response
     ) async throws -> Response {
-        guard let origin = request.headers[.origin] else {
+        // No Origin, or the dashboard this port served calling back.
+        guard let origin = request.headers[.origin], !isSameOrigin(origin, as: request) else {
             try authorize(request)
             return try await next(request, context)
         }
@@ -124,6 +125,7 @@ struct LoopbackRPCAuthMiddleware<Context: RequestContext>: RouterMiddleware {
 
     private func authorize(_ request: Request) throws {
         if request.method == .get || request.method == .head, request.uri.path == "/health" { return }
+        if Dashboard.isAsset(request) { return }
         guard auth.accepts(request.headers[.authorization]) else {
             // No WWW-Authenticate challenge: Linux URLSession (corelibs
             // FoundationNetworking) answers one by stalling the request

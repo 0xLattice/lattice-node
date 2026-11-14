@@ -628,6 +628,7 @@ func makeApplication(
     case .remote(let tokens, let origins):
         router.add(middleware: OperatorTokenMiddleware(tokens: tokens, allowedOrigins: origins))
     }
+    Dashboard.addRoutes(to: router)
     addPublicReadRoutes(
         to: router,
         reads: ChainReadsByPath(root: reads, levels: levelReads),

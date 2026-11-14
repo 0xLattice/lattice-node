@@ -205,7 +205,8 @@ struct OperatorTokenMiddleware<Context: RequestContext>: RouterMiddleware {
         context: Context,
         next: (Request, Context) async throws -> Response
     ) async throws -> Response {
-        guard let origin = request.headers[.origin] else {
+        // No Origin, or the dashboard this listener served calling back.
+        guard let origin = request.headers[.origin], !isSameOrigin(origin, as: request) else {
             try authorize(request, context: context)
             return try await next(request, context)
         }
@@ -236,6 +237,9 @@ struct OperatorTokenMiddleware<Context: RequestContext>: RouterMiddleware {
     }
 
     private func authorize(_ request: Request, context: Context) throws {
+        // The dashboard's own files hold no data; what the page then asks
+        // for carries a token.
+        if Dashboard.isAsset(request) { return }
         guard let entry = tokens.entry(for: request.headers[.authorization]) else {
             throw HTTPError(.unauthorized, message: "the operator listener requires a bearer token")
         }

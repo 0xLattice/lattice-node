@@ -90,6 +90,20 @@ The listener is plain HTTP: put it on a private network (a VPN, a private
 subnet), or behind a proxy that terminates TLS, and never on a public
 address without one. `--rpc-bind` stays loopback-only.
 
+### Dashboard
+
+Both operator listeners serve a web dashboard at `GET /` (with
+`/dashboard.js` and `/dashboard.css`), built into the binary. Those three
+files are the only answers given without a credential; the page asks for a
+token (or, on the loopback port, the cookie) and sends it as
+`Authorization: Bearer` with every request it makes. It keeps the token in
+the tab, or in the browser's local storage when the operator asks it to
+remember it, and never in a URL. A request whose `Origin` is the listener's
+own address (the page it served) is not treated as cross-origin; any other
+origin still needs `operatorAllowedOrigins` (or `rpcAllowedOrigins`). The
+page can also watch other nodes: each must list the page's origin in its
+`operatorAllowedOrigins`.
+
 ## Integer encoding
 
 Every 64- or 128-bit consensus integer, in responses and in the

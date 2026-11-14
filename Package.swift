@@ -121,6 +121,11 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "VolumeBroker", package: "VolumeBroker"),
+            ],
+            resources: [
+                .embedInCode("Dashboard/index.html"),
+                .embedInCode("Dashboard/dashboard.css"),
+                .embedInCode("Dashboard/dashboard.js"),
             ]),
         .executableTarget(
             name: "LatticeProofVerifier",

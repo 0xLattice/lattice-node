@@ -232,6 +232,49 @@ final class OperatorListenerTests: XCTestCase {
         }
     }
 
+    /// The dashboard's files are open on both operator listeners; every
+    /// route that reads or changes the node still needs its credential.
+    func testTheDashboardIsServedWithoutACredential() async throws {
+        for remote in [true, false] {
+            let app = try await node(remote: remote).app
+            try await app.test(.router) { client in
+                try await client.execute(uri: "/", method: .get) {
+                    XCTAssertEqual($0.status, .ok)
+                    XCTAssertEqual($0.headers[.contentType], "text/html; charset=utf-8")
+                    XCTAssertTrue(String(buffer: $0.body).contains("dashboard.js"))
+                    XCTAssertNotNil($0.headers[.contentSecurityPolicy])
+                }
+                for asset in ["/dashboard.js", "/dashboard.css"] {
+                    try await client.execute(uri: asset, method: .get) { XCTAssertEqual($0.status, .ok, asset) }
+                }
+                for (uri, method) in [
+                    ("/status", HTTPRequest.Method.get), ("/config", .get), ("/tokens", .get), ("/restart", .post),
+                ] {
+                    try await client.execute(uri: uri, method: method) {
+                        XCTAssertEqual($0.status, .unauthorized, "\(remote ? "remote" : "loopback") \(uri)")
+                    }
+                }
+            }
+        }
+    }
+
+    /// The page a listener served calls back with its own origin, which
+    /// needs no listing; any other origin is still refused.
+    func testTheDashboardsOwnOriginIsNotCrossOrigin() async throws {
+        let app = try await node().app
+        try await app.test(.router) { client in
+            // The test client names the listener "localhost".
+            let own: HTTPFields = [.authorization: "Bearer \(Self.reader)", .origin: "http://localhost"]
+            try await client.execute(uri: "/status", method: .get, headers: own) { XCTAssertEqual($0.status, .ok) }
+            let other: HTTPFields = [.authorization: "Bearer \(Self.reader)", .origin: "http://elsewhere.example"]
+            try await client.execute(uri: "/status", method: .get, headers: other) { XCTAssertEqual($0.status, .forbidden) }
+            // A Host that disagrees with the origin is not the same origin.
+            var rebound = own
+            rebound.append(.init(name: .init("Host")!, value: "10.0.0.5:8090"))
+            try await client.execute(uri: "/status", method: .get, headers: rebound) { XCTAssertEqual($0.status, .forbidden) }
+        }
+    }
+
     func testTokenFileEntriesAreChecked() throws {
         let hash = String(repeating: "ab", count: 32)
         XCTAssertThrowsError(try OperatorTokens([.init(name: "a", sha256: "abc", routes: [])]))
