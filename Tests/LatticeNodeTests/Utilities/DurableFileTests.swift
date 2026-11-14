@@ -46,4 +46,17 @@ final class DurableFileTests: XCTestCase {
         removeIfUnchanged(url, expected: theirs)
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
     }
+
+    /// A private file replaces a readable one and is never readable by
+    /// others: staged 0600 from its creation, no staging copy left.
+    func testAPrivateWriteReplacesAndStaysOwnerOnly() throws {
+        let file = directory.appendingPathComponent("tokens.json")
+        try writeDurably(Data("old".utf8), to: file)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: file.path)
+        try writePrivateDurably(Data("new".utf8), to: file)
+        XCTAssertEqual(try Data(contentsOf: file), Data("new".utf8))
+        let mode = try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual((mode?.intValue ?? 0o777) & 0o077, 0, "readable by others")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["tokens.json"])
+    }
 }

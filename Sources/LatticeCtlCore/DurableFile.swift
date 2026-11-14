@@ -12,6 +12,25 @@ public func writeDurably(_ data: Data, to url: URL) throws {
     try syncToDisk(directory.path)
 }
 
+/// `writeDurably` for a file only its owner may read: staged mode 0600 from
+/// its creation, synced, renamed over `url`, the directory synced.
+public func writePrivateDurably(_ data: Data, to url: URL) throws {
+    let directory = url.deletingLastPathComponent()
+    try FileManager.default.createDirectory(
+        at: directory, withIntermediateDirectories: true
+    )
+    let staging = directory.appendingPathComponent(
+        ".\(url.lastPathComponent).\(UUID().uuidString)"
+    )
+    defer { unlink(staging.path) }
+    try writePrivateFile(data, to: staging.path)
+    try syncToDisk(staging.path)
+    guard rename(staging.path, url.path) == 0 else {
+        throw CtlError("cannot replace \(url.path) (errno \(errno))")
+    }
+    try syncToDisk(directory.path)
+}
+
 /// Writes `data` to `url` durably only if nothing is there yet; false when
 /// something already is, which is left untouched.
 public func createDurably(_ data: Data, at url: URL) throws -> Bool {

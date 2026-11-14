@@ -188,8 +188,7 @@ final class TokenStore: @unchecked Sendable {
         do {
             // Synced before it is used: a revoked token does not come back
             // after a power loss.
-            try writeDurably(try encoder.encode(next.entries), to: file)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+            try writePrivateDurably(try encoder.encode(next.entries), to: file)
         } catch {
             throw HTTPError(.internalServerError, message: "could not write \(file.path): \(error)")
         }

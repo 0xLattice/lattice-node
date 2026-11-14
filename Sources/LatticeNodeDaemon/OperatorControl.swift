@@ -357,7 +357,11 @@ private func listeners(_ topology: Topology) -> [(key: String, host: String, por
 /// Whether a TCP listener could bind `host:port` (an IPv4 or IPv6 literal,
 /// or `localhost`) now; any other host cannot be checked, so is refused.
 private func canBind(host: String, port: UInt16) -> Bool {
-    let literal = host == "localhost" ? "127.0.0.1" : host
+    // localhost is both loopbacks: the listener may take either.
+    if host == "localhost" {
+        return canBind(host: "127.0.0.1", port: port) && (!hasIPv6Loopback() || canBind(host: "::1", port: port))
+    }
+    let literal = host
     var v4 = sockaddr_in(), v6 = sockaddr_in6()
     if inet_pton(AF_INET, literal, &v4.sin_addr) == 1 {
         v4.sin_family = sa_family_t(AF_INET)
@@ -378,6 +382,11 @@ private func canBind(host: String, port: UInt16) -> Bool {
         }
     }
     return false
+}
+
+/// Whether this host has an IPv6 loopback to bind (port 0: any).
+private func hasIPv6Loopback() -> Bool {
+    canBind(host: "::1", port: 0)
 }
 
 private func bindsNow(_ family: Int32, _ address: UnsafePointer<sockaddr>, _ length: socklen_t) -> Bool {

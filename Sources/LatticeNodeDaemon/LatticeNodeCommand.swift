@@ -305,8 +305,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             throw ValidationError("--operator-allowed-origin requires --operator-listen")
         }
         let operatorListener = try operatorListen.map { listen -> OperatorListener in
-            guard let (host, port) = Topology.hostPort(listen) else {
-                throw ValidationError("--operator-listen must be host:port")
+            guard let (host, port) = Topology.hostPort(listen), Topology.isAddressLiteral(host) else {
+                throw ValidationError("--operator-listen must be address:port, the address an IPv4 or IPv6 literal ([::1]:8090) or localhost")
             }
             guard port != rpcPort, port != publicReadPort, port != listenPort, port != webSocketPort else {
                 throw ValidationError("--operator-listen must use a port of its own")

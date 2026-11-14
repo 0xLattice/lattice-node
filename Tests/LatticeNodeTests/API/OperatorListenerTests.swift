@@ -290,4 +290,18 @@ final class OperatorListenerTests: XCTestCase {
         )
         XCTAssertNoThrow(try OperatorTokens(entries))
     }
+
+    /// The flag is held to the same rule as lattice.json: an address the
+    /// listener binds as named, not a name.
+    func testTheOperatorListenFlagTakesOnlyAnAddress() throws {
+        let tokens = FileManager.default.temporaryDirectory.appendingPathComponent("tokens-\(UUID().uuidString).json")
+        for (listen, accepted) in [("ops.example:8090", false), ("127.0.0.1:8090", true), ("[::1]:8090", true), ("localhost:8090", true)] {
+            let command = try LatticeNodeCommand.parse(["--operator-listen", listen, "--operator-tokens", tokens.path])
+            if accepted {
+                XCTAssertNoThrow(try command.plan(), listen)
+            } else {
+                XCTAssertThrowsError(try command.plan(), listen)
+            }
+        }
+    }
 }
