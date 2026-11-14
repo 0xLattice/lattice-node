@@ -125,6 +125,10 @@ actor OperatorConfig {
                 throw OperatorConfigError.invalid("\(chain.path) is not a child chain's path")
             }
             var files: ChainFiles?
+            if chain.spec != nil, (saved.hostedChains ?? []).contains(chain.path),
+               !FileManager.default.fileExists(atPath: layout.childSpec(for: chain.path).path) {
+                throw OperatorConfigError.conflict("\(chain.path) is hosted as an existing chain, synced from its peers; it takes no spec")
+            }
             if chain.spec != nil {
                 files = try prepare(chain)
             } else if chain.premineTo != nil || chain.genesisTransactions != nil || chain.policyModules != nil {
@@ -208,11 +212,12 @@ actor OperatorConfig {
             }
         }
         let changed = try effective.changedKeys(from: saved)
-        if changed.contains("mine") { await mining.apply(effective.mine) }
         if !changed.isEmpty {
             try effective.save(root: layout.root)
             saved = effective
         }
+        // After the save: the loop reads lattice.json as it starts.
+        if changed.contains("mine") { await mining.apply(effective.mine) }
         return ConfigChangeResponse(
             config: saved,
             applied: changed.filter { Topology.liveKeys.contains($0) },
@@ -313,10 +318,7 @@ struct ChainFiles: Sendable {
     let moduleDirectory: URL?
 
     func write() throws {
-        for (file, data) in files {
-            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try data.write(to: file, options: .atomic)
-        }
+        for (file, data) in files { try writeDurably(data, to: file) }
     }
 
     /// The spec first: without it the chain counts as never created.
@@ -352,26 +354,41 @@ private func listeners(_ topology: Topology) -> [(key: String, host: String, por
     return result
 }
 
-/// Whether a TCP listener could bind `host:port` (an IPv4 address or
-/// `localhost`) now.
+/// Whether a TCP listener could bind `host:port` (an IPv4 or IPv6 literal,
+/// or `localhost`) now; any other host cannot be checked, so is refused.
 private func canBind(host: String, port: UInt16) -> Bool {
+    let literal = host == "localhost" ? "127.0.0.1" : host
+    var v4 = sockaddr_in(), v6 = sockaddr_in6()
+    if inet_pton(AF_INET, literal, &v4.sin_addr) == 1 {
+        v4.sin_family = sa_family_t(AF_INET)
+        v4.sin_port = port.bigEndian
+        return withUnsafePointer(to: &v4) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bindsNow(AF_INET, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+    }
+    if inet_pton(AF_INET6, literal, &v6.sin6_addr) == 1 {
+        v6.sin6_family = sa_family_t(AF_INET6)
+        v6.sin6_port = port.bigEndian
+        return withUnsafePointer(to: &v6) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bindsNow(AF_INET6, $0, socklen_t(MemoryLayout<sockaddr_in6>.size))
+            }
+        }
+    }
+    return false
+}
+
+private func bindsNow(_ family: Int32, _ address: UnsafePointer<sockaddr>, _ length: socklen_t) -> Bool {
     #if canImport(Darwin)
-    let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+    let descriptor = socket(family, SOCK_STREAM, 0)
     #else
-    let descriptor = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+    let descriptor = socket(family, Int32(SOCK_STREAM.rawValue), 0)
     #endif
     guard descriptor >= 0 else { return false }
     defer { _ = close(descriptor) }
-    var address = sockaddr_in()
-    address.sin_family = sa_family_t(AF_INET)
-    address.sin_port = port.bigEndian
-    let ipv4 = host == "localhost" ? "127.0.0.1" : host
-    guard inet_pton(AF_INET, ipv4, &address.sin_addr) == 1 else { return true }  // a name or IPv6: left to the start
-    return withUnsafePointer(to: &address) {
-        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-            bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
-        }
-    }
+    return bind(descriptor, address, length) == 0
 }
 
 extension NodeRuntime: HostingRuntime {

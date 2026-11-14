@@ -155,6 +155,12 @@ final class TokenStore: @unchecked Sendable {
             name: request.name, sha256: OperatorTokens.hash(token), role: request.role, routes: request.routes
         )
         try OperatorTokens.check(entry)
+        // A name a URL path carries as it is (DELETE /tokens/{name}).
+        guard request.name.unicodeScalars.allSatisfy({
+            ($0.isASCII && CharacterSet.alphanumerics.contains($0)) || "._-".unicodeScalars.contains($0)
+        }) else {
+            throw ValidationError("a token name is letters, digits, '.', '_' and '-'")
+        }
         try lock.withLock {
             guard !tokens.entries.contains(where: { $0.name == request.name }) else {
                 throw HTTPError(.conflict, message: "a token named \(request.name) exists; revoke it first")
@@ -179,11 +185,13 @@ final class TokenStore: @unchecked Sendable {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let temporary = file.appendingPathExtension("tmp")
-        try? FileManager.default.removeItem(at: temporary)
-        guard (try? writePrivateFile(try encoder.encode(next.entries), to: temporary.path)) != nil,
-              rename(temporary.path, file.path) == 0 else {
-            throw HTTPError(.internalServerError, message: "could not write \(file.path)")
+        do {
+            // Synced before it is used: a revoked token does not come back
+            // after a power loss.
+            try writeDurably(try encoder.encode(next.entries), to: file)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        } catch {
+            throw HTTPError(.internalServerError, message: "could not write \(file.path): \(error)")
         }
         tokens = next
     }

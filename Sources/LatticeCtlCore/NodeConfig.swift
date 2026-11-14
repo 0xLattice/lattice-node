@@ -54,6 +54,14 @@ extension Topology {
         return host.isEmpty ? nil : (host, port)
     }
 
+    /// An IPv4 or IPv6 address literal, or `localhost`: a host a listener
+    /// binds as named, with no name lookup between check and start.
+    public static func isAddressLiteral(_ host: String) -> Bool {
+        if host == "localhost" { return true }
+        var v4 = in_addr(), v6 = in6_addr()
+        return inet_pton(AF_INET, host, &v4) == 1 || inet_pton(AF_INET6, host, &v6) == 1
+    }
+
     /// A peer as `public-key@host:port`, as the node reads `--peer`.
     public static func peerEndpoint(_ value: String) -> (key: String, host: String, port: UInt16)? {
         guard let at = value.firstIndex(of: "@"), at != value.startIndex,

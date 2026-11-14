@@ -257,6 +257,7 @@ final class LatticeCtlTopologyTests: XCTestCase {
             #"{"listen":4001,"rpc":4003,"operatorListen":"0.0.0.0:4003","operatorTokens":"t.json"}"#,
             #"{"listen":4001,"rpc":4003,"webSocket":8090,"operatorListen":"0.0.0.0:8090","operatorTokens":"t.json"}"#,
             #"{"listen":4001,"rpc":4003,"operatorListen":"8090","operatorTokens":"t.json"}"#,
+            #"{"listen":4001,"rpc":4003,"operatorListen":"ops.example:8090","operatorTokens":"t.json"}"#,
             #"{"listen":4001,"rpc":4003,"operatorAllowedOrigins":["https://d.example"]}"#,
         ] {
             try Data(refused.utf8).write(to: file)

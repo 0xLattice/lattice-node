@@ -317,4 +317,53 @@ final class OperatorConfigTests: XCTestCase {
             XCTFail("a mine change was not checked")
         } catch OperatorConfigError.invalid {}
     }
+
+    /// The operator listener's host is an address it binds as named: a
+    /// name, or an IPv6 port another socket holds, is refused before it is
+    /// kept, not found at the next start.
+    func testAnOperatorListenerThatCannotBeBoundIsRefused() async throws {
+        let (config, _) = try make()
+        #if canImport(Darwin)
+        let held = socket(AF_INET6, SOCK_STREAM, 0)
+        #else
+        let held = socket(AF_INET6, Int32(SOCK_STREAM.rawValue), 0)
+        #endif
+        defer { close(held) }
+        var address = sockaddr_in6()
+        address.sin6_family = sa_family_t(AF_INET6)
+        address.sin6_addr = in6addr_loopback
+        let bound = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Self.bindSocket(held, $0, socklen_t(MemoryLayout<sockaddr_in6>.size))
+            }
+        }
+        try XCTSkipIf(bound != 0, "no IPv6 loopback here")
+        _ = Self.listenSocket(held, 1)
+        var length = socklen_t(MemoryLayout<sockaddr_in6>.size)
+        _ = withUnsafeMutablePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(held, $0, &length) }
+        }
+        let port = UInt16(bigEndian: address.sin6_port)
+        for refused in [
+            #"{"operatorListen":"ops.example:9000","operatorTokens":"t.json"}"#,
+            #"{"operatorListen":"[::1]:\#(port)","operatorTokens":"t.json"}"#,
+        ] {
+            do {
+                _ = try await config.patch(patch(refused), remote: false)
+                XCTFail("\(refused) was accepted")
+            } catch OperatorConfigError.invalid {}
+        }
+    }
+
+    /// A chain hosted by path (synced from its peers) takes no spec later:
+    /// one would mine a rival genesis at the next start.
+    func testASpecForAChainHostedWithoutOneIsRefused() async throws {
+        let (config, layout) = try make()
+        _ = try await config.host(HostedChain(path: "Nexus/A"))
+        do {
+            _ = try await config.host(HostedChain(path: "Nexus/A", spec: spec))
+            XCTFail("a spec was taken for a synced chain")
+        } catch OperatorConfigError.conflict {}
+        XCTAssertFalse(FileManager.default.fileExists(atPath: layout.childSpec(for: "Nexus/A").path))
+    }
 }

@@ -407,20 +407,32 @@ func restartNode(_ rpc: NodeRPC, _ route: String) async throws {
     try await send(rpc: rpc, "POST", route, json: Data("{}".utf8))
     print(route == "wipe" ? "wiping: the node restarts on empty storage" : "restarting")
     let back = ContinuousClock.now + .seconds(180)
+    var gone = false
     while ContinuousClock.now < back {
         if let before {
             if let now = await startTime(rpc), now != before { return print("the node is back") }
-        } else if await health(rpc: rpc) == nil {
-            // No start time to compare (a token without GET /status, or an older node):
-            // gone first, then back.
-            while await health(rpc: rpc) == nil, ContinuousClock.now < back {
-                try await Task.sleep(for: .milliseconds(500))
+        } else {
+            // No start time to compare (a token without GET /status, or an
+            // older node): gone (no answer, or a 5xx), then any answer.
+            let status = await healthStatus(rpc)
+            if status == nil || status! >= 500 {
+                gone = true
+            } else if gone {
+                return print("the node is back")
             }
-            if ContinuousClock.now < back { return print("the node is back") }
         }
         try await Task.sleep(for: .milliseconds(250))
     }
     throw CtlError("the node did not answer within 180s of its restart; see `lattice logs`")
+}
+
+/// The HTTP status `/health` answers with; nil when nothing answers.
+private func healthStatus(_ rpc: NodeRPC) async -> Int? {
+    guard var request = try? rpc.request("health") else { return nil }
+    request.timeoutInterval = 5
+    request.cachePolicy = .reloadIgnoringLocalCacheData
+    guard let (_, response) = try? await URLSession.shared.data(for: request) else { return nil }
+    return (response as? HTTPURLResponse)?.statusCode
 }
 
 /// The node process's start time, from its status.

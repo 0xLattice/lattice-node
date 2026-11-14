@@ -31,6 +31,9 @@ actor MinerSupervisor {
     private var failures = 0
     private var lastExit: String?
     private var checkedLegacy = false
+    /// Set by `stop()`, for good: the node is going, and no loop may start
+    /// to outlive it (an exec keeps its children).
+    private var stopped = false
 
     /// `executable` runs the loop (`mine run ...`); the `lattice` beside this
     /// binary unless given.
@@ -64,6 +67,7 @@ actor MinerSupervisor {
     /// Mine as `mine` says from now on. Returns at once; the loop is stopped
     /// and started in the background.
     func apply(_ mine: TopologyMine?) {
+        guard !stopped else { return }
         desired = mine?.enabled == true ? mine : nil
         Task { await reconcile() }
     }
@@ -81,6 +85,7 @@ actor MinerSupervisor {
 
     /// Stops the loop for good: the node is stopping or restarting.
     func stop() async {
+        stopped = true
         desired = nil
         if let current = running {
             running = nil
@@ -105,7 +110,7 @@ actor MinerSupervisor {
                 running = nil
                 await terminate(current.process)
             }
-            if running == nil, let mine = desired {
+            if running == nil, !stopped, let mine = desired {
                 do {
                     running = (try start(), mine, .now)
                 } catch {

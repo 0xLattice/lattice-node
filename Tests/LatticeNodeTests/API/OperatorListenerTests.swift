@@ -171,6 +171,7 @@ final class OperatorListenerTests: XCTestCase {
             for body in [
                 CreateTokenRequest(name: "dash", role: "read"), CreateTokenRequest(name: "x", role: "root"),
                 CreateTokenRequest(name: "y", role: "read", routes: ["GET /status"]),
+                CreateTokenRequest(name: "a b", role: "read"), CreateTokenRequest(name: "%2e", role: "read"),
             ] {
                 try await client.execute(
                     uri: "/tokens", method: .post,

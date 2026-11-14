@@ -100,4 +100,18 @@ final class MinerSupervisorTests: XCTestCase {
         XCTAssertTrue(text.hasPrefix("earlier output\n"), text)
         XCTAssertEqual(text.components(separatedBy: "loop started").count, 3, text)
     }
+
+    /// A stop is for good: an apply after it (one queued as the node
+    /// stops) starts nothing that would outlive the node.
+    func testNothingStartsAfterAStop() async throws {
+        let (layout, loop) = try layout()
+        let supervisor = MinerSupervisor(layout: layout, executable: loop)
+        await supervisor.stop()
+        await supervisor.apply(TopologyMine(enabled: true))
+        try await Task.sleep(for: .milliseconds(500))
+        let status = await supervisor.status()
+        XCTAssertFalse(status.running)
+        XCTAssertFalse(status.enabled)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: layout.logFile(for: "mine").path))
+    }
 }

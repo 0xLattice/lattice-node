@@ -283,8 +283,8 @@ public struct Topology: Codable, Sendable {
             throw CtlError("operatorListen and operatorTokens go together")
         }
         if let operatorListen {
-            guard let port = Self.hostPort(operatorListen)?.port else {
-                throw CtlError("operatorListen must be host:port")
+            guard let (host, port) = Self.hostPort(operatorListen), Self.isAddressLiteral(host) else {
+                throw CtlError("operatorListen must be address:port, the address an IPv4 or IPv6 literal ([::1]:8090) or localhost")
             }
             guard !ports.contains(port), port != webSocket else {
                 throw CtlError("operatorListen must use a port of its own, not one of listen, rpc, publicRead or webSocket")
