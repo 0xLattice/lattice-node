@@ -55,6 +55,12 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(name: .customLong("rpc-allowed-origin"), help: "A browser origin allowed on the loopback RPC port, exactly as the browser sends it, e.g. chrome-extension://<id> (repeatable). Requests with any other Origin are refused; an allowed origin gets CORS preflight answers and still needs the cookie.")
     var rpcAllowedOrigins: [String] = []
 
+    @Option(name: .customLong("operator-listen"), help: "host:port of an operator listener for clients on other machines, e.g. 10.0.0.5:8090. It serves the loopback API's routes, each request carrying Authorization: Bearer <token> for a token in --operator-tokens that lists the route; the cookie is not accepted there, and a request naming a file on this node's disk (POST /hosted-chains with a spec, genesis-transactions or policy-module path) is refused: send it inline. Plain HTTP: put it on a private network or behind a TLS proxy. Requires --operator-tokens.")
+    var operatorListen: String?
+
+    @Option(name: .customLong("operator-tokens"), help: "The --operator-listen tokens: a JSON array of {\"name\", \"sha256\": hex SHA-256 of the token, \"routes\": [\"POST /hosted-chains\", ...]}. Read at start.")
+    var operatorTokens: String?
+
     @Option(parsing: .upToNextOption, help: "Overlay peer as public-key@host:port. Any peer given here REPLACES the built-in default bootstrap peers; the two are never merged.")
     var peer: [String] = []
 
@@ -163,6 +169,25 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             webSocket = publicReadPort == WebSocketListener.defaultPort
                 ? .off : .ifAvailable(WebSocketListener.defaultPort)
         }
+        guard (operatorListen == nil) == (operatorTokens == nil) else {
+            throw ValidationError("--operator-listen and --operator-tokens go together")
+        }
+        let operatorListener = try operatorListen.map { listen -> OperatorListener in
+            guard let colon = listen.lastIndex(of: ":"), let port = UInt16(listen[listen.index(after: colon)...]),
+                  port != 0 else {
+                throw ValidationError("--operator-listen must be host:port")
+            }
+            var host = String(listen[..<colon])
+            if host.first == "[", host.last == "]" { host = String(host.dropFirst().dropLast()) }
+            guard !host.isEmpty else { throw ValidationError("--operator-listen must be host:port") }
+            guard port != rpcPort, port != publicReadPort else {
+                throw ValidationError("--operator-listen must use a port of its own")
+            }
+            return OperatorListener(
+                host: host, port: Int(port),
+                tokens: try OperatorTokens.load(file: URL(fileURLWithPath: operatorTokens!))
+            )
+        }
         if publicSubmit, publicReadPort == nil {
             throw ValidationError("--public-submit requires --public-read-port")
         }
@@ -263,6 +288,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         try await runNodeRuntime(
             configuration: configuration,
             cookieFile: cookieFile,
+            operatorListener: operatorListener,
             publicReadLimits: publicReadLimits,
             processStartTime: processStartTime
         )
@@ -324,7 +350,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
 /// The child chains `--host-chain`, `--premine-to`, `--genesis-transactions`,
 /// `--chain-peer` and `--policy-module` name: read the same at start and when
 /// the operator changes them on a running node (`POST /hosted-chains`). Each
-/// spec file is read once, so the paths and specs agree.
+/// spec file is read once, so the paths and specs agree. `chains` names more,
+/// after them, inline: what a client that cannot write files on this node
+/// sends, checked as the flags are.
 struct HostedChildren {
     var children: [[String]] = []
     var specs: [[String]: ChainSpec] = [:]
@@ -335,9 +363,10 @@ struct HostedChildren {
 
     init(
         hostChain: [String], premineTo: [String], genesisTransactions genesisFiles: [String] = [],
-        chainPeer: [String], policyModule: [String]
+        chainPeer: [String], policyModule: [String], chains: [HostedChain] = []
     ) throws {
         policyModules = try policyModule.map { try Data(contentsOf: URL(fileURLWithPath: $0)) }
+            + chains.flatMap { $0.policyModules ?? [] }
         for entry in hostChain {
             let parts = entry.split(separator: "=", maxSplits: 1).map(String.init)
             guard let first = parts.first else {
@@ -349,6 +378,14 @@ struct HostedChildren {
             guard specs[path] == nil else { continue }
             let data = try Data(contentsOf: URL(fileURLWithPath: parts[1]))
             specs[path] = try JSONDecoder().decode(ChainSpec.self, from: data)
+        }
+        for chain in chains {
+            let path = chain.path.split(separator: "/").map(String.init)
+            guard !children.contains(path) else {
+                throw ValidationError("chains names \(chain.path) twice")
+            }
+            children.append(path)
+            specs[path] = chain.spec
         }
         for entry in chainPeer {
             let parts = entry.split(separator: "=", maxSplits: 1).map(String.init)
@@ -366,42 +403,63 @@ struct HostedChildren {
             guard parts.count == 2, !parts[1].isEmpty else {
                 throw ValidationError("--premine-to must use chain-path=address")
             }
-            let path = parts[0].split(separator: "/").map(String.init)
-            guard let spec = specs[path] else {
-                throw ValidationError("--premine-to names \(parts[0]), which is not a hosted chain with a spec")
-            }
-            do {
-                try NodeRuntime.checkPremine(spec: spec, to: parts[1], on: path, modules: policyModules)
-            } catch {
-                throw ValidationError("--premine-to \(entry): \(error)")
-            }
-            premineRecipients[path] = parts[1]
+            try premine(parts[0].split(separator: "/").map(String.init), to: parts[1], option: "--premine-to", entry: entry)
+        }
+        for chain in chains {
+            guard let recipient = chain.premineTo else { continue }
+            try premine(chain.path.split(separator: "/").map(String.init), to: recipient, option: "premineTo", entry: chain.path)
         }
         for entry in genesisFiles {
             let parts = entry.split(separator: "=", maxSplits: 1).map(String.init)
             guard parts.count == 2, !parts[1].isEmpty else {
                 throw ValidationError("--genesis-transactions must use chain-path=file.json")
             }
-            let path = parts[0].split(separator: "/").map(String.init)
-            guard let spec = specs[path] else {
-                throw ValidationError("--genesis-transactions names \(parts[0]), which is not a hosted chain with a spec")
-            }
-            guard genesisTransactions[path] == nil else {
-                throw ValidationError("--genesis-transactions names \(parts[0]) twice")
-            }
-            let transactions: [Transaction]
-            do {
-                transactions = try JSONDecoder().decode(
+            try genesis(parts[0].split(separator: "/").map(String.init), option: "--genesis-transactions", entry: entry) {
+                try JSONDecoder().decode(
                     [SubmitTransactionRequest].self, from: Data(contentsOf: URL(fileURLWithPath: parts[1]))
                 ).map(\.transaction)
-                try NodeRuntime.checkPremine(
-                    spec: spec, to: premineRecipients[path], transactions: transactions, on: path, modules: policyModules
-                )
-            } catch {
-                throw ValidationError("--genesis-transactions \(entry): \(error)")
             }
-            genesisTransactions[path] = transactions
         }
+        for chain in chains {
+            guard let transactions = chain.genesisTransactions else { continue }
+            try genesis(chain.path.split(separator: "/").map(String.init), option: "genesisTransactions", entry: chain.path) {
+                transactions.map(\.transaction)
+            }
+        }
+    }
+
+    private mutating func premine(_ path: [String], to recipient: String, option: String, entry: String) throws {
+        guard let spec = specs[path] else {
+            throw ValidationError("\(option) names \(path.joined(separator: "/")), which is not a hosted chain with a spec")
+        }
+        do {
+            try NodeRuntime.checkPremine(spec: spec, to: recipient, on: path, modules: policyModules)
+        } catch {
+            throw ValidationError("\(option) \(entry): \(error)")
+        }
+        premineRecipients[path] = recipient
+    }
+
+    private mutating func genesis(
+        _ path: [String], option: String, entry: String, transactions read: () throws -> [Transaction]
+    ) throws {
+        let name = path.joined(separator: "/")
+        guard let spec = specs[path] else {
+            throw ValidationError("\(option) names \(name), which is not a hosted chain with a spec")
+        }
+        guard genesisTransactions[path] == nil else {
+            throw ValidationError("\(option) names \(name) twice")
+        }
+        let transactions: [Transaction]
+        do {
+            transactions = try read()
+            try NodeRuntime.checkPremine(
+                spec: spec, to: premineRecipients[path], transactions: transactions, on: path, modules: policyModules
+            )
+        } catch {
+            throw ValidationError("\(option) \(entry): \(error)")
+        }
+        genesisTransactions[path] = transactions
     }
 }
 
@@ -485,14 +543,36 @@ protocol OperatorWrites: Sendable {
 }
 
 /// `POST /hosted-chains`: the child chains the node hosts from now on, in the
-/// shape of the flags that name them at start (`--host-chain`, ...). A chain
-/// left out stops; its data stays.
+/// shape of the flags that name them at start (`--host-chain`, ...), and
+/// inline in `chains`, after them. A chain left out stops; its data stays.
 struct HostedChainsRequest: Codable, Sendable {
-    let hostChain: [String]
+    let hostChain: [String]?
     let premineTo: [String]?
     let genesisTransactions: [String]?
     let chainPeer: [String]?
     let policyModule: [String]?
+    var chains: [HostedChain]?
+
+    /// Whether a field names a file on the node's disk: a spec, genesis
+    /// transactions or a policy module. The remote operator listener refuses
+    /// those; its clients send them inline.
+    var namesFiles: Bool {
+        (hostChain ?? []).contains { $0.contains("=") }
+            || !(genesisTransactions ?? []).isEmpty || !(policyModule ?? []).isEmpty
+    }
+}
+
+/// One hosted child chain inline: its path and, to mine its genesis, the
+/// spec, the premine's recipient, the signed transactions the genesis
+/// carries (each what `POST /transactions` takes) and the WASM modules the
+/// spec names (base64): what `--host-chain path=spec.json`, `--premine-to`,
+/// `--genesis-transactions` and `--policy-module` give from files.
+struct HostedChain: Codable, Sendable {
+    let path: String
+    var spec: ChainSpec?
+    var premineTo: String?
+    var genesisTransactions: [SubmitTransactionRequest]?
+    var policyModules: [Data]?
 }
 
 /// The child chains the node hosts, parent first, as `Nexus/Alpha`.
@@ -521,9 +601,10 @@ struct PinsResponse: Codable, Sendable {
 extension NodeRuntime: OperatorWrites {
     func hostChains(_ request: HostedChainsRequest) async throws {
         let hosted = try HostedChildren(
-            hostChain: request.hostChain, premineTo: request.premineTo ?? [],
+            hostChain: request.hostChain ?? [], premineTo: request.premineTo ?? [],
             genesisTransactions: request.genesisTransactions ?? [],
-            chainPeer: request.chainPeer ?? [], policyModule: request.policyModule ?? []
+            chainPeer: request.chainPeer ?? [], policyModule: request.policyModule ?? [],
+            chains: request.chains ?? []
         )
         try await host(
             hosted.children, childSpecs: hosted.specs, childPremineRecipients: hosted.premineRecipients,
@@ -549,14 +630,20 @@ func makeApplication(
     port: Int,
     peers: @Sendable @escaping () async -> ExplorerPeersResponse,
     processStartTime: Date,
-    auth: LoopbackRPCAuth,
+    auth: OperatorAccess,
     endpoints: @escaping ChainEndpointsLookup = { _ in nil },
     configure: (Router<BasicRequestContext>) -> Void = { _ in }
 ) -> Application<RouterResponder<BasicRequestContext>> {
     let router = Router()
     // First, so it covers every route below and the not-found responder: the
-    // origin policy and the cookie check (LoopbackRPCAuth).
-    router.add(middleware: LoopbackRPCAuthMiddleware(auth: auth))
+    // origin policy and the cookie check (LoopbackRPCAuth), or on the remote
+    // listener the scoped bearer tokens (OperatorTokens).
+    switch auth {
+    case .loopback(let cookie):
+        router.add(middleware: LoopbackRPCAuthMiddleware(auth: cookie))
+    case .remote(let tokens):
+        router.add(middleware: OperatorTokenMiddleware(tokens: tokens))
+    }
     addPublicReadRoutes(
         to: router,
         reads: ChainReadsByPath(root: reads, levels: levelReads),
@@ -584,12 +671,31 @@ func makeApplication(
             body: ResponseBody(byteBuffer: ByteBuffer(string: body))
         )
     }
-    addOperatorWriteRoutes(to: router, writes: writes)
+    addOperatorWriteRoutes(to: router, writes: writes, remote: auth.isRemote)
     configure(router)
     return Application(
         responder: router.buildResponder(),
         configuration: .init(address: .hostname(host, port: port))
     )
+}
+
+/// Who may reach an operator application: the loopback API's cookie, or the
+/// remote operator listener's scoped bearer tokens.
+enum OperatorAccess: Sendable {
+    case loopback(LoopbackRPCAuth)
+    case remote(OperatorTokens)
+
+    var isRemote: Bool {
+        if case .remote = self { return true }
+        return false
+    }
+}
+
+/// `--operator-listen`: where the remote operator listener binds, and its tokens.
+struct OperatorListener: Sendable {
+    let host: String
+    let port: Int
+    let tokens: OperatorTokens
 }
 
 /// The public read application: exactly the bounded, non-mutating GET routes
@@ -1174,18 +1280,23 @@ struct ChainReadsByPath: Sendable {
 /// Unauthenticated writes: registered only on the loopback application. The
 /// public listener's opt-in `POST /transactions` is registered separately,
 /// in `makePublicReadApplication`.
+/// `remote`: the routes serve the remote operator listener, whose clients
+/// are not on this host. Its bearer tokens are no credential a browser sends
+/// on its own, so the loopback Host check (against DNS rebinding) does not
+/// apply there, and nothing sent there may name a file on this node's disk.
 private func addOperatorWriteRoutes(
     to router: Router<BasicRequestContext>,
-    writes service: any OperatorWrites
+    writes service: any OperatorWrites,
+    remote: Bool
 ) {
     router.post("transactions") { request, context in
-        let input: SubmitTransactionRequest = try await decode(request, context: context)
+        let input: SubmitTransactionRequest = try await decode(request, context: context, remote: remote)
         return try await serviceCall(request: request, context: context) {
             try await service.submitTransaction(input)
         }
     }
     router.post("mining/templates") { request, context in
-        let input: MiningTemplateRequest = try await decode(request, context: context)
+        let input: MiningTemplateRequest = try await decode(request, context: context, remote: remote)
         return try await serviceCall(request: request, context: context) {
             try await service.miningTemplate(input)
         }
@@ -1205,14 +1316,14 @@ private func addOperatorWriteRoutes(
         )
     }
     router.post("mining/work") { request, context in
-        let input: SubmitWorkRequest = try await decode(request, context: context)
+        let input: SubmitWorkRequest = try await decode(request, context: context, remote: remote)
         return try await serviceCall(request: request, context: context) {
             try await service.submitWork(input)
         }
     }
     // A child block's author pushes it here until its status is "tree".
     router.post("child-blocks") { request, context in
-        let input: SubmitChildBlockRequest = try await decode(request, context: context)
+        let input: SubmitChildBlockRequest = try await decode(request, context: context, remote: remote)
         return try await serviceCall(request: request, context: context) {
             try await service.submitChildBlock(input)
         }
@@ -1220,7 +1331,7 @@ private func addOperatorWriteRoutes(
     // A child block built here for its author to commit on the parent; the
     // answer carries the push above.
     router.post("child-blocks/build") { request, context in
-        let input: BuildChildBlockRequest = try await decode(request, context: context)
+        let input: BuildChildBlockRequest = try await decode(request, context: context, remote: remote)
         return try await serviceCall(request: request, context: context) {
             try await service.buildChildBlock(input)
         }
@@ -1259,14 +1370,17 @@ private func addOperatorWriteRoutes(
         )
     }
     router.post("hosted-chains") { request, context in
-        let input: HostedChainsRequest = try await decode(request, context: context)
+        let input: HostedChainsRequest = try await decode(request, context: context, remote: remote)
+        if remote, input.namesFiles {
+            throw HTTPError(.badRequest, message: "the operator listener takes no file paths: send specs, genesis transactions and policy modules inline in chains")
+        }
         return try await serviceCall(request: request, context: context) {
             try await service.hostChains(input)
             return HostedChainsResponse(chains: service.hostedChildren.map { $0.joined(separator: "/") })
         }
     }
     router.post("pins") { request, context in
-        let input: PinRequest = try await decode(request, context: context)
+        let input: PinRequest = try await decode(request, context: context, remote: remote)
         guard isPlausibleCID(input.cid) else { throw HTTPError(.badRequest, message: "invalidCID") }
         return try await serviceCall(request: request, context: context) {
             try await service.pinVolume(input.cid, entries: input.entries)
@@ -1282,7 +1396,7 @@ private func addOperatorWriteRoutes(
         }
     }
     router.post("serving-credit") { request, context in
-        let input: ServingCreditRequest = try await decode(request, context: context)
+        let input: ServingCreditRequest = try await decode(request, context: context, remote: remote)
         return try await serviceCall(request: request, context: context) {
             ServingCreditResponse(
                 peer: input.peer,
@@ -1291,7 +1405,7 @@ private func addOperatorWriteRoutes(
         }
     }
     router.delete("pins/:cid") { request, context in
-        try requireLoopbackHost(request)
+        if !remote { try requireLoopbackHost(request) }
         guard let cid = context.parameters.get("cid"), isPlausibleCID(cid) else {
             throw HTTPError(.badRequest, message: "invalidCID")
         }
@@ -1327,12 +1441,16 @@ private func decode<Value: Decodable>(
 /// cross-origin form or text/plain POST is a "simple" request that needs no
 /// CORS preflight; requiring application/json forces the preflight the
 /// read-only CORS policy denies), and a Host naming anything but loopback (a
-/// DNS-rebinding page reaching this listener under a hostname it controls).
+/// DNS-rebinding page reaching this listener under a hostname it controls) —
+/// except on the remote operator listener, which no page reaches with a
+/// credential it holds on its own.
 private func decode<Value: Decodable, Context: RequestContext>(
     _ request: Request,
-    context: Context
+    context: Context,
+    remote: Bool
 ) async throws -> Value {
-    try requireLoopbackJSON(request)
+    if !remote { try requireLoopbackHost(request) }
+    try requireJSON(request)
     do {
         return try await request.decode(as: Value.self, context: context)
     } catch {
@@ -1340,8 +1458,7 @@ private func decode<Value: Decodable, Context: RequestContext>(
     }
 }
 
-private func requireLoopbackJSON(_ request: Request) throws {
-    try requireLoopbackHost(request)
+private func requireJSON(_ request: Request) throws {
     let mediaType = request.headers[.contentType]?
         .split(separator: ";").first?
         .trimmingCharacters(in: .whitespaces).lowercased()

@@ -5,22 +5,30 @@ import FoundationNetworking
 import LatticeCtlCore
 import LatticeMiningCoordinator
 
-/// The local node's loopback RPC: its port, and the cookie the node writes
-/// at every start, which every route but /health requires.
+/// A node's operator RPC: the local node's loopback port with the cookie the
+/// node writes at every start, which every route but /health requires; or a
+/// remote node's operator listener (`--operator-listen`) with a bearer token.
 struct NodeRPC: Sendable {
-    let port: UInt16
-    let cookieFile: URL
+    let baseURL: String
+    let cookieFile: URL?
+    let token: String?
 
     init(port: UInt16, cookieFile: URL) {
-        self.port = port
+        self.baseURL = "http://127.0.0.1:\(port)"
         self.cookieFile = cookieFile
+        self.token = nil
     }
 
     init(_ topology: Topology, _ layout: HostLayout) {
         self.init(port: topology.rpc, cookieFile: layout.rpcCookie)
     }
 
-    var baseURL: String { "http://127.0.0.1:\(port)" }
+    /// A remote node's operator listener, e.g. http://10.0.0.5:8090.
+    init(url: String, token: String) {
+        self.baseURL = url.hasSuffix("/") ? String(url.dropLast()) : url
+        self.cookieFile = nil
+        self.token = token
+    }
 
     /// A request to `path`, naming a child chain with `?chainPath=`, carrying
     /// the cookie as it is now (re-read: a restarted node rotated it).
@@ -29,7 +37,9 @@ struct NodeRPC: Sendable {
             throw CtlError("bad RPC URL")
         }
         var request = URLRequest(url: url)
-        if let authorization = rpcCookieAuthorization(file: cookieFile) {
+        if let token {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        } else if let cookieFile, let authorization = rpcCookieAuthorization(file: cookieFile) {
             request.setValue(authorization, forHTTPHeaderField: "Authorization")
         }
         return request

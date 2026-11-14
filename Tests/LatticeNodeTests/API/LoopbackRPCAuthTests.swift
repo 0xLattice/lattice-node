@@ -23,7 +23,7 @@ final class LoopbackRPCAuthTests: XCTestCase {
         let service = try await startRuntime(storage)
         return makeApplication(
             service: service, host: "127.0.0.1", port: 8080,
-            auth: LoopbackRPCAuth(token: "test-cookie", allowedOrigins: Set(allowedOrigins))
+            auth: .loopback(LoopbackRPCAuth(token: "test-cookie", allowedOrigins: Set(allowedOrigins)))
         )
     }
 

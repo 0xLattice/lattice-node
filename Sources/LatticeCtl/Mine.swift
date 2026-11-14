@@ -355,7 +355,7 @@ func runCoordinatorOnce(
         .appendingPathComponent("lattice-mining-coordinator")
     var arguments = [
         "--node", settings.rpc.baseURL,
-        "--rpc-cookie-file", settings.rpc.cookieFile.path,
+        "--rpc-cookie-file", layout.rpcCookie.path,
         "--worker-executable", settings.workerExecutable.path,
         "--workers", String(settings.mine.workers ?? 1),
         "--batch-size", String(settings.mine.batchSize ?? 2_000_000_000),

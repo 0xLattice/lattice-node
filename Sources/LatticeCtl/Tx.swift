@@ -258,28 +258,34 @@ struct TxOptions: ParsableArguments {
         actions generalActions: [Action] = [],
         depositActions: [DepositAction] = [],
         receiptActions: [ReceiptAction] = [],
-        withdrawalActions: [WithdrawalAction] = []
+        withdrawalActions: [WithdrawalAction] = [],
+        remote: NodeRPC? = nil
     ) async throws {
-        let topology = try Topology.load(root: rootOption.layout.root).validated()
         // A child chain is a level of the one process: its reads and
-        // writes go to the Nexus RPC, by chain path.
-        guard chain == ChainAddress.nexus || (topology.hostedChains ?? []).contains(chain) else {
-            throw CtlError("\(chain) is not in the tree")
+        // writes go to the Nexus RPC, by chain path. A remote node checks
+        // the chain itself.
+        let rpc: NodeRPC
+        if let remote {
+            rpc = remote
+        } else {
+            let topology = try Topology.load(root: rootOption.layout.root).validated()
+            guard chain == ChainAddress.nexus || (topology.hostedChains ?? []).contains(chain) else {
+                throw CtlError("\(chain) is not in the tree")
+            }
+            rpc = NodeRPC(topology, rootOption.layout)
         }
         let path = chain.components(separatedBy: "/")
         let signerNonce: UInt64
         if let nonce {
             signerNonce = nonce
         } else {
-            signerNonce = try await nextNonce(
-                rpc: NodeRPC(topology, rootOption.layout), address: signer.address, chain: chain
-            )
+            signerNonce = try await nextNonce(rpc: rpc, address: signer.address, chain: chain)
         }
         let fee: UInt64
         if let chosen = self.fee {
             fee = chosen
         } else {
-            fee = try await relayFloor(rpc: NodeRPC(topology, rootOption.layout), chain: chain)
+            fee = try await relayFloor(rpc: rpc, chain: chain)
         }
         var actions = accountActions
         if fee > 0 {
@@ -302,7 +308,7 @@ struct TxOptions: ParsableArguments {
             throw CtlError("signing failed; check the key file")
         }
         let response: SubmitTransactionResponse = try await post(
-            rpc: NodeRPC(topology, rootOption.layout), path: "transactions",
+            rpc: rpc, path: "transactions",
             body: SubmitTransactionRequest(transaction: Transaction(
                 signatures: [signer.publicKey: signature], body: header
             ))

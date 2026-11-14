@@ -243,6 +243,21 @@ lattice tx send --root /var/lib/lattice --chain Nexus/Alpha \
 lattice child commit Nexus/Alpha --root /var/lib/lattice --key ./wallet.json
 ```
 
+The author's loop can run on another machine than the node: give the node's
+[remote operator listener](rpc-api.md#remote-operator-listener) and a file
+holding a token for it instead of `--root`:
+
+```bash
+lattice child commit Nexus/Alpha --node http://10.0.0.5:8090 \
+  --token-file ./operator-token --key ./wallet.json
+```
+
+The token's routes must include `GET /health`, `GET /api/fees`,
+`GET /api/state/account/{addr}`, `GET /api/mempool`,
+`GET /api/transaction/{cid}`, `POST /transactions`,
+`GET /child-blocks/commitment`, `POST /child-blocks/build` and
+`POST /child-blocks`.
+
 A node that hosts `X` pools and relays `child/X` commitments but leaves every
 one out of its own templates, whether or not they carry its own candidate
 for `X`.

@@ -63,14 +63,29 @@ struct Child: AsyncParsableCommand {
         @Option(name: .long, help: "The commit's fee; defaults to the parent's relay floor (minRelayFee).")
         var fee: UInt64?
 
+        @Option(name: .long, help: "A remote node's operator listener (its --operator-listen), e.g. http://10.0.0.5:8090, instead of the local host under --root. Requires --token-file.")
+        var node: String?
+
+        @Option(name: .long, help: "A file holding the bearer token for --node. Its routes must include GET /health, GET /api/fees, GET /api/state/account/{addr}, GET /api/mempool, GET /api/transaction/{cid}, POST /transactions, GET /child-blocks/commitment, POST /child-blocks/build and POST /child-blocks.")
+        var tokenFile: String?
+
         func run() async throws {
             let components = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
             guard components.count > 1, let directory = components.last else {
                 throw CtlError("\(path) is not a child chain's path")
             }
             let parent = components.dropLast().joined(separator: "/")
+            guard (node == nil) == (tokenFile == nil) else {
+                throw CtlError("--node and --token-file go together")
+            }
+            let remote = try node.map { url in
+                let token = try String(contentsOf: URL(fileURLWithPath: tokenFile!), encoding: .utf8)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !token.isEmpty else { throw CtlError("--token-file \(tokenFile!) is empty") }
+                return NodeRPC(url: url, token: token)
+            }
             let layout = rootOption.layout
-            let rpc = NodeRPC(try Topology.load(root: layout.root).validated(), layout)
+            let rpc = try remote ?? NodeRPC(try Topology.load(root: layout.root).validated(), layout)
             let tx = try TxOptions.parse(
                 ["--chain", parent, "--key", key] + (rootOption.root.map { ["--root", $0] } ?? [])
                     + (fee.map { ["--fee", String($0)] } ?? [])
@@ -82,7 +97,7 @@ struct Child: AsyncParsableCommand {
                 try await tx.submit(signer: signer, actions: [Tx.CommitChild.action(
                     directory: directory, block: block.blockCID,
                     parentState: block.parentState, previous: block.previous
-                )])
+                )], remote: remote)
                 accepted = true
             }
             while true {

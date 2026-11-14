@@ -4,6 +4,8 @@ Base operator URL: `http://127.0.0.1:<rpc-port>`
 
 The API has one unversioned route set. `/v1/...` does not exist. The operator
 listener is loopback-only and authenticated ([Authentication](#authentication)).
+An optional remote operator listener serves the same routes to clients on
+other machines, with scoped tokens ([Remote operator listener](#remote-operator-listener)).
 The optional public-read listener is unauthenticated. The optional public-read
 listener registers only the GET routes in the read table below, plus
 `POST /transactions` when its operator turns public submit on
@@ -34,6 +36,52 @@ in `lattice.json`), e.g. `chrome-extension://<extension id>`. A listed origin
 gets CORS preflight answers (`GET, HEAD, POST`; headers `Authorization,
 Content-Type`) and `Access-Control-Allow-Origin` on responses, refusals
 included, and still needs the cookie.
+
+## Remote operator listener
+
+A client on another machine (a hosting seller, a child-block author) reaches
+the operator routes through a second listener, off by default:
+
+```bash
+lattice-node ... --operator-listen 10.0.0.5:8090 --operator-tokens /etc/lattice/operator-tokens.json
+```
+
+It serves the operator listener's routes (the same handlers), but:
+
+- Every request, `/health` included, carries `Authorization: Bearer <token>`
+  for a token in the file. No known token: `401`. The cookie is not a token
+  here.
+- Each token may use only the routes its entry lists: anything else, an
+  unknown path included, is `403`. A route is the method and the path as the
+  node registers it, a parameter in braces: `GET /api/state/account/{addr}`,
+  `GET /fetch/{cid}`. `?chainPath=` is not part of a route; a token reaches
+  every chain the node hosts.
+- No field may name a file on the node's disk: `POST /hosted-chains` with a
+  `hostChain` spec path (`path=spec.json`), `genesisTransactions` or
+  `policyModule` is `400`. Send them inline in `chains`
+  ([`POST /hosted-chains`](#post-hosted-chains)).
+- The loopback `Host` check does not apply (a bearer token is not a
+  credential a browser sends on its own); POSTs still need
+  `Content-Type: application/json`.
+
+The token file is a JSON array; it holds each token's SHA-256, never the
+token, and is read at start:
+
+```json
+[{"name": "seller",
+  "sha256": "<hex SHA-256 of the token>",
+  "routes": ["GET /hosted-chains", "POST /hosted-chains"]}]
+```
+
+To make a token:
+
+```bash
+token=$(openssl rand -hex 32)
+printf %s "$token" | shasum -a 256   # the "sha256" entry; give $token to the client
+```
+
+The listener is plain HTTP: put it on a private network, or behind a proxy
+that terminates TLS. `--rpc-bind` stays loopback-only.
 
 ## Integer encoding
 
@@ -639,8 +687,28 @@ The hosted child chains, parent first.
 ```
 
 The node hosts these chains and only these, from now on. Each entry reads as
-the start flag of the same name (`--host-chain`, ...); only `hostChain` is
-required. A newly listed chain starts as it would at start and syncs from the
+the start flag of the same name (`--host-chain`, ...), whose specs, genesis
+transactions and policy modules are files on the node's disk.
+
+A client that cannot write files there (the
+[remote operator listener](#remote-operator-listener) accepts only this form)
+sends the chains inline in `chains`, hosted after those in `hostChain`:
+
+```json
+{"chains": [
+  {"path": "Nexus/Alpha"},
+  {"path": "Nexus/Beta",
+   "spec": {"...": "a ChainSpec, as in a spec file"},
+   "premineTo": "<address>",
+   "genesisTransactions": [{"transaction": {"...": "as POST /transactions takes"}}],
+   "policyModules": ["<base64 WASM module>"]}],
+ "chainPeer": ["Nexus/Alpha=<public-key>@host:port"]}
+```
+
+Only `path` is required; the rest mines a new chain's genesis, as
+`--host-chain path=spec.json`, `--premine-to`, `--genesis-transactions` and
+`--policy-module` do, and is checked the same way. Every field of the request
+is optional. A newly listed chain starts as it would at start and syncs from the
 node's peers; a chain left out stops with every chain below it, and what it
 stored stays, so listing it again resumes it. Answers as `GET
 /hosted-chains`. `400` when the list does not hold together (a child before
@@ -744,8 +812,10 @@ are ignored.
 - `400 Bad Request` — malformed JSON, invalid content, policy refusal, or
   invalid work;
 - `413 Content Too Large` — public submit body over 1 MiB;
-- `401 Unauthorized` — operator route without the node's cookie (no challenge header);
-- `403 Forbidden` — browser `Origin` not listed, or a non-loopback `Host`;
+- `401 Unauthorized` — operator route without the node's cookie, or on the
+  remote operator listener without a known bearer token (no challenge header);
+- `403 Forbidden` — browser `Origin` not listed, a non-loopback `Host`, or a
+  route the remote operator listener's token does not list;
 - `404 Not Found` — unknown resource or unhosted `chainPath`;
 - `409 Conflict` — a pin whose root the store holds with other entries;
 - `415 Unsupported Media Type` — operator POST without JSON content type;

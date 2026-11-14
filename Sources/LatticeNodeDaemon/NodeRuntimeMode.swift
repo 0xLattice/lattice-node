@@ -20,6 +20,7 @@ extension LatticeNodeCommand {
     func runNodeRuntime(
         configuration: NodeConfiguration,
         cookieFile: URL,
+        operatorListener: OperatorListener?,
         publicReadLimits: PublicReadRateLimits,
         processStartTime: Date
     ) async throws {
@@ -34,34 +35,40 @@ extension LatticeNodeCommand {
         let peers: @Sendable () async -> ExplorerPeersResponse = {
             ExplorerPeersResponse(count: runtime.peerCount, peers: [])
         }
-        let app = makeApplication(
-            reads: runtime.reads,
-            levelReads: { Array(runtime.levelReads.values) },
-            writes: runtime,
-            status: { await runtime.status() },
-            metrics: { runtime.metricsExposition(peers: $0, processStartTime: $1) },
-            host: rpcBind,
-            port: Int(rpcPort),
-            peers: peers,
-            processStartTime: processStartTime,
-            auth: auth,
-            endpoints: { await runtime.chainEndpoints($0) }
-        ) { router in
-            router.get("core/snapshot") { _, _ -> Response in
-                guard let snapshot = runtime.published.value else { return Response(status: .serviceUnavailable) }
-                let body = try JSONEncoder().encode(ChainSnapshotResponse(
-                    bestHeaderTip: snapshot.bestHeaderTip,
-                    bestHeaderHeight: snapshot.bestHeaderHeight,
-                    actOnTip: snapshot.actOnTip,
-                    actOnHeight: snapshot.actOnHeight
-                ))
-                return Response(
-                    status: .ok,
-                    headers: [.contentType: "application/json"],
-                    body: ResponseBody(byteBuffer: ByteBuffer(bytes: body))
-                )
+        // The loopback API and the remote operator listener: one set of
+        // routes, each listener with its own credentials.
+        let operatorApplication = { (host: String, port: Int, access: OperatorAccess) in
+            makeApplication(
+                reads: runtime.reads,
+                levelReads: { Array(runtime.levelReads.values) },
+                writes: runtime,
+                status: { await runtime.status() },
+                metrics: { runtime.metricsExposition(peers: $0, processStartTime: $1) },
+                host: host,
+                port: port,
+                peers: peers,
+                processStartTime: processStartTime,
+                auth: access,
+                endpoints: { await runtime.chainEndpoints($0) }
+            ) { router in
+                router.get("core/snapshot") { _, _ -> Response in
+                    guard let snapshot = runtime.published.value else { return Response(status: .serviceUnavailable) }
+                    let body = try JSONEncoder().encode(ChainSnapshotResponse(
+                        bestHeaderTip: snapshot.bestHeaderTip,
+                        bestHeaderHeight: snapshot.bestHeaderHeight,
+                        actOnTip: snapshot.actOnTip,
+                        actOnHeight: snapshot.actOnHeight
+                    ))
+                    return Response(
+                        status: .ok,
+                        headers: [.contentType: "application/json"],
+                        body: ResponseBody(byteBuffer: ByteBuffer(bytes: body))
+                    )
+                }
             }
         }
+        let app = operatorApplication(rpcBind, Int(rpcPort), .loopback(auth))
+        let remoteApp = operatorListener.map { operatorApplication($0.host, $0.port, .remote($0.tokens)) }
         var submit: PublicSubmit?
         if publicSubmit {
             submit = { @Sendable request in try await runtime.submitPublicTransaction(request) }
@@ -96,22 +103,22 @@ extension LatticeNodeCommand {
             if publicSubmit { print("  public-submit: POST /transactions on the public read port") }
             print("  public-read-fetches: \(fetchLimit) at once")
         }
+        if let operatorListener {
+            print("  operator: http://\(operatorListener.host):\(operatorListener.port) (bearer tokens, \(operatorListener.tokens.byHash.count) listed)")
+        }
         let result: Result<Void, any Error>
         do {
-            if let publicReadApp {
-                try await withThrowingTaskGroup(of: Void.self) { group in
-                    group.addTask { try await app.runService() }
-                    group.addTask { try await publicReadApp.runService() }
-                    do {
-                        _ = try await group.next()
-                    } catch {
-                        group.cancelAll()
-                        throw error
-                    }
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask { try await app.runService() }
+                if let publicReadApp { group.addTask { try await publicReadApp.runService() } }
+                if let remoteApp { group.addTask { try await remoteApp.runService() } }
+                do {
+                    _ = try await group.next()
+                } catch {
                     group.cancelAll()
+                    throw error
                 }
-            } else {
-                try await app.runService()
+                group.cancelAll()
             }
             result = .success(())
         } catch {
