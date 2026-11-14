@@ -1,11 +1,65 @@
 # Operator CLI
 
-`lattice` is the declarative front door for one host. It reads one
-`lattice.json`, owns no resident state, and reconciles one `lattice-node`
-process that hosts the configured Nexus-rooted tree.
+`lattice` operates one node: it starts `lattice-node --root <root>`, which
+hosts the Nexus-rooted tree its `lattice.json` describes, and then asks that
+node, over its operator API, for everything else. The node owns
+`lattice.json` while it runs ([Operator control](rpc-api.md#operator-control)).
 
-Every command accepts `--root <directory>`. The current directory is the
-default.
+Every command accepts `--root <directory>` (the current directory is the
+default). Every command that operates a node also accepts `--node <url>
+--token-file <file>`: it then asks that node's
+[remote operator listener](rpc-api.md#remote-operator-listener) instead of
+the one under `--root` (loopback and its cookie). Only `init`, `identity`,
+`key`, `up`, `down` and `emit-systemd` work on the local machine alone.
+
+## Operating a node
+
+| Command | Effect |
+|---|---|
+| `lattice status` | Each hosted chain's phase and tip, configured chains not running, mining, keys waiting for a restart. |
+| `lattice config get [a.b.c]` | The configuration, or one key of it. |
+| `lattice config set a.b.c=value ...` | Change keys (a value that parses as JSON is JSON, else a string), or `--patch '<merge patch>'`. |
+| `lattice config unset a.b.c ...` | Remove keys. |
+| `lattice child create/host/unhost/commit` | [Child chains](#child-chains). |
+| `lattice mine start/stop/status` | [Mining](#mining). |
+| `lattice tx ...` | [Transactions](#spending-keys-and-transactions). |
+| `lattice pins list/add/remove` | The Volumes the node keeps for its operator. |
+| `lattice restart` | Restart the node in place; waits until it answers again. |
+| `lattice wipe` | Delete chain storage, keep identity and configuration; a running node restarts empty. |
+| `lattice tokens list/create/revoke` | Remote operator tokens. |
+| `lattice logs [--miner] [--tail N]` | The node's (or the mining loop's) recent log lines. |
+
+A running node applies hosted chains, child-chain peers and mining at once;
+it writes every other key and lists it as waiting for a restart until
+`lattice restart`. A change to a stopped node is written to `lattice.json`
+directly, checked first, under the spawn lock. A running node refuses a
+change when `lattice.json` was edited by hand since it last wrote it: stop it
+to edit the file by hand, or `lattice restart` to load the edit. A file that
+does not check stops the node at start with the reason.
+
+Remote control, from an operator's machine:
+
+```bash
+# Beside the node, once: a listener on the private network and an admin token.
+lattice config set operatorListen=10.0.0.5:8090 operatorTokens=operator-tokens.json --root /var/lib/lattice
+lattice restart --root /var/lib/lattice
+lattice tokens create ops --role admin --out ops.token --root /var/lib/lattice
+
+# Anywhere on that network:
+lattice status --node http://10.0.0.5:8090 --token-file ops.token
+lattice child create Nexus/Alpha --block-time 10000 --reward 1000 --node http://10.0.0.5:8090 --token-file ops.token
+lattice config set mine.recipients.Nexus/Alpha=<address> --node http://10.0.0.5:8090 --token-file ops.token
+lattice mine start --node http://10.0.0.5:8090 --token-file ops.token
+```
+
+Tokens have a role, `admin` (every route) or `read` (every `GET`), or
+`--route "METHOD /path"` repeated. The secret is printed (or written with
+`--out`, mode `0600`) once; the node keeps its SHA-256. `tokens revoke` takes
+effect from the next request. Keep the listener on a private network or
+behind a TLS proxy: it is plain HTTP.
+
+A remote client may not set `mine.worker` or `operatorTokens`, which name
+files on the node's machine.
 
 ## Topology
 
@@ -82,11 +136,12 @@ This is intentionally one schema:
   `publicRead`: the public listener also accepts `POST /transactions` (see
   [Running a public submit endpoint](operations.md#running-a-public-submit-endpoint));
   absent or false is off;
-- `operatorListen` and `operatorTokens` go together and are passed as
-  `--operator-listen` and `--operator-tokens`: the remote operator listener's
-  `host:port` and its token file, a relative path being under the root (see
+- `operatorListen` and `operatorTokens` go together: the remote operator
+  listener's `host:port`, on a port no other listener uses, and its token
+  file, a relative path being under the root (see
   [Remote operator listener](rpc-api.md#remote-operator-listener)); absent is
-  off;
+  off; `operatorAllowedOrigins` lists the browser origins it answers;
+- `mine.enabled` turns the node's mining loop on;
 - unknown paths in mining policy are rejected.
 
 ## Lifecycle
@@ -94,11 +149,12 @@ This is intentionally one schema:
 | Command | Effect |
 |---|---|
 | `lattice init` | Create `lattice.json` and the process identity, refusing to overwrite a topology. |
-| `lattice up` | Start the one node process in the background. Restart it when the configured hosted path set changed. |
+| `lattice up` | Start `lattice-node --root <root>` in the background, its output to `log/lattice-node.log`. A running node is left as it is. |
 | `lattice up --foreground` | Supervise the node for container or init-system use. |
-| `lattice status` | Read every hosted level from the one loopback RPC. |
-| `lattice down` | Stop the node process under the spawn lock. |
-| `lattice wipe` | Remove the complete stopped tree storage. Preserve identity, specs, and topology. |
+| `lattice status` | Read every hosted level from the node. |
+| `lattice down` | Stop the node process (and its mining loop) under the spawn lock. |
+| `lattice restart` | Restart the running node in place (same pid, same arguments). |
+| `lattice wipe` | Remove the tree storage; preserve identity, specs, tokens, and topology. A running node does it on a restart. |
 | `lattice identity` | Print the process public key and peer string. |
 
 Examples:
@@ -112,7 +168,12 @@ lattice down --root /var/lib/lattice
 
 The PID file names the executable as well as the PID, so a recycled PID is not
 signalled. Start, stop, restart, child creation, and wipe share one spawn lock.
-Storage also has its own writer lock; `wipe` refuses if any node still owns it.
+Storage also has its own writer lock; a stopped-node `wipe` refuses if any
+node still owns it, and `lattice` takes a held lock to mean the node runs.
+
+`POST /restart` makes the node replace itself with its own binary and
+arguments (`execv`) after an orderly stop, so it needs no supervisor: the pid,
+the pidfile and any supervisor that watches it stay as they are.
 
 ## Child chains
 
@@ -201,28 +262,23 @@ To host a child chain that already exists, add its path:
 lattice child host Nexus/Alpha --root /var/lib/lattice
 ```
 
-It is added to `hostedChains`, and a running host is told over
-[`POST /hosted-chains`](rpc-api.md#post-hosted-chains), as `child create`
-does. The chain syncs from the node's peers.
+A running node starts it at once and syncs it from its peers; a stopped one
+hosts it from its next start. `child create` on a running node sends the spec
+(with its premine recipient, genesis transactions and modules) inline in
+[`POST /hosted-chains`](rpc-api.md#post-hosted-chains), and the node keeps
+them under `specs/`; a second create of the same path is refused. Remotely,
+`--spec`, `--genesis-transactions` and `--policy-module` are files on the
+machine running `lattice`.
 
-The node owns its hosted chains. Once any `POST /hosted-chains` has set them
-(`lattice child create`, `child host`, or any other client), it keeps them in
-`<root>/chains/Nexus/hosted-chains.json` and hosts those at every start;
-`lattice.json`'s `hostedChains` (the flags `lattice up` passes) only seeds a
-node that keeps none yet, and `lattice up` never sends it to one that does.
-`child create` and `child host` add their one chain to what the node keeps,
-leaving every other chain as it is:
+To stop hosting one:
 
-- host running, chains kept: read `GET /hosted-chains`, add the chain to
-  `saved`, post it back;
-- host running, none kept yet: post `lattice.json`'s list, which becomes the
-  kept one;
-- host stopped, chains kept: add the chain to `hosted-chains.json`, so the
-  next start hosts it;
-- host stopped, none kept: nothing more; the next `lattice up` passes it as a
-  flag.
+```bash
+lattice child unhost Nexus/Alpha --root /var/lib/lattice
+```
 
-The chain is also added to `lattice.json`, as before.
+It refuses while a chain below it is hosted, and removes the chain's
+recipient, peers and minimum work with it. What it stored stays; hosting it
+again resumes it.
 
 ### Committing a child block on its parent
 
@@ -292,9 +348,18 @@ for `X`.
 
 | Command | Effect |
 |---|---|
-| `lattice mine start` | Start the background coordinator loop. |
-| `lattice mine status` | Show its PID and configured recipients. |
-| `lattice mine stop` | Finish or bound the active round, then stop. |
+| `lattice mine start` | Set `mine.enabled`; the node starts its mining loop. |
+| `lattice mine status` | Whether it runs, its pid, last exit, and the recipients. |
+| `lattice mine stop` | Clear `mine.enabled`; the loop finishes or bounds its round, then stops. |
+
+The node supervises the loop (`lattice mine run --root <root>` as its child,
+output in `log/mine.log`): it starts it while `mine.enabled` is true, starts
+it again 5 seconds after it exits, restarts it when `mine` changes (new
+recipients apply to the next round), and stops it on `mine stop`, restart and
+shutdown. The loop exits if its node does. So mining follows the node's
+configuration across restarts, and recipients are checked against the chains
+that node hosts. `lattice mine start` on a host where an earlier `lattice`
+ran the loop itself stops that loop first.
 
 `mine.worker` is `cpu` for the bundled worker or an executable path implementing
 the worker contract. `mine.recipients` controls each chain's reward and fee
@@ -354,14 +419,16 @@ also returns 404 for an unhosted path.
 
 ## systemd
 
-Generate foreground units from the configured topology:
+Generate a foreground unit from the configured topology (the node runs its
+own mining loop, so there is no mining unit):
 
 ```bash
 lattice emit-systemd --root /var/lib/lattice \
   > /etc/systemd/system/lattice.generated.units
 ```
 
-The checked-in examples are [deploy/lattice-node.service](../deploy/lattice-node.service)
+For a node started with flags rather than `--root`, the checked-in examples
+are [deploy/lattice-node.service](../deploy/lattice-node.service)
 and [deploy/lattice-mining-coordinator.service](../deploy/lattice-mining-coordinator.service).
 The coordinator unit requires a nonempty `RECIPIENT_ARGS` in
 `/etc/lattice/mining.env` so production mining cannot silently burn all
@@ -379,8 +446,10 @@ rewards.
     volumes.db
     volume-bundles.db
     storage.lock
+  operator-tokens.json   (operatorTokens, when set)
   run/
-  log/
+  log/lattice-node.log
+  log/mine.log
 ```
 
 There is no per-chain process, port, key, or child `state.db`. The path in
