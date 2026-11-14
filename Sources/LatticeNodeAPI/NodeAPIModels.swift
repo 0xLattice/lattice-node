@@ -397,6 +397,9 @@ public struct NodeStatusResponse: Codable, Sendable, Equatable {
     /// The reason is one of a fixed set; no error text is shown here. The
     /// node keeps retrying; nil when it waits on nothing.
     public var waiting: String? = nil
+    /// The node's version (`LatticeNodeVersion.current`); operator status
+    /// only, never the public `/health`. Nil from a node predating it.
+    public var version: String? = nil
 
     public init(
         phase: NodeAPIPhase,
@@ -409,7 +412,8 @@ public struct NodeStatusResponse: Codable, Sendable, Equatable {
         mempoolBytes: Int,
         templateDigest: String?,
         bestHeaderHeight: UInt64? = nil,
-        waiting: String? = nil
+        waiting: String? = nil,
+        version: String? = nil
     ) {
         self.phase = phase
         self.chainPath = chainPath
@@ -422,6 +426,7 @@ public struct NodeStatusResponse: Codable, Sendable, Equatable {
         self.templateDigest = templateDigest
         self.bestHeaderHeight = bestHeaderHeight
         self.waiting = waiting
+        self.version = version
     }
 }
 

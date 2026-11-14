@@ -407,7 +407,8 @@ pre.cmd { margin: 0; padding: 10px 12px; background: var(--code); border: 1px so
   }
   .topbar .brand-line { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .topbar .brand { padding: 0; }
-  .topbar select { width: auto; max-width: 60vw; min-height: 34px; padding: 4px 8px; }
+  .topbar select { width: auto; min-width: 0; flex: 0 1 auto; min-height: 34px; padding: 4px 8px; text-overflow: ellipsis; }
+  .topbar .fresh { flex: none; white-space: nowrap; }
   .topbar nav { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; margin: 0 -16px; padding: 0 12px; }
   .topbar nav a { flex: none; padding: 8px 10px; color: var(--ink-2); text-decoration: none; font-size: 14px; border-bottom: 2px solid transparent; display: inline-flex; gap: 6px; align-items: center; }
   .topbar nav a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
@@ -457,4 +458,5 @@ details > summary { cursor: pointer; color: var(--accent); }
 @media (max-width: 860px) { .row .facts { grid-template-columns: auto; } .row .facts .age { display: none; } }
 [hidden] { display: none !important; }
 #restart-slot:empty { display: none; }
-h1:focus { outline: none; }
+/* Focus moved by the page (headings, main) is for screen readers, not a control. */
+[tabindex="-1"]:focus, [tabindex="-1"]:focus-visible { outline: none; }

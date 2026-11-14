@@ -636,6 +636,7 @@ function vitalsHTML(s) {
   const m = s.mining;
   const mining = !m ? '–' : m.running ? 'On' : m.enabled ? 'On, not running' : 'Off';
   const parts = [
+    ['Version', s.status && s.status.version ? s.status.version : '–'],
     ['Up for', s.metrics && s.metrics.start ? duration(Date.now() - s.metrics.start) : '–'],
     ['Peers', peers == null ? '–' : num(peers)],
     ['Disk free', s.disk ? bytes(s.disk.freeBytes) : '–'],
@@ -669,10 +670,12 @@ function rowHTML(s, path, below) {
   const last = c && c.latest && c.latest.timestamp ? Number(c.latest.timestamp) : null;
   const facts = height == null ? '' : html`<span class="h" title="Height of the newest block this node acts on">${num(height)}</span><span class="age">${last ? ago(last) : ''}</span>`;
   const name = lastSegment(path);
+  // A problem the attention list explains is only named on its row.
+  const covered = level === 'bad' || level === 'warn';
   return html`<a class="row ${level}" href="#/chain/${path}">
     <span class="name">${name}${level === 'quiet' && !quietAbove(s, path) ? html`<small>${v.text}</small>` : ''}</span>
     <span class="facts">${facts}</span>
-    ${v && level !== 'quiet' ? html`<span class="verdict">${raw(ICON[level] || '')}<span><strong>${v.text}.</strong> ${v.detail || ''}</span></span>` : ''}
+    ${v && level !== 'quiet' ? html`<span class="verdict">${raw(ICON[level] || '')}${covered ? html`<span>${v.text}</span>` : html`<span><strong>${v.text}.</strong> ${v.detail || ''}</span>`}</span>` : ''}
     ${v && v.progress != null ? html`<span class="progress" role="progressbar" aria-label="Sync progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(v.progress * 100)}"><i data-w="${(v.progress * 100).toFixed(1)}%"></i></span>` : ''}
     ${below && !(v && (v.level === 'bad' || v.level === 'warn')) ? html`<span class="below">${below === 1 ? 'A chain below needs attention' : `${below} chains below need attention`}</span>` : ''}
   </a>`;

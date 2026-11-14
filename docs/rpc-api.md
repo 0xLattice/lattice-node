@@ -322,6 +322,9 @@ declares or commits the child. Billed to the expensive public read budget.
 }
 ```
 
+`GET /status` (operator only) also carries `version`, the node's build version
+as `lattice-node --version` prints it; `/health` does not.
+
 `bestHeaderHeight` is the height of the best header chain the node knows (absent
 before any header); `height` is the height of the heaviest executed tip, the
 block the node acts on. It is on the best header chain unless a heavier

@@ -16,7 +16,8 @@ import LatticeCtlCore
 struct LatticeNodeCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "lattice-node",
-        abstract: "Run one Nexus-rooted hosted tree"
+        abstract: "Run one Nexus-rooted hosted tree",
+        version: LatticeNodeVersion.current
     )
 
     @Option(help: "A host root made by `lattice init`: the node runs as <root>/lattice.json says (storage, identity, ports, hosted chains, mining...) and is that file's only writer while it runs, changing it through its operator API (GET/PATCH /config) and applying each change live or at the next restart. Give no other flag with it.")

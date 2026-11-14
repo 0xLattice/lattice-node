@@ -602,7 +602,8 @@ extension NodeRuntime {
             mempoolBytes: read.mempoolBytes,
             templateDigest: read.tipCID == nil ? nil : readView.value?.templateDigest,
             bestHeaderHeight: read.bestHeaderHeight,
-            waiting: read.waiting
+            waiting: read.waiting,
+            version: LatticeNodeVersion.current
         )
     }
 
