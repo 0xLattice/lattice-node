@@ -3,6 +3,7 @@ import Hummingbird
 import LatticeNode
 import LatticeNodeCore
 import LatticeNodeAPI
+import LatticeCtlCore
 
 /// What `GET /core/snapshot` answers: the root chain's last published
 /// snapshot.
@@ -20,6 +21,8 @@ extension LatticeNodeCommand {
     func runNodeRuntime(
         configuration: NodeConfiguration,
         cookieFile: URL,
+        operatorListener: OperatorListener?,
+        owner: (layout: HostLayout, topology: Topology)?,
         publicReadLimits: PublicReadRateLimits,
         processStartTime: Date
     ) async throws {
@@ -34,33 +37,59 @@ extension LatticeNodeCommand {
         let peers: @Sendable () async -> ExplorerPeersResponse = {
             ExplorerPeersResponse(count: runtime.peerCount, peers: [])
         }
-        let app = makeApplication(
-            reads: runtime.reads,
-            levelReads: { Array(runtime.levelReads.values) },
-            writes: runtime,
-            status: { await runtime.status() },
-            metrics: { runtime.metricsExposition(peers: $0, processStartTime: $1) },
-            host: rpcBind,
-            port: Int(rpcPort),
-            peers: peers,
-            processStartTime: processStartTime,
-            auth: auth,
-            endpoints: { await runtime.chainEndpoints($0) }
-        ) { router in
-            router.get("core/snapshot") { _, _ -> Response in
-                guard let snapshot = runtime.published.value else { return Response(status: .serviceUnavailable) }
-                let body = try JSONEncoder().encode(ChainSnapshotResponse(
-                    bestHeaderTip: snapshot.bestHeaderTip,
-                    bestHeaderHeight: snapshot.bestHeaderHeight,
-                    actOnTip: snapshot.actOnTip,
-                    actOnHeight: snapshot.actOnHeight
-                ))
-                return Response(
-                    status: .ok,
-                    headers: [.contentType: "application/json"],
-                    body: ResponseBody(byteBuffer: ByteBuffer(bytes: body))
-                )
+        // The operator's control of the node: restart always; under --root
+        // its configuration (mining included), logs and wipe.
+        let lifecycle = NodeLifecycle()
+        var control = OperatorControl(
+            tokens: operatorListener?.tokens, lifecycle: lifecycle, storagePath: configuration.storagePath
+        )
+        if let owner {
+            let mining = MinerSupervisor(layout: owner.layout)
+            control.mining = mining
+            control.config = OperatorConfig(
+                layout: owner.layout, started: owner.topology, runtime: runtime, mining: mining
+            )
+            control.logs = [
+                "node": owner.layout.logFile(for: "lattice-node"), "mine": owner.layout.logFile(for: "mine"),
+            ]
+            await mining.apply(owner.topology.mine)
+        }
+        // The loopback API and the remote operator listener: one set of
+        // routes, each listener with its own credentials.
+        let operatorApplication = { (host: String, port: Int, access: OperatorAccess) in
+            makeApplication(
+                reads: runtime.reads,
+                levelReads: { Array(runtime.levelReads.values) },
+                writes: runtime,
+                status: { await runtime.status() },
+                metrics: { runtime.metricsExposition(peers: $0, processStartTime: $1) },
+                host: host,
+                port: port,
+                peers: peers,
+                processStartTime: processStartTime,
+                auth: access,
+                endpoints: { await runtime.chainEndpoints($0) },
+                control: control
+            ) { router in
+                router.get("core/snapshot") { _, _ -> Response in
+                    guard let snapshot = runtime.published.value else { return Response(status: .serviceUnavailable) }
+                    let body = try JSONEncoder().encode(ChainSnapshotResponse(
+                        bestHeaderTip: snapshot.bestHeaderTip,
+                        bestHeaderHeight: snapshot.bestHeaderHeight,
+                        actOnTip: snapshot.actOnTip,
+                        actOnHeight: snapshot.actOnHeight
+                    ))
+                    return Response(
+                        status: .ok,
+                        headers: [.contentType: "application/json"],
+                        body: ResponseBody(byteBuffer: ByteBuffer(bytes: body))
+                    )
+                }
             }
+        }
+        let app = operatorApplication(rpcBind, Int(rpcPort), .loopback(auth))
+        let remoteApp = operatorListener.map {
+            operatorApplication($0.host, $0.port, .remote($0.tokens, allowedOrigins: $0.allowedOrigins))
         }
         var submit: PublicSubmit?
         if publicSubmit {
@@ -96,28 +125,37 @@ extension LatticeNodeCommand {
             if publicSubmit { print("  public-submit: POST /transactions on the public read port") }
             print("  public-read-fetches: \(fetchLimit) at once")
         }
+        if let operatorListener {
+            print("  operator: http://\(operatorListener.host):\(operatorListener.port) (bearer tokens, \(operatorListener.tokens.count) listed)")
+        }
         let result: Result<Void, any Error>
         do {
-            if let publicReadApp {
-                try await withThrowingTaskGroup(of: Void.self) { group in
-                    group.addTask { try await app.runService() }
-                    group.addTask { try await publicReadApp.runService() }
-                    do {
-                        _ = try await group.next()
-                    } catch {
-                        group.cancelAll()
-                        throw error
-                    }
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask { try await app.runService() }
+                if let publicReadApp { group.addTask { try await publicReadApp.runService() } }
+                if let remoteApp { group.addTask { try await remoteApp.runService() } }
+                group.addTask { await lifecycle.waitForRequest() }
+                do {
+                    _ = try await group.next()
+                } catch {
                     group.cancelAll()
+                    throw error
                 }
-            } else {
-                try await app.runService()
+                group.cancelAll()
             }
             result = .success(())
         } catch {
             result = .failure(error)
         }
+        // Side by side: the node's own stop has a grace of its own to keep.
+        async let miningStopped: Void? = control.mining?.stop()
         await runtime.stop()
+        _ = await miningStopped
         try result.get()
+        if lifecycle.restartRequested {
+            print("restarting as asked")
+            try? FileManager.default.removeItem(at: cookieFile)
+            lifecycle.reexec()
+        }
     }
 }

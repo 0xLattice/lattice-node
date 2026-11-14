@@ -23,7 +23,7 @@ final class LoopbackRPCAuthTests: XCTestCase {
         let service = try await startRuntime(storage)
         return makeApplication(
             service: service, host: "127.0.0.1", port: 8080,
-            auth: LoopbackRPCAuth(token: "test-cookie", allowedOrigins: Set(allowedOrigins))
+            auth: .loopback(LoopbackRPCAuth(token: "test-cookie", allowedOrigins: Set(allowedOrigins)))
         )
     }
 
@@ -131,8 +131,9 @@ final class LoopbackRPCAuthTests: XCTestCase {
                 XCTAssertEqual(response.status, .noContent)
                 XCTAssertEqual(response.headers[.accessControlAllowOrigin], Self.extensionOrigin)
                 XCTAssertTrue(response.headers[.accessControlAllowMethods]?.contains("POST") == true)
-                // An allowed origin may unpin.
+                // An allowed origin may unpin, and change settings or mining.
                 XCTAssertTrue(response.headers[.accessControlAllowMethods]?.contains("DELETE") == true)
+                XCTAssertTrue(response.headers[.accessControlAllowMethods]?.contains("PATCH") == true)
                 XCTAssertTrue(response.headers[.accessControlAllowHeaders]?.contains("Authorization") == true)
             }
             try await client.execute(uri: "/status", method: .get, headers: [.origin: Self.extensionOrigin]) { response in

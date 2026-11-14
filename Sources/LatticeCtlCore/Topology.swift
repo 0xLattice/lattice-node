@@ -8,6 +8,7 @@
 import Foundation
 import Lattice
 import LatticeNode
+import LatticeMinerCore
 
 /// `peers` in `lattice.json`: an object keyed by chain path. An array is
 /// Nexus's list, as every file written before chains had lists of their own.
@@ -43,7 +44,7 @@ public struct Topology: Codable, Sendable {
         case publicReadRate, publicReadExpensiveRate, publicReadMaxRate, publicReadFetches
         case publicReadURL, publicSubmit, publicSubmitRate, minRelayFee
         case servingMaxConcurrent, servingMaxInFlightVolumeBytes, maxAcquisitionBytes, blockBodies, state, stateWindow, stateWindows, finalityWindow, finalityWindows, announceLifetime
-        case hostedChains, mine, rpcAllowedOrigins
+        case hostedChains, mine, rpcAllowedOrigins, operatorListen, operatorTokens, operatorAllowedOrigins
     }
     public var listen: UInt16
     public var rpc: UInt16
@@ -129,6 +130,18 @@ public struct Topology: Codable, Sendable {
     /// `--rpc-allowed-origin`), e.g. `chrome-extension://<id>`. Each still
     /// needs the node's cookie. Absent = browsers are refused.
     public var rpcAllowedOrigins: [String]? = nil
+    /// The remote operator listener's `host:port` (the node's
+    /// `--operator-listen`), for clients on other machines. Requires
+    /// `operatorTokens`. Absent = off.
+    public var operatorListen: String? = nil
+    /// The remote operator listener's token file (`--operator-tokens`); a
+    /// relative path is under the root. The node creates it with the first
+    /// token made through its API.
+    public var operatorTokens: String? = nil
+    /// Browser origins allowed on the remote operator listener
+    /// (`--operator-allowed-origin`), e.g. `https://dashboard.example`. Each
+    /// still needs a token. Absent = browsers are refused.
+    public var operatorAllowedOrigins: [String]? = nil
 
     public init(
         listen: UInt16, rpc: UInt16, peers: [String]? = nil,
@@ -164,6 +177,11 @@ public struct Topology: Codable, Sendable {
         guard let data = try? Data(contentsOf: url) else {
             throw CtlError("no \(fileName) in \(root.path); run `lattice init` first")
         }
+        return try load(data: data)
+    }
+
+    /// A `lattice.json`'s content, refusing a key this release does not know.
+    public static func load(data: Data) throws -> Topology {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw CtlError("\(fileName) must contain one JSON object")
         }
@@ -176,11 +194,15 @@ public struct Topology: Codable, Sendable {
     }
 
     public func save(root: URL) throws {
+        try writeDurably(canonicalData(), to: root.appendingPathComponent(Self.fileName))
+    }
+
+    /// This configuration as `save` writes it: sorted keys, so two equal
+    /// configurations are equal bytes.
+    public func canonicalData() throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        try writeDurably(
-            encoder.encode(self), to: root.appendingPathComponent(Self.fileName)
-        )
+        return try encoder.encode(self)
     }
 
     /// Nexus's list replaces the built-in peers (empty: none at all); a
@@ -209,6 +231,11 @@ public struct Topology: Codable, Sendable {
         }
         for chain in (peers?.byChain ?? [:]).keys where !listed.contains(chain) {
             throw CtlError("peers are listed for \(chain), which is not a hosted chain")
+        }
+        for (chain, list) in peers?.byChain ?? [:] {
+            for peer in list where Self.peerEndpoint(peer) == nil {
+                throw CtlError("peer \(peer) for \(chain) is not public-key@host:port")
+            }
         }
         if let blockBodies, blockBodies != "all", blockBodies != "none" {
             throw CtlError("blockBodies is all or none, not \(blockBodies)")
@@ -252,6 +279,20 @@ public struct Topology: Codable, Sendable {
                 throw CtlError("\(name) must be finite and nonnegative")
             }
         }
+        guard (operatorListen == nil) == (operatorTokens == nil) else {
+            throw CtlError("operatorListen and operatorTokens go together")
+        }
+        if let operatorListen {
+            guard let (host, port) = Self.hostPort(operatorListen), Self.isAddressLiteral(host) else {
+                throw CtlError("operatorListen must be address:port, the address an IPv4 or IPv6 literal ([::1]:8090) or localhost")
+            }
+            guard !ports.contains(port), port != webSocket else {
+                throw CtlError("operatorListen must use a port of its own, not one of listen, rpc, publicRead or webSocket")
+            }
+        }
+        if operatorAllowedOrigins != nil, operatorListen == nil {
+            throw CtlError("operatorAllowedOrigins requires operatorListen")
+        }
         if let publicReadURL, !NodeConfiguration.isValidPublicReadURL(publicReadURL) {
             throw CtlError("publicReadURL must be an absolute http(s) URL with a host and no credentials, query or fragment")
         }
@@ -274,6 +315,12 @@ public struct Topology: Codable, Sendable {
         for path in Set((mine?.recipients ?? [:]).keys)
             .union((mine?.minWork ?? [:]).keys) where !listed.contains(path) {
             throw CtlError("mining configuration names unhosted chain \(path)")
+        }
+        if let mine, MinerLoopLogic.recipientField(mine.recipientEntries) == nil {
+            throw CtlError("mine.recipients maps chain paths to addresses")
+        }
+        if let mine, MinerLoopLogic.minimumWorkField(mine.minimumWorkEntries) == nil {
+            throw CtlError("mine.minWork maps chain paths to work per block, as 2^N or a positive decimal integer")
         }
         if let timeout = mine?.templateTimeoutSeconds, timeout < 1 {
             throw CtlError("mine.templateTimeoutSeconds must be at least 1; a zero timeout can never see the node answer a template request, so the miner would never mine")
@@ -326,6 +373,10 @@ public struct Topology: Codable, Sendable {
 }
 
 public struct TopologyMine: Codable, Sendable {
+    /// Whether the node mines: it runs the mining loop (`lattice mine run`)
+    /// while this is true, and restarts it when this section changes.
+    /// Absent = false.
+    public var enabled: Bool?
     /// "cpu" or a path to any contract-conforming worker executable.
     public var worker: String?
     public var workers: Int?
@@ -367,6 +418,7 @@ public struct TopologyMine: Codable, Sendable {
     public var roundDeadlineMultiplier: Int?
 
     public init(
+        enabled: Bool? = nil,
         worker: String? = nil, workers: Int? = nil,
         batchSize: UInt64? = nil, recipients: [String: String]? = nil,
         minWork: [String: String]? = nil,
@@ -374,6 +426,7 @@ public struct TopologyMine: Codable, Sendable {
         templateTimeoutSeconds: UInt64? = nil,
         roundDeadlineMultiplier: Int? = nil
     ) {
+        self.enabled = enabled
         self.worker = worker
         self.workers = workers
         self.batchSize = batchSize
@@ -385,7 +438,7 @@ public struct TopologyMine: Codable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case worker, workers, batchSize, recipients, minWork
+        case enabled, worker, workers, batchSize, recipients, minWork
         case minBlockIntervalSeconds, templateTimeoutSeconds
         case roundDeadlineMultiplier
     }
@@ -405,6 +458,7 @@ public struct TopologyMine: Codable, Sendable {
         }
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
+            enabled: try container.decodeIfPresent(Bool.self, forKey: .enabled),
             worker: try container.decodeIfPresent(String.self, forKey: .worker),
             workers: try container.decodeIfPresent(Int.self, forKey: .workers),
             batchSize: try container.decodeIfPresent(UInt64.self, forKey: .batchSize),
@@ -546,6 +600,13 @@ public struct HostLayout: Sendable {
                 CharacterSet(charactersIn: "._-")
             )
         ) ?? path
+    }
+
+    /// Where a node asked to wipe its storage (`POST /wipe`) records it,
+    /// outside the storage it wipes: its next start removes the storage
+    /// directory before opening it, then this file.
+    public var wipeRequest: URL {
+        root.appendingPathComponent("run").appendingPathComponent("wipe-requested")
     }
 
     public func pidFile(for path: String) -> URL {

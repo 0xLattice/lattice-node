@@ -113,6 +113,7 @@ let package = Package(
                 "LatticeNode",
                 "LatticeNodeCore",
                 "LatticeCtlCore",
+                "LatticeProcessWait",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "Ivy", package: "Ivy2"),
                 .product(name: "Hummingbird", package: "hummingbird"),
@@ -153,6 +154,7 @@ let package = Package(
             name: "LatticeCtlCore",
             dependencies: [
                 "LatticeNode",
+                "LatticeMinerCore",
                 "LatticeProcessWait",
                 .product(name: "Lattice", package: "lattice"),
             ]),

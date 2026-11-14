@@ -695,6 +695,9 @@ final class DaemonHTTPTests: XCTestCase {
         try await loopback.test(.router) { client in
             try await client.execute(uri: "/status", method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
                 XCTAssertEqual(response.status, .ok)
+                let status = try JSONDecoder().decode(NodeStatusResponse.self, from: Data(buffer: response.body))
+                XCTAssertEqual(status.version, LatticeNodeVersion.current)
+                XCTAssertNotNil(status.startedAt)
             }
             try await client.execute(uri: "/v1/status", method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
                 XCTAssertEqual(response.status, .notFound)

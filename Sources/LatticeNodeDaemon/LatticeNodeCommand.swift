@@ -10,13 +10,18 @@ import LatticeNodeCore
 import UInt256
 import VolumeBroker
 import LatticeNodeAPI
+import LatticeCtlCore
 
 @main
 struct LatticeNodeCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "lattice-node",
-        abstract: "Run one Nexus-rooted hosted tree"
+        abstract: "Run one Nexus-rooted hosted tree",
+        version: LatticeNodeVersion.current
     )
+
+    @Option(help: "A host root made by `lattice init`: the node runs as <root>/lattice.json says (storage, identity, ports, hosted chains, mining...) and is that file's only writer while it runs, changing it through its operator API (GET/PATCH /config) and applying each change live or at the next restart. Give no other flag with it.")
+    var root: String?
 
     @Option(help: "Hosted-tree storage directory; defaults to ~/.lattice/chains/Nexus")
     var dataDirectory: String?
@@ -54,6 +59,15 @@ struct LatticeNodeCommand: AsyncParsableCommand {
 
     @Option(name: .customLong("rpc-allowed-origin"), help: "A browser origin allowed on the loopback RPC port, exactly as the browser sends it, e.g. chrome-extension://<id> (repeatable). Requests with any other Origin are refused; an allowed origin gets CORS preflight answers and still needs the cookie.")
     var rpcAllowedOrigins: [String] = []
+
+    @Option(name: .customLong("operator-listen"), help: "host:port of an operator listener for clients on other machines, e.g. 10.0.0.5:8090. It serves the loopback API's routes, each request carrying Authorization: Bearer <token> for a token in --operator-tokens allowed that route; the cookie is not accepted there, and nothing sent there may name a file on this node's disk. Plain HTTP: put it on a private network or behind a TLS proxy. Requires --operator-tokens.")
+    var operatorListen: String?
+
+    @Option(name: .customLong("operator-tokens"), help: "The --operator-listen tokens: a JSON array of {\"name\", \"sha256\": hex SHA-256 of the token, and \"role\": \"admin\" or \"read\", or \"routes\": [\"POST /hosted-chains\", ...]}. Created by the first POST /tokens when absent; changed through /tokens while the node runs.")
+    var operatorTokens: String?
+
+    @Option(name: .customLong("operator-allowed-origin"), help: "A browser origin allowed on the --operator-listen listener, exactly as the browser sends it, e.g. https://dashboard.example (repeatable). Requests with any other Origin are refused; an allowed origin gets CORS answers and still needs a token.")
+    var operatorAllowedOrigins: [String] = []
 
     @Option(parsing: .upToNextOption, help: "Overlay peer as public-key@host:port. Any peer given here REPLACES the built-in default bootstrap peers; the two are never merged.")
     var peer: [String] = []
@@ -140,64 +154,42 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     var externalAddress: String?
 
     mutating func run() async throws {
+        guard let root else {
+            try await start(owner: nil)
+            return
+        }
+        // Only `--root` (and its value) on the command line: everything else
+        // comes from lattice.json.
+        let given = CommandLine.arguments.dropFirst()
+        guard given.allSatisfy({ !$0.hasPrefix("-") || $0 == "--root" || $0.hasPrefix("--root=") }) else {
+            throw ValidationError("--root takes every setting from lattice.json; give no other flag with it")
+        }
+        let layout = HostLayout(root: root)
+        let topology: Topology
+        do {
+            topology = try Topology.load(root: layout.root).validated()
+        } catch {
+            throw ValidationError("\(layout.root.appendingPathComponent(Topology.fileName).path): \(error). The node starts only from a valid configuration; fix the file by hand while the node is stopped (`lattice config set` edits it then too).")
+        }
+        try performRequestedWipe(layout)
+        var command = try LatticeNodeCommand.parse(topology.nodeArguments(layout: layout))
+        try await command.start(owner: (layout, topology))
+    }
+
+    /// Runs the node with these flags; `owner` is the host root and the
+    /// configuration it was started from, when it runs under `--root`.
+    mutating func start(owner: (layout: HostLayout, topology: Topology)?) async throws {
         let processStartTime = Date()
         let address = ChainAddress([ChainAddress.nexus])!
-        guard ["127.0.0.1", "::1", "localhost"].contains(rpcBind.lowercased()) else {
-            throw ValidationError("the operator HTTP API may bind only to loopback")
-        }
-        if let publicReadPort {
-            guard publicReadPort != rpcPort else {
-                throw ValidationError("--public-read-port must differ from --rpc-port")
-            }
-        }
-        let webSocket: WebSocketListener
-        switch webSocketPort {
-        case 0:
-            webSocket = .off
-        case let port?:
-            guard port != publicReadPort else {
-                throw ValidationError("--websocket-port must differ from --public-read-port")
-            }
-            webSocket = .required(port)
-        case nil:
-            webSocket = publicReadPort == WebSocketListener.defaultPort
-                ? .off : .ifAvailable(WebSocketListener.defaultPort)
-        }
-        if publicSubmit, publicReadPort == nil {
-            throw ValidationError("--public-submit requires --public-read-port")
-        }
-        guard publicReadFetches >= 0 else {
-            throw ValidationError("--public-read-fetches must be nonnegative")
-        }
-        let sessionBytes = NodeResourcePolicy.default.maximumAcquisitionStorageBytes
-        guard maxAcquisitionBytes >= sessionBytes else {
-            throw ValidationError("--max-acquisition-bytes must be at least \(sessionBytes), the bytes one block's fetch may hold")
-        }
-        guard let blockBodies = BlockBodies(rawValue: blockBodies) else {
-            throw ValidationError("--block-bodies is all or none")
-        }
-        guard let state = StateRetention(named: state) else {
-            throw ValidationError("--state is all, recent or none")
-        }
-        guard stateWindow.isEmpty || state == .recent else {
-            throw ValidationError("--state-window applies to --state recent only")
-        }
-        let publicReadLimits = try PublicReadRateLimits.validated(
-            generalRate: publicReadRate,
-            expensiveRate: publicReadExpensiveRate,
-            listenerRate: publicReadMaxRate,
-            submitRate: publicSubmitRate
-        )
-
+        let plan = try plan()
         let storage = try storageURL(for: address)
         let keyURL = identityKey.map { URL(fileURLWithPath: $0) }
             ?? storage.appendingPathComponent("storage.key")
         let privateKeyHex = try loadOrCreateIdentity(at: keyURL)
-        let explicitPeers = try peer.map(parsePeerEndpoint)
         // An operator peer source is authoritative: a supplied list replaces
         // the built-in defaults, and --no-default-peers expresses the empty
         // one. Only "nothing configured at all" falls back to the defaults.
-        let configuredPeers = explicitPeers.isEmpty && !noDefaultPeers ? nil : explicitPeers
+        let configuredPeers = plan.explicitPeers.isEmpty && !noDefaultPeers ? nil : plan.explicitPeers
         if DefaultBootstrapPeers.forbidden(
             configured: configuredPeers,
             environment: ProcessInfo.processInfo.environment
@@ -215,11 +207,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         // Behind the seeds by name, the same seeds at fixed addresses.
         let fixedSeedPeers = seedPeers.isEmpty ? [] : DefaultBootstrapPeers.nexusFixed
         let overlayPeers = configuredPeers ?? []
-
-        let hosted = try HostedChildren(
-            hostChain: hostChain, premineTo: premineTo, genesisTransactions: genesisTransactions,
-            chainPeer: chainPeer, policyModule: policyModule
-        )
+        let hosted = plan.hosted
+        let webSocket = plan.webSocket, blockBodies = plan.blockBodies, state = plan.state
+        let publicReadLimits = plan.publicReadLimits, operatorListener = plan.operatorListener
         let configuration = try NodeConfiguration(
             chainPath: address.components,
             storagePath: storage,
@@ -255,16 +245,115 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             publicReadURL: publicReadUrl,
             publicSubmit: publicSubmit,
             minRelayFee: minRelayFee,
-            finality: try windows(finalityWindow, option: "--finality-window", zeroIsOff: true),
-            stateWindows: try windows(stateWindow, option: "--state-window", zeroIsOff: false)
+            finality: plan.finality,
+            stateWindows: plan.stateWindows
         )
         let cookieFile = rpcCookieFile.map { URL(fileURLWithPath: $0) }
             ?? storage.appendingPathComponent(".cookie")
         try await runNodeRuntime(
             configuration: configuration,
             cookieFile: cookieFile,
+            operatorListener: operatorListener,
+            owner: owner,
             publicReadLimits: publicReadLimits,
             processStartTime: processStartTime
+        )
+    }
+
+
+    /// What a start makes of its flags, checked without touching storage,
+    /// identity or ports: what `start` runs from, and what a configuration
+    /// change or restart is checked against before it is taken.
+    struct StartPlan {
+        let webSocket: WebSocketListener
+        let operatorListener: OperatorListener?
+        let blockBodies: BlockBodies
+        let state: StateRetention
+        let publicReadLimits: PublicReadRateLimits
+        let explicitPeers: [PeerEndpoint]
+        let finality: FinalityWindows
+        let stateWindows: FinalityWindows
+        let hosted: HostedChildren
+    }
+
+    func plan() throws -> StartPlan {
+        guard ["127.0.0.1", "::1", "localhost"].contains(rpcBind.lowercased()) else {
+            throw ValidationError("the operator HTTP API may bind only to loopback")
+        }
+        if let publicReadPort {
+            guard publicReadPort != rpcPort else {
+                throw ValidationError("--public-read-port must differ from --rpc-port")
+            }
+        }
+        let webSocket: WebSocketListener
+        switch webSocketPort {
+        case 0:
+            webSocket = .off
+        case let port?:
+            guard port != publicReadPort else {
+                throw ValidationError("--websocket-port must differ from --public-read-port")
+            }
+            webSocket = .required(port)
+        case nil:
+            webSocket = publicReadPort == WebSocketListener.defaultPort
+                ? .off : .ifAvailable(WebSocketListener.defaultPort)
+        }
+        guard (operatorListen == nil) == (operatorTokens == nil) else {
+            throw ValidationError("--operator-listen and --operator-tokens go together")
+        }
+        guard operatorAllowedOrigins.isEmpty || operatorListen != nil else {
+            throw ValidationError("--operator-allowed-origin requires --operator-listen")
+        }
+        let operatorListener = try operatorListen.map { listen -> OperatorListener in
+            guard let (host, port) = Topology.hostPort(listen) else {
+                throw ValidationError("--operator-listen must be host:port")
+            }
+            guard port != rpcPort, port != publicReadPort, port != listenPort, port != webSocketPort else {
+                throw ValidationError("--operator-listen must use a port of its own")
+            }
+            return OperatorListener(
+                host: host, port: Int(port),
+                tokens: try TokenStore(file: URL(fileURLWithPath: operatorTokens!)),
+                allowedOrigins: Set(operatorAllowedOrigins)
+            )
+        }
+        if publicSubmit, publicReadPort == nil {
+            throw ValidationError("--public-submit requires --public-read-port")
+        }
+        guard publicReadFetches >= 0 else {
+            throw ValidationError("--public-read-fetches must be nonnegative")
+        }
+        let sessionBytes = NodeResourcePolicy.default.maximumAcquisitionStorageBytes
+        guard maxAcquisitionBytes >= sessionBytes else {
+            throw ValidationError("--max-acquisition-bytes must be at least \(sessionBytes), the bytes one block's fetch may hold")
+        }
+        guard let blockBodies = BlockBodies(rawValue: blockBodies) else {
+            throw ValidationError("--block-bodies is all or none")
+        }
+        guard let state = StateRetention(named: state) else {
+            throw ValidationError("--state is all, recent or none")
+        }
+        guard stateWindow.isEmpty || state == .recent else {
+            throw ValidationError("--state-window applies to --state recent only")
+        }
+        let publicReadLimits = try PublicReadRateLimits.validated(
+            generalRate: publicReadRate,
+            expensiveRate: publicReadExpensiveRate,
+            listenerRate: publicReadMaxRate,
+            submitRate: publicSubmitRate
+        )
+
+        let explicitPeers = try peer.map(parsePeerEndpoint)
+        let hosted = try HostedChildren(
+            hostChain: hostChain, premineTo: premineTo, genesisTransactions: genesisTransactions,
+            chainPeer: chainPeer, policyModule: policyModule
+        )
+        return StartPlan(
+            webSocket: webSocket, operatorListener: operatorListener, blockBodies: blockBodies, state: state,
+            publicReadLimits: publicReadLimits, explicitPeers: explicitPeers,
+            finality: try windows(finalityWindow, option: "--finality-window", zeroIsOff: true),
+            stateWindows: try windows(stateWindow, option: "--state-window", zeroIsOff: false),
+            hosted: hosted
         )
     }
 
@@ -444,26 +533,10 @@ func parsePeerEndpoint(_ value: String) throws -> PeerEndpoint {
 }
 
 private func parseEndpoint(_ value: String) throws -> (key: String, host: String, port: UInt16) {
-    guard let separator = value.firstIndex(of: "@"),
-          separator != value.startIndex else {
+    guard let parsed = Topology.peerEndpoint(value) else {
         throw ValidationError("endpoint must use public-key@host:port")
     }
-    let key = String(value[..<separator])
-    let address = String(value[value.index(after: separator)...])
-    guard let colon = address.lastIndex(of: ":"),
-          let port = UInt16(address[address.index(after: colon)...]),
-          port != 0 else {
-        throw ValidationError("endpoint must use public-key@host:port")
-    }
-    var host = String(address[..<colon])
-    if host.first == "[", host.last == "]" {
-        host.removeFirst()
-        host.removeLast()
-    }
-    guard !host.isEmpty else {
-        throw ValidationError("endpoint host must be nonempty")
-    }
-    return (key, host, port)
+    return parsed
 }
 
 /// The loopback operator writes: the node runtime's RPC events.
@@ -484,20 +557,17 @@ protocol OperatorWrites: Sendable {
     var servingLedger: ServingLedger { get }
 }
 
-/// `POST /hosted-chains`: the child chains the node hosts from now on, in the
-/// shape of the flags that name them at start (`--host-chain`, ...). A chain
-/// left out stops; its data stays.
+/// `POST /hosted-chains` on a node started with flags: the child chains it
+/// hosts from now on, in the shape of the flags that name them at start
+/// (`--host-chain`, ...), until its next start. A chain left out stops; its
+/// data stays. (Under `--root` the node keeps its chains in its
+/// configuration; see `OperatorConfig`.)
 struct HostedChainsRequest: Codable, Sendable {
     let hostChain: [String]
     let premineTo: [String]?
     let genesisTransactions: [String]?
     let chainPeer: [String]?
     let policyModule: [String]?
-}
-
-/// The child chains the node hosts, parent first, as `Nexus/Alpha`.
-struct HostedChainsResponse: Codable, Sendable {
-    let chains: [String]
 }
 
 /// `POST /pins`: the Volume an operator pins, by its root CID.
@@ -520,16 +590,11 @@ struct PinsResponse: Codable, Sendable {
 
 extension NodeRuntime: OperatorWrites {
     func hostChains(_ request: HostedChainsRequest) async throws {
-        let hosted = try HostedChildren(
+        try await host(try HostedChildren(
             hostChain: request.hostChain, premineTo: request.premineTo ?? [],
             genesisTransactions: request.genesisTransactions ?? [],
             chainPeer: request.chainPeer ?? [], policyModule: request.policyModule ?? []
-        )
-        try await host(
-            hosted.children, childSpecs: hosted.specs, childPremineRecipients: hosted.premineRecipients,
-            childGenesisTransactions: hosted.genesisTransactions,
-            childSeedPeers: hosted.seedPeers, policyModules: hosted.policyModules
-        )
+        ))
     }
 }
 
@@ -549,14 +614,21 @@ func makeApplication(
     port: Int,
     peers: @Sendable @escaping () async -> ExplorerPeersResponse,
     processStartTime: Date,
-    auth: LoopbackRPCAuth,
+    auth: OperatorAccess,
     endpoints: @escaping ChainEndpointsLookup = { _ in nil },
+    control: OperatorControl = OperatorControl(),
     configure: (Router<BasicRequestContext>) -> Void = { _ in }
 ) -> Application<RouterResponder<BasicRequestContext>> {
     let router = Router()
     // First, so it covers every route below and the not-found responder: the
-    // origin policy and the cookie check (LoopbackRPCAuth).
-    router.add(middleware: LoopbackRPCAuthMiddleware(auth: auth))
+    // origin policy and the cookie check (LoopbackRPCAuth), or on the remote
+    // listener the scoped bearer tokens (OperatorTokens).
+    switch auth {
+    case .loopback(let cookie):
+        router.add(middleware: LoopbackRPCAuthMiddleware(auth: cookie))
+    case .remote(let tokens, let origins):
+        router.add(middleware: OperatorTokenMiddleware(tokens: tokens, allowedOrigins: origins))
+    }
     addPublicReadRoutes(
         to: router,
         reads: ChainReadsByPath(root: reads, levels: levelReads),
@@ -573,7 +645,24 @@ func makeApplication(
     // /status reads the live runtime status and template digest. It is an
     // internal endpoint; the public status surface is /health.
     router.get("status") { request, context in
-        try json(await status(), request: request, context: context)
+        var answer = await status()
+        answer.startedAt = processStartTime.timeIntervalSince1970
+        return try json(answer, request: request, context: context)
+    }
+    // Who the caller is, so a client can offer only what its credential may
+    // do. Open to every credential the listener accepts; never the secret.
+    router.get("whoami") { request, context in
+        let me: TokensResponse.Token
+        switch auth {
+        case .loopback:
+            me = .init(name: "cookie", role: "admin", routes: nil)
+        case .remote(let tokens, _):
+            guard let entry = tokens.entry(for: request.headers[.authorization]) else {
+                throw HTTPError(.unauthorized, message: "the operator listener requires a bearer token")
+            }
+            me = .init(name: entry.name, role: entry.role, routes: entry.routes)
+        }
+        return try json(me, request: request, context: context)
     }
     // Prometheus exposition: operator surface only, never the public read app.
     router.get("metrics") { _, _ in
@@ -584,12 +673,33 @@ func makeApplication(
             body: ResponseBody(byteBuffer: ByteBuffer(string: body))
         )
     }
-    addOperatorWriteRoutes(to: router, writes: writes)
+    addOperatorWriteRoutes(to: router, writes: writes, remote: auth.isRemote)
+    addOperatorControlRoutes(to: router, control: control, writes: writes, remote: auth.isRemote)
     configure(router)
     return Application(
         responder: router.buildResponder(),
         configuration: .init(address: .hostname(host, port: port))
     )
+}
+
+/// Who may reach an operator application: the loopback API's cookie, or the
+/// remote operator listener's scoped bearer tokens.
+enum OperatorAccess: Sendable {
+    case loopback(LoopbackRPCAuth)
+    case remote(TokenStore, allowedOrigins: Set<String>)
+
+    var isRemote: Bool {
+        if case .remote = self { return true }
+        return false
+    }
+}
+
+/// `--operator-listen`: where the remote operator listener binds, and its tokens.
+struct OperatorListener: Sendable {
+    let host: String
+    let port: Int
+    let tokens: TokenStore
+    let allowedOrigins: Set<String>
 }
 
 /// The public read application: exactly the bounded, non-mutating GET routes
@@ -1174,18 +1284,23 @@ struct ChainReadsByPath: Sendable {
 /// Unauthenticated writes: registered only on the loopback application. The
 /// public listener's opt-in `POST /transactions` is registered separately,
 /// in `makePublicReadApplication`.
+/// `remote`: the routes serve the remote operator listener, whose clients
+/// are not on this host. Its bearer tokens are no credential a browser sends
+/// on its own, so the loopback Host check (against DNS rebinding) does not
+/// apply there, and nothing sent there may name a file on this node's disk.
 private func addOperatorWriteRoutes(
     to router: Router<BasicRequestContext>,
-    writes service: any OperatorWrites
+    writes service: any OperatorWrites,
+    remote: Bool
 ) {
     router.post("transactions") { request, context in
-        let input: SubmitTransactionRequest = try await decode(request, context: context)
+        let input: SubmitTransactionRequest = try await decode(request, context: context, remote: remote)
         return try await serviceCall(request: request, context: context) {
             try await service.submitTransaction(input)
         }
     }
     router.post("mining/templates") { request, context in
-        let input: MiningTemplateRequest = try await decode(request, context: context)
+        let input: MiningTemplateRequest = try await decode(request, context: context, remote: remote)
         return try await serviceCall(request: request, context: context) {
             try await service.miningTemplate(input)
         }
@@ -1205,14 +1320,14 @@ private func addOperatorWriteRoutes(
         )
     }
     router.post("mining/work") { request, context in
-        let input: SubmitWorkRequest = try await decode(request, context: context)
+        let input: SubmitWorkRequest = try await decode(request, context: context, remote: remote)
         return try await serviceCall(request: request, context: context) {
             try await service.submitWork(input)
         }
     }
     // A child block's author pushes it here until its status is "tree".
     router.post("child-blocks") { request, context in
-        let input: SubmitChildBlockRequest = try await decode(request, context: context)
+        let input: SubmitChildBlockRequest = try await decode(request, context: context, remote: remote)
         return try await serviceCall(request: request, context: context) {
             try await service.submitChildBlock(input)
         }
@@ -1220,7 +1335,7 @@ private func addOperatorWriteRoutes(
     // A child block built here for its author to commit on the parent; the
     // answer carries the push above.
     router.post("child-blocks/build") { request, context in
-        let input: BuildChildBlockRequest = try await decode(request, context: context)
+        let input: BuildChildBlockRequest = try await decode(request, context: context, remote: remote)
         return try await serviceCall(request: request, context: context) {
             try await service.buildChildBlock(input)
         }
@@ -1251,22 +1366,8 @@ private func addOperatorWriteRoutes(
             return PinRequest(cid: volume.root, entries: volume.entries)
         }
     }
-    // The child chains this node hosts, changed without a restart.
-    router.get("hosted-chains") { request, context in
-        try json(
-            HostedChainsResponse(chains: service.hostedChildren.map { $0.joined(separator: "/") }),
-            request: request, context: context
-        )
-    }
-    router.post("hosted-chains") { request, context in
-        let input: HostedChainsRequest = try await decode(request, context: context)
-        return try await serviceCall(request: request, context: context) {
-            try await service.hostChains(input)
-            return HostedChainsResponse(chains: service.hostedChildren.map { $0.joined(separator: "/") })
-        }
-    }
     router.post("pins") { request, context in
-        let input: PinRequest = try await decode(request, context: context)
+        let input: PinRequest = try await decode(request, context: context, remote: remote)
         guard isPlausibleCID(input.cid) else { throw HTTPError(.badRequest, message: "invalidCID") }
         return try await serviceCall(request: request, context: context) {
             try await service.pinVolume(input.cid, entries: input.entries)
@@ -1282,7 +1383,7 @@ private func addOperatorWriteRoutes(
         }
     }
     router.post("serving-credit") { request, context in
-        let input: ServingCreditRequest = try await decode(request, context: context)
+        let input: ServingCreditRequest = try await decode(request, context: context, remote: remote)
         return try await serviceCall(request: request, context: context) {
             ServingCreditResponse(
                 peer: input.peer,
@@ -1291,7 +1392,7 @@ private func addOperatorWriteRoutes(
         }
     }
     router.delete("pins/:cid") { request, context in
-        try requireLoopbackHost(request)
+        if !remote { try requireLoopbackHost(request) }
         guard let cid = context.parameters.get("cid"), isPlausibleCID(cid) else {
             throw HTTPError(.badRequest, message: "invalidCID")
         }
@@ -1327,12 +1428,16 @@ private func decode<Value: Decodable>(
 /// cross-origin form or text/plain POST is a "simple" request that needs no
 /// CORS preflight; requiring application/json forces the preflight the
 /// read-only CORS policy denies), and a Host naming anything but loopback (a
-/// DNS-rebinding page reaching this listener under a hostname it controls).
-private func decode<Value: Decodable, Context: RequestContext>(
+/// DNS-rebinding page reaching this listener under a hostname it controls) —
+/// except on the remote operator listener, which no page reaches with a
+/// credential it holds on its own.
+func decode<Value: Decodable, Context: RequestContext>(
     _ request: Request,
-    context: Context
+    context: Context,
+    remote: Bool
 ) async throws -> Value {
-    try requireLoopbackJSON(request)
+    if !remote { try requireLoopbackHost(request) }
+    try requireJSON(request)
     do {
         return try await request.decode(as: Value.self, context: context)
     } catch {
@@ -1340,8 +1445,7 @@ private func decode<Value: Decodable, Context: RequestContext>(
     }
 }
 
-private func requireLoopbackJSON(_ request: Request) throws {
-    try requireLoopbackHost(request)
+func requireJSON(_ request: Request) throws {
     let mediaType = request.headers[.contentType]?
         .split(separator: ";").first?
         .trimmingCharacters(in: .whitespaces).lowercased()
@@ -1350,7 +1454,7 @@ private func requireLoopbackJSON(_ request: Request) throws {
     }
 }
 
-private func requireLoopbackHost(_ request: Request) throws {
+func requireLoopbackHost(_ request: Request) throws {
     let hosts = [request.head.authority].compactMap { $0 }
         + request.headers.filter { $0.name.canonicalName == "host" }.map(\.value)
     for host in hosts where !isLoopbackAuthority(host) {
@@ -1369,7 +1473,7 @@ private func isLoopbackAuthority(_ authority: String) -> Bool {
     return ["127.0.0.1", "localhost", "::1"].contains(String(host))
 }
 
-private func serviceCall<Value: Encodable, Context: RequestContext>(
+func serviceCall<Value: Encodable, Context: RequestContext>(
     request: Request,
     context: Context,
     operation: () async throws -> Value
@@ -1488,7 +1592,7 @@ private func reason(_ error: some Error) -> String {
     String(describing: error)
 }
 
-private func json<Value: Encodable, Context: RequestContext>(
+func json<Value: Encodable, Context: RequestContext>(
     _ value: Value,
     request: Request,
     context: Context

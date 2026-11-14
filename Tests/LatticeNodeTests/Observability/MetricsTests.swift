@@ -20,7 +20,7 @@ final class MetricsTests: XCTestCase {
             port: 8080,
             peers: { ExplorerPeersResponse(count: 3, peers: []) },
             processStartTime: Date(timeIntervalSince1970: 1_700_000_000.5),
-            auth: testOperatorAuth
+            auth: .loopback(testOperatorAuth)
         )
         try await app.test(.router) { client in
             let response = try await client.execute(uri: "/metrics", method: .get, headers: [.authorization: testOperatorAuthorization])

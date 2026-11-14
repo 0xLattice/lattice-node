@@ -18,68 +18,38 @@ struct Mine: AsyncParsableCommand {
         subcommands: [Start.self, Run.self, Stop.self, MineStatus.self]
     )
 
+    /// Mining is the node's: `mine.enabled` in its configuration, which a
+    /// running node applies at once (it runs `mine run` as its child).
     struct Start: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Start the mining loop in the background."
+            abstract: "Turn mining on (mine.enabled); the node runs the mining loop."
         )
 
-        @OptionGroup var rootOption: RootOption
+        @OptionGroup var target: NodeTarget
 
         func run() async throws {
-            let layout = rootOption.layout
-            _ = try minerSettings(layout)
-            try await withSpawnLock(layout) {
-                try self.startLocked(layout)
+            if try target.remote() == nil {
+                // A loop `mine start` ran itself before the node ran it.
+                let layout = target.layout
+                try await withSpawnLock(layout) {
+                    if try await stopProcess(layout, "mine", grace: .seconds(60)) {
+                        print("stopped the mining loop started by an earlier lattice")
+                    }
+                }
             }
-        }
-
-        private func startLocked(_ layout: HostLayout) throws {
-            if let pid = runningPid(layout, "mine") {
-                throw CtlError("mining already running (pid \(pid))")
-            }
-            let process = Process()
-            process.executableURL = URL(
-                fileURLWithPath: CommandLine.arguments[0]
-            ).resolvingSymlinksInPath()
-            process.arguments = ["mine", "run", "--root", layout.root.path]
-            let log = layout.logFile(for: "mine")
-            _ = FileManager.default.createFile(atPath: log.path, contents: nil)
-            let handle = try FileHandle(forWritingTo: log)
-            handle.seekToEndOfFile()
-            process.standardOutput = handle
-            process.standardError = handle
-            try process.run()
-            try writePidFile(
-                layout, "mine",
-                pid: process.processIdentifier, name: "lattice"
-            )
-            print("mining started (pid \(process.processIdentifier)), log \(log.path)")
+            try await setMining(target, true)
         }
     }
 
     struct Stop: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Stop the mining loop."
+            abstract: "Turn mining off (mine.enabled); the node stops the loop after its batch."
         )
 
-        @OptionGroup var rootOption: RootOption
+        @OptionGroup var target: NodeTarget
 
         func run() async throws {
-            let layout = rootOption.layout
-            // Under the spawn lock, so a concurrent `mine start` cannot
-            // lose its pidfile to this stop. Graceful: the loop finishes
-            // its batch within the grace.
-            let stopped = try await withSpawnLock(layout) {
-                try await stopProcess(
-                    layout, "mine", grace: .seconds(60),
-                    onKill: {
-                        if let coordinator = runningPid(layout, "mine-coordinator") {
-                            kill(coordinator, SIGKILL)
-                        }
-                    }
-                )
-            }
-            print(stopped ? "mining stopped" : "mining not running")
+            try await setMining(target, false)
         }
     }
 
@@ -89,31 +59,41 @@ struct Mine: AsyncParsableCommand {
             abstract: "Whether mining runs, and who it pays."
         )
 
-        @OptionGroup var rootOption: RootOption
+        @OptionGroup var target: NodeTarget
 
         func run() async throws {
-            let layout = rootOption.layout
-            let settings = try minerSettings(layout)
-            let running = runningPid(layout, "mine").map { "running (pid \($0))" }
-                ?? "stopped"
-            print("mining: \(running)")
-            print("chain:  Nexus and configured hosted descendants")
-            let recipients = settings.mine.recipientEntries
-            if recipients.isEmpty {
+            let mining: MiningStatusResponse
+            if let rpc = try await target.running() {
+                mining = try JSONDecoder().decode(MiningStatusResponse.self, from: try await send(rpc: rpc, "GET", "mining"))
+            } else {
+                let mine = try Topology.load(root: target.layout.root).mine
+                mining = MiningStatusResponse(
+                    enabled: mine?.enabled == true, running: false, pid: nil, restarts: 0, lastExit: nil,
+                    recipients: mine?.recipients ?? [:]
+                )
+            }
+            print("mining: \(mining.enabled ? "on" : "off"), \(mining.running ? "running (pid \(mining.pid ?? 0))" : "not running")")
+            if let lastExit = mining.lastExit { print("last exit: \(lastExit) (restarts: \(mining.restarts))") }
+            if mining.recipients.isEmpty {
                 print("recipients: none configured (rewards and fees burn)")
             } else {
-                for entry in recipients { print("recipient: \(entry)") }
+                for (path, address) in mining.recipients.sorted(by: { $0.key < $1.key }) {
+                    print("recipient: \(path)=\(address)")
+                }
             }
         }
     }
 
     struct Run: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Foreground mining loop (used by `mine start`).",
+            abstract: "Foreground mining loop (the node runs it while mine.enabled).",
             shouldDisplay: false
         )
 
         @OptionGroup var rootOption: RootOption
+
+        @Option(help: "Exit once this process is no longer the loop's parent: the node that runs it stopped.")
+        var parentPid: Int32?
 
         func run() async throws {
             let layout = rootOption.layout
@@ -133,6 +113,12 @@ struct Mine: AsyncParsableCommand {
             let source = DispatchSource.makeSignalSource(signal: SIGTERM)
             source.setEventHandler { stopRequested.raise() }
             source.resume()
+            if let parentPid {
+                Task.detached {
+                    while getppid() == parentPid { try? await Task.sleep(for: .seconds(1)) }
+                    stopRequested.raise()
+                }
+            }
             let multiplier = settings.mine.roundDeadlineMultiplier
                 ?? MiningRoundDeadline.defaultMultiplier
             let templateTimeout = settings.mine.resolvedTemplateTimeoutSeconds
@@ -307,12 +293,6 @@ func minerSettings(_ layout: HostLayout) throws -> MinerSettings {
     guard FileManager.default.isExecutableFile(atPath: worker.path) else {
         throw CtlError("worker is not executable: \(worker.path)")
     }
-    if MinerLoopLogic.recipientField(mine.recipientEntries) == nil {
-        throw CtlError("mine.recipients maps chain paths to addresses")
-    }
-    if MinerLoopLogic.minimumWorkField(mine.minimumWorkEntries) == nil {
-        throw CtlError("mine.minWork maps chain paths to work per block, as 2^N or a positive decimal integer")
-    }
     return MinerSettings(
         mine: mine, rpc: NodeRPC(topology, layout), workerExecutable: worker
     )
@@ -355,7 +335,7 @@ func runCoordinatorOnce(
         .appendingPathComponent("lattice-mining-coordinator")
     var arguments = [
         "--node", settings.rpc.baseURL,
-        "--rpc-cookie-file", settings.rpc.cookieFile.path,
+        "--rpc-cookie-file", layout.rpcCookie.path,
         "--worker-executable", settings.workerExecutable.path,
         "--workers", String(settings.mine.workers ?? 1),
         "--batch-size", String(settings.mine.batchSize ?? 2_000_000_000),
@@ -431,4 +411,21 @@ func nodeAnswersTemplates(
     guard let (_, response) = try? await URLSession.shared.data(for: request),
           let http = response as? HTTPURLResponse else { return false }
     return http.statusCode == 200
+}
+
+/// Sets `mine.enabled`: on the running (or remote) node, which starts or
+/// stops its loop, or in lattice.json for the next start.
+private func setMining(_ target: NodeTarget, _ enabled: Bool) async throws {
+    try await target.changeConfig(api: { rpc in
+        try await sendChange(
+            rpc: rpc, "PATCH", "config", json: Data(#"{"mine":{"enabled":\#(enabled)}}"#.utf8),
+            contentType: "application/merge-patch+json"
+        )
+        print(enabled ? "mining on" : "mining off")
+    }, stopped: { topology in
+        var mine = topology.mine ?? TopologyMine()
+        mine.enabled = enabled
+        topology.mine = mine
+        print(enabled ? "mining on from the next start" : "mining off")
+    })
 }

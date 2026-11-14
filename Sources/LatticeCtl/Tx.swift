@@ -209,7 +209,7 @@ struct SwapOptions: ParsableArguments {
 }
 
 struct TxOptions: ParsableArguments {
-    @OptionGroup var rootOption: RootOption
+    @OptionGroup var target: NodeTarget
 
     @Option(name: .long, help: "Absolute chain path in the tree (e.g. Nexus/Market).")
     var chain: String
@@ -260,26 +260,22 @@ struct TxOptions: ParsableArguments {
         receiptActions: [ReceiptAction] = [],
         withdrawalActions: [WithdrawalAction] = []
     ) async throws {
-        let topology = try Topology.load(root: rootOption.layout.root).validated()
         // A child chain is a level of the one process: its reads and
-        // writes go to the Nexus RPC, by chain path.
-        guard chain == ChainAddress.nexus || (topology.hostedChains ?? []).contains(chain) else {
-            throw CtlError("\(chain) is not in the tree")
-        }
+        // writes go to the Nexus RPC, by chain path; the node answers 404
+        // for a chain it does not host.
+        let rpc = try await target.runningNode()
         let path = chain.components(separatedBy: "/")
         let signerNonce: UInt64
         if let nonce {
             signerNonce = nonce
         } else {
-            signerNonce = try await nextNonce(
-                rpc: NodeRPC(topology, rootOption.layout), address: signer.address, chain: chain
-            )
+            signerNonce = try await nextNonce(rpc: rpc, address: signer.address, chain: chain)
         }
         let fee: UInt64
         if let chosen = self.fee {
             fee = chosen
         } else {
-            fee = try await relayFloor(rpc: NodeRPC(topology, rootOption.layout), chain: chain)
+            fee = try await relayFloor(rpc: rpc, chain: chain)
         }
         var actions = accountActions
         if fee > 0 {
@@ -302,7 +298,7 @@ struct TxOptions: ParsableArguments {
             throw CtlError("signing failed; check the key file")
         }
         let response: SubmitTransactionResponse = try await post(
-            rpc: NodeRPC(topology, rootOption.layout), path: "transactions",
+            rpc: rpc, path: "transactions",
             body: SubmitTransactionRequest(transaction: Transaction(
                 signatures: [signer.publicKey: signature], body: header
             ))
