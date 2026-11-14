@@ -198,10 +198,24 @@ It is added to `hostedChains`, and a running host is told over
 [`POST /hosted-chains`](rpc-api.md#post-hosted-chains), as `child create`
 does. The chain syncs from the node's peers.
 
-The node keeps the list it was last sent and hosts it after a restart, in
-place of its start flags. So that `lattice.json` still decides on a host
-`lattice` runs, `lattice up` sends its list again once a host it starts
-answers.
+The node owns its hosted chains. Once any `POST /hosted-chains` has set them
+(`lattice child create`, `child host`, or any other client), it keeps them in
+`<root>/chains/Nexus/hosted-chains.json` and hosts those at every start;
+`lattice.json`'s `hostedChains` (the flags `lattice up` passes) only seeds a
+node that keeps none yet, and `lattice up` never sends it to one that does.
+`child create` and `child host` add their one chain to what the node keeps,
+leaving every other chain as it is:
+
+- host running, chains kept: read `GET /hosted-chains`, add the chain to
+  `saved`, post it back;
+- host running, none kept yet: post `lattice.json`'s list, which becomes the
+  kept one;
+- host stopped, chains kept: add the chain to `hosted-chains.json`, so the
+  next start hosts it;
+- host stopped, none kept: nothing more; the next `lattice up` passes it as a
+  flag.
+
+The chain is also added to `lattice.json`, as before.
 
 ### Committing a child block on its parent
 

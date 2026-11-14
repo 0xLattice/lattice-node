@@ -86,7 +86,7 @@ final class HostChainsRuntimeTests: XCTestCase {
             try await Self.hostedChains(client, ["Nexus/Alpha"])
             try await client.execute(
                 uri: "/hosted-chains", method: .get, headers: [.authorization: testOperatorAuthorization]
-            ) { XCTAssertEqual(String(buffer: $0.body), #"{"chains":["Nexus\/Alpha"]}"#) }
+            ) { XCTAssertEqual(String(buffer: $0.body), #"{"chains":["Nexus\/Alpha"],"saved":{"chains":[{"path":"Nexus\/Alpha"}]}}"#) }
             try await Self.alphaHealth(client, .ok)
         }
         XCTAssertEqual(follower.runtime.hostedChildren, [Self.alpha])

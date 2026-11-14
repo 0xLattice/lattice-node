@@ -672,10 +672,17 @@ operator port only.
 ### `GET /hosted-chains`
 
 ```json
-{"chains": ["Nexus/Alpha"]}
+{"chains": ["Nexus/Alpha"],
+ "saved": {"chains": [{"path": "Nexus/Alpha", "spec": {"...": "..."}, "premineTo": "<address>"}],
+           "chainPeer": ["Nexus/Alpha=<public-key>@host:port"]}}
 ```
 
-The hosted child chains, parent first.
+The hosted child chains, parent first, and `saved`: what the node keeps of
+them inline (below), or `null` before any `POST /hosted-chains`, when it
+hosts what its flags name. `saved` is itself a `POST /hosted-chains` body: to
+add or remove one chain, a client reads it, changes that chain and posts it
+back, and every other chain keeps its spec, recipient, transactions, modules
+and seeds.
 
 ### `POST /hosted-chains`
 
@@ -717,7 +724,8 @@ the file atomically, and hosts what that file lists at every later start. The
 `--host-chain`, `--premine-to`, `--genesis-transactions`, `--policy-module`
 and `--chain-peer` flags apply only until the first accepted
 `POST /hosted-chains`; after that the node ignores them and says so at start.
-Deleting the file returns it to its flags. A newly listed chain starts as it would at start and syncs from the
+Deleting the file returns it to its flags. `POST /hosted-chains` answers as
+`GET /hosted-chains`, `saved` included. A newly listed chain starts as it would at start and syncs from the
 node's peers; a chain left out stops with every chain below it, and what it
 stored stays, so listing it again resumes it. Answers as `GET
 /hosted-chains`. `400` when the list does not hold together (a child before

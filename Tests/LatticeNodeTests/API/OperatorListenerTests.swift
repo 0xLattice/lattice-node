@@ -137,6 +137,10 @@ final class OperatorListenerTests: XCTestCase {
                 XCTAssertEqual($0.status, .badRequest)
             }
             XCTAssertNil(try HostedChildren.saved(in: directory), "a refused request saves nothing")
+            try await client.execute(uri: "/hosted-chains", method: .get, headers: post) { response in
+                let answer = try JSONDecoder().decode(HostedChainsResponse.self, from: Data(buffer: response.body))
+                XCTAssertNil(answer.saved, "nothing kept before a change")
+            }
             try await client.execute(
                 uri: "/hosted-chains", method: .post, headers: post,
                 body: try Self.hostedChains(HostedChainsRequest(
@@ -144,9 +148,35 @@ final class OperatorListenerTests: XCTestCase {
                     chains: [HostedChain(path: "Nexus/Alpha")]
                 ))
             ) { XCTAssertEqual($0.status, .ok, String(buffer: $0.body)) }
+            // GET returns what is kept, inline, for a client to change and post back.
+            try await client.execute(uri: "/hosted-chains", method: .get, headers: post) { response in
+                let answer = try JSONDecoder().decode(HostedChainsResponse.self, from: Data(buffer: response.body))
+                XCTAssertEqual(answer.chains, ["Nexus/Alpha"])
+                XCTAssertEqual(answer.saved?.chains.map(\.path), ["Nexus/Alpha"])
+            }
         }
         let saved = try XCTUnwrap(try HostedChildren.saved(in: directory))
         XCTAssertEqual(saved.children, [Self.alpha])
+    }
+
+    /// Adding a chain to the kept set (what `lattice child create` and
+    /// `child host` send) leaves every other chain as it was.
+    func testAddingAChainLeavesTheOthers() throws {
+        let spec = ChainSpec(
+            maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 5,
+            targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
+        )
+        let recipient = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
+        let peer = "Nexus/Alpha=\(String(repeating: "ab", count: 32))@node.example:4001"
+        let kept = SavedHostedChains(
+            chains: [HostedChain(path: "Nexus/Alpha", spec: spec, premineTo: recipient)], chainPeer: [peer]
+        )
+        let added = try XCTUnwrap(kept.adding(HostedChain(path: "Nexus/Beta"), peers: ["Nexus/Beta=k@b.example:4001"]))
+        XCTAssertEqual(added.chains.map(\.path), ["Nexus/Alpha", "Nexus/Beta"])
+        XCTAssertEqual(try JSONEncoder().encode(added.chains[0].spec), try JSONEncoder().encode(spec))
+        XCTAssertEqual(added.chains[0].premineTo, recipient)
+        XCTAssertEqual(added.chainPeer, [peer, "Nexus/Beta=k@b.example:4001"])
+        XCTAssertNil(added.adding(HostedChain(path: "Nexus/Beta")), "a listed chain is not added again")
     }
 
     /// The saved form is inline: a chain read from files comes back from it

@@ -33,7 +33,7 @@ struct Child: AsyncParsableCommand {
             topology.hostedChains = (topology.hostedChains ?? []) + [path]
             _ = try topology.validated()
             try topology.save(root: layout.root)
-            let updated = try await withSpawnLock(layout) { try await updateHostIfRunningLocked(layout) }
+            let updated = try await withSpawnLock(layout) { try await addHostedChainLocked(layout, path) }
             print("\(path): hosted; synced from its peers")
             if updated { print("the host now runs \(path)") }
         }
@@ -265,7 +265,7 @@ struct Child: AsyncParsableCommand {
                 }
             }
             try topology.save(root: layout.root)
-            let updated = try await withSpawnLock(layout) { try await updateHostIfRunningLocked(layout) }
+            let updated = try await withSpawnLock(layout) { try await addHostedChainLocked(layout, path) }
             print("\(path): spec \(file.path); genesis mined from it in the next template that carries it")
             if updated { print("the host now runs \(path)") }
         }

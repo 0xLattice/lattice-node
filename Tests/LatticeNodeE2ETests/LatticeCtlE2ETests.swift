@@ -933,3 +933,51 @@ private let e2eTimeScale: Int = ProcessInfo.processInfo
 private func e2eScaled(_ timeout: Duration) -> Duration {
     timeout * e2eTimeScale
 }
+
+/// The node keeps its hosted chains: a change through `POST /hosted-chains`
+/// outlives `lattice up` and restarts, lattice.json only seeding the first
+/// start, and `child create` / `child host` add one chain to what it keeps,
+/// running or stopped.
+extension LatticeCtlE2ETests {
+    private struct KeptChains: Decodable {
+        let chains: [String]
+        let saved: SavedHostedChains?
+    }
+
+    private func keptChains(_ host: CtlHost) async throws -> KeptChains {
+        let (data, response) = try await URLSession.shared.data(for: try Self.operatorRequest(host, "hosted-chains"))
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200, String(decoding: data, as: UTF8.self))
+        return try JSONDecoder().decode(KeptChains.self, from: data)
+    }
+
+    func testTheNodeKeepsTheChainsSetThroughItsAPI() async throws {
+        let host = try await bringUpMiningHost(miner: nil)
+        var post = try Self.operatorRequest(host, "hosted-chains")
+        post.httpMethod = "POST"
+        post.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        post.httpBody = try JSONEncoder().encode(SavedHostedChains(chains: [HostedChain(path: "Nexus/Remote")]))
+        let (body, response) = try await URLSession.shared.data(for: post)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200, String(decoding: body, as: UTF8.self))
+
+        // lattice.json lists no child; `up` leaves the node's own list alone.
+        _ = try await runCtl(["up"], root: host.root)
+        let afterUp = try await keptChains(host)
+        XCTAssertEqual(afterUp.chains, ["Nexus/Remote"])
+
+        // Running: create adds Alpha, Remote stays.
+        _ = try await runCtl(["child", "create", "Nexus/Alpha", "--block-time", "1000", "--reward", "100"], root: host.root)
+        let created = try await keptChains(host)
+        XCTAssertEqual(Set(created.chains), ["Nexus/Remote", "Nexus/Alpha"])
+        XCTAssertNotNil(created.saved?.chains.first { $0.path == "Nexus/Alpha" }?.spec, "Alpha kept with its spec")
+
+        // Stopped: host adds Beta to the kept file; a start hosts all three.
+        _ = try await runCtl(["down"], root: host.root)
+        _ = try await runCtl(["child", "host", "Nexus/Beta"], root: host.root)
+        _ = try await runCtl(["up"], root: host.root)
+        try await waitFor("Nexus active after the restart") {
+            await self.health(host.nexusRPC)?["phase"] as? String == "active"
+        }
+        let restarted = try await keptChains(host)
+        XCTAssertEqual(Set(restarted.chains), ["Nexus/Remote", "Nexus/Alpha", "Nexus/Beta"])
+    }
+}

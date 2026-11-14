@@ -447,15 +447,15 @@ struct HostedChildren {
     static func saved(in storage: URL) throws -> HostedChildren? {
         let file = savedFile(in: storage)
         guard FileManager.default.fileExists(atPath: file.path) else { return nil }
-        let request: HostedChainsRequest
+        let request: SavedHostedChains
         do {
-            request = try JSONDecoder().decode(HostedChainsRequest.self, from: Data(contentsOf: file))
+            request = try JSONDecoder().decode(SavedHostedChains.self, from: Data(contentsOf: file))
         } catch {
             throw ValidationError("\(file.path): \(error)")
         }
         return try HostedChildren(
             hostChain: [], premineTo: [], chainPeer: request.chainPeer ?? [], policyModule: [],
-            chains: request.chains ?? []
+            chains: request.chains
         )
     }
 
@@ -465,9 +465,9 @@ struct HostedChildren {
         try JSONEncoder().encode(inlineRequest).write(to: Self.savedFile(in: storage), options: .atomic)
     }
 
-    /// These chains as an inline `POST /hosted-chains` body. Each chain
-    /// carries the policy modules its spec names.
-    var inlineRequest: HostedChainsRequest {
+    /// These chains inline. Each chain carries the policy modules its spec
+    /// names.
+    var inlineRequest: SavedHostedChains {
         var modules: [String: Data] = [:]
         for bytes in policyModules {
             if let cid = try? WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: bytes)).rawCID { modules[cid] = bytes }
@@ -487,10 +487,7 @@ struct HostedChildren {
                 return "\(path.joined(separator: "/"))=\(peer.publicKey)@\(host):\(peer.port)"
             }
         }
-        return HostedChainsRequest(
-            hostChain: nil, premineTo: nil, genesisTransactions: nil,
-            chainPeer: peers.isEmpty ? nil : peers, policyModule: nil, chains: chains
-        )
+        return SavedHostedChains(chains: chains, chainPeer: peers.isEmpty ? nil : peers)
     }
 
     private mutating func premine(_ path: [String], to recipient: String, option: String, entry: String) throws {
@@ -604,6 +601,8 @@ protocol OperatorWrites: Sendable {
     func pinnedVolumes() async -> [String]
     func hostChains(_ request: HostedChainsRequest) async throws
     var hostedChildren: [[String]] { get }
+    /// What the node keeps of its hosted chains, or nil before any change.
+    var savedHostedChains: SavedHostedChains? { get }
     var servingLedger: ServingLedger { get }
 }
 
@@ -631,22 +630,13 @@ struct HostedChainsRequest: Codable, Sendable {
     }
 }
 
-/// One hosted child chain inline: its path and, to mine its genesis, the
-/// spec, the premine's recipient, the signed transactions the genesis
-/// carries (each what `POST /transactions` takes) and the WASM modules the
-/// spec names (base64): what `--host-chain path=spec.json`, `--premine-to`,
-/// `--genesis-transactions` and `--policy-module` give from files.
-struct HostedChain: Codable, Sendable {
-    let path: String
-    var spec: ChainSpec?
-    var premineTo: String?
-    var genesisTransactions: [SubmitTransactionRequest]?
-    var policyModules: [Data]?
-}
 
-/// The child chains the node hosts, parent first, as `Nexus/Alpha`.
+/// The child chains the node hosts, parent first, as `Nexus/Alpha`, and
+/// what it keeps of them inline (nil until a `POST /hosted-chains`; the
+/// node then hosts what its flags name).
 struct HostedChainsResponse: Codable, Sendable {
     let chains: [String]
+    let saved: SavedHostedChains?
 }
 
 /// `POST /pins`: the Volume an operator pins, by its root CID.
@@ -682,6 +672,12 @@ extension NodeRuntime: OperatorWrites {
         )
         // Kept: what the node hosts after a restart, in place of its flags.
         try hosted.save(in: storagePath)
+    }
+
+    var savedHostedChains: SavedHostedChains? {
+        try? JSONDecoder().decode(
+            SavedHostedChains.self, from: Data(contentsOf: HostedChildren.savedFile(in: storagePath))
+        )
     }
 }
 
@@ -1436,7 +1432,9 @@ private func addOperatorWriteRoutes(
     // The child chains this node hosts, changed without a restart.
     router.get("hosted-chains") { request, context in
         try json(
-            HostedChainsResponse(chains: service.hostedChildren.map { $0.joined(separator: "/") }),
+            HostedChainsResponse(
+                chains: service.hostedChildren.map { $0.joined(separator: "/") }, saved: service.savedHostedChains
+            ),
             request: request, context: context
         )
     }
@@ -1450,7 +1448,9 @@ private func addOperatorWriteRoutes(
         }
         return try await serviceCall(request: request, context: context) {
             try await service.hostChains(input)
-            return HostedChainsResponse(chains: service.hostedChildren.map { $0.joined(separator: "/") })
+            return HostedChainsResponse(
+                chains: service.hostedChildren.map { $0.joined(separator: "/") }, saved: service.savedHostedChains
+            )
         }
     }
     router.post("pins") { request, context in
