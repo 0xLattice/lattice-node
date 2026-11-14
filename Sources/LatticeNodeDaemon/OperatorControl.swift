@@ -308,8 +308,9 @@ final class NodeLifecycle: @unchecked Sendable {
     /// arguments. Every descriptor but the standard three is closed on the
     /// way, so the new image finds its ports, storage lock and files free.
     static func reexec() -> Never {
-        fflush(stdout)
-        fflush(stderr)
+        // Every open output stream, without naming the C globals (not
+        // concurrency-safe under strict checking).
+        fflush(nil)
         let directory = FileManager.default.fileExists(atPath: "/proc/self/fd") ? "/proc/self/fd" : "/dev/fd"
         for name in (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? [] {
             if let fd = Int32(name), fd > 2 { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) }

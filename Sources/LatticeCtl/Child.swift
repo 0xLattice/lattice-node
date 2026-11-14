@@ -98,11 +98,12 @@ struct Child: AsyncParsableCommand {
             }
             let parent = components.dropLast().joined(separator: "/")
             let rpc = try await target.runningNode()
-            let tx = try TxOptions.parse(
-                ["--chain", parent, "--key", key] + (target.rootOption.root.map { ["--root", $0] } ?? [])
-                    + (target.node.map { ["--node", $0] } ?? []) + (target.tokenFile.map { ["--token-file", $0] } ?? [])
-                    + (fee.map { ["--fee", String($0)] } ?? [])
-            )
+            var arguments: [String] = ["--chain", parent, "--key", key]
+            if let root = target.rootOption.root { arguments += ["--root", root] }
+            if let node = target.node { arguments += ["--node", node] }
+            if let tokenFile = target.tokenFile { arguments += ["--token-file", tokenFile] }
+            if let fee { arguments += ["--fee", String(fee)] }
+            let tx = try TxOptions.parse(arguments)
             let signer = try tx.signer()
             var built: BuildChildBlockResponse?
             var accepted = false
