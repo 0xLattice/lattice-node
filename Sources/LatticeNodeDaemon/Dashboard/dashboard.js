@@ -138,7 +138,9 @@ async function api(node, path, { method = 'GET', body, text = false, contentType
       cache: 'no-store', credentials: 'omit', signal: AbortSignal.timeout(timeout),
     });
   } catch (e) {
-    throw new ApiError(0, e && e.name === 'TimeoutError' ? 'The node did not answer in time.' : 'The node could not be reached.');
+    const err = new ApiError(0, e && e.name === 'TimeoutError' ? 'The node did not answer in time.' : 'The node could not be reached.');
+    err.timedOut = !!(e && e.name === 'TimeoutError');
+    throw err;
   }
   const bodyText = await res.text();
   let data = bodyText;
@@ -1482,13 +1484,39 @@ function dialog({ title, body, confirm, danger = false, typed = null, cancel = t
   });
 }
 
+/** Waits for the process that replaces the one asked to restart, as
+ *  `lattice restart` does. With the old start time (process_start_time_seconds)
+ *  known, only a different one is back: a slow answer from the old process is
+ *  not. Without it (a token that may not read /metrics), the node must be
+ *  seen gone (unreachable, or a 5xx; not a timeout) and then answer anything.
+ *  A 401 means the loopback cookie rotated: a new process. */
+async function waitForNewProcess({ before, startOf, health, deadline, offline = () => {}, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = Date.now }) {
+  const gone = (e) => (e.status === 0 && !e.timedOut) || e.status >= 500;
+  let seenDown = false;
+  while (now() < deadline) {
+    try {
+      if (before != null) {
+        const start = await startOf();
+        if (start != null && start !== before) return { back: true };
+      } else {
+        await health();
+        if (seenDown) return { back: true };
+      }
+    } catch (e) {
+      if (e.status === 401) return { back: true, cookieChanged: true };
+      if (gone(e)) { seenDown = true; offline(); } else if (before == null && seenDown && e.status) return { back: true };
+    }
+    await sleep(1000);
+  }
+  return { back: false };
+}
+
 async function restartFlow({ wipe = false } = {}) {
   const n = node();
   const ok = wipe
     ? await dialog({ title: `Wipe ${n.name}?`, body: html`<p class="soft">Every chain's blocks, state and pinned content on this node are deleted, and it restarts empty. It downloads everything again from its peers. Identity, settings, specs, tokens and logs stay.</p>`, confirm: 'Wipe and restart', danger: true, typed: n.name })
     : await dialog({ title: `Restart ${n.name}?`, body: html`<p class="soft">It's offline for about ${restartSeconds()} seconds while it restarts. Every chain resumes where it was${snap().mining && snap().mining.enabled ? ', and mining starts again' : ''}.${restartKeys(snap()).length ? ` It then uses the saved ${restartKeys(snap()).join(', ')}.` : ''}</p>`, confirm: 'Restart' });
   if (!ok) return;
-  // Back means a new process: its start time differs, or it was seen down.
   const startOf = async () => parseMetrics(await get(n, 'metrics', { text: true, timeout: 2000 })).start;
   const before = await startOf().catch(() => undefined);
   const started = Date.now();
@@ -1500,18 +1528,12 @@ async function restartFlow({ wipe = false } = {}) {
   document.body.append(overlay); overlay.showModal();
   const status = $('#rs-status', overlay);
   await new Promise((r) => setTimeout(r, 1200));
-  let back = false; let cookieChanged = false; let seenDown = false;
-  while (Date.now() - started < 180000) {
-    try {
-      const now = await startOf();
-      if (seenDown || (before != null && now != null && now !== before)) { back = true; break; }
-    } catch (e) {
-      if (e.status === 401) { cookieChanged = true; back = true; break; }
-      seenDown = true;
-      status.textContent = `Offline for ${duration(Date.now() - started)}. Waiting for it to answer…`;
-    }
-    await new Promise((r) => setTimeout(r, 1000));
-  }
+  const { back, cookieChanged } = await waitForNewProcess({
+    before, startOf,
+    health: () => api(n, 'health', { timeout: 2000 }),
+    deadline: started + 180000,
+    offline: () => { status.textContent = `Offline for ${duration(Date.now() - started)}. Waiting for it to answer…`; },
+  });
   overlay.close(); overlay.remove();
   const took = Math.max(2, Math.round((Date.now() - started) / 1000));
   if (back && !wipe) lset(`lattice.dashboard.restart.${n.id}`, took);
