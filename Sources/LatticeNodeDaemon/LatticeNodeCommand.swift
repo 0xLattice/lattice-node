@@ -16,7 +16,8 @@ import LatticeCtlCore
 struct LatticeNodeCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "lattice-node",
-        abstract: "Run one Nexus-rooted hosted tree"
+        abstract: "Run one Nexus-rooted hosted tree",
+        version: LatticeNodeVersion.current
     )
 
     @Option(help: "A host root made by `lattice init`: the node runs as <root>/lattice.json says (storage, identity, ports, hosted chains, mining...) and is that file's only writer while it runs, changing it through its operator API (GET/PATCH /config) and applying each change live or at the next restart. Give no other flag with it.")
@@ -644,7 +645,24 @@ func makeApplication(
     // /status reads the live runtime status and template digest. It is an
     // internal endpoint; the public status surface is /health.
     router.get("status") { request, context in
-        try json(await status(), request: request, context: context)
+        var answer = await status()
+        answer.startedAt = processStartTime.timeIntervalSince1970
+        return try json(answer, request: request, context: context)
+    }
+    // Who the caller is, so a client can offer only what its credential may
+    // do. Open to every credential the listener accepts; never the secret.
+    router.get("whoami") { request, context in
+        let me: TokensResponse.Token
+        switch auth {
+        case .loopback:
+            me = .init(name: "cookie", role: "admin", routes: nil)
+        case .remote(let tokens, _):
+            guard let entry = tokens.entry(for: request.headers[.authorization]) else {
+                throw HTTPError(.unauthorized, message: "the operator listener requires a bearer token")
+            }
+            me = .init(name: entry.name, role: entry.role, routes: entry.routes)
+        }
+        return try json(me, request: request, context: context)
     }
     // Prometheus exposition: operator surface only, never the public read app.
     router.get("metrics") { _, _ in

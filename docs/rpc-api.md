@@ -33,7 +33,7 @@ The cookie changes at every restart; clients re-read the file.
 Browsers are refused: a request with an `Origin` header gets `403` unless the
 operator lists that exact origin with `--rpc-allowed-origin` (`rpcAllowedOrigins`
 in `lattice.json`), e.g. `chrome-extension://<extension id>`. A listed origin
-gets CORS preflight answers (`GET, HEAD, POST`; headers `Authorization,
+gets CORS preflight answers (`GET, HEAD, POST, PATCH, DELETE`; headers `Authorization,
 Content-Type`) and `Access-Control-Allow-Origin` on responses, refusals
 included, and still needs the cookie.
 
@@ -58,7 +58,8 @@ same handlers), but:
   here.
 - Each token has a role or a route list. `admin` may use every route; `read`
   every `GET`/`HEAD` except `/tokens`; a route list only the routes it names.
-  Anything else, an unknown path included, is `403`. A route is the method
+  Anything else, an unknown path included, is `403`; `GET /whoami` is
+  open to every token, whatever its role or routes. A route is the method
   and the path as the node registers it, a parameter in braces:
   `GET /api/state/account/{addr}`, `GET /fetch/{cid}`. `?chainPath=` is not
   part of a route; a token reaches every chain the node hosts. Only `admin`
@@ -307,6 +308,11 @@ declares or commits the child. Billed to the expensive public read budget.
   "bestHeaderHeight": "57"
 }
 ```
+
+`GET /status` (operator only) also carries `version`, the node's build version
+as `lattice-node --version` prints it, and `startedAt`, when the node process
+started (unix seconds; a restart in place changes it); `/health` carries
+neither.
 
 `bestHeaderHeight` is the height of the best header chain the node knows (absent
 before any header); `height` is the height of the heaviest executed tip, the
@@ -821,7 +827,7 @@ then the node stops (its mining loop first) and
 starts again in the same process: it replaces itself with its own binary and
 arguments (`execv`), so its pid, its supervisor (systemd, a container, `lattice
 up`) and its pidfile do not change, and it reads `lattice.json` afresh.
-Clients wait until `process_start_time_seconds` in `GET /metrics` changes.
+Clients wait until `startedAt` in `GET /status` changes.
 
 ### `POST /wipe`
 
@@ -842,6 +848,13 @@ use). `409` for a name in use; `400` for an unknown role, or both a role and
 routes.
 
 `DELETE /tokens/{name}` revokes it; `404` for an unknown name.
+
+`GET /whoami` names the caller's own credential, so a client can offer only
+what it may do: `{"name": "seller", "routes": ["GET /hosted-chains"]}`, or
+`{"name": "ops", "role": "admin"}`. `role` is absent for a route-list token
+and `routes` for a role. The cookie answers `{"name": "cookie", "role":
+"admin"}`. It never includes a secret or its hash. Every credential the
+listener accepts may call it; none: `401`.
 
 The cookie (on the operator port) and `admin` tokens (on the remote listener)
 reach these routes. `409` when the node has no token file

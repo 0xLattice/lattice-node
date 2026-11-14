@@ -400,7 +400,7 @@ struct Wipe: AsyncParsableCommand {
 
 /// Asks the node behind `rpc` to restart (`POST /restart` or `/wipe`) and
 /// waits until the new process answers: one whose start time
-/// (`process_start_time_seconds` in `/metrics`) is not the old one's, so the
+/// (`startedAt` in `GET /status`) is not the old one's, so the
 /// old process answering on its way out is not taken for the new one.
 func restartNode(_ rpc: NodeRPC, _ route: String) async throws {
     let before = await startTime(rpc)
@@ -411,7 +411,7 @@ func restartNode(_ rpc: NodeRPC, _ route: String) async throws {
         if let before {
             if let now = await startTime(rpc), now != before { return print("the node is back") }
         } else if await health(rpc: rpc) == nil {
-            // No start time to compare (a token without GET /metrics):
+            // No start time to compare (a token without GET /status, or an older node):
             // gone first, then back.
             while await health(rpc: rpc) == nil, ContinuousClock.now < back {
                 try await Task.sleep(for: .milliseconds(500))
@@ -423,10 +423,8 @@ func restartNode(_ rpc: NodeRPC, _ route: String) async throws {
     throw CtlError("the node did not answer within 180s of its restart; see `lattice logs`")
 }
 
-/// The node process's start time, from its metrics.
-private func startTime(_ rpc: NodeRPC) async -> String? {
-    guard let data = try? await send(rpc: rpc, "GET", "metrics") else { return nil }
-    return String(decoding: data, as: UTF8.self).split(separator: "\n")
-        .first { $0.hasPrefix("process_start_time_seconds") }
-        .flatMap { $0.split(separator: " ").last.map(String.init) }
+/// The node process's start time, from its status.
+private func startTime(_ rpc: NodeRPC) async -> Double? {
+    guard let data = try? await send(rpc: rpc, "GET", "status") else { return nil }
+    return try? JSONDecoder().decode(NodeStatusResponse.self, from: data).startedAt
 }

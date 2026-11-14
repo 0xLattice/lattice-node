@@ -240,6 +240,8 @@ struct OperatorTokenMiddleware<Context: RequestContext>: RouterMiddleware {
             throw HTTPError(.unauthorized, message: "the operator listener requires a bearer token")
         }
         let path = context.endpointPath ?? ""
+        // Every token may ask who it is.
+        if request.method == .get && path == "/whoami" { return }
         guard context.endpointPath != nil || entry.role == "admin",
               entry.allows(method: request.method.rawValue, path: path) else {
             throw HTTPError(.forbidden, message: "token \(entry.name) may not use \(request.method.rawValue) \(path)")

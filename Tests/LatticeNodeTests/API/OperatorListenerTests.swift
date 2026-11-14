@@ -232,6 +232,48 @@ final class OperatorListenerTests: XCTestCase {
         }
     }
 
+    /// Every credential may ask who it is, and learns its name, role and
+    /// routes, never a secret.
+    func testWhoamiNamesTheCallersCredential() async throws {
+        let remote = try await node().app
+        try await remote.test(.router) { client in
+            func who(_ secret: String) async throws -> TokensResponse.Token {
+                try await client.execute(uri: "/whoami", method: .get, headers: Self.bearer(secret)) {
+                    XCTAssertEqual($0.status, .ok)
+                    let body = String(buffer: $0.body)
+                    XCTAssertFalse(body.contains(secret) || body.contains("sha256"), body)
+                    return try JSONDecoder().decode(TokensResponse.Token.self, from: Data(buffer: $0.body))
+                }
+            }
+            let admin = try await who(Self.admin)
+            XCTAssertEqual(admin.name, "ops"); XCTAssertEqual(admin.role, "admin"); XCTAssertNil(admin.routes)
+            let reader = try await who(Self.reader)
+            XCTAssertEqual(reader.name, "viewer"); XCTAssertEqual(reader.role, "read")
+            // A routes token need not list /whoami.
+            let seller = try await who(Self.token)
+            XCTAssertEqual(seller.name, "seller"); XCTAssertNil(seller.role)
+            XCTAssertEqual(seller.routes?.contains("GET /hosted-chains"), true)
+            try await client.execute(uri: "/whoami", method: .get) { XCTAssertEqual($0.status, .unauthorized) }
+            try await client.execute(uri: "/whoami", method: .get, headers: Self.bearer("nobody")) {
+                XCTAssertEqual($0.status, .unauthorized)
+            }
+            // Only GET is open to every token.
+            try await client.execute(uri: "/whoami", method: .post, headers: Self.bearer(Self.reader)) {
+                XCTAssertEqual($0.status, .forbidden)
+            }
+        }
+        let loopback = try await node(remote: false).app
+        try await loopback.test(.router) { client in
+            try await client.execute(uri: "/whoami", method: .get, headers: [.authorization: testOperatorAuthorization]) {
+                XCTAssertEqual($0.status, .ok)
+                let me = try JSONDecoder().decode(TokensResponse.Token.self, from: Data(buffer: $0.body))
+                XCTAssertEqual(me.name, "cookie"); XCTAssertEqual(me.role, "admin")
+                XCTAssertFalse(String(buffer: $0.body).contains("test-cookie"))
+            }
+            try await client.execute(uri: "/whoami", method: .get) { XCTAssertEqual($0.status, .unauthorized) }
+        }
+    }
+
     func testTokenFileEntriesAreChecked() throws {
         let hash = String(repeating: "ab", count: 32)
         XCTAssertThrowsError(try OperatorTokens([.init(name: "a", sha256: "abc", routes: [])]))
