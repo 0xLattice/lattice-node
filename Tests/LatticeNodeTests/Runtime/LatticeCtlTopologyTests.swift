@@ -230,6 +230,33 @@ final class LatticeCtlTopologyTests: XCTestCase {
         }
     }
 
+    /// The remote operator listener: both keys or neither, the token file
+    /// under the root when relative.
+    func testOperatorListenerLoadsFromConfigAndProducesNodeFlags() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ctl-operator-listener-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent(Topology.fileName)
+        try Data(#"{"listen":4001,"rpc":4003,"operatorListen":"0.0.0.0:8090","operatorTokens":"tokens.json"}"#.utf8).write(to: file)
+        let loaded = try Topology.load(root: root).validated()
+        XCTAssertEqual(loaded.operatorArguments(root: root), [
+            "--operator-listen", "0.0.0.0:8090",
+            "--operator-tokens", root.appendingPathComponent("tokens.json").path,
+        ])
+        var absolute = loaded
+        absolute.operatorTokens = "/etc/lattice/tokens.json"
+        XCTAssertEqual(absolute.operatorArguments(root: root).last, "/etc/lattice/tokens.json")
+
+        try Data(#"{"listen":4001,"rpc":4003}"#.utf8).write(to: file)
+        XCTAssertEqual(try Topology.load(root: root).validated().operatorArguments(root: root), [])
+
+        try Data(#"{"listen":4001,"rpc":4003,"operatorListen":"0.0.0.0:8090"}"#.utf8).write(to: file)
+        XCTAssertThrowsError(try Topology.load(root: root).validated())
+        try Data(#"{"listen":4001,"rpc":4003,"operatorTokens":"tokens.json"}"#.utf8).write(to: file)
+        XCTAssertThrowsError(try Topology.load(root: root).validated())
+    }
+
     /// `peers` is a list per chain. An array is Nexus's list, as in every
     /// file written before chains had their own; a list for a chain that is
     /// not hosted is refused.

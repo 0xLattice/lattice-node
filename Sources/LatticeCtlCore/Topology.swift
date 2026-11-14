@@ -43,7 +43,7 @@ public struct Topology: Codable, Sendable {
         case publicReadRate, publicReadExpensiveRate, publicReadMaxRate, publicReadFetches
         case publicReadURL, publicSubmit, publicSubmitRate, minRelayFee
         case servingMaxConcurrent, servingMaxInFlightVolumeBytes, maxAcquisitionBytes, blockBodies, state, stateWindow, stateWindows, finalityWindow, finalityWindows, announceLifetime
-        case hostedChains, mine, rpcAllowedOrigins
+        case hostedChains, mine, rpcAllowedOrigins, operatorListen, operatorTokens
     }
     public var listen: UInt16
     public var rpc: UInt16
@@ -129,6 +129,13 @@ public struct Topology: Codable, Sendable {
     /// `--rpc-allowed-origin`), e.g. `chrome-extension://<id>`. Each still
     /// needs the node's cookie. Absent = browsers are refused.
     public var rpcAllowedOrigins: [String]? = nil
+    /// The remote operator listener's `host:port` (the node's
+    /// `--operator-listen`), for clients on other machines. Requires
+    /// `operatorTokens`. Absent = off.
+    public var operatorListen: String? = nil
+    /// The remote operator listener's token file (`--operator-tokens`); a
+    /// relative path is under the root.
+    public var operatorTokens: String? = nil
 
     public init(
         listen: UInt16, rpc: UInt16, peers: [String]? = nil,
@@ -252,6 +259,9 @@ public struct Topology: Codable, Sendable {
                 throw CtlError("\(name) must be finite and nonnegative")
             }
         }
+        guard (operatorListen == nil) == (operatorTokens == nil) else {
+            throw CtlError("operatorListen and operatorTokens go together")
+        }
         if let publicReadURL, !NodeConfiguration.isValidPublicReadURL(publicReadURL) {
             throw CtlError("publicReadURL must be an absolute http(s) URL with a host and no credentials, query or fragment")
         }
@@ -314,6 +324,15 @@ public struct Topology: Codable, Sendable {
     /// Node flags represented by the public submission policy in
     /// `lattice.json`. Keeping this translation in the config model makes it
     /// directly testable instead of relying on daemon-flag tests alone.
+    /// `--operator-listen` and `--operator-tokens`, the token file resolved
+    /// against `root` when relative.
+    public func operatorArguments(root: URL) -> [String] {
+        guard let operatorListen, let operatorTokens else { return [] }
+        let tokens = operatorTokens.hasPrefix("/")
+            ? operatorTokens : root.appendingPathComponent(operatorTokens).path
+        return ["--operator-listen", operatorListen, "--operator-tokens", tokens]
+    }
+
     public var publicSubmissionArguments: [String] {
         var arguments: [String] = []
         if publicSubmit == true { arguments.append("--public-submit") }

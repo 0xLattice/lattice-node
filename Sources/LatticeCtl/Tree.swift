@@ -182,6 +182,7 @@ func spawnHost(layout: HostLayout) throws {
     arguments += topology.publicSubmissionArguments
     arguments += topology.contentServingArguments
     for origin in topology.rpcAllowedOrigins ?? [] { arguments += ["--rpc-allowed-origin", origin] }
+    arguments += topology.operatorArguments(root: layout.root)
     let hosted = hostedChainsRequest(layout, topology)
     arguments += hosted.hostChain.flatMap { ["--host-chain", $0] }
     arguments += hosted.premineTo.flatMap { ["--premine-to", $0] }

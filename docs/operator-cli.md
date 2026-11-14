@@ -22,6 +22,8 @@ default.
   "publicReadMaxRate": 200,
   "publicReadURL": "https://reads.example.org",
   "publicSubmit": false,
+  "operatorListen": "10.0.0.5:8090",
+  "operatorTokens": "operator-tokens.json",
   "hostedChains": [
     "Nexus/Alpha",
     "Nexus/Alpha/Beta"
@@ -80,6 +82,11 @@ This is intentionally one schema:
   `publicRead`: the public listener also accepts `POST /transactions` (see
   [Running a public submit endpoint](operations.md#running-a-public-submit-endpoint));
   absent or false is off;
+- `operatorListen` and `operatorTokens` go together and are passed as
+  `--operator-listen` and `--operator-tokens`: the remote operator listener's
+  `host:port` and its token file, a relative path being under the root (see
+  [Remote operator listener](rpc-api.md#remote-operator-listener)); absent is
+  off;
 - unknown paths in mining policy are rejected.
 
 ## Lifecycle
