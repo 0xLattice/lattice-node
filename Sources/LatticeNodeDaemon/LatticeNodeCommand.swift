@@ -630,6 +630,21 @@ func makeApplication(
         router.add(middleware: OperatorTokenMiddleware(tokens: tokens, allowedOrigins: origins))
     }
     Dashboard.addRoutes(to: router)
+    // Who the caller is, so a client can offer only what its credential may
+    // do. Open to every credential the listener accepts; never the secret.
+    router.get("whoami") { request, context in
+        let me: TokensResponse.Token
+        switch auth {
+        case .loopback:
+            me = .init(name: "cookie", role: "admin", routes: nil)
+        case .remote(let tokens, _):
+            guard let entry = tokens.entry(for: request.headers[.authorization]) else {
+                throw HTTPError(.unauthorized, message: "the operator listener requires a bearer token")
+            }
+            me = .init(name: entry.name, role: entry.role, routes: entry.routes)
+        }
+        return try json(me, request: request, context: context)
+    }
     addPublicReadRoutes(
         to: router,
         reads: ChainReadsByPath(root: reads, levels: levelReads),

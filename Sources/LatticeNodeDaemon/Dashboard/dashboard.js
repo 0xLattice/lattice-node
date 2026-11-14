@@ -170,14 +170,14 @@ const SNAP_KEY = (id) => `lattice.dashboard.snap.${id}`;
 function persistSnap(id) {
   const n = node(id); const s = state.snaps[id];
   if (!n || !s) return;
-  // The role belongs to the token, not the node: it is asked afresh.
-  const keep = { ...s, role: undefined, roleToken: undefined, blockCache: undefined, logCache: undefined, pinsCache: undefined, mineLog: undefined };
+  // Who the token is belongs to the token, not the node: asked afresh.
+  const keep = { ...s, who: undefined, whoToken: undefined, blockCache: undefined, logCache: undefined, pinsCache: undefined, mineLog: undefined };
   if (n.remember) lset(SNAP_KEY(id), keep); else sset(SNAP_KEY(id), keep);
 }
 function restoreSnap(id) {
   const n = node(id);
   const s = (n && n.remember ? lget(SNAP_KEY(id), null) : null) || sget(SNAP_KEY(id), null);
-  if (s) { s.restored = true; delete s.role; delete s.roleToken; state.snaps[id] = { ...blankSnap(), ...s }; }
+  if (s) { s.restored = true; delete s.who; delete s.whoToken; state.snaps[id] = { ...blankSnap(), ...s }; }
 }
 
 /** One refresh of everything the overview shows for a node. Last-known
@@ -195,10 +195,10 @@ async function refresh(id) {
       const [status, hosted] = await Promise.all([get(n, 'status'), get(n, 'hosted-chains')]);
       s.status = status;
       s.hosted = hosted;
-      // A role is the token's: asked again whenever the token changed.
-      if (s.roleToken !== token) {
-        const role = await detectRole(n);
-        if (n.token === token) { s.role = role; s.roleToken = role ? token : undefined; }
+      // Asked again whenever the token changed.
+      if (s.whoToken !== token) {
+        const who = await whoami(n);
+        if (n.token === token) { s.who = who; s.whoToken = who ? token : undefined; }
       }
       const chains = ['Nexus', ...(hosted.chains || [])];
       const extra = await Promise.allSettled([
@@ -274,14 +274,10 @@ function rateOf(s, path) {
   return (now[1] - from[1]) / dt; // blocks per second
 }
 
-/** 'admin' if the token may list tokens, 'limited' if refused (a read or
- *  routes token: which writes it may make, the node says per action), and
- *  undefined when unknown, so the next refresh asks again. */
-async function detectRole(n) {
-  const r = await api(n, 'tokens', { accept: [403, 404, 409] }).catch(() => ({ status: 0 }));
-  if (r.status === 200 || r.status === 409) return 'admin';
-  if (r.status === 403) return 'limited';
-  return undefined;
+/** The credential's name, role and routes (GET /whoami), or undefined when
+ *  the node could not be asked: the next refresh asks again. */
+async function whoami(n) {
+  try { return await get(n, 'whoami'); } catch { return undefined; }
 }
 function parseMetrics(text) {
   const out = {};
@@ -547,13 +543,26 @@ setInterval(paintFreshness, 1000);
 function restartBanner() {
   return html`<div id="restart-slot">${restartBannerInner()}</div>`;
 }
+/** Whether this credential may make `route` ("METHOD /path", as GET
+ *  /whoami lists it). Unknown until /whoami answers: offered, and the node
+ *  decides. */
+function may(route = 'PATCH /config') {
+  const who = snap().who;
+  if (!who || who.role === 'admin') return true;
+  if (who.role === 'read') return false;
+  return (who.routes || []).some((r) => r.replace(/^\S+/, (m) => m.toUpperCase()) === route);
+}
+function writeGuard(action, route = 'PATCH /config') {
+  return may(route) ? '' : html`<p class="why-not">This ${snap().who.role === 'read' ? 'read-only token' : 'token'} can't ${action}.</p>`;
+}
+const disabledUnless = (route = 'PATCH /config', action = 'change settings') => raw(may(route) ? '' : `disabled title="This token can't ${action}"`);
 function restartBannerInner() {
   const keys = restartKeys(snap());
   if (!keys.length) return '';
   return html`<div class="banner" role="status">
     ${raw(ICON.warn)}
     <div class="grow"><strong>Restart needed.</strong> ${keys.length === 1 ? 'One saved setting applies' : `${keys.length} saved settings apply`} only after the node restarts: ${keys.join(', ')}.</div>
-    <button type="button" class="primary" data-restart>Restart now</button>
+    ${may('POST /restart') ? html`<button type="button" class="primary" data-restart>Restart now</button>` : html`<span class="why-not">This token can't restart the node.</span>`}
   </div>`;
 }
 
@@ -602,7 +611,7 @@ async function signIn(token, remember) {
   saveNodes();
   state.snaps[n.id] = state.snaps[n.id] || blankSnap();
   restoreSnap(n.id);
-  snap().role = undefined;
+  snap().who = undefined;
   delete state.inflight[n.id]; // a read begun with the previous token
   $('#app').innerHTML = '';
   paint(true);
@@ -649,7 +658,7 @@ VIEWS.overview = {
       ${restartBanner()}
       ${items.length ? html`<section class="attention" aria-labelledby="att-h"><h2 id="att-h">Needs attention</h2>${items.map(issueHTML)}</section>` : ''}
       <section aria-labelledby="chains-h">
-        <div class="section-head"><h2 id="chains-h">Chains</h2><a class="small" href="#/settings?focus=chains">Host another chain</a></div>
+        <div class="section-head"><h2 id="chains-h">Chains</h2>${may() ? html`<a class="small" href="#/settings?focus=chains">Host another chain</a>` : ''}</div>
         ${s.status ? treeHTML(s) : html`<p class="empty">Reading the node…</p>`}
       </section>`;
   },
@@ -788,14 +797,15 @@ function chainActions(s, path, below) {
   return html`<div class="actions">
     <div class="action">
       <div class="grow"><strong>Stop hosting ${lastSegment(path)}</strong><p class="soft small">The node stops following it right away. What it stored stays, so hosting it again resumes where it left off.</p>${blocked ? html`<p class="why-not">${blocked}</p>` : ''}</div>
-      <button type="button" class="danger" data-unhost="${path}" ${raw(blocked ? 'disabled' : '')}>Stop hosting</button>
+      <button type="button" class="danger" data-unhost="${path}" ${raw(blocked || !may('DELETE /hosted-chains') ? 'disabled' : '')}>Stop hosting</button>
     </div>
     <div class="action">
       <div class="grow"><strong>Commit a block on ${lastSegment(parentOf(path))}</strong>
       <p class="soft small mb-2">Asks ${parentOf(path)}'s miners to carry this chain's next block. It's a signed transaction, so it runs where your wallet key is, not here:</p>
       <pre class="cmd">lattice child commit ${path} --key ./wallet.json --fee 1 --root &lt;root&gt;</pre></div>
     </div>
-  </div>`;
+  </div>
+  ${writeGuard('stop hosting a chain', 'DELETE /hosted-chains')}`;
 }
 
 // Sparkline: one series (seconds between consecutive blocks), with the
@@ -980,9 +990,10 @@ VIEWS.mining = {
         : m.enabled ? "Mining is on, but the miner isn't running right now." : 'Mining is off.';
     return html`
       <div class="page-head"><div class="titles"><h1>Mining</h1><p class="lede sub ${m.enabled && !m.running ? 'warn' : ''}">${sentence}</p></div>
-        ${s.config && !s.config.flags ? html`<button type="button" class="${m.enabled ? '' : 'primary'}" data-mine="${m.enabled ? 'off' : 'on'}">${m.enabled ? 'Stop mining' : 'Start mining'}</button>` : ''}
+        ${s.config && !s.config.flags ? html`<button type="button" class="${m.enabled ? '' : 'primary'}" data-mine="${m.enabled ? 'off' : 'on'}" ${disabledUnless('PATCH /config', 'start or stop mining')}>${m.enabled ? 'Stop mining' : 'Start mining'}</button>` : ''}
       </div>
       ${restartBanner()}
+      ${writeGuard('start or stop mining')}
       <dl class="facts-grid">
         <div><dt>Restarts since the node started</dt><dd>${num(m.restarts || 0)}</dd></div>
         <div><dt>Last exit</dt><dd>${m.lastExit || html`<small>none</small>`}</dd></div>
@@ -990,7 +1001,7 @@ VIEWS.mining = {
         <div><dt>Least time between blocks</dt><dd>${mine.minBlockIntervalSeconds ? `${mine.minBlockIntervalSeconds} s` : html`<small>none</small>`}</dd></div>
       </dl>
       <section aria-labelledby="rec-h">
-        <div class="section-head"><h2 id="rec-h">Who each chain pays</h2><a class="small" href="#/settings?focus=mining">Change in Settings</a></div>
+        <div class="section-head"><h2 id="rec-h">Who each chain pays</h2>${may() ? html`<a class="small" href="#/settings?focus=mining">Change in Settings</a>` : ''}</div>
         <ul class="list">${chains.map((c) => html`<li><span class="grow"><strong>${c}</strong></span>${recipients[c] ? cidView(recipients[c]) : html`<span class="muted small">No one: its block reward is burned</span>`}</li>`)}</ul>
       </section>
       <section aria-labelledby="ml-h">
@@ -1035,7 +1046,7 @@ VIEWS.storage = {
       ${d ? html`<ul class="meters" aria-label="Space by store">${groups.map((g) => html`<li><span><strong>${g.name}</strong><br><span class="muted small">${g.about}</span></span><span class="bar" aria-hidden="true"><i data-w="${((g.bytes / max) * 100).toFixed(1)}%"></i></span><span class="val">${bytes(g.bytes)}</span></li>`)}</ul>
         <p class="muted small">Data directory: <code>${d.storage}</code></p>` : html`<p class="empty">Reading…</p>`}
       <section aria-labelledby="ret-h">
-        <div class="section-head"><h2 id="ret-h">What the node keeps</h2><a class="small" href="#/settings?focus=retention">Change in Settings</a></div>
+        <div class="section-head"><h2 id="ret-h">What the node keeps</h2>${may() ? html`<a class="small" href="#/settings?focus=retention">Change in Settings</a>` : ''}</div>
         <dl class="facts-grid">
           <div><dt>State</dt><dd>${retention(cfg, 'Nexus')}</dd></div>
           <div><dt>Block bodies</dt><dd>${cfg.blockBodies === 'none' ? 'Not kept after use' : 'All'}</dd></div>
@@ -1058,7 +1069,7 @@ function pinsHTML(c) {
   if (!c) return html`<p class="empty">Reading…</p>`;
   if (c.error) return html`<p class="empty">${c.error}</p>`;
   return c.pins.length
-    ? html`<p class="muted small">Kept and served until you unpin them, whatever the node otherwise keeps.</p><ul class="list">${c.pins.map((cid) => html`<li><span class="grow">${cidView(cid)}</span><button type="button" class="small danger" data-unpin="${cid}">Unpin</button></li>`)}</ul>`
+    ? html`<p class="muted small">Kept and served until you unpin them, whatever the node otherwise keeps.</p><ul class="list">${c.pins.map((cid) => html`<li><span class="grow">${cidView(cid)}</span><button type="button" class="small danger" data-unpin="${cid}" ${disabledUnless('DELETE /pins/{cid}', 'unpin')}>Unpin</button></li>`)}</ul>`
     : html`<p class="empty">Nothing is pinned. Apps pin content with <code>lattice pins add</code>.</p>`;
 }
 
@@ -1140,10 +1151,11 @@ VIEWS.settings = {
     return html`
       <div class="page-head"><div class="titles"><h1>Settings</h1><p class="muted">The node's <code>lattice.json</code>. Some changes apply at once; the rest wait for a restart, and each one says which.</p></div></div>
       ${restartBanner()}
+      ${writeGuard('change settings')}
       <div class="tabs" role="tablist"><button type="button" role="tab" data-tab="form" aria-selected="${String(settings.tab === 'form')}">Common settings</button><button type="button" role="tab" data-tab="raw" aria-selected="${String(settings.tab === 'raw')}">Raw JSON</button></div>
       ${settings.result ? resultHTML() : ''}
       ${settings.tab === 'form' ? settingsForm(s) : rawForm()}
-      ${changes.length && !settings.review ? html`<div class="staged" role="region" aria-label="Unsaved changes"><span class="grow"><strong>${plural(changes.length, 'change')}</strong> not applied yet.</span><button type="button" class="quiet" data-discard>Discard</button><button type="button" class="primary" data-review>Review changes</button></div>` : ''}
+      ${changes.length && !settings.review ? html`<div class="staged" role="region" aria-label="Unsaved changes"><span class="grow"><strong>${plural(changes.length, 'change')}</strong> not applied yet.</span><button type="button" class="quiet" data-discard>Discard</button><button type="button" class="primary" data-review ${disabledUnless()}>Review changes</button></div>` : ''}
       ${settings.review ? reviewHTML(changes, patch) : ''}`;
   },
   mount(main) {
@@ -1187,21 +1199,22 @@ function settingsForm(s) {
   const peers = Array.isArray(d.peers) ? { Nexus: d.peers } : (d.peers || {});
   const chains = ['Nexus', ...hosted];
   const mine = d.mine || {};
+  const ro = disabledUnless();
   const origins = d.operatorAllowedOrigins || [];
   return html`
     <section id="set-chains" aria-labelledby="sc-h">
       <div class="section-head"><h2 id="sc-h">Chains this node hosts</h2>${liveTag('hostedChains')}</div>
       <p class="prose small">Nexus is always hosted. A chain added by its path is synced from peers that host it; its parent must be hosted too.</p>
-      <ul class="list">${hosted.length ? hosted.map((c) => html`<li><span class="grow"><strong>${c}</strong>${(o.hostedChains || []).includes(c) ? '' : html` <span class="tag live">new</span>`}</span><button type="button" class="small" data-remove-chain="${c}">Remove</button></li>`) : html`<li class="muted">No chains besides Nexus.</li>`}</ul>
-      <form class="inline" data-add-chain><label class="visually-hidden" for="add-chain">Chain path</label><input id="add-chain" type="text" placeholder="Nexus/Name" spellcheck="false" pattern="Nexus(/[^/\\s]+)+"><button type="submit">Add chain</button></form>
+      <ul class="list">${hosted.length ? hosted.map((c) => html`<li><span class="grow"><strong>${c}</strong>${(o.hostedChains || []).includes(c) ? '' : html` <span class="tag live">new</span>`}</span><button type="button" class="small" data-remove-chain="${c}" ${ro}>Remove</button></li>`) : html`<li class="muted">No chains besides Nexus.</li>`}</ul>
+      <form class="inline" data-add-chain><label class="visually-hidden" for="add-chain">Chain path</label><input id="add-chain" type="text" placeholder="Nexus/Name" spellcheck="false" pattern="Nexus(/[^/\\s]+)+" ${ro}><button type="submit" ${ro}>Add chain</button></form>
     </section>
     <section id="set-mining" aria-labelledby="sm-h">
       <div class="section-head"><h2 id="sm-h">Mining</h2>${liveTag('mine')}</div>
-      <label class="check"><input type="checkbox" data-key="mine.enabled" data-type="bool" ${raw(mine.enabled ? 'checked' : '')}> Mine on this node</label>
+      <label class="check"><input type="checkbox" data-key="mine.enabled" data-type="bool" ${raw(mine.enabled ? 'checked' : '')} ${ro}> Mine on this node</label>
       <div class="form-grid">${chains.map((c) => {
         const id = `rec-${c.replace(/\W/g, '-')}`; const v = (mine.recipients || {})[c] || '';
         const changed = v !== (((o.mine || {}).recipients || {})[c] || '');
-        return html`<div class="field ${changed ? 'changed' : ''}"><label for="${id}" class="label-line">${c} pays</label><input id="${id}" type="text" spellcheck="false" placeholder="Address (empty burns the reward)" data-key="mine.recipients.${c}" data-type="text" value="${v}"></div>`;
+        return html`<div class="field ${changed ? 'changed' : ''}"><label for="${id}" class="label-line">${c} pays</label><input id="${id}" type="text" spellcheck="false" placeholder="Address (empty burns the reward)" data-key="mine.recipients.${c}" data-type="text" value="${v}" ${ro}></div>`;
       })}</div>
     </section>
     <section id="set-peers" aria-labelledby="sp-h">
@@ -1210,7 +1223,7 @@ function settingsForm(s) {
       <div class="form-grid">${chains.map((c) => {
         const id = `peers-${c.replace(/\W/g, '-')}`; const v = (peers[c] || []).join('\n');
         const was = (Array.isArray(o.peers) ? { Nexus: o.peers } : (o.peers || {}))[c] || [];
-        return html`<div class="field ${same(peers[c] || [], was) ? '' : 'changed'}"><label for="${id}" class="label-line">${c} ${c === 'Nexus' ? html`<span class="tag restart">Needs restart</span>` : html`<span class="tag live">Applies now</span>`}</label><textarea id="${id}" rows="3" data-peers="${c}" spellcheck="false">${v}</textarea></div>`;
+        return html`<div class="field ${same(peers[c] || [], was) ? '' : 'changed'}"><label for="${id}" class="label-line">${c} ${c === 'Nexus' ? html`<span class="tag restart">Needs restart</span>` : html`<span class="tag live">Applies now</span>`}</label><textarea id="${id}" rows="3" data-peers="${c}" spellcheck="false" ${ro}>${v}</textarea></div>`;
       })}</div>
     </section>
     <section id="set-retention" aria-labelledby="sr-h"><h2 id="sr-h">What the node keeps</h2><div class="form-grid">${FIELDS.filter((f) => f.group === 'retention').map(fieldHTML)}</div></section>
@@ -1218,12 +1231,12 @@ function settingsForm(s) {
     <section id="set-access" aria-labelledby="sa-h">
       <div class="section-head"><h2 id="sa-h">Dashboards allowed to connect</h2>${liveTag('operatorAllowedOrigins')}</div>
       <p class="prose small">Another node's dashboard can manage this node only if its address is listed here, one per line, exactly as the browser shows it (for example <code>http://10.0.0.6:8090</code>). This page, served by this node, needs no entry.</p>
-      <div class="field ${same(origins, o.operatorAllowedOrigins || []) ? '' : 'changed'}"><label class="visually-hidden" for="origins">Allowed dashboard addresses</label><textarea id="origins" rows="3" data-lines="operatorAllowedOrigins" spellcheck="false">${origins.join('\n')}</textarea></div>
+      <div class="field ${same(origins, o.operatorAllowedOrigins || []) ? '' : 'changed'}"><label class="visually-hidden" for="origins">Allowed dashboard addresses</label><textarea id="origins" rows="3" data-lines="operatorAllowedOrigins" spellcheck="false" ${ro}>${origins.join('\n')}</textarea></div>
     </section>`;
 }
 function rawForm() {
   return html`<div class="field"><label for="raw" class="label-line">lattice.json <span class="muted small">edit, then review</span></label>
-    <textarea id="raw" rows="24" data-raw spellcheck="false">${JSON.stringify(settings.draft, null, 2)}</textarea>
+    <textarea id="raw" rows="24" data-raw spellcheck="false" ${disabledUnless()}>${JSON.stringify(settings.draft, null, 2)}</textarea>
     <span class="error" id="raw-error" role="alert">${settings.rawError || ''}</span></div>`;
 }
 function reviewHTML(changes, patch) {
@@ -1239,7 +1252,7 @@ function reviewHTML(changes, patch) {
 }
 function resultHTML() {
   const r = settings.result;
-  if (r.error) return html`<div class="banner bad" role="alert">${raw(ICON.bad)}<div class="grow"><strong>Nothing was changed.</strong> ${r.error}</div>${r.conflict ? html`<button type="button" data-restart>Restart to load the file</button>` : ''}<button type="button" class="quiet" data-dismiss-result>Dismiss</button></div>`;
+  if (r.error) return html`<div class="banner bad" role="alert">${raw(ICON.bad)}<div class="grow"><strong>Nothing was changed.</strong> ${r.error}</div>${r.conflict && may('POST /restart') ? html`<button type="button" data-restart>Restart to load the file</button>` : ''}<button type="button" class="quiet" data-dismiss-result>Dismiss</button></div>`;
   const failed = r.failed || [];
   return html`<div class="banner ${failed.length ? 'bad' : 'info'}" role="status"><div class="grow">
     ${failed.length ? html`<strong>Part of the change failed.</strong> What failed was left out of the file.` : html`<strong>Saved.</strong>`}
@@ -1299,7 +1312,7 @@ function paintStaged() {
   let bar = $('.staged');
   if (!changes.length) { if (bar) bar.remove(); return; }
   if (settings.review) return;
-  const markup = html`<span class="grow"><strong>${plural(changes.length, 'change')}</strong> not applied yet.</span><button type="button" class="quiet" data-discard>Discard</button><button type="button" class="primary" data-review>Review changes</button>`.s;
+  const markup = html`<span class="grow"><strong>${plural(changes.length, 'change')}</strong> not applied yet.</span><button type="button" class="quiet" data-discard>Discard</button><button type="button" class="primary" data-review ${disabledUnless()}>Review changes</button>`.s;
   if (!bar) { bar = document.createElement('div'); bar.className = 'staged'; bar.setAttribute('role', 'region'); bar.setAttribute('aria-label', 'Unsaved changes'); $('main .page').append(bar); }
   bar.innerHTML = markup;
 }
@@ -1344,7 +1357,7 @@ VIEWS.access = {
     return html`
       <div class="page-head"><div class="titles"><h1>Access</h1><p class="muted">Tokens let a dashboard or the <code>lattice</code> command manage this node from another machine.</p></div></div>
       ${restartBanner()}
-      ${s.role === 'limited' ? html`<p class="prose">Only an admin token can see or change tokens; this one can't.</p>` : html`
+      ${s.who && s.who.role !== 'admin' ? html`<p class="prose">Only an admin token can see or change tokens; this one can't.</p>` : html`
       <section aria-labelledby="tok-h"><h2 id="tok-h">Tokens</h2><div id="tokens"><p class="empty">Reading…</p></div></section>
       <section aria-labelledby="new-h">
         <h2 id="new-h">Make a token</h2>
@@ -1364,7 +1377,7 @@ VIEWS.access = {
         <p class="prose small">${originsSentence(s)} <a href="#/settings?focus=access">Change in Settings</a>.</p>
       </section>`;
   },
-  mount() { if (snap().role !== 'limited') loadTokens(); },
+  mount() { const w = snap().who; if (!w || w.role === 'admin') loadTokens(); },
 };
 function originsSentence(s) {
   const list = (s.config && s.config.config && s.config.config.operatorAllowedOrigins) || [];
@@ -1390,16 +1403,17 @@ VIEWS.danger = {
     return html`
       <div class="page-head"><div class="titles"><h1>Restart and wipe</h1></div></div>
       ${restartBanner()}
+      ${!may('POST /restart') && !may('POST /wipe') ? writeGuard('restart or wipe this node', 'POST /restart') : html`${writeGuard('restart this node', 'POST /restart')}${writeGuard('wipe this node', 'POST /wipe')}`}
       <section aria-labelledby="rs-h">
         <h2 id="rs-h">Restart the node</h2>
         <p class="prose">The node stops and starts again in the same process, reading its settings afresh. It's offline for about ${restartSeconds()} seconds; every chain then resumes where it was.${restartKeys(s).length ? ` This applies ${restartKeys(s).join(', ')}.` : ''}</p>
-        <div><button type="button" data-restart>Restart…</button></div>
+        <div><button type="button" data-restart ${disabledUnless('POST /restart', 'restart the node')}>Restart…</button></div>
       </section>
       <section aria-labelledby="wp-h" class="ruled">
         <h2 id="wp-h">Wipe chain data</h2>
         <div class="prose"><p>Deletes everything this node stored for every chain, then restarts. It downloads Nexus again from its peers, and each hosted chain from that chain's peers. That can take a long time.</p>
         <p><strong>Kept:</strong> the node's identity, its settings, chain specs, tokens and logs. <strong>Deleted:</strong> blocks, state, and pinned content.</p></div>
-        <div><button type="button" class="danger" data-wipe ${raw(s.config && s.config.flags ? 'disabled' : '')}>Wipe…</button></div>
+        <div><button type="button" class="danger" data-wipe ${disabledUnless('POST /wipe', 'wipe the node')} ${raw(s.config && s.config.flags ? 'disabled' : '')}>Wipe…</button></div>
         ${s.config && s.config.flags ? html`<p class="why-not">A wipe needs a node started with <code>lattice up</code>.</p>` : ''}
       </section>
       <p class="muted small">This node: ${n.name}</p>`;

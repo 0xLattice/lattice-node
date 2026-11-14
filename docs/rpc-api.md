@@ -58,7 +58,8 @@ same handlers), but:
   here.
 - Each token has a role or a route list. `admin` may use every route; `read`
   every `GET`/`HEAD` except `/tokens`; a route list only the routes it names.
-  Anything else, an unknown path included, is `403`. A route is the method
+  Anything else, an unknown path included, is `403`; `GET /whoami` is
+  open to every token, whatever its role or routes. A route is the method
   and the path as the node registers it, a parameter in braces:
   `GET /api/state/account/{addr}`, `GET /fetch/{cid}`. `?chainPath=` is not
   part of a route; a token reaches every chain the node hosts. Only `admin`
@@ -877,6 +878,13 @@ routes.
 The cookie (on the operator port) and `admin` tokens (on the remote listener)
 reach these routes. `409` when the node has no token file
 (`operatorTokens`).
+
+`GET /whoami` names the caller's own credential, so a client can offer only
+what it may do: `{"name": "seller", "routes": ["GET /hosted-chains"]}`, or
+`{"name": "ops", "role": "admin"}`. `role` is absent for a route-list token
+and `routes` for a role. The cookie answers `{"name": "cookie", "role":
+"admin"}`. It never includes a secret or its hash. Every credential the
+listener accepts may call it; none: `401`.
 
 ## Operator pins
 
