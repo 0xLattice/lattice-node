@@ -329,6 +329,51 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
         XCTAssertNil(NodeRuntime.nextJob(execution: &execution, mining: &mining, in: harness.host))
     }
 
+    /// A level's next block runs ahead of the proof checks queued before
+    /// it. Taken first in, first out by one worker (a one-CPU host), the
+    /// root's next block waited behind thousands of child proof checks while
+    /// a node synced a tree of chains, and the root executed a block every
+    /// few minutes. The checks keep their order behind it.
+    func testALevelsNextBlockRunsAheadOfQueuedProofChecks() async throws {
+        let harness = try await harness(keyByte: 0x47)
+        var execution = (0..<1_000).map { Self.job("check-\($0)", depth: 2) }
+            + [Self.job("root-block", depth: 1, connects: true)]
+        var mining: [NodeRuntime.RuntimeJob] = []
+        var order: [String] = []
+        while let next = NodeRuntime.nextJob(execution: &execution, mining: &mining, in: harness.host) {
+            order.append(next.path.last ?? "")
+        }
+        XCTAssertEqual(order, ["root-block"] + (0..<1_000).map { "check-\($0)" })
+    }
+
+    /// No level goes ahead of another: while a shallower level keeps
+    /// queueing work, its own next blocks among it, a deeper level's next
+    /// block and other work still run in their turn.
+    func testADeeperLevelsNextBlockRunsUnderSteadyShallowerWork() async throws {
+        let harness = try await harness(keyByte: 0x48)
+        var execution = [Self.job("grand-block", depth: 3, connects: true), Self.job("grand-check", depth: 3)]
+        var mining: [NodeRuntime.RuntimeJob] = []
+        var ran: [String] = []
+        for step in 0..<10 {
+            // Each turn the root queues more work, a next block among it.
+            execution += [Self.job("root-check-\(step)", depth: 1), Self.job("root-block-\(step)", depth: 1, connects: true)]
+            if let next = NodeRuntime.nextJob(execution: &execution, mining: &mining, in: harness.host) {
+                ran.append(next.path.last ?? "")
+            }
+        }
+        XCTAssertEqual(ran.first, "grand-block", "the grandchild's next block, queued first, runs first")
+        XCTAssertEqual(Array(ran.dropFirst()), (0..<9).map { "root-block-\($0)" }, "then each next block in turn")
+        XCTAssertEqual(ran.count, 10)
+        XCTAssertEqual(execution.first?.path.last, "grand-check", "the other work keeps its place, first in line")
+    }
+
+    /// A job told apart by its path's last element, at `depth`; no tip
+    /// epoch, so it is always current.
+    private static func job(_ name: String, depth: Int, connects: Bool = false) -> NodeRuntime.RuntimeJob {
+        let path = Array(["Nexus", "Child", "Grand"].prefix(depth - 1)) + [name]
+        return NodeRuntime.RuntimeJob(path: path, epoch: nil, connects: connects) { [] }
+    }
+
     /// A job reads the levels on the running loop, and once the loop has
     /// stopped every read is nil rather than a wait that never ends.
     func testAJobReadsTheLiveLevelsUntilTheLoopStops() async throws {

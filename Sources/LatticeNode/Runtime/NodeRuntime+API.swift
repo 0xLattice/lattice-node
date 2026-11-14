@@ -626,9 +626,11 @@ extension NodeRuntime {
 
     /// A worker job. One with a tip epoch is skipped at dequeue when its
     /// level's mining tip epoch has moved: it runs nothing, posts nothing.
+    /// `connects` marks a level's next block to execute (`connectJob`).
     struct RuntimeJob: Sendable {
         let path: ChainPath
         let epoch: UInt64?
+        var connects = false
         let run: @Sendable () async -> [NodeEvent]
 
         func isCurrent(in core: NodeCore) -> Bool {
@@ -636,13 +638,19 @@ extension NodeRuntime {
         }
     }
 
-    /// The next job a free worker runs, execution first. A job whose tip
+    /// The next job a free worker runs, execution first, and of execution
+    /// a level's next block ahead of the rest, each first in, first out. A
+    /// level connects one block at a time, so its next block would otherwise
+    /// wait behind every child proof check queued before it: thousands while
+    /// a node syncs a tree of chains. No level goes ahead of another, so
+    /// steady work at one never holds another's blocks back. A job whose tip
     /// epoch moved is dropped here: it runs nothing, posts nothing.
     static func nextJob(
         execution: inout [RuntimeJob], mining: inout [RuntimeJob], in core: NodeCore
     ) -> RuntimeJob? {
         while !execution.isEmpty || !mining.isEmpty {
-            let job = execution.isEmpty ? mining.removeFirst() : execution.removeFirst()
+            let job = execution.firstIndex(where: \.connects).map { execution.remove(at: $0) }
+                ?? (execution.isEmpty ? mining.removeFirst() : execution.removeFirst())
             if job.isCurrent(in: core) { return job }
         }
         return nil
@@ -818,7 +826,7 @@ extension NodeRuntime {
         storage: NodeStorage,
         remote: IvyRootContentSource? = nil
     ) -> RuntimeJob {
-        RuntimeJob(path: path, epoch: nil) {
+        RuntimeJob(path: path, epoch: nil, connects: true) {
             await reading(job.blockHash, at: path, storage: storage, remote: remote) { fetcher in
                 let verdict = await ChainTree.connect(
                     job,
