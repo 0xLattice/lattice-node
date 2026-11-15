@@ -3,7 +3,6 @@ import Foundation
 import FoundationNetworking
 #endif
 import ArgumentParser
-import LatticeCtlCore
 import LatticeMiningCoordinator
 import LatticeNode
 

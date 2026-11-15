@@ -10,13 +10,15 @@ default). Every command that operates a node also accepts `--node <url>
 --token-file <file>`: it then asks that node's
 [remote operator listener](rpc-api.md#remote-operator-listener) instead of
 the one under `--root` (loopback and its cookie). Only `init`, `identity`,
-`key`, `up`, `down` and `emit-systemd` work on the local machine alone.
+`key`, `up`, `down`, `mine stop` and `emit-systemd` work on the local machine
+alone. The miner always runs on the machine `lattice mine` runs on; `--node`
+only says which node it mines through.
 
 ## Operating a node
 
 | Command | Effect |
 |---|---|
-| `lattice status` | Each hosted chain's phase and tip, configured chains not running, mining, keys waiting for a restart. |
+| `lattice status` | Each hosted chain's phase and tip, configured chains not running, keys waiting for a restart. |
 | `lattice config get [a.b.c]` | The configuration, or one key of it. |
 | `lattice config set a.b.c=value ...` | Change keys (a value that parses as JSON is JSON, else a string), or `--patch '<merge patch>'`. |
 | `lattice config unset a.b.c ...` | Remove keys. |
@@ -27,9 +29,9 @@ the one under `--root` (loopback and its cookie). Only `init`, `identity`,
 | `lattice restart` | Restart the node in place; waits until it answers again. |
 | `lattice wipe` | Delete chain storage, keep identity and configuration; a running node restarts empty. |
 | `lattice tokens list/create/revoke` | Remote operator tokens. |
-| `lattice logs [--miner] [--tail N]` | The node's (or the mining loop's) recent log lines. |
+| `lattice logs [--miner] [--tail N]` | The node's recent log lines (`--miner`: the local mining loop's, read from `log/mine.log` under `--root`). |
 
-A running node applies hosted chains, child-chain peers and mining at once;
+A running node applies hosted chains and child-chain peers at once;
 it writes every other key and lists it as waiting for a restart until
 `lattice restart` (refused while `lattice.json` would not start the node). A
 change the node would not start from (a peer that does not parse, a port in
@@ -50,8 +52,7 @@ lattice tokens create ops --role admin --out ops.token --root /var/lib/lattice
 # Anywhere on that network:
 lattice status --node http://10.0.0.5:8090 --token-file ops.token
 lattice child create Nexus/Alpha --block-time 10000 --reward 1000 --node http://10.0.0.5:8090 --token-file ops.token
-lattice config set mine.recipients.Nexus/Alpha=<address> --node http://10.0.0.5:8090 --token-file ops.token
-lattice mine start --node http://10.0.0.5:8090 --token-file ops.token
+lattice config set minRelayFee=5 --node http://10.0.0.5:8090 --token-file ops.token
 ```
 
 Tokens have a role, `admin` (every route) or `read` (every `GET`), or
@@ -60,8 +61,8 @@ Tokens have a role, `admin` (every route) or `read` (every `GET`), or
 effect from the next request. Keep the listener on a private network or
 behind a TLS proxy: it is plain HTTP.
 
-A remote client may not set `mine.worker` or `operatorTokens`, which name
-files on the node's machine.
+A remote client may not set `operatorTokens`, which names a file on the
+node's machine.
 
 ## Topology
 
@@ -83,18 +84,7 @@ files on the node's machine.
   "hostedChains": [
     "Nexus/Alpha",
     "Nexus/Alpha/Beta"
-  ],
-  "mine": {
-    "worker": "cpu",
-    "workers": 2,
-    "batchSize": 2000000,
-    "recipients": {
-      "Nexus": "<address>",
-      "Nexus/Alpha": "<address>",
-      "Nexus/Alpha/Beta": "<address>"
-    },
-    "minBlockIntervalSeconds": 10
-  }
+  ]
 }
 ```
 
@@ -105,7 +95,6 @@ This is intentionally one schema:
 - `peers` is a list per chain, keyed by absolute path; an array is Nexus's
   list (see "Configured peers" in `operations.md`);
 - `hostedChains` lists child paths parent before child;
-- mining maps are keyed by hosted absolute path;
 - ports must be nonzero and unique, except that `webSocket` may be 0, which
   turns the browser listener off (see "Network surfaces" in `operations.md`);
 - rates must be finite and nonnegative;
@@ -143,8 +132,11 @@ This is intentionally one schema:
   file, a relative path being under the root (see
   [Remote operator listener](rpc-api.md#remote-operator-listener)); absent is
   off; `operatorAllowedOrigins` lists the browser origins it answers;
-- `mine.enabled` turns the node's mining loop on;
-- unknown paths in mining policy are rejected.
+- it holds no mining settings: the miner is a separate process with its own
+  file ([Mining](#mining)). A `mine` object left from an earlier release is
+  ignored by the node (with a warning at start) and dropped the next time the
+  node writes the file, or by `lattice config unset mine`; a change adding
+  one is refused.
 
 ## Lifecycle
 
@@ -154,7 +146,7 @@ This is intentionally one schema:
 | `lattice up` | Start `lattice-node --root <root>` in the background, its output to `log/lattice-node.log`. A running node is left as it is. |
 | `lattice up --foreground` | Supervise the node for container or init-system use. |
 | `lattice status` | Read every hosted level from the node. |
-| `lattice down` | Stop the node process (and its mining loop) under the spawn lock. |
+| `lattice down` | Stop the node process under the spawn lock. |
 | `lattice restart` | Restart the running node in place (same pid, same arguments). |
 | `lattice wipe` | Remove the tree storage; preserve identity, specs, tokens, and topology. A running node does it on a restart. |
 | `lattice identity` | Print the process public key and peer string. |
@@ -350,30 +342,73 @@ for `X`.
 
 | Command | Effect |
 |---|---|
-| `lattice mine start` | Set `mine.enabled`; the node starts its mining loop. |
-| `lattice mine status` | Whether it runs, its pid, last exit, and the recipients. |
-| `lattice mine stop` | Clear `mine.enabled`; the loop finishes or bounds its round, then stops. |
+| `lattice mine start` | Start the mining loop in the background (`run/mine.pid`, output in `log/mine.log`). |
+| `lattice mine status` | Whether it runs, the node it mines through, and its recipients. |
+| `lattice mine stop` | Finish or bound the active round, then stop. |
 
-The node supervises the loop (`lattice mine run --root <root>` as its child,
-output in `log/mine.log`): it starts it while `mine.enabled` is true, starts
-it again 5 seconds after it exits, restarts it when `mine` changes (new
-recipients apply to the next round), and stops it on `mine stop`, restart and
-shutdown, ending the round in flight. A loop that keeps exiting is started
-again after a pause that doubles to 5 minutes. The loop exits if its node does. So mining follows the node's
-configuration across restarts, and recipients are checked against the chains
-that node hosts. `lattice mine start` on a host where an earlier `lattice`
-ran the loop itself stops that loop first.
+Mining is a separate process, not part of the node: the node serves
+templates and accepts work, and knows nothing of who mines through it. The
+loop is a client of one node, by default the one under `--root` (its loopback
+API and cookie), or with `--node <url> --token-file <file>` any node's
+[remote operator listener](rpc-api.md#remote-operator-listener). A token
+for mining needs only three routes:
 
-`mine.worker` is `cpu` for the bundled worker or an executable path implementing
-the worker contract. `mine.recipients` controls each chain's reward and fee
-recipient; an omitted path burns that payout. `mine.minWork` is a local search
-filter, not a committed consensus target. `mine.minBlockIntervalSeconds` is a
-floor on template spacing and releases itself when rounds run longer.
+```bash
+# Beside the node:
+lattice tokens create miner --out miner.token --root /var/lib/lattice \
+  --route "POST /mining/templates" --route "POST /mining/work" --route "GET /status"
+
+# On the mining machine, with its own root for settings, pidfile and log:
+lattice mine start --root /var/lib/lattice-miner \
+  --node http://10.0.0.5:8090 --token-file miner.token
+```
+
+Its settings are its own file, `<root>/miner.json` (or `--config <file>`),
+never the node's `lattice.json`:
+
+```json
+{
+  "worker": "cpu",
+  "workers": 2,
+  "batchSize": 2000000,
+  "recipients": {
+    "Nexus": "<address>",
+    "Nexus/Alpha": "<address>",
+    "Nexus/Alpha/Beta": "<address>"
+  },
+  "minBlockIntervalSeconds": 10
+}
+```
+
+The loop reads it again before each round, so a changed recipient applies to
+the next round with no restart; a file that no longer checks is logged and
+the last good settings kept. An unknown key is refused.
+
+While there is no `miner.json`, the miner reads the `mine` object an older
+`lattice.json` in the same root still holds (its `enabled` ignored) and copies
+it to `miner.json` once, saying so (never over a `miner.json` already there),
+so a host upgraded with no edits keeps mining. The node drops that object the
+next time it writes `lattice.json`; the copy is what the miner reads from then
+on. So after upgrading, start the miner once (`lattice mine start`, or its
+unit) before changing the node's configuration: a change made first drops
+`mine` before anything copied it, and the miner then finds no settings.
+
+A host upgraded from a build where the node itself started the miner (the
+unreleased `main` between #63 and this change) mines no more on its own:
+start the miner after upgrading with `lattice mine start --root <root>`, or
+install the `lattice-mine.service` unit `emit-systemd` prints.
+
+`worker` is `cpu` for the bundled worker or an executable path implementing
+the worker contract. `recipients` sends each chain's reward and fees to an
+address; each template request carries them, and an omitted path burns that
+payout. `minWork` is a local search filter, not a committed consensus target.
+`minBlockIntervalSeconds` is a floor on template spacing and releases itself
+when rounds run longer.
 
 The mining loop starts once the node answers a template request
-(`mine.templateTimeoutSeconds`) and places a deadline around each coordinator
+(`templateTimeoutSeconds`) and places a deadline around each coordinator
 process group: 600 seconds until a round completes, then the longest
-completed round (counted up to 600 seconds) times `mine.roundDeadlineMultiplier`,
+completed round (counted up to 600 seconds) times `roundDeadlineMultiplier`,
 never less than 600 seconds.
 It only catches a hung coordinator; work itself never expires on a clock. A
 timeout is logged loudly and the next round retries.
@@ -422,18 +457,14 @@ also returns 404 for an unhosted path.
 
 ## systemd
 
-Generate a foreground unit from the configured topology (the node runs its
-own mining loop, so there is no mining unit):
+Generate foreground units from the configured topology (and a
+`lattice-mine.service` running `lattice mine run --root <root>` when the root
+holds miner settings):
 
 ```bash
 lattice emit-systemd --root /var/lib/lattice \
   > /etc/systemd/system/lattice.generated.units
 ```
-
-A host that ran mining as its own unit (`lattice-mine.service`, from an
-earlier `emit-systemd`) stops and removes it: `systemctl disable --now
-lattice-mine.service`. The node stops a loop it finds that an earlier
-`lattice mine start` ran.
 
 For a node started with flags rather than `--root`, the checked-in examples
 are [deploy/lattice-node.service](../deploy/lattice-node.service)
@@ -455,9 +486,10 @@ rewards.
     volume-bundles.db
     storage.lock
   operator-tokens.json   (operatorTokens, when set)
+  miner.json             (the miner's own settings, when it mines here)
   run/
   log/lattice-node.log
-  log/mine.log
+  log/mine.log           (the mining loop's, when it mines here)
 ```
 
 There is no per-chain process, port, key, or child `state.db`. The path in

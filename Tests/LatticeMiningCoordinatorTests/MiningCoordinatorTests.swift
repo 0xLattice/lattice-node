@@ -883,6 +883,28 @@ final class MiningCoordinatorTests: XCTestCase {
         XCTAssertEqual(rotated, "t")
     }
 
+    /// A coordinator mining through a node's operator listener sends its
+    /// token file's bearer token, as the file holds it now.
+    func testHTTPClientSendsTheTokenFilesBearerToken() async throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("token-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try Data("miner-secret\n".utf8).write(to: file)
+        StubTemplateURLProtocol.responder = { request in
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer miner-secret")
+            return (200, Data(#"{"tipCID":"t"}"#.utf8))
+        }
+        defer { StubTemplateURLProtocol.responder = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [StubTemplateURLProtocol.self]
+        let client = HTTPMiningCoordinatorNodeClient(
+            apiBaseURL: URL(string: "http://127.0.0.1:1")!,
+            session: URLSession(configuration: config),
+            tokenFile: file
+        )
+        let token = try await client.fetchStaleToken()
+        XCTAssertEqual(token, "t")
+    }
+
     func testHTTPSubmitTreatsJSONServerFailureAsRetryableTransportFailure() throws {
         let response = try XCTUnwrap(HTTPURLResponse(
             url: URL(string: "http://127.0.0.1/mining/work")!,

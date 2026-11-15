@@ -1,15 +1,17 @@
-// Host integration: a systemd unit for the tree. Restart policy, cgroups
-// and log routing belong to the init system, so the unit runs the
-// foreground mode; mining is the node's own child (mine.enabled).
+// Host integration: systemd units for the tree and, when the root holds
+// miner settings, the miner beside it (a process of its own). The CLI
+// stays a reconciler — restart policy, cgroups, and log routing belong to
+// the init system, so the units run the foreground modes.
 
 import Foundation
 import ArgumentParser
 import LatticeCtlCore
+import LatticeNode
 
 struct EmitSystemd: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "emit-systemd",
-        abstract: "Print the systemd unit running this host's tree in the foreground (mining included, as lattice.json says)."
+        abstract: "Print systemd units running this host's tree and miner in the foreground."
     )
 
     @OptionGroup var rootOption: RootOption
@@ -31,6 +33,25 @@ struct EmitSystemd: AsyncParsableCommand {
         ExecStart=\(binary) up --foreground --root \(root)
         ExecStop=\(binary) down --root \(root)
         Restart=on-failure
+
+        [Install]
+        WantedBy=multi-user.target
+        """)
+        guard FileManager.default.fileExists(
+            atPath: layout.root.appendingPathComponent(MinerConfig.fileName).path
+        ) || Topology.holdsRetiredMining(root: layout.root) else { return }
+        print("""
+
+        # lattice-mine.service
+        [Unit]
+        Description=Lattice mining loop
+        After=lattice-tree.service
+        BindsTo=lattice-tree.service
+
+        [Service]
+        ExecStart=\(binary) mine run --root \(root)
+        Restart=on-failure
+        TimeoutStopSec=90
 
         [Install]
         WantedBy=multi-user.target

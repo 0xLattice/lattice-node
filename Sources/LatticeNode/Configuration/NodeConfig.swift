@@ -6,7 +6,6 @@
 
 import Foundation
 import Lattice
-import LatticeNode
 
 extension Topology {
     /// The node flags this configuration stands for under `layout`: what
@@ -76,6 +75,10 @@ extension Topology {
         guard let changes = try? JSONSerialization.jsonObject(with: patch) as? [String: Any] else {
             throw CtlError("a configuration change is one JSON object (a merge patch of \(Self.fileName))")
         }
+        // Removing it (`null`, `lattice config unset mine`) is cleanup.
+        guard changes[Self.retiredMiningKey] == nil || changes[Self.retiredMiningKey] is NSNull else {
+            throw CtlError("\(Self.fileName) holds no mining settings: the miner is a separate process and reads its own miner.json")
+        }
         let merged = Self.merge(try jsonObject(), changes)
         return try Self.load(data: JSONSerialization.data(withJSONObject: merged))
     }
@@ -99,8 +102,7 @@ extension Topology {
     }
 
     /// This configuration without `paths` and every entry keyed by one of
-    /// them that requires it hosted: its peers, mining recipient and
-    /// minimum work.
+    /// them that requires it hosted: its peers.
     public func removingChains(_ paths: Set<String>) -> Topology {
         var next = self
         next.hostedChains = hostedChains.map { $0.filter { !paths.contains($0) } }
@@ -108,18 +110,12 @@ extension Topology {
             for path in paths { peers.byChain[path] = nil }
             next.peers = peers
         }
-        if var mine = next.mine {
-            if mine.recipients != nil { mine.recipients = mine.recipients?.filter { !paths.contains($0.key) } }
-            if mine.minWork != nil { mine.minWork = mine.minWork?.filter { !paths.contains($0.key) } }
-            next.mine = mine
-        }
         return next
     }
 
-    /// The keys a running node applies as they change: its hosted chains,
-    /// the hosted children's peers, and mining. Every other key takes a
-    /// restart.
-    public static let liveKeys: Set<String> = ["hostedChains", "peers", "mine"]
+    /// The keys a running node applies as they change: its hosted chains
+    /// and the hosted children's peers. Every other key takes a restart.
+    public static let liveKeys: Set<String> = ["hostedChains", "peers"]
 
     /// The keys whose value here differs from `running` (what a node started
     /// with) and that apply only at a start. Peers apply live except Nexus's,
@@ -205,7 +201,7 @@ public enum ConfigAssignment {
         var patch: [String: Any] = [:]
         for assignment in assignments {
             guard let equals = assignment.firstIndex(of: "="), equals != assignment.startIndex else {
-                throw CtlError("\(assignment): use key=value, e.g. mine.recipients.Nexus=<address>")
+                throw CtlError("\(assignment): use key=value, e.g. stateWindow=128")
             }
             let text = String(assignment[assignment.index(after: equals)...])
             let value = (try? JSONSerialization.jsonObject(with: Data(text.utf8), options: [.fragmentsAllowed])) ?? text
@@ -292,26 +288,6 @@ public struct HostedChainsResponse: Codable, Sendable {
     public init(chains: [String], configured: [String]?) {
         self.chains = chains
         self.configured = configured
-    }
-}
-
-/// `GET /mining`: whether the node mines, and the loop it runs for it.
-public struct MiningStatusResponse: Codable, Sendable {
-    public let enabled: Bool
-    public let running: Bool
-    public let pid: Int32?
-    /// Starts after the loop exited on its own.
-    public let restarts: Int
-    public let lastExit: String?
-    public let recipients: [String: String]
-
-    public init(enabled: Bool, running: Bool, pid: Int32?, restarts: Int, lastExit: String?, recipients: [String: String]) {
-        self.enabled = enabled
-        self.running = running
-        self.pid = pid
-        self.restarts = restarts
-        self.lastExit = lastExit
-        self.recipients = recipients
     }
 }
 

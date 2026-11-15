@@ -2,7 +2,7 @@ import ArgumentParser
 import Crypto
 import Foundation
 import Hummingbird
-import LatticeCtlCore
+import LatticeNode
 
 /// The remote operator listener's credentials (`--operator-tokens`): bearer
 /// tokens, each with a role or a list of the routes it may use. The file

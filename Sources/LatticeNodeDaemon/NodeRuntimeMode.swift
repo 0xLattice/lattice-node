@@ -3,7 +3,6 @@ import Hummingbird
 import LatticeNode
 import LatticeNodeCore
 import LatticeNodeAPI
-import LatticeCtlCore
 
 /// What `GET /core/snapshot` answers: the root chain's last published
 /// snapshot.
@@ -38,21 +37,14 @@ extension LatticeNodeCommand {
             ExplorerPeersResponse(count: runtime.peerCount, peers: [])
         }
         // The operator's control of the node: restart always; under --root
-        // its configuration (mining included), logs and wipe.
+        // its configuration, log and wipe.
         let lifecycle = NodeLifecycle()
         var control = OperatorControl(
             tokens: operatorListener?.tokens, lifecycle: lifecycle, storagePath: configuration.storagePath
         )
         if let owner {
-            let mining = MinerSupervisor(layout: owner.layout)
-            control.mining = mining
-            control.config = OperatorConfig(
-                layout: owner.layout, started: owner.topology, runtime: runtime, mining: mining
-            )
-            control.logs = [
-                "node": owner.layout.logFile(for: "lattice-node"), "mine": owner.layout.logFile(for: "mine"),
-            ]
-            await mining.apply(owner.topology.mine)
+            control.config = OperatorConfig(layout: owner.layout, started: owner.topology, runtime: runtime)
+            control.logs = ["node": owner.layout.logFile(for: "lattice-node")]
         }
         // The loopback API and the remote operator listener: one set of
         // routes, each listener with its own credentials.
@@ -147,10 +139,7 @@ extension LatticeNodeCommand {
         } catch {
             result = .failure(error)
         }
-        // Side by side: the node's own stop has a grace of its own to keep.
-        async let miningStopped: Void? = control.mining?.stop()
         await runtime.stop()
-        _ = await miningStopped
         try result.get()
         if lifecycle.restartRequested {
             print("restarting as asked")

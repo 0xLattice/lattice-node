@@ -10,7 +10,6 @@ import LatticeNodeCore
 import UInt256
 import VolumeBroker
 import LatticeNodeAPI
-import LatticeCtlCore
 
 @main
 struct LatticeNodeCommand: AsyncParsableCommand {
@@ -20,7 +19,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         version: LatticeNodeVersion.current
     )
 
-    @Option(help: "A host root made by `lattice init`: the node runs as <root>/lattice.json says (storage, identity, ports, hosted chains, mining...) and is that file's only writer while it runs, changing it through its operator API (GET/PATCH /config) and applying each change live or at the next restart. Give no other flag with it.")
+    @Option(help: "A host root made by `lattice init`: the node runs as <root>/lattice.json says (storage, identity, ports, hosted chains...) and is that file's only writer while it runs, changing it through its operator API (GET/PATCH /config) and applying each change live or at the next restart. Give no other flag with it.")
     var root: String?
 
     @Option(help: "Hosted-tree storage directory; defaults to ~/.lattice/chains/Nexus")
@@ -170,6 +169,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             topology = try Topology.load(root: layout.root).validated()
         } catch {
             throw ValidationError("\(layout.root.appendingPathComponent(Topology.fileName).path): \(error). The node starts only from a valid configuration; fix the file by hand while the node is stopped (`lattice config set` edits it then too).")
+        }
+        if Topology.holdsRetiredMining(root: layout.root) {
+            FileHandle.standardError.write(Data("warning: \(Topology.retiredMiningWarning)\n".utf8))
         }
         try performRequestedWipe(layout)
         var command = try LatticeNodeCommand.parse(topology.nodeArguments(layout: layout))

@@ -10,21 +10,13 @@ import FoundationNetworking
 #endif
 import ArgumentParser
 import Lattice
-import LatticeCtlCore
 import LatticeProcessWait
+import LatticeCtlCore
 import LatticeNode
 import LatticeNodeAPI
 
 func nodeBinary() throws -> URL {
-    let own = URL(fileURLWithPath: CommandLine.arguments[0])
-        .resolvingSymlinksInPath().deletingLastPathComponent()
-    for candidate in [
-        own.appendingPathComponent("lattice-node"),
-        URL(fileURLWithPath: "/usr/local/bin/lattice-node"),
-    ] where FileManager.default.isExecutableFile(atPath: candidate.path) {
-        return candidate
-    }
-    throw CtlError("lattice-node not found beside lattice or in /usr/local/bin")
+    try siblingBinary("lattice-node")
 }
 
 /// A live pid is only "ours" if the command name still matches what the
@@ -318,7 +310,7 @@ struct Down: AsyncParsableCommand {
 
 struct Status: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "One line per hosted chain, mining, and what waits for a restart."
+        abstract: "One line per hosted chain, and what waits for a restart."
     )
 
     @OptionGroup var target: NodeTarget
@@ -345,10 +337,6 @@ struct Status: AsyncParsableCommand {
         }
         for path in (hosted.configured ?? []) where !hosted.chains.contains(path) {
             print("\(path): configured, not running")
-        }
-        if let data = try? await send(rpc: rpc, "GET", "mining"),
-           let mining = try? JSONDecoder().decode(MiningStatusResponse.self, from: data) {
-            print("mining: \(mining.enabled ? (mining.running ? "on" : "on, loop not running") : "off")")
         }
         if let data = try? await send(rpc: rpc, "GET", "config"),
            let config = try? JSONDecoder().decode(ConfigResponse.self, from: data), !config.restartRequired.isEmpty {

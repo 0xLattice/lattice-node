@@ -108,8 +108,6 @@ let package = Package(
                 "LatticeNodeAPI",
                 "LatticeNode",
                 "LatticeNodeCore",
-                "LatticeCtlCore",
-                "LatticeProcessWait",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "Ivy", package: "Ivy2"),
                 .product(name: "Hummingbird", package: "hummingbird"),

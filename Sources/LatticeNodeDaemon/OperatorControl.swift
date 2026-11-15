@@ -2,7 +2,6 @@ import ArgumentParser
 import Foundation
 import Hummingbird
 import Lattice
-import LatticeCtlCore
 import LatticeNode
 import LatticeNodeAPI
 
@@ -30,16 +29,6 @@ protocol HostingRuntime: Sendable {
     var hostedChildren: [[String]] { get }
 }
 
-/// What turns mining on and off as the configuration says.
-protocol MiningControl: Sendable {
-    func check(_ mine: TopologyMine?) throws
-    func apply(_ mine: TopologyMine?) async
-}
-
-extension MinerSupervisor: MiningControl {
-    nonisolated func check(_ mine: TopologyMine?) throws { try Self.check(mine) }
-}
-
 /// The node's one configuration, `<root>/lattice.json`, which a node started
 /// with `--root` read at its start and alone writes while it runs (its
 /// storage lock is held meanwhile; `lattice` edits the file only while the
@@ -47,7 +36,7 @@ extension MinerSupervisor: MiningControl {
 ///
 /// Every change is applied one at a time, in arrival order: checked as a
 /// whole (as a start would check it), then what applies live is applied
-/// (hosted chains, their peers, mining), then the file is written to say
+/// (hosted chains and their peers), then the file is written to say
 /// what took effect, a chain that did not start left out of it, then the
 /// change is answered. Every other key is kept for the next start and
 /// reported as waiting for a restart.
@@ -58,7 +47,6 @@ actor OperatorConfig {
     let started: Topology
     private(set) var saved: Topology
     private let runtime: any HostingRuntime
-    private let mining: any MiningControl
     /// Whether a configuration would start: the start's own checks (as
     /// `LatticeNodeCommand.plan`) and a listener port it newly names being
     /// free. Checked before a change is kept and before a restart.
@@ -67,14 +55,13 @@ actor OperatorConfig {
     private var waiting: [CheckedContinuation<Void, Never>] = []
 
     init(
-        layout: HostLayout, started: Topology, runtime: any HostingRuntime, mining: any MiningControl,
+        layout: HostLayout, started: Topology, runtime: any HostingRuntime,
         startCheck: @escaping @Sendable (Topology, HostLayout, Topology) throws -> Void = checkStarts
     ) {
         self.layout = layout
         self.started = started
         self.saved = started
         self.runtime = runtime
-        self.mining = mining
         self.startCheck = startCheck
     }
 
@@ -99,8 +86,7 @@ actor OperatorConfig {
     }
 
     /// Applies an RFC 7396 merge patch of `lattice.json`. A `remote` client
-    /// may not name files on this node's disk (`mine.worker`,
-    /// `operatorTokens`).
+    /// may not name a file on this node's disk (`operatorTokens`).
     func patch(_ patch: Data, remote: Bool) async throws -> ConfigChangeResponse {
         try await serially {
             let next: Topology
@@ -109,8 +95,8 @@ actor OperatorConfig {
             } catch {
                 throw OperatorConfigError.invalid("\(error)")
             }
-            if remote, next.mine?.worker != saved.mine?.worker || next.operatorTokens != saved.operatorTokens {
-                throw OperatorConfigError.invalid("the operator listener takes no file paths: mine.worker and operatorTokens are set beside the node")
+            if remote, next.operatorTokens != saved.operatorTokens {
+                throw OperatorConfigError.invalid("the operator listener takes no file paths: operatorTokens is set beside the node")
             }
             return try await apply(next)
         }
@@ -142,8 +128,7 @@ actor OperatorConfig {
         }
     }
 
-    /// Stops hosting `path`, and with it its peers, mining recipient and
-    /// minimum work. Its data and spec stay. A chain whose children are
+    /// Stops hosting `path`, and with it its peers. Its data and spec stay. A chain whose children are
     /// hosted is refused: unhost them first.
     func unhost(_ path: String) async throws -> ConfigChangeResponse {
         try await serially {
@@ -176,7 +161,6 @@ actor OperatorConfig {
         let hosted: HostedChildren
         do {
             next = try proposed.validated()
-            if try next.changedKeys(from: saved).contains("mine") { try mining.check(next.mine) }
         } catch {
             throw OperatorConfigError.invalid("\(error)")
         }
@@ -212,12 +196,12 @@ actor OperatorConfig {
             }
         }
         let changed = try effective.changedKeys(from: saved)
-        if !changed.isEmpty {
+        // A `mine` left in the file by an earlier release goes at any write
+        // (`{"mine": null}` asks for nothing else).
+        if !changed.isEmpty || Topology.holdsRetiredMining(root: layout.root) {
             try effective.save(root: layout.root)
             saved = effective
         }
-        // After the save: the loop reads lattice.json as it starts.
-        if changed.contains("mine") { await mining.apply(effective.mine) }
         return ConfigChangeResponse(
             config: saved,
             applied: changed.filter { Topology.liveKeys.contains($0) },
@@ -465,15 +449,14 @@ final class NodeLifecycle: @unchecked Sendable {
 }
 
 /// The operator surface beyond the chains' reads and writes: the node's
-/// configuration (with `--root`), its tokens, mining, logs, disk, restart
+/// configuration (with `--root`), its tokens, log, disk, restart
 /// and wipe. Each part is absent where the node has none.
 struct OperatorControl: Sendable {
     var config: OperatorConfig?
     var tokens: TokenStore?
-    var mining: MinerSupervisor?
     var lifecycle: NodeLifecycle?
     var storagePath: URL?
-    /// The node's own log and the mining loop's, by name; known when the
+    /// The node's own log, by name; known when the
     /// node runs under `--root` (where `lattice up` sends its output).
     var logs: [String: URL] = [:]
 }
@@ -611,14 +594,6 @@ func addOperatorControlRoutes(
             guard let config = control.config else { throw OperatorConfigError.notOwned }
             return try await config.patch(Data(buffer: body), remote: remote)
         }
-    }
-    router.get("mining") { request, context in
-        if let mining = control.mining { return try json(await mining.status(), request: request, context: context) }
-        let mine = await control.config?.saved.mine
-        return try json(
-            MiningStatusResponse(enabled: false, running: false, pid: nil, restarts: 0, lastExit: nil, recipients: mine?.recipients ?? [:]),
-            request: request, context: context
-        )
     }
     router.get("logs") { request, context in
         let name = request.uri.queryParameters["file"].map(String.init) ?? "node"
