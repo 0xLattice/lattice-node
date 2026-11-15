@@ -52,9 +52,7 @@ struct Mine: AsyncParsableCommand {
                 throw CtlError("mining already running (pid \(pid))")
             }
             let process = Process()
-            process.executableURL = URL(
-                fileURLWithPath: CommandLine.arguments[0]
-            ).resolvingSymlinksInPath()
+            process.executableURL = currentExecutable
             process.arguments = ["mine", "run"] + options.runArguments
             let log = layout.logFile(for: "mine")
             try FileManager.default.createDirectory(

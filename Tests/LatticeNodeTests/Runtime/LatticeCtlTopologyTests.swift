@@ -159,6 +159,31 @@ final class LatticeCtlTopologyTests: XCTestCase {
         XCTAssertNil(none)
     }
 
+    /// The miner's binaries are found beside the real `lattice`, through a
+    /// symlink (as on PATH), not beside argv[0] or lattice-node.
+    func testSiblingBinariesResolveBesideTheRealExecutable() throws {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ctl-siblings-\(UUID().uuidString)")
+        let real = scratch.appendingPathComponent("opt/lattice/bin")
+        let onPath = scratch.appendingPathComponent("home/.local/bin")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: onPath, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        for name in ["lattice", "lattice-miner"] {
+            let file = real.appendingPathComponent(name)
+            try Data("#!/bin/sh\n".utf8).write(to: file)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
+        }
+        try FileManager.default.createSymbolicLink(
+            at: onPath.appendingPathComponent("lattice"), withDestinationURL: real.appendingPathComponent("lattice")
+        )
+        let found = try siblingBinary("lattice-miner", beside: onPath.appendingPathComponent("lattice"))
+        XCTAssertEqual(found.resolvingSymlinksInPath().path, real.appendingPathComponent("lattice-miner").resolvingSymlinksInPath().path)
+        XCTAssertThrowsError(try siblingBinary("lattice-no-such-binary", beside: onPath.appendingPathComponent("lattice")))
+        XCTAssertTrue(currentExecutable.path.hasPrefix("/"), currentExecutable.path)
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: currentExecutable.path))
+    }
+
     func testValidationRejectsInvalidOperationalValues() {
         XCTAssertThrowsError(try MinerConfig(recipients: ["Nexus": ""]).validated())
         XCTAssertThrowsError(try MinerConfig(workers: 0).validated())
