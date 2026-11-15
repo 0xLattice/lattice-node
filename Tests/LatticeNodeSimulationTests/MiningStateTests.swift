@@ -193,6 +193,49 @@ final class MiningStateTests: XCTestCase {
         XCTAssertTrue(effects.contains { if case .preflight(let recheck) = $0 { recheck.cid == job.cid } else { false } })
     }
 
+    /// A stale verdict carries no balances, so no budget: it is pooled only
+    /// into free room. An account over-committing through stale verdicts
+    /// into a full pool, however much it pays, evicts no one and drops no
+    /// journal row: each is refused `.full`.
+    func testStaleVerdictsIntoAFullPoolEvictNothing() throws {
+        var mining = MiningState(tipCID: "A", spec: testSpec(), config: MiningConfig(mempool: MempoolLimits(maxCount: 3)))
+        let peer = PeerID(key: "p", session: 1)
+        let (peerKey, attacker) = (CryptoUtils.generateKeyPair(), CryptoUtils.generateKeyPair())
+        let honest: [(Transaction, TransactionOrigin)] = [
+            (try transfer(nonce: 0), .local(replyID: 1)),
+            (try signed(peerKey, [AccountAction(owner: address(peerKey), delta: -2)], nonce: 0), .peer(peer)),
+            (try transfer(nonce: 1), .restored(addedAt: 1)),
+        ]
+        for (tx, origin) in honest {
+            guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: origin), now: 0).first
+            else { return XCTFail() }
+            _ = mining.step(.preflighted(job, .ready, balances: funded(job)), now: 0)
+        }
+        let pooled = Set(mining.mempool.items.map(\.cid))
+        let journaled = mining.journaled
+        XCTAssertEqual(pooled.count, 3)
+        XCTAssertEqual(journaled.count, 2)
+
+        var jobs: [PreflightJob] = []
+        for nonce in UInt64(0)..<4 {
+            let tx = try signed(attacker, [AccountAction(owner: address(attacker), delta: -1_000)], nonce: nonce)
+            guard case .preflight(let job)? = mining.step(
+                .transactionReceived(tx, origin: .submitted(replyID: 10 + nonce)), now: 1
+            ).first else { return XCTFail() }
+            jobs.append(job)
+        }
+        _ = mining.step(.tipMoved(TipMove(tipCID: "B")), now: 2)
+        for job in jobs {
+            let effects = mining.step(.preflighted(job, .ready, balances: [:]), now: 3)
+            XCTAssertTrue(effects.contains {
+                if case .transactionRefused(_, .full) = $0 { true } else { false }
+            }, "\(effects)")
+            for case .poolChanged(let delta) in effects { XCTAssertTrue(delta.removed.isEmpty, "\(delta)") }
+        }
+        XCTAssertEqual(Set(mining.mempool.items.map(\.cid)), pooled, "no honest or local entry evicted")
+        XCTAssertEqual(mining.journaled, journaled, "journal rows survive")
+    }
+
     /// A local submit joining a peer's admission is answered by a job of its
     /// own, run ahead of other work; the peer's job no longer counts.
     func testALocalOriginJoiningAPeerAdmissionGetsANewAwaitedJob() throws {
@@ -228,6 +271,32 @@ final class MiningStateTests: XCTestCase {
         XCTAssertEqual(other.pendingSubmitted, 1)
         // A peer's resend changes nothing.
         XCTAssertTrue(other.step(.transactionReceived(second, origin: .peer(peer)), now: 0).isEmpty)
+    }
+
+    /// Nobody waits on a restored journal row: its job is not awaited, though
+    /// it counts in the local bound. A local submit joining it is waited on,
+    /// and gets a fresh awaited job.
+    func testARestoredRowIsNotAwaitedUntilALocalSubmitJoinsIt() throws {
+        var mining = MiningState(tipCID: "A", spec: testSpec())
+        var jobs: [PreflightJob] = []
+        for nonce in 0..<4 {
+            let effects = mining.step(.transactionReceived(try transfer(nonce: UInt64(nonce)), origin: .restored(addedAt: 1)), now: 0)
+            guard case .preflight(let job)? = effects.first else { return XCTFail("\(effects)") }
+            jobs.append(job)
+        }
+        XCTAssertEqual(jobs.map(\.awaited), [false, false, false, false])
+        let joined = mining.step(.transactionReceived(jobs[0].transaction, origin: .local(replyID: 1)), now: 0)
+        guard case .preflight(let awaited)? = joined.first, joined.count == 1 else { return XCTFail("\(joined)") }
+        XCTAssertTrue(awaited.awaited)
+        XCTAssertNotEqual(awaited.id, jobs[0].id)
+        XCTAssertTrue(mining.step(.preflighted(jobs[0], .ready, balances: funded(jobs[0])), now: 1).isEmpty, "let go")
+        let admitted = mining.step(.preflighted(awaited, .ready, balances: funded(awaited)), now: 2)
+        XCTAssertTrue(admitted.contains { if case .transactionAdmitted(1, _, _, _) = $0 { true } else { false } }, "\(admitted)")
+        // A second local origin finds it awaited already: no new job.
+        let resent = mining.step(.transactionReceived(jobs[1].transaction, origin: .local(replyID: 2)), now: 2)
+        guard case .preflight(let second)? = resent.first else { return XCTFail("\(resent)") }
+        XCTAssertTrue(mining.step(.transactionReceived(jobs[1].transaction, origin: .local(replyID: 3)), now: 2).isEmpty)
+        XCTAssertTrue(second.awaited)
     }
 
     func testAMoveThatLeavesBlocksAsksForTheirTransactions() {

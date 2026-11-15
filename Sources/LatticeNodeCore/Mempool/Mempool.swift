@@ -306,8 +306,9 @@ public struct Mempool: Sendable {
     /// Pool a transaction preflight found ready. `balances` holds, for each
     /// account it debits, the balance preflight read on the tip; one
     /// missing counts as empty. Nil when none was read on the tip (a verdict
-    /// from a tip since moved): no account is shed for it, and the recheck
-    /// that follows rebalances (`rebalance(_:)`).
+    /// from a tip since moved): it is pooled only into free room, displacing,
+    /// shedding and evicting nothing, else refused `.full`; the recheck that
+    /// follows rebalances (`rebalance(_:)`).
     @discardableResult
     public mutating func submit(
         _ transaction: Transaction,
@@ -346,8 +347,16 @@ public struct Mempool: Sendable {
             if let holder = claimants[claim], let existing = entries[holder] { displaced[holder] = existing }
         }
         let claimsConflict = !displaced.isEmpty
+        guard let balances else {
+            guard !claimsConflict, entries.count < limits.maxCount, entry.size <= limits.maxBytes - byteCount else {
+                throw MempoolError.full
+            }
+            insert(entry)
+            var mutation = MempoolMutation(transactionCID: cid)
+            mutation.inserted = Self.item(entry)
+            return mutation
+        }
         for (account, debit) in entry.debits.sorted(by: { $0.key < $1.key }) {
-            guard let balances else { break }
             guard let shed = shed(account, toFit: debit, in: balances[account, default: 0], besides: displaced) else {
                 throw MempoolError.insufficientFunds
             }

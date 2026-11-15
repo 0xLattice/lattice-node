@@ -68,7 +68,7 @@ public struct TipMove: Sendable {
 ///   recheck again.
 ///
 /// `awaited` marks an admission an RPC is waiting on (a local or public
-/// submit, or a restored row): the executor runs those ahead of other work.
+/// submit among its origins): the executor runs those ahead of other work.
 ///
 /// `checksPolicies` is false for a pooled transaction: the chain's policies
 /// accepted it on admission, and every template, root or child, judges it
@@ -312,15 +312,23 @@ public struct MiningState: Sendable {
         case submitted
         case peer(PeerID)
         case returned
-
-        /// An RPC waits on its verdict.
-        var isAwaited: Bool { self == .local || self == .submitted }
     }
 
     private struct Admission {
         let transaction: Transaction
         var origins: [TransactionOrigin]
         var slot: Slot
+
+        /// An RPC waits on its verdict: a local or public submit is among
+        /// its origins (a restored row is not waited on).
+        var isAwaited: Bool { origins.contains(where: Self.isAnswered) }
+
+        static func isAnswered(_ origin: TransactionOrigin) -> Bool {
+            switch origin {
+            case .local, .submitted: true
+            case .peer, .returned, .restored: false
+            }
+        }
     }
 
     /// A template request waiting on a build, and the tip moves it has waited
@@ -450,8 +458,10 @@ public struct MiningState: Sendable {
             // submit a peer's or a returned one into its. One that now has an
             // RPC waiting is judged by a job run ahead of other work: the
             // job out is let go, and its verdict no longer counts.
-            let upgrades = slot.isAwaited && !admission.slot.isAwaited
-            if upgrades || (slot == .local && admission.slot != .local) {
+            let upgrades = Admission.isAnswered(origin) && !admission.isAwaited
+            let reslots = slot != admission.slot
+                && (slot == .local || (slot == .submitted && admission.slot != .local))
+            if reslots {
                 guard hasRoom(for: slot) else {
                     if case .submitted(let replyID) = origin {
                         turn.replies.append(.transactionRefused(replyID: replyID, .full))
@@ -537,7 +547,7 @@ public struct MiningState: Sendable {
     /// Issue `cid`'s admission preflight, unless one is outstanding.
     private mutating func preflight(_ cid: String, _ transaction: Transaction, _ turn: inout Turn) {
         guard admitting[cid] == nil else { return }
-        let awaited = admissions[cid]?.slot.isAwaited ?? false
+        let awaited = admissions[cid]?.isAwaited ?? false
         admitting[cid] = issue(cid, transaction, checksPolicies: true, awaited: awaited, &turn)
     }
 
