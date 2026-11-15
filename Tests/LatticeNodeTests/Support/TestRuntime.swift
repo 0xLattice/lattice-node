@@ -61,7 +61,7 @@ func makePublicReadApplication(
     healthClock: @escaping @Sendable () -> Double = PublicReadRateLimiter.monotonicSeconds,
     submit: Bool = false,
     fetches: PublicVolumeFetches? = nil
-) -> Application<RouterResponder<PublicReadRequestContext>> {
+) -> Application<RouterResponder<BasicRequestContext>> {
     makePublicReadApplication(
         reads: runtime.reads, levelReads: { Array(runtime.levelReads.values) }, host: host, port: port,
         peers: { ExplorerPeersResponse(count: runtime.peerCount, peers: []) },

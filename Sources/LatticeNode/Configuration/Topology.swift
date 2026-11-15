@@ -63,17 +63,13 @@ public struct Topology: Codable, Sendable {
     /// `--external-address`) for overlay announcements from NAT/proxy-fronted
     /// processes. Host only; the chain's listen port applies.
     public var externalAddress: String?
-    /// Per-client arrival-rate ceilings for the public read listener (the
-    /// node's `--public-read-rate` / `--public-read-expensive-rate`), in
-    /// requests per second. The client is the peer socket address, so a host
-    /// behind a proxy that presents ONE address for every client must set
-    /// these to `0` — otherwise the whole internet is throttled as one user.
-    /// Absent = the node's defaults.
+    /// Ignored by the node (`--public-read-rate` /
+    /// `--public-read-expensive-rate`, per-client limits that were removed).
+    /// Still accepted so an existing `lattice.json` keeps loading.
     public var publicReadRate: Double?
     public var publicReadExpensiveRate: Double?
     /// Listener-wide arrival-rate ceiling (`--public-read-max-rate`), in
-    /// requests per second. Address-agnostic, so it stays correct behind such
-    /// a proxy. Absent = the node's default; `0` disables it.
+    /// requests per second. Absent = the node's default; `0` disables it.
     public var publicReadMaxRate: Double?
     /// Volumes the public read listener reads from peers at once for
     /// readers when the node does not hold them (`--public-read-fetches`).

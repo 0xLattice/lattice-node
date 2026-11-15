@@ -236,9 +236,10 @@ carries nothing more for the pair.
 
 The public-read listener serves the bounded GET routes and never registers
 operator status, metrics, or mining handlers; it registers
-`POST /transactions` only with public submit on (below). Set all three read-rate controls to
-zero only behind a proxy that supplies its own per-client and global limits
-(`--public-submit-rate` is a fourth ceiling; it bounds only `POST /transactions`).
+`POST /transactions` only with public submit on (below). Its rate limits are
+listener-wide ceilings: `--public-read-max-rate` (default 200/s) for reads and
+`--public-submit-rate` for `POST /transactions`. Set them to zero only behind a
+proxy that supplies its own limits.
 The lattice-ops read replica uses nginx as the public boundary.
 
 A Volume a public reader asks for that the node does not hold is read from
@@ -371,15 +372,11 @@ What it costs and what it does not change:
   same fee-rate eviction, replacement and minimum rules as peer gossip, is
   never journaled, and cannot displace the operator's own submits except by
   paying a better fee rate, which any peer transaction could do too;
-- its own rate budget (`--public-submit-rate`, default 10/s listener-wide,
-  plus each client's expensive read budget), so submit load never spends the
-  read budget and the reverse;
+- its own rate budget (`--public-submit-rate`, default 10/s listener-wide),
+  so submit load never spends the read budget and the reverse;
 - with `publicReadURL` declared, the host also declares that it accepts
   submits; `GET /api/chain/endpoints` lists it in `submitEndpoints`, and
   wallets can confirm with `GET /api/chain/info` (`acceptsSubmit`).
-
-Behind a proxy that collapses client addresses (fly-proxy), set the per-client
-read rates to 0 as for reads; the submit listener budget still applies.
 
 ## Serving standing
 
@@ -753,6 +750,6 @@ wire revision and Nexus genesis.
 
 ### Public reads return 429
 
-Determine whether the code listener or nginx produced the response. Behind an
-L4 proxy that collapses source addresses, disable the node's per-client rates
-and keep a listener-wide rate plus trusted proxy-side client limits.
+Determine whether the code listener or nginx produced the response. The node's
+limits are listener-wide (`--public-read-max-rate`, `--public-submit-rate`); a
+429 from the node means the listener as a whole is over its ceiling.

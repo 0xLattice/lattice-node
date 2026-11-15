@@ -12,10 +12,8 @@ import LatticeNodeAPI
 
 /// The public read listener is the one surface an unauthenticated caller can
 /// drive as fast as it likes, and a directly exposed node has no proxy in front
-/// of it to bound that. These assert the two things that are easy to get wrong:
-/// that a limit exists at all on the expensive routes while `/health` stays
-/// exempt, and that the cheap-budget escape hatch — a path the ROUTER resolves
-/// to an expensive handler but a raw-string classifier does not — is closed.
+/// of it to bound that. These assert that the listener-wide ceilings refuse
+/// load while `/health` stays exempt.
 final class PublicReadRateLimitTests: XCTestCase {
     private func makeService(
         _ name: String
@@ -35,23 +33,20 @@ final class PublicReadRateLimitTests: XCTestCase {
         )
     }
 
-    /// At the shipped defaults the expensive per-client budget is 1 r/s with a
-    /// 10-second bank: 10 tokens, which 14 back-to-back requests cannot be
-    /// covered by (refill over the milliseconds they take is negligible). On a
-    /// listener with no limiter installed every one of them is served, so the
-    /// 429 assertion is what fails — and `/health` must answer 200 either way,
-    /// because a platform health check that public load can throttle turns load
-    /// into a depooled machine.
-    func testExpensiveRouteIsRefusedAtDefaultsWhileHealthStaysExempt() async throws {
+    /// A one-token listener bank: the second read is refused, and `/health`
+    /// must still answer 200, because a platform health check that public load
+    /// can throttle turns load into a depooled machine.
+    func testReadIsRefusedOverTheListenerCeilingWhileHealthStaysExempt() async throws {
         let (service, configuration) = try await makeService("public-read-rate")
         let app = makePublicReadApplication(
-            service: service, host: "127.0.0.1", port: 8081
+            service: service, host: "127.0.0.1", port: 8081,
+            limits: try PublicReadRateLimits.validated(listenerRate: 0.001)
         )
         let cid = configuration.nexusGenesisCID
 
         try await app.test(.router) { client in
             var statuses: [Int] = []
-            for _ in 0..<14 {
+            for _ in 0..<3 {
                 try await client.execute(
                     uri: "/api/block/\(cid)/children", method: .get, headers: [.authorization: testOperatorAuthorization]
                 ) { response in
@@ -60,57 +55,13 @@ final class PublicReadRateLimitTests: XCTestCase {
             }
             XCTAssertTrue(
                 statuses.contains(429),
-                "14 requests against a 10-token expensive bank must be refused at least once, got \(statuses)"
+                "3 requests against a 1-token listener bank must be refused at least once, got \(statuses)"
             )
 
             try await client.execute(uri: "/health", method: .get, headers: [.authorization: testOperatorAuthorization]) { response in
                 XCTAssertEqual(
                     response.status, .ok,
                     "/health is exempt from every limit"
-                )
-            }
-        }
-    }
-
-    /// The router resolves a path with `splitSequence`, which omits empty
-    /// components, so `//api/block//<cid>/children/` reaches the SAME expensive
-    /// handler as the canonical spelling. A classifier that compared the raw
-    /// path string would bill those requests to the general budget (50 tokens,
-    /// never exhausted here), leave the expensive bank full, and answer the
-    /// canonical path with whatever the handler returns instead of a 429.
-    func testEscapedSpellingSpendsTheBudgetOfTheRouteItReaches() async throws {
-        let (service, configuration) = try await makeService("public-read-escape")
-        let app = makePublicReadApplication(
-            service: service, host: "127.0.0.1", port: 8081
-        )
-        let cid = configuration.nexusGenesisCID
-        let escaped = "//api/block//\(cid)/children/"
-
-        // The classification itself, stated as an invariant rather than
-        // inferred from the HTTP result below.
-        XCTAssertEqual(
-            PublicReadRouteClass(method: .get, path: escaped), .expensive
-        )
-        XCTAssertEqual(
-            PublicReadRouteClass(method: .get, path: "/api/block/\(cid)/children"),
-            .expensive
-        )
-        XCTAssertEqual(
-            PublicReadRouteClass(method: .get, path: "/api/transaction/\(cid)"),
-            .expensive
-        )
-
-        try await app.test(.router) { client in
-            // Spend the expensive bank ONLY through the escaped spelling.
-            for _ in 0..<12 {
-                try await client.execute(uri: escaped, method: .get, headers: [.authorization: testOperatorAuthorization]) { _ in }
-            }
-            try await client.execute(
-                uri: "/api/block/\(cid)/children", method: .get, headers: [.authorization: testOperatorAuthorization]
-            ) { response in
-                XCTAssertEqual(
-                    response.status, .tooManyRequests,
-                    "the escaped spelling routes to the expensive handler, so it must spend the expensive budget"
                 )
             }
         }
@@ -123,13 +74,16 @@ final class PublicReadRateLimitTests: XCTestCase {
     /// spending the budget.
     func testARefusalStillCarriesCORSSoAPageCanSeeIt() async throws {
         let (service, configuration) = try await makeService("public-read-cors-refusal")
-        let app = makePublicReadApplication(service: service, host: "127.0.0.1", port: 8081)
+        let app = makePublicReadApplication(
+            service: service, host: "127.0.0.1", port: 8081,
+            limits: try PublicReadRateLimits.validated(listenerRate: 0.001)
+        )
         let path = "/api/block/\(configuration.nexusGenesisCID)/children"
         let origin: HTTPFields = [.origin: "https://stoa.example"]
         try await app.test(.router) { client in
             var refused: HTTPResponse.Status?
             var allowOrigin: String?
-            for _ in 0..<14 {
+            for _ in 0..<3 {
                 try await client.execute(uri: path, method: .get, headers: origin) { response in
                     if response.status == .tooManyRequests {
                         refused = response.status
@@ -137,7 +91,7 @@ final class PublicReadRateLimitTests: XCTestCase {
                     }
                 }
             }
-            XCTAssertEqual(refused, .tooManyRequests, "the expensive bank runs out")
+            XCTAssertEqual(refused, .tooManyRequests, "the listener bank runs out")
             XCTAssertEqual(allowOrigin, "*", "a refusal carries CORS, so a page sees the 429")
             let preflight: HTTPFields = [.origin: "https://stoa.example", .accessControlRequestMethod: "GET"]
             try await client.execute(uri: path, method: .options, headers: preflight) { response in
@@ -147,37 +101,9 @@ final class PublicReadRateLimitTests: XCTestCase {
         }
     }
 
-    /// Every route's budget, one-for-one with the nginx `zone=expensive`
-    /// locations.
-    func testRouteClassificationMatchesTheExpensiveAllowlist() {
-        // Paths only: `URI.path` never carries the query string, so a
-        // query-bearing spelling is not an input this ever sees.
-        for path in [
-            "/api/block/bafy",
-            "/api/block/bafy/transactions",
-            "/api/block/bafy/children",
-            "/api/chain/endpoints",
-            "/api/deposits",
-            "/volumes/bafy",
-            "/volumes",
-            "//volumes/",
-        ] {
-            XCTAssertEqual(
-                PublicReadRouteClass(method: .get, path: path), .expensive, path
-            )
-        }
-        for path in [
-            "/transactions/bafy",
-            "/accounts/bafy",
-            "/api/block/latest",
-            "/api/blocks",
-            "/api/peers",
-            "/api/mempool",
-            "/unknown",
-        ] {
-            XCTAssertEqual(
-                PublicReadRouteClass(method: .get, path: path), .general, path
-            )
+    func testRouteClassification() {
+        for path in ["/api/block/bafy/children", "/volumes", "/transactions/bafy", "/unknown"] {
+            XCTAssertEqual(PublicReadRouteClass(method: .get, path: path), .read, path)
         }
         XCTAssertEqual(PublicReadRouteClass(method: .get, path: "/health"), .exempt)
         XCTAssertEqual(PublicReadRouteClass(method: .head, path: "/health"), .exempt)
@@ -190,115 +116,38 @@ final class PublicReadRateLimitTests: XCTestCase {
         for method in [HTTPRequest.Method.post, .put, .delete, .options] {
             XCTAssertEqual(
                 PublicReadRouteClass(method: method, path: "/health"),
-                .general,
+                .read,
                 "\(method) /health must not be exempt"
             )
         }
     }
 
-    /// `URI.path` excludes the query string, so a caller-chosen query cannot
-    /// steer an expensive route onto the cheaper budget. Driven over HTTP,
-    /// because that is where the classified path actually comes from.
-    func testQueryStringDoesNotMoveARequestOffTheExpensiveBudget() async throws {
-        let (service, _) = try await makeService("public-read-query")
-        let app = makePublicReadApplication(
-            service: service, host: "127.0.0.1", port: 8081
-        )
-
-        try await app.test(.router) { client in
-            var statuses: [Int] = []
-            for _ in 0..<12 {
-                try await client.execute(
-                    uri: "/api/block/bafy/transactions?offset=1", method: .get, headers: [.authorization: testOperatorAuthorization]
-                ) { response in
-                    statuses.append(response.status.code)
-                }
-            }
-            XCTAssertTrue(
-                statuses.contains(429),
-                "a query must not move /api/block/:id/transactions onto the general budget, got \(statuses)"
-            )
-        }
-    }
-
-    func testBucketsAreIndependentPerClientAndPerBudgetAndRefillOnTheClock() async throws {
+    func testListenerBucketRefillsOnTheClock() async throws {
         let clock = TestClock()
-        let limits = try PublicReadRateLimits.validated(
-            generalRate: 25, expensiveRate: 1, listenerRate: 200
-        )
+        let limits = try PublicReadRateLimits.validated(listenerRate: 2)
         let limiter = try XCTUnwrap(
             PublicReadRateLimiter(limits: limits, clock: { clock.now })
         )
 
-        // Expensive bank: 1 r/s x 10 s = 10 tokens.
-        for token in 0..<10 {
-            let admitted = await limiter.admit(client: "a", route: .expensive)
+        // Listener bank: 2 r/s x 1 s = 2 tokens.
+        for token in 0..<2 {
+            let admitted = await limiter.admit(route: .read)
             XCTAssertTrue(admitted, "token \(token) must be inside the bank")
         }
-        var admitted = await limiter.admit(client: "a", route: .expensive)
-        XCTAssertFalse(admitted, "the 11th request exceeds the bank")
-
-        // A different client key carries its own bank.
-        admitted = await limiter.admit(client: "b", route: .expensive)
-        XCTAssertTrue(admitted)
-        // ...and the same client's general budget is a separate bank.
-        admitted = await limiter.admit(client: "a", route: .general)
-        XCTAssertTrue(admitted)
+        var admitted = await limiter.admit(route: .read)
+        XCTAssertFalse(admitted, "the 3rd request exceeds the bank")
 
         // Refill is on the injected clock, never wall time.
-        clock.advance(0.5)
-        admitted = await limiter.admit(client: "a", route: .expensive)
+        clock.advance(0.25)
+        admitted = await limiter.admit(route: .read)
         XCTAssertFalse(admitted, "half a token is not a token")
-        clock.advance(1)
-        admitted = await limiter.admit(client: "a", route: .expensive)
-        XCTAssertTrue(admitted, "a second of refill at 1 r/s buys one request")
-
-        // The exemption is unconditional, not a large budget.
-        for _ in 0..<1_000 {
-            let health = await limiter.admit(client: "a", route: .exempt)
-            XCTAssertTrue(health)
-        }
-    }
-
-    /// The tracked-client map is a ceiling, never a growth path: an attacker
-    /// cycling source addresses must not be able to make the node allocate.
-    func testTrackedClientMapIsCappedAndEvictsRefilledEntriesFirst() async throws {
-        let clock = TestClock()
-        // Ceiling = max(rate) x longest bank = max(1, 1, 0) x 10 = 10 entries.
-        // The listener ceiling is off so this isolates the map.
-        let limits = try PublicReadRateLimits.validated(
-            generalRate: 1, expensiveRate: 1, listenerRate: 0
-        )
-        let limiter = try XCTUnwrap(
-            PublicReadRateLimiter(limits: limits, clock: { clock.now })
-        )
-
-        for index in 0..<10 {
-            _ = await limiter.admit(client: "client-\(index)", route: .expensive)
-        }
-        var tracked = await limiter.trackedClientCount
-        XCTAssertEqual(tracked, 10)
-
-        // An 11th address while every tracked bank is still draining: nothing
-        // is evictable, so it goes untracked rather than growing the map.
-        _ = await limiter.admit(client: "client-overflow", route: .expensive)
-        tracked = await limiter.trackedClientCount
-        XCTAssertEqual(tracked, 10, "the map must not grow past its ceiling")
-
-        // Once those banks have fully refilled they carry no state worth
-        // keeping, so they are the first thing evicted to make room.
-        clock.advance(20)
-        _ = await limiter.admit(client: "client-late", route: .expensive)
-        tracked = await limiter.trackedClientCount
-        XCTAssertEqual(
-            tracked, 1, "fully refilled entries must be evicted before the map blocks"
-        )
+        clock.advance(0.5)
+        admitted = await limiter.admit(route: .read)
+        XCTAssertTrue(admitted, "half a second of refill at 2 r/s buys one request")
     }
 
     func testAllZeroRatesDisableTheLimiterEntirely() throws {
-        let off = try PublicReadRateLimits.validated(
-            generalRate: 0, expensiveRate: 0, listenerRate: 0, submitRate: 0
-        )
+        let off = try PublicReadRateLimits.validated(listenerRate: 0, submitRate: 0)
         XCTAssertTrue(off.isFullyDisabled)
         XCTAssertNil(PublicReadRateLimiter(limits: off))
     }
@@ -306,19 +155,15 @@ final class PublicReadRateLimitTests: XCTestCase {
     /// A bad value in a unit file must name the flag that carried it, not trap
     /// the whole node on a `precondition`.
     func testBadRatesAreRefusedByFlagName() {
-        let cases: [(Double, Double, Double, String)] = [
-            (-1, 1, 1, "--public-read-rate"),
-            (1, -0.5, 1, "--public-read-expensive-rate"),
-            (1, 1, .nan, "--public-read-max-rate"),
-            (1, 1, .infinity, "--public-read-max-rate"),
+        let cases: [(Double, Double, String)] = [
+            (-1, 1, "--public-read-max-rate"),
+            (.nan, 1, "--public-read-max-rate"),
+            (.infinity, 1, "--public-read-max-rate"),
+            (1, -1, "--public-submit-rate"),
         ]
-        for (general, expensive, listener, flag) in cases {
+        for (listener, submit, flag) in cases {
             XCTAssertThrowsError(
-                try PublicReadRateLimits.validated(
-                    generalRate: general,
-                    expensiveRate: expensive,
-                    listenerRate: listener
-                ),
+                try PublicReadRateLimits.validated(listenerRate: listener, submitRate: submit),
                 flag
             ) { error in
                 XCTAssertTrue(
@@ -333,61 +178,49 @@ final class PublicReadRateLimitTests: XCTestCase {
         }
     }
 
-    /// The port is dropped: a client opening a fresh connection per request
-    /// gets a fresh source port, and keying on it would hand every request a
-    /// full bank.
-    func testClientKeyDropsThePort() throws {
-        let first = try SocketAddress(ipAddress: "203.0.113.7", port: 40_001)
-        let second = try SocketAddress(ipAddress: "203.0.113.7", port: 51_999)
-        let other = try SocketAddress(ipAddress: "203.0.113.8", port: 40_001)
-        typealias Key = PublicReadRateLimitMiddleware<PublicReadRequestContext>
-        XCTAssertEqual(Key.clientKey(first), Key.clientKey(second))
-        XCTAssertNotEqual(Key.clientKey(first), Key.clientKey(other))
-        XCTAssertEqual(Key.clientKey(first), "203.0.113.7")
+    /// The removed per-client flags still parse, so an existing unit file or
+    /// deploy entrypoint keeps starting; the node ignores them.
+    func testRemovedPerClientFlagsStillParse() throws {
+        let command = try LatticeNodeCommand.parse([
+            "--public-read-rate", "0", "--public-read-expensive-rate", "0",
+        ])
+        XCTAssertEqual(command.publicReadRate, 0)
+        XCTAssertEqual(command.publicReadExpensiveRate, 0)
     }
 
-    /// The defaults are the lattice-ops read replica's nginx numbers, and the
-    /// banks are its bursts carried as `burst / rate` so an operator changing a
+    /// The default is the lattice-ops read replica's nginx number, and the
+    /// bank is its burst carried as `burst / rate` so an operator changing the
     /// rate keeps the tuned burstiness.
     func testDefaultsReproduceTheReadReplicaLimits() {
         let limits = PublicReadRateLimits.default
-        XCTAssertEqual(limits.generalRate, 25)
-        XCTAssertEqual(limits.expensiveRate, 1)
         XCTAssertEqual(limits.listenerRate, 200)
-        // nginx burst= values: 50, 10, 200.
-        XCTAssertEqual(
-            limits.generalRate * PublicReadRateLimits.generalBankSeconds, 50
-        )
-        XCTAssertEqual(
-            limits.expensiveRate * PublicReadRateLimits.expensiveBankSeconds, 10
-        )
+        // nginx burst=200.
         XCTAssertEqual(
             limits.listenerRate * PublicReadRateLimits.listenerBankSeconds, 200
         )
     }
+
     /// The deliberate decision behind the `/health` exemption: it is exempt
-    /// from the LISTENER bucket too, not just the per-client ones. Charging it
-    /// there would mean a sustained flood empties the bucket, the health check
-    /// 429s, and the platform depools a machine that carries every chain in the
-    /// path — load amplified into an outage. The cost is bounded by collapsing
-    /// the work instead (see the snapshot-cache tests below).
-    func testExemptRouteIsNotChargedToTheListenerBucketEither() async throws {
+    /// from the listener bucket. Charging it there would mean a sustained flood
+    /// empties the bucket, the health check 429s, and the platform depools a
+    /// machine that carries every chain in the path — load amplified into an
+    /// outage. The cost is bounded by collapsing the work instead (see the
+    /// snapshot-cache tests below).
+    func testExemptRouteIsNotChargedToTheListenerBucket() async throws {
         let clock = TestClock()
         // Listener bank = max(1, 1 x 1) = exactly one token.
-        let limits = try PublicReadRateLimits.validated(
-            generalRate: 0, expensiveRate: 0, listenerRate: 1
-        )
+        let limits = try PublicReadRateLimits.validated(listenerRate: 1)
         let limiter = try XCTUnwrap(
             PublicReadRateLimiter(limits: limits, clock: { clock.now })
         )
 
-        var admitted = await limiter.admit(client: "a", route: .general)
+        var admitted = await limiter.admit(route: .read)
         XCTAssertTrue(admitted)
-        admitted = await limiter.admit(client: "a", route: .general)
+        admitted = await limiter.admit(route: .read)
         XCTAssertFalse(admitted, "the listener bank is spent")
         // Same instant, same empty listener bucket: the health check still wins.
         for _ in 0..<100 {
-            let health = await limiter.admit(client: "a", route: .exempt)
+            let health = await limiter.admit(route: .exempt)
             XCTAssertTrue(
                 health,
                 "a health check must never be refused by public load"
@@ -396,35 +229,22 @@ final class PublicReadRateLimitTests: XCTestCase {
     }
 
     /// Public submit has its own listener budget: a submit flood never spends
-    /// the read listener's, nor reads the submit one's, and each submitting
-    /// client is billed to its expensive per-client budget.
+    /// the read listener's, nor reads the submit one's.
     func testSubmitIsClassifiedAndBilledToItsOwnListenerBudget() async throws {
         XCTAssertEqual(PublicReadRouteClass(method: .post, path: "/transactions"), .submit)
         XCTAssertEqual(PublicReadRouteClass(method: .post, path: "//transactions/"), .submit)
-        XCTAssertEqual(PublicReadRouteClass(method: .get, path: "/transactions"), .general)
+        XCTAssertEqual(PublicReadRouteClass(method: .get, path: "/transactions"), .read)
         let clock = TestClock()
-        let limits = try PublicReadRateLimits.validated(
-            generalRate: 0, expensiveRate: 0, listenerRate: 1, submitRate: 1
-        )
+        let limits = try PublicReadRateLimits.validated(listenerRate: 1, submitRate: 1)
         let limiter = try XCTUnwrap(PublicReadRateLimiter(limits: limits, clock: { clock.now }))
-        var admitted = await limiter.admit(client: "a", route: .submit)
+        var admitted = await limiter.admit(route: .submit)
         XCTAssertTrue(admitted)
-        admitted = await limiter.admit(client: "b", route: .submit)
+        admitted = await limiter.admit(route: .submit)
         XCTAssertTrue(admitted, "a two-second bank")
-        admitted = await limiter.admit(client: "c", route: .submit)
+        admitted = await limiter.admit(route: .submit)
         XCTAssertFalse(admitted, "the submit listener bank is spent")
-        admitted = await limiter.admit(client: "c", route: .general)
+        admitted = await limiter.admit(route: .read)
         XCTAssertTrue(admitted, "reads keep their own listener budget")
-
-        let perClient = try XCTUnwrap(PublicReadRateLimiter(limits: try PublicReadRateLimits.validated(
-            generalRate: 0, expensiveRate: 1, listenerRate: 0, submitRate: 0
-        ), clock: { clock.now }))
-        for _ in 0..<10 {
-            let within = await perClient.admit(client: "a", route: .submit)
-            XCTAssertTrue(within)
-        }
-        let over = await perClient.admit(client: "a", route: .submit)
-        XCTAssertFalse(over, "one client's submits draw on its expensive budget")
     }
 
     /// What bounds `/health` instead of a rate limit: the work collapses.

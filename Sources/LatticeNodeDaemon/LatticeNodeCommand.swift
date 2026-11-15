@@ -119,13 +119,13 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Public read-only HTTP port; binds all interfaces and serves ONLY the bounded GET read routes (the read-replica allowlist, enforced in code). Chain data is public; this exposes no operator or write surface.")
     var publicReadPort: UInt16?
 
-    @Option(help: "Per-client arrival-rate ceiling for the general public read routes, in requests per second. The client is the PEER SOCKET ADDRESS (no forwarded-for header is trusted), so behind a proxy that presents one address for every client this throttles the whole internet as one user — set it to 0 there. 0 disables this ceiling.")
-    var publicReadRate = PublicReadRateLimits.defaultGeneralRate
+    @Option(help: ArgumentHelp("Ignored: per-client read limits were removed. Accepted so existing configurations keep starting.", visibility: .hidden))
+    var publicReadRate: Double?
 
-    @Option(help: "Per-client arrival-rate ceiling, in requests per second, for the expensive public reads: a block's detail, /transactions or /children (hundreds of content fetches). Keyed like --public-read-rate; 0 disables it.")
-    var publicReadExpensiveRate = PublicReadRateLimits.defaultExpensiveRate
+    @Option(help: ArgumentHelp("Ignored: per-client read limits were removed. Accepted so existing configurations keep starting.", visibility: .hidden))
+    var publicReadExpensiveRate: Double?
 
-    @Option(help: "Listener-wide arrival-rate ceiling for the public read port, in requests per second. Address-agnostic, so it remains correct behind a proxy that collapses every client onto one address. 0 disables it; all three rates 0 is no rate limiting at all.")
+    @Option(help: "Listener-wide arrival-rate ceiling for the public read port, in requests per second. 0 disables it; with --public-submit-rate 0 too, there is no rate limiting at all.")
     var publicReadMaxRate = PublicReadRateLimits.defaultListenerRate
 
     @Option(help: "Volumes the public read port reads from peers at once for readers when this node does not hold them. Each is checked against its CID, served, and not kept; readers asking for the same Volume share one read, and past this many a reader waits, first come first served, for a place (up to 30 s, then 503). At most as many run as fit, at 64 MiB each, in half of --serving-max-in-flight-volume-bytes (and at least one), so the node's own sync keeps the other half. 0: the port serves only the Volumes this node holds.")
@@ -137,7 +137,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Flag(help: "Also accept POST /transactions on the public read port (operator choice; default off). Same body and answer as the loopback route, body capped, its own listener rate budget (--public-submit-rate); a public submit is never journaled and is admitted under the pool's ordinary capacity rules, with no local priority. Declared beside --public-read-url to peers. Requires --public-read-port.")
     var publicSubmit = false
 
-    @Option(help: "Listener-wide arrival-rate ceiling for public POST /transactions, in requests per second, separate from the read budgets; each client is also held to --public-read-expensive-rate. 0 disables it.")
+    @Option(help: "Listener-wide arrival-rate ceiling for public POST /transactions, in requests per second, separate from the read budget. 0 disables it.")
     var publicSubmitRate = PublicReadRateLimits.defaultSubmitRate
 
     @Option(help: "The smallest fee (a transaction's balance excess) this node admits to its pool, at every hosted level. Node relay policy, never consensus: blocks carrying cheaper transactions stay valid. Reported as minRelayFee by GET /api/chain/info. 0 admits any fee, and pool space is then free to hold.")
@@ -338,9 +338,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         guard stateWindow.isEmpty || state == .recent else {
             throw ValidationError("--state-window applies to --state recent only")
         }
+        if publicReadRate != nil { print("warning: --public-read-rate is ignored (per-client read limits were removed)") }
+        if publicReadExpensiveRate != nil { print("warning: --public-read-expensive-rate is ignored (per-client read limits were removed)") }
         let publicReadLimits = try PublicReadRateLimits.validated(
-            generalRate: publicReadRate,
-            expensiveRate: publicReadExpensiveRate,
             listenerRate: publicReadMaxRate,
             submitRate: publicSubmitRate
         )
@@ -722,12 +722,10 @@ func makePublicReadApplication(
     endpoints: @escaping ChainEndpointsLookup = { _ in nil },
     submit: PublicSubmit? = nil,
     fetches: PublicVolumeFetches? = nil
-) -> Application<RouterResponder<PublicReadRequestContext>> {
+) -> Application<RouterResponder<BasicRequestContext>> {
     // This listener faces the public internet with nothing in front of it, so
-    // it carries its own arrival-rate ceilings. Its context is NOT
-    // BasicRequestContext: the peer socket address is the only client identity
-    // available here, and BasicRequestContext does not carry one.
-    let router = Router(context: PublicReadRequestContext.self)
+    // it carries its own arrival-rate ceilings.
+    let router = Router(context: BasicRequestContext.self)
     // CORS is scoped to READ methods only. The POST write routes stay off the
     // allow-list on purpose: they consume application/json, so a cross-origin
     // browser POST needs a preflight — denying .post here keeps those routes
@@ -745,7 +743,7 @@ func makePublicReadApplication(
     // Middleware applies only to routes registered AFTER this call, so the
     // limiter must be installed before the routes it is meant to cover.
     if let limiter = PublicReadRateLimiter(limits: limits) {
-        router.add(middleware: PublicReadRateLimitMiddleware<PublicReadRequestContext>(
+        router.add(middleware: PublicReadRateLimitMiddleware<BasicRequestContext>(
             limiter: limiter
         ))
     }
