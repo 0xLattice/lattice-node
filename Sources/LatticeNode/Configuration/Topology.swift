@@ -7,7 +7,6 @@
 
 import Foundation
 import Lattice
-import LatticeNode
 
 /// `peers` in `lattice.json`: an object keyed by chain path. An array is
 /// Nexus's list, as every file written before chains had lists of their own.
@@ -184,7 +183,7 @@ public struct Topology: Codable, Sendable {
 
     /// The warning for a lattice.json that still holds `mine`.
     public static let retiredMiningWarning =
-        "mine in \(fileName) is no longer used by the node; the miner reads \(MinerConfig.fileName)"
+        "mine in \(fileName) is no longer used by the node; the miner reads miner.json"
 
     /// Whether the lattice.json under `root` still holds `mine`.
     public static func holdsRetiredMining(root: URL) -> Bool {

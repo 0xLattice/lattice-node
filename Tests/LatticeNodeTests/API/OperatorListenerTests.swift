@@ -3,7 +3,6 @@ import Foundation
 import Hummingbird
 import HummingbirdTesting
 import Lattice
-import LatticeCtlCore
 import XCTest
 @testable import LatticeNode
 @testable import LatticeNodeDaemon

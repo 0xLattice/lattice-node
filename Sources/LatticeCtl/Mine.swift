@@ -8,6 +8,7 @@ import FoundationNetworking
 #endif
 import ArgumentParser
 import LatticeCtlCore
+import LatticeNode
 import LatticeMinerCore
 import LatticeMiningCoordinator
 import LatticeProcessWait

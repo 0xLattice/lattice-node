@@ -6,7 +6,6 @@
 
 import Foundation
 import Lattice
-import LatticeNode
 
 extension Topology {
     /// The node flags this configuration stands for under `layout`: what
@@ -77,7 +76,7 @@ extension Topology {
             throw CtlError("a configuration change is one JSON object (a merge patch of \(Self.fileName))")
         }
         guard changes[Self.retiredMiningKey] == nil else {
-            throw CtlError("\(Self.fileName) holds no mining settings: the miner is a separate process and reads its own \(MinerConfig.fileName)")
+            throw CtlError("\(Self.fileName) holds no mining settings: the miner is a separate process and reads its own miner.json")
         }
         let merged = Self.merge(try jsonObject(), changes)
         return try Self.load(data: JSONSerialization.data(withJSONObject: merged))
