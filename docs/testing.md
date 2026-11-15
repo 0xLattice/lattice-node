@@ -82,7 +82,7 @@ transport primitive suites; this repository tests the node-facing integration.
 
 Pull requests run strict-concurrency builds on Linux and macOS, unit/integration
 tests, the simulator, wire fuzzing, SwiftLint, deployment configuration checks,
-the nginx public-read allowlist, Docker builds, reproducible Linux builds, and
+Docker builds, reproducible Linux builds, and
 the dedicated operator E2E lane. Sanitizers run on main and merge-queue pushes.
 
 Release jobs run on every pull request as well as release events. They package

@@ -2,9 +2,9 @@
 //
 // A node exposing `--public-read-port` directly has no proxy in front of it,
 // so nothing else bounds how fast the public internet can ask it for the
-// expensive reads. The read-replica gets these limits from nginx
-// (deploy/read-replica/nginx.conf); a directly exposed node has to enforce
-// them itself, and the numbers here are that file's, not taste.
+// expensive reads. The lattice-ops read replica gets these limits from its
+// nginx; a directly exposed node has to enforce them itself, and the numbers
+// here are that file's, not taste.
 //
 // Client identity is the peer socket address and nothing else. A directly
 // exposed node has no trusted header, so a forwarded-for header is never read.

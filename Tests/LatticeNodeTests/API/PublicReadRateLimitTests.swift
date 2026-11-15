@@ -346,7 +346,7 @@ final class PublicReadRateLimitTests: XCTestCase {
         XCTAssertEqual(Key.clientKey(first), "203.0.113.7")
     }
 
-    /// The defaults are `deploy/read-replica/nginx.conf`'s numbers, and the
+    /// The defaults are the lattice-ops read replica's nginx numbers, and the
     /// banks are its bursts carried as `burst / rate` so an operator changing a
     /// rate keeps the tuned burstiness.
     func testDefaultsReproduceTheReadReplicaLimits() {

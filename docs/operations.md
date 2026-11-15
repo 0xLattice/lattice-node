@@ -24,8 +24,8 @@ Before exposing a node:
 4. List hosted paths parent first and keep each child spec immutable.
 5. Configure at least two independent bootstrap peers.
 6. Set `externalAddress` when the observed source address is not dialable.
-7. Keep RPC on loopback. Use `publicRead` or the checked-in nginx allowlist for
-   public reads.
+7. Keep RPC on loopback. Use `publicRead` or a proxy allowing no more than it
+   for public reads.
 8. Configure a mining recipient for every chain that should pay rewards.
 9. Reserve enough disk for unbounded fact history and retained content, or
    set `blockBodies` and `state` (see "What a node keeps").
@@ -121,9 +121,8 @@ answers without the pinned key is refused.
 - A different key behind a name needs a release, because the key is what a
   node accepts.
 
-The deployed hosts list each other by the same names
-(`deploy/read-replica/entrypoint.sh`), so a host that moves is found by
-everyone through one record.
+The deployed hosts list each other by the same names, so a host that moves
+is found by everyone through one record.
 
 ### Remembered peers
 
@@ -240,7 +239,7 @@ operator status, metrics, or mining handlers; it registers
 `POST /transactions` only with public submit on (below). Set all three read-rate controls to
 zero only behind a proxy that supplies its own per-client and global limits
 (`--public-submit-rate` is a fourth ceiling; it bounds only `POST /transactions`).
-The example Fly read replica uses nginx as the public boundary.
+The lattice-ops read replica uses nginx as the public boundary.
 
 A Volume a public reader asks for that the node does not hold is read from
 peers, at most `--public-read-fetches` at once (fewer when half of

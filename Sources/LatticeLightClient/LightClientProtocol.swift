@@ -5,8 +5,8 @@ import cashew
 // Module 10 (layer cleanup) — ownership decision: `LatticeLightClient` is a
 // BLESSED lower-layer client package, deliberately kept OUT of the daemon. It
 // depends only on Lattice + cashew + VolumeBroker (never LatticeNode), so a
-// light client / the `LatticeProofVerifier` executable can verify a state
-// witness without booting any node/RPC machinery. It is not folded into Lattice
+// light client can verify a state witness without booting any node/RPC
+// machinery. It is not folded into Lattice
 // because that would force the core consensus library to depend on VolumeBroker;
 // keeping it a first-class client target gives clients a stable import path
 // while leaving proof verification daemon-free. Do NOT move this into LatticeNode.
