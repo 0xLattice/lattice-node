@@ -11,25 +11,43 @@ import LatticeNodeAPI
 /// node writes at every start, which every route but /health requires; or a
 /// remote node's operator listener (`--operator-listen`) with a bearer token.
 struct NodeRPC: Sendable {
-    let baseURL: String
     let cookieFile: URL?
     let token: String?
+    private let remoteURL: String?
+    private let addressFile: URL?
+    private let configuredPort: UInt16
 
-    init(port: UInt16, cookieFile: URL) {
-        self.baseURL = "http://127.0.0.1:\(port)"
-        self.cookieFile = cookieFile
-        self.token = nil
-    }
-
+    /// The local node under `layout`, wherever it listens now.
     init(_ topology: Topology, _ layout: HostLayout) {
-        self.init(port: topology.rpc, cookieFile: layout.rpcCookie)
+        self.remoteURL = nil
+        self.addressFile = layout.rpcAddress
+        self.configuredPort = topology.rpc
+        self.cookieFile = layout.rpcCookie
+        self.token = nil
     }
 
     /// A remote node's operator listener, e.g. http://10.0.0.5:8090.
     init(url: String, token: String) {
-        self.baseURL = url.hasSuffix("/") ? String(url.dropLast()) : url
+        self.remoteURL = url.hasSuffix("/") ? String(url.dropLast()) : url
+        self.addressFile = nil
+        self.configuredPort = 0
         self.cookieFile = nil
         self.token = token
+    }
+
+    /// Where the node listens: the remote node's URL; the local node's
+    /// own record of its listener, read again each time (a restart may move
+    /// it); or, with no record (a node not yet started, or one older than
+    /// it), the port lattice.json gives. A record a crashed node left names
+    /// a port nothing answers on (refused at once, never waited on), and the
+    /// next start replaces it as soon as it holds the storage.
+    var baseURL: String {
+        if let remoteURL { return remoteURL }
+        if let addressFile, let text = try? String(contentsOf: addressFile, encoding: .utf8) {
+            let url = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !url.isEmpty { return url }
+        }
+        return "http://127.0.0.1:\(configuredPort)"
     }
 
     /// A request to `path`, naming a child chain with `?chainPath=`, carrying

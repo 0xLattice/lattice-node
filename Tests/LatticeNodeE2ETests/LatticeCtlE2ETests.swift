@@ -1011,6 +1011,27 @@ extension LatticeCtlE2ETests {
         XCTAssertTrue(collected.contains(Topology.fileName), collected)
     }
 
+    /// A changed `rpc` waits for a restart; until then the CLI reaches the
+    /// node where it listens, and after it, where it moved.
+    func testTheCLIFollowsTheNodeToANewRPCPort() async throws {
+        let host = try await bringUpMiningHost(miner: nil)
+        let moved = randomPorts(1)[0]
+        let set = try await runCtl(["config", "set", "rpc=\(moved)"], root: host.root)
+        XCTAssertTrue(set.contains("waiting for a restart"), set)
+        let before = try await runCtl(["status"], root: host.root)
+        XCTAssertTrue(before.contains("Nexus: active"), before)
+        XCTAssertTrue(before.contains("waiting for a restart: rpc"), before)
+        _ = try await runCtl(["restart"], root: host.root)
+        XCTAssertEqual(host.supervisor.exits.last, 75, "a restart is an exit its process manager starts again")
+        let after = try await runCtl(["status"], root: host.root)
+        XCTAssertTrue(after.contains("Nexus: "), after)
+        XCTAssertFalse(after.contains("waiting for a restart"), after)
+        let onMoved = await health(moved)
+        XCTAssertNotNil(onMoved, "the node listens on the new port")
+        let onOld = await health(host.nexusRPC)
+        XCTAssertNil(onOld, "and no longer on the old one")
+    }
+
     func testANodeIsOperatedRemotelyThroughItsOperatorListener() async throws {
         let alpha = "Nexus/Alpha"
         let scratch = FileManager.default.temporaryDirectory

@@ -33,6 +33,12 @@ extension LatticeNodeCommand {
         // run never authenticates against this one.
         let auth = try LoopbackRPCAuth.createCookie(at: cookieFile, allowedOrigins: rpcAllowedOrigins)
         defer { try? FileManager.default.removeItem(at: cookieFile) }
+        // Where this process listens, for the CLI on the same root: its
+        // lattice.json may already say where the next start will.
+        let rpcAddress = HostLayout.rpcAddress(storage: configuration.storagePath)
+        let rpcHost = rpcBind.contains(":") ? "[\(rpcBind)]" : rpcBind
+        try Data("http://\(rpcHost):\(rpcPort)\n".utf8).write(to: rpcAddress, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: rpcAddress) }
         let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration)
         let peers: @Sendable () async -> ExplorerPeersResponse = {
             ExplorerPeersResponse(count: runtime.peerCount, peers: [])

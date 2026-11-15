@@ -408,6 +408,19 @@ public struct HostLayout: Sendable {
         chainDirectory(for: "Nexus").appendingPathComponent(".cookie")
     }
 
+    /// Where the running node listens for its loopback RPC (e.g.
+    /// `http://127.0.0.1:8080`), which it writes beside its storage at every
+    /// start and removes at exit, as Kubo does its `api` file: once
+    /// lattice.json's `rpc` changes, the port it gives is the next start's,
+    /// not this one's.
+    public var rpcAddress: URL {
+        Self.rpcAddress(storage: chainDirectory(for: "Nexus"))
+    }
+
+    public static func rpcAddress(storage: URL) -> URL {
+        storage.appendingPathComponent(".rpc-address")
+    }
+
     private static func encoded(_ path: String) -> String {
         path.addingPercentEncoding(
             withAllowedCharacters: CharacterSet.alphanumerics.union(

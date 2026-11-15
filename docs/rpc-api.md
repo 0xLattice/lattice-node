@@ -30,6 +30,12 @@ secret). Send either:
 Anything else gets `401` (no `WWW-Authenticate` challenge).
 The cookie changes at every restart; clients re-read the file.
 
+Beside it, in `<data-directory>/.rpc-address`, the node writes where this
+listener is (e.g. `http://127.0.0.1:8080`) at every start and removes it at
+exit, as Kubo does its `api` file. A changed `rpc` waits for a restart, so
+until then `lattice.json` names the next start's port, not this one's; local
+clients read the file.
+
 Browsers are refused: a request with an `Origin` header gets `403` unless the
 operator lists that exact origin with `--rpc-allowed-origin` (`rpcAllowedOrigins`
 in `lattice.json`), e.g. `chrome-extension://<extension id>`. A listed origin
