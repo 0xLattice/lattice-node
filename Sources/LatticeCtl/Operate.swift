@@ -129,7 +129,7 @@ struct Logs: AsyncParsableCommand {
             return print(lines.suffix(tail + 1).joined(separator: "\n"), terminator: "")
         }
         guard let rpc = try await target.running() else {
-            throw CtlError("the node is not running; its log is wherever its process manager put it (journalctl -u lattice-tree, the launchd log file, docker logs)")
+            throw CtlError("the node is not running; its log is wherever its process manager put it (journalctl -u lattice-tree for `lattice emit-systemd`'s unit or -u lattice-node for the checked-in one, the launchd log file, docker logs)")
         }
         FileHandle.standardOutput.write(try await send(rpc: rpc, "GET", "logs?tail=\(tail)"))
     }

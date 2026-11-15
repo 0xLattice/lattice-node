@@ -44,8 +44,10 @@ struct Up: AsyncParsableCommand {
         exits 0 when asked to stop (`lattice down`), 75 when asked to restart \
         (`lattice restart`, `lattice wipe`) and 78 when its configuration is \
         invalid. Run it under a process manager that starts it again on a \
-        failure exit but not on 0 or 78: `lattice emit-systemd`, \
-        `lattice emit-launchd`, or a container runtime's on-failure restart.
+        failure exit: `lattice emit-systemd` (which also leaves 78 stopped), \
+        `lattice emit-launchd`, or a container runtime's on-failure restart; \
+        launchd and Docker retry 78 too, throttled. On Fly, restart on 75 in \
+        the entrypoint, since Fly counts every failure exit toward its limit.
         """
     )
 

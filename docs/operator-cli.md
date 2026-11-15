@@ -168,13 +168,15 @@ what it wants next:
 |---|---|---|
 | 0 | Asked to stop (`lattice down`, `POST /stop`), or SIGTERM/SIGINT. | leaves it stopped |
 | 75 | Asked to restart (`lattice restart`, `lattice wipe`). | starts it again |
-| 78 | Its configuration does not check; the reason is on standard error. | leaves it stopped until fixed |
+| 78 | Its configuration does not check (lattice.json, or a flag given with `--root`); the reason is on standard error. | systemd leaves it stopped until fixed; launchd and Docker start it again, throttled |
 | other | A failure. | starts it again |
 
 That is systemd's `Restart=on-failure` with `RestartPreventExitStatus=78`,
 launchd's `KeepAlive` with `SuccessfulExit` false, or Docker's `--restart
-on-failure`: `lattice emit-systemd` and `lattice emit-launchd` print one. A
-node run with nothing to start it again stays stopped after a restart.
+on-failure`: `lattice emit-systemd` and `lattice emit-launchd` print one.
+Only systemd has a setting for leaving 78 alone; under launchd or Docker a
+bad configuration is retried at their throttle until it is fixed. A node run
+with nothing to start it again stays stopped after a restart.
 
 Storage has its own writer lock: a stopped-node `wipe` or configuration edit
 takes it, so no node starts on the storage meanwhile, and `lattice` takes a
@@ -479,7 +481,9 @@ lattice emit-systemd --root /var/lib/lattice \
 
 The tree's unit runs `lattice up --root <root>` with `Restart=on-failure`,
 `RestartPreventExitStatus=78` and `TimeoutStopSec=90`; its log is the
-journal (`journalctl -u lattice-tree`).
+journal (`journalctl -u lattice-tree`). The miner's unit `Wants` the tree
+rather than binding to it, so a node restart leaves the miner running, and
+restarts the miner always.
 
 On macOS, a launchd job for the current user:
 
@@ -489,14 +493,19 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/build.lattice.node.plist
 ```
 
 It restarts the node on any exit but 0 (78 included, at launchd's throttle
-interval) and sends its output to `<root>/log/lattice-node.log`.
+interval of 10 seconds) and sends its output to `<root>/log/lattice-node.log`.
+launchd does not rotate that file: truncate it now and then, or add a
+`newsyslog.d` entry for it.
 
 In a container, run `lattice up --root <root>` as the main process with
 `docker run --restart on-failure` (Compose `restart: on-failure`). On Fly,
 set `[[restart]] policy = "on-failure"` and a `kill_timeout` long enough for
-an orderly stop (60 s or more) in `fly.toml`. A shell entrypoint that
-starts sidecars beside the node should start the node again itself when it
-exits 75, so its sidecars keep running:
+an orderly stop (60 s or more) in `fly.toml`. Fly counts every exit but 0
+toward the Machine's restart limit (`max_retries`, 10 by default, within a
+few minutes), after which it leaves the Machine stopped; a restart asked for
+(75) must not spend that limit. So on Fly, and in any shell entrypoint that
+starts sidecars beside the node, start the node again on 75 in the
+entrypoint; Fly then sees only a stop, a crash or a bad configuration:
 
 ```sh
 while :; do

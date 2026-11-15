@@ -399,12 +399,9 @@ extension NodeRuntime: HostingRuntime {
 let exitRestart: Int32 = 75
 
 /// The process's exit status for a configuration it cannot start from:
-/// sysexits' EX_CONFIG, which a process manager is told not to retry
-/// (systemd `RestartPreventExitStatus=78`).
+/// sysexits' EX_CONFIG. systemd is told not to retry it
+/// (`RestartPreventExitStatus=78`); launchd and Docker retry it, throttled.
 let exitConfigurationError: Int32 = 78
-
-/// The node's output, kept for `GET /logs`.
-let nodeLog = NodeLog()
 
 /// A stop asked for through the API: `POST /stop` (the process exits 0 and
 /// stays stopped) or `POST /restart` and `POST /wipe` (it exits 75, and
@@ -425,14 +422,23 @@ final class NodeLifecycle: @unchecked Sendable {
     /// What was asked for, if anything; the first request stands.
     var requested: Request? { lock.withLock { request } }
 
-    func requestRestart() { ask(.restart) }
-
-    func requestStop() { ask(.stop) }
-
-    private func ask(_ request: Request) {
-        lock.withLock { if self.request == nil { self.request = request } }
-        continuation.yield()
-        continuation.finish()
+    /// Asks for `request`, recorded at once and begun after `delay` (so an
+    /// answer saying so goes out first). False, and nothing changes, when a
+    /// stop or restart was asked for already: the first request stands.
+    @discardableResult
+    func ask(_ request: Request, after delay: Duration = .zero) -> Bool {
+        let first = lock.withLock { () -> Bool in
+            guard self.request == nil else { return false }
+            self.request = request
+            return true
+        }
+        guard first else { return false }
+        Task { [continuation] in
+            try? await Task.sleep(for: delay)
+            continuation.yield()
+            continuation.finish()
+        }
+        return true
     }
 
     /// Returns once a stop or restart is asked for.
@@ -596,20 +602,14 @@ func addOperatorControlRoutes(
         if !remote { try requireLoopbackHost(request) }
         guard let lifecycle = control.lifecycle else { throw HTTPError(.notFound) }
         try await checkRestart(control)
-        Task {
-            // Answered first: the restart begins once this reply is on its way.
-            try? await Task.sleep(for: .milliseconds(200))
-            lifecycle.requestRestart()
-        }
+        // Answered first: the restart begins once this reply is on its way.
+        lifecycle.ask(.restart, after: .milliseconds(200))
         return try json(["restarting": true], request: request, context: context, status: .accepted)
     }
     router.post("stop") { request, context in
         if !remote { try requireLoopbackHost(request) }
         guard let lifecycle = control.lifecycle else { throw HTTPError(.notFound) }
-        Task {
-            try? await Task.sleep(for: .milliseconds(200))
-            lifecycle.requestStop()
-        }
+        lifecycle.ask(.stop, after: .milliseconds(200))
         return try json(["stopping": true], request: request, context: context, status: .accepted)
     }
     router.post("wipe") { request, context in
@@ -617,12 +617,17 @@ func addOperatorControlRoutes(
         guard let lifecycle = control.lifecycle, let layout = control.config?.layout else {
             throw HTTPError(.conflict, message: "a wipe needs a node started with --root, which keeps identity and configuration outside its storage")
         }
+        // The wipe itself runs at the next start, before storage opens: once
+        // a stop is under way that start may never come, so none is asked for.
+        let underWay = "a stop or restart is already under way; ask for the wipe once the node is back"
+        guard lifecycle.requested == nil else { throw HTTPError(.conflict, message: underWay) }
         try await checkRestart(control)
         try FileManager.default.createDirectory(at: layout.wipeRequest.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data().write(to: layout.wipeRequest)
-        Task {
-            try? await Task.sleep(for: .milliseconds(200))
-            lifecycle.requestRestart()
+        guard lifecycle.ask(.restart, after: .milliseconds(200)) else {
+            // A stop came in between: the marker stays, and the wipe runs
+            // whenever the node next starts.
+            throw HTTPError(.conflict, message: "a stop came first; the wipe runs at the node's next start")
         }
         return try json(["restarting": true, "wiping": true], request: request, context: context, status: .accepted)
     }

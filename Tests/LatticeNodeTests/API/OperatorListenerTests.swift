@@ -24,7 +24,7 @@ final class OperatorListenerTests: XCTestCase {
         let log: NodeLog
     }
 
-    private func node(remote: Bool = true, origins: Set<String> = []) async throws -> Node {
+    private func node(remote: Bool = true, origins: Set<String> = [], root: HostLayout? = nil) async throws -> Node {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-operator-listener-\(UUID().uuidString)"
         )
@@ -47,7 +47,15 @@ final class OperatorListenerTests: XCTestCase {
         ]), file: directory.appendingPathComponent("tokens.json"))
         let lifecycle = NodeLifecycle()
         let log = NodeLog()
-        let control = OperatorControl(tokens: tokens, lifecycle: lifecycle, storagePath: directory, log: log)
+        let config = try root.map {
+            OperatorConfig(
+                layout: $0, started: try Topology.load(root: $0.root).validated(), runtime: service,
+                startCheck: { _, _, _ in }
+            )
+        }
+        let control = OperatorControl(
+            config: config, tokens: tokens, lifecycle: lifecycle, storagePath: directory, log: log
+        )
         let app = remote
             ? makeApplication(
                 service: service, host: "10.0.0.5", port: 8090,
@@ -353,15 +361,40 @@ final class OperatorListenerTests: XCTestCase {
             }
             await node.lifecycle.waitForRequest()
             XCTAssertEqual(node.lifecycle.requested, expected, route)
-            node.lifecycle.requestRestart()
+            XCTAssertFalse(node.lifecycle.ask(.restart))
             XCTAssertEqual(node.lifecycle.requested, expected, "the first request stands")
+        }
+    }
+
+    /// A wipe runs at the next start, so none is taken once a stop is under
+    /// way; before one, it is kept for that start and the node restarts.
+    func testAWipeIsRefusedOnceAStopIsUnderWay() async throws {
+        for stopFirst in [true, false] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("wipe-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+            try Data(#"{"listen":4001,"rpc":4003,"peers":[]}"#.utf8).write(to: root.appendingPathComponent(Topology.fileName))
+            let layout = HostLayout(root: root.path)
+            let node = try await node(root: layout)
+            try await node.app.test(.router) { client in
+                if stopFirst {
+                    try await client.execute(uri: "/stop", method: .post, headers: Self.bearer(Self.admin)) {
+                        XCTAssertEqual($0.status, .accepted)
+                    }
+                }
+                try await client.execute(uri: "/wipe", method: .post, headers: Self.bearer(Self.admin)) {
+                    XCTAssertEqual($0.status, stopFirst ? .conflict : .accepted, String(buffer: $0.body))
+                }
+            }
+            XCTAssertEqual(FileManager.default.fileExists(atPath: layout.wipeRequest.path), !stopFirst)
+            XCTAssertEqual(node.lifecycle.requested, stopFirst ? .stop : .restart)
         }
     }
 
     /// `GET /logs` serves the node's own recent output from memory.
     func testLogsAreTheNodesRecentOutput() async throws {
         let node = try await node()
-        node.log.append(Data("one\ntwo\nthree\n".utf8))
+        node.log.append("one\ntwo\nthree")
         try await node.app.test(.router) { client in
             try await client.execute(uri: "/logs?tail=2", method: .get, headers: Self.bearer(Self.reader)) {
                 XCTAssertEqual($0.status, .ok)

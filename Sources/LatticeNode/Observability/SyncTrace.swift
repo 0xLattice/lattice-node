@@ -4,8 +4,8 @@ import Foundation
 /// deliberately log-quiet; this is a field-diagnosis seam, not a general
 /// logging facility. Zero cost when disabled.
 ///
-/// `LATTICE_SYNC_TRACE=1` writes to stderr, which `lattice up` sends to the
-/// host's log file. Any other non-empty value is treated as a file path,
+/// `LATTICE_SYNC_TRACE=1` writes to stderr, which whatever runs the node
+/// collects (journald, launchd, Docker, Fly); it is not kept for `/logs`. Any other non-empty value is treated as a file path,
 /// shared by every node process and restart and opened for append (each
 /// line one `write`, tagged with its pid and chain). It is bounded: once it
 /// passes `LATTICE_SYNC_TRACE_MAX_BYTES` (default 64 MiB) it is truncated

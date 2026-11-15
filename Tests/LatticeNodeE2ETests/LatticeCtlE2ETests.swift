@@ -939,6 +939,21 @@ extension LatticeCtlE2ETests {
         return output
     }
 
+    /// SIGTERM is a stop (0); a configuration that does not check is 78,
+    /// with the reason in what the process manager collects.
+    func testTheExitStatusTellsTheProcessManagerWhatNext() async throws {
+        let host = try await bringUpMiningHost(miner: nil)
+        host.supervisor.stop()
+        try await waitFor("the stop is recorded") { host.supervisor.exits.count == 1 }
+        XCTAssertEqual(host.supervisor.exits.last, 0, "SIGTERM is a stop")
+        try Data("{not json".utf8).write(to: host.root.appendingPathComponent(Topology.fileName))
+        try host.supervisor.start()
+        try await waitFor("the node exits") { host.supervisor.exits.count == 2 }
+        XCTAssertEqual(host.supervisor.exits.last, 78, "a broken lattice.json is a configuration error")
+        let collected = try String(contentsOf: host.root.appendingPathComponent("log/lattice-node.log"), encoding: .utf8)
+        XCTAssertTrue(collected.contains(Topology.fileName), collected)
+    }
+
     func testANodeIsOperatedRemotelyThroughItsOperatorListener() async throws {
         let alpha = "Nexus/Alpha"
         let scratch = FileManager.default.temporaryDirectory
@@ -1012,6 +1027,8 @@ extension LatticeCtlE2ETests {
         let before = await height(host.nexusRPC, chain: alpha)
         _ = try await remote(["restart"])
         XCTAssertEqual(host.supervisor.exits.last, 75, "a restart is an exit its process manager starts again")
+        let collected = try String(contentsOf: host.root.appendingPathComponent("log/lattice-node.log"), encoding: .utf8)
+        XCTAssertTrue(collected.contains("stopped to restart (exit 75)"), "the last line reaches the process manager")
         let config = try await remote(["config", "get"])
         XCTAssertTrue(config.contains(alpha) && config.contains("900"), config)
         XCTAssertFalse(config.contains("\"mine\""), "the node keeps no mining settings: \(config)")

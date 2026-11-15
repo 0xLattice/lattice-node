@@ -792,10 +792,12 @@ host it.
 
 ### `GET /logs?tail=N`
 
-The last `N` lines (default 200, at most 10000) of the node's own output, as
-`text/plain`. The node writes everything to its standard error (where its
-process manager collects it) and keeps its last 10000 lines, at most 4 MiB,
-in memory: lines from before its last start are not here. `?file=node` is
+The last `N` lines (default 200, at most 10000) of the node's log, as
+`text/plain`. Each line the node logs goes to its standard error (where its
+process manager collects it) and is kept in memory, the last 10000 lines and
+at most 4 MiB: lines from before its last start are not here, nor is
+anything else on standard error, such as a crash report or
+`LATTICE_SYNC_TRACE=1` output. `?file=node` is
 accepted; any other `file` is `404` (a client beside the node keeps its own
 log).
 
@@ -826,9 +828,11 @@ which a process manager leaves stopped. Clients wait until nothing answers.
 
 ### `POST /wipe`
 
-`202 {"restarting": true, "wiping": true}`; root mode only. The node exits 75
-as for a restart and, at its next start, before it opens its storage, deletes
-every chain's data (`<root>/chains`);
+`202 {"restarting": true, "wiping": true}`; root mode only. The wipe runs at
+the node's next start, before it opens its storage: the node records it,
+exits 75 as for a restart, and the started process deletes every chain's
+data (`<root>/chains`); `409` once a stop or restart is already under way,
+since that start may not come.
 identity, `lattice.json`, specs and tokens stay. Nexus syncs again from
 its peers, and hosted chains from theirs. Per-chain wipes are not offered:
 chains share one store.

@@ -1,24 +1,23 @@
 import Foundation
 import XCTest
-@testable import LatticeNodeDaemon
+@testable import LatticeNode
 
-/// The node's recent output, kept in memory for `GET /logs`: whole lines,
-/// bounded by count and by bytes.
+/// The node's recent log lines, kept in memory for `GET /logs`: bounded by
+/// count and by bytes.
 final class NodeLogTests: XCTestCase {
-    func testALineIsKeptOnceItEnds() {
+    func testLinesAreKeptInOrder() {
         let log = NodeLog()
-        log.append(Data("first\nsec".utf8))
-        XCTAssertEqual(log.tail(10), "first\n")
-        log.append(Data("ond\n".utf8))
-        XCTAssertEqual(log.tail(10), "first\nsecond\n")
-        XCTAssertEqual(log.tail(1), "second\n")
+        log.append("first")
+        log.append("second\nthird")
+        XCTAssertEqual(log.tail(10), "first\nsecond\nthird\n")
+        XCTAssertEqual(log.tail(1), "third\n")
         XCTAssertEqual(log.tail(0), "")
     }
 
     func testTheOldestLinesGoPastTheLineBound() {
         let log = NodeLog()
         let total = NodeLog.maximumLines + 2_500
-        for index in 0..<total { log.append(Data("line \(index)\n".utf8)) }
+        for index in 0..<total { log.append("line \(index)") }
         let kept = log.tail(.max).split(separator: "\n")
         XCTAssertEqual(kept.count, NodeLog.maximumLines)
         XCTAssertEqual(kept.first, "line \(total - NodeLog.maximumLines)")
@@ -28,17 +27,16 @@ final class NodeLogTests: XCTestCase {
     func testTheOldestLinesGoPastTheByteBound() {
         let log = NodeLog()
         let line = String(repeating: "x", count: 8 << 10)
-        for _ in 0..<(NodeLog.maximumBytes / (8 << 10) + 100) { log.append(Data((line + "\n").utf8)) }
+        for _ in 0..<(NodeLog.maximumBytes / (8 << 10) + 100) { log.append(line) }
         let kept = log.tail(.max)
         XCTAssertLessThanOrEqual(kept.utf8.count - kept.split(separator: "\n").count, NodeLog.maximumBytes)
         XCTAssertGreaterThan(kept.utf8.count, NodeLog.maximumBytes / 2)
     }
 
-    func testAnEndlessLineIsKeptInParts() {
+    func testALongLineIsKeptInParts() {
         let log = NodeLog()
-        log.append(Data(String(repeating: "y", count: NodeLog.maximumLineBytes * 2 + 5).utf8))
+        log.append(String(repeating: "y", count: NodeLog.maximumLineBytes * 2 + 5))
         let kept = log.tail(.max).split(separator: "\n")
-        XCTAssertEqual(kept.count, 2)
-        XCTAssertTrue(kept.allSatisfy { $0.utf8.count == NodeLog.maximumLineBytes })
+        XCTAssertEqual(kept.map(\.utf8.count), [NodeLog.maximumLineBytes, NodeLog.maximumLineBytes, 5])
     }
 }

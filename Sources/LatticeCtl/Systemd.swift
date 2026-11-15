@@ -3,7 +3,11 @@
 // The CLI stays a reconciler — restart policy, cgroups, and log routing
 // belong to the init system, so the units run the foreground modes. The
 // node exits 0 when asked to stop, 75 when asked to restart and 78 when its
-// configuration is invalid: restarted on failure, never on 78.
+// configuration is invalid: systemd restarts it on failure but not on 78
+// (`RestartPreventExitStatus`); launchd and Docker have no such setting and
+// restart it on 78 too, throttled. The miner is only Wanted by the tree, not
+// bound to it: a node restart (exit 75) does not take the miner down, and
+// the miner, restarted always, waits out the node's absence itself.
 
 import Foundation
 import ArgumentParser
@@ -48,12 +52,13 @@ struct EmitSystemd: AsyncParsableCommand {
         # lattice-mine.service
         [Unit]
         Description=Lattice mining loop
+        Wants=lattice-tree.service
         After=lattice-tree.service
-        BindsTo=lattice-tree.service
 
         [Service]
         ExecStart=\(binary) mine run --root \(root)
-        Restart=on-failure
+        Restart=always
+        RestartSec=5
         TimeoutStopSec=90
 
         [Install]
@@ -69,8 +74,10 @@ struct EmitLaunchd: AsyncParsableCommand {
         discussion: """
         Save it as ~/Library/LaunchAgents/<label>.plist and load it with \
         `launchctl bootstrap gui/$(id -u) <file>`. launchd starts the node again \
-        whenever it exits other than 0 (`lattice restart` exits 75); `lattice down` \
-        leaves it stopped. Its log goes to <root>/log/lattice-node.log.
+        whenever it exits other than 0 (`lattice restart` exits 75), a bad \
+        configuration's 78 included, at most every 10 seconds; `lattice down` \
+        leaves it stopped. Its log goes to <root>/log/lattice-node.log, which \
+        launchd never rotates: truncate it, or rotate it with newsyslog.
         """
     )
 
