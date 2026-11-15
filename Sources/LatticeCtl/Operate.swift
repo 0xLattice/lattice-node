@@ -5,7 +5,7 @@
 
 import ArgumentParser
 import Foundation
-import LatticeCtlCore
+import LatticeNode
 import LatticeNodeAPI
 
 struct Config: AsyncParsableCommand {

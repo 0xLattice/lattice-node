@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-import LatticeCtlCore
+import LatticeNode
 
 /// The pending-deploy file is the only copy of a child genesis seed whose CID
 /// may already be anchored. Two deploys of the same child racing each other

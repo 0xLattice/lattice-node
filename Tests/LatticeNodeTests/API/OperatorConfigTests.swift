@@ -3,7 +3,7 @@ import Foundation
 import Glibc
 #endif
 import Lattice
-import LatticeCtlCore
+import LatticeNode
 import LatticeNodeAPI
 import XCTest
 @testable import LatticeNodeDaemon
