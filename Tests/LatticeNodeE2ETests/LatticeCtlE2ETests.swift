@@ -364,7 +364,8 @@ final class LatticeCtlE2ETests: XCTestCase {
         let (_, refused) = try await URLSession.shared.data(for: bare)
         XCTAssertEqual((refused as? HTTPURLResponse)?.statusCode, 401)
         let started = try await runCtl(["mine", "start"], root: host.root)
-        XCTAssertTrue(started.contains("move it to"), "the miner says to move the older settings: \(started)")
+        XCTAssertTrue(started.contains("copied"), "the miner copies the older settings to miner.json: \(started)")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: host.root.appendingPathComponent(MinerConfig.fileName).path))
         try await waitFor("miner funded by Nexus rewards", seconds: 180) {
             await self.balance(host, miner.address) >= 10
         }

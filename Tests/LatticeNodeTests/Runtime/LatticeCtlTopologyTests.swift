@@ -122,7 +122,8 @@ final class LatticeCtlTopologyTests: XCTestCase {
     }
 
     /// While there is no miner.json, the miner reads an older lattice.json's
-    /// `mine` (its `enabled` ignored) and says to move it; miner.json wins.
+    /// `mine` (its `enabled` ignored) and copies it there once; miner.json
+    /// wins.
     func testTheMinerFallsBackToAnOlderLatticeJSONsMine() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ctl-miner-fallback-\(UUID().uuidString)")
@@ -136,9 +137,21 @@ final class LatticeCtlTopologyTests: XCTestCase {
         XCTAssertEqual(fallback.workers, 3)
         XCTAssertEqual(fallback.batchSize, 10_000_000_000)
         XCTAssertEqual(fallback.recipients, ["Nexus": "old"])
-        XCTAssertTrue(warning?.contains(MinerConfig.fileName) == true, warning ?? "no warning")
-        try JSONEncoder().encode(MinerConfig(recipients: ["Nexus": "new"]))
-            .write(to: root.appendingPathComponent(MinerConfig.fileName))
+        XCTAssertTrue(warning?.contains("copied") == true, warning ?? "no warning")
+        // Copied once, without `enabled`: a later node rewrite of
+        // lattice.json (which drops `mine`) strands nothing.
+        let copied = root.appendingPathComponent(MinerConfig.fileName)
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: copied)) as? [String: Any])
+        XCTAssertNil(object["enabled"])
+        XCTAssertEqual(try MinerConfig.load(file: copied).batchSize, 10_000_000_000)
+        try Data(#"{"listen":4001,"rpc":4003}"#.utf8).write(to: root.appendingPathComponent(Topology.fileName))
+        let (again, said) = try MinerConfig.load(root: root)
+        XCTAssertEqual(again.recipients, ["Nexus": "old"])
+        XCTAssertNil(said, "said once")
+        // miner.json wins, and is never overwritten by the fallback.
+        try Data(#"{"listen":4001,"rpc":4003,"mine":{"recipients":{"Nexus":"older"}}}"#.utf8)
+            .write(to: root.appendingPathComponent(Topology.fileName))
+        try JSONEncoder().encode(MinerConfig(recipients: ["Nexus": "new"])).write(to: copied)
         let (own, none) = try MinerConfig.load(root: root)
         XCTAssertEqual(own.recipients, ["Nexus": "new"])
         XCTAssertNil(own.workers)
