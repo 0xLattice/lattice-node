@@ -26,8 +26,8 @@ public enum DefaultBootstrapPeers {
     /// grants nothing: a seed is dialled by name and accepted by key, so
     /// whoever answers at the name without the pinned key is refused.
     ///
-    /// `deploy/read-replica/entrypoint.sh` carries this COMPLETE set and is
-    /// the drift anchor the tests check against.
+    /// The lattice-ops read replica carries this COMPLETE set, and its CI
+    /// checks it against this list at the node commit it pins.
     ///
     /// Today `seed1`-`seed3` are the mainnet backbone, in one 137.66.0.0/16
     /// netgroup; `seed4` is the public follower in a different /16, so the set

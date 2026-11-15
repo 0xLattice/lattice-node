@@ -18,10 +18,6 @@ let package = Package(
             targets: ["LatticeMiningCoordinatorTool"]
         ),
         .executable(
-            name: "lattice-proof-verifier",
-            targets: ["LatticeProofVerifier"]
-        ),
-        .executable(
             name: "lattice",
             targets: ["LatticeCtl"]
         ),
@@ -121,11 +117,6 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "VolumeBroker", package: "VolumeBroker"),
-            ]),
-        .executableTarget(
-            name: "LatticeProofVerifier",
-            dependencies: [
-                "LatticeLightClient",
             ]),
         .target(
             name: "LatticeProcessWait"),

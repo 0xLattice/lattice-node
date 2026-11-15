@@ -148,17 +148,13 @@ Invariants:
   bodies. Whatever surface serves child discovery must account for every
   possessed block, not only the validated spine.
 
-The prior "declining work cheaply" companion (operator-finality) is
-narrowed, not subsumed: this design removes execution and state storage
-for unselected blocks, but weighing a child block still requires
-soliciting its securing-work proof, so the per-sibling round trip that
-companion worries about is unchanged and remains the open question, under
-the boundaries operator-finality states.
+This design removes execution and state storage for unselected blocks,
+but weighing a child block still requires soliciting its securing-work
+proof, so the per-sibling round trip for that proof is unchanged.
 
-The three designs compose: **eviction is weight-preserving
-(operator-finality), transport is an ordered stream (bulk-sync-stream),
-and execution is deferred to load-bearing blocks — weigh what you hold,
-move bytes in order, execute exactly what matters.**
+In short: **eviction is weight-preserving, transport is an ordered
+stream, and execution is deferred to load-bearing blocks — weigh what you
+hold, move bytes in order, execute exactly what matters.**
 
 ## Boundaries
 

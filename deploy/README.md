@@ -10,7 +10,7 @@ workers.
 
 1. List hosted child paths parent first in the flat `hostedChains` array.
 2. Keep the operator RPC on loopback. Publish only the GET-only read listener
-   or the checked-in nginx allowlist.
+   or a proxy allowing no more than it.
 3. Expose one overlay port for the tree, not one port per hosted chain.
 4. Treat `state.db` and `volumes.db` as one recovery unit.
    `volume-bundles.db` is a cache and may be lost.
@@ -59,11 +59,6 @@ RECIPIENT_ARGS=--recipient Nexus=<address> --recipient Nexus/Alpha=<address>
 Protect the file as mode `0640`. Omit a recipient only when burning that
 chain's payout is intentional.
 
-For a bare-metal binary refresh from GHCR, install `crane` from a separately
-verified source and pass [upgrade-binaries.sh](upgrade-binaries.sh) the image's
-immutable `sha256:...` digest. The script refuses mutable tags and never changes
-the data directory.
-
 The persistent layout is:
 
 ```text
@@ -82,24 +77,10 @@ There are no per-child databases or identity keys.
 
 ## Containers and Fly
 
-`read-replica/` is a reference public read proxy: a Nexus follower plus nginx.
-The node's operator RPC remains on loopback (cookie-authenticated, unused
-here); nginx proxies the node's public read listener (8082, unpublished) and
-exposes only bounded GET routes on port 8081. Its Dockerfile builds the
-repository checkout directly:
-
-```bash
-fly deploy -c deploy/read-replica/fly.toml .
-```
-
-Operator-specific deployments (app names, addresses, peers, and public submit
-policy) live outside this repository.
-
-Run the allowlist test whenever public routes change:
-
-```bash
-bash deploy/read-replica/test-allowlist.sh
-```
+Operator deployments (the public read replica, followers, app names,
+addresses, peers, and public submit policy) live in
+[lattice-ops](https://github.com/0xLattice/lattice-ops), not in this
+repository.
 
 The public-read listener or proxy must never expose `/status`, `/metrics`,
 `/core/snapshot`, or any POST route.

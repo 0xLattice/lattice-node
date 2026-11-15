@@ -329,14 +329,6 @@ jobs:
           SIM_SEEDS: "5"
         run: swift test --skip-build --filter LatticeNodeSimulationTests
 
-  read-replica-allowlist:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Assert the read-replica nginx allowlist boundary
-        run: bash deploy/read-replica/test-allowlist.sh
-
   deployment-config:
     runs-on: ubuntu-latest
     steps:
