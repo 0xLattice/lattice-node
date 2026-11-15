@@ -177,14 +177,40 @@ extension MinerConfig {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw CtlError("\(file.path) must contain one JSON object")
         }
+        return try load(object, source: file.path)
+    }
+
+    /// The settings under `root`: its miner.json, or, while there is none,
+    /// the `mine` object a lattice.json there still holds from before mining
+    /// was a process of its own (its `enabled` ignored), with a warning to
+    /// move it. Nil warning when read from miner.json.
+    public static func load(root: URL) throws -> (config: MinerConfig, warning: String?) {
+        let file = root.appendingPathComponent(fileName)
+        if FileManager.default.fileExists(atPath: file.path) { return (try load(file: file), nil) }
+        let topologyFile = root.appendingPathComponent(Topology.fileName)
+        guard let data = try? Data(contentsOf: topologyFile),
+              let topology = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var mine = topology[Topology.retiredMiningKey] as? [String: Any] else {
+            return (try load(file: file), nil)
+        }
+        mine["enabled"] = nil
+        return (
+            try load(mine, source: "\(topologyFile.path) (mine)"),
+            "mining with the mine object in \(topologyFile.path); move it to \(file.path), which the miner reads first (the node no longer uses it)"
+        )
+    }
+
+    private static func load(_ object: [String: Any], source: String) throws -> MinerConfig {
         let unknown = Set(object.keys).subtracting(CodingKeys.allCases.map(\.rawValue)).sorted()
         guard unknown.isEmpty else {
-            throw CtlError("unknown \(file.lastPathComponent) key(s): \(unknown.joined(separator: ", "))")
+            throw CtlError("\(source): unknown miner setting(s): \(unknown.joined(separator: ", "))")
         }
         do {
-            return try JSONDecoder().decode(MinerConfig.self, from: data).validated()
+            return try JSONDecoder().decode(
+                MinerConfig.self, from: JSONSerialization.data(withJSONObject: object)
+            ).validated()
         } catch {
-            throw CtlError("\(file.path): \(error)")
+            throw CtlError("\(source): \(error)")
         }
     }
 

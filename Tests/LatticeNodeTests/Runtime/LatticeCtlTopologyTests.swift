@@ -86,9 +86,8 @@ final class LatticeCtlTopologyTests: XCTestCase {
         XCTAssertEqual(loaded.hostedChains, ["Nexus/Payments"])
     }
 
-    /// The miner's settings are its own file, beside (never inside) the
-    /// node's lattice.json, which refuses a `mine` object by name.
-    func testMinerSettingsAreTheirOwnFileAndLatticeJSONRefusesThem() throws {
+    /// The miner's settings are its own file, beside the node's lattice.json.
+    func testMinerSettingsAreTheirOwnFile() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ctl-miner-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -107,11 +106,43 @@ final class LatticeCtlTopologyTests: XCTestCase {
         // A misspelt key would burn rewards silently: refused.
         try Data(#"{"recipient":{"Nexus":"x"}}"#.utf8).write(to: file)
         XCTAssertThrowsError(try MinerConfig.load(file: file))
-        XCTAssertThrowsError(try Topology.load(data: Data(
-            #"{"listen":4001,"rpc":4003,"mine":{"workers":1}}"#.utf8
-        ))) { error in
-            XCTAssertTrue("\(error)".contains(MinerConfig.fileName), "\(error)")
-        }
+    }
+
+    /// A lattice.json from before mining was a process of its own still
+    /// starts the node, which ignores its `mine` and never writes it back;
+    /// a change adding `mine` is refused.
+    func testAnOlderLatticeJSONWithMineStillLoads() throws {
+        let topology = try Topology.load(data: Data(
+            #"{"listen":4001,"rpc":4003,"mine":{"enabled":true,"workers":1,"recipients":{"Nexus":"x"}}}"#.utf8
+        )).validated()
+        XCTAssertEqual(topology.rpc, 4003)
+        XCTAssertFalse(String(decoding: try topology.canonicalData(), as: UTF8.self).contains("mine"))
+        XCTAssertThrowsError(try topology.applying(mergePatch: Data(#"{"mine":{"workers":2}}"#.utf8)))
+        XCTAssertThrowsError(try Topology.load(data: Data(#"{"listen":4001,"rpc":4003,"nope":1}"#.utf8)))
+    }
+
+    /// While there is no miner.json, the miner reads an older lattice.json's
+    /// `mine` (its `enabled` ignored) and says to move it; miner.json wins.
+    func testTheMinerFallsBackToAnOlderLatticeJSONsMine() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ctl-miner-fallback-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data(
+            #"{"listen":4001,"rpc":4003,"mine":{"enabled":true,"workers":3,"batchSize":10000000000,"recipients":{"Nexus":"old"}}}"#.utf8
+        ).write(to: root.appendingPathComponent(Topology.fileName))
+        XCTAssertTrue(Topology.holdsRetiredMining(root: root))
+        let (fallback, warning) = try MinerConfig.load(root: root)
+        XCTAssertEqual(fallback.workers, 3)
+        XCTAssertEqual(fallback.batchSize, 10_000_000_000)
+        XCTAssertEqual(fallback.recipients, ["Nexus": "old"])
+        XCTAssertTrue(warning?.contains(MinerConfig.fileName) == true, warning ?? "no warning")
+        try JSONEncoder().encode(MinerConfig(recipients: ["Nexus": "new"]))
+            .write(to: root.appendingPathComponent(MinerConfig.fileName))
+        let (own, none) = try MinerConfig.load(root: root)
+        XCTAssertEqual(own.recipients, ["Nexus": "new"])
+        XCTAssertNil(own.workers)
+        XCTAssertNil(none)
     }
 
     func testValidationRejectsInvalidOperationalValues() {

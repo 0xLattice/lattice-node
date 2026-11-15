@@ -246,7 +246,8 @@ final class LatticeCtlE2ETests: XCTestCase {
     /// target a child rides child-only carriers, which leave Nexus's
     /// post-state alone.
     private func bringUpMiningHost(
-        miner: TestKey?, minRelayFee: UInt64? = nil, configure: (inout Topology) -> Void = { _ in }
+        miner: TestKey?, minRelayFee: UInt64? = nil, olderMiningConfig: Bool = false,
+        configure: (inout Topology) -> Void = { _ in }
     ) async throws -> CtlHost {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("lattice-node-e2e-ctl-\(UUID().uuidString)")
@@ -268,6 +269,17 @@ final class LatticeCtlE2ETests: XCTestCase {
         configure(&topology)
         try topology.validated().save(root: root)
         try writeMinerConfig(root, recipients: miner.map { ["Nexus": $0.address] } ?? [:])
+        if olderMiningConfig {
+            // As a host upgraded from a release whose miner read lattice.json:
+            // its `mine` object there and no miner.json.
+            let file = root.appendingPathComponent(MinerConfig.fileName)
+            var object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: topologyURL)) as? [String: Any])
+            var mine = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+            mine["enabled"] = true
+            object["mine"] = mine
+            try JSONSerialization.data(withJSONObject: object).write(to: topologyURL)
+            try FileManager.default.removeItem(at: file)
+        }
 
         _ = try await runCtl(["up"], root: root)
         let host = CtlHost(root: root, nexusRPC: ports[1])
@@ -342,14 +354,17 @@ final class LatticeCtlE2ETests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: scratch) }
         let miner = try await makeKey(scratch, "miner")
         let recipient = try await makeKey(scratch, "recipient")
-        let host = try await bringUpMiningHost(miner: miner)
+        // Upgraded with no edits: the node starts from a lattice.json that
+        // still holds `mine`, and the miner mines from it.
+        let host = try await bringUpMiningHost(miner: miner, olderMiningConfig: true)
         // The operator port refuses a client without the cookie; the CLI and
         // its coordinator below carry it.
         var bare = URLRequest(url: URL(string: "http://127.0.0.1:\(host.nexusRPC)/status")!)
         bare.cachePolicy = .reloadIgnoringLocalCacheData
         let (_, refused) = try await URLSession.shared.data(for: bare)
         XCTAssertEqual((refused as? HTTPURLResponse)?.statusCode, 401)
-        _ = try await runCtl(["mine", "start"], root: host.root)
+        let started = try await runCtl(["mine", "start"], root: host.root)
+        XCTAssertTrue(started.contains("move it to"), "the miner says to move the older settings: \(started)")
         try await waitFor("miner funded by Nexus rewards", seconds: 180) {
             await self.balance(host, miner.address) >= 10
         }
