@@ -1096,7 +1096,7 @@ private final class NodeSupervisor: @unchecked Sendable {
         let log = root.appendingPathComponent("log/lattice-node.log")
         try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
         if !FileManager.default.fileExists(atPath: log.path) {
-            FileManager.default.createFile(atPath: log.path, contents: nil)
+            _ = FileManager.default.createFile(atPath: log.path, contents: nil)
         }
         let output = try FileHandle(forWritingTo: log)
         output.seekToEndOfFile()
