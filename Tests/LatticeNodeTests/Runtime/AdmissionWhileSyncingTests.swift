@@ -41,7 +41,7 @@ final class AdmissionWhileSyncingTests: XCTestCase {
         peers: [PeerEndpoint] = [],
         workers: Int = 2,
         bodyWindow: Int = 64,
-        observe: (@Sendable (NodeRuntime.RuntimeJob) async -> Void)? = nil
+        observe: NodeRuntime.JobObserver? = nil
     ) async throws -> Node {
         let port = NetworkTransportTestPorts.allocate()
         let configuration = try NodeConfiguration(
@@ -108,14 +108,14 @@ final class AdmissionWhileSyncingTests: XCTestCase {
             // The connect into the held height waits until the submit does.
             let held: UInt64 = workers == 1 ? blocks - 1 : 0
             let probe = Probe()
-            let syncing = try await node(keyByte: 0x72 + UInt8(workers), peers: [miner.endpoint], workers: workers) { job in
-                switch job.kind {
-                case .connect:
+            let syncing = try await node(keyByte: 0x72 + UInt8(workers), peers: [miner.endpoint], workers: workers) { kind, effect in
+                switch (kind, effect) {
+                case (.connect, _):
                     await probe.count("connect")
                     if await probe.runtime?.published.value?.actOnHeight == held {
                         await Self.until { await probe.level { $0.mining.isPending(cid) } == true }
                     }
-                case .preflight(let preflight) where preflight.cid == cid:
+                case (_, .preflight(let preflight)?) where preflight.cid == cid:
                     await probe.count(preflight.checksPolicies ? "admission" : "recheck")
                     // With a second worker, the check outlasts every move.
                     if preflight.checksPolicies, workers > 1 {
@@ -174,14 +174,14 @@ final class AdmissionWhileSyncingTests: XCTestCase {
             let probe = Probe()
             let synced = try await node(
                 keyByte: keyByte, peers: [source.endpoint], workers: 1, bodyWindow: window
-            ) { job in
+            ) { kind, effect in
                 let catchingUp = await probe.level(\.synced) != true
-                switch job.kind {
-                case .connect:
+                switch (kind, effect) {
+                case (.connect, _):
                     await probe.count("connect")
-                case .template where catchingUp:
+                case (_, .buildTemplate?) where catchingUp:
                     await probe.count("template while catching up")
-                case .preflight(let preflight) where preflight.checksPolicies && !preflight.awaited:
+                case (_, .preflight(let preflight)?) where preflight.checksPolicies && !preflight.awaited:
                     await probe.count(catchingUp ? "peer admission while catching up" : "peer admission")
                 default:
                     break

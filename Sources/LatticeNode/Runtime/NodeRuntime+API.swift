@@ -629,11 +629,12 @@ extension NodeRuntime {
     /// level's mining tip epoch has moved: it runs nothing, posts nothing.
     /// `kind` decides its queue (`JobQueues`).
     struct RuntimeJob: Sendable {
+        /// Its queue (`JobQueues`).
         enum Kind: Sendable {
+            /// What an RPC waits on: an awaited admission, a template build.
+            case answered
             /// A level's next block to execute (`connectJob`).
             case connect
-            case preflight(PreflightJob)
-            case template
             case other
         }
 
@@ -665,10 +666,9 @@ extension NodeRuntime {
 
         mutating func append(_ job: RuntimeJob) {
             switch job.kind {
-            case .template: answered.append(job)
-            case .preflight(let preflight) where preflight.awaited: answered.append(job)
+            case .answered: answered.append(job)
             case .connect: connects.append(job)
-            case .preflight, .other: rest.append(job)
+            case .other: rest.append(job)
             }
         }
 
@@ -729,8 +729,10 @@ extension NodeRuntime {
         case .preflight(let job):
             // An admission always runs: its verdict counts on any tip
             // (`PreflightJob`).
-            return RuntimeJob(path: path, epoch: job.checksPolicies ? nil : job.tipEpoch, kind: .preflight(job)) {
-                guard let basis else { return [] }
+            return RuntimeJob(
+                path: path, epoch: job.checksPolicies ? nil : job.tipEpoch, kind: job.awaited ? .answered : .other
+            ) {
+                guard let basis else { preconditionFailure("every hosted level's tree carries a context: a preflight has a basis") }
                 // A child withdrawal is proven against the parent's executed
                 // state, so it is ready, invalid or a retry, never held
                 // unchecked.
@@ -771,7 +773,7 @@ extension NodeRuntime {
                 return [.level(path, .mining(.preflighted(job, verdict, balances: balances)))]
             }
         case .buildTemplate(let job):
-            return RuntimeJob(path: path, epoch: job.tipEpoch, kind: .template) {
+            return RuntimeJob(path: path, epoch: job.tipEpoch, kind: .answered) {
                 let (built, refused) = await reading(job.tipCID, at: path, storage: storage, remote: remote) { fetcher in
                     var refused: [PolicyRefusal] = []
                     let built = await buildTemplate(

@@ -319,7 +319,7 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
         XCTAssertNotEqual(stale.epoch, epoch, "the tip moved")
         var queues = NodeRuntime.JobQueues()
         queues.append(stale)
-        queues.append(NodeRuntime.RuntimeJob(path: root, epoch: epoch, kind: .template) { [] })
+        queues.append(NodeRuntime.RuntimeJob(path: root, epoch: epoch, kind: .answered) { [] })
         let next = queues.next(in: harness.host)
         XCTAssertEqual(next?.epoch, epoch, "the stale job is skipped for the current one")
         XCTAssertTrue(queues.isEmpty, "the stale job is dropped")
@@ -369,42 +369,72 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
     func testJobsRunAnsweredThenConnectsThenTheRestEachInArrivalOrder() async throws {
         let harness = try await harness(keyByte: 0x4A)
         let epoch = harness.mining.tipEpoch
+        let ran = Ran()
+        // Each job, as queued, runs only to say its name.
+        func named(_ name: String, _ job: NodeRuntime.RuntimeJob) -> NodeRuntime.RuntimeJob {
+            NodeRuntime.RuntimeJob(path: job.path, epoch: job.epoch, kind: job.kind) { await ran.add(name); return [] }
+        }
         func preflight(_ name: String, awaited: Bool, checksPolicies: Bool = true, epoch tipEpoch: UInt64 = epoch) throws
             -> NodeRuntime.RuntimeJob {
             let job = PreflightJob(
                 id: 0, cid: name, transaction: try transaction(), tipCID: "", tipEpoch: tipEpoch, poolVersion: 0,
                 checksPolicies: checksPolicies, awaited: awaited
             )
-            return NodeRuntime.RuntimeJob(
-                path: harness.host.rootPath, epoch: checksPolicies ? nil : tipEpoch, kind: .preflight(job)
-            ) { [] }
+            return named(name, NodeRuntime.miningJob(
+                .preflight(job), at: harness.host.rootPath, basis: nil, storage: harness.storage
+            ))
         }
-        func name(_ job: NodeRuntime.RuntimeJob) -> String {
-            switch job.kind {
-            case .preflight(let preflight): preflight.cid
-            case .template: job.epoch == epoch ? "build-0" : "stale-build"
-            case .connect, .other: job.path.last ?? ""
-            }
+        func build(epoch tipEpoch: UInt64) -> NodeRuntime.RuntimeJob {
+            named(tipEpoch == epoch ? "build-0" : "stale-build",
+                  NodeRuntime.RuntimeJob(path: harness.host.rootPath, epoch: tipEpoch, kind: .answered) { [] })
+        }
+        func other(_ name: String, kind: NodeRuntime.RuntimeJob.Kind = .other) -> NodeRuntime.RuntimeJob {
+            named(name, Self.job(name, depth: 1, kind: kind))
         }
         var queues = NodeRuntime.JobQueues()
-        queues.append(Self.job("check-0", depth: 1))
+        queues.append(other("check-0"))
         queues.append(try preflight("peer-0", awaited: false))
-        queues.append(Self.job("connect-0", depth: 1, kind: .connect))
+        queues.append(other("connect-0", kind: .connect))
         queues.append(try preflight("recheck-0", awaited: false, checksPolicies: false))
         queues.append(try preflight("stale-recheck", awaited: false, checksPolicies: false, epoch: epoch &+ 7))
-        queues.append(NodeRuntime.RuntimeJob(path: harness.host.rootPath, epoch: epoch &+ 7, kind: .template) { [] })
+        queues.append(build(epoch: epoch &+ 7))
         queues.append(try preflight("submit-0", awaited: true))
-        queues.append(Self.job("connect-1", depth: 1, kind: .connect))
-        queues.append(NodeRuntime.RuntimeJob(path: harness.host.rootPath, epoch: epoch, kind: .template) { [] })
+        queues.append(other("connect-1", kind: .connect))
+        queues.append(build(epoch: epoch))
         queues.append(try preflight("submit-1", awaited: true))
-        queues.append(Self.job("read-0", depth: 1))
-        var order: [String] = []
-        while let next = queues.next(in: harness.host) { order.append(name(next)) }
+        queues.append(other("read-0"))
+        while let next = queues.next(in: harness.host) { _ = await next.run() }
+        let order = await ran.names
         XCTAssertEqual(order, [
             "submit-0", "build-0", "submit-1",
             "connect-0", "connect-1",
             "check-0", "peer-0", "recheck-0", "read-0",
         ])
+    }
+
+    /// Restored journal rows at boot are nobody's wait: their admissions
+    /// queue behind a connect queued after them (C), never ahead (A).
+    func testRestoredRowsQueueBehindConnects() async throws {
+        var harness = try await harness(keyByte: 0x4B)
+        let root = harness.host.rootPath
+        for nonce in 0..<6 {
+            try await harness.step(.level(root, .mining(.transactionReceived(
+                try transaction(nonce: UInt64(nonce)), origin: .restored(addedAt: 1)
+            ))))
+        }
+        XCTAssertEqual(harness.jobs.count, 6)
+        let ran = Ran()
+        var queues = NodeRuntime.JobQueues()
+        for (index, job) in harness.jobs.enumerated() {
+            XCTAssertEqual(job.kind, .other)
+            queues.append(NodeRuntime.RuntimeJob(path: job.path, epoch: job.epoch, kind: job.kind) {
+                await ran.add("restored-\(index)"); return []
+            })
+        }
+        queues.append(NodeRuntime.RuntimeJob(path: root, epoch: nil, kind: .connect) { await ran.add("connect"); return [] })
+        while let next = queues.next(in: harness.host) { _ = await next.run() }
+        let order = await ran.names
+        XCTAssertEqual(order, ["connect"] + (0..<6).map { "restored-\($0)" })
     }
 
     /// One worker, the tip moving while a submit's job waits: the job runs
@@ -441,6 +471,11 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
         XCTAssertFalse(harness.refused(1), "\(harness.replies)")
         XCTAssertTrue(harness.mining.mempool.contains(cid), "pooled on the final tip")
         XCTAssertEqual(harness.mining.outstandingPreflights, 0)
+    }
+
+    private actor Ran {
+        var names: [String] = []
+        func add(_ name: String) { names.append(name) }
     }
 
     /// A job told apart by its path's last element, at `depth`; no tip

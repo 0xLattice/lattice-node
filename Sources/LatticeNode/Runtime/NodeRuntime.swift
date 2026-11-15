@@ -163,6 +163,10 @@ public final class NodeRuntime: Sendable {
         )
     }
 
+    /// What a test sees of each job, awaited on its worker before it runs:
+    /// its queue class and, for a mining job, its effect.
+    typealias JobObserver = @Sendable (RuntimeJob.Kind, MiningEffect?) async -> Void
+
     /// `start`, with `observeJob` awaited on each job's worker before the
     /// job runs (a test's view of the worker pool).
     static func start(
@@ -172,7 +176,7 @@ public final class NodeRuntime: Sendable {
         coreConfig: ChainCoreConfig = ChainCoreConfig(),
         workers: Int = max(1, ProcessInfo.processInfo.activeProcessorCount - 1),
         failStop: @escaping @Sendable (any Error) -> Void = { fatalError("node runtime: persist failed: \($0)") },
-        observeJob: (@Sendable (RuntimeJob) async -> Void)?
+        observeJob: JobObserver?
     ) async throws -> NodeRuntime {
         var coreConfig = coreConfig
         coreConfig.mining.mempool.minRelayFee = configuration.minRelayFee
@@ -297,7 +301,7 @@ public final class NodeRuntime: Sendable {
         helloTimeout: Duration,
         workers: Int,
         failStop: @escaping @Sendable (any Error) -> Void,
-        observeJob: (@Sendable (RuntimeJob) async -> Void)?
+        observeJob: JobObserver?
     ) {
         let (stream, inputs) = AsyncStream<Input>.makeStream()
         let published = PublishedValue(core.levels[core.rootPath]?.snapshot)
@@ -524,7 +528,7 @@ extension NodeRuntime {
         let remote: IvyRootContentSource
         let workers: Int
         let failStop: @Sendable (any Error) -> Void
-        let observeJob: (@Sendable (RuntimeJob) async -> Void)?
+        let observeJob: JobObserver?
         let peerMemory: PeerMemory?
         /// Each hosted child level's last template block, reused while
         /// nothing it was built from changes (`ChildTemplateCache`).
@@ -678,7 +682,7 @@ extension NodeRuntime {
             remote: IvyRootContentSource,
             workers: Int,
             failStop: @escaping @Sendable (any Error) -> Void,
-            observeJob: (@Sendable (RuntimeJob) async -> Void)?,
+            observeJob: JobObserver?,
             peerMemory: PeerMemory?
         ) {
             self.peerMemory = peerMemory
@@ -1427,6 +1431,8 @@ extension NodeRuntime {
         /// fetched and not recently fetched, within the cap on concurrent
         /// fetches; anything else is dropped, never blamed.
         private mutating func fetchAnnounced(_ cid: String, from session: Session) {
+            // No hosted level would take it yet (`ChainCore.synced`).
+            guard core.levels.values.contains(where: \.synced) else { return }
             let pools = core.levels.sorted { $0.key.lexicographicallyPrecedes($1.key) }.map(\.value.mining)
             // A fetched transaction may be worth fetching again once any
             // hosted chain moves: a child's tip moves without the root's.
@@ -1552,7 +1558,7 @@ extension NodeRuntime {
                     _ = await ivy.disconnectSession(ifCurrent: session.peer)
                 }
             case .connect(let path, let job):
-                queued.append(NodeRuntime.connectJob(
+                enqueue(NodeRuntime.connectJob(
                     job, at: path, levels: LiveLevels(inputs: inputs), storage: storage, remote: remote
                 ))
                 startJobs()
@@ -1680,7 +1686,7 @@ extension NodeRuntime {
                 let held = job.block ?? storage.store.header(job.childCID)?.block
                 let parent = Array(path.dropLast())
                 let (storage, failStop) = (storage, failStop)
-                queued.append(RuntimeJob(path: path, epoch: nil) {
+                enqueue(RuntimeJob(path: path, epoch: nil) {
                     var upstream: [ChildBlockProof] = []
                     if parent.count > 1 {
                         do {
@@ -1700,12 +1706,12 @@ extension NodeRuntime {
                     inputs.yield(.event(.level(path, .proofDropped(job))))
                     break
                 }
-                queued.append(RuntimeJob(path: path, epoch: nil) {
+                enqueue(RuntimeJob(path: path, epoch: nil) {
                     [.level(path, .proofVerified(job, await job.run(block)))]
                 })
                 startJobs()
             case .readTransactions(let blocks):
-                queued.append(NodeRuntime.readJob(blocks, at: path, storage: storage))
+                enqueue(NodeRuntime.readJob(blocks, at: path, storage: storage))
                 startJobs()
             case .lookupProofs(let cids):
                 // Read off the loop, as a served page is; each block's
@@ -1782,21 +1788,23 @@ extension NodeRuntime {
                     }
                 }
             case .preflight:
+                // An admission's job must run, else its submit is never
+                // answered and its cid stays admitting.
                 guard let basis = core.levels[path].flatMap({
                     NodeRuntime.miningBasis(effect, tree: $0.tree, parent: core.levels[Array(path.dropLast())])
-                }) else { break }
-                queued.append(NodeRuntime.miningJob(effect, at: path, basis: basis, storage: storage, remote: remote))
+                }) else { preconditionFailure("every hosted level's tree carries a context: a preflight has a basis") }
+                enqueue(NodeRuntime.miningJob(effect, at: path, basis: basis, storage: storage, remote: remote), effect)
                 startJobs()
             case .buildTemplate:
                 guard let basis = core.levels[path].flatMap({ NodeRuntime.miningBasis(effect, tree: $0.tree) }) else { break }
-                queued.append(NodeRuntime.miningJob(
+                enqueue(NodeRuntime.miningJob(
                     effect, at: path, basis: basis, storage: storage, remote: remote,
                     children: childTemplateInputs(below: path), levels: LiveLevels(inputs: inputs),
                     cache: childTemplates
-                ))
+                ), effect)
                 startJobs()
             case .returnTransactions:
-                queued.append(NodeRuntime.miningJob(effect, at: path, basis: nil, storage: storage, remote: remote))
+                enqueue(NodeRuntime.miningJob(effect, at: path, basis: nil, storage: storage, remote: remote), effect)
                 startJobs()
             }
             return true
@@ -1837,12 +1845,18 @@ extension NodeRuntime {
             while runningJobs < workers, let job = queued.next(in: core) {
                 runningJobs += 1
                 nextJob += 1
-                let (inputs, id, observeJob) = (inputs, nextJob, observeJob)
-                jobs[id] = Task {
-                    await observeJob?(job)
-                    inputs.yield(.jobDone(id, await job.run()))
-                }
+                let (inputs, id) = (inputs, nextJob)
+                jobs[id] = Task { inputs.yield(.jobDone(id, await job.run())) }
             }
+        }
+
+        /// Queue `job`, behind `observeJob` when a test watches the pool.
+        private mutating func enqueue(_ job: RuntimeJob, _ effect: MiningEffect? = nil) {
+            guard let observeJob else { return queued.append(job) }
+            queued.append(RuntimeJob(path: job.path, epoch: job.epoch, kind: job.kind) {
+                await observeJob(job.kind, effect)
+                return await job.run()
+            })
         }
 
         /// The working set, when the operator keeps no bodies beyond it:
