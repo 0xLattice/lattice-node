@@ -195,8 +195,14 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     mutating func start(owner: (layout: HostLayout, topology: Topology)?) async throws {
         let processStartTime = Date()
         let address = ChainAddress([ChainAddress.nexus])!
+        // A fault in lattice.json (`--root`) is the configuration's: 78. One
+        // in the flags is the command line's: 64, as ArgumentParser exits.
+        let isOwned = owner != nil
+        func fault(_ reason: String) -> Error {
+            isOwned ? configurationFault(reason) : ValidationError(reason)
+        }
         let plan: StartPlan
-        do { plan = try self.plan() } catch { throw configurationFault("\(error)") }
+        do { plan = try self.plan() } catch { throw fault("\(error)") }
         let storage = try storageURL(for: address)
         let keyURL = identityKey.map { URL(fileURLWithPath: $0) }
             ?? storage.appendingPathComponent("storage.key")
@@ -209,7 +215,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             configured: configuredPeers,
             environment: ProcessInfo.processInfo.environment
         ) {
-            throw configurationFault(
+            throw fault(
                 "\(DefaultBootstrapPeers.forbidEnvironmentKey)=1: pass --peer or --no-default-peers"
             )
         }
@@ -266,7 +272,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                 stateWindows: plan.stateWindows
             )
         } catch {
-            throw configurationFault("\(error)")
+            throw fault("\(error)")
         }
         let cookieFile = rpcCookieFile.map { URL(fileURLWithPath: $0) }
             ?? storage.appendingPathComponent(".cookie")

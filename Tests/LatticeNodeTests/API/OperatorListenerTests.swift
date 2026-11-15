@@ -361,6 +361,11 @@ final class OperatorListenerTests: XCTestCase {
             }
             await node.lifecycle.waitForRequest()
             XCTAssertEqual(node.lifecycle.requested, expected, route)
+            try await node.app.test(.router) { client in
+                try await client.execute(uri: "/restart", method: .post, headers: Self.bearer(Self.admin)) {
+                    XCTAssertEqual($0.status, .conflict, "a restart is refused once one is under way")
+                }
+            }
             XCTAssertFalse(node.lifecycle.ask(.restart))
             XCTAssertEqual(node.lifecycle.requested, expected, "the first request stands")
         }
@@ -388,6 +393,42 @@ final class OperatorListenerTests: XCTestCase {
             }
             XCTAssertEqual(FileManager.default.fileExists(atPath: layout.wipeRequest.path), !stopFirst)
             XCTAssertEqual(node.lifecycle.requested, stopFirst ? .stop : .restart)
+        }
+    }
+
+    /// A stop and a wipe at once: whichever is recorded first, a refused
+    /// wipe leaves no marker and an accepted one leaves it.
+    func testARefusedWipeNeverLeavesAWipePending() async throws {
+        for _ in 0..<20 {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("wipe-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+            try Data(#"{"listen":4001,"rpc":4003,"peers":[]}"#.utf8).write(to: root.appendingPathComponent(Topology.fileName))
+            let layout = HostLayout(root: root.path)
+            let node = try await node(root: layout)
+            let wipe = try await node.app.test(.router) { client in
+                try await withThrowingTaskGroup(of: HTTPResponse.Status?.self) { group in
+                    group.addTask {
+                        try await client.execute(uri: "/stop", method: .post, headers: Self.bearer(Self.admin)) { _ in }
+                        return nil
+                    }
+                    group.addTask {
+                        try await client.execute(uri: "/wipe", method: .post, headers: Self.bearer(Self.admin)) { $0.status }
+                    }
+                    return try await group.compactMap { $0 }.first { _ in true }
+                }
+            }
+            let marked = FileManager.default.fileExists(atPath: layout.wipeRequest.path)
+            switch wipe {
+            case .accepted?:
+                XCTAssertTrue(marked)
+                XCTAssertEqual(node.lifecycle.requested, .restart)
+            case .conflict?:
+                XCTAssertFalse(marked, "a 409 leaves no wipe pending")
+                XCTAssertEqual(node.lifecycle.requested, .stop)
+            default:
+                XCTFail("wipe answered \(String(describing: wipe))")
+            }
         }
     }
 

@@ -814,7 +814,8 @@ Bytes per store in the data directory, and the free bytes on its volume.
 ### `POST /restart`
 
 `409` when `lattice.json` as it is on disk would not start the node (it is
-read and checked as a start would). Otherwise `202 {"restarting": true}`,
+read and checked as a start would), or when a stop or restart is already
+under way. Otherwise `202 {"restarting": true}`,
 then the node stops as on SIGTERM and exits with status 75 (`EX_TEMPFAIL`).
 Its process manager starts it again (systemd `Restart=on-failure`, launchd
 `KeepAlive`, `docker run --restart on-failure`), and the new process reads
@@ -831,11 +832,10 @@ which a process manager leaves stopped. Clients wait until nothing answers.
 `202 {"restarting": true, "wiping": true}`; root mode only. The wipe runs at
 the node's next start, before it opens its storage: the node records it,
 exits 75 as for a restart, and the started process deletes every chain's
-data (`<root>/chains`); `409` once a stop or restart is already under way,
-since that start may not come.
-identity, `lattice.json`, specs and tokens stay. Nexus syncs again from
-its peers, and hosted chains from theirs. Per-chain wipes are not offered:
-chains share one store.
+data (`<root>/chains`). Identity, `lattice.json`, specs and tokens stay.
+Nexus syncs again from its peers, and hosted chains from theirs. Per-chain
+wipes are not offered: chains share one store. `409`, with no wipe recorded,
+once a stop or restart is already under way, since that start may not come.
 
 ### Tokens
 

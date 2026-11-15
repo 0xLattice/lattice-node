@@ -425,10 +425,17 @@ final class NodeLifecycle: @unchecked Sendable {
     /// Asks for `request`, recorded at once and begun after `delay` (so an
     /// answer saying so goes out first). False, and nothing changes, when a
     /// stop or restart was asked for already: the first request stands.
+    /// `prepare` runs only for a request that will be recorded, before it is
+    /// and before any other can be; if it throws, nothing is recorded.
     @discardableResult
     func ask(_ request: Request, after delay: Duration = .zero) -> Bool {
-        let first = lock.withLock { () -> Bool in
+        ask(request, after: delay, prepare: {})
+    }
+
+    func ask(_ request: Request, after delay: Duration, prepare: () throws -> Void) rethrows -> Bool {
+        let first = try lock.withLock { () -> Bool in
             guard self.request == nil else { return false }
+            try prepare()
             self.request = request
             return true
         }
@@ -603,7 +610,9 @@ func addOperatorControlRoutes(
         guard let lifecycle = control.lifecycle else { throw HTTPError(.notFound) }
         try await checkRestart(control)
         // Answered first: the restart begins once this reply is on its way.
-        lifecycle.ask(.restart, after: .milliseconds(200))
+        guard lifecycle.ask(.restart, after: .milliseconds(200)) else {
+            throw HTTPError(.conflict, message: "a stop or restart is already under way")
+        }
         return try json(["restarting": true], request: request, context: context, status: .accepted)
     }
     router.post("stop") { request, context in
@@ -622,13 +631,13 @@ func addOperatorControlRoutes(
         let underWay = "a stop or restart is already under way; ask for the wipe once the node is back"
         guard lifecycle.requested == nil else { throw HTTPError(.conflict, message: underWay) }
         try await checkRestart(control)
-        try FileManager.default.createDirectory(at: layout.wipeRequest.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Data().write(to: layout.wipeRequest)
-        guard lifecycle.ask(.restart, after: .milliseconds(200)) else {
-            // A stop came in between: the marker stays, and the wipe runs
-            // whenever the node next starts.
-            throw HTTPError(.conflict, message: "a stop came first; the wipe runs at the node's next start")
+        // The marker is written only by the request that is recorded, so a
+        // 409 always leaves no wipe pending, even with a stop in between.
+        let asked = try lifecycle.ask(.restart, after: .milliseconds(200)) {
+            try FileManager.default.createDirectory(at: layout.wipeRequest.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data().write(to: layout.wipeRequest)
         }
+        guard asked else { throw HTTPError(.conflict, message: underWay) }
         return try json(["restarting": true, "wiping": true], request: request, context: context, status: .accepted)
     }
     router.get("tokens") { request, context in

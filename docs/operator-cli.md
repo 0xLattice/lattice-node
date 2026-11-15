@@ -169,6 +169,7 @@ what it wants next:
 | 0 | Asked to stop (`lattice down`, `POST /stop`), or SIGTERM/SIGINT. | leaves it stopped |
 | 75 | Asked to restart (`lattice restart`, `lattice wipe`). | starts it again |
 | 78 | Its configuration does not check (lattice.json, or a flag given with `--root`); the reason is on standard error. | systemd leaves it stopped until fixed; launchd and Docker start it again, throttled |
+| 64 | A command-line error: an unknown flag or bad value, or, for a node started with flags rather than `--root`, flags that do not check (ArgumentParser's usage status). Only `--root` configuration faults are 78. | starts it again; fix the unit |
 | other | A failure. | starts it again |
 
 That is systemd's `Restart=on-failure` with `RestartPreventExitStatus=78`,
