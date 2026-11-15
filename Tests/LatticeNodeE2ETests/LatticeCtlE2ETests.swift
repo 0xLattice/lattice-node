@@ -1129,6 +1129,9 @@ private final class NodeSupervisor: @unchecked Sendable {
     private var process: Process?
     private var stopping = false
     private var exitStatuses: [Int32] = []
+    /// Cleared where the exit is recorded, so `exits` is current once it reads false
+    /// (Process.isRunning turns false before the termination handler runs).
+    private var live = false
 
     init(lattice: URL, root: URL) {
         self.lattice = lattice
@@ -1138,7 +1141,7 @@ private final class NodeSupervisor: @unchecked Sendable {
     /// Every exit so far, in order.
     var exits: [Int32] { lock.withLock { exitStatuses } }
     var pid: Int32? { lock.withLock { process.map(\.processIdentifier) } }
-    var isRunning: Bool { lock.withLock { process?.isRunning ?? false } }
+    var isRunning: Bool { lock.withLock { live } }
 
     func start() throws {
         try lock.withLock {
@@ -1178,11 +1181,13 @@ private final class NodeSupervisor: @unchecked Sendable {
         }
         try process.run()
         self.process = process
+        live = true
     }
 
     private func exited(_ ended: Process) {
         lock.withLock {
             exitStatuses.append(ended.terminationReason == .exit ? ended.terminationStatus : -ended.terminationStatus)
+            if ended === process { live = false }
             guard ended === process, !stopping, ended.terminationReason == .exit, ended.terminationStatus == 75 else { return }
             try? launch()
         }
