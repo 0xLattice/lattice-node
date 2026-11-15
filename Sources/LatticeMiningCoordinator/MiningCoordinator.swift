@@ -596,27 +596,41 @@ public func rpcCookieAuthorization(file: URL) -> String? {
     return "Basic " + Data(cookie.utf8).base64EncodedString()
 }
 
+/// The `Authorization` value for a bearer token file (a token for a node's
+/// remote operator listener, e.g. one listing only the mining routes), read
+/// fresh each call so a replaced token applies at once. Nil when unreadable.
+public func bearerTokenAuthorization(file: URL) -> String? {
+    guard let content = try? String(contentsOf: file, encoding: .utf8) else { return nil }
+    let token = content.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !token.isEmpty else { return nil }
+    return "Bearer " + token
+}
+
 public final class HTTPMiningCoordinatorNodeClient: MiningCoordinatorNodeClient {
     private let apiBaseURL: URL
     private let templateRequestBody: Data
     private let session: URLSession
     private let cookieFile: URL?
+    private let tokenFile: URL?
 
     public init(
         apiBaseURL: URL,
         templateRequestBody: Data = Data(#"{"recipients":[]}"#.utf8),
         session: URLSession = .shared,
-        cookieFile: URL? = nil
+        cookieFile: URL? = nil,
+        tokenFile: URL? = nil
     ) {
         self.apiBaseURL = apiBaseURL
         self.templateRequestBody = templateRequestBody
         self.session = session
         self.cookieFile = cookieFile
+        self.tokenFile = tokenFile
     }
 
     private func request(_ path: String) -> URLRequest {
         var request = URLRequest(url: apiBaseURL.appendingPathComponent(path))
-        if let authorization = cookieFile.flatMap(rpcCookieAuthorization(file:)) {
+        if let authorization = tokenFile.flatMap(bearerTokenAuthorization(file:))
+            ?? cookieFile.flatMap(rpcCookieAuthorization(file:)) {
             request.setValue(authorization, forHTTPHeaderField: "Authorization")
         }
         return request

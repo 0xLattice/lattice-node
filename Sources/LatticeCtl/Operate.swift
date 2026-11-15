@@ -19,7 +19,7 @@ struct Config: AsyncParsableCommand {
 
         @OptionGroup var target: NodeTarget
 
-        @Argument(help: "A key path, e.g. mine.recipients.")
+        @Argument(help: "A key path, e.g. hostedChains.")
         var key: String?
 
         func run() async throws {
@@ -53,15 +53,15 @@ struct Config: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "set",
             abstract: "Change keys: key=value (a.b.c=value; the value is JSON when it parses as JSON), or --patch with a JSON merge patch.",
-            discussion: "A running node applies hosted chains, child peers and mining at once and keeps every other key for its next start (`lattice restart`)."
+            discussion: "A running node applies hosted chains and child peers at once and keeps every other key for its next start (`lattice restart`)."
         )
 
         @OptionGroup var target: NodeTarget
 
-        @Argument(help: "key=value assignments, e.g. mine.recipients.Nexus=<address> stateWindow=128.")
+        @Argument(help: "key=value assignments, e.g. minRelayFee=5 stateWindow=128.")
         var assignments: [String] = []
 
-        @Option(help: "An RFC 7396 merge patch of lattice.json, e.g. '{\"mine\":{\"recipients\":{\"Nexus/Alpha\":null}}}'.")
+        @Option(help: "An RFC 7396 merge patch of lattice.json, e.g. '{\"peers\":{\"Nexus/Alpha\":null}}'.")
         var patch: String?
 
         func run() async throws {
@@ -77,7 +77,7 @@ struct Config: AsyncParsableCommand {
 
         @OptionGroup var target: NodeTarget
 
-        @Argument(help: "Key paths, e.g. mine.recipients.Nexus.")
+        @Argument(help: "Key paths, e.g. peers.Nexus/Alpha.")
         var keys: [String]
 
         func run() async throws {
@@ -108,20 +108,20 @@ struct Restart: AsyncParsableCommand {
 }
 
 struct Logs: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Print the node's recent log lines, or the mining loop's.")
+    static let configuration = CommandConfiguration(abstract: "Print the node's recent log lines, or the local mining loop's.")
 
     @OptionGroup var target: NodeTarget
 
-    @Flag(help: "The mining loop's log instead of the node's.")
+    @Flag(help: "The mining loop's log under --root (`lattice mine start`), instead of the node's.")
     var miner = false
 
     @Option(help: "How many lines.")
     var tail = 200
 
     func run() async throws {
-        let name = miner ? "mine" : "node"
-        if let rpc = try await target.running() {
-            let data = try await send(rpc: rpc, "GET", "logs?file=\(name)&tail=\(tail)")
+        // The miner is a process of its own: its log is on this machine.
+        if !miner, let rpc = try await target.running() {
+            let data = try await send(rpc: rpc, "GET", "logs?file=node&tail=\(tail)")
             FileHandle.standardOutput.write(data)
         } else {
             let file = target.layout.logFile(for: miner ? "mine" : "lattice-node")

@@ -318,7 +318,7 @@ struct Down: AsyncParsableCommand {
 
 struct Status: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "One line per hosted chain, mining, and what waits for a restart."
+        abstract: "One line per hosted chain, and what waits for a restart."
     )
 
     @OptionGroup var target: NodeTarget
@@ -345,10 +345,6 @@ struct Status: AsyncParsableCommand {
         }
         for path in (hosted.configured ?? []) where !hosted.chains.contains(path) {
             print("\(path): configured, not running")
-        }
-        if let data = try? await send(rpc: rpc, "GET", "mining"),
-           let mining = try? JSONDecoder().decode(MiningStatusResponse.self, from: data) {
-            print("mining: \(mining.enabled ? (mining.running ? "on" : "on, loop not running") : "off")")
         }
         if let data = try? await send(rpc: rpc, "GET", "config"),
            let config = try? JSONDecoder().decode(ConfigResponse.self, from: data), !config.restartRequired.isEmpty {

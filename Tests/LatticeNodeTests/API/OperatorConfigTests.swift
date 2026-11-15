@@ -44,24 +44,8 @@ final class OperatorConfigTests: XCTestCase {
         }
     }
 
-    private final class FakeMining: MiningControl, @unchecked Sendable {
-        private let lock = NSLock()
-        private var list: [TopologyMine?] = []
-        /// Refuses every `mine` section, as a host without its worker does.
-        let refusing: Bool
-
-        init(refusing: Bool = false) { self.refusing = refusing }
-
-        var applied: [TopologyMine?] { lock.withLock { list } }
-        func check(_ mine: TopologyMine?) throws {
-            if refusing { throw OperatorConfigError.invalid("mine.worker is not executable here") }
-        }
-        func apply(_ mine: TopologyMine?) async { lock.withLock { list.append(mine) } }
-    }
-
     private func make(
         _ json: String = #"{"listen":4001,"rpc":4003,"peers":[]}"#, runtime: FakeRuntime = FakeRuntime(),
-        mining: FakeMining = FakeMining(),
         startCheck: @escaping @Sendable (Topology, HostLayout, Topology) throws -> Void = checkStarts
     ) throws -> (OperatorConfig, HostLayout) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("operator-config-\(UUID().uuidString)")
@@ -70,7 +54,7 @@ final class OperatorConfigTests: XCTestCase {
         try Data(json.utf8).write(to: root.appendingPathComponent(Topology.fileName))
         let layout = HostLayout(root: root.path)
         let config = OperatorConfig(
-            layout: layout, started: try Topology.load(root: root).validated(), runtime: runtime, mining: mining,
+            layout: layout, started: try Topology.load(root: root).validated(), runtime: runtime,
             startCheck: startCheck
         )
         return (config, layout)
@@ -97,13 +81,12 @@ final class OperatorConfigTests: XCTestCase {
         let runtime = FakeRuntime(failing: ["Nexus/B"])
         let (config, layout) = try make(runtime: runtime)
         let response = try await config.patch(
-            patch(#"{"hostedChains":["Nexus/A","Nexus/B"],"mine":{"recipients":{"Nexus/B":"x"}}}"#), remote: false
+            patch(#"{"hostedChains":["Nexus/A","Nexus/B"]}"#), remote: false
         )
         XCTAssertEqual(response.failed.map(\.chain), ["Nexus/B"])
         XCTAssertEqual(response.config.hostedChains, ["Nexus/A"])
         let kept = try Topology.load(root: layout.root)
         XCTAssertEqual(kept.hostedChains, ["Nexus/A"], "what runs is what a restart hosts")
-        XCTAssertEqual(kept.mine?.recipients, [:], "nothing names the chain that did not start")
         XCTAssertNoThrow(try kept.validated())
     }
 
@@ -112,7 +95,7 @@ final class OperatorConfigTests: XCTestCase {
         let (config, layout) = try make(runtime: runtime)
         let before = try Data(contentsOf: layout.root.appendingPathComponent(Topology.fileName))
         for refused in [
-            #"{"mine":{"recipients":{"Nexus/Unhosted":"x"}}}"#, #"{"state":"some"}"#, #"{"unknown":1}"#,
+            #"{"mine":{"workers":1}}"#, #"{"state":"some"}"#, #"{"unknown":1}"#,
             #"{"hostedChains":["Nexus/A/B"]}"#, #"{"rpc":4001}"#,
         ] {
             do {
@@ -125,12 +108,10 @@ final class OperatorConfigTests: XCTestCase {
     }
 
     func testKeysTakingARestartAreKeptAndReported() async throws {
-        let mining = FakeMining()
-        let (config, layout) = try make(mining: mining)
-        let response = try await config.patch(patch(#"{"listen":5001,"mine":{"enabled":true}}"#), remote: false)
-        XCTAssertEqual(response.applied, ["mine"])
+        let (config, layout) = try make()
+        let response = try await config.patch(patch(#"{"listen":5001,"hostedChains":["Nexus/A"]}"#), remote: false)
+        XCTAssertEqual(response.applied, ["hostedChains"])
         XCTAssertEqual(response.restartRequired, ["listen"])
-        XCTAssertEqual(mining.applied.last??.enabled, true)
         XCTAssertEqual(try Topology.load(root: layout.root).listen, 5001)
         let current = try await config.current()
         XCTAssertEqual(current.restartRequired, ["listen"])
@@ -138,7 +119,7 @@ final class OperatorConfigTests: XCTestCase {
 
     func testTheRemoteListenerNamesNoFiles() async throws {
         let (config, _) = try make()
-        for refused in [#"{"mine":{"worker":"/bin/sh"}}"#, #"{"operatorListen":"0.0.0.0:9000","operatorTokens":"/etc/t.json"}"#] {
+        for refused in [#"{"operatorListen":"0.0.0.0:9000","operatorTokens":"/etc/t.json"}"#] {
             do {
                 _ = try await config.patch(patch(refused), remote: true)
                 XCTFail("\(refused) was accepted")
@@ -179,7 +160,6 @@ final class OperatorConfigTests: XCTestCase {
             XCTFail("a second spec was accepted")
         } catch OperatorConfigError.conflict {}
         _ = try await config.host(HostedChain(path: "Nexus/A/B"))
-        _ = try await config.patch(patch(#"{"mine":{"recipients":{"Nexus/A/B":"x"}}}"#), remote: false)
         do {
             _ = try await config.unhost("Nexus/A")
             XCTFail("a parent was unhosted under its child")
@@ -187,7 +167,6 @@ final class OperatorConfigTests: XCTestCase {
         _ = try await config.unhost("Nexus/A/B")
         let kept = try Topology.load(root: layout.root)
         XCTAssertEqual(kept.hostedChains, ["Nexus/A"])
-        XCTAssertEqual(kept.mine?.recipients, [:])
     }
 
     private let spec = ChainSpec(
@@ -303,19 +282,6 @@ final class OperatorConfigTests: XCTestCase {
             _ = try await config.host(HostedChain(path: "Nexus/A", spec: premined, premineTo: second))
             XCTFail("another premine recipient was accepted")
         } catch OperatorConfigError.conflict {}
-    }
-
-    /// Mining is checked when `mine` changes, not on every change: a host
-    /// whose worker went missing still takes other keys.
-    func testMiningIsCheckedOnlyWhenItChanges() async throws {
-        let (config, _) = try make(
-            #"{"listen":4001,"rpc":4003,"peers":[],"mine":{"enabled":true}}"#, mining: FakeMining(refusing: true)
-        )
-        _ = try await config.patch(patch(#"{"minRelayFee":3}"#), remote: false)
-        do {
-            _ = try await config.patch(patch(#"{"mine":{"workers":2}}"#), remote: false)
-            XCTFail("a mine change was not checked")
-        } catch OperatorConfigError.invalid {}
     }
 
     /// The operator listener's host is an address it binds as named: a
