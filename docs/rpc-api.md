@@ -184,8 +184,7 @@ after the answer; a request pipelined behind it on that connection is dropped
 with it, and a client sends it again on a new one. Behind a
 proxy that presents every client as one address, all clients share these
 reads. `--public-read-fetches 0` serves only what the node holds. A Volume no
-peer served within the caps above is 404. The immutable response is billed to the
-expensive public-read budget. Like the other per-level reads, a hosted child is selected
+peer served within the caps above is 404. Like the other per-level reads, a hosted child is selected
 with `?chainPath=Nexus/Alpha`; omitting it selects Nexus.
 
 `GET /volumes?cids=<cid>,<cid>,...` answers many Volumes in one request, for a
@@ -208,8 +207,7 @@ archive over 4 MiB is never in it, never truncated. At most 32 CIDs are
 accepted; more, none, or any that is not a CID is `400`. When every requested
 CID is in the body the response is immutable like `/volumes/:cid`; otherwise
 it is cached for the status max-age only, since the node may hold more later.
-It is billed to the expensive public-read budget and takes `?chainPath=` like
-the single route.
+It takes `?chainPath=` like the single route.
 
 Both `/api/block/latest` and `/api/block/:height-or-cid` report the block's
 coinbase. `rewardRecipient` is the header's recipient address; it is omitted
@@ -297,7 +295,7 @@ only: the newest child block the parent's last 64 canonical blocks commit,
 null when they commit none. It can be a block the child chain did not keep,
 or one nobody serves, so a reader never requires a URL to serve it. The route
 answers 404 when this node does not host the parent, or when nothing hosts,
-declares or commits the child. Billed to the expensive public read budget.
+declares or commits the child.
 
 ## Health and status
 
@@ -463,7 +461,7 @@ canonical post-states (at most ~64 account reads) for the first block whose
 nonce exceeds it, then confirms that block's transaction list holds the CID
 (a rival at the same nonce also moves the nonce). Reorg-correct because it
 reads the current canonical chain; the answer is cached for 3 seconds, not
-as immutable. Billed to the expensive public read budget. When the
+as immutable. When the
 post-state or block content needed is not held here, inclusion is omitted.
 
 ### Public submit
@@ -476,9 +474,8 @@ operator route's loopback `Host` and `Content-Type` checks (CORS allows POST
 on that listener). Differences:
 
 - the body is capped at 1 MiB before decoding (`413` above it);
-- each client is billed to its expensive read budget, and the listener to a
-  separate submit budget (`--public-submit-rate`, default 10/s): `429` over
-  either;
+- the listener bills it to a separate submit budget (`--public-submit-rate`,
+  default 10/s): `429` over it;
 - the transaction is volatile, never written to the local journal, and is
   held to the pool's ordinary capacity rules (fee-rate eviction and
   replacement) with no priority over peer gossip. While it waits for its

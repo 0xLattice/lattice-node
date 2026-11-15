@@ -156,8 +156,6 @@ open the code-enforced GET-only read surface on all interfaces:
   "listen": 4001,
   "rpc": 8080,
   "publicRead": 8081,
-  "publicReadRate": 25,
-  "publicReadExpensiveRate": 1,
   "publicReadMaxRate": 200
 }
 ```

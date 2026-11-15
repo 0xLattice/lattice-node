@@ -74,8 +74,6 @@ node's machine.
   "peers": ["<public-key>@node.example:4001"],
   "externalAddress": "192.0.2.10",
   "publicRead": 8081,
-  "publicReadRate": 25,
-  "publicReadExpensiveRate": 1,
   "publicReadMaxRate": 200,
   "publicReadURL": "https://reads.example.org",
   "publicSubmit": false,
