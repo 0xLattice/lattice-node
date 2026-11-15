@@ -118,6 +118,7 @@ final class LatticeCtlTopologyTests: XCTestCase {
         XCTAssertEqual(topology.rpc, 4003)
         XCTAssertFalse(String(decoding: try topology.canonicalData(), as: UTF8.self).contains("mine"))
         XCTAssertThrowsError(try topology.applying(mergePatch: Data(#"{"mine":{"workers":2}}"#.utf8)))
+        XCTAssertNoThrow(try topology.applying(mergePatch: Data(#"{"mine":null}"#.utf8)), "removing it is cleanup")
         XCTAssertThrowsError(try Topology.load(data: Data(#"{"listen":4001,"rpc":4003,"nope":1}"#.utf8)))
     }
 

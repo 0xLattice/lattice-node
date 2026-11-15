@@ -196,7 +196,9 @@ actor OperatorConfig {
             }
         }
         let changed = try effective.changedKeys(from: saved)
-        if !changed.isEmpty {
+        // A `mine` left in the file by an earlier release goes at any write
+        // (`{"mine": null}` asks for nothing else).
+        if !changed.isEmpty || Topology.holdsRetiredMining(root: layout.root) {
             try effective.save(root: layout.root)
             saved = effective
         }

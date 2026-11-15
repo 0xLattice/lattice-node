@@ -372,8 +372,7 @@ func minerSettings(_ options: MinerOptions) throws -> MinerSettings {
     if let path = mine.worker, path != "cpu" {
         worker = URL(fileURLWithPath: path)
     } else {
-        worker = try nodeBinary().deletingLastPathComponent()
-            .appendingPathComponent("lattice-miner")
+        worker = try siblingBinary("lattice-miner")
     }
     guard FileManager.default.isExecutableFile(atPath: worker.path) else {
         throw CtlError("worker is not executable: \(worker.path)")
@@ -417,8 +416,7 @@ final class InterruptFlag: @unchecked Sendable {
 func runCoordinatorOnce(
     _ settings: MinerSettings, layout: HostLayout, deadline: Duration
 ) async throws -> CoordinatorOutcome {
-    let executable = try nodeBinary().deletingLastPathComponent()
-        .appendingPathComponent("lattice-mining-coordinator")
+    let executable = try siblingBinary("lattice-mining-coordinator")
     var arguments = [
         "--node", settings.rpc.baseURL,
     ] + settings.coordinatorAuthentication + [

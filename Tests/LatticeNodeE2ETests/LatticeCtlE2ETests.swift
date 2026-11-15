@@ -960,10 +960,11 @@ private func e2eScaled(_ timeout: Duration) -> Duration {
 /// --token-file` against its operator listener, nothing on its disk.
 extension LatticeCtlE2ETests {
     private func runRemote(
-        _ arguments: [String], _ url: String, _ tokenFile: URL, expectFailure: Bool = false
+        _ arguments: [String], _ url: String, _ tokenFile: URL, expectFailure: Bool = false,
+        lattice: URL? = nil
     ) async throws -> String {
         let process = Process()
-        process.executableURL = try binary("E2E_CTL_BIN", "lattice")
+        process.executableURL = try lattice ?? binary("E2E_CTL_BIN", "lattice")
         process.arguments = arguments + ["--node", url, "--token-file", tokenFile.path]
         let stdout = Pipe()
         process.standardOutput = stdout
@@ -1017,7 +1018,21 @@ extension LatticeCtlE2ETests {
         try FileManager.default.createDirectory(at: minerRoot, withIntermediateDirectories: true)
         minerRoots.append(minerRoot)
         try writeMinerConfig(minerRoot, recipients: [alpha: first.address])
-        _ = try await runRemote(["mine", "start", "--root", minerRoot.path], url, minerToken)
+        // A miner-only host: lattice and the mining binaries, no lattice-node.
+        let minerBin = minerRoot.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: minerBin, withIntermediateDirectories: true)
+        let lattice = try binary("E2E_CTL_BIN", "lattice")
+        for name in ["lattice", "lattice-mining-coordinator", "lattice-miner"] {
+            try FileManager.default.copyItem(
+                at: lattice.deletingLastPathComponent().appendingPathComponent(name),
+                to: minerBin.appendingPathComponent(name)
+            )
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: minerBin.appendingPathComponent("lattice-node").path))
+        _ = try await runRemote(
+            ["mine", "start", "--root", minerRoot.path], url, minerToken,
+            lattice: minerBin.appendingPathComponent("lattice")
+        )
         try await waitFor("Alpha mined", seconds: 180) {
             await self.height(host.nexusRPC, chain: alpha) >= 2
         }

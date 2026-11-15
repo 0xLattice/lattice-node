@@ -135,7 +135,8 @@ This is intentionally one schema:
 - it holds no mining settings: the miner is a separate process with its own
   file ([Mining](#mining)). A `mine` object left from an earlier release is
   ignored by the node (with a warning at start) and dropped the next time the
-  node writes the file; a change adding one is refused.
+  node writes the file, or by `lattice config unset mine`; a change adding
+  one is refused.
 
 ## Lifecycle
 
@@ -388,7 +389,14 @@ While there is no `miner.json`, the miner reads the `mine` object an older
 it to `miner.json` once, saying so (never over a `miner.json` already there),
 so a host upgraded with no edits keeps mining. The node drops that object the
 next time it writes `lattice.json`; the copy is what the miner reads from then
-on.
+on. So after upgrading, start the miner once (`lattice mine start`, or its
+unit) before changing the node's configuration: a change made first drops
+`mine` before anything copied it, and the miner then finds no settings.
+
+A host upgraded from a build where the node itself started the miner (the
+unreleased `main` between #63 and this change) mines no more on its own:
+start the miner after upgrading with `lattice mine start --root <root>`, or
+install the `lattice-mine.service` unit `emit-systemd` prints.
 
 `worker` is `cpu` for the bundled worker or an executable path implementing
 the worker contract. `recipients` sends each chain's reward and fees to an

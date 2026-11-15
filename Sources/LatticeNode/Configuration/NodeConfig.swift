@@ -75,7 +75,8 @@ extension Topology {
         guard let changes = try? JSONSerialization.jsonObject(with: patch) as? [String: Any] else {
             throw CtlError("a configuration change is one JSON object (a merge patch of \(Self.fileName))")
         }
-        guard changes[Self.retiredMiningKey] == nil else {
+        // Removing it (`null`, `lattice config unset mine`) is cleanup.
+        guard changes[Self.retiredMiningKey] == nil || changes[Self.retiredMiningKey] is NSNull else {
             throw CtlError("\(Self.fileName) holds no mining settings: the miner is a separate process and reads its own miner.json")
         }
         let merged = Self.merge(try jsonObject(), changes)

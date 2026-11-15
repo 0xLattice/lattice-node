@@ -117,6 +117,17 @@ final class OperatorConfigTests: XCTestCase {
         XCTAssertEqual(current.restartRequired, ["listen"])
     }
 
+    /// A `mine` an earlier release left in lattice.json is ignored, and
+    /// `{"mine": null}` (`lattice config unset mine`) removes it from the file.
+    func testAnOlderMineIsRemovedByUnsettingIt() async throws {
+        let (config, layout) = try make(#"{"listen":4001,"rpc":4003,"peers":[],"mine":{"workers":1}}"#)
+        XCTAssertTrue(Topology.holdsRetiredMining(root: layout.root))
+        let response = try await config.patch(patch(#"{"mine":null}"#), remote: false)
+        XCTAssertEqual(response.applied, [])
+        XCTAssertFalse(Topology.holdsRetiredMining(root: layout.root))
+        XCTAssertEqual(try Topology.load(root: layout.root).listen, 4001)
+    }
+
     func testTheRemoteListenerNamesNoFiles() async throws {
         let (config, _) = try make()
         for refused in [#"{"operatorListen":"0.0.0.0:9000","operatorTokens":"/etc/t.json"}"#] {

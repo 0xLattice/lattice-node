@@ -15,15 +15,22 @@ import LatticeNode
 import LatticeNodeAPI
 
 func nodeBinary() throws -> URL {
+    try siblingBinary("lattice-node")
+}
+
+/// The executable `name` beside this `lattice` (symlinks resolved), or in
+/// /usr/local/bin: lattice-node, or the miner's lattice-mining-coordinator
+/// and lattice-miner, which a miner-only host has without lattice-node.
+func siblingBinary(_ name: String) throws -> URL {
     let own = URL(fileURLWithPath: CommandLine.arguments[0])
         .resolvingSymlinksInPath().deletingLastPathComponent()
     for candidate in [
-        own.appendingPathComponent("lattice-node"),
-        URL(fileURLWithPath: "/usr/local/bin/lattice-node"),
+        own.appendingPathComponent(name),
+        URL(fileURLWithPath: "/usr/local/bin/\(name)"),
     ] where FileManager.default.isExecutableFile(atPath: candidate.path) {
         return candidate
     }
-    throw CtlError("lattice-node not found beside lattice or in /usr/local/bin")
+    throw CtlError("\(name) not found beside lattice or in /usr/local/bin")
 }
 
 /// A live pid is only "ours" if the command name still matches what the
