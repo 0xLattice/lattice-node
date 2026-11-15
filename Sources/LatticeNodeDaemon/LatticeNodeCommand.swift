@@ -153,6 +153,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     var externalAddress: String?
 
     mutating func run() async throws {
+        try nodeLog.capture()
+        defer { nodeLog.finish() }
         guard let root else {
             try await start(owner: nil)
             return
@@ -168,7 +170,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         do {
             topology = try Topology.load(root: layout.root).validated()
         } catch {
-            throw ValidationError("\(layout.root.appendingPathComponent(Topology.fileName).path): \(error). The node starts only from a valid configuration; fix the file by hand while the node is stopped (`lattice config set` edits it then too).")
+            FileHandle.standardError.write(Data("\(layout.root.appendingPathComponent(Topology.fileName).path): \(error). The node starts only from a valid configuration; fix the file by hand while the node is stopped (`lattice config set` edits it then too).\n".utf8))
+            throw ExitCode(exitConfigurationError)
         }
         if Topology.holdsRetiredMining(root: layout.root) {
             FileHandle.standardError.write(Data("warning: \(Topology.retiredMiningWarning)\n".utf8))

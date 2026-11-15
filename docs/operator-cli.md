@@ -1,8 +1,10 @@
 # Operator CLI
 
-`lattice` operates one node: it starts `lattice-node --root <root>`, which
-hosts the Nexus-rooted tree its `lattice.json` describes, and then asks that
-node, over its operator API, for everything else. The node owns
+`lattice` operates one node: `lattice up` runs `lattice-node --root <root>`
+in the foreground, which hosts the Nexus-rooted tree its `lattice.json`
+describes, and every other command asks that node, over its operator API.
+Starting the node again after it exits is the job of a process manager
+(systemd, launchd, a container runtime), not of `lattice` or the node. The node owns
 `lattice.json` while it runs ([Operator control](rpc-api.md#operator-control)).
 
 Every command accepts `--root <directory>` (the current directory is the
@@ -10,8 +12,8 @@ default). Every command that operates a node also accepts `--node <url>
 --token-file <file>`: it then asks that node's
 [remote operator listener](rpc-api.md#remote-operator-listener) instead of
 the one under `--root` (loopback and its cookie). Only `init`, `identity`,
-`key`, `up`, `down`, `mine stop` and `emit-systemd` work on the local machine
-alone. The miner always runs on the machine `lattice mine` runs on; `--node`
+`key`, `up`, `mine stop`, `emit-systemd` and `emit-launchd` work on the local
+machine alone. The miner always runs on the machine `lattice mine` runs on; `--node`
 only says which node it mines through.
 
 ## Operating a node
@@ -26,17 +28,18 @@ only says which node it mines through.
 | `lattice mine start/stop/status` | [Mining](#mining). |
 | `lattice tx ...` | [Transactions](#spending-keys-and-transactions). |
 | `lattice pins list/add/remove` | The Volumes the node keeps for its operator. |
-| `lattice restart` | Restart the node in place; waits until it answers again. |
+| `lattice restart` | Restart the node: it stops and exits 75, and its process manager starts it again; waits until a new process answers. |
+| `lattice down` | Stop the node: it exits 0, and its process manager leaves it stopped. |
 | `lattice wipe` | Delete chain storage, keep identity and configuration; a running node restarts empty. |
 | `lattice tokens list/create/revoke` | Remote operator tokens. |
-| `lattice logs [--miner] [--tail N]` | The node's recent log lines (`--miner`: the local mining loop's, read from `log/mine.log` under `--root`). |
+| `lattice logs [--miner] [--tail N]` | The running node's recent log lines, from its memory (`--miner`: the local mining loop's, read from `log/mine.log` under `--root`). |
 
 A running node applies hosted chains and child-chain peers at once;
 it writes every other key and lists it as waiting for a restart until
 `lattice restart` (refused while `lattice.json` would not start the node). A
 change the node would not start from (a peer that does not parse, a port in
 use) is refused before it is kept. A change to a stopped node is written to `lattice.json`
-directly, checked first, under the spawn lock. A running node refuses a
+directly, checked first, under the node's storage lock. A running node refuses a
 change when `lattice.json` was edited by hand since it last wrote it: stop it
 to edit the file by hand, or `lattice restart` to load the edit. A file that
 does not check stops the node at start with the reason.
@@ -141,11 +144,10 @@ This is intentionally one schema:
 | Command | Effect |
 |---|---|
 | `lattice init` | Create `lattice.json` and the process identity, refusing to overwrite a topology. |
-| `lattice up` | Start `lattice-node --root <root>` in the background, its output to `log/lattice-node.log`. A running node is left as it is. |
-| `lattice up --foreground` | Supervise the node for container or init-system use. |
+| `lattice up` | Run `lattice-node --root <root>` in the foreground (`lattice` becomes that process). `--foreground` is accepted as a deprecated alias. |
 | `lattice status` | Read every hosted level from the node. |
-| `lattice down` | Stop the node process under the spawn lock. |
-| `lattice restart` | Restart the running node in place (same pid, same arguments). |
+| `lattice down` | Ask the node to stop (`POST /stop`); it exits 0. |
+| `lattice restart` | Ask the node to restart (`POST /restart`); it exits 75 for its process manager to start it again. |
 | `lattice wipe` | Remove the tree storage; preserve identity, specs, tokens, and topology. A running node does it on a restart. |
 | `lattice identity` | Print the process public key and peer string. |
 
@@ -153,19 +155,30 @@ Examples:
 
 ```bash
 lattice init --root /var/lib/lattice
-lattice up --root /var/lib/lattice
+lattice up --root /var/lib/lattice          # in the foreground; another shell:
 lattice status --root /var/lib/lattice
 lattice down --root /var/lib/lattice
 ```
 
-The PID file names the executable as well as the PID, so a recycled PID is not
-signalled. Start, stop, restart, child creation, and wipe share one spawn lock.
-Storage also has its own writer lock; a stopped-node `wipe` refuses if any
-node still owns it, and `lattice` takes a held lock to mean the node runs.
+The node logs to standard error and keeps its last lines in memory for
+`lattice logs`; it writes no log file and no pidfile. Its exit status says
+what it wants next:
 
-`POST /restart` makes the node replace itself with its own binary and
-arguments (`execv`) after an orderly stop, so it needs no supervisor: the pid,
-the pidfile and any supervisor that watches it stay as they are.
+| Exit | Meaning | A process manager |
+|---|---|---|
+| 0 | Asked to stop (`lattice down`, `POST /stop`), or SIGTERM/SIGINT. | leaves it stopped |
+| 75 | Asked to restart (`lattice restart`, `lattice wipe`). | starts it again |
+| 78 | Its configuration does not check; the reason is on standard error. | leaves it stopped until fixed |
+| other | A failure. | starts it again |
+
+That is systemd's `Restart=on-failure` with `RestartPreventExitStatus=78`,
+launchd's `KeepAlive` with `SuccessfulExit` false, or Docker's `--restart
+on-failure`: `lattice emit-systemd` and `lattice emit-launchd` print one. A
+node run with nothing to start it again stays stopped after a restart.
+
+Storage has its own writer lock: a stopped-node `wipe` or configuration edit
+takes it, so no node starts on the storage meanwhile, and `lattice` takes a
+held lock to mean the node runs.
 
 ## Child chains
 
@@ -453,7 +466,7 @@ that parent state, and a pooled one leaves the pool when the tip moves on. All s
 absolute chain path. The CLI rejects a path this host does not serve; the node
 also returns 404 for an unhosted path.
 
-## systemd
+## systemd, launchd, containers
 
 Generate foreground units from the configured topology (and a
 `lattice-mine.service` running `lattice mine run --root <root>` when the root
@@ -462,6 +475,35 @@ holds miner settings):
 ```bash
 lattice emit-systemd --root /var/lib/lattice \
   > /etc/systemd/system/lattice.generated.units
+```
+
+The tree's unit runs `lattice up --root <root>` with `Restart=on-failure`,
+`RestartPreventExitStatus=78` and `TimeoutStopSec=90`; its log is the
+journal (`journalctl -u lattice-tree`).
+
+On macOS, a launchd job for the current user:
+
+```bash
+lattice emit-launchd --root ~/lattice > ~/Library/LaunchAgents/build.lattice.node.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/build.lattice.node.plist
+```
+
+It restarts the node on any exit but 0 (78 included, at launchd's throttle
+interval) and sends its output to `<root>/log/lattice-node.log`.
+
+In a container, run `lattice up --root <root>` as the main process with
+`docker run --restart on-failure` (Compose `restart: on-failure`). On Fly,
+set `[[restart]] policy = "on-failure"` and a `kill_timeout` long enough for
+an orderly stop (60 s or more) in `fly.toml`. A shell entrypoint that
+starts sidecars beside the node should start the node again itself when it
+exits 75, so its sidecars keep running:
+
+```sh
+while :; do
+  lattice up --root /data
+  status=$?
+  [ "$status" -eq 75 ] || exit "$status"
+done
 ```
 
 For a node started with flags rather than `--root`, the checked-in examples
@@ -485,9 +527,9 @@ rewards.
     storage.lock
   operator-tokens.json   (operatorTokens, when set)
   miner.json             (the miner's own settings, when it mines here)
-  run/
-  log/lattice-node.log
+  run/                   (the mining loop's pidfile, when it mines here)
   log/mine.log           (the mining loop's, when it mines here)
+  log/lattice-node.log   (only where launchd writes the node's output)
 ```
 
 There is no per-chain process, port, key, or child `state.db`. The path in

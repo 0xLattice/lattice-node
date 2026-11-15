@@ -22,7 +22,7 @@ struct LatticeCtl: AsyncParsableCommand {
             Init.self, Up.self, Down.self, Status.self,
             Identity.self, Key.self, Wipe.self, Mine.self, Tx.self, Child.self,
             Config.self, Restart.self, Logs.self, Pins.self, Tokens.self,
-            EmitSystemd.self,
+            EmitSystemd.self, EmitLaunchd.self,
         ]
     )
 }

@@ -394,57 +394,50 @@ extension NodeRuntime: HostingRuntime {
     }
 }
 
-/// A restart asked for through the API (`POST /restart`, `POST /wipe`):
-/// the node stops as it would on SIGTERM, then runs its own binary again
-/// with the same arguments in the same process (exec), so whatever
-/// supervises it sees no exit and no new pid.
+/// The process's exit status asking whatever runs the node to start it
+/// again (`POST /restart`, `POST /wipe`): sysexits' EX_TEMPFAIL.
+let exitRestart: Int32 = 75
+
+/// The process's exit status for a configuration it cannot start from:
+/// sysexits' EX_CONFIG, which a process manager is told not to retry
+/// (systemd `RestartPreventExitStatus=78`).
+let exitConfigurationError: Int32 = 78
+
+/// The node's output, kept for `GET /logs`.
+let nodeLog = NodeLog()
+
+/// A stop asked for through the API: `POST /stop` (the process exits 0 and
+/// stays stopped) or `POST /restart` and `POST /wipe` (it exits 75, and
+/// whatever runs it starts it again). Either way the node first stops as it
+/// would on SIGTERM. The node never starts itself.
 final class NodeLifecycle: @unchecked Sendable {
+    enum Request: Sendable { case stop, restart }
+
     private let lock = NSLock()
-    private var requested = false
+    private var request: Request?
     private let stream: AsyncStream<Void>
     private let continuation: AsyncStream<Void>.Continuation
 
-    /// The binary to run again, as it was named when this process started:
-    /// a later look (`/proc/self/exe`) can name a file an upgrade replaced.
-    private let executable: String
-
     init() {
         (stream, continuation) = AsyncStream.makeStream()
-        executable = Bundle.main.executablePath.map {
-            $0.hasSuffix(" (deleted)") ? String($0.dropLast(" (deleted)".count)) : $0
-        } ?? CommandLine.arguments[0]
     }
 
-    var restartRequested: Bool { lock.withLock { requested } }
+    /// What was asked for, if anything; the first request stands.
+    var requested: Request? { lock.withLock { request } }
 
-    func requestRestart() {
-        lock.withLock { requested = true }
+    func requestRestart() { ask(.restart) }
+
+    func requestStop() { ask(.stop) }
+
+    private func ask(_ request: Request) {
+        lock.withLock { if self.request == nil { self.request = request } }
         continuation.yield()
         continuation.finish()
     }
 
-    /// Returns once a restart is asked for.
+    /// Returns once a stop or restart is asked for.
     func waitForRequest() async {
         for await _ in stream { return }
-    }
-
-    /// Replaces this process with its own binary, run with the same
-    /// arguments. Every descriptor but the standard three is closed on the
-    /// way, so the new image finds its ports, storage lock and files free.
-    func reexec() -> Never {
-        // Every open output stream, without naming the C globals (not
-        // concurrency-safe under strict checking).
-        fflush(nil)
-        let directory = FileManager.default.fileExists(atPath: "/proc/self/fd") ? "/proc/self/fd" : "/dev/fd"
-        for name in (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? [] {
-            if let fd = Int32(name), fd > 2 { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) }
-        }
-        var argv: [UnsafeMutablePointer<CChar>?] = CommandLine.arguments.map { strdup($0) }
-        argv.append(nil)
-        execv(executable, argv)
-        // Not silently: a supervisor restarts a process that exits nonzero.
-        FileHandle.standardError.write(Data("restart failed: exec \(executable): \(String(cString: strerror(errno)))\n".utf8))
-        exit(75)
     }
 }
 
@@ -456,9 +449,8 @@ struct OperatorControl: Sendable {
     var tokens: TokenStore?
     var lifecycle: NodeLifecycle?
     var storagePath: URL?
-    /// The node's own log, by name; known when the
-    /// node runs under `--root` (where `lattice up` sends its output).
-    var logs: [String: URL] = [:]
+    /// The node's recent output (`GET /logs`).
+    var log: NodeLog?
 }
 
 /// Wipes the storage a `POST /wipe` asked to wipe, before anything opens it:
@@ -478,20 +470,7 @@ func performRequestedWipe(_ layout: HostLayout) throws {
         _ = lock
     }
     try FileManager.default.removeItem(at: request)
-    print("storage wiped as asked (\(directory.path)); identity and \(Topology.fileName) kept")
-}
-
-/// The last `count` lines of `file`, read from at most its last 4 MiB.
-func tailLines(_ file: URL, count: Int) throws -> String {
-    let handle = try FileHandle(forReadingFrom: file)
-    defer { try? handle.close() }
-    let size = try handle.seekToEnd()
-    let window: UInt64 = 4 << 20
-    try handle.seek(toOffset: size > window ? size - window : 0)
-    let text = String(decoding: try handle.readToEnd() ?? Data(), as: UTF8.self)
-    var lines = text.split(separator: "\n", omittingEmptySubsequences: false)
-    if lines.last == "" { lines.removeLast() }
-    return lines.suffix(count).joined(separator: "\n") + (lines.isEmpty ? "" : "\n")
+    logLine("storage wiped as asked (\(directory.path)); identity and \(Topology.fileName) kept")
 }
 
 /// Bytes on disk of each entry of `storage`, and its file system's free space.
@@ -596,18 +575,17 @@ func addOperatorControlRoutes(
         }
     }
     router.get("logs") { request, context in
-        let name = request.uri.queryParameters["file"].map(String.init) ?? "node"
-        guard let file = control.logs[name], FileManager.default.fileExists(atPath: file.path) else {
-            throw HTTPError(.notFound, message: control.logs.isEmpty
-                ? "this node's log goes to its standard output (it was not started under --root)"
-                : "no log \(name); there are \(control.logs.keys.sorted().joined(separator: ", "))")
+        // Only the node's own: a client that runs beside it keeps its log.
+        if let name = request.uri.queryParameters["file"], name != "node" {
+            throw HTTPError(.notFound, message: "no log \(name): the node serves its own output only")
         }
+        guard let log = control.log else { throw HTTPError(.notFound) }
         let tail = request.uri.queryParameters["tail"].flatMap { Int($0) } ?? 200
         guard tail > 0 else { throw HTTPError(.badRequest, message: "tail is a positive number of lines") }
         return Response(
             status: .ok,
             headers: [.contentType: "text/plain; charset=utf-8", .cacheControl: "no-store"],
-            body: ResponseBody(byteBuffer: ByteBuffer(string: try tailLines(file, count: min(tail, 10_000))))
+            body: ResponseBody(byteBuffer: ByteBuffer(string: log.tail(min(tail, NodeLog.maximumLines))))
         )
     }
     router.get("disk") { request, context in
@@ -624,6 +602,15 @@ func addOperatorControlRoutes(
             lifecycle.requestRestart()
         }
         return try json(["restarting": true], request: request, context: context, status: .accepted)
+    }
+    router.post("stop") { request, context in
+        if !remote { try requireLoopbackHost(request) }
+        guard let lifecycle = control.lifecycle else { throw HTTPError(.notFound) }
+        Task {
+            try? await Task.sleep(for: .milliseconds(200))
+            lifecycle.requestStop()
+        }
+        return try json(["stopping": true], request: request, context: context, status: .accepted)
     }
     router.post("wipe") { request, context in
         if !remote { try requireLoopbackHost(request) }

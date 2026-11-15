@@ -130,23 +130,19 @@ struct NodeTarget: ParsableArguments {
         stopped: (inout Topology) throws -> Void
     ) async throws {
         if let remote = try remote() { return try await api(remote) }
-        let layout = layout
-        let local: NodeRPC? = try await withSpawnLock(layout) {
-            guard case .stopped(let lock) = localNode(layout) else {
-                return NodeRPC(try Topology.load(root: layout.root), layout)
-            }
-            var topology = try Topology.load(root: layout.root)
-            try stopped(&topology)
-            try topology.validated().save(root: layout.root)
-            _ = lock
-            return nil
+        guard case .stopped(let lock) = localNode(layout) else {
+            return try await api(try await answering(NodeRPC(try Topology.load(root: layout.root), layout)))
         }
-        if let local { try await api(try await answering(local)) }
+        // Edited under the node's storage lock, so no node starts meanwhile.
+        var topology = try Topology.load(root: layout.root)
+        try stopped(&topology)
+        try topology.validated().save(root: layout.root)
+        _ = lock
     }
 }
 
-/// The local node once it answers: a node `lattice up` just started opens
-/// its storage and listener only after a while.
+/// The local node once it answers: a node just started opens its storage
+/// and listener only after a while.
 private func answering(_ rpc: NodeRPC) async throws -> NodeRPC {
     let deadline = ContinuousClock.now + .seconds(180)
     var said = false
@@ -176,12 +172,8 @@ enum LocalNode {
     case stopped(StorageDirectoryLock?)
 }
 
-/// The local node, by its storage lock. Callers that edit hold the spawn
-/// lock too, so no `up` starts a node meanwhile.
+/// The local node, by its storage lock: held while a node runs on it.
 func localNode(_ layout: HostLayout) -> LocalNode {
-    // A node `lattice up` started may not hold its storage lock yet; taking
-    // it here would keep that node from starting.
-    if runningPid(layout, hostProcessName) != nil { return .running }
     let directory = layout.chainDirectory(for: ChainAddress.nexus)
     guard FileManager.default.fileExists(atPath: directory.path) else { return .stopped(nil) }
     do {

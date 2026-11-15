@@ -63,9 +63,9 @@ same handlers), but:
   and the path as the node registers it, a parameter in braces:
   `GET /api/state/account/{addr}`, `GET /fetch/{cid}`. `?chainPath=` is not
   part of a route; a token reaches every chain the node hosts. Only `admin`
-  reaches `/tokens`. A token allowed `PATCH /config`, `POST /restart` or
-  `POST /wipe` controls the node as fully as `admin` does, short of tokens:
-  give those routes only where `admin` would do.
+  reaches `/tokens`. A token allowed `PATCH /config`, `POST /restart`,
+  `POST /stop` or `POST /wipe` controls the node as fully as `admin` does,
+  short of tokens: give those routes only where `admin` would do.
 - No field may name a file on the node's disk: the flag form of
   `POST /hosted-chains` is `409`, and `PATCH /config` that changes
   `operatorTokens` is `400`. That is set beside the node.
@@ -314,7 +314,7 @@ declares or commits the child.
 
 `GET /status` (operator only) also carries `version`, the node's build version
 as `lattice-node --version` prints it, and `startedAt`, when the node process
-started (unix seconds; a restart in place changes it); `/health` carries
+started (unix seconds; a restart changes it); `/health` carries
 neither.
 
 `bestHeaderHeight` is the height of the best header chain the node knows (absent
@@ -792,10 +792,12 @@ host it.
 
 ### `GET /logs?tail=N`
 
-The last `N` lines (default 200, at most 10000) of the node's log
-(`<root>/log/lattice-node.log`, written under `lattice up`), as
-`text/plain`. `404` for a node whose log goes to its standard
-output.
+The last `N` lines (default 200, at most 10000) of the node's own output, as
+`text/plain`. The node writes everything to its standard error (where its
+process manager collects it) and keeps its last 10000 lines, at most 4 MiB,
+in memory: lines from before its last start are not here. `?file=node` is
+accepted; any other `file` is `404` (a client beside the node keeps its own
+log).
 
 ### `GET /disk`
 
@@ -811,17 +813,23 @@ Bytes per store in the data directory, and the free bytes on its volume.
 
 `409` when `lattice.json` as it is on disk would not start the node (it is
 read and checked as a start would). Otherwise `202 {"restarting": true}`,
-then the node stops and
-starts again in the same process: it replaces itself with its own binary and
-arguments (`execv`), so its pid, its supervisor (systemd, a container, `lattice
-up`) and its pidfile do not change, and it reads `lattice.json` afresh.
-Clients wait until `startedAt` in `GET /status` changes.
+then the node stops as on SIGTERM and exits with status 75 (`EX_TEMPFAIL`).
+Its process manager starts it again (systemd `Restart=on-failure`, launchd
+`KeepAlive`, `docker run --restart on-failure`), and the new process reads
+`lattice.json` afresh; the node never starts itself. Clients wait until
+`startedAt` in `GET /status` changes.
+
+### `POST /stop`
+
+`202 {"stopping": true}`, then the node stops as on SIGTERM and exits 0,
+which a process manager leaves stopped. Clients wait until nothing answers.
 
 ### `POST /wipe`
 
-`202 {"restarting": true, "wiping": true}`; root mode only. The node restarts
-and, before it opens its storage, deletes every chain's data (`<root>/chains`);
-identity, `lattice.json`, specs, tokens and logs stay. Nexus syncs again from
+`202 {"restarting": true, "wiping": true}`; root mode only. The node exits 75
+as for a restart and, at its next start, before it opens its storage, deletes
+every chain's data (`<root>/chains`);
+identity, `lattice.json`, specs and tokens stay. Nexus syncs again from
 its peers, and hosted chains from theirs. Per-chain wipes are not offered:
 chains share one store.
 

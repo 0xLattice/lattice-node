@@ -20,6 +20,8 @@ final class OperatorListenerTests: XCTestCase {
     private struct Node {
         let app: Application<RouterResponder<BasicRequestContext>>
         let tokens: TokenStore
+        let lifecycle: NodeLifecycle
+        let log: NodeLog
     }
 
     private func node(remote: Bool = true, origins: Set<String> = []) async throws -> Node {
@@ -43,14 +45,16 @@ final class OperatorListenerTests: XCTestCase {
                 "GET /status", "POST /mining/templates", "POST /mining/work",
             ]),
         ]), file: directory.appendingPathComponent("tokens.json"))
-        let control = OperatorControl(tokens: tokens, storagePath: directory)
+        let lifecycle = NodeLifecycle()
+        let log = NodeLog()
+        let control = OperatorControl(tokens: tokens, lifecycle: lifecycle, storagePath: directory, log: log)
         let app = remote
             ? makeApplication(
                 service: service, host: "10.0.0.5", port: 8090,
                 auth: .remote(tokens, allowedOrigins: origins), control: control
             )
             : makeApplication(service: service, host: "127.0.0.1", port: 8080, control: control)
-        return Node(app: app, tokens: tokens)
+        return Node(app: app, tokens: tokens, lifecycle: lifecycle, log: log)
     }
 
     private static func bearer(_ token: String) -> HTTPFields { [.authorization: "Bearer \(token)"] }
@@ -87,6 +91,7 @@ final class OperatorListenerTests: XCTestCase {
             }
             for (uri, method) in [
                 ("/config", HTTPRequest.Method.patch), ("/hosted-chains", .get), ("/transactions", .post), ("/restart", .post),
+                ("/stop", .post), ("/logs", .get),
             ] {
                 try await client.execute(uri: uri, method: method, headers: Self.bearer(Self.miner)) {
                     XCTAssertEqual($0.status, .forbidden, uri)
@@ -132,7 +137,9 @@ final class OperatorListenerTests: XCTestCase {
                     XCTAssertEqual($0.status, .ok, "\(uri): \(String(buffer: $0.body))")
                 }
             }
-            for (uri, method) in [("/restart", HTTPRequest.Method.post), ("/config", .patch), ("/tokens", .get)] {
+            for (uri, method) in [
+                ("/restart", HTTPRequest.Method.post), ("/stop", .post), ("/wipe", .post), ("/config", .patch), ("/tokens", .get),
+            ] {
                 try await client.execute(uri: uri, method: method, headers: Self.bearer(Self.reader)) {
                     XCTAssertEqual($0.status, .forbidden, uri)
                 }
@@ -330,6 +337,41 @@ final class OperatorListenerTests: XCTestCase {
                 XCTAssertNoThrow(try command.plan(), listen)
             } else {
                 XCTAssertThrowsError(try command.plan(), listen)
+            }
+        }
+    }
+
+    /// `POST /stop` and `POST /restart` stop the node as SIGTERM does; what
+    /// was asked decides its exit (0 or 75), and the first request stands.
+    func testStopAndRestartAreAskedOfTheLifecycle() async throws {
+        for (route, expected) in [("/stop", NodeLifecycle.Request.stop), ("/restart", .restart)] {
+            let node = try await node()
+            try await node.app.test(.router) { client in
+                try await client.execute(uri: route, method: .post, headers: Self.bearer(Self.admin)) {
+                    XCTAssertEqual($0.status, .accepted, String(buffer: $0.body))
+                }
+            }
+            await node.lifecycle.waitForRequest()
+            XCTAssertEqual(node.lifecycle.requested, expected, route)
+            node.lifecycle.requestRestart()
+            XCTAssertEqual(node.lifecycle.requested, expected, "the first request stands")
+        }
+    }
+
+    /// `GET /logs` serves the node's own recent output from memory.
+    func testLogsAreTheNodesRecentOutput() async throws {
+        let node = try await node()
+        node.log.append(Data("one\ntwo\nthree\n".utf8))
+        try await node.app.test(.router) { client in
+            try await client.execute(uri: "/logs?tail=2", method: .get, headers: Self.bearer(Self.reader)) {
+                XCTAssertEqual($0.status, .ok)
+                XCTAssertEqual(String(buffer: $0.body), "two\nthree\n")
+            }
+            try await client.execute(uri: "/logs?file=node", method: .get, headers: Self.bearer(Self.reader)) {
+                XCTAssertEqual(String(buffer: $0.body), "one\ntwo\nthree\n")
+            }
+            try await client.execute(uri: "/logs?file=mine", method: .get, headers: Self.bearer(Self.reader)) {
+                XCTAssertEqual($0.status, .notFound, "a client's log is not the node's")
             }
         }
     }

@@ -1,3 +1,4 @@
+import ArgumentParser
 import Foundation
 import Hummingbird
 import LatticeNode
@@ -40,11 +41,11 @@ extension LatticeNodeCommand {
         // its configuration, log and wipe.
         let lifecycle = NodeLifecycle()
         var control = OperatorControl(
-            tokens: operatorListener?.tokens, lifecycle: lifecycle, storagePath: configuration.storagePath
+            tokens: operatorListener?.tokens, lifecycle: lifecycle, storagePath: configuration.storagePath,
+            log: nodeLog
         )
         if let owner {
             control.config = OperatorConfig(layout: owner.layout, started: owner.topology, runtime: runtime)
-            control.logs = ["node": owner.layout.logFile(for: "lattice-node")]
         }
         // The loopback API and the remote operator listener: one set of
         // routes, each listener with its own credentials.
@@ -108,17 +109,17 @@ extension LatticeNodeCommand {
                 }
             )
         }
-        print("lattice-node (node runtime)")
-        print("  storage: \(configuration.processPublicKey)")
-        print("  nexus:   \(configuration.nexusGenesisCID)")
-        print("  rpc:     http://\(rpcBind):\(rpcPort) (cookie: \(cookieFile.path))")
+        logLine("lattice-node (node runtime)")
+        logLine("  storage: \(configuration.processPublicKey)")
+        logLine("  nexus:   \(configuration.nexusGenesisCID)")
+        logLine("  rpc:     http://\(rpcBind):\(rpcPort) (cookie: \(cookieFile.path))")
         if let publicReadPort {
-            print("  public-read: http://0.0.0.0:\(publicReadPort)")
-            if publicSubmit { print("  public-submit: POST /transactions on the public read port") }
-            print("  public-read-fetches: \(fetchLimit) at once")
+            logLine("  public-read: http://0.0.0.0:\(publicReadPort)")
+            if publicSubmit { logLine("  public-submit: POST /transactions on the public read port") }
+            logLine("  public-read-fetches: \(fetchLimit) at once")
         }
         if let operatorListener {
-            print("  operator: http://\(operatorListener.host):\(operatorListener.port) (bearer tokens, \(operatorListener.tokens.count) listed)")
+            logLine("  operator: http://\(operatorListener.host):\(operatorListener.port) (bearer tokens, \(operatorListener.tokens.count) listed)")
         }
         let result: Result<Void, any Error>
         do {
@@ -141,10 +142,15 @@ extension LatticeNodeCommand {
         }
         await runtime.stop()
         try result.get()
-        if lifecycle.restartRequested {
-            print("restarting as asked")
-            try? FileManager.default.removeItem(at: cookieFile)
-            lifecycle.reexec()
+        switch lifecycle.requested {
+        case .restart:
+            // Whatever runs the node starts it again on this status.
+            logLine("stopped to restart (exit \(exitRestart))")
+            throw ExitCode(exitRestart)
+        case .stop:
+            logLine("stopped as asked")
+        case nil:
+            break
         }
     }
 }

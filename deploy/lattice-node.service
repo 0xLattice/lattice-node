@@ -7,10 +7,13 @@ Wants=network-online.target
 Type=simple
 User=lattice
 Group=lattice
-ExecStart=/usr/local/bin/lattice up --foreground --root /var/lib/lattice
-ExecStop=/usr/local/bin/lattice down --root /var/lib/lattice
-Restart=always
+# The node exits 0 when asked to stop, 75 when asked to restart, 78 on a
+# configuration that does not check: restart on failure, never on 78.
+ExecStart=/usr/local/bin/lattice up --root /var/lib/lattice
+Restart=on-failure
+RestartPreventExitStatus=78
 RestartSec=5
+TimeoutStopSec=90
 LimitNOFILE=65536
 # Two malloc arenas: per-thread arenas hold freed boot peaks as resident memory.
 Environment=MALLOC_ARENA_MAX=2
