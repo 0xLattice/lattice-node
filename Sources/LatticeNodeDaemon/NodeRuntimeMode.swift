@@ -4,6 +4,7 @@ import Hummingbird
 import LatticeNode
 import LatticeNodeCore
 import LatticeNodeAPI
+import ServiceLifecycle
 
 /// What `GET /core/snapshot` answers: the root chain's last published
 /// snapshot.
@@ -133,34 +134,40 @@ extension LatticeNodeCommand {
         // SIGHUP: read the configuration again (as nginx and systemd do).
         let config = control.config
         if let config { Hangups.shared.onHangup { Task { await config.reload() } } }
+        // One group runs the listeners. SIGTERM, SIGINT and a stop or
+        // restart asked through the API each shut it down gracefully: every
+        // connection a listener accepted is served and closed. Cancelled
+        // instead, a listener drops the connections it accepted but had not
+        // taken up yet, and NIO traps on their unfinished writers.
+        let listeners = Listeners(
+            required: [app] + (publicReadApp.map { [$0] } ?? []),
+            remote: remoteApp
+        ) { error in
+            guard let operatorListener else { return }
+            let problem = "\(operatorListener.host):\(operatorListener.port) did not open: \(error)"
+            logLine("operator listener \(problem)")
+            await config?.report("operatorListen", problem)
+        }
+        var listening = ServiceGroupConfiguration(
+            services: [.init(service: listeners)], gracefulShutdownSignals: [.sigterm, .sigint], logger: app.logger
+        )
+        // A client that stalls mid-request, or stops reading its answer,
+        // would hold the drain open: past this the listeners are cancelled.
+        // By then each has stopped accepting and taken up every connection
+        // it accepted, whose handlers close (and finish) them on
+        // cancellation. Under the 90 s a process manager gives a stop
+        // (systemd's TimeoutStopSec, Fly's kill_timeout).
+        listening.maximumGracefulShutdownDuration = .seconds(30)
+        let group = ServiceGroup(configuration: listening)
         let result: Result<Void, any Error>
         do {
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { try await app.runService() }
-                if let publicReadApp { group.addTask { try await publicReadApp.runService() } }
-                if let remoteApp, let operatorListener {
-                    // A remote listener that cannot open (its port taken) is
-                    // reported, not fatal: the node stays reachable on
-                    // loopback to fix it.
-                    group.addTask {
-                        do {
-                            try await remoteApp.runService()
-                        } catch where !Task.isCancelled {
-                            let problem = "\(operatorListener.host):\(operatorListener.port) did not open: \(error)"
-                            logLine("operator listener \(problem)")
-                            await config?.report("operatorListen", problem)
-                            while !Task.isCancelled { try? await Task.sleep(for: .seconds(3_600)) }
-                        }
-                    }
+            try await withThrowingTaskGroup(of: Void.self) { tasks in
+                tasks.addTask {
+                    await lifecycle.waitForRequest()
+                    await group.triggerGracefulShutdown()
                 }
-                group.addTask { await lifecycle.waitForRequest() }
-                do {
-                    _ = try await group.next()
-                } catch {
-                    group.cancelAll()
-                    throw error
-                }
-                group.cancelAll()
+                try await group.run()
+                tasks.cancelAll()
             }
             result = .success(())
         } catch {
@@ -177,6 +184,41 @@ extension LatticeNodeCommand {
             logLine("stopped as asked")
         case nil:
             break
+        }
+    }
+}
+
+/// The node's HTTP listeners as one service, so that a graceful shutdown
+/// reaches all of them at once (a service group shuts its services down one
+/// after another, and its cap would cancel those not yet asked). The remote
+/// operator listener, when it cannot open (its port taken), is reported, not
+/// fatal: the node stays reachable on loopback to fix it.
+private struct Listeners: Service {
+    let required: [any Service]
+    let remote: (any Service)?
+    let reportRemote: @Sendable (any Error) async -> Void
+
+    func run() async throws {
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for listener in required {
+                    group.addTask { try await listener.run() }
+                }
+                if let remote {
+                    group.addTask {
+                        do {
+                            try await remote.run()
+                        } catch where !Task.isCancelled {
+                            await reportRemote(error)
+                        }
+                    }
+                }
+                try await group.waitForAll()
+            }
+        } catch where Task.isShuttingDownGracefully {
+            // Cancelled at the shutdown cap: a listener can end with an error
+            // then (Hummingbird's own service group reports its date cache
+            // as finished unexpectedly), which is no failure to serve.
         }
     }
 }
