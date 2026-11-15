@@ -40,7 +40,7 @@ struct Child: AsyncParsableCommand {
     /// Stop hosting a child chain; what it stored stays.
     struct Unhost: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Stop hosting a child chain, and drop its peers and mining entries; its data stays."
+            abstract: "Stop hosting a child chain, and drop its peers; its data stays."
         )
 
         @OptionGroup var target: NodeTarget

@@ -68,7 +68,7 @@ same handlers), but:
   give those routes only where `admin` would do.
 - No field may name a file on the node's disk: the flag form of
   `POST /hosted-chains` is `409`, and `PATCH /config` that changes
-  `mine.worker` or `operatorTokens` is `400`. Those are set beside the node.
+  `operatorTokens` is `400`. That is set beside the node.
 - A request with an `Origin` header is `403` unless `operatorAllowedOrigins`
   lists that exact origin; a listed one gets CORS preflight answers and
   `Access-Control-Allow-Origin`, and still needs a token.
@@ -107,7 +107,12 @@ numbers. Targets are hex strings. An absent optional field is omitted, never
 
 The mining routes (`/mining/templates`, `/mining/events`, `/mining/work`) are the miner's
 protocol, not this read/submit contract, and are unchanged: their `block` is
-the consensus block's own encoding.
+the consensus block's own encoding. The miner is a separate process, a client
+of these routes (`lattice mine run`, or `lattice-mining-coordinator`); the
+node runs none and keeps no mining settings. Each template request carries
+its recipients. On the remote listener a miner's token needs only
+`POST /mining/templates`, `POST /mining/work` and `GET /status` (the
+coordinator's freshness probe).
 
 ## Selecting a hosted chain
 
@@ -687,13 +692,12 @@ listener. A node started with flags has no configuration of its own:
 earlier whole-set form (below).
 
 Every change is applied one at a time, in arrival order: checked (the
-resulting file must be valid, a recipient must name a hosted chain, a spec
-must parse, a module must load), applied to the running node, then written
+resulting file must be valid, a spec must parse, a module must load), applied to the running node, then written
 atomically, and answered:
 
 ```json
 {"config": {"...": "lattice.json as now written"},
- "applied": ["hostedChains", "mine"],
+ "applied": ["hostedChains"],
  "failed": [{"key": "hostedChains", "chain": "Nexus/Beta", "error": "..."}],
  "restartRequired": ["listen"]}
 ```
@@ -706,11 +710,10 @@ it newly names must be free now;
 (stop the node to edit it, or `lattice restart` to load the edit); `200`
 when all of it took effect; `500` with the same body when part of it failed:
 what failed is left out of what is written (a chain that did not start is not
-listed, nor are the recipients, peers and minimum work that name it).
+listed, nor are the peers that name it).
 
-Live keys apply at once: `hostedChains`, `peers` for child chains, and
-`mine` (on/off, recipients, minimum work; the node restarts its mining loop).
-Every other key (ports, `peers.Nexus`, retention, listeners, serving limits,
+Live keys apply at once: `hostedChains` and `peers` for child chains. Every
+other key (ports, `peers.Nexus`, retention, listeners, serving limits,
 relay fee, ...) is written and listed in `restartRequired` until
 [`POST /restart`](#post-restart).
 
@@ -728,9 +731,11 @@ An [RFC 7396](https://www.rfc-editor.org/rfc/rfc7396) merge patch of
 `application/json`): a member replaces, `null` removes, an object merges.
 
 ```json
-{"mine": {"enabled": true, "recipients": {"Nexus/Alpha": "<address>", "Nexus/Beta": null}},
+{"peers": {"Nexus/Alpha": ["<public-key>@host:port"], "Nexus/Beta": null},
  "announceLifetime": 900}
 ```
+
+`lattice.json` holds no mining settings; a patch adding `mine` is `400`.
 
 ### `GET /hosted-chains`
 
@@ -778,7 +783,7 @@ node started with `--root` is `400` (update `lattice`).
 ### `DELETE /hosted-chains?chainPath=Nexus/Beta`
 
 Stops hosting the chain and removes it from the configuration, with the
-recipient, peers and minimum work that name it. `409` while a chain below it
+peers that name it. `409` while a chain below it
 is hosted. What it stored stays: hosting it again resumes it.
 
 A peer that connects afterwards is told the new list in the hello. A peer
@@ -786,27 +791,11 @@ already connected learns a newly hosted chain from its provider record, and a
 peer that asks for a stopped one is answered as by any node that does not
 host it.
 
-### `GET /mining`
-
-```json
-{"enabled": true, "running": true, "pid": 4242, "restarts": 0,
- "lastExit": "exit 1", "recipients": {"Nexus/Alpha": "<address>"}}
-```
-
-The node runs the mining loop (`lattice mine run`) as its child while
-`mine.enabled` is true and stops it when mining is turned off, when `mine`
-changes, on restart and on shutdown; a stop ends the round in flight. A loop
-that exits on its own is started again after 5 s, the pause doubling (to
-5 minutes) while it keeps exiting within a minute; `lastExit` says how it
-exited and when it starts again. Its output is appended to
-`<root>/log/mine.log`. At its start the node stops a loop an earlier
-`lattice mine start` ran on its own (`run/mine.pid`).
-
-### `GET /logs?file=node|mine&tail=N`
+### `GET /logs?tail=N`
 
 The last `N` lines (default 200, at most 10000) of the node's log
-(`<root>/log/lattice-node.log`, written under `lattice up`) or the mining
-loop's, as `text/plain`. `404` for a node whose log goes to its standard
+(`<root>/log/lattice-node.log`, written under `lattice up`), as
+`text/plain`. `404` for a node whose log goes to its standard
 output.
 
 ### `GET /disk`
@@ -823,7 +812,7 @@ Bytes per store in the data directory, and the free bytes on its volume.
 
 `409` when `lattice.json` as it is on disk would not start the node (it is
 read and checked as a start would). Otherwise `202 {"restarting": true}`,
-then the node stops (its mining loop first) and
+then the node stops and
 starts again in the same process: it replaces itself with its own binary and
 arguments (`execv`), so its pid, its supervisor (systemd, a container, `lattice
 up`) and its pidfile do not change, and it reads `lattice.json` afresh.

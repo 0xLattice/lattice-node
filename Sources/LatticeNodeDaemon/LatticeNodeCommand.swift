@@ -20,7 +20,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         version: LatticeNodeVersion.current
     )
 
-    @Option(help: "A host root made by `lattice init`: the node runs as <root>/lattice.json says (storage, identity, ports, hosted chains, mining...) and is that file's only writer while it runs, changing it through its operator API (GET/PATCH /config) and applying each change live or at the next restart. Give no other flag with it.")
+    @Option(help: "A host root made by `lattice init`: the node runs as <root>/lattice.json says (storage, identity, ports, hosted chains...) and is that file's only writer while it runs, changing it through its operator API (GET/PATCH /config) and applying each change live or at the next restart. Give no other flag with it.")
     var root: String?
 
     @Option(help: "Hosted-tree storage directory; defaults to ~/.lattice/chains/Nexus")

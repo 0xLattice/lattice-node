@@ -16,6 +16,7 @@ final class OperatorListenerTests: XCTestCase {
     private static let token = "seller-token"
     private static let admin = "admin-token"
     private static let reader = "read-token"
+    private static let miner = "miner-token"
 
     private struct Node {
         let app: Application<RouterResponder<BasicRequestContext>>
@@ -39,6 +40,9 @@ final class OperatorListenerTests: XCTestCase {
             ]),
             .init(name: "ops", sha256: OperatorTokens.hash(Self.admin), role: "admin"),
             .init(name: "viewer", sha256: OperatorTokens.hash(Self.reader), role: "read"),
+            .init(name: "miner", sha256: OperatorTokens.hash(Self.miner), routes: [
+                "GET /status", "POST /mining/templates", "POST /mining/work",
+            ]),
         ]), file: directory.appendingPathComponent("tokens.json"))
         let control = OperatorControl(tokens: tokens, storagePath: directory)
         let app = remote
@@ -63,6 +67,32 @@ final class OperatorListenerTests: XCTestCase {
                 uri: "/api/state/account/\(String(repeating: "a", count: 40))", method: .get,
                 headers: Self.bearer(Self.token)
             ) { XCTAssertNotEqual($0.status, .forbidden) }
+        }
+    }
+
+    /// A separate miner (`lattice mine run --node --token-file`) needs the
+    /// template, work and status routes, and its token reaches nothing else.
+    func testAMinerTokenReachesTheMiningRoutesAlone() async throws {
+        let app = try await node().app
+        try await app.test(.router) { client in
+            try await client.execute(uri: "/status", method: .get, headers: Self.bearer(Self.miner)) {
+                XCTAssertEqual($0.status, .ok, String(buffer: $0.body))
+            }
+            for uri in ["/mining/templates", "/mining/work"] {
+                var headers = Self.bearer(Self.miner)
+                headers[.contentType] = "application/json"
+                try await client.execute(uri: uri, method: .post, headers: headers, body: ByteBuffer(string: "{}")) {
+                    XCTAssertNotEqual($0.status, .forbidden, uri)
+                    XCTAssertNotEqual($0.status, .unauthorized, uri)
+                }
+            }
+            for (uri, method) in [
+                ("/config", HTTPRequest.Method.patch), ("/hosted-chains", .get), ("/transactions", .post), ("/restart", .post),
+            ] {
+                try await client.execute(uri: uri, method: method, headers: Self.bearer(Self.miner)) {
+                    XCTAssertEqual($0.status, .forbidden, uri)
+                }
+            }
         }
     }
 
@@ -98,7 +128,7 @@ final class OperatorListenerTests: XCTestCase {
     func testRolesScopeTheirTokens() async throws {
         let app = try await node().app
         try await app.test(.router) { client in
-            for uri in ["/status", "/pins", "/hosted-chains", "/disk", "/mining"] {
+            for uri in ["/status", "/pins", "/hosted-chains", "/disk"] {
                 try await client.execute(uri: uri, method: .get, headers: Self.bearer(Self.reader)) {
                     XCTAssertEqual($0.status, .ok, "\(uri): \(String(buffer: $0.body))")
                 }
@@ -191,7 +221,7 @@ final class OperatorListenerTests: XCTestCase {
         }
         // What the file says is what a restart reads.
         let reloaded = try TokenStore(file: node.tokens.file)
-        XCTAssertEqual(reloaded.list().tokens.map(\.name), ["seller", "ops", "viewer"])
+        XCTAssertEqual(reloaded.list().tokens.map(\.name), ["seller", "ops", "viewer", "miner"])
     }
 
     /// The loopback cookie manages tokens too.

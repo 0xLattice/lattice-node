@@ -100,26 +100,24 @@ that is a consensus consequence, not an availability error.
 
 ## Configure mining
 
-Add a `mine` object to `lattice.json`:
+The miner is a separate process that asks the node for templates and submits
+work; the node keeps no mining settings. Write the miner's own settings to
+`./node-data/miner.json`:
 
 ```json
 {
-  "listen": 4001,
-  "rpc": 8080,
-  "hostedChains": ["Nexus/Payments"],
-  "mine": {
-    "worker": "cpu",
-    "workers": 2,
-    "batchSize": 2000000,
-    "recipients": {
-      "Nexus": "<nexus-address>",
-      "Nexus/Payments": "<payments-address>"
-    }
+  "worker": "cpu",
+  "workers": 2,
+  "batchSize": 2000000,
+  "recipients": {
+    "Nexus": "<nexus-address>",
+    "Nexus/Payments": "<payments-address>"
   }
 }
 ```
 
-Then start the mining loop:
+Then start the mining loop (it mines through the node under `--root`; see
+[Mining](operator-cli.md#mining) for a node elsewhere):
 
 ```bash
 swift run lattice mine start --root ./node-data

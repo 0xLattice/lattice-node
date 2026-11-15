@@ -88,20 +88,17 @@ positive rewards before using it as a parent.
 
 ## Mine the tree
 
-The operator CLI reads mining policy from `lattice.json`:
+The miner is a separate process, a client of the node's template and work
+routes. Its settings are its own file, `node-data/miner.json` (the node's
+`lattice.json` holds none):
 
 ```json
 {
-  "listen": 4001,
-  "rpc": 8080,
-  "hostedChains": ["Nexus/Payments"],
-  "mine": {
-    "worker": "cpu",
-    "workers": 2,
-    "recipients": {
-      "Nexus": "<nexus-address>",
-      "Nexus/Payments": "<payments-address>"
-    }
+  "worker": "cpu",
+  "workers": 2,
+  "recipients": {
+    "Nexus": "<nexus-address>",
+    "Nexus/Payments": "<payments-address>"
   }
 }
 ```

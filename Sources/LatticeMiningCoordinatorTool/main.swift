@@ -20,11 +20,14 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
         abstract: "Coordinate proof-of-work nonce search for lattice-node."
     )
 
-    @Option(name: .long, help: "RPC base URL of the Nexus node (e.g. http://127.0.0.1:8080)")
+    @Option(name: .long, help: "RPC base URL of the Nexus node (e.g. http://127.0.0.1:8080, or its operator listener with --token-file)")
     var node: String
 
     @Option(name: .long, help: "The node's loopback RPC cookie file (lattice-node --rpc-cookie-file; default <data-directory>/.cookie), re-read at every request")
     var rpcCookieFile: String?
+
+    @Option(name: .long, help: "A file holding a bearer token for a node's remote operator listener (lattice-node --operator-listen), re-read at every request. The token needs the routes GET /status, POST /mining/templates and POST /mining/work.")
+    var tokenFile: String?
 
     @Option(name: .long, help: "Parallel worker count (default: CPU count - 1)")
     var workers: Int = max(ProcessInfo.processInfo.activeProcessorCount - 1, 1)
@@ -69,7 +72,8 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
                 recipients: recipient,
                 minimumWork: minWork
             ),
-            cookieFile: rpcCookieFile.map { URL(fileURLWithPath: $0) }
+            cookieFile: rpcCookieFile.map { URL(fileURLWithPath: $0) },
+            tokenFile: tokenFile.map { URL(fileURLWithPath: $0) }
         )
 
         let coordinatorWorkers = try makeWorkers(count: workerCount)
