@@ -1,4 +1,5 @@
 import ArgumentParser
+import Crypto
 import Foundation
 import Hummingbird
 import Lattice
@@ -6,17 +7,19 @@ import LatticeNode
 import LatticeNodeAPI
 
 enum OperatorConfigError: Error, CustomStringConvertible {
-    /// The change is refused; nothing was applied (400).
+    /// The change is refused; nothing was written (400).
     case invalid(String)
-    /// The change does not fit what the node keeps now (409).
-    case conflict(String)
     case notFound(String)
+    /// It conflicts with what is (409): a chain created otherwise.
+    case conflict(String)
+    /// The fragment is not the version the client read (`If-Match`, 412).
+    case changed(String)
     /// The node was started with flags, not `--root` (409).
     case notOwned
 
     var description: String {
         switch self {
-        case .invalid(let reason), .conflict(let reason), .notFound(let reason): reason
+        case .invalid(let reason), .notFound(let reason), .conflict(let reason), .changed(let reason): reason
         case .notOwned: "this node was started with flags, not --root: its configuration is its command line"
         }
     }
@@ -29,119 +32,207 @@ protocol HostingRuntime: Sendable {
     var hostedChildren: [[String]] { get }
 }
 
-/// The node's one configuration, `<root>/lattice.json`, which a node started
-/// with `--root` read at its start and alone writes while it runs (its
-/// storage lock is held meanwhile; `lattice` edits the file only while the
-/// node is stopped).
-///
-/// Every change is applied one at a time, in arrival order: checked as a
-/// whole (as a start would check it), then what applies live is applied
-/// (hosted chains and their peers), then the file is written to say
-/// what took effect, a chain that did not start left out of it, then the
-/// change is answered. Every other key is kept for the next start and
-/// reported as waiting for a restart.
+/// The configuration of a node started with `--root`: `<root>/lattice.json`
+/// and the fragments of `<root>/config.d`, merged (`MergedConfig`). The node
+/// reads them at its start, again on SIGHUP, and after each change of a
+/// fragment through its API, and converges to what they say: hosted chains
+/// and their peers at once, every other key at its next start (reported as
+/// pending a restart). It writes the fragments it is sent, and never
+/// lattice.json. Changes are applied one at a time, in arrival order. The
+/// chains hosted are the merged tree (`HostedTree`): a chain stops only once
+/// no layer lists it or any chain under it.
 actor OperatorConfig {
     let layout: HostLayout
-    /// What this process started with: the keys that differ from it and take
-    /// a restart are reported as waiting for one.
+    /// What this process started with: a key that differs from it and takes
+    /// a restart is reported as pending one.
     let started: Topology
-    private(set) var saved: Topology
+    private(set) var desired: MergedConfig
+    /// The listed chains that did not start, and why.
+    private var hostErrors: [String: String] = [:]
+    /// What else does not match, by what it concerns (`reload`, a listener).
+    private var problems: [String: String] = [:]
+    private var appliedPeers: [String: [String]]
     private let runtime: any HostingRuntime
-    /// Whether a configuration would start: the start's own checks (as
-    /// `LatticeNodeCommand.plan`) and a listener port it newly names being
-    /// free. Checked before a change is kept and before a restart.
-    private let startCheck: @Sendable (Topology, HostLayout, Topology) throws -> Void
     private var busy = false
     private var waiting: [CheckedContinuation<Void, Never>] = []
 
-    init(
-        layout: HostLayout, started: Topology, runtime: any HostingRuntime,
-        startCheck: @escaping @Sendable (Topology, HostLayout, Topology) throws -> Void = checkStarts
-    ) {
+    init(layout: HostLayout, desired: MergedConfig, started: Topology, runtime: any HostingRuntime) {
         self.layout = layout
+        self.desired = desired
         self.started = started
-        self.saved = started
+        self.appliedPeers = Self.childPeers(started)
         self.runtime = runtime
-        self.startCheck = startCheck
+    }
+
+    func current() throws -> ConfigResponse {
+        let running = Set(runtime.hostedChildren.map { $0.joined(separator: "/") })
+        return ConfigResponse(
+            spec: desired.topology, fragments: desired.layers,
+            status: ConfigStatus(
+                chains: desired.tree.status(running: running, errors: hostErrors),
+                pendingRestart: try desired.topology.restartRequired(comparedTo: started),
+                errors: problems.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" },
+                inert: desired.inert
+            )
+        )
+    }
+
+    /// A layer's file as it is, and its entity tag: a fragment, or
+    /// lattice.json as `lattice`.
+    func fragment(_ name: String) throws -> (data: Data, etag: String) {
+        let file = name == ConfigFragments.baseName
+            ? layout.root.appendingPathComponent(Topology.fileName)
+            : ConfigFragments.file(root: layout.root, name: name)
+        guard ConfigFragments.isValidName(name) || name == ConfigFragments.baseName,
+              let data = try? Data(contentsOf: file) else {
+            throw OperatorConfigError.notFound("no fragment \(name)")
+        }
+        return (data, Self.etag(data))
+    }
+
+    /// A file's entity tag: the SHA-256 of its bytes.
+    static func etag(_ data: Data) -> String {
+        "\"" + SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() + "\""
+    }
+
+    /// Replaces the fragment `name` with `data` (one JSON object), once the
+    /// configuration it makes checks as a start would check it. A `remote`
+    /// client may not name a file on this node's disk (`operatorTokens`).
+    /// With `ifMatch`, only while the fragment is still that version.
+    /// With `ifNoneMatch` `*`, only while there is no such fragment yet.
+    func put(
+        _ name: String, _ data: Data, ifMatch: String?, ifNoneMatch: String? = nil, remote: Bool
+    ) async throws -> ConfigResponse {
+        guard ConfigFragments.isValidName(name) else {
+            throw OperatorConfigError.invalid(name == ConfigFragments.baseName
+                ? "\(Topology.fileName) is not written through the API; a fragment of \(ConfigFragments.directoryName) is"
+                : "a fragment's name is lowercase letters, digits, ., _ and -, starting with a letter or digit")
+        }
+        let object: [String: Any]
+        do {
+            object = try ConfigFragments.object(data, named: name)
+        } catch {
+            throw OperatorConfigError.invalid("\(error)")
+        }
+        return try await serially {
+            let file = ConfigFragments.file(root: layout.root, name: name)
+            try precondition(file, ifMatch)
+            if ifNoneMatch?.trimmingCharacters(in: .whitespaces) == "*", FileManager.default.fileExists(atPath: file.path) {
+                throw OperatorConfigError.changed("\(name) was created since it was read (If-None-Match); read it again")
+            }
+            let next = try checked(remote: remote) {
+                try MergedConfig.merge(ConfigFragments.layers(root: layout.root, replacing: name, with: object))
+            }
+            try writeDurably(data, to: file)
+            desired = next
+            await converge()
+            return try current()
+        }
+    }
+
+    /// Removes the fragment `name`, once the configuration left checks.
+    func delete(_ name: String, ifMatch: String?, remote: Bool) async throws -> ConfigResponse {
+        try await serially {
+            let file = ConfigFragments.file(root: layout.root, name: name)
+            guard ConfigFragments.isValidName(name), FileManager.default.fileExists(atPath: file.path) else {
+                throw OperatorConfigError.notFound("no fragment \(name)")
+            }
+            try precondition(file, ifMatch)
+            let next = try checked(remote: remote) {
+                try MergedConfig.merge(ConfigFragments.layers(root: layout.root, replacing: name, with: nil))
+            }
+            try removeDurably(file)
+            desired = next
+            await converge()
+            return try current()
+        }
+    }
+
+    /// Reads every layer again (SIGHUP), checked as a change through the
+    /// API is. A configuration that does not check is not used, and
+    /// reported, until one does.
+    func reload() async {
+        await serially {
+            do {
+                desired = try checked(remote: false) { try MergedConfig.load(root: layout.root) }
+                problems["reload"] = nil
+            } catch {
+                problems["reload"] = "\(error)"
+                logLine("configuration not reloaded: \(error)")
+                return
+            }
+            for note in desired.inert { logLine("configuration: \(note)") }
+            await converge()
+        }
+    }
+
+    /// Creates the child chain `chain` (`POST /chains`): its files under
+    /// `specs/`, written once. True when written now, false when it was
+    /// created with exactly these already.
+    func create(_ chain: HostedChain) async throws -> Bool {
+        try await serially {
+            do {
+                return try ChainCreation.create(chain, layout: layout)
+            } catch let error as ChainCreation.Exists {
+                throw OperatorConfigError.conflict(error.description)
+            } catch let error as ChainCreation.Synced {
+                throw OperatorConfigError.conflict(error.description)
+            } catch {
+                throw OperatorConfigError.invalid("\(error)")
+            }
+        }
+    }
+
+    /// Something the configuration names that the node could not do, kept
+    /// for its status.
+    func report(_ key: String, _ problem: String) {
+        problems[key] = problem
     }
 
     /// Refuses a restart the configuration on disk would not survive: a
     /// node that cannot start is out of reach of this API.
     func checkRestart() throws {
-        let onDisk: Topology
         do {
-            onDisk = try Topology.load(root: layout.root).validated()
+            try checkPlan(MergedConfig.load(root: layout.root).topology)
         } catch {
-            throw OperatorConfigError.conflict("\(Topology.fileName) would not start the node: \(error); fix it before restarting")
+            throw OperatorConfigError.invalid("the configuration would not start the node: \(error); fix it before restarting")
         }
+    }
+
+    /// Refuses a write when the fragment is not the version `ifMatch` names
+    /// (`*`: any version, as long as there is one).
+    private func precondition(_ file: URL, _ ifMatch: String?) throws {
+        guard let ifMatch else { return }
+        let current = (try? Data(contentsOf: file)).map(Self.etag)
+        let tags = ifMatch.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard let current, tags.contains("*") || tags.contains(current) else {
+            throw OperatorConfigError.changed("\(file.lastPathComponent) changed since it was read (If-Match); read it again")
+        }
+    }
+
+    /// The configuration `make` makes, if the node may take it: it would
+    /// start, and a remote client named no file on this node's disk.
+    private func checked(remote: Bool, _ make: () throws -> MergedConfig) throws -> MergedConfig {
+        let next: MergedConfig
         do {
-            try startCheck(onDisk, layout, started)
+            next = try make()
+            try checkPlan(next.topology)
         } catch {
-            throw OperatorConfigError.conflict("\(Topology.fileName) would not start the node: \(error); fix it before restarting")
+            throw OperatorConfigError.invalid("\(error)")
         }
-    }
-
-    func current() throws -> ConfigResponse {
-        ConfigResponse(config: saved, restartRequired: try saved.restartRequired(comparedTo: started))
-    }
-
-    /// Applies an RFC 7396 merge patch of `lattice.json`. A `remote` client
-    /// may not name a file on this node's disk (`operatorTokens`).
-    func patch(_ patch: Data, remote: Bool) async throws -> ConfigChangeResponse {
-        try await serially {
-            let next: Topology
-            do {
-                next = try saved.applying(mergePatch: patch)
-            } catch {
-                throw OperatorConfigError.invalid("\(error)")
-            }
-            if remote, next.operatorTokens != saved.operatorTokens {
-                throw OperatorConfigError.invalid("the operator listener takes no file paths: operatorTokens is set beside the node")
-            }
-            return try await apply(next)
+        if remote, next.topology.operatorTokens != desired.topology.operatorTokens {
+            throw OperatorConfigError.invalid("the operator listener takes no file paths: operatorTokens is set beside the node")
         }
+        return next
     }
 
-    /// Hosts `chain`, creating it from its inline spec (kept under `specs/`
-    /// as `lattice child create` keeps one) when it has one. Repeating a
-    /// request that took effect changes nothing.
-    func host(_ chain: HostedChain) async throws -> ConfigChangeResponse {
-        try await serially {
-            guard let address = ChainAddress(string: chain.path), address.key == chain.path, !address.isNexus else {
-                throw OperatorConfigError.invalid("\(chain.path) is not a child chain's path")
-            }
-            var files: ChainFiles?
-            if chain.spec != nil, (saved.hostedChains ?? []).contains(chain.path),
-               !FileManager.default.fileExists(atPath: layout.childSpec(for: chain.path).path) {
-                throw OperatorConfigError.conflict("\(chain.path) is hosted as an existing chain, synced from its peers; it takes no spec")
-            }
-            if chain.spec != nil {
-                files = try prepare(chain)
-            } else if chain.premineTo != nil || chain.genesisTransactions != nil || chain.policyModules != nil {
-                throw OperatorConfigError.invalid("premineTo, genesisTransactions and policyModules come with a spec")
-            }
-            var next = saved
-            if !(next.hostedChains ?? []).contains(chain.path) {
-                next.hostedChains = (next.hostedChains ?? []) + [chain.path]
-            }
-            return try await apply(next, creating: files)
-        }
+    /// Whether `topology` would start the node: its flags parse and pass the
+    /// start's own checks.
+    private func checkPlan(_ topology: Topology) throws {
+        _ = try LatticeNodeCommand.parse(topology.nodeArguments(layout: layout)).plan()
     }
 
-    /// Stops hosting `path`, and with it its peers. Its data and spec stay. A chain whose children are
-    /// hosted is refused: unhost them first.
-    func unhost(_ path: String) async throws -> ConfigChangeResponse {
-        try await serially {
-            let hosted = saved.hostedChains ?? []
-            guard hosted.contains(path) else { throw OperatorConfigError.notFound("\(path) is not hosted") }
-            if let child = hosted.first(where: { $0.hasPrefix(path + "/") }) {
-                throw OperatorConfigError.conflict("\(child) is hosted under \(path); unhost it first")
-            }
-            return try await apply(saved.removingChains([path]))
-        }
-    }
-
-    private func serially<T: Sendable>(_ body: () async throws -> T) async throws -> T {
+    private func serially<T: Sendable>(_ body: () async throws -> T) async rethrows -> T {
         if busy {
             await withCheckedContinuation { waiting.append($0) }
         } else {
@@ -153,235 +244,38 @@ actor OperatorConfig {
         return try await body()
     }
 
-    /// Applies `proposed`; `creating` is a new chain's files, written only
-    /// once the rest checks and removed again unless the chain started.
-    private func apply(_ proposed: Topology, creating: ChainFiles? = nil) async throws -> ConfigChangeResponse {
-        try requireUnedited()
-        let next: Topology
-        let hosted: HostedChildren
-        do {
-            next = try proposed.validated()
-        } catch {
-            throw OperatorConfigError.invalid("\(error)")
+    /// Hosts the tree `desired` makes: a path created here (its files under
+    /// `specs/`) is mined from its spec, any other synced from its peers.
+    /// One that does not start is reported, with its children.
+    private func converge() async {
+        let target = desired.topology
+        let peers = Self.childPeers(target)
+        let running = Set(runtime.hostedChildren.map { $0.joined(separator: "/") })
+        guard Set(target.hostedChains ?? []) != running || peers != appliedPeers else {
+            hostErrors = [:]
+            return
         }
+        var reason: String?
         do {
-            try creating?.write()
-            try startCheck(next, layout, started)
-            let files = HostedChainFiles(layout, next)
-            hosted = try HostedChildren(
+            let files = HostedChainFiles(layout, target)
+            try await runtime.host(HostedChildren(
                 hostChain: files.hostChain, premineTo: files.premineTo, genesisTransactions: files.genesisTransactions,
                 chainPeer: files.chainPeer, policyModule: files.policyModule
-            )
+            ))
+            appliedPeers = peers
         } catch {
-            creating?.remove()
-            throw OperatorConfigError.invalid("\(error)")
+            reason = "\(error)"
         }
-        var effective = next
-        var failed: [ConfigFailure] = []
-        if next.hostedChains ?? [] != saved.hostedChains ?? [] || childPeers(next) != childPeers(saved) {
-            var reason: String?
-            do {
-                try await runtime.host(hosted)
-            } catch {
-                reason = "\(error)"
-            }
-            let running = Set(runtime.hostedChildren.map { $0.joined(separator: "/") })
-            let missing = (next.hostedChains ?? []).filter { !running.contains($0) }
-            if let creating, missing.contains(creating.path) { creating.remove() }
-            if !missing.isEmpty {
-                effective = next.removingChains(Set(missing))
-                failed += missing.map { ConfigFailure(key: "hostedChains", chain: $0, error: reason ?? "did not start") }
-            } else if let reason {
-                failed.append(ConfigFailure(key: "hostedChains", error: reason))
-            }
+        let now = Set(runtime.hostedChildren.map { $0.joined(separator: "/") })
+        hostErrors = [:]
+        for path in target.hostedChains ?? [] where !now.contains(path) {
+            hostErrors[path] = reason ?? "did not start"
         }
-        let changed = try effective.changedKeys(from: saved)
-        // A `mine` left in the file by an earlier release goes at any write
-        // (`{"mine": null}` asks for nothing else).
-        if !changed.isEmpty || Topology.holdsRetiredMining(root: layout.root) {
-            try effective.save(root: layout.root)
-            saved = effective
-        }
-        return ConfigChangeResponse(
-            config: saved,
-            applied: changed.filter { Topology.liveKeys.contains($0) },
-            failed: failed,
-            restartRequired: try saved.restartRequired(comparedTo: started)
-        )
     }
 
-    private func childPeers(_ topology: Topology) -> [String: [String]] {
+    private static func childPeers(_ topology: Topology) -> [String: [String]] {
         (topology.peers?.byChain ?? [:]).filter { $0.key != ChainAddress.nexus }
     }
-
-    /// The file is the node's while it runs: one edited by hand meanwhile
-    /// would be overwritten, so the change is refused instead.
-    private func requireUnedited() throws {
-        let onDisk = try? Topology.load(root: layout.root).canonicalData()
-        guard onDisk == (try saved.canonicalData()) else {
-            throw OperatorConfigError.conflict(
-                "\(Topology.fileName) was changed on disk while the node runs; `lattice restart` to load it, or undo the edit"
-            )
-        }
-    }
-
-    /// A new chain's inline spec, premine recipient, genesis transactions
-    /// and modules, checked as `lattice child create` checks them, as the
-    /// files `specs/` keeps; nil when the chain was created with exactly
-    /// these. A chain is created once: anything else for it is refused.
-    private func prepare(_ chain: HostedChain) throws -> ChainFiles? {
-        guard let spec = chain.spec else { return nil }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        let specData = try encoder.encode(spec)
-        let specFile = layout.childSpec(for: chain.path)
-        let premineFile = layout.premineRecipient(for: chain.path)
-        let genesisFile = layout.genesisTransactions(for: chain.path)
-        let genesisData = try chain.genesisTransactions.map { try encoder.encode($0) }
-        if let existing = try? Data(contentsOf: specFile) {
-            // Modules are named by CID in the spec: the same spec, the same modules.
-            let sameSpec = (try? encoder.encode(JSONDecoder().decode(ChainSpec.self, from: existing))) == specData
-            let premine = (try? String(contentsOf: premineFile, encoding: .utf8))?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let genesis = (try? Data(contentsOf: genesisFile)).flatMap {
-                try? encoder.encode(JSONDecoder().decode([SubmitTransactionRequest].self, from: $0))
-            }
-            guard sameSpec, premine == chain.premineTo, genesis == genesisData else {
-                throw OperatorConfigError.conflict(
-                    "\(chain.path) already exists with another spec, premine recipient or genesis transactions; a child chain is created once"
-                )
-            }
-            return nil
-        }
-        var modules: [String: Data] = [:]
-        for bytes in chain.policyModules ?? [] {
-            let cid = try WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: bytes)).rawCID
-            let policies = spec.wasmPolicies.filter { $0.moduleCID == cid }
-            guard !policies.isEmpty else {
-                throw OperatorConfigError.invalid("module \(cid) is not named by the spec's wasmPolicies")
-            }
-            for policy in policies {
-                do {
-                    try WasmPolicyEvaluator.validate(policy: policy, moduleBytes: bytes)
-                } catch {
-                    throw OperatorConfigError.invalid("module \(cid) is not valid for policy \(policy.entrypoint): \(error)")
-                }
-            }
-            modules[cid] = bytes
-        }
-        if let missing = spec.wasmPolicies.map(\.moduleCID).first(where: { modules[$0] == nil }) {
-            throw OperatorConfigError.invalid("the spec names policy module \(missing); send it in policyModules")
-        }
-        do {
-            try NodeRuntime.checkPremine(
-                spec: spec, to: chain.premineTo, transactions: (chain.genesisTransactions ?? []).map(\.transaction),
-                on: chain.path.split(separator: "/").map(String.init), modules: Array(modules.values)
-            )
-        } catch {
-            throw OperatorConfigError.invalid("\(chain.path): \(error)")
-        }
-        var files: [(URL, Data)] = []
-        if let premineTo = chain.premineTo { files.append((premineFile, Data(premineTo.utf8))) }
-        if let genesisData { files.append((genesisFile, genesisData)) }
-        let directory = layout.policyModules(for: chain.path)
-        for (cid, bytes) in modules.sorted(by: { $0.key < $1.key }) {
-            files.append((directory.appendingPathComponent(cid + ".wasm"), bytes))
-        }
-        // The spec last: it marks the chain created, so it never stands
-        // without what its genesis is built from.
-        files.append((specFile, specData))
-        return ChainFiles(path: chain.path, files: files, moduleDirectory: modules.isEmpty ? nil : directory)
-    }
-}
-
-/// A chain's files under `specs/`, written for a chain being created and
-/// removed again when it is not kept.
-struct ChainFiles: Sendable {
-    let path: String
-    let files: [(URL, Data)]
-    let moduleDirectory: URL?
-
-    func write() throws {
-        for (file, data) in files { try writeDurably(data, to: file) }
-    }
-
-    /// The spec first: without it the chain counts as never created.
-    func remove() {
-        for (file, _) in files.reversed() { try? FileManager.default.removeItem(at: file) }
-        if let moduleDirectory { try? FileManager.default.removeItem(at: moduleDirectory) }
-    }
-}
-
-/// Whether `topology` would start the node (`--root` at `layout`): its
-/// flags parse and pass the start's own checks, and every listener port
-/// it names that the running node (started from `started`) does not hold
-/// can be bound now.
-func checkStarts(_ topology: Topology, layout: HostLayout, started: Topology) throws {
-    _ = try LatticeNodeCommand.parse(topology.nodeArguments(layout: layout)).plan()
-    let held = Set(listeners(started).map { "\($0.host):\($0.port)" })
-    for listener in listeners(topology) where !held.contains("\(listener.host):\(listener.port)") {
-        guard canBind(host: listener.host, port: listener.port) else {
-            throw CtlError("\(listener.host):\(listener.port) (\(listener.key)) cannot be bound: in use, or not an address of this host")
-        }
-    }
-}
-
-private func listeners(_ topology: Topology) -> [(key: String, host: String, port: UInt16)] {
-    var result: [(key: String, host: String, port: UInt16)] = [
-        ("listen", "0.0.0.0", topology.listen), ("rpc", "127.0.0.1", topology.rpc),
-    ]
-    if let port = topology.publicRead { result.append(("publicRead", "0.0.0.0", port)) }
-    if let port = topology.webSocket, port != 0 { result.append(("webSocket", "0.0.0.0", port)) }
-    if let listen = topology.operatorListen, let (host, port) = Topology.hostPort(listen) {
-        result.append(("operatorListen", host, port))
-    }
-    return result
-}
-
-/// Whether a TCP listener could bind `host:port` (an IPv4 or IPv6 literal,
-/// or `localhost`) now; any other host cannot be checked, so is refused.
-private func canBind(host: String, port: UInt16) -> Bool {
-    // localhost is both loopbacks: the listener may take either.
-    if host == "localhost" {
-        return canBind(host: "127.0.0.1", port: port) && (!hasIPv6Loopback() || canBind(host: "::1", port: port))
-    }
-    let literal = host
-    var v4 = sockaddr_in(), v6 = sockaddr_in6()
-    if inet_pton(AF_INET, literal, &v4.sin_addr) == 1 {
-        v4.sin_family = sa_family_t(AF_INET)
-        v4.sin_port = port.bigEndian
-        return withUnsafePointer(to: &v4) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                bindsNow(AF_INET, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-    }
-    if inet_pton(AF_INET6, literal, &v6.sin6_addr) == 1 {
-        v6.sin6_family = sa_family_t(AF_INET6)
-        v6.sin6_port = port.bigEndian
-        return withUnsafePointer(to: &v6) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                bindsNow(AF_INET6, $0, socklen_t(MemoryLayout<sockaddr_in6>.size))
-            }
-        }
-    }
-    return false
-}
-
-/// Whether this host has an IPv6 loopback to bind (port 0: any).
-private func hasIPv6Loopback() -> Bool {
-    canBind(host: "::1", port: 0)
-}
-
-private func bindsNow(_ family: Int32, _ address: UnsafePointer<sockaddr>, _ length: socklen_t) -> Bool {
-    #if canImport(Darwin)
-    let descriptor = socket(family, SOCK_STREAM, 0)
-    #else
-    let descriptor = socket(family, Int32(SOCK_STREAM.rawValue), 0)
-    #endif
-    guard descriptor >= 0 else { return false }
-    defer { _ = close(descriptor) }
-    return bind(descriptor, address, length) == 0
 }
 
 extension NodeRuntime: HostingRuntime {
@@ -454,6 +348,12 @@ final class NodeLifecycle: @unchecked Sendable {
     }
 }
 
+/// A node started with `--root`: its root and what its layers say.
+struct NodeOwner: Sendable {
+    let layout: HostLayout
+    let merged: MergedConfig
+}
+
 /// The operator surface beyond the chains' reads and writes: the node's
 /// configuration (with `--root`), its tokens, log, disk, restart
 /// and wipe. Each part is absent where the node has none.
@@ -521,51 +421,31 @@ func addOperatorControlRoutes(
     writes service: any OperatorWrites,
     remote: Bool
 ) {
-    // The child chains this node hosts, changed without a restart.
+    // The child chains this node hosts, and those its configuration hosts
+    // (listed or implied): what `GET /config` reports.
     router.get("hosted-chains") { request, context in
-        let configured = await control.config?.saved.hostedChains
+        guard let config = try await control.config?.current() else {
+            return try json(
+                HostedChainsResponse(chains: service.hostedChildren.map { $0.joined(separator: "/") }, configured: nil),
+                request: request, context: context
+            )
+        }
         return try json(
             HostedChainsResponse(
-                chains: service.hostedChildren.map { $0.joined(separator: "/") },
-                configured: control.config == nil ? nil : (configured ?? [])
+                chains: config.status.chains.filter { $0.actual == "hosted" }.map(\.path),
+                configured: config.spec.hostedChains ?? []
             ),
             request: request, context: context
         )
     }
-    router.post("hosted-chains") { request, context in
+    // A child chain created, once; hosting its path then mines it.
+    router.post("chains") { request, context in
         if !remote { try requireLoopbackHost(request) }
-        try requireJSON(request)
-        let body = try await request.body.collect(upTo: context.maxUploadSize)
-        let data = Data(buffer: body)
-        let legacy = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["hostChain"] != nil
-        guard let config = control.config else {
-            // Started with flags: the whole set, as the flags name it, until
-            // the next start.
-            guard !remote else { throw HTTPError(.conflict, message: OperatorConfigError.notOwned.description) }
-            guard let input = try? JSONDecoder().decode(HostedChainsRequest.self, from: data) else {
-                throw HTTPError(.badRequest, message: "this node, started with flags, takes the chains as its flags name them (hostChain, premineTo, ...)")
-            }
-            return try await serviceCall(request: request, context: context) {
-                try await service.hostChains(input)
-                return HostedChainsResponse(chains: service.hostedChildren.map { $0.joined(separator: "/") }, configured: nil)
-            }
-        }
-        guard !legacy else {
-            throw HTTPError(.badRequest, message: "this node keeps its configuration: POST /hosted-chains hosts one chain ({path, spec, ...}) and PATCH /config sets hostedChains; update lattice")
-        }
-        guard let chain = try? JSONDecoder().decode(HostedChain.self, from: data) else {
-            throw HTTPError(.badRequest, message: "send one chain: {path, spec?, premineTo?, genesisTransactions?, policyModules?}")
-        }
-        return try await configChange(request: request, context: context) { try await config.host(chain) }
-    }
-    router.delete("hosted-chains") { request, context in
-        if !remote { try requireLoopbackHost(request) }
-        guard let path = request.uri.queryParameters["chainPath"].map(String.init) else {
-            throw HTTPError(.badRequest, message: "name the chain with ?chainPath=")
-        }
+        let chain: HostedChain = try await decode(request, context: context, remote: remote)
         return try await configChange(request: request, context: context) {
             guard let config = control.config else { throw OperatorConfigError.notOwned }
-            return try await config.unhost(path)
+            let created = try await config.create(chain)
+            return CreatedChainResponse(path: chain.path, created: created)
         }
     }
     router.get("config") { request, context in
@@ -574,17 +454,37 @@ func addOperatorControlRoutes(
             return try await config.current()
         }
     }
-    router.patch("config") { request, context in
-        if !remote { try requireLoopbackHost(request) }
-        let mediaType = request.headers[.contentType]?.split(separator: ";").first?
-            .trimmingCharacters(in: .whitespaces).lowercased()
-        guard mediaType == "application/json" || mediaType == "application/merge-patch+json" else {
-            throw HTTPError(.unsupportedMediaType, message: "Content-Type must be application/merge-patch+json or application/json")
+    router.get("config/fragments/:name") { request, context in
+        guard let config = control.config else { throw HTTPError(.conflict, message: OperatorConfigError.notOwned.description) }
+        do {
+            let (data, etag) = try await config.fragment(context.parameters.get("name") ?? "")
+            return Response(
+                status: .ok, headers: [.contentType: "application/json", .cacheControl: "no-store", .eTag: etag],
+                body: ResponseBody(byteBuffer: ByteBuffer(bytes: data))
+            )
+        } catch let error as OperatorConfigError {
+            throw HTTPError(.notFound, message: error.description)
         }
+    }
+    router.put("config/fragments/:name") { request, context in
+        if !remote { try requireLoopbackHost(request) }
+        try requireJSON(request)
         let body = try await request.body.collect(upTo: context.maxUploadSize)
+        let name = context.parameters.get("name") ?? ""
         return try await configChange(request: request, context: context) {
             guard let config = control.config else { throw OperatorConfigError.notOwned }
-            return try await config.patch(Data(buffer: body), remote: remote)
+            return try await config.put(
+                name, Data(buffer: body), ifMatch: request.headers[.ifMatch], ifNoneMatch: request.headers[.ifNoneMatch],
+                remote: remote
+            )
+        }
+    }
+    router.delete("config/fragments/:name") { request, context in
+        if !remote { try requireLoopbackHost(request) }
+        let name = context.parameters.get("name") ?? ""
+        return try await configChange(request: request, context: context) {
+            guard let config = control.config else { throw OperatorConfigError.notOwned }
+            return try await config.delete(name, ifMatch: request.headers[.ifMatch], remote: remote)
         }
     }
     router.get("logs") { request, context in
@@ -673,20 +573,18 @@ private func checkRestart(_ control: OperatorControl) async throws {
 
 private let noTokenFile = "no operator token file: set operatorListen and operatorTokens (then restart), or start with --operator-tokens"
 
-/// A configuration change's answer: 200 when all of it took effect, 500
-/// with the same body when a part failed (left out of what is kept).
+/// A configuration read or change: 200 with its answer, or the refusal.
 private func configChange<Value: Encodable & Sendable>(
     request: Request, context: BasicRequestContext, _ operation: () async throws -> Value
 ) async throws -> Response {
     do {
-        let value = try await operation()
-        let failed = !((value as? ConfigChangeResponse)?.failed.isEmpty ?? true)
-        return try json(value, request: request, context: context, status: failed ? .internalServerError : .ok)
+        return try json(try await operation(), request: request, context: context)
     } catch let error as OperatorConfigError {
         switch error {
         case .invalid(let reason): throw HTTPError(.badRequest, message: reason)
-        case .conflict(let reason): throw HTTPError(.conflict, message: reason)
         case .notFound(let reason): throw HTTPError(.notFound, message: reason)
+        case .conflict(let reason): throw HTTPError(.conflict, message: reason)
+        case .changed(let reason): throw HTTPError(.preconditionFailed, message: reason)
         case .notOwned: throw HTTPError(.conflict, message: error.description)
         }
     }

@@ -10,7 +10,7 @@ import LatticeNode
 ///
 /// ```json
 /// [{ "name": "ops", "sha256": "<hex>", "role": "admin" },
-///  { "name": "seller", "sha256": "<hex>", "routes": ["GET /hosted-chains", "POST /hosted-chains"] }]
+///  { "name": "seller", "sha256": "<hex>", "routes": ["GET /config", "PUT /config/fragments/{name}"] }]
 /// ```
 ///
 /// `admin` may use every route, `read` every GET; a route is the method and
@@ -32,14 +32,20 @@ struct OperatorTokens: Sendable {
             self.routes = routes
         }
 
-        /// Whether this token may use `METHOD path`.
-        func allows(method: String, path: String) -> Bool {
+        /// Whether this token may use `METHOD path`, the route's registered
+        /// pattern (`/config/fragments/{name}`); a listed route without a
+        /// parameter may instead name one request path (`concrete`), such as
+        /// `PUT /config/fragments/hostmarket`, and allows that one only.
+        func allows(method: String, path: String, concrete: String? = nil) -> Bool {
             switch role {
             case "admin": return true
             case "read": return (method == "GET" || method == "HEAD") && !path.hasPrefix("/tokens")
             default:
                 guard !path.hasPrefix("/tokens") else { return false }
-                return (routes ?? []).contains { $0.uppercasedMethod == "\(method) \(path)" }
+                return (routes ?? []).contains {
+                    let route = $0.uppercasedMethod
+                    return route == "\(method) \(path)" || (concrete.map { route == "\(method) \($0)" } ?? false)
+                }
             }
         }
     }
@@ -219,13 +225,13 @@ struct OperatorTokenMiddleware<Context: RequestContext>: RouterMiddleware {
         guard allowedOrigins.contains(origin) else {
             throw HTTPError(.forbidden, message: "origin not allowed on the operator listener")
         }
-        let cors: HTTPFields = [.accessControlAllowOrigin: origin, .vary: "Origin"]
+        let cors: HTTPFields = [.accessControlAllowOrigin: origin, .vary: "Origin", .accessControlExposeHeaders: "ETag"]
         if request.method == .options {
             // A preflight carries no credentials; it only learns what the
             // real request may send.
             var headers = cors
-            headers[.accessControlAllowMethods] = "GET, HEAD, POST, PATCH, DELETE"
-            headers[.accessControlAllowHeaders] = "Authorization, Content-Type"
+            headers[.accessControlAllowMethods] = "GET, HEAD, POST, PUT, DELETE"
+            headers[.accessControlAllowHeaders] = "Authorization, Content-Type, If-Match, If-None-Match"
             headers[.accessControlMaxAge] = "600"
             return Response(status: .noContent, headers: headers)
         }
@@ -250,7 +256,7 @@ struct OperatorTokenMiddleware<Context: RequestContext>: RouterMiddleware {
         // Every token may ask who it is.
         if request.method == .get && path == "/whoami" { return }
         guard context.endpointPath != nil || entry.role == "admin",
-              entry.allows(method: request.method.rawValue, path: path) else {
+              entry.allows(method: request.method.rawValue, path: path, concrete: request.uri.path) else {
             throw HTTPError(.forbidden, message: "token \(entry.name) may not use \(request.method.rawValue) \(path)")
         }
     }

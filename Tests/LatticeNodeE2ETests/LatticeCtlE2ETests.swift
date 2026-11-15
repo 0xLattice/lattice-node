@@ -312,6 +312,63 @@ final class LatticeCtlE2ETests: XCTestCase {
         try writeMinerConfig(root, recipients: recipients)
     }
 
+    /// The configuration in layers: a fragment applied, one written by hand
+    /// and read on SIGHUP, a chain another fragment lists refused to `child
+    /// unhost`, one a chain under it keeps said to stay; and an operator listener whose port is taken reported, not
+    /// fatal.
+    func testFragmentsAndAnOperatorListenerThatCannotOpen() async throws {
+        #if canImport(Darwin)
+        let held = socket(AF_INET, SOCK_STREAM, 0)
+        #else
+        let held = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        #endif
+        defer { close(held) }
+        let port = randomPorts(1)[0]
+        var address = sockaddr_in()
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = port.bigEndian
+        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        let bound = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Foundation.bind(held, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        XCTAssertEqual(bound, 0)
+        XCTAssertEqual(listen(held, 1), 0)
+        let host = try await bringUpMiningHost(miner: nil) {
+            $0.operatorListen = "127.0.0.1:\(port)"
+            $0.operatorTokens = "operator-tokens.json"
+        }
+        let status = try await runCtl(["status"], root: host.root)
+        XCTAssertTrue(status.contains("Nexus: active") && status.contains("operatorListen"), status)
+
+        // A fragment applied: its chain is hosted at once, its value waits.
+        let file = host.root.appendingPathComponent("hostmarket.json")
+        try Data(#"{"hostedChains":["Nexus/Beta"],"minRelayFee":4}"#.utf8).write(to: file)
+        let applied = try await runCtl(["apply", "-f", file.path, "--fragment", "hostmarket"], root: host.root)
+        XCTAssertTrue(applied.contains("minRelayFee"), applied)
+        let fragment = try await runCtl(["config", "get", "--fragment", "hostmarket"], root: host.root)
+        XCTAssertTrue(fragment.contains("Nexus/Beta"), fragment)
+        let refused = try await runCtl(["child", "unhost", "Nexus/Beta"], root: host.root, expectFailure: true)
+        XCTAssertTrue(refused.contains("listed by hostmarket"), refused)
+        // A chain listed under it keeps it hosted: said, not refused.
+        _ = try await runCtl(["child", "host", "Nexus/Delta/Eps"], root: host.root)
+        _ = try await runCtl(["child", "host", "Nexus/Delta"], root: host.root)
+        let kept = try await runCtl(["child", "unhost", "Nexus/Delta"], root: host.root)
+        XCTAssertTrue(kept.contains("still hosted for Nexus/Delta/Eps"), kept)
+        let implied = try await runCtl(["status"], root: host.root)
+        XCTAssertTrue(implied.contains("Nexus/Delta: implied by Nexus/Delta/Eps"), implied)
+
+        // A fragment written by hand is read on SIGHUP, and a later one wins.
+        try Data(#"{"minRelayFee":9}"#.utf8).write(to: ConfigFragments.file(root: host.root, name: "zz-hand"))
+        XCTAssertEqual(kill(try XCTUnwrap(host.supervisor.pid), SIGHUP), 0)
+        try await waitFor("the hand-written fragment is read") {
+            let fee = try? await self.runCtl(["config", "get", "minRelayFee"], root: host.root)
+            return fee?.contains("9") == true
+        }
+        XCTAssertTrue(host.supervisor.isRunning, "SIGHUP does not stop the node")
+    }
+
     func testNexusMiningAndTransferThroughTheCLI() async throws {
         let scratch = FileManager.default.temporaryDirectory
             .appendingPathComponent("lattice-node-e2e-ctlkeys-\(UUID().uuidString)")
@@ -1079,6 +1136,9 @@ private final class NodeSupervisor: @unchecked Sendable {
     private var process: Process?
     private var stopping = false
     private var exitStatuses: [Int32] = []
+    /// Cleared where the exit is recorded, so `exits` is current once it reads false
+    /// (Process.isRunning turns false before the termination handler runs).
+    private var live = false
 
     init(lattice: URL, root: URL) {
         self.lattice = lattice
@@ -1088,7 +1148,7 @@ private final class NodeSupervisor: @unchecked Sendable {
     /// Every exit so far, in order.
     var exits: [Int32] { lock.withLock { exitStatuses } }
     var pid: Int32? { lock.withLock { process.map(\.processIdentifier) } }
-    var isRunning: Bool { lock.withLock { process?.isRunning ?? false } }
+    var isRunning: Bool { lock.withLock { live } }
 
     func start() throws {
         try lock.withLock {
@@ -1128,11 +1188,13 @@ private final class NodeSupervisor: @unchecked Sendable {
         }
         try process.run()
         self.process = process
+        live = true
     }
 
     private func exited(_ ended: Process) {
         lock.withLock {
             exitStatuses.append(ended.terminationReason == .exit ? ended.terminationStatus : -ended.terminationStatus)
+            if ended === process { live = false }
             guard ended === process, !stopping, ended.terminationReason == .exit, ended.terminationStatus == 75 else { return }
             try? launch()
         }

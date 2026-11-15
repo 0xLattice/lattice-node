@@ -116,8 +116,16 @@ struct Status: AsyncParsableCommand {
             print("\(path): configured, not running")
         }
         if let data = try? await send(rpc: rpc, "GET", "config"),
-           let config = try? JSONDecoder().decode(ConfigResponse.self, from: data), !config.restartRequired.isEmpty {
-            print("waiting for a restart: \(config.restartRequired.joined(separator: ", "))")
+           let config = try? JSONDecoder().decode(ConfigResponse.self, from: data) {
+            for chain in config.status.chains {
+                if let below = chain.impliedBy { print("\(chain.path): implied by \(below.joined(separator: ", "))") }
+                if let error = chain.error { print("\(chain.path): not hosted: \(error)") }
+            }
+            if !config.status.pendingRestart.isEmpty {
+                print("waiting for a restart: \(config.status.pendingRestart.joined(separator: ", "))")
+            }
+            for error in config.status.errors { print(error) }
+            for note in config.status.inert { print("inert: \(note)") }
         }
     }
 }

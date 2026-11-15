@@ -97,13 +97,13 @@ struct LoopbackRPCAuthMiddleware<Context: RequestContext>: RouterMiddleware {
         guard auth.allowedOrigins.contains(origin) else {
             throw HTTPError(.forbidden, message: "origin not allowed on the operator RPC port")
         }
-        let cors: HTTPFields = [.accessControlAllowOrigin: origin, .vary: "Origin"]
+        let cors: HTTPFields = [.accessControlAllowOrigin: origin, .vary: "Origin", .accessControlExposeHeaders: "ETag"]
         if request.method == .options {
             // A preflight carries no credentials; it only learns what the real
             // request may send.
             var headers = cors
-            headers[.accessControlAllowMethods] = "GET, HEAD, POST, PATCH, DELETE"
-            headers[.accessControlAllowHeaders] = "Authorization, Content-Type"
+            headers[.accessControlAllowMethods] = "GET, HEAD, POST, PUT, DELETE"
+            headers[.accessControlAllowHeaders] = "Authorization, Content-Type, If-Match, If-None-Match"
             headers[.accessControlMaxAge] = "600"
             return Response(status: .noContent, headers: headers)
         }

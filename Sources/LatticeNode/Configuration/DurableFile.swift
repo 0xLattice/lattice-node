@@ -12,6 +12,12 @@ public func writeDurably(_ data: Data, to url: URL) throws {
     try syncToDisk(directory.path)
 }
 
+/// Removes `url` and syncs its directory, so the removal survives a crash.
+public func removeDurably(_ url: URL) throws {
+    try FileManager.default.removeItem(at: url)
+    try syncToDisk(url.deletingLastPathComponent().path)
+}
+
 /// `writeDurably` for a file only its owner may read: staged mode 0600 from
 /// its creation, synced, renamed over `url`, the directory synced.
 public func writePrivateDurably(_ data: Data, to url: URL) throws {

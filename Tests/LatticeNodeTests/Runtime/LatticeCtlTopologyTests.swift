@@ -109,16 +109,13 @@ final class LatticeCtlTopologyTests: XCTestCase {
     }
 
     /// A lattice.json from before mining was a process of its own still
-    /// starts the node, which ignores its `mine` and never writes it back;
-    /// a change adding `mine` is refused.
+    /// starts the node, which ignores its `mine` and never writes it back.
     func testAnOlderLatticeJSONWithMineStillLoads() throws {
         let topology = try Topology.load(data: Data(
             #"{"listen":4001,"rpc":4003,"mine":{"enabled":true,"workers":1,"recipients":{"Nexus":"x"}}}"#.utf8
         )).validated()
         XCTAssertEqual(topology.rpc, 4003)
         XCTAssertFalse(String(decoding: try topology.canonicalData(), as: UTF8.self).contains("mine"))
-        XCTAssertThrowsError(try topology.applying(mergePatch: Data(#"{"mine":{"workers":2}}"#.utf8)))
-        XCTAssertNoThrow(try topology.applying(mergePatch: Data(#"{"mine":null}"#.utf8)), "removing it is cleanup")
         XCTAssertThrowsError(try Topology.load(data: Data(#"{"listen":4001,"rpc":4003,"nope":1}"#.utf8)))
     }
 
@@ -232,15 +229,25 @@ final class LatticeCtlTopologyTests: XCTestCase {
             try load(#"{"listen":4001,"rpc":4003,"state":"tip"}"#).contentServingArguments, ["--state", "tip"]
         )
         XCTAssertEqual(
-            try load(#"{"listen":4001,"rpc":4003,"state":"recent","stateWindow":32,"stateWindows":{"Nexus/Alpha":500}}"#)
+            try load(#"{"listen":4001,"rpc":4003,"hostedChains":["Nexus/Alpha"],"state":"recent","stateWindow":32,"stateWindows":{"Nexus/Alpha":500}}"#)
                 .contentServingArguments,
             ["--state", "recent", "--state-window", "32", "--state-window", "Nexus/Alpha=500"]
         )
         XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"state":"recent","stateWindow":0}"#))
         XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"state":"recent","stateWindows":{"Alpha":5}}"#))
-        // A window says how much recent state to keep: on all or none it says nothing.
-        XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"stateWindow":32}"#))
-        XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"state":"none","stateWindows":{"Nexus/Alpha":5}}"#))
+        // A window says how much recent state to keep: on all or none it says
+        // nothing, and is left out (inert, reported), as is one for a chain
+        // not hosted.
+        XCTAssertEqual(try load(#"{"listen":4001,"rpc":4003,"stateWindow":32}"#).contentServingArguments, [])
+        XCTAssertEqual(
+            try load(#"{"listen":4001,"rpc":4003,"hostedChains":["Nexus/Alpha"],"state":"none","stateWindows":{"Nexus/Alpha":5}}"#)
+                .contentServingArguments,
+            ["--state", "none"]
+        )
+        XCTAssertEqual(
+            try load(#"{"listen":4001,"rpc":4003,"state":"recent","stateWindows":{"Nexus/Alpha":5}}"#).contentServingArguments,
+            ["--state", "recent"]
+        )
         XCTAssertEqual(
             try load(#"{"listen":4001,"rpc":4003,"state":"none"}"#).contentServingArguments, ["--state", "none"]
         )
@@ -250,7 +257,7 @@ final class LatticeCtlTopologyTests: XCTestCase {
             ["--announce-lifetime", "3600"]
         )
         XCTAssertEqual(
-            try load(#"{"listen":4001,"rpc":4003,"finalityWindow":240,"finalityWindows":{"Nexus/Beta":0,"Nexus/Alpha":500}}"#)
+            try load(#"{"listen":4001,"rpc":4003,"hostedChains":["Nexus/Alpha","Nexus/Beta"],"finalityWindow":240,"finalityWindows":{"Nexus/Beta":0,"Nexus/Alpha":500}}"#)
                 .contentServingArguments,
             ["--finality-window", "240", "--finality-window", "Nexus/Alpha=500", "--finality-window", "Nexus/Beta=0"]
         )
@@ -340,23 +347,28 @@ final class LatticeCtlTopologyTests: XCTestCase {
         }
     }
 
-    /// A configuration change is an RFC 7396 merge patch: members replace,
-    /// null removes, an unknown key is refused.
+    /// A configuration change is an RFC 7396 merge patch of a fragment:
+    /// members replace, null removes.
     func testAMergePatchChangesOnlyWhatItNames() throws {
+        let fragment: [String: Any] = [
+            "hostedChains": ["Nexus/A"], "peers": ["Nexus": [String](), "Nexus/A": ["k@a.example:4001"]], "minRelayFee": 3,
+        ]
+        let next = try Topology.applying(
+            mergePatch: Data(#"{"peers":{"Nexus":null},"stateWindow":null,"listen":5001}"#.utf8), to: fragment
+        )
+        XCTAssertEqual(next["listen"] as? Int, 5001)
+        XCTAssertEqual(next["minRelayFee"] as? Int, 3)
+        XCTAssertEqual(next["peers"] as? [String: [String]], ["Nexus/A": ["k@a.example:4001"]])
+        XCTAssertEqual(next["hostedChains"] as? [String], ["Nexus/A"])
+        XCTAssertNil(next["stateWindow"])
+        XCTAssertThrowsError(try Topology.applying(mergePatch: Data("[1]".utf8), to: fragment))
         let topology = try Topology.load(data: Data(
-            #"{"listen":4001,"rpc":4003,"hostedChains":["Nexus/A"],"peers":{"Nexus":[],"Nexus/A":["k@a.example:4001"]},"minRelayFee":3}"#.utf8
+            #"{"listen":4001,"rpc":4003,"hostedChains":["Nexus/A"],"peers":{"Nexus":[],"Nexus/A":["k@a.example:4001"]}}"#.utf8
         ))
-        let next = try topology.applying(mergePatch: Data(
-            #"{"peers":{"Nexus":null},"stateWindow":null,"listen":5001}"#.utf8
+        let changed = try Topology.load(data: Data(
+            #"{"listen":5001,"rpc":4003,"hostedChains":["Nexus/A"],"peers":{"Nexus/A":["k@a.example:4001"]}}"#.utf8
         ))
-        XCTAssertEqual(next.listen, 5001)
-        XCTAssertEqual(next.minRelayFee, 3)
-        XCTAssertEqual(next.peers?.byChain, ["Nexus/A": ["k@a.example:4001"]])
-        XCTAssertEqual(next.hostedChains, ["Nexus/A"])
-        XCTAssertThrowsError(try topology.applying(mergePatch: Data(#"{"nope":1}"#.utf8)))
-        XCTAssertThrowsError(try topology.applying(mergePatch: Data("[1]".utf8)))
-        XCTAssertEqual(try next.restartRequired(comparedTo: topology), ["listen", "peers"])
-        XCTAssertEqual(try next.changedKeys(from: topology), ["listen", "peers"])
+        XCTAssertEqual(try changed.restartRequired(comparedTo: topology), ["listen", "peers"])
         // A chain's removal takes what requires it hosted with it.
         let removed = topology.removingChains(["Nexus/A"])
         XCTAssertEqual(removed.hostedChains, [])
@@ -422,11 +434,8 @@ final class LatticeCtlTopologyTests: XCTestCase {
             ["--no-default-peers", "--chain-peer", "Nexus/Alpha=k@a.example:4001"]
         )
 
-        XCTAssertThrowsError(
-            try load(#"{"listen":4001,"rpc":4003,"peers":{"Nexus/Alpha":["k@a.example:4001"]}}"#)
-        ) { error in
-            XCTAssertTrue(String(describing: error).contains("Nexus/Alpha"))
-        }
+        // Peers for a chain not hosted are inert: left out, not an error.
+        XCTAssertNil(try load(#"{"listen":4001,"rpc":4003,"peers":{"Nexus/Alpha":["k@a.example:4001"]}}"#).peers)
         XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"peers":"k@a.example:4001"}"#))
     }
 

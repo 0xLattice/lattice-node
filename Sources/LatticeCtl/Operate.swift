@@ -1,7 +1,7 @@
 // Operating a node, local or remote: its configuration, restart, pins,
 // operator tokens and logs. Each verb asks the node's operator API (loopback
 // and cookie under --root, or --node with --token-file); a configuration
-// change on a stopped local node is made to lattice.json itself.
+// change on a stopped local node is made to its fragment file itself.
 
 import ArgumentParser
 import Foundation
@@ -10,31 +10,48 @@ import LatticeNodeAPI
 
 struct Config: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Read and change the node's configuration (lattice.json, which the running node owns).",
+        abstract: "Read and change the node's configuration: lattice.json and the fragments of config.d, merged.",
+        discussion: """
+        `set` and `unset` change the `operator` fragment, which comes after every \
+        other layer: its values win, and its hosted chains and peers join theirs. \
+        A running node applies hosted chains and child peers at once and every \
+        other key at its next start (`lattice restart`).
+        """,
         subcommands: [Get.self, SetKeys.self, Unset.self]
     )
 
     struct Get: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "Print the configuration, or one key of it (a.b.c).")
+        static let configuration = CommandConfiguration(abstract: "Print the merged configuration, or one key of it (a.b.c), or one fragment.")
 
         @OptionGroup var target: NodeTarget
+
+        @Option(help: "A fragment as it is (lattice for lattice.json), instead of the merged configuration.")
+        var fragment: String?
 
         @Argument(help: "A key path, e.g. hostedChains.")
         var key: String?
 
         func run() async throws {
             var value: Any
-            if let rpc = try await target.running() {
-                let data = try await send(rpc: rpc, "GET", "config")
-                let response = try JSONDecoder().decode(ConfigResponse.self, from: data)
-                value = try response.config.jsonObject()
-                if !response.restartRequired.isEmpty {
-                    FileHandle.standardError.write(Data(
-                        "waiting for a restart: \(response.restartRequired.joined(separator: ", "))\n".utf8
-                    ))
+            if let fragment {
+                if let rpc = try await target.running() {
+                    value = try ConfigFragments.object(try await send(rpc: rpc, "GET", "config/fragments/\(fragment)"), named: fragment)
+                } else {
+                    value = try ConfigFragments.object(at: fragment == ConfigFragments.baseName
+                        ? target.layout.root.appendingPathComponent(Topology.fileName)
+                        : ConfigFragments.file(root: target.layout.root, name: fragment))
                 }
             } else {
-                value = try Topology.load(root: target.layout.root).jsonObject()
+                let response = try await target.config()
+                value = try response.spec.jsonObject()
+                for chain in response.status.chains where chain.error != nil {
+                    FileHandle.standardError.write(Data("\(chain.path) (\(chain.from.joined(separator: ", "))): \(chain.error!)\n".utf8))
+                }
+                if !response.status.pendingRestart.isEmpty {
+                    FileHandle.standardError.write(Data(
+                        "waiting for a restart: \(response.status.pendingRestart.joined(separator: ", "))\n".utf8
+                    ))
+                }
             }
             for part in (key ?? "").split(separator: ".") {
                 guard let inner = (value as? [String: Any])?[String(part)] else {
@@ -52,8 +69,7 @@ struct Config: AsyncParsableCommand {
     struct SetKeys: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "set",
-            abstract: "Change keys: key=value (a.b.c=value; the value is JSON when it parses as JSON), or --patch with a JSON merge patch.",
-            discussion: "A running node applies hosted chains and child peers at once and keeps every other key for its next start (`lattice restart`)."
+            abstract: "Change keys of the operator fragment: key=value (a.b.c=value; the value is JSON when it parses as JSON), or --patch with a JSON merge patch."
         )
 
         @OptionGroup var target: NodeTarget
@@ -61,7 +77,7 @@ struct Config: AsyncParsableCommand {
         @Argument(help: "key=value assignments, e.g. minRelayFee=5 stateWindow=128.")
         var assignments: [String] = []
 
-        @Option(help: "An RFC 7396 merge patch of lattice.json, e.g. '{\"peers\":{\"Nexus/Alpha\":null}}'.")
+        @Option(help: "An RFC 7396 merge patch of the operator fragment, e.g. '{\"peers\":{\"Nexus/Alpha\":null}}'.")
         var patch: String?
 
         func run() async throws {
@@ -73,7 +89,9 @@ struct Config: AsyncParsableCommand {
     }
 
     struct Unset: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "Remove keys (a.b.c).")
+        static let configuration = CommandConfiguration(
+            abstract: "Remove keys (a.b.c) from the operator fragment; another layer's value then holds."
+        )
 
         @OptionGroup var target: NodeTarget
 
@@ -86,12 +104,40 @@ struct Config: AsyncParsableCommand {
     }
 
     static func apply(_ target: NodeTarget, _ patch: Data) async throws {
-        try await target.changeConfig(api: { rpc in
-            try await sendChange(rpc: rpc, "PATCH", "config", json: patch, contentType: "application/merge-patch+json")
-        }, stopped: { topology in
-            topology = try topology.applying(mergePatch: patch)
-            print("saved; the node reads it at its next start")
-        })
+        let response = try await target.editFragment(operatorFragment) { object, _ in
+            object = try Topology.applying(mergePatch: patch, to: object)
+        }
+        try report(response)
+    }
+}
+
+struct Apply: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Replace one fragment of the node's configuration (config.d/<name>.json) with a file.",
+        discussion: """
+        The node checks the configuration the fragment makes with every other \
+        layer and refuses it (changing nothing) when it does not check; then it \
+        applies hosted chains and child peers at once and every other key at its \
+        next start. Each writer owns one fragment: `deploy` for a deploy script, \
+        `operator` for people (`lattice config set`), a tool its own.
+        """
+    )
+
+    @OptionGroup var target: NodeTarget
+
+    @Option(name: [.short, .customLong("file")], help: "The fragment: one JSON object, keys as in lattice.json.")
+    var file: String
+
+    @Option(help: "The fragment's name, e.g. deploy.")
+    var fragment: String
+
+    func run() async throws {
+        let object = try ConfigFragments.object(at: URL(fileURLWithPath: file))
+        let response = try await target.putFragment(fragment, object)
+        for chain in response.status.chains where chain.error != nil {
+            print("\(chain.path): \(chain.error!)")
+        }
+        try report(response)
     }
 }
 
@@ -210,7 +256,7 @@ struct Tokens: AsyncParsableCommand {
         @Argument var name: String
         @Option(help: "admin (every route) or read (every GET).")
         var role: String?
-        @Option(help: "A route it may use instead of a role, as METHOD /path, e.g. \"POST /hosted-chains\" (repeatable).")
+        @Option(help: "A route it may use instead of a role, as METHOD /path, e.g. \"PUT /config/fragments/{name}\" (repeatable).")
         var route: [String] = []
         @Option(help: "Write the token to this file (mode 0600) instead of printing it.")
         var out: String?

@@ -5,6 +5,7 @@ import FoundationNetworking
 import ArgumentParser
 import LatticeMiningCoordinator
 import LatticeNode
+import LatticeNodeAPI
 
 /// A node's operator RPC: the local node's loopback port with the cookie the
 /// node writes at every start, which every route but /health requires; or a
@@ -122,22 +123,132 @@ struct NodeTarget: ParsableArguments {
         return rpc
     }
 
-    /// A change to the node's configuration: sent to a running (or remote)
-    /// node, which applies it and writes lattice.json; made to the file
-    /// itself while the local node is stopped (its next start reads it).
-    func changeConfig(
-        api: (NodeRPC) async throws -> Void,
-        stopped: (inout Topology) throws -> Void
-    ) async throws {
-        if let remote = try remote() { return try await api(remote) }
-        guard case .stopped(let lock) = localNode(layout) else {
-            return try await api(try await answering(NodeRPC(try Topology.load(root: layout.root), layout)))
+    /// The configuration as the node has it, or (stopped) as its files
+    /// make it.
+    func config() async throws -> ConfigResponse {
+        if let rpc = try await running() {
+            return try JSONDecoder().decode(ConfigResponse.self, from: try await send(rpc: rpc, "GET", "config"))
         }
-        // Edited under the node's storage lock, so no node starts meanwhile.
-        var topology = try Topology.load(root: layout.root)
-        try stopped(&topology)
-        try topology.validated().save(root: layout.root)
-        _ = lock
+        return try stoppedResponse(MergedConfig.load(root: layout.root))
+    }
+
+    /// Fragment `name` changed by `edit` (`{}` when there is none yet),
+    /// given the configuration as it is. On a running node the change is
+    /// sent with the version it was made from (`If-Match`), and made again
+    /// from the new one when another writer changed it meanwhile.
+    @discardableResult
+    func editFragment(
+        _ name: String, _ edit: (inout [String: Any], ConfigResponse) throws -> Void
+    ) async throws -> ConfigResponse {
+        guard let rpc = try await running() else {
+            // Read and written under the node's storage lock, so neither a
+            // node nor another edit comes in between.
+            guard case .stopped(let lock) = localNode(layout) else { throw CtlError("the storage lock is held: the node started meanwhile, or another lattice command holds it; try again") }
+            defer { _ = lock }
+            var object: [String: Any] = [:]
+            let file = ConfigFragments.file(root: layout.root, name: name)
+            if FileManager.default.fileExists(atPath: file.path) { object = try ConfigFragments.object(at: file) }
+            try edit(&object, stoppedResponse(try MergedConfig.load(root: layout.root)))
+            return try saveStopped(name, object)
+        }
+        let path = "config/fragments/\(name)"
+        for _ in 0..<5 {
+            let current = try JSONDecoder().decode(ConfigResponse.self, from: try await send(rpc: rpc, "GET", "config"))
+            let (status, data, response) = try await exchange(rpc: rpc, "GET", path)
+            var object: [String: Any] = [:]
+            var version: String?
+            switch status {
+            case 200..<300:
+                object = try ConfigFragments.object(data, named: name)
+                version = response?.value(forHTTPHeaderField: "ETag")
+            case 404 where !data.isEmpty:
+                break // none yet
+            default:
+                throw failure("GET", path, status, data)
+            }
+            try edit(&object, current)
+            let body = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+            // The version read, or (none read) that there is none yet.
+            let (putStatus, answer, _) = try await exchange(
+                rpc: rpc, "PUT", path, json: body, headers: version.map { ["If-Match": $0] } ?? ["If-None-Match": "*"]
+            )
+            if putStatus == 412 { continue }
+            guard (200..<300).contains(putStatus) else { throw failure("PUT", path, putStatus, answer) }
+            return try JSONDecoder().decode(ConfigResponse.self, from: answer)
+        }
+        throw CtlError("\(name) kept changing while it was edited; try again")
+    }
+
+    /// Creates the child chain `chain`, once: through a running (or remote)
+    /// node's API; on a stopped local node, in its files.
+    @discardableResult
+    func createChain(_ chain: HostedChain) async throws -> Bool {
+        if let rpc = try await running() {
+            let body = try JSONEncoder().encode(chain)
+            return try JSONDecoder().decode(
+                CreatedChainResponse.self, from: try await send(rpc: rpc, "POST", "chains", json: body)
+            ).created
+        }
+        // Under the node's storage lock, so no node starts meanwhile.
+        guard case .stopped(let lock) = localNode(layout) else { throw CtlError("the storage lock is held: the node started meanwhile, or another lattice command holds it; try again") }
+        defer { _ = lock }
+        return try ChainCreation.create(chain, layout: layout)
+    }
+
+    /// Replaces fragment `name` with `object`: through a running (or
+    /// remote) node's API, which applies it; on a stopped local node, in its
+    /// file, once the configuration it makes checks (its next start reads it).
+    @discardableResult
+    func putFragment(_ name: String, _ object: [String: Any]) async throws -> ConfigResponse {
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+        if let rpc = try await running() {
+            return try JSONDecoder().decode(
+                ConfigResponse.self, from: try await send(rpc: rpc, "PUT", "config/fragments/\(name)", json: data)
+            )
+        }
+        // Under the node's storage lock, so no node starts meanwhile.
+        guard case .stopped(let lock) = localNode(layout) else { throw CtlError("the storage lock is held: the node started meanwhile, or another lattice command holds it; try again") }
+        defer { _ = lock }
+        return try saveStopped(name, object)
+    }
+
+    /// Writes fragment `name` of a stopped node, once the configuration it
+    /// makes checks; the caller holds the storage lock.
+    private func saveStopped(_ name: String, _ object: [String: Any]) throws -> ConfigResponse {
+        guard ConfigFragments.isValidName(name) else { throw CtlError("\(name) is not a fragment's name") }
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+        let merged = try MergedConfig.merge(ConfigFragments.layers(root: layout.root, replacing: name, with: object))
+        try FileManager.default.createDirectory(at: ConfigFragments.directory(root: layout.root), withIntermediateDirectories: true)
+        try writeDurably(data, to: ConfigFragments.file(root: layout.root, name: name))
+        print("saved \(ConfigFragments.directoryName)/\(name).json; the node reads it at its next start")
+        return stoppedResponse(merged)
+    }
+
+    private func stoppedResponse(_ merged: MergedConfig) -> ConfigResponse {
+        ConfigResponse(
+            spec: merged.topology, fragments: merged.layers,
+            status: ConfigStatus(
+                chains: merged.tree.status(running: [], errors: [:]),
+                pendingRestart: [], errors: [], inert: merged.inert
+            )
+        )
+    }
+}
+
+/// The fragment `lattice config set`, `lattice child ...` and the dashboard
+/// edit: people's. Layers merge in name order alone, so it comes after
+/// `deploy` and `hostmarket` and before any name sorting after it.
+let operatorFragment = "operator"
+
+/// Prints what a change left to do, and fails when `chain` (if given) did
+/// not start.
+func report(_ response: ConfigResponse, chain: String? = nil) throws {
+    for note in response.status.inert { print("inert: \(note)") }
+    if !response.status.pendingRestart.isEmpty {
+        print("waiting for a restart (`lattice restart`): \(response.status.pendingRestart.joined(separator: ", "))")
+    }
+    if let chain, let error = response.status.chains.first(where: { $0.path == chain })?.error {
+        throw CtlError("\(chain): \(error)")
     }
 }
 
@@ -184,14 +295,22 @@ func localNode(_ layout: HostLayout) -> LocalNode {
 }
 
 /// Sends `body` (JSON) to `path` with `method` and returns the answer's
-/// bytes, failing on anything but 2xx with the node's message. A
-/// configuration change's answer is returned on 500 too: its body says what
-/// failed.
+/// bytes, failing on anything but 2xx with the node's message.
 @discardableResult
 func send(
     rpc: NodeRPC, _ method: String, _ path: String, json body: Data? = nil,
-    contentType: String = "application/json", acceptFailedChange: Bool = false
+    contentType: String = "application/json"
 ) async throws -> Data {
+    let (status, data, _) = try await exchange(rpc: rpc, method, path, json: body, contentType: contentType)
+    if (200..<300).contains(status) { return data }
+    throw failure(method, path, status, data)
+}
+
+/// One request and its answer as it came: status, body and headers.
+func exchange(
+    rpc: NodeRPC, _ method: String, _ path: String, json body: Data? = nil,
+    contentType: String = "application/json", headers: [String: String] = [:]
+) async throws -> (status: Int, data: Data, response: HTTPURLResponse?) {
     var request = try rpc.request(path)
     request.httpMethod = method
     request.cachePolicy = .reloadIgnoringLocalCacheData
@@ -200,32 +319,19 @@ func send(
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
         request.httpBody = body
     }
+    for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
     let (data, response) = try await URLSession.shared.data(for: request)
-    let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-    if (200..<300).contains(status) || (acceptFailedChange && status == 500
-        && (try? JSONDecoder().decode(ConfigChangeResponse.self, from: data)) != nil) {
-        return data
-    }
+    let http = response as? HTTPURLResponse
+    return (http?.statusCode ?? 0, data, http)
+}
+
+/// The error a refused request reads as.
+func failure(_ method: String, _ path: String, _ status: Int, _ data: Data) -> CtlError {
     if status == 404, (String(data: data, encoding: .utf8) ?? "").isEmpty {
-        throw CtlError("\(method) /\(path): this node does not have that route; it predates this lattice (upgrade lattice-node)")
+        return CtlError("\(method) /\(path): this node does not have that route; it predates this lattice (upgrade lattice-node)")
     }
     let message = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
         .flatMap { ($0["error"] as? [String: Any])?["message"] as? String }
         ?? String(decoding: data.prefix(512), as: UTF8.self)
-    throw CtlError("\(method) /\(path) failed: HTTP \(status) \(message)")
-}
-
-/// A configuration change sent to `rpc`, its outcome printed; throws when a
-/// part of it failed.
-func sendChange(rpc: NodeRPC, _ method: String, _ path: String, json body: Data? = nil, contentType: String = "application/json") async throws {
-    let data = try await send(rpc: rpc, method, path, json: body, contentType: contentType, acceptFailedChange: true)
-    let change = try JSONDecoder().decode(ConfigChangeResponse.self, from: data)
-    if !change.applied.isEmpty { print("applied: \(change.applied.joined(separator: ", "))") }
-    if !change.restartRequired.isEmpty {
-        print("waiting for a restart (`lattice restart`): \(change.restartRequired.joined(separator: ", "))")
-    }
-    guard change.failed.isEmpty else {
-        throw CtlError(change.failed.map { "failed: \($0.key)\($0.chain.map { " " + $0 } ?? ""): \($0.error)" }
-            .joined(separator: "\n"))
-    }
+    return CtlError("\(method) /\(path) failed: HTTP \(status) \(message)")
 }
