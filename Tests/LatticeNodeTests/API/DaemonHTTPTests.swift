@@ -7,6 +7,7 @@ import UInt256
 import Synchronization
 import XCTest
 import cashew
+import VolumeBroker
 @testable import LatticeNode
 @testable import LatticeNodeDaemon
 import LatticeNodeAPI
@@ -324,6 +325,23 @@ final class DaemonHTTPTests: XCTestCase {
         }
         let gone = await storage.volume(held.rawCID)
         XCTAssertNil(gone)
+    }
+
+    /// A pin whose Volume was evicted between the hold check and the pin
+    /// (VolumeBroker's `missingRetainedRoot`) answers the plain fact: not held.
+    func testPinRacedByEvictionAnswersNotHeld() async throws {
+        let router = Router()
+        router.post("/race") { request, context in
+            try await serviceCall(request: request, context: context) { () async throws -> [String] in
+                throw BrokerError.missingRetainedRoot("bafy")
+            }
+        }
+        try await Application(router: router).test(.router) { client in
+            try await client.execute(uri: "/race", method: .post) { response in
+                XCTAssertEqual(response.status, .notFound)
+                XCTAssertTrue(String(buffer: response.body).contains("notHeld"))
+            }
+        }
     }
 
     /// A web page can send a cross-origin "simple" POST (no preflight) or

@@ -933,9 +933,9 @@ against its CID; the node never reads a pin from peers. `404` (`notHeld`)
 when the node does not hold it and `entries` does not provide it; `400`
 (`invalidVolume`) when `entries` lacks the root or an entry is not the bytes
 its CID names; `409`
-(`conflictingVolume`) when the store holds that root with other entries;
-`503` (`contextChanged`) when the Volume went from the store before it was
-pinned.
+(`conflictingVolume`) when the store holds that root with other entries.
+A Volume that leaves the store before it is pinned answers `404`
+(`notHeld`).
 
 ### `GET /fetch/:cid`
 
