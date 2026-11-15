@@ -131,11 +131,10 @@ final class ChildTemplateCacheTests: XCTestCase {
         XCTAssertEqual(rebuilt.gamma, firstLeaves.gamma, "Gamma's block is still reused")
 
         // Mined, the reused Gamma block, with its older timestamp, becomes
-        // Gamma's tip like any other.
+        // Gamma's tip like any other. Ground to every carried block's
+        // target: one met at the root's alone carries no child.
         let gammaBefore = await gammaReads.readSnapshot().height ?? 0
-        var nonce: UInt64 = 0
-        while withTransaction.block.replacingNonce(nonce).proofOfWorkHash() > withTransaction.block.target { nonce += 1 }
-        _ = try await runtime.submitWork(SubmitWorkRequest(workID: withTransaction.workID, nonce: nonce))
+        _ = try await runtime.mine(withTransaction)
         try await eventually("Gamma advances with the reused block") {
             (await gammaReads.readSnapshot().height ?? 0) > gammaBefore
         }
