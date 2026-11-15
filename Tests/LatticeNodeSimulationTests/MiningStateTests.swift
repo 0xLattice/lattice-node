@@ -5,8 +5,9 @@ import UInt256
 import XCTest
 
 /// `MiningState.step`: preflight and template jobs carry the tip they ran on, a
-/// result for a moved tip is dropped and redone, the pool delta precedes
-/// every reply, and `submitWork` is an event.
+/// recheck's or build's result for a moved tip is dropped and redone, an
+/// admission's is applied and rechecked, the pool delta precedes every reply,
+/// and `submitWork` is an event.
 final class MiningStateTests: XCTestCase {
     let key = CryptoUtils.generateKeyPair()
 
@@ -100,14 +101,133 @@ final class MiningStateTests: XCTestCase {
         XCTAssertFalse(mining.mempool.contains(try Mempool.cid(of: local)))
     }
 
-    func testAPublicSubmitWaitingThroughTooManyMovesIsAnsweredRetriable() throws {
+    /// A ready verdict read on a tip that has since moved is applied as if
+    /// it arrived before the moves: the submit is admitted, the moves never
+    /// refused it or issued its job again, and the pooled transaction gets
+    /// exactly one recheck, on the current tip.
+    func testAReadyVerdictOnAnOldTipIsAdmittedAndRecheckedOnceOnTheCurrentTip() throws {
         var mining = MiningState(tipCID: "A", spec: testSpec(), config: MiningConfig(maxReissues: 1))
-        _ = mining.step(.transactionReceived(try transfer(nonce: 0), origin: .submitted(replyID: 7)), now: 0)
-        _ = mining.step(.tipMoved(TipMove(tipCID: "B")), now: 1)
-        let second = mining.step(.tipMoved(TipMove(tipCID: "C")), now: 2)
-        XCTAssertTrue(second.contains { if case .transactionRefused(7, .contextChanged) = $0 { true } else { false } }, "\(second)")
-        XCTAssertEqual(mining.pendingSubmitted, 0)
+        let tx = try transfer(nonce: 0)
+        let cid = try Mempool.cid(of: tx)
+        guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 7)), now: 0).first
+        else { return XCTFail() }
+        XCTAssertTrue(job.awaited)
+        for tip in ["B", "C", "D"] {
+            let moved = mining.step(.tipMoved(TipMove(tipCID: tip)), now: 1)
+            XCTAssertFalse(moved.contains { if case .transactionRefused = $0 { true } else { false } }, "\(moved)")
+            XCTAssertFalse(moved.contains { if case .preflight = $0 { true } else { false } }, "its job is still out")
+        }
+        let effects = mining.step(.preflighted(job, .ready, balances: funded(job)), now: 2)
+        XCTAssertEqual(effects.filter { if case .transactionAdmitted(7, cid, _, _) = $0 { true } else { false } }.count, 1, "\(effects)")
+        XCTAssertTrue(mining.mempool.contains(cid))
+        XCTAssertEqual(mining.journaled, [cid])
+        let jobs = effects.compactMap { if case .preflight(let job) = $0 { job } else { nil } }
+        XCTAssertEqual(jobs.count, 1, "\(effects)")
+        XCTAssertEqual(jobs.first?.cid, cid)
+        XCTAssertEqual(jobs.first?.checksPolicies, false, "an ordinary recheck")
+        XCTAssertEqual(jobs.first?.tipCID, "D")
+        XCTAssertEqual(jobs.first?.tipEpoch, mining.tipEpoch)
         XCTAssertEqual(mining.pendingAdmissions, 0)
+        // Its recheck lands: nothing more is issued.
+        let recheck = try XCTUnwrap(jobs.first)
+        XCTAssertFalse(mining.step(.preflighted(recheck, .ready, balances: funded(recheck)), now: 3).contains {
+            if case .preflight = $0 { true } else { false }
+        })
+        XCTAssertTrue(mining.mempool.contains(cid))
+        XCTAssertEqual(mining.outstandingPreflights, 0)
+    }
+
+    /// A verdict that is not ready, read on a tip that has since moved, is
+    /// refused once: no job is issued again, no second answer.
+    func testANotReadyVerdictOnAnOldTipIsRefusedOnce() throws {
+        var mining = MiningState(tipCID: "A", spec: testSpec())
+        let tx = try transfer(nonce: 0)
+        guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .submitted(replyID: 7)), now: 0).first
+        else { return XCTFail() }
+        _ = mining.step(.tipMoved(TipMove(tipCID: "B")), now: 1)
+        let effects = mining.step(.preflighted(job, .future, balances: [:]), now: 2)
+        XCTAssertEqual(effects.count, 1, "\(effects)")
+        guard case .transactionRefused(7, .nonceAhead)? = effects.first else { return XCTFail("\(effects)") }
+        XCTAssertEqual(mining.pendingAdmissions, 0)
+        XCTAssertEqual(mining.pendingSubmitted, 0)
+        XCTAssertEqual(mining.outstandingPreflights, 0)
+        XCTAssertTrue(mining.step(.preflighted(job, .future, balances: [:]), now: 3).isEmpty, "answered once")
+    }
+
+    /// A verdict read on an old tip brings that tip's balances. They shed
+    /// nothing: an account's other pooled transactions and their journal
+    /// rows stay, and the recheck on the current tip rebalances.
+    func testAStaleVerdictsStaleLowBalancesShedNothing() throws {
+        let sender = address(key)
+        func pooled() throws -> (MiningState, PreflightJob, [String]) {
+            var mining = MiningState(tipCID: "A", spec: testSpec())
+            var cids: [String] = []
+            for nonce in UInt64(0)...1 {
+                let tx = try transfer(nonce: nonce, debit: 5)
+                guard case .preflight(let job)? = mining.step(
+                    .transactionReceived(tx, origin: .local(replyID: nonce + 1)), now: 0
+                ).first else { throw XCTSkip("no job") }
+                _ = mining.step(.preflighted(job, .ready, balances: [sender: 100]), now: 0)
+                cids.append(job.cid)
+            }
+            guard case .preflight(let job)? = mining.step(
+                .transactionReceived(try transfer(nonce: 2, debit: 5), origin: .local(replyID: 3)), now: 0
+            ).first else { throw XCTSkip("no job") }
+            return (mining, job, cids)
+        }
+        // On the tip it was read on, a balance of 5 cannot back 15: the
+        // newcomer would shed the account's pooled transactions, and paying
+        // less than they do, it is refused.
+        var (fresh, freshJob, _) = try pooled()
+        let refused = fresh.step(.preflighted(freshJob, .ready, balances: [sender: 5]), now: 1)
+        XCTAssertTrue(refused.contains { if case .transactionRefused(3, .insufficientFunds) = $0 { true } else { false } },
+                      "\(refused)")
+
+        var (mining, job, cids) = try pooled()
+        _ = mining.step(.tipMoved(TipMove(tipCID: "B")), now: 1)
+        let effects = mining.step(.preflighted(job, .ready, balances: [sender: 5]), now: 2)
+        XCTAssertTrue(effects.contains { if case .transactionAdmitted(3, _, _, _) = $0 { true } else { false } }, "\(effects)")
+        for cid in cids + [job.cid] { XCTAssertTrue(mining.mempool.contains(cid), "\(effects)") }
+        XCTAssertEqual(mining.journaled, Set(cids + [job.cid]))
+        for case .poolChanged(let delta) in effects { XCTAssertTrue(delta.removed.isEmpty, "no journal row dropped") }
+        XCTAssertTrue(effects.contains { if case .preflight(let recheck) = $0 { recheck.cid == job.cid } else { false } })
+    }
+
+    /// A local submit joining a peer's admission is answered by a job of its
+    /// own, run ahead of other work; the peer's job no longer counts.
+    func testALocalOriginJoiningAPeerAdmissionGetsANewAwaitedJob() throws {
+        var mining = MiningState(tipCID: "A", spec: testSpec())
+        let tx = try transfer(nonce: 0)
+        let peer = PeerID(key: "p", session: 1)
+        guard case .preflight(let peerJob)? = mining.step(.transactionReceived(tx, origin: .peer(peer)), now: 0).first
+        else { return XCTFail() }
+        XCTAssertFalse(peerJob.awaited)
+        let joined = mining.step(.transactionReceived(tx, origin: .local(replyID: 1)), now: 0)
+        guard case .preflight(let awaited)? = joined.first, joined.count == 1 else { return XCTFail("\(joined)") }
+        XCTAssertTrue(awaited.awaited)
+        XCTAssertTrue(awaited.checksPolicies)
+        XCTAssertNotEqual(awaited.id, peerJob.id)
+        XCTAssertEqual(mining.pendingPeerAdmissions, 0, "out of the peer's bound")
+        XCTAssertEqual(mining.outstandingPreflights, 1)
+
+        XCTAssertTrue(mining.step(.preflighted(peerJob, .ready, balances: funded(peerJob)), now: 1).isEmpty, "ignored")
+        XCTAssertTrue(mining.isPending(peerJob.cid))
+        let admitted = mining.step(.preflighted(awaited, .ready, balances: funded(awaited)), now: 2)
+        XCTAssertTrue(admitted.contains { if case .transactionAdmitted(1, _, _, _) = $0 { true } else { false } }, "\(admitted)")
+        XCTAssertEqual(mining.mempool.count, 1)
+
+        // A public submit joining a peer's admission takes it into its own
+        // bound, the same way.
+        var other = MiningState(tipCID: "A", spec: testSpec())
+        let second = try transfer(nonce: 1)
+        _ = other.step(.transactionReceived(second, origin: .peer(peer)), now: 0)
+        let submitted = other.step(.transactionReceived(second, origin: .submitted(replyID: 2)), now: 0)
+        guard case .preflight(let job)? = submitted.first else { return XCTFail("\(submitted)") }
+        XCTAssertTrue(job.awaited)
+        XCTAssertEqual(other.pendingPeerAdmissions, 0)
+        XCTAssertEqual(other.pendingSubmitted, 1)
+        // A peer's resend changes nothing.
+        XCTAssertTrue(other.step(.transactionReceived(second, origin: .peer(peer)), now: 0).isEmpty)
     }
 
     func testAMoveThatLeavesBlocksAsksForTheirTransactions() {
@@ -153,26 +273,87 @@ final class MiningStateTests: XCTestCase {
                        "a resend of a pooled transaction is not relayed again")
     }
 
-    func testAVerdictOnAMovedTipIsDroppedAndTheMoveReissuesIt() throws {
+    /// An admission's job outstanding across many moves is issued once and
+    /// posts once: a second verdict for it does nothing.
+    func testAnAdmissionsJobOutlivesMovesAndPostsOnce() throws {
+        var mining = MiningState(tipCID: "T0", spec: testSpec())
+        let tx = try transfer(nonce: 0)
+        let cid = try Mempool.cid(of: tx)
+        guard case .preflight(let queued)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 1)), now: 0).first
+        else { return XCTFail() }
+        var issued = 1
+        for move in 1...10 {
+            for case .preflight(let job) in mining.step(.tipMoved(TipMove(tipCID: "T\(move)")), now: Int64(move))
+            where job.cid == cid { issued += 1 }
+        }
+        XCTAssertEqual(issued, 1, "the moves never issue it again")
+        let posted = mining.step(.preflighted(queued, .ready, balances: funded(queued)), now: 11)
+        XCTAssertEqual(posted.filter { if case .transactionAdmitted(1, _, _, _) = $0 { true } else { false } }.count, 1)
+        XCTAssertTrue(mining.step(.preflighted(queued, .ready, balances: funded(queued)), now: 12).isEmpty, "posted once")
+    }
+
+    /// The move confirmed the admission: its late verdict does nothing. One
+    /// never matched to its admission's job (confirmed, then returned by a
+    /// reorg under a new job) admits and announces nothing, and the submit
+    /// is answered exactly once.
+    func testALateVerdictForAnAdmissionTheMoveConfirmedDoesNothing() throws {
         var mining = MiningState(tipCID: "A", spec: testSpec())
         let tx = try transfer(nonce: 0)
-        guard case .preflight(let stale)? = mining.step(
-            .transactionReceived(tx, origin: .peer(PeerID(key: "p", session: 1))), now: 0
-        ).first else { return XCTFail() }
+        let cid = try Mempool.cid(of: tx)
+        guard case .preflight(let queued)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 1)), now: 0).first
+        else { return XCTFail() }
+        let running = queued
+        let confirmed = mining.step(.tipMoved(TipMove(tipCID: "B", confirmed: [cid])), now: 1)
+        XCTAssertTrue(mining.step(.preflighted(running, .ready, balances: funded(running)), now: 1).isEmpty,
+                      "confirmed: the late verdict does nothing")
+        XCTAssertEqual(mining.mempool.count, 0)
+        let returned = mining.step(.tipMoved(TipMove(tipCID: "C", returned: [tx])), now: 2)
+        let fresh = returned.compactMap { if case .preflight(let job) = $0, job.cid == cid { job } else { nil } }
+        XCTAssertEqual(fresh.count, 1, "the returned transaction gets a job of its own")
+        XCTAssertNotEqual(fresh.first?.id, running.id)
 
-        let moved = mining.step(.tipMoved(TipMove(tipCID: "B", confirmed: [], returned: [])), now: 1)
-        guard case .preflight(let current)? = moved.first else { return XCTFail("the move reissues: \(moved)") }
-        XCTAssertEqual(current.tipCID, "B")
-        XCTAssertEqual(mining.outstandingPreflights, 1, "only the job on the current tip is tracked")
+        let stale = mining.step(.preflighted(running, .ready, balances: funded(running)), now: 3)
+        XCTAssertTrue(stale.isEmpty, "\(stale)")
+        XCTAssertEqual(mining.mempool.count, 0)
+        XCTAssertTrue(mining.isPending(cid))
+        let answers = (confirmed + returned + stale).filter {
+            switch $0 {
+            case .transactionAdmitted(1, _, _, _), .transactionRefused(1, _): true
+            default: false
+            }
+        }
+        XCTAssertEqual(answers.count, 1, "answered once, as confirmed: \(answers)")
+        XCTAssertFalse((returned + stale).contains { if case .announceTransaction = $0 { true } else { false } })
+    }
 
-        XCTAssertTrue(mining.step(.preflighted(stale, .ready, balances: funded(stale)), now: 2).isEmpty)
-        XCTAssertEqual(mining.mempool.count, 0, "a stale verdict is never applied")
-        XCTAssertEqual(mining.pendingAdmissions, 1)
+    /// A verdict for a pooled transaction that is not the current recheck
+    /// (an earlier epoch's, or an admission job's) applies neither a
+    /// rebalance nor a removal.
+    func testAStaleVerdictForAPooledTransactionChangesNothing() throws {
+        var mining = MiningState(tipCID: "A", spec: testSpec())
+        let tx = try transfer(nonce: 0, debit: 5)
+        let cid = try Mempool.cid(of: tx)
+        guard case .preflight(let admission)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 1)), now: 0).first
+        else { return XCTFail() }
+        _ = mining.step(.preflighted(admission, .ready, balances: funded(admission)), now: 0)
+        let first = mining.step(.tipMoved(TipMove(tipCID: "B")), now: 1).compactMap {
+            if case .preflight(let job) = $0 { job } else { nil }
+        }
+        let old = try XCTUnwrap(first.first)
+        XCTAssertFalse(old.checksPolicies)
+        _ = mining.step(.tipMoved(TipMove(tipCID: "C")), now: 2)
 
-        _ = mining.step(.preflighted(current, .ready, balances: funded(current)), now: 3)
-        XCTAssertEqual(mining.mempool.count, 1)
-        XCTAssertEqual(mining.pendingAdmissions, 0)
-        XCTAssertEqual(mining.outstandingPreflights, 0)
+        // Too poor to pay it, or no longer valid: both would remove it.
+        let sender = address(key)
+        for stale in [
+            MiningEvent.preflighted(old, .ready, balances: [sender: 0]),
+            .preflighted(old, .invalid, balances: [:]),
+            .preflighted(admission, .ready, balances: [sender: 0]),
+            .preflighted(admission, .invalid, balances: [:]),
+        ] {
+            XCTAssertTrue(mining.step(stale, now: 3).isEmpty)
+            XCTAssertTrue(mining.mempool.contains(cid))
+        }
     }
 
     func testATipMoveRechecksAReadyTransactionWithoutItsPolicies() throws {
@@ -191,7 +372,7 @@ final class MiningStateTests: XCTestCase {
             if case .preflight(let job) = $0 { (job.cid, job.checksPolicies) } else { nil }
         })
         XCTAssertEqual(jobs[try Mempool.cid(of: ready)], false, "a ready one passed them already")
-        XCTAssertEqual(jobs[try Mempool.cid(of: arriving)], true, "an admission still waiting is judged")
+        XCTAssertNil(jobs[try Mempool.cid(of: arriving)], "an admission still waiting keeps its own job")
     }
 
     /// A tip move never judges the pool by its policies; a template does,
@@ -221,8 +402,8 @@ final class MiningStateTests: XCTestCase {
     }
 
     /// A resend arriving while a tip move's check (without policies) of it
-    /// is out is judged by the policies: that check's verdict only reissues
-    /// it. Only an admission adds to the pool.
+    /// is out is judged by the policies, on a job of its own: that check's
+    /// verdict admits nothing. Only an admission adds to the pool.
     func testAResendIsNeverAdmittedByATipMovesCheck() throws {
         var mining = MiningState(tipCID: "A", spec: testSpec())
         let tx = try transfer(nonce: 0)
@@ -234,13 +415,12 @@ final class MiningStateTests: XCTestCase {
         }).first else { return XCTFail() }
         XCTAssertFalse(recheck.checksPolicies)
         _ = mining.step(.policyRefused(tipCID: "B", cids: [job.cid]), now: 1)
-        XCTAssertTrue(mining.step(.transactionReceived(tx, origin: .local(replyID: 2)), now: 1).isEmpty,
-                      "its check is already out")
-
-        let effects = mining.step(.preflighted(recheck, .ready, balances: funded(recheck)), now: 2)
-        XCTAssertEqual(mining.mempool.count, 0)
-        guard case .preflight(let judged)? = effects.first else { return XCTFail("\(effects)") }
+        guard case .preflight(let judged)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 2)), now: 1).first
+        else { return XCTFail("the resend is judged by the policies") }
         XCTAssertTrue(judged.checksPolicies)
+
+        XCTAssertTrue(mining.step(.preflighted(recheck, .ready, balances: funded(recheck)), now: 2).isEmpty)
+        XCTAssertEqual(mining.mempool.count, 0)
         _ = mining.step(.preflighted(judged, .ready, balances: funded(judged)), now: 2)
         XCTAssertEqual(mining.mempool.count, 1)
     }
@@ -354,12 +534,11 @@ final class MiningStateTests: XCTestCase {
     func testRefusalsAnswerLocalSubmitsAndNeverPeers() throws {
         var mining = MiningState(tipCID: "A", spec: testSpec())
         let tx = try transfer(nonce: 0)
-        guard case .preflight(let job)? = mining.step(
-            .transactionReceived(tx, origin: .peer(PeerID(key: "p", session: 1))), now: 0
-        ).first else { return XCTFail() }
-        // A second arrival joins the first's pending verdict: one job.
-        let joined = mining.step(.transactionReceived(tx, origin: .local(replyID: 4)), now: 0)
-        XCTAssertTrue(joined.isEmpty)
+        _ = mining.step(.transactionReceived(tx, origin: .peer(PeerID(key: "p", session: 1))), now: 0)
+        // A local submit joins the peer's pending admission, on a job of its
+        // own (`testALocalOriginJoiningAPeerAdmissionGetsANewAwaitedJob`).
+        guard case .preflight(let job)? = mining.step(.transactionReceived(tx, origin: .local(replyID: 4)), now: 0).first
+        else { return XCTFail() }
         let answered = mining.step(.preflighted(job, .invalid, balances: [:]), now: 1)
         guard case .transactionRefused(4, .invalidState)? = answered.first, answered.count == 1 else {
             return XCTFail("only the local submit is answered: \(answered)")
@@ -536,6 +715,8 @@ final class MiningStateTests: XCTestCase {
         XCTAssertEqual(mining.pendingPeerAdmissions, before.2)
     }
 
+    /// A, B, A: an admission's old verdict is applied and rechecked on the
+    /// current epoch; an old build is dropped.
     func testAJobFromBeforeATipMovesAwayAndBackIsStale() async throws {
         var mining = MiningState(tipCID: "A", spec: testSpec())
         let tx = try transfer(nonce: 0)
@@ -545,21 +726,24 @@ final class MiningStateTests: XCTestCase {
               ).first
         else { return XCTFail() }
         _ = mining.step(.tipMoved(TipMove(tipCID: "B", confirmed: [], returned: [])), now: 1)
-        let back = mining.step(.tipMoved(TipMove(tipCID: "A", confirmed: [], returned: [])), now: 2)
+        _ = mining.step(.tipMoved(TipMove(tipCID: "A", confirmed: [], returned: [])), now: 2)
         XCTAssertEqual(mining.tipCID, old.tipCID)
         XCTAssertNotEqual(mining.tipEpoch, old.tipEpoch)
-        let fresh = back.compactMap { if case .preflight(let job) = $0 { job } else { nil } }
-        XCTAssertEqual(fresh.map(\.tipEpoch), [mining.tipEpoch])
 
-        XCTAssertTrue(mining.step(.preflighted(old, .ready, balances: funded(old)), now: 3).isEmpty, "A, B, A: the old verdict is stale")
-        XCTAssertEqual(mining.mempool.count, 0)
+        let stale = mining.step(.preflighted(old, .ready, balances: funded(old)), now: 3)
+        let rechecks = stale.compactMap { if case .preflight(let job) = $0 { job } else { nil } }
+        XCTAssertEqual(rechecks.map(\.tipEpoch), [mining.tipEpoch], "A, B, A: the old verdict is rechecked: \(stale)")
+        XCTAssertEqual(rechecks.map(\.checksPolicies), [false])
+        XCTAssertEqual(mining.mempool.count, 1)
         let block = try await candidateBlock()
         let build = TemplateBuild(workID: "w", block: block, searchTarget: block.target, targets: [block.target])
         XCTAssertTrue(mining.step(.templateBuilt(oldBuild, build), now: 3).isEmpty, "A, B, A: the old build is stale")
         XCTAssertEqual(mining.waitingTemplateRequests, 1)
     }
 
-    func testRepliesAreBoundedWhileTheTipChurns() throws {
+    /// A template request is refused as retriable after `maxReissues`
+    /// moves; a submit waiting through the same moves is not.
+    func testTemplateRepliesAreBoundedWhileTheTipChurns() throws {
         var mining = MiningState(tipCID: "T0", spec: testSpec(), config: MiningConfig(maxReissues: 3))
         let tx = try transfer(nonce: 0)
         _ = mining.step(.transactionReceived(tx, origin: .local(replyID: 1)), now: 0)
@@ -570,12 +754,42 @@ final class MiningStateTests: XCTestCase {
             XCTAssertFalse(effects.contains { if case .templateRefused = $0 { true } else { false } })
         }
         let fourth = mining.step(.tipMoved(TipMove(tipCID: "T4", confirmed: [], returned: [])), now: 4)
-        XCTAssertTrue(fourth.contains { if case .transactionRefused(1, .contextChanged) = $0 { true } else { false } }, "\(fourth)")
         XCTAssertTrue(fourth.contains { if case .templateRefused(2, .contextChanged) = $0 { true } else { false } }, "\(fourth)")
-        XCTAssertEqual(mining.pendingAdmissions, 0)
+        XCTAssertFalse(fourth.contains { if case .transactionRefused = $0 { true } else { false } }, "\(fourth)")
+        XCTAssertEqual(mining.pendingAdmissions, 1)
         XCTAssertEqual(mining.waitingTemplateRequests, 0)
-        XCTAssertFalse(fourth.contains { if case .preflight = $0 { true } else { false } })
         XCTAssertFalse(fourth.contains { if case .buildTemplate = $0 { true } else { false } })
+    }
+
+    /// With no refusal for waiting, the pending bounds still hold however
+    /// often the tip moves: the 257th public submit is answered `.full`,
+    /// and a peer flood stays within its caps.
+    func testPendingBoundsHoldAcrossManyMoves() throws {
+        var mining = MiningState(tipCID: "T0", spec: testSpec())
+        let bounds = mining.config
+        var full: [UInt64] = []
+        for reply in UInt64(1)...UInt64(bounds.maxPendingSubmitted + 1) {
+            for case .transactionRefused(let replyID, .full) in mining.step(
+                .transactionReceived(try transfer(nonce: reply), origin: .submitted(replyID: reply)), now: 0
+            ) { full.append(replyID) }
+        }
+        XCTAssertEqual(full, [UInt64(bounds.maxPendingSubmitted + 1)])
+        XCTAssertEqual(mining.pendingSubmitted, bounds.maxPendingSubmitted)
+
+        let peers = (0..<20).map { PeerID(key: "flood\($0)", session: 1) }
+        for move in 1...10 {
+            for peer in peers {
+                for _ in 0..<8 {
+                    let key = CryptoUtils.generateKeyPair()
+                    _ = mining.step(.transactionReceived(try signed(key, [], nonce: 0), origin: .peer(peer)), now: 0)
+                }
+                XCTAssertLessThanOrEqual(mining.pendingAdmissions(from: peer), bounds.maxPendingPerPeer)
+            }
+            _ = mining.step(.tipMoved(TipMove(tipCID: "T\(move)")), now: Int64(move))
+            XCTAssertLessThanOrEqual(mining.pendingPeerAdmissions, bounds.maxPendingPeerAdmissions)
+            XCTAssertEqual(mining.pendingSubmitted, bounds.maxPendingSubmitted)
+        }
+        XCTAssertEqual(mining.pendingPeerAdmissions, bounds.maxPendingPeerAdmissions)
     }
 
     func testAnOrdinaryReorgReturnsEveryTransactionByDefault() {

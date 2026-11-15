@@ -292,8 +292,9 @@ extension NodeRuntime {
     }
 
     /// A submit on the opt-in public listener: the same answer, but the
-    /// transaction is volatile (never journaled) and its wait for a verdict is
-    /// bounded; once pooled it is held to the pool's ordinary capacity rules.
+    /// transaction is volatile (never journaled) and, while it waits for a
+    /// verdict, held to its own pending bound; once pooled it is held to the
+    /// pool's ordinary capacity rules.
     public func submitPublicTransaction(
         _ request: SubmitTransactionRequest
     ) async throws -> SubmitTransactionResponse {
@@ -626,11 +627,19 @@ extension NodeRuntime {
 
     /// A worker job. One with a tip epoch is skipped at dequeue when its
     /// level's mining tip epoch has moved: it runs nothing, posts nothing.
-    /// `connects` marks a level's next block to execute (`connectJob`).
+    /// `kind` decides its queue (`JobQueues`).
     struct RuntimeJob: Sendable {
+        enum Kind: Sendable {
+            /// A level's next block to execute (`connectJob`).
+            case connect
+            case preflight(PreflightJob)
+            case template
+            case other
+        }
+
         let path: ChainPath
         let epoch: UInt64?
-        var connects = false
+        var kind = Kind.other
         let run: @Sendable () async -> [NodeEvent]
 
         func isCurrent(in core: NodeCore) -> Bool {
@@ -638,22 +647,40 @@ extension NodeRuntime {
         }
     }
 
-    /// The next job a free worker runs, execution first, and of execution
-    /// a level's next block ahead of the rest, each first in, first out. A
-    /// level connects one block at a time, so its next block would otherwise
-    /// wait behind every child proof check queued before it: thousands while
-    /// a node syncs a tree of chains. No level goes ahead of another, so
-    /// steady work at one never holds another's blocks back. A job whose tip
-    /// epoch moved is dropped here: it runs nothing, posts nothing.
-    static func nextJob(
-        execution: inout [RuntimeJob], mining: inout [RuntimeJob], in core: NodeCore
-    ) -> RuntimeJob? {
-        while !execution.isEmpty || !mining.isEmpty {
-            let job = execution.firstIndex(where: \.connects).map { execution.remove(at: $0) }
-                ?? (execution.isEmpty ? mining.removeFirst() : execution.removeFirst())
-            if job.isCurrent(in: core) { return job }
+    /// The worker's queues, each first in, first out, served in a fixed
+    /// order: (A) what an RPC waits on, a submit's admission and a template
+    /// build; then (B) each level's next block, so a level's connect never
+    /// waits behind the child proof checks queued before it, thousands
+    /// while a node syncs a tree of chains, and no level goes ahead of
+    /// another; then (C) everything else in arrival order: proof checks,
+    /// derivations, reads, rechecks, and a peer's or a returned
+    /// transaction's admission. A recheck or build whose tip epoch moved is
+    /// dropped at dequeue: it runs nothing, posts nothing.
+    struct JobQueues {
+        var answered: [RuntimeJob] = []
+        var connects: [RuntimeJob] = []
+        var rest: [RuntimeJob] = []
+
+        var isEmpty: Bool { answered.isEmpty && connects.isEmpty && rest.isEmpty }
+
+        mutating func append(_ job: RuntimeJob) {
+            switch job.kind {
+            case .template: answered.append(job)
+            case .preflight(let preflight) where preflight.awaited: answered.append(job)
+            case .connect: connects.append(job)
+            case .preflight, .other: rest.append(job)
+            }
         }
-        return nil
+
+        /// The next job a free worker runs.
+        mutating func next(in core: NodeCore) -> RuntimeJob? {
+            while !isEmpty {
+                let job = !answered.isEmpty ? answered.removeFirst()
+                    : !connects.isEmpty ? connects.removeFirst() : rest.removeFirst()
+                if job.isCurrent(in: core) { return job }
+            }
+            return nil
+        }
     }
 
     /// The basis of a preflight or template job on `tree`, the live level's,
@@ -700,7 +727,9 @@ extension NodeRuntime {
         let fetcher = storage.workFetcher
         switch effect {
         case .preflight(let job):
-            return RuntimeJob(path: path, epoch: job.tipEpoch) {
+            // An admission always runs: its verdict counts on any tip
+            // (`PreflightJob`).
+            return RuntimeJob(path: path, epoch: job.checksPolicies ? nil : job.tipEpoch, kind: .preflight(job)) {
                 guard let basis else { return [] }
                 // A child withdrawal is proven against the parent's executed
                 // state, so it is ready, invalid or a retry, never held
@@ -742,7 +771,7 @@ extension NodeRuntime {
                 return [.level(path, .mining(.preflighted(job, verdict, balances: balances)))]
             }
         case .buildTemplate(let job):
-            return RuntimeJob(path: path, epoch: job.tipEpoch) {
+            return RuntimeJob(path: path, epoch: job.tipEpoch, kind: .template) {
                 let (built, refused) = await reading(job.tipCID, at: path, storage: storage, remote: remote) { fetcher in
                     var refused: [PolicyRefusal] = []
                     let built = await buildTemplate(
@@ -826,7 +855,7 @@ extension NodeRuntime {
         storage: NodeStorage,
         remote: IvyRootContentSource? = nil
     ) -> RuntimeJob {
-        RuntimeJob(path: path, epoch: nil, connects: true) {
+        RuntimeJob(path: path, epoch: nil, kind: .connect) {
             await reading(job.blockHash, at: path, storage: storage, remote: remote) { fetcher in
                 let verdict = await ChainTree.connect(
                     job,

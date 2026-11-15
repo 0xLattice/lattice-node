@@ -29,10 +29,6 @@ public enum MempoolError: Error, Sendable, Equatable {
     /// This node cannot judge it now (state, a policy module, or a
     /// withdrawal's receipt it does not hold yet). Retriable.
     case unavailable
-    /// Retriable: the executed tip moved more than `maxReissues` times while
-    /// the submit waited for its verdict (the actor's
-    /// `templateContextChanged`).
-    case contextChanged
 }
 
 /// Lattice's classification of a transaction against one executed tip. Only
@@ -309,13 +305,15 @@ public struct Mempool: Sendable {
 
     /// Pool a transaction preflight found ready. `balances` holds, for each
     /// account it debits, the balance preflight read on the tip; one
-    /// missing counts as empty.
+    /// missing counts as empty. Nil when none was read on the tip (a verdict
+    /// from a tip since moved): no account is shed for it, and the recheck
+    /// that follows rebalances (`rebalance(_:)`).
     @discardableResult
     public mutating func submit(
         _ transaction: Transaction,
         spec: ChainSpec,
         addedAt: Int64,
-        balances: [String: UInt64]
+        balances: [String: UInt64]?
     ) throws -> MempoolMutation {
         let measured = try measure(transaction, spec: spec)
         let cid = measured.cid
@@ -349,6 +347,7 @@ public struct Mempool: Sendable {
         }
         let claimsConflict = !displaced.isEmpty
         for (account, debit) in entry.debits.sorted(by: { $0.key < $1.key }) {
+            guard let balances else { break }
             guard let shed = shed(account, toFit: debit, in: balances[account, default: 0], besides: displaced) else {
                 throw MempoolError.insufficientFunds
             }

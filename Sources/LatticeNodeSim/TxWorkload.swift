@@ -78,7 +78,8 @@ public struct TxWorkloadReport: Sendable {
     public var templates = 0
     public var mined = 0
     public var reorgs = 0
-    /// Jobs an executor skipped at dequeue because the tip had moved.
+    /// Jobs an executor skipped at dequeue because the tip had moved: a
+    /// recheck or a build (an admission always runs).
     public var skippedJobs = 0
     public var floods = 0
     /// A fingerprint of the run's event order: equal seeds, equal traces.
@@ -98,7 +99,6 @@ public struct TxWorkload {
     enum Item {
         case event(MiningEvent)
         case submit
-        case resubmit(Transaction)
         case requestTemplate
         case reorg
         case flood
@@ -148,19 +148,22 @@ public struct TxWorkload {
     /// A reordered nonce held back for the next submission.
     var heldBack: Transaction?
     var lastSubmission: Int64 = 0
-    /// (tip, transaction) of every preflight run whose verdict is not yet
+    /// (tip, transaction) of every recheck run whose verdict is not yet
     /// delivered: at most one per transaction, and only on the current tip.
     var runningPreflights: Set<String> = []
-    /// Preflights run on the current tip, and the bound on them: every
-    /// pooled or pending transaction once, plus each new arrival.
+    /// Rechecks run on the current tip, and the bound on them, counted when
+    /// the tip moved: every pooled transaction once, and every pending one
+    /// (its verdict, read on an older tip, is rechecked once pooled).
     var preflightsOnTip = 0
-    var arrivalsOnTip = 0
-    var epochAtMove: UInt64 = .max
     var poolAtMove = 0
     var floodCount: Int64 = 0
-    /// Local submits awaiting a reply, and refused ones awaiting a retry.
+    /// Local submits awaiting a reply, and when each was sent.
     var submissions: [UInt64: Transaction] = [:]
-    var retrying: [String: Transaction] = [:]
+    var submittedAt: [UInt64: Int64] = [:]
+    /// Admission jobs issued, and the bound on them: a tip move never issues
+    /// one again, so at most one per arrival and per returned transaction.
+    var admissionJobs = 0
+    var admissionSources = 0
 
     public static func make(_ config: TxWorkloadConfig) async throws -> TxWorkload {
         let cas = SimCAS()
@@ -228,11 +231,6 @@ public struct TxWorkload {
             switch next.item {
             case .event(let event):
                 try await step(event)
-            case .resubmit(let transaction):
-                let replyID = reply()
-                submissions[replyID] = transaction
-                if let cid = try? Mempool.cid(of: transaction) { retrying[cid] = nil }
-                try await step(.transactionReceived(transaction, origin: .local(replyID: replyID)))
             case .submit:
                 try await submit()
             case .requestTemplate:
@@ -290,6 +288,7 @@ public struct TxWorkload {
         recent = Array((recent + [transaction]).suffix(16))
         let replyID = reply()
         submissions[replyID] = transaction
+        submittedAt[replyID] = now
         try await step(.transactionReceived(transaction, origin: .local(replyID: replyID)))
         if rng.chance(config.duplicateProbability) {
             let again = recent[rng.draw(0...recent.count - 1)]
@@ -317,10 +316,10 @@ public struct TxWorkload {
         let receiver = others[rng.draw(0...others.count - 1)]
         let senderAddress = CryptoUtils.createAddress(from: sender.publicKey)
         var nonce = try await nextNonce(senderAddress)
-        // Past every nonce the client already has out: pooled, awaiting a
-        // reply, or awaiting a retry.
+        // Past every nonce the client already has out: pooled, or awaiting a
+        // reply.
         let outstanding = mining.mempool.items.map(\.transaction)
-            + Array(submissions.values) + Array(retrying.values)
+            + Array(submissions.values)
         nonce += UInt64(Set(outstanding.filter {
             $0.body.node?.signers.contains(senderAddress) == true
         }.compactMap { try? Mempool.cid(of: $0) }).count)
@@ -447,11 +446,17 @@ public struct TxWorkload {
         case .preflighted(let job, _, _):
             runningPreflights.remove("\(job.tipEpoch)/" + job.cid)
         case .transactionReceived:
-            arrivalsOnTip += 1
+            admissionSources += 1
+        case .tipMoved(let move):
+            admissionSources += move.returned.count
         default:
             break
         }
         let effects = mining.step(event, now: now)
+        if case .tipMoved = event {
+            preflightsOnTip = 0
+            poolAtMove = mining.mempool.count + mining.pendingAdmissions
+        }
         try checkOrder(effects)
         for effect in effects {
             try await execute(effect)
@@ -467,16 +472,12 @@ public struct TxWorkload {
         case .transactionAdmitted(let replyID, _, _, _):
             try answer(replyID)
             submissions[replyID] = nil
+            submittedAt[replyID] = nil
             report.admitted += 1
-        case .transactionRefused(let replyID, let error):
+        case .transactionRefused(let replyID, _):
             try answer(replyID)
-            // A client retries a refusal the tip's churn caused.
-            if error == .contextChanged, let transaction = submissions[replyID],
-               let cid = try? Mempool.cid(of: transaction) {
-                retrying[cid] = transaction
-                schedule(at: now + delay(), .resubmit(transaction))
-            }
             submissions[replyID] = nil
+            submittedAt[replyID] = nil
             report.refused += 1
         case .announceTransaction:
             break
@@ -497,6 +498,12 @@ public struct TxWorkload {
             try answer(replyID)
             try await mined(block)
         case .preflight(let job):
+            if job.checksPolicies {
+                admissionJobs += 1
+                guard admissionJobs <= admissionSources else {
+                    throw fail("\(admissionJobs) admission jobs for \(admissionSources) arrivals: one issued again")
+                }
+            }
             schedule(at: now + delay(), .runPreflight(job))
         case .returnTransactions:
             // The workload passes its tip moves' transactions directly.
@@ -506,25 +513,22 @@ public struct TxWorkload {
         }
     }
 
-    /// The executor's side of the job contract: a job is skipped iff its tip
-    /// epoch is not `MiningState.tipEpoch` when it is dequeued.
+    /// The executor's side of the job contract: an admission always runs,
+    /// on the tip it was issued on; a recheck is skipped iff its tip epoch is
+    /// not `MiningState.tipEpoch` when it is dequeued.
     mutating func run(_ job: PreflightJob) async throws {
-        guard job.tipEpoch == mining.tipEpoch else {
-            report.skippedJobs += 1
-            return
-        }
-        guard runningPreflights.insert("\(job.tipEpoch)/" + job.cid).inserted else {
-            throw fail("preflight of \(job.cid) ran twice at once in tip epoch \(job.tipEpoch)")
-        }
-        if epochAtMove != job.tipEpoch {
-            epochAtMove = job.tipEpoch
-            preflightsOnTip = 0
-            arrivalsOnTip = 0
-            poolAtMove = mining.mempool.count + mining.pendingAdmissions
-        }
-        preflightsOnTip += 1
-        guard preflightsOnTip <= poolAtMove + arrivalsOnTip else {
-            throw fail("\(preflightsOnTip) preflights in tip epoch \(job.tipEpoch): more than one tip's worth")
+        if !job.checksPolicies {
+            guard job.tipEpoch == mining.tipEpoch else {
+                report.skippedJobs += 1
+                return
+            }
+            guard runningPreflights.insert("\(job.tipEpoch)/" + job.cid).inserted else {
+                throw fail("recheck of \(job.cid) ran twice at once in tip epoch \(job.tipEpoch)")
+            }
+            preflightsOnTip += 1
+            guard preflightsOnTip <= poolAtMove else {
+                throw fail("\(preflightsOnTip) rechecks in tip epoch \(job.tipEpoch): more than one tip's worth")
+            }
         }
         let (verdict, balances) = try await classify(job)
         schedule(at: now + delay(), .event(.preflighted(job, verdict, balances: balances)))
@@ -666,6 +670,12 @@ public struct TxWorkload {
               mining.waitingTemplateRequests <= bounds.maxWaitingTemplateRequests else {
             throw fail("waiting work over its bounds")
         }
+        // An admission's job always runs and its verdict always counts, so a
+        // submit is answered once two job delays have passed: its job's run
+        // and its verdict's delivery.
+        if let (replyID, sent) = submittedAt.first(where: { now > $0.value + 2 * config.maxJobDelay }) {
+            throw fail("submit \(replyID) sent at \(sent) still unanswered")
+        }
         if let stale = pooled.intersection(onChain).first {
             throw fail("pool holds \(stale), already on the executed chain")
         }
@@ -689,7 +699,7 @@ public struct TxWorkload {
     mutating func settle() async throws {
         queue.removeAll {
             switch $0.item {
-            case .event, .runPreflight, .runTemplate, .resubmit: false
+            case .event, .runPreflight, .runTemplate: false
             case .submit, .requestTemplate, .reorg, .flood: true
             }
         }
@@ -701,11 +711,6 @@ public struct TxWorkload {
                 case .event(let event): try await step(event)
                 case .runPreflight(let job): try await run(job)
                 case .runTemplate(let job): try await run(job)
-                case .resubmit(let transaction):
-                    let replyID = reply()
-                    submissions[replyID] = transaction
-                    if let cid = try? Mempool.cid(of: transaction) { retrying[cid] = nil }
-                    try await step(.transactionReceived(transaction, origin: .local(replyID: replyID)))
                 case .submit, .requestTemplate, .reorg, .flood: break
                 }
             }

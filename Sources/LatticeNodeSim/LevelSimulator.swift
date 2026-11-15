@@ -377,7 +377,12 @@ public struct LevelSimulator {
     mutating func step(_ name: String, _ event: NodeEvent) async throws {
         // The step mutates the one copy: the node is taken out and put back.
         guard var node = cores.removeValue(forKey: name) else { return }
+        let synced = Set(node.core.levels.filter(\.value.synced).keys)
         let effects = node.core.step(event, now: now)
+        // The sync latch is never unset while the node runs.
+        if let lost = synced.first(where: { node.core.levels[$0]?.synced == false }) {
+            throw Invariants.fail(name, "level \(lost) went back to unsynced")
+        }
         var persisted = false
         var persists = 0
         var minedLevels = 0

@@ -80,6 +80,14 @@ extension ChainCore {
         tree.headerSnapshot(of: tree.heaviestExecutedTip()).flatMap { tree.specs[$0.specCID] }
     }
 
+    /// Set `synced` once a peer's log has been read to its end and applied,
+    /// and the act-on tip is the best header tip.
+    mutating func latchSynced() {
+        guard !synced, sync.peers.values.contains(where: { $0.readToEnd && !$0.more && $0.holes.isEmpty }) else { return }
+        let snapshot = snapshot
+        if snapshot.actOnTip == snapshot.bestHeaderTip { synced = true }
+    }
+
     public var snapshot: ChainSnapshot {
         let actOn = actOnTip
         return ChainSnapshot(
