@@ -50,6 +50,31 @@ final class ChainCreationTests: XCTestCase {
         XCTAssertTrue(try ChainCreation.create(HostedChain(path: "Nexus/B", spec: spec), layout: layout))
     }
 
+    /// The probe reads a store a node stopped cleanly: a WAL database whose
+    /// -wal and -shm files are gone (SQLite opens it read-only only with
+    /// them). No store at all holds nothing.
+    func testTheProbeReadsACleanlyStoppedStore() async throws {
+        let layout = try root()
+        let storage = layout.chainDirectory(for: ChainAddress.nexus)
+        XCTAssertFalse(try NodeStore.holdsBlocks(of: "Nexus/A", storage: storage), "no state.db")
+        try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
+        try await writeOneBlock(at: "Nexus/A", storage: storage)
+        let database = NodeStore.databasePath(storage: storage).path
+        for suffix in ["-wal", "-shm"] where FileManager.default.fileExists(atPath: database + suffix) {
+            try FileManager.default.removeItem(atPath: database + suffix)
+        }
+        XCTAssertTrue(try NodeStore.holdsBlocks(of: "Nexus/A", storage: storage))
+        XCTAssertFalse(try NodeStore.holdsBlocks(of: "Nexus/B", storage: storage))
+    }
+
+    /// Opens the store, records one block of `chain`, and closes it.
+    private func writeOneBlock(at chain: String, storage: URL) async throws {
+        let store = try NodeStore(databasePath: NodeStore.databasePath(storage: storage), nexusGenesisCID: "genesis")
+        try await store.persistAcceptedBlockRows(
+            [AcceptedBlockRecord(blockCID: "block-a", parentCID: nil)], at: chain, admissionSequence: 1, status: .header
+        )
+    }
+
     /// A store that cannot be read refuses the creation: it might hold the
     /// chain.
     func testAnUnreadableStoreRefusesTheCreation() throws {

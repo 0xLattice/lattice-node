@@ -77,13 +77,16 @@ extension NodeStore {
         storage.appendingPathComponent("state.db")
     }
 
-    /// Whether the store in `storage` holds blocks of `chainPath`, read
-    /// without writing or creating anything: false when there is no store
-    /// yet, an error when there is one that cannot be read.
+    /// Whether the store in `storage` holds blocks of `chainPath`, by a
+    /// query only, never creating a store: false when there is none yet, an
+    /// error when there is one that cannot be read. Opened read-write: a WAL
+    /// database stopped cleanly has no -wal/-shm files, and SQLite opens it
+    /// read-only only with them. Its callers are the node itself, or a CLI
+    /// holding the storage lock.
     static func holdsBlocks(of chainPath: String, storage: URL) throws -> Bool {
         let path = databasePath(storage: storage)
         guard FileManager.default.fileExists(atPath: path.path) else { return false }
-        let database = try NodeSQLite(path: path.path, readOnly: true)
+        let database = try NodeSQLite(path: path.path, create: false)
         return !(try database.query(
             "SELECT 1 FROM accepted_blocks WHERE chain_path = ?1 LIMIT 1", params: [.text(chainPath)]
         )).isEmpty

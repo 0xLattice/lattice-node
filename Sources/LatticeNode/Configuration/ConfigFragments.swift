@@ -117,7 +117,6 @@ public enum ConfigFragments {
     }
 }
 
-
 /// The configuration every layer makes together.
 public struct MergedConfig: Sendable {
     /// The merged configuration, checked, as the node's flags take it: its

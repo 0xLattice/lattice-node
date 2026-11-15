@@ -62,7 +62,8 @@ struct Child: AsyncParsableCommand {
             }
             // A chain listed under it keeps it, as its parent.
             if let kept = response.status.chains.first(where: { $0.path == path }), let below = kept.impliedBy {
-                print("\(path): no longer listed; still hosted for \(below.joined(separator: ", ")), until they are unhosted")
+                let named = below.prefix(5).joined(separator: ", ") + (below.count > 5 ? " and \(below.count - 5) more" : "")
+                print("\(path): no longer listed; still hosted for \(named), until they are unhosted")
             } else {
                 print("\(path): no longer hosted")
             }
