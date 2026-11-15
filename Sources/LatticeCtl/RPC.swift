@@ -5,6 +5,7 @@ import FoundationNetworking
 import ArgumentParser
 import LatticeMiningCoordinator
 import LatticeNode
+import LatticeNodeAPI
 
 /// A node's operator RPC: the local node's loopback port with the cookie the
 /// node writes at every start, which every route but /health requires; or a
@@ -132,22 +133,61 @@ struct NodeTarget: ParsableArguments {
     }
 
     /// Fragment `name` changed by `edit` (`{}` when there is none yet),
-    /// given the configuration as it is.
+    /// given the configuration as it is. On a running node the change is
+    /// sent with the version it was made from (`If-Match`), and made again
+    /// from the new one when another writer changed it meanwhile.
     @discardableResult
     func editFragment(
         _ name: String, _ edit: (inout [String: Any], ConfigResponse) throws -> Void
     ) async throws -> ConfigResponse {
-        let current = try await config()
-        var object: [String: Any] = [:]
-        if let rpc = try await running() {
-            if let data = try? await send(rpc: rpc, "GET", "config/fragments/\(name)") {
-                object = try ConfigFragments.object(data, named: name)
-            }
-        } else if FileManager.default.fileExists(atPath: ConfigFragments.file(root: layout.root, name: name).path) {
-            object = try ConfigFragments.object(at: ConfigFragments.file(root: layout.root, name: name))
+        guard let rpc = try await running() else {
+            var object: [String: Any] = [:]
+            let file = ConfigFragments.file(root: layout.root, name: name)
+            if FileManager.default.fileExists(atPath: file.path) { object = try ConfigFragments.object(at: file) }
+            try edit(&object, try await config())
+            return try await putFragment(name, object)
         }
-        try edit(&object, current)
-        return try await putFragment(name, object)
+        let path = "config/fragments/\(name)"
+        for _ in 0..<5 {
+            let current = try JSONDecoder().decode(ConfigResponse.self, from: try await send(rpc: rpc, "GET", "config"))
+            let (status, data, response) = try await exchange(rpc: rpc, "GET", path)
+            var object: [String: Any] = [:]
+            var version: String?
+            switch status {
+            case 200..<300:
+                object = try ConfigFragments.object(data, named: name)
+                version = response?.value(forHTTPHeaderField: "ETag")
+            case 404 where !data.isEmpty:
+                break // none yet
+            default:
+                throw failure("GET", path, status, data)
+            }
+            try edit(&object, current)
+            let body = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+            let (putStatus, answer, _) = try await exchange(
+                rpc: rpc, "PUT", path, json: body, headers: version.map { ["If-Match": $0] } ?? [:]
+            )
+            if putStatus == 412 { continue }
+            guard (200..<300).contains(putStatus) else { throw failure("PUT", path, putStatus, answer) }
+            return try JSONDecoder().decode(ConfigResponse.self, from: answer)
+        }
+        throw CtlError("\(name) kept changing while it was edited; try again")
+    }
+
+    /// Creates the child chain `chain`, once: through a running (or remote)
+    /// node's API; on a stopped local node, in its files.
+    @discardableResult
+    func createChain(_ chain: HostedChain) async throws -> Bool {
+        if let rpc = try await running() {
+            let body = try JSONEncoder().encode(chain)
+            return try JSONDecoder().decode(
+                CreatedChainResponse.self, from: try await send(rpc: rpc, "POST", "chains", json: body)
+            ).created
+        }
+        // Under the node's storage lock, so no node starts meanwhile.
+        guard case .stopped(let lock) = localNode(layout) else { throw CtlError("the node started meanwhile; try again") }
+        defer { _ = lock }
+        return try ChainCreation.create(chain, layout: layout)
     }
 
     /// Replaces fragment `name` with `object`: through a running (or
@@ -179,7 +219,7 @@ struct NodeTarget: ParsableArguments {
                 chains: merged.declaredBy.keys.sorted().map {
                     ConfigStatus.Chain(path: $0, from: merged.declaredBy[$0] ?? [], actual: "notHosted", error: merged.chainErrors[$0])
                 },
-                pendingRestart: [], errors: []
+                pendingRestart: [], errors: [], inert: merged.inert
             )
         )
     }
@@ -192,6 +232,7 @@ let operatorFragment = "operator"
 /// Prints what a change left to do, and fails when `chain` (if given) did
 /// not start.
 func report(_ response: ConfigResponse, chain: String? = nil) throws {
+    for note in response.status.inert { print("inert: \(note)") }
     if !response.status.pendingRestart.isEmpty {
         print("waiting for a restart (`lattice restart`): \(response.status.pendingRestart.joined(separator: ", "))")
     }
@@ -249,6 +290,16 @@ func send(
     rpc: NodeRPC, _ method: String, _ path: String, json body: Data? = nil,
     contentType: String = "application/json"
 ) async throws -> Data {
+    let (status, data, _) = try await exchange(rpc: rpc, method, path, json: body, contentType: contentType)
+    if (200..<300).contains(status) { return data }
+    throw failure(method, path, status, data)
+}
+
+/// One request and its answer as it came: status, body and headers.
+func exchange(
+    rpc: NodeRPC, _ method: String, _ path: String, json body: Data? = nil,
+    contentType: String = "application/json", headers: [String: String] = [:]
+) async throws -> (status: Int, data: Data, response: HTTPURLResponse?) {
     var request = try rpc.request(path)
     request.httpMethod = method
     request.cachePolicy = .reloadIgnoringLocalCacheData
@@ -257,14 +308,19 @@ func send(
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
         request.httpBody = body
     }
+    for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
     let (data, response) = try await URLSession.shared.data(for: request)
-    let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-    if (200..<300).contains(status) { return data }
+    let http = response as? HTTPURLResponse
+    return (http?.statusCode ?? 0, data, http)
+}
+
+/// The error a refused request reads as.
+func failure(_ method: String, _ path: String, _ status: Int, _ data: Data) -> CtlError {
     if status == 404, (String(data: data, encoding: .utf8) ?? "").isEmpty {
-        throw CtlError("\(method) /\(path): this node does not have that route; it predates this lattice (upgrade lattice-node)")
+        return CtlError("\(method) /\(path): this node does not have that route; it predates this lattice (upgrade lattice-node)")
     }
     let message = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
         .flatMap { ($0["error"] as? [String: Any])?["message"] as? String }
         ?? String(decoding: data.prefix(512), as: UTF8.self)
-    throw CtlError("\(method) /\(path) failed: HTTP \(status) \(message)")
+    return CtlError("\(method) /\(path) failed: HTTP \(status) \(message)")
 }

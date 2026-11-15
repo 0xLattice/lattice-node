@@ -37,6 +37,7 @@ struct EmitSystemd: AsyncParsableCommand {
 
         [Service]
         ExecStart=\(binary) up --root \(root)
+        ExecReload=/bin/kill -HUP $MAINPID
         Restart=on-failure
         RestartPreventExitStatus=78
         TimeoutStopSec=90

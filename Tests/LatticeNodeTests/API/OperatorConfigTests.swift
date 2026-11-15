@@ -61,17 +61,17 @@ final class OperatorConfigTests: XCTestCase {
         targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
     )
 
-    private func entry(_ path: String, _ spec: ChainSpec, premineTo: String? = nil) throws -> String {
-        String(decoding: try JSONEncoder().encode(HostedChain(path: path, spec: spec, premineTo: premineTo)), as: UTF8.self)
+    private func put(_ config: OperatorConfig, _ name: String, _ json: String, ifMatch: String? = nil) async throws -> ConfigResponse {
+        try await config.put(name, data(json), ifMatch: ifMatch, remote: false)
     }
 
     func testConcurrentChangesApplyOneAtATimeAndAllAreKept() async throws {
         let runtime = FakeRuntime()
         let (config, layout) = try make(runtime: runtime)
         let (a, b, c) = (data(#"{"hostedChains":["Nexus/A"]}"#), data(#"{"hostedChains":["Nexus/B"]}"#), data(#"{"minRelayFee":5}"#))
-        async let first = config.put("deploy", a, remote: false)
-        async let second = config.put("hostmarket", b, remote: false)
-        async let third = config.put("operator", c, remote: false)
+        async let first = config.put("deploy", a, ifMatch: nil, remote: false)
+        async let second = config.put("hostmarket", b, ifMatch: nil, remote: false)
+        async let third = config.put("operator", c, ifMatch: nil, remote: false)
         _ = try await (first, second, third)
         XCTAssertEqual(runtime.mostAtOnce, 1, "no two changes were applied at once")
         let kept = try Topology.load(root: layout.root)
@@ -85,7 +85,7 @@ final class OperatorConfigTests: XCTestCase {
     func testAChainThatDoesNotStartIsReportedNotDropped() async throws {
         let runtime = FakeRuntime(failing: ["Nexus/B"])
         let (config, layout) = try make(runtime: runtime)
-        let response = try await config.put("operator", data(#"{"hostedChains":["Nexus/A","Nexus/B"]}"#), remote: false)
+        let response = try await put(config, "operator", #"{"hostedChains":["Nexus/A","Nexus/B"]}"#)
         XCTAssertEqual(response.spec.hostedChains, ["Nexus/A", "Nexus/B"])
         let b = try XCTUnwrap(response.status.chains.first { $0.path == "Nexus/B" })
         XCTAssertEqual(b.actual, "notHosted")
@@ -101,10 +101,10 @@ final class OperatorConfigTests: XCTestCase {
         for refused in [
             #"{"state":"some"}"#, #"{"unknown":1}"#, #"[1]"#, #"{"rpc":4001}"#,
             #"{"peers":{"Nexus":["garbage"]}}"#, #"{"stateWindows":{"Nexus":0}}"#,
-            #"{"hostedChains":["Nexus"]}"#, #"{"hostedChains":[{"path":"Nexus/A","premineTo":"x"}]}"#,
+            #"{"hostedChains":["Nexus"]}"#, #"{"hostedChains":[{"path":"Nexus/A"}]}"#,
         ] {
             do {
-                _ = try await config.put("operator", data(refused), remote: false)
+                _ = try await put(config, "operator", refused)
                 XCTFail("\(refused) was accepted")
             } catch OperatorConfigError.invalid {}
         }
@@ -112,28 +112,30 @@ final class OperatorConfigTests: XCTestCase {
         XCTAssertEqual(ConfigFragments.names(root: layout.root), [])
         for name in ["lattice", "Ops", "../x", ""] {
             do {
-                _ = try await config.put(name, data("{}"), remote: false)
+                _ = try await put(config, name, "{}")
                 XCTFail("\(name) was accepted as a name")
             } catch OperatorConfigError.invalid {}
         }
     }
 
     func testKeysTakingARestartAreReported() async throws {
-        let (config, _) = try make()
-        let response = try await config.put("deploy", data(#"{"listen":5001,"hostedChains":["Nexus/A"]}"#), remote: false)
+        let (config, layout) = try make()
+        let response = try await put(config, "deploy", #"{"listen":5001,"hostedChains":["Nexus/A"]}"#)
         XCTAssertEqual(response.status.pendingRestart, ["listen"])
         XCTAssertEqual(response.spec.listen, 5001)
-        // Deleting the fragment takes it back.
-        let deleted = try await config.delete("deploy", remote: false)
+        // Deleting the fragment takes it back, and its chain stops.
+        let deleted = try await config.delete("deploy", ifMatch: nil, remote: false)
         XCTAssertEqual(deleted.status.pendingRestart, [])
         XCTAssertEqual(deleted.spec.hostedChains, nil)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ConfigFragments.file(root: layout.root, name: "deploy").path))
     }
 
     func testTheRemoteListenerNamesNoFiles() async throws {
         let (config, _) = try make()
         do {
             _ = try await config.put(
-                "operator", data(#"{"operatorListen":"0.0.0.0:9000","operatorTokens":"/etc/t.json"}"#), remote: true
+                "operator", data(#"{"operatorListen":"0.0.0.0:9000","operatorTokens":"/etc/t.json"}"#),
+                ifMatch: nil, remote: true
             )
             XCTFail("accepted")
         } catch OperatorConfigError.invalid {}
@@ -157,70 +159,112 @@ final class OperatorConfigTests: XCTestCase {
         XCTAssertTrue(kept.status.errors.contains { $0.hasPrefix("reload:") }, "\(kept.status.errors)")
     }
 
-    /// A chain sent with its spec is kept under specs/ as `child create`
-    /// keeps one; another layer creating it differently leaves it unhosted.
-    func testChainsAreCreatedOnceAndConflictsAreTheChainsAlone() async throws {
-        let (config, layout) = try make()
-        _ = try await config.put("hostmarket", data(#"{"hostedChains":[\#(try entry("Nexus/A", spec))]}"#), remote: false)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: layout.childSpec(for: "Nexus/A").path))
-        // The same creation from another layer is the same chain.
-        let same = try await config.put("operator", data(#"{"hostedChains":[\#(try entry("Nexus/A", spec))]}"#), remote: false)
-        XCTAssertNil(same.status.chains.first { $0.path == "Nexus/A" }?.error)
-        let other = ChainSpec(
-            maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
-            targetBlockTime: 2_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
-        )
-        let conflict = try await config.put(
-            "operator", data(#"{"hostedChains":[\#(try entry("Nexus/A", other)),"Nexus/A/B"],"minRelayFee":3}"#),
-            remote: false
-        )
-        let a = try XCTUnwrap(conflict.status.chains.first { $0.path == "Nexus/A" })
-        XCTAssertEqual(a.from, ["hostmarket", "operator"])
-        XCTAssertTrue(a.error?.contains("differently") == true, "\(String(describing: a.error))")
-        XCTAssertNotNil(conflict.status.chains.first { $0.path == "Nexus/A/B" }?.error, "its child waits")
-        XCTAssertEqual(conflict.spec.minRelayFee, 3, "the rest of the fragment holds")
+    /// A running chain stops only once no layer lists it: a change (or a
+    /// re-read) that would stop it otherwise is refused, the chain kept.
+    func testARunningChainStopsOnlyWhenNoLayerListsIt() async throws {
+        let runtime = FakeRuntime()
+        let (config, layout) = try make(runtime: runtime)
+        _ = try await put(config, "deploy", #"{"hostedChains":["Nexus/A"]}"#)
+        _ = try await put(config, "operator", #"{"hostedChains":["Nexus/A/B"]}"#)
+        do {
+            _ = try await config.delete("deploy", ifMatch: nil, remote: false)
+            XCTFail("removing Nexus/A would stop Nexus/A/B, which operator lists")
+        } catch OperatorConfigError.invalid {}
+        // The same rule holds for a re-read: the hand edit is not used.
+        try data("{}").write(to: ConfigFragments.file(root: layout.root, name: "deploy"))
+        await config.reload()
+        let kept = try await config.current()
+        XCTAssertTrue(kept.status.errors.contains { $0.hasPrefix("reload:") && $0.contains("Nexus/A/B") }, "\(kept.status.errors)")
+        XCTAssertEqual(Set(runtime.hostedChildren.map { $0.joined(separator: "/") }), ["Nexus/A", "Nexus/A/B"])
+        // Removed from every layer, it stops.
+        try data(#"{"hostedChains":["Nexus/A"]}"#).write(to: ConfigFragments.file(root: layout.root, name: "deploy"))
+        _ = try await config.delete("operator", ifMatch: nil, remote: false)
+        XCTAssertEqual(runtime.hostedChildren.map { $0.joined(separator: "/") }, ["Nexus/A"])
     }
 
-    /// A chain that did not start keeps no spec: it can be sent again, with
-    /// another spec if need be.
-    func testAChainThatDidNotStartKeepsNoSpec() async throws {
-        let (config, layout) = try make(runtime: FakeRuntime(failing: ["Nexus/A"]))
-        let response = try await config.put(
-            "operator", data(#"{"hostedChains":[\#(try entry("Nexus/A", spec))]}"#), remote: false
+    /// A setting for a chain not hosted, or a state window without `state:
+    /// recent`, is inert: reported, not refused.
+    func testInertSettingsAreReportedNotRefused() async throws {
+        let (config, _) = try make()
+        let response = try await put(
+            config, "operator",
+            #"{"peers":{"Nexus/Z":["\#(String(repeating: "ab", count: 33))@10.0.0.1:4001"]},"stateWindows":{"Nexus":5},"finalityWindows":{"Nexus/Z":3}}"#
         )
-        XCTAssertNotNil(response.status.chains.first { $0.path == "Nexus/A" }?.error)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: layout.childSpec(for: "Nexus/A").path))
+        XCTAssertNil(response.spec.peers?.byChain["Nexus/Z"])
+        XCTAssertNil(response.spec.stateWindows)
+        XCTAssertNil(response.spec.finalityWindows)
+        XCTAssertEqual(response.status.inert.count, 3, "\(response.status.inert)")
+        // Hosted, its peers apply.
+        let hosted = try await put(config, "deploy", #"{"hostedChains":["Nexus/Z"]}"#)
+        XCTAssertNotNil(hosted.spec.peers?.byChain["Nexus/Z"])
     }
 
-    /// A chain created once refuses another spec or premine recipient.
-    func testACreatedChainRefusesAnotherCreation() async throws {
+    func testFilesThatAreNotFragmentsAreReported() throws {
+        let (_, layout) = try make()
+        try FileManager.default.createDirectory(at: ConfigFragments.directory(root: layout.root), withIntermediateDirectories: true)
+        for name in ["README", "Deploy.json", "deploy.json.bak"] {
+            try data("{}").write(to: ConfigFragments.directory(root: layout.root).appendingPathComponent(name))
+        }
+        let merged = try MergedConfig.load(root: layout.root)
+        XCTAssertEqual(merged.layers, ["lattice"])
+        XCTAssertEqual(merged.inert.filter { $0.contains("is not read") }.count, 3, "\(merged.inert)")
+    }
+
+    /// A fragment is written only as the version a client read (If-Match).
+    func testAStaleVersionIsRefused() async throws {
+        let (config, _) = try make()
+        _ = try await put(config, "operator", #"{"minRelayFee":2}"#)
+        let (_, read) = try await config.fragment("operator")
+        _ = try await put(config, "operator", #"{"minRelayFee":3}"#, ifMatch: read)
+        let (_, now) = try await config.fragment("operator")
+        do {
+            _ = try await put(config, "operator", #"{"minRelayFee":4}"#, ifMatch: read)
+            XCTFail("a stale version was written")
+        } catch OperatorConfigError.changed {}
+        do {
+            _ = try await config.delete("operator", ifMatch: read, remote: false)
+            XCTFail("a stale version was removed")
+        } catch OperatorConfigError.changed {}
+        do {
+            _ = try await put(config, "absent", "{}", ifMatch: now)
+            XCTFail("If-Match on no fragment was accepted")
+        } catch OperatorConfigError.changed {}
+        _ = try await config.delete("operator", ifMatch: now, remote: false)
+    }
+
+    /// A chain is created once (`POST /chains`): the same creation again is
+    /// no change; another, or one for a chain synced without a spec, is a
+    /// conflict. Hosting the path then mines it from its spec.
+    func testAChainIsCreatedOnce() async throws {
         let premined = ChainSpec(
             maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 10,
             targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
         )
-        let (config, _) = try make()
+        let runtime = FakeRuntime()
+        let (config, layout) = try make(runtime: runtime)
         let first = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
         let second = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
-        let created = #"{"hostedChains":[\#(try entry("Nexus/A", premined, premineTo: first))]}"#
-        _ = try await config.put("operator", data(created), remote: false)
-        let again = try await config.put("operator", data(created), remote: false)
-        XCTAssertNil(again.status.chains.first { $0.path == "Nexus/A" }?.error)
-        let refused = try await config.put(
-            "operator", data(#"{"hostedChains":[\#(try entry("Nexus/A", premined, premineTo: second))]}"#), remote: false
-        )
-        XCTAssertTrue(refused.status.chains.first { $0.path == "Nexus/A" }?.error?.contains("created once") == true)
-    }
-
-    /// A chain hosted by path (synced from its peers) takes no spec later:
-    /// one would mine a rival genesis at the next start.
-    func testASpecForAChainHostedWithoutOneIsRefused() async throws {
-        let (config, layout) = try make()
-        _ = try await config.put("operator", data(#"{"hostedChains":["Nexus/A"]}"#), remote: false)
-        let response = try await config.put(
-            "hostmarket", data(#"{"hostedChains":[\#(try entry("Nexus/A", spec))]}"#), remote: false
-        )
-        XCTAssertNotNil(response.status.chains.first { $0.path == "Nexus/A" }?.error)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: layout.childSpec(for: "Nexus/A").path))
+        let created = try await config.create(HostedChain(path: "Nexus/A", spec: premined, premineTo: first))
+        XCTAssertTrue(created)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: layout.childSpec(for: "Nexus/A").path))
+        let again = try await config.create(HostedChain(path: "Nexus/A", spec: premined, premineTo: first))
+        XCTAssertFalse(again)
+        do {
+            _ = try await config.create(HostedChain(path: "Nexus/A", spec: premined, premineTo: second))
+            XCTFail("created twice")
+        } catch OperatorConfigError.conflict {}
+        do {
+            _ = try await config.create(HostedChain(path: "Nexus/B", spec: premined))
+            XCTFail("a premine with no recipient was accepted")
+        } catch OperatorConfigError.invalid {}
+        // A chain hosted without a spec is synced; it takes none later.
+        _ = try await put(config, "operator", #"{"hostedChains":["Nexus/A","Nexus/S"]}"#)
+        do {
+            _ = try await config.create(HostedChain(path: "Nexus/S", spec: spec))
+            XCTFail("a synced chain took a spec")
+        } catch OperatorConfigError.conflict {}
+        XCTAssertFalse(FileManager.default.fileExists(atPath: layout.childSpec(for: "Nexus/S").path))
+        XCTAssertEqual(Set(runtime.hostedChildren.map { $0.joined(separator: "/") }), ["Nexus/A", "Nexus/S"])
     }
 
     /// A restart reads the files afresh: a configuration that would not
@@ -238,10 +282,11 @@ final class OperatorConfigTests: XCTestCase {
 
     func testAFragmentIsReadAsItIs() async throws {
         let (config, _) = try make()
-        _ = try await config.put("operator", data(#"{"minRelayFee":2}"#), remote: false)
-        let fragment = try await config.fragment("operator")
+        _ = try await put(config, "operator", #"{"minRelayFee":2}"#)
+        let (fragment, etag) = try await config.fragment("operator")
         XCTAssertEqual(String(decoding: fragment, as: UTF8.self), #"{"minRelayFee":2}"#)
-        let base = try await config.fragment("lattice")
+        XCTAssertEqual(etag, OperatorConfig.etag(fragment))
+        let (base, _) = try await config.fragment("lattice")
         XCTAssertTrue(String(decoding: base, as: UTF8.self).contains("4003"))
         do {
             _ = try await config.fragment("nothing")

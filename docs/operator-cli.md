@@ -35,10 +35,14 @@ only says which node it mines through.
 | `lattice tokens list/create/revoke` | Remote operator tokens. |
 | `lattice logs [--miner] [--tail N]` | The running node's recent log lines, from its memory (`--miner`: the local mining loop's, read from `log/mine.log` under `--root`). |
 
-`config set`, `config unset` and `child create/host/unhost` change the
-`operator` fragment (`config.d/operator.json`), which comes after every other
-layer; `lattice apply -f <file> --fragment <name>` replaces any one fragment,
-for a tool or script that owns it:
+`config set`, `config unset` and `child host/unhost` change the `operator`
+fragment (`config.d/operator.json`). Layers merge in name order alone
+(`lattice.json`, then `config.d` by name: `operator` comes after `deploy`
+and `hostmarket`, before `zz-...`; number fragments to order them). These
+edits send the version they read (`If-Match`) and redo the change when
+another writer changed the fragment meanwhile. `lattice apply -f <file>
+--fragment <name>` replaces any one fragment, for a tool or script that owns
+it:
 
 ```bash
 lattice apply -f deploy.json --fragment deploy --root /var/lib/lattice
@@ -52,8 +56,12 @@ A change that would not check, or that the node would not start from, is
 refused and nothing is written. A change to a stopped node is written to its
 fragment file directly, checked first, under the node's storage lock. A file
 edited by hand is read at the next start, or on `SIGHUP`
-(`systemctl reload`, `kill -HUP`). A configuration that does not check stops
-the node at start with the reason (exit 78).
+(`systemctl reload`: the emitted unit's `ExecReload`, or `kill -HUP`),
+checked as a change is. A setting for a chain not hosted (its peers or
+windows), or a state window while `state` is not `recent`, is inert: listed
+in the status, not an error. A file in `config.d` whose name is not a
+fragment's is not read, and is listed too. A configuration that does not
+check stops the node at start with the reason (exit 78).
 
 Remote control, from an operator's machine:
 
@@ -266,7 +274,8 @@ kept beside the spec and passed to the node as
 start. A signer's later transactions continue from the nonces its genesis
 transactions used.
 
-Creation writes one immutable spec and adds the path to `hostedChains`. The
+Creation writes one immutable spec (through the node's `POST /chains`, or
+in the files of a stopped node) and adds the path to `hostedChains`. The
 node builds the genesis candidate from that spec when the parent has an
 executed state it can commit, and ordinary merged mining secures it. There is
 no child-deploy command or parent authorization transaction.
@@ -282,10 +291,11 @@ lattice child host Nexus/Alpha --root /var/lib/lattice
 ```
 
 A running node starts it at once and syncs it from its peers; a stopped one
-hosts it from its next start. `child create` adds the spec (with its premine
-recipient, genesis transactions and modules) inline to the `operator`
-fragment's `hostedChains`, and the node keeps them under `specs/`; a second
-create of the same path is refused. `child unhost` removes a chain from the
+hosts it from its next start. `child create` has the node keep the spec
+(with its premine recipient, genesis transactions and modules) under
+`specs/`, once, then adds the path to the `operator` fragment's
+`hostedChains`; creating the same path with anything else is refused, as is
+a spec for a chain already synced without one. `child unhost` removes a chain from the
 `operator` fragment; a chain another fragment lists is refused, naming it. Remotely,
 `--spec`, `--genesis-transactions` and `--policy-module` are files on the
 machine running `lattice`.
@@ -296,9 +306,9 @@ To stop hosting one:
 lattice child unhost Nexus/Alpha --root /var/lib/lattice
 ```
 
-It refuses while a chain below it is hosted, and removes the chain's
-recipient, peers and minimum work with it. What it stored stays; hosting it
-again resumes it.
+It refuses while a chain below it is hosted. Its peers and windows, if any
+layer sets them, stay where they are, inert until it is hosted again. What
+it stored stays; hosting it again resumes it.
 
 ### Committing a child block on its parent
 
@@ -493,7 +503,8 @@ lattice emit-systemd --root /var/lib/lattice \
 ```
 
 The tree's unit runs `lattice up --root <root>` with `Restart=on-failure`,
-`RestartPreventExitStatus=78` and `TimeoutStopSec=90`; its log is the
+`RestartPreventExitStatus=78`, `TimeoutStopSec=90` and `ExecReload` sending
+`SIGHUP` (`systemctl reload lattice-tree` re-reads the configuration); its log is the
 journal (`journalctl -u lattice-tree`). The miner's unit `Wants` the tree
 rather than binding to it, so a node restart leaves the miner running, and
 restarts the miner always.

@@ -16,6 +16,7 @@ final class OperatorListenerTests: XCTestCase {
     private static let admin = "admin-token"
     private static let reader = "read-token"
     private static let miner = "miner-token"
+    private static let fragment = "fragment-token"
 
     private struct Node {
         let app: Application<RouterResponder<BasicRequestContext>>
@@ -43,6 +44,9 @@ final class OperatorListenerTests: XCTestCase {
             .init(name: "viewer", sha256: OperatorTokens.hash(Self.reader), role: "read"),
             .init(name: "miner", sha256: OperatorTokens.hash(Self.miner), routes: [
                 "GET /status", "POST /mining/templates", "POST /mining/work",
+            ]),
+            .init(name: "hostmarket", sha256: OperatorTokens.hash(Self.fragment), routes: [
+                "GET /config/fragments/hostmarket", "PUT /config/fragments/hostmarket",
             ]),
         ]), file: directory.appendingPathComponent("tokens.json"))
         let lifecycle = NodeLifecycle()
@@ -227,7 +231,7 @@ final class OperatorListenerTests: XCTestCase {
         }
         // What the file says is what a restart reads.
         let reloaded = try TokenStore(file: node.tokens.file)
-        XCTAssertEqual(reloaded.list().tokens.map(\.name), ["seller", "ops", "viewer", "miner"])
+        XCTAssertEqual(reloaded.list().tokens.map(\.name), ["seller", "ops", "viewer", "miner", "hostmarket"])
     }
 
     /// The loopback cookie manages tokens too.
@@ -258,6 +262,10 @@ final class OperatorListenerTests: XCTestCase {
             try await client.execute(uri: "/status", method: .options, headers: [.origin: "https://dash.example"]) {
                 XCTAssertEqual($0.status, .noContent)
                 XCTAssertEqual($0.headers[.accessControlAllowOrigin], "https://dash.example")
+                // A fragment is written with PUT, If-Match its version.
+                let methods = ($0.headers[.accessControlAllowMethods] ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                XCTAssertTrue(methods.contains("PUT") && !methods.contains("PATCH"), "\(methods)")
+                XCTAssertTrue($0.headers[.accessControlAllowHeaders]?.contains("If-Match") == true)
             }
             try await client.execute(uri: "/status", method: .get, headers: [.origin: "https://dash.example"]) {
                 XCTAssertEqual($0.status, .unauthorized)
@@ -265,8 +273,89 @@ final class OperatorListenerTests: XCTestCase {
             }
             try await client.execute(
                 uri: "/status", method: .get, headers: [.authorization: "Bearer \(Self.reader)", .origin: "https://dash.example"]
-            ) { XCTAssertEqual($0.status, .ok) }
+            ) {
+                XCTAssertEqual($0.status, .ok)
+                XCTAssertEqual($0.headers[.accessControlExposeHeaders], "ETag", "a page reads a fragment's version")
+            }
         }
+    }
+
+    /// A token may name one fragment: it reaches that one, no other.
+    func testATokenNamingAFragmentReachesThatOneAlone() async throws {
+        let app = try await node(root: try rootLayout()).app
+        try await app.test(.router) { client in
+            let headers: HTTPFields = [.authorization: "Bearer \(Self.fragment)", .contentType: "application/json"]
+            try await client.execute(
+                uri: "/config/fragments/hostmarket", method: .put, headers: headers, body: ByteBuffer(string: "{}")
+            ) { XCTAssertEqual($0.status, .ok, String(buffer: $0.body)) }
+            try await client.execute(
+                uri: "/config/fragments/operator", method: .put, headers: headers, body: ByteBuffer(string: "{}")
+            ) { XCTAssertEqual($0.status, .forbidden) }
+            try await client.execute(uri: "/config/fragments/hostmarket", method: .delete, headers: headers) {
+                XCTAssertEqual($0.status, .forbidden, "only the methods it names")
+            }
+        }
+    }
+
+    /// GET answers a fragment's version (ETag); a PUT or DELETE sent with
+    /// another (If-Match) is refused, 412.
+    func testAFragmentIsWrittenOnlyAsTheVersionRead() async throws {
+        let app = try await node(root: try rootLayout()).app
+        let json: HTTPFields = [.authorization: "Bearer \(Self.admin)", .contentType: "application/json"]
+        try await app.test(.router) { client in
+            try await client.execute(
+                uri: "/config/fragments/operator", method: .put, headers: json, body: ByteBuffer(string: #"{"minRelayFee":1}"#)
+            ) { XCTAssertEqual($0.status, .ok, String(buffer: $0.body)) }
+            let etag = try await client.execute(uri: "/config/fragments/operator", method: .get, headers: Self.bearer(Self.admin)) {
+                XCTAssertEqual($0.status, .ok)
+                return try XCTUnwrap($0.headers[.eTag])
+            }
+            var matching = json
+            matching[.ifMatch] = etag
+            try await client.execute(
+                uri: "/config/fragments/operator", method: .put, headers: matching, body: ByteBuffer(string: #"{"minRelayFee":2}"#)
+            ) { XCTAssertEqual($0.status, .ok, String(buffer: $0.body)) }
+            try await client.execute(
+                uri: "/config/fragments/operator", method: .put, headers: matching, body: ByteBuffer(string: #"{"minRelayFee":3}"#)
+            ) { XCTAssertEqual($0.status, .preconditionFailed) }
+            try await client.execute(uri: "/config/fragments/operator", method: .delete, headers: matching) {
+                XCTAssertEqual($0.status, .preconditionFailed)
+            }
+        }
+    }
+
+    /// `POST /chains` creates a chain once: again the same is no change,
+    /// another spec a conflict.
+    func testAChainIsCreatedOnceThroughTheAPI() async throws {
+        let app = try await node(root: try rootLayout()).app
+        let spec = { (blockTime: UInt64) in
+            ChainSpec(
+                maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
+                targetBlockTime: blockTime, initialReward: 10, halvingInterval: 10_000, halfLife: 10
+            )
+        }
+        let first = ByteBuffer(bytes: try JSONEncoder().encode(HostedChain(path: "Nexus/A", spec: spec(1_000))))
+        let other = ByteBuffer(bytes: try JSONEncoder().encode(HostedChain(path: "Nexus/A", spec: spec(2_000))))
+        let json: HTTPFields = [.authorization: "Bearer \(Self.admin)", .contentType: "application/json"]
+        try await app.test(.router) { client in
+            for created in [true, false] {
+                try await client.execute(uri: "/chains", method: .post, headers: json, body: first) {
+                    XCTAssertEqual($0.status, .ok, String(buffer: $0.body))
+                    XCTAssertEqual(try JSONDecoder().decode(CreatedChainResponse.self, from: $0.body).created, created)
+                }
+            }
+            try await client.execute(uri: "/chains", method: .post, headers: json, body: other) {
+                XCTAssertEqual($0.status, .conflict)
+            }
+        }
+    }
+
+    private func rootLayout() throws -> HostLayout {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("listener-root-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        try Data(#"{"listen":4001,"rpc":4003,"peers":[]}"#.utf8).write(to: root.appendingPathComponent(Topology.fileName))
+        return HostLayout(root: root.path)
     }
 
     /// Every credential may ask who it is, and learns its name, role and

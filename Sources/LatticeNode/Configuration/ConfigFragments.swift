@@ -1,20 +1,23 @@
 // The node's configuration is layered, as systemd drop-ins and sudoers.d
 // are: `<root>/lattice.json` first, then each `<root>/config.d/<name>.json`
-// in name order. Each writer owns one file (a deploy script `deploy`, a
-// hosting seller `hostmarket`, people and dashboards `operator`); the node
-// merges them and never writes lattice.json.
+// in name order (byte order: number them, `10-deploy`, `50-hostmarket`, to
+// order them). Each writer owns one file (a deploy script, a hosting seller,
+// people and dashboards `operator`); the node merges them and never writes
+// lattice.json. Precedence is name order alone: no layer outranks another
+// otherwise.
 //
 // Merge rules, per key:
 // - a value (a port, a rate, a mode): the later layer's wins;
-// - `hostedChains`, each chain's `peers`, `rpcAllowedOrigins` and
-//   `operatorAllowedOrigins`: the union of every layer's;
+// - `hostedChains` (chain paths), each chain's `peers`, `rpcAllowedOrigins`
+//   and `operatorAllowedOrigins`: the union of every layer's;
 // - `stateWindows` and `finalityWindows`: per chain path, the later layer's.
-// A `hostedChains` entry is a chain's path, or an object that also carries
-// what creates the chain (`{path, spec, premineTo, genesisTransactions,
-// policyModules}`); two layers that create one chain differently leave it
-// unhosted with an error, as is a chain whose parent no layer hosts. Any
-// other problem (a file that is not JSON, an unknown key, a merged result
-// that does not check) is the whole configuration's: the node does not start.
+// A key set to null is as if the layer did not set it: it does not unset
+// an earlier layer's value. A chain whose parent no layer hosts is left
+// unhosted, reported. A setting for a chain not hosted (its peers, its
+// windows), or a state window while `state` is not `recent`, is inert:
+// reported, not applied, not an error. Any other problem (a file that is
+// not JSON, an unknown key, a merged result that does not check) is the
+// whole configuration's: the node does not start, and a change is refused.
 
 import Foundation
 import Lattice
@@ -58,9 +61,21 @@ public enum ConfigFragments {
     /// The fragments' names in config.d, in merge order. A file whose name
     /// is not a fragment's (`x.json.bak`, `README`) is not read.
     public static func names(root: URL) -> [String] {
-        let files = (try? FileManager.default.contentsOfDirectory(atPath: directory(root: root).path)) ?? []
-        return files.filter { $0.hasSuffix(".json") }.map { String($0.dropLast(5)) }
-            .filter(isValidName).sorted()
+        files(root: root).filter { isFragment($0) }.map { String($0.dropLast(5)) }.sorted()
+    }
+
+    /// The files of config.d that are not read, their names not a
+    /// fragment's (hidden files aside).
+    public static func ignored(root: URL) -> [String] {
+        files(root: root).filter { !$0.hasPrefix(".") && !isFragment($0) }.sorted()
+    }
+
+    private static func files(root: URL) -> [String] {
+        (try? FileManager.default.contentsOfDirectory(atPath: directory(root: root).path)) ?? []
+    }
+
+    private static func isFragment(_ file: String) -> Bool {
+        file.hasSuffix(".json") && isValidName(String(file.dropLast(5)))
     }
 
     /// lattice.json (when there is one), then every fragment, in order;
@@ -104,19 +119,30 @@ public enum ConfigFragments {
 /// The configuration every layer makes together.
 public struct MergedConfig: Sendable {
     /// The merged configuration, checked: its `hostedChains` are the chains
-    /// that can be hosted (parent first), the ones in `chainErrors` left out.
+    /// that can be hosted (parent first), the ones in `chainErrors` left out,
+    /// and the inert settings left out.
     public let topology: Topology
-    /// What creates each chain a layer creates, by path.
-    public let creates: [String: HostedChain]
     /// The layers that list each chain, in merge order.
     public let declaredBy: [String: [String]]
     /// The chains listed but not hosted, and why.
     public let chainErrors: [String: String]
+    /// What the layers set that does not apply, and why: settings for chains
+    /// not hosted, state windows without `state: recent`, files of config.d
+    /// that are not read.
+    public let inert: [String]
     /// The layers merged, in order.
     public let layers: [String]
 
     public static func load(root: URL) throws -> MergedConfig {
-        try merge(ConfigFragments.layers(root: root))
+        let merged = try merge(ConfigFragments.layers(root: root))
+        let ignored = ConfigFragments.ignored(root: root).map {
+            "\(ConfigFragments.directoryName)/\($0) is not read: a fragment is <name>.json, the name lowercase letters, digits, ., _ and -"
+        }
+        guard !ignored.isEmpty else { return merged }
+        return MergedConfig(
+            topology: merged.topology, declaredBy: merged.declaredBy, chainErrors: merged.chainErrors,
+            inert: merged.inert + ignored, layers: merged.layers
+        )
     }
 
     private static let unionLists: Set<String> = ["rpcAllowedOrigins", "operatorAllowedOrigins"]
@@ -126,29 +152,14 @@ public struct MergedConfig: Sendable {
         var merged: [String: Any] = [:]
         var chains: [String] = []
         var declaredBy: [String: [String]] = [:]
-        var creates: [String: HostedChain] = [:]
-        var createdBy: [String: (layer: String, bytes: Data)] = [:]
         var chainErrors: [String: String] = [:]
         var peers: [String: [String]] = [:]
         var lists: [String: [String]] = [:]
         var maps: [String: [String: Any]] = [:]
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
         for layer in layers {
-            let entries = try check(layer)
-            for (path, entry) in entries {
+            for path in try check(layer) {
                 if declaredBy[path] == nil { chains.append(path) }
                 if declaredBy[path]?.contains(layer.name) != true { declaredBy[path, default: []].append(layer.name) }
-                guard let entry, entry.spec != nil else { continue }
-                let bytes = try encoder.encode(entry)
-                if let earlier = createdBy[path] {
-                    if earlier.bytes != bytes {
-                        chainErrors[path] = "\(earlier.layer) and \(layer.name) create \(path) differently"
-                    }
-                } else {
-                    createdBy[path] = (layer.name, bytes)
-                    creates[path] = entry
-                }
             }
             for (key, value) in layer.object where key != "hostedChains" && key != Topology.retiredMiningKey {
                 if value is NSNull { continue }
@@ -168,7 +179,7 @@ public struct MergedConfig: Sendable {
         var hosted: [String] = []
         var hostable: Set<String> = [ChainAddress.nexus]
         let depth = { (path: String) in path.split(separator: "/").count }
-        for path in chains.sorted(by: { (depth($0), $0) < (depth($1), $1) }) where chainErrors[path] == nil {
+        for path in chains.sorted(by: { (depth($0), $0) < (depth($1), $1) }) {
             guard let parent = ChainAddress(string: path)?.parent?.key, hostable.contains(parent) else {
                 let parent = ChainAddress(string: path)?.parent?.key ?? "its parent"
                 chainErrors[path] = "waiting for \(parent), which is not hosted"
@@ -178,12 +189,35 @@ public struct MergedConfig: Sendable {
             hosted.append(path)
         }
         if !chains.isEmpty { merged["hostedChains"] = hosted }
-        // A listed chain left unhosted takes its peers with it; peers for a
-        // chain no layer lists are an error of the whole.
-        let hostedPeers = peers.filter { chainErrors[$0.key] == nil }
-        if !hostedPeers.isEmpty { merged["peers"] = hostedPeers }
+        // A zero window is wrong wherever it is, inert or not.
+        if merged["stateWindow"] as? Int == 0 || (maps["stateWindows"] ?? [:]).values.contains(where: { $0 as? Int == 0 }) {
+            throw CtlError("a state window is at least 1 block")
+        }
+        // A setting for a chain not hosted waits, inert, until it is.
+        var inert: [String] = []
+        for chain in peers.keys.sorted() where !hostable.contains(chain) {
+            inert.append("peers for \(chain): not hosted")
+            peers[chain] = nil
+        }
+        if !peers.isEmpty { merged["peers"] = peers }
         for (key, list) in lists { merged[key] = list }
-        for (key, map) in maps { merged[key] = map }
+        let recent = (merged["state"] as? String ?? "all") == "recent"
+        for key in chainMaps.sorted() {
+            guard var map = maps[key] else { continue }
+            for chain in map.keys.sorted() where ChainAddress(string: chain) != nil && !hostable.contains(chain) {
+                inert.append("\(key) for \(chain): not hosted")
+                map[chain] = nil
+            }
+            if key == "stateWindows", !recent, !map.isEmpty {
+                inert.append("stateWindows: state is \(merged["state"] as? String ?? "all"), not recent")
+                map = [:]
+            }
+            if !map.isEmpty { merged[key] = map }
+        }
+        if !recent, merged["stateWindow"] != nil {
+            inert.append("stateWindow: state is \(merged["state"] as? String ?? "all"), not recent")
+            merged["stateWindow"] = nil
+        }
         for key in ["listen", "rpc"] where merged[key] == nil {
             throw CtlError("no layer sets \(key) (\(layers.map(\.name).joined(separator: ", ")))")
         }
@@ -194,34 +228,24 @@ public struct MergedConfig: Sendable {
             throw CtlError("the merged configuration (\(layers.map(\.name).joined(separator: ", "))) does not check: \(error)")
         }
         return MergedConfig(
-            topology: topology, creates: creates, declaredBy: declaredBy, chainErrors: chainErrors,
+            topology: topology, declaredBy: declaredBy, chainErrors: chainErrors, inert: inert,
             layers: layers.map(\.name)
         )
     }
 
-    /// The layer's hosted chains (with what creates each, when it does),
-    /// after checking every key the layer sets as lattice.json's.
-    private static func check(_ layer: ConfigLayer) throws -> [(String, HostedChain?)] {
+    /// The layer's hosted chains, after checking every key the layer sets
+    /// as lattice.json's.
+    private static func check(_ layer: ConfigLayer) throws -> [String] {
         let name = layer.name == ConfigFragments.baseName ? Topology.fileName : "\(ConfigFragments.directoryName)/\(layer.name).json"
-        var entries: [(String, HostedChain?)] = []
+        var paths: [String] = []
         for entry in layer.object["hostedChains"] as? [Any] ?? [] {
-            if let path = entry as? String {
-                entries.append((path, nil))
-            } else if entry is [String: Any],
-                      let chain = try? JSONDecoder().decode(HostedChain.self, from: JSONSerialization.data(withJSONObject: entry)) {
-                entries.append((chain.path, chain))
-            } else {
-                throw CtlError("\(name): a hostedChains entry is a chain path or {path, spec, premineTo, genesisTransactions, policyModules}")
+            guard let path = entry as? String else {
+                throw CtlError("\(name): a hostedChains entry is a chain path; a chain is created with POST /chains (`lattice child create`)")
             }
-        }
-        for (path, chain) in entries {
             guard let address = ChainAddress(string: path), address.key == path, !address.isNexus else {
                 throw CtlError("\(name): \(path) is not a child chain's path")
             }
-            if let chain, chain.spec == nil,
-               chain.premineTo != nil || chain.genesisTransactions != nil || chain.policyModules != nil {
-                throw CtlError("\(name): \(path): premineTo, genesisTransactions and policyModules come with a spec")
-            }
+            paths.append(path)
         }
         // Every other key as lattice.json holds it (listen and rpc may be
         // another layer's).
@@ -236,7 +260,7 @@ public struct MergedConfig: Sendable {
         } catch {
             throw CtlError("\(name): \(error)")
         }
-        return entries
+        return paths
     }
 
     private static func union(_ first: [String], _ second: [String]) -> [String] {

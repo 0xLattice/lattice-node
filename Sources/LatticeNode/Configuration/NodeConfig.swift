@@ -266,11 +266,28 @@ public struct ConfigStatus: Codable, Sendable {
     /// What else does not match: a re-read the node could not use, a
     /// listener it could not open.
     public let errors: [String]
+    /// What the layers set that does not apply (a setting for a chain not
+    /// hosted, a state window without `state: recent`, a file of config.d
+    /// that is not read): reported, not an error.
+    public let inert: [String]
 
-    public init(chains: [Chain], pendingRestart: [String], errors: [String]) {
+    public init(chains: [Chain], pendingRestart: [String], errors: [String], inert: [String] = []) {
         self.chains = chains
         self.pendingRestart = pendingRestart
         self.errors = errors
+        self.inert = inert
+    }
+}
+
+/// `POST /chains`: the chain, and whether this request created it (false:
+/// it was created with exactly this already).
+public struct CreatedChainResponse: Codable, Sendable {
+    public let path: String
+    public let created: Bool
+
+    public init(path: String, created: Bool) {
+        self.path = path
+        self.created = created
     }
 }
 

@@ -157,6 +157,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             try await start(owner: nil)
             return
         }
+        // Caught from the start: a SIGHUP before the node can reload is kept
+        // for when it can, not the end of the process.
+        Hangups.shared.install()
         // Only `--root` (and its value) on the command line: everything else
         // comes from lattice.json and config.d.
         let given = CommandLine.arguments.dropFirst()
@@ -174,19 +177,18 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             logLine("warning: \(Topology.retiredMiningWarning)")
         }
         try performRequestedWipe(layout)
-        // A chain that cannot be created starts without it, reported.
-        let failures = prepareCreates(merged, layout: layout).failures
-        for (path, error) in (merged.chainErrors.merging(failures) { first, _ in first }).sorted(by: { $0.key < $1.key }) {
+        for (path, error) in merged.chainErrors.sorted(by: { $0.key < $1.key }) {
             logLine("not hosting \(path): \(error)")
         }
-        let topology = merged.topology.removingChains(Set(failures.keys))
+        for note in merged.inert { logLine("configuration: \(note)") }
+        let topology = merged.topology
         var command: LatticeNodeCommand
         do {
             command = try LatticeNodeCommand.parse(topology.nodeArguments(layout: layout))
         } catch {
             throw configurationFault(LatticeNodeCommand.message(for: error))
         }
-        try await command.start(owner: NodeOwner(layout: layout, started: topology, merged: merged, failures: failures))
+        try await command.start(owner: NodeOwner(layout: layout, merged: merged))
     }
 
     /// A configuration the node cannot start from: said, then the exit status
@@ -1693,5 +1695,45 @@ private extension Data {
             append(byte)
             index = next
         }
+    }
+}
+
+/// SIGHUP, caught from the process's start (`install`): one that comes
+/// before the node can act on it is kept, and acted on once it can.
+final class Hangups: @unchecked Sendable {
+    static let shared = Hangups()
+
+    private let lock = NSLock()
+    private var source: DispatchSourceSignal?
+    private var action: (@Sendable () -> Void)?
+    private var missed = false
+
+    func install() {
+        lock.withLock {
+            guard source == nil else { return }
+            signal(SIGHUP, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: SIGHUP)
+            source.setEventHandler { [self] in hangUp() }
+            source.resume()
+            self.source = source
+        }
+    }
+
+    /// What a SIGHUP does from now on; run at once for one already caught.
+    func onHangup(_ action: @escaping @Sendable () -> Void) {
+        let caught = lock.withLock { () -> Bool in
+            self.action = action
+            defer { missed = false }
+            return missed
+        }
+        if caught { action() }
+    }
+
+    private func hangUp() {
+        let action = lock.withLock { () -> (@Sendable () -> Void)? in
+            if self.action == nil { missed = true }
+            return self.action
+        }
+        action?()
     }
 }

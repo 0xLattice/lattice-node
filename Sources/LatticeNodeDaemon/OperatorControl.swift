@@ -1,4 +1,5 @@
 import ArgumentParser
+import Crypto
 import Foundation
 import Hummingbird
 import Lattice
@@ -9,12 +10,16 @@ enum OperatorConfigError: Error, CustomStringConvertible {
     /// The change is refused; nothing was written (400).
     case invalid(String)
     case notFound(String)
+    /// It conflicts with what is (409): a chain created otherwise.
+    case conflict(String)
+    /// The fragment is not the version the client read (`If-Match`, 412).
+    case changed(String)
     /// The node was started with flags, not `--root` (409).
     case notOwned
 
     var description: String {
         switch self {
-        case .invalid(let reason), .notFound(let reason): reason
+        case .invalid(let reason), .notFound(let reason), .conflict(let reason), .changed(let reason): reason
         case .notOwned: "this node was started with flags, not --root: its configuration is its command line"
         }
     }
@@ -33,7 +38,8 @@ protocol HostingRuntime: Sendable {
 /// fragment through its API, and converges to what they say: hosted chains
 /// and their peers at once, every other key at its next start (reported as
 /// pending a restart). It writes the fragments it is sent, and never
-/// lattice.json. Changes are applied one at a time, in arrival order.
+/// lattice.json. Changes are applied one at a time, in arrival order, and a
+/// running chain stops only once no layer lists it.
 actor OperatorConfig {
     let layout: HostLayout
     /// What this process started with: a key that differs from it and takes
@@ -41,7 +47,7 @@ actor OperatorConfig {
     let started: Topology
     private(set) var desired: MergedConfig
     /// The listed chains that did not start, and why.
-    private var failures: [String: String]
+    private var hostErrors: [String: String] = [:]
     /// What else does not match, by what it concerns (`reload`, a listener).
     private var problems: [String: String] = [:]
     private var appliedPeers: [String: [String]]
@@ -49,19 +55,13 @@ actor OperatorConfig {
     private var busy = false
     private var waiting: [CheckedContinuation<Void, Never>] = []
 
-    init(
-        layout: HostLayout, desired: MergedConfig, started: Topology,
-        failures: [String: String] = [:], runtime: any HostingRuntime
-    ) {
+    init(layout: HostLayout, desired: MergedConfig, started: Topology, runtime: any HostingRuntime) {
         self.layout = layout
         self.desired = desired
         self.started = started
-        self.failures = failures
         self.appliedPeers = Self.childPeers(started)
         self.runtime = runtime
     }
-
-    var desiredChains: [String] { desired.topology.hostedChains ?? [] }
 
     func current() throws -> ConfigResponse {
         let running = Set(runtime.hostedChildren.map { $0.joined(separator: "/") })
@@ -71,7 +71,7 @@ actor OperatorConfig {
             ConfigStatus.Chain(
                 path: path, from: desired.declaredBy[path] ?? [],
                 actual: running.contains(path) ? "hosted" : "notHosted",
-                error: desired.chainErrors[path] ?? failures[path]
+                error: desired.chainErrors[path] ?? hostErrors[path]
             )
         }
         for path in running.subtracting(listed).sorted() {
@@ -81,13 +81,15 @@ actor OperatorConfig {
             spec: desired.topology, fragments: desired.layers,
             status: ConfigStatus(
                 chains: chains, pendingRestart: try desired.topology.restartRequired(comparedTo: started),
-                errors: problems.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }
+                errors: problems.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" },
+                inert: desired.inert
             )
         )
     }
 
-    /// A layer's file as it is: a fragment, or lattice.json as `lattice`.
-    func fragment(_ name: String) throws -> Data {
+    /// A layer's file as it is, and its entity tag: a fragment, or
+    /// lattice.json as `lattice`.
+    func fragment(_ name: String) throws -> (data: Data, etag: String) {
         let file = name == ConfigFragments.baseName
             ? layout.root.appendingPathComponent(Topology.fileName)
             : ConfigFragments.file(root: layout.root, name: name)
@@ -95,13 +97,19 @@ actor OperatorConfig {
               let data = try? Data(contentsOf: file) else {
             throw OperatorConfigError.notFound("no fragment \(name)")
         }
-        return data
+        return (data, Self.etag(data))
+    }
+
+    /// A file's entity tag: the SHA-256 of its bytes.
+    static func etag(_ data: Data) -> String {
+        "\"" + SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() + "\""
     }
 
     /// Replaces the fragment `name` with `data` (one JSON object), once the
     /// configuration it makes checks as a start would check it. A `remote`
     /// client may not name a file on this node's disk (`operatorTokens`).
-    func put(_ name: String, _ data: Data, remote: Bool) async throws -> ConfigResponse {
+    /// With `ifMatch`, only while the fragment is still that version.
+    func put(_ name: String, _ data: Data, ifMatch: String?, remote: Bool) async throws -> ConfigResponse {
         guard ConfigFragments.isValidName(name) else {
             throw OperatorConfigError.invalid(name == ConfigFragments.baseName
                 ? "\(Topology.fileName) is not written through the API; a fragment of \(ConfigFragments.directoryName) is"
@@ -114,40 +122,72 @@ actor OperatorConfig {
             throw OperatorConfigError.invalid("\(error)")
         }
         return try await serially {
-            try change(name, to: object, remote: remote)
-            try writeDurably(data, to: ConfigFragments.file(root: layout.root, name: name))
+            let file = ConfigFragments.file(root: layout.root, name: name)
+            try precondition(file, ifMatch)
+            let next = try vet(remote: remote) {
+                try MergedConfig.merge(ConfigFragments.layers(root: layout.root, replacing: name, with: object))
+            }
+            try writeDurably(data, to: file)
+            desired = next
             await converge()
             return try current()
         }
     }
 
     /// Removes the fragment `name`, once the configuration left checks.
-    func delete(_ name: String, remote: Bool) async throws -> ConfigResponse {
+    func delete(_ name: String, ifMatch: String?, remote: Bool) async throws -> ConfigResponse {
         try await serially {
             let file = ConfigFragments.file(root: layout.root, name: name)
             guard ConfigFragments.isValidName(name), FileManager.default.fileExists(atPath: file.path) else {
                 throw OperatorConfigError.notFound("no fragment \(name)")
             }
-            try change(name, to: nil, remote: remote)
-            try FileManager.default.removeItem(at: file)
+            try precondition(file, ifMatch)
+            let next = try vet(remote: remote) {
+                try MergedConfig.merge(ConfigFragments.layers(root: layout.root, replacing: name, with: nil))
+            }
+            try removeDurably(file)
+            desired = next
             await converge()
             return try current()
         }
     }
 
-    /// Reads every layer again (SIGHUP). A configuration that does not
-    /// check is not used, and reported, until one does.
+    /// Reads every layer again (SIGHUP), checked as a change through the
+    /// API is. A configuration that does not check is not used, and
+    /// reported, until one does.
     func reload() async {
         await serially {
             do {
-                desired = try MergedConfig.load(root: layout.root)
+                desired = try vet(remote: false) { try MergedConfig.load(root: layout.root) }
                 problems["reload"] = nil
             } catch {
                 problems["reload"] = "\(error)"
                 logLine("configuration not reloaded: \(error)")
                 return
             }
+            for note in desired.inert { logLine("configuration: \(note)") }
             await converge()
+        }
+    }
+
+    /// Creates the child chain `chain` (`POST /chains`): its files under
+    /// `specs/`, written once. True when written now, false when it was
+    /// created with exactly these already.
+    func create(_ chain: HostedChain) async throws -> Bool {
+        try await serially {
+            let running = Set(runtime.hostedChildren.map { $0.joined(separator: "/") })
+            if running.contains(chain.path), !ChainCreation.isCreated(chain.path, layout: layout) {
+                throw OperatorConfigError.conflict(
+                    "\(chain.path) is hosted as an existing chain, synced from its peers; it takes no spec"
+                )
+            }
+            do {
+                return try ChainCreation.create(chain, layout: layout)
+            } catch let error as ChainCreation.Exists {
+                throw OperatorConfigError.conflict(error.description)
+            } catch {
+                throw OperatorConfigError.invalid("\(error)")
+            }
         }
     }
 
@@ -167,12 +207,24 @@ actor OperatorConfig {
         }
     }
 
-    /// The configuration with fragment `name` as `object` (nil: without
-    /// it), made the desired one once it checks.
-    private func change(_ name: String, to object: [String: Any]?, remote: Bool) throws {
+    /// Refuses a write when the fragment is not the version `ifMatch` names
+    /// (`*`: any version, as long as there is one).
+    private func precondition(_ file: URL, _ ifMatch: String?) throws {
+        guard let ifMatch else { return }
+        let current = (try? Data(contentsOf: file)).map(Self.etag)
+        let tags = ifMatch.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard let current, tags.contains("*") || tags.contains(current) else {
+            throw OperatorConfigError.changed("\(file.lastPathComponent) changed since it was read (If-Match); read it again")
+        }
+    }
+
+    /// The configuration `make` makes, if the node may converge to it: it
+    /// would start, a remote client named no file of this node's disk, and
+    /// no chain that runs would stop while a layer still lists it.
+    private func vet(remote: Bool, _ make: () throws -> MergedConfig) throws -> MergedConfig {
         let next: MergedConfig
         do {
-            next = try MergedConfig.merge(ConfigFragments.layers(root: layout.root, replacing: name, with: object))
+            next = try make()
             try checkPlan(next.topology)
         } catch {
             throw OperatorConfigError.invalid("\(error)")
@@ -180,7 +232,14 @@ actor OperatorConfig {
         if remote, next.topology.operatorTokens != desired.topology.operatorTokens {
             throw OperatorConfigError.invalid("the operator listener takes no file paths: operatorTokens is set beside the node")
         }
-        desired = next
+        let hosted = Set(next.topology.hostedChains ?? [])
+        for path in runtime.hostedChildren.map({ $0.joined(separator: "/") }).sorted()
+        where !hosted.contains(path) && next.declaredBy[path] != nil {
+            throw OperatorConfigError.invalid(
+                "\(path) runs and is still listed, but would stop: \(next.chainErrors[path] ?? "not hosted")"
+            )
+        }
+        return next
     }
 
     /// Whether `topology` would start the node: its flags parse and pass the
@@ -201,19 +260,17 @@ actor OperatorConfig {
         return try await body()
     }
 
-    /// Hosts what `desired` lists: a chain it creates is created first (its
-    /// files under `specs/`), and one that does not start is reported, with
-    /// its children.
+    /// Hosts what `desired` lists: a path created here (its files under
+    /// `specs/`) is mined from its spec, any other synced from its peers.
+    /// One that does not start is reported, with its children.
     private func converge() async {
-        let running = Set(runtime.hostedChildren.map { $0.joined(separator: "/") })
-        var prepared = prepareCreates(desired, layout: layout) { path in
-            // A chain followed from its peers is not created again here.
-            running.contains(path) && !FileManager.default.fileExists(atPath: layout.childSpec(for: path).path)
-        }
-        let target = desired.topology.removingChains(Set(prepared.failures.keys))
+        let target = desired.topology
         let peers = Self.childPeers(target)
-        defer { failures = prepared.failures }
-        guard Set(target.hostedChains ?? []) != running || peers != appliedPeers else { return }
+        let running = Set(runtime.hostedChildren.map { $0.joined(separator: "/") })
+        guard Set(target.hostedChains ?? []) != running || peers != appliedPeers else {
+            hostErrors = [:]
+            return
+        }
         var reason: String?
         do {
             let files = HostedChainFiles(layout, target)
@@ -226,130 +283,14 @@ actor OperatorConfig {
             reason = "\(error)"
         }
         let now = Set(runtime.hostedChildren.map { $0.joined(separator: "/") })
+        hostErrors = [:]
         for path in target.hostedChains ?? [] where !now.contains(path) {
-            prepared.failures[path] = reason ?? "did not start"
-            prepared.created.first { $0.path == path }?.remove()
+            hostErrors[path] = reason ?? "did not start"
         }
     }
 
     private static func childPeers(_ topology: Topology) -> [String: [String]] {
         (topology.peers?.byChain ?? [:]).filter { $0.key != ChainAddress.nexus }
-    }
-}
-
-/// Writes the files of each chain `merged` creates that is not created yet
-/// (`specs/`). A chain whose files are refused is not hosted, nor are its
-/// children; nor is a chain `skip` names (refused with the reason it gives).
-func prepareCreates(
-    _ merged: MergedConfig, layout: HostLayout, skip: (String) -> Bool = { _ in false }
-) -> (failures: [String: String], created: [ChainFiles]) {
-    var failures: [String: String] = [:]
-    var created: [ChainFiles] = []
-    for path in merged.topology.hostedChains ?? [] {
-        if let parent = ChainAddress(string: path)?.parent?.key, failures[parent] != nil {
-            failures[path] = "waiting for \(parent), which is not hosted"
-            continue
-        }
-        guard let chain = merged.creates[path] else { continue }
-        if skip(path) {
-            failures[path] = "\(path) is hosted as an existing chain, synced from its peers; it takes no spec"
-            continue
-        }
-        do {
-            if let files = try prepareChain(chain, layout: layout) {
-                try files.write()
-                created.append(files)
-            }
-        } catch {
-            failures[path] = "\(error)"
-        }
-    }
-    return (failures, created)
-}
-
-/// A new chain's inline spec, premine recipient, genesis transactions
-/// and modules, checked as `lattice child create` checks them, as the
-/// files `specs/` keeps; nil when the chain was created with exactly
-/// these. A chain is created once: anything else for it is refused.
-func prepareChain(_ chain: HostedChain, layout: HostLayout) throws -> ChainFiles? {
-    guard let spec = chain.spec else { return nil }
-    let encoder = JSONEncoder()
-    encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-    let specData = try encoder.encode(spec)
-    let specFile = layout.childSpec(for: chain.path)
-    let premineFile = layout.premineRecipient(for: chain.path)
-    let genesisFile = layout.genesisTransactions(for: chain.path)
-    let genesisData = try chain.genesisTransactions.map { try encoder.encode($0) }
-    if let existing = try? Data(contentsOf: specFile) {
-        // Modules are named by CID in the spec: the same spec, the same modules.
-        let sameSpec = (try? encoder.encode(JSONDecoder().decode(ChainSpec.self, from: existing))) == specData
-        let premine = (try? String(contentsOf: premineFile, encoding: .utf8))?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let genesis = (try? Data(contentsOf: genesisFile)).flatMap {
-            try? encoder.encode(JSONDecoder().decode([SubmitTransactionRequest].self, from: $0))
-        }
-        guard sameSpec, premine == chain.premineTo, genesis == genesisData else {
-            throw CtlError(
-                "\(chain.path) already exists with another spec, premine recipient or genesis transactions; a child chain is created once"
-            )
-        }
-        return nil
-    }
-    var modules: [String: Data] = [:]
-    for bytes in chain.policyModules ?? [] {
-        let cid = try WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: bytes)).rawCID
-        let policies = spec.wasmPolicies.filter { $0.moduleCID == cid }
-        guard !policies.isEmpty else {
-            throw CtlError("module \(cid) is not named by the spec's wasmPolicies")
-        }
-        for policy in policies {
-            do {
-                try WasmPolicyEvaluator.validate(policy: policy, moduleBytes: bytes)
-            } catch {
-                throw CtlError("module \(cid) is not valid for policy \(policy.entrypoint): \(error)")
-            }
-        }
-        modules[cid] = bytes
-    }
-    if let missing = spec.wasmPolicies.map(\.moduleCID).first(where: { modules[$0] == nil }) {
-        throw CtlError("the spec names policy module \(missing); send it in policyModules")
-    }
-    do {
-        try NodeRuntime.checkPremine(
-            spec: spec, to: chain.premineTo, transactions: (chain.genesisTransactions ?? []).map(\.transaction),
-            on: chain.path.split(separator: "/").map(String.init), modules: Array(modules.values)
-        )
-    } catch {
-        throw CtlError("\(chain.path): \(error)")
-    }
-    var files: [(URL, Data)] = []
-    if let premineTo = chain.premineTo { files.append((premineFile, Data(premineTo.utf8))) }
-    if let genesisData { files.append((genesisFile, genesisData)) }
-    let directory = layout.policyModules(for: chain.path)
-    for (cid, bytes) in modules.sorted(by: { $0.key < $1.key }) {
-        files.append((directory.appendingPathComponent(cid + ".wasm"), bytes))
-    }
-    // The spec last: it marks the chain created, so it never stands
-    // without what its genesis is built from.
-    files.append((specFile, specData))
-    return ChainFiles(path: chain.path, files: files, moduleDirectory: modules.isEmpty ? nil : directory)
-}
-
-/// A chain's files under `specs/`, written for a chain being created and
-/// removed again when it is not kept.
-struct ChainFiles: Sendable {
-    let path: String
-    let files: [(URL, Data)]
-    let moduleDirectory: URL?
-
-    func write() throws {
-        for (file, data) in files { try writeDurably(data, to: file) }
-    }
-
-    /// The spec first: without it the chain counts as never created.
-    func remove() {
-        for (file, _) in files.reversed() { try? FileManager.default.removeItem(at: file) }
-        if let moduleDirectory { try? FileManager.default.removeItem(at: moduleDirectory) }
     }
 }
 
@@ -423,14 +364,10 @@ final class NodeLifecycle: @unchecked Sendable {
     }
 }
 
-/// A node started with `--root`: its root, the configuration it started
-/// from (`started`, the chains that could not be created left out), what
-/// its layers say (`merged`), and the chains that could not be created.
+/// A node started with `--root`: its root and what its layers say.
 struct NodeOwner: Sendable {
     let layout: HostLayout
-    let started: Topology
     let merged: MergedConfig
-    let failures: [String: String]
 }
 
 /// The operator surface beyond the chains' reads and writes: the node's
@@ -500,13 +437,32 @@ func addOperatorControlRoutes(
     writes service: any OperatorWrites,
     remote: Bool
 ) {
-    // The child chains this node hosts, and those its configuration lists.
+    // The child chains this node hosts, and those its configuration lists:
+    // what `GET /config` reports in its status.
     router.get("hosted-chains") { request, context in
-        let configured = await control.config?.desiredChains
+        guard let status = try await control.config?.current().status else {
+            return try json(
+                HostedChainsResponse(chains: service.hostedChildren.map { $0.joined(separator: "/") }, configured: nil),
+                request: request, context: context
+            )
+        }
         return try json(
-            HostedChainsResponse(chains: service.hostedChildren.map { $0.joined(separator: "/") }, configured: configured),
+            HostedChainsResponse(
+                chains: status.chains.filter { $0.actual == "hosted" }.map(\.path),
+                configured: status.chains.filter { !$0.from.isEmpty }.map(\.path)
+            ),
             request: request, context: context
         )
+    }
+    // A child chain created, once; hosting its path then mines it.
+    router.post("chains") { request, context in
+        if !remote { try requireLoopbackHost(request) }
+        let chain: HostedChain = try await decode(request, context: context, remote: remote)
+        return try await configChange(request: request, context: context) {
+            guard let config = control.config else { throw OperatorConfigError.notOwned }
+            let created = try await config.create(chain)
+            return CreatedChainResponse(path: chain.path, created: created)
+        }
     }
     router.get("config") { request, context in
         try await configChange(request: request, context: context) {
@@ -517,9 +473,9 @@ func addOperatorControlRoutes(
     router.get("config/fragments/:name") { request, context in
         guard let config = control.config else { throw HTTPError(.conflict, message: OperatorConfigError.notOwned.description) }
         do {
-            let data = try await config.fragment(context.parameters.get("name") ?? "")
+            let (data, etag) = try await config.fragment(context.parameters.get("name") ?? "")
             return Response(
-                status: .ok, headers: [.contentType: "application/json", .cacheControl: "no-store"],
+                status: .ok, headers: [.contentType: "application/json", .cacheControl: "no-store", .eTag: etag],
                 body: ResponseBody(byteBuffer: ByteBuffer(bytes: data))
             )
         } catch let error as OperatorConfigError {
@@ -533,7 +489,7 @@ func addOperatorControlRoutes(
         let name = context.parameters.get("name") ?? ""
         return try await configChange(request: request, context: context) {
             guard let config = control.config else { throw OperatorConfigError.notOwned }
-            return try await config.put(name, Data(buffer: body), remote: remote)
+            return try await config.put(name, Data(buffer: body), ifMatch: request.headers[.ifMatch], remote: remote)
         }
     }
     router.delete("config/fragments/:name") { request, context in
@@ -541,7 +497,7 @@ func addOperatorControlRoutes(
         let name = context.parameters.get("name") ?? ""
         return try await configChange(request: request, context: context) {
             guard let config = control.config else { throw OperatorConfigError.notOwned }
-            return try await config.delete(name, remote: remote)
+            return try await config.delete(name, ifMatch: request.headers[.ifMatch], remote: remote)
         }
     }
     router.get("logs") { request, context in
@@ -640,6 +596,8 @@ private func configChange<Value: Encodable & Sendable>(
         switch error {
         case .invalid(let reason): throw HTTPError(.badRequest, message: reason)
         case .notFound(let reason): throw HTTPError(.notFound, message: reason)
+        case .conflict(let reason): throw HTTPError(.conflict, message: reason)
+        case .changed(let reason): throw HTTPError(.preconditionFailed, message: reason)
         case .notOwned: throw HTTPError(.conflict, message: error.description)
         }
     }

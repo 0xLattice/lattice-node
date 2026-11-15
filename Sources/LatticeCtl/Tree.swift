@@ -124,6 +124,7 @@ struct Status: AsyncParsableCommand {
                 print("waiting for a restart: \(config.status.pendingRestart.joined(separator: ", "))")
             }
             for error in config.status.errors { print(error) }
+            for note in config.status.inert { print("inert: \(note)") }
         }
     }
 }

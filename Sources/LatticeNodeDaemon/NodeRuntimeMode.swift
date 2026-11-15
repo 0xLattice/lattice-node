@@ -46,7 +46,7 @@ extension LatticeNodeCommand {
         )
         if let owner {
             control.config = OperatorConfig(
-                layout: owner.layout, desired: owner.merged, started: owner.started, failures: owner.failures,
+                layout: owner.layout, desired: owner.merged, started: owner.merged.topology,
                 runtime: runtime
             )
         }
@@ -125,12 +125,8 @@ extension LatticeNodeCommand {
             logLine("  operator: http://\(operatorListener.host):\(operatorListener.port) (bearer tokens, \(operatorListener.tokens.count) listed)")
         }
         // SIGHUP: read the configuration again (as nginx and systemd do).
-        signal(SIGHUP, SIG_IGN)
-        let hangup = DispatchSource.makeSignalSource(signal: SIGHUP)
         let config = control.config
-        hangup.setEventHandler { Task { await config?.reload() } }
-        hangup.resume()
-        defer { hangup.cancel() }
+        if let config { Hangups.shared.onHangup { Task { await config.reload() } } }
         let result: Result<Void, any Error>
         do {
             try await withThrowingTaskGroup(of: Void.self) { group in

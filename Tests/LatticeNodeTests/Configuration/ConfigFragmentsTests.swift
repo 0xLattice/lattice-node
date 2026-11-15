@@ -11,19 +11,6 @@ final class ConfigFragmentsTests: XCTestCase {
         ConfigLayer(name: name, object: try ConfigFragments.object(Data(json.utf8), named: name))
     }
 
-    private let spec = ChainSpec(
-        maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
-        targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
-    )
-
-    private func created(_ path: String, targetBlockTime: UInt64 = 1_000) throws -> String {
-        let spec = ChainSpec(
-            maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
-            targetBlockTime: targetBlockTime, initialReward: 10, halvingInterval: 10_000, halfLife: 10
-        )
-        return String(decoding: try JSONEncoder().encode(HostedChain(path: path, spec: spec)), as: UTF8.self)
-    }
-
     /// Three writers, each with its own fragment: a deploy script, a hosting
     /// seller and the operator.
     func testThreeWritersMerge() throws {
@@ -34,7 +21,7 @@ final class ConfigFragmentsTests: XCTestCase {
              "hostedChains":["Nexus/testnet","Nexus/testnet/names"],"state":"recent","stateWindow":64}
             """),
             layer("hostmarket", """
-            {"hostedChains":["Nexus/testnet/blog",\(try created("Nexus/testnet/shop"))]}
+            {"hostedChains":["Nexus/testnet/blog","Nexus/testnet/shop"]}
             """),
             layer("operator", """
             {"stateWindow":128,"hostedChains":["Nexus/testnet/turnup"],
@@ -54,7 +41,6 @@ final class ConfigFragmentsTests: XCTestCase {
         ])
         XCTAssertEqual(topology.stateWindows, ["Nexus/testnet/blog": 500])
         XCTAssertEqual(merged.declaredBy["Nexus/testnet/shop"], ["hostmarket"])
-        XCTAssertEqual(merged.creates["Nexus/testnet/shop"]?.spec?.targetBlockTime, 1_000)
         XCTAssertEqual(merged.chainErrors, [:])
     }
 
@@ -70,7 +56,7 @@ final class ConfigFragmentsTests: XCTestCase {
 
     func testListsAreUnionsAndMapsMergePerKey() throws {
         let merged = try MergedConfig.merge([
-            layer("lattice", #"{"listen":4001,"rpc":8080,"peers":["aa@a.example:1"],"rpcAllowedOrigins":["https://a"],"state":"recent","stateWindows":{"Nexus":10,"Nexus/A":20}}"#),
+            layer("lattice", #"{"listen":4001,"rpc":8080,"hostedChains":["Nexus/A"],"peers":["aa@a.example:1"],"rpcAllowedOrigins":["https://a"],"state":"recent","stateWindows":{"Nexus":10,"Nexus/A":20}}"#),
             layer("operator", #"{"peers":{"Nexus":["aa@a.example:1","bb@b.example:2"]},"rpcAllowedOrigins":["https://b"],"stateWindows":{"Nexus/A":30}}"#),
         ])
         XCTAssertEqual(merged.topology.peers?.byChain["Nexus"], ["aa@a.example:1", "bb@b.example:2"])
@@ -85,27 +71,38 @@ final class ConfigFragmentsTests: XCTestCase {
         XCTAssertEqual(merged.topology.peers?.byChain["Nexus"], [])
     }
 
-    func testTwoLayersCreatingAChainDifferentlyLeaveItUnhosted() throws {
-        let merged = try MergedConfig.merge([
-            layer("lattice", #"{"listen":4001,"rpc":8080}"#),
-            layer("hostmarket", #"{"hostedChains":[\#(try created("Nexus/A"))]}"#),
-            layer("operator", #"{"hostedChains":[\#(try created("Nexus/A", targetBlockTime: 2_000)),"Nexus/A/B","Nexus/C"],"peers":{"Nexus/A":["aa@a.example:1"]}}"#),
-        ])
-        XCTAssertEqual(merged.topology.hostedChains, ["Nexus/C"])
-        XCTAssertTrue(merged.chainErrors["Nexus/A"]?.contains("hostmarket and operator") == true)
-        XCTAssertTrue(merged.chainErrors["Nexus/A/B"]?.contains("waiting for Nexus/A") == true)
-        XCTAssertNil(merged.topology.peers?.byChain["Nexus/A"], "an unhosted chain's peers go with it")
-    }
-
-    func testTheSameCreationFromTwoLayersIsOneChain() throws {
-        let merged = try MergedConfig.merge([
-            layer("lattice", #"{"listen":4001,"rpc":8080}"#),
-            layer("hostmarket", #"{"hostedChains":[\#(try created("Nexus/A"))]}"#),
-            layer("operator", #"{"hostedChains":[\#(try created("Nexus/A")),"Nexus/A"]}"#),
-        ])
+    /// A chain is a path: what creates one is POST /chains, not a layer.
+    func testAHostedChainIsAPath() throws {
+        let base = try layer("lattice", #"{"listen":4001,"rpc":8080}"#)
+        XCTAssertThrowsError(try MergedConfig.merge([base, layer("operator", #"{"hostedChains":[{"path":"Nexus/A"}]}"#)])) {
+            XCTAssertTrue("\($0)".contains("POST /chains"), "\($0)")
+        }
+        let merged = try MergedConfig.merge([base, layer("hostmarket", #"{"hostedChains":["Nexus/A"]}"#), layer("operator", #"{"hostedChains":["Nexus/A"]}"#)])
         XCTAssertEqual(merged.topology.hostedChains, ["Nexus/A"])
         XCTAssertEqual(merged.declaredBy["Nexus/A"], ["hostmarket", "operator"])
-        XCTAssertEqual(merged.chainErrors, [:])
+    }
+
+    /// A key set to null is as if the layer did not set it.
+    func testANullIsNoValue() throws {
+        let merged = try MergedConfig.merge([
+            layer("lattice", #"{"listen":4001,"rpc":8080,"minRelayFee":2}"#),
+            layer("operator", #"{"minRelayFee":null}"#),
+        ])
+        XCTAssertEqual(merged.topology.minRelayFee, 2)
+    }
+
+    /// Settings for a chain not hosted wait, inert, until it is; so does a
+    /// state window while state is not recent.
+    func testInertSettingsAreLeftOutAndReported() throws {
+        let merged = try MergedConfig.merge([
+            layer("lattice", #"{"listen":4001,"rpc":8080,"hostedChains":["Nexus/A/B"],"stateWindow":5}"#),
+            layer("operator", #"{"peers":{"Nexus/A/B":["aa@a.example:1"],"Nexus/C":["aa@a.example:1"]},"finalityWindows":{"Nexus/C":4}}"#),
+        ])
+        XCTAssertEqual(merged.topology.hostedChains, [])
+        XCTAssertNil(merged.topology.peers)
+        XCTAssertNil(merged.topology.finalityWindows)
+        XCTAssertNil(merged.topology.stateWindow)
+        XCTAssertEqual(merged.inert.count, 4, "\(merged.inert)")
     }
 
     func testAChainWhoseParentNoLayerHostsWaits() throws {
@@ -144,6 +141,7 @@ final class ConfigFragmentsTests: XCTestCase {
         try Data("{}".utf8).write(to: directory.appendingPathComponent("Upper.json"))
         let merged = try MergedConfig.load(root: root)
         XCTAssertEqual(merged.layers, ["lattice", "50-hostmarket", "deploy", "operator"])
+        XCTAssertEqual(merged.inert.count, 2, "the files not read are reported: \(merged.inert)")
         XCTAssertEqual(merged.topology.minRelayFee, 3)
         // lattice.json is optional when a fragment sets the ports.
         try FileManager.default.removeItem(at: root.appendingPathComponent(Topology.fileName))

@@ -26,18 +26,18 @@ struct Child: AsyncParsableCommand {
         func run() async throws {
             let response = try await target.editFragment(operatorFragment) { object, _ in
                 var chains = object["hostedChains"] as? [Any] ?? []
-                if !chains.contains(where: { hostedPath($0) == path }) { chains.append(path) }
+                if !chains.contains(where: { $0 as? String == path }) { chains.append(path) }
                 object["hostedChains"] = chains
             }
             try report(response, chain: path)
-            print("\(path): hosted; synced from its peers")
+            print("\(path): hosted")
         }
     }
 
     /// Stop hosting a child chain; what it stored stays.
     struct Unhost: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Stop hosting a child chain, and drop its peers; its data stays."
+            abstract: "Stop hosting a child chain; its data stays."
         )
 
         @OptionGroup var target: NodeTarget
@@ -48,7 +48,7 @@ struct Child: AsyncParsableCommand {
         func run() async throws {
             try await target.editFragment(operatorFragment) { object, current in
                 let chains = object["hostedChains"] as? [Any] ?? []
-                guard chains.contains(where: { hostedPath($0) == path }) else {
+                guard chains.contains(where: { $0 as? String == path }) else {
                     let owners = current.status.chains.first { $0.path == path }?.from ?? []
                     throw CtlError(owners.isEmpty
                         ? "\(path) is not hosted"
@@ -57,11 +57,7 @@ struct Child: AsyncParsableCommand {
                 if let child = current.status.chains.first(where: { $0.path.hasPrefix(path + "/") }) {
                     throw CtlError("\(child.path) is hosted under \(path); unhost it first")
                 }
-                object["hostedChains"] = chains.filter { hostedPath($0) != path }
-                if var peers = object["peers"] as? [String: Any] {
-                    peers[path] = nil
-                    object["peers"] = peers
-                }
+                object["hostedChains"] = chains.filter { $0 as? String != path }
             }
             print("\(path): no longer hosted")
         }
@@ -191,7 +187,6 @@ struct Child: AsyncParsableCommand {
         var genesisTransactions: String?
 
         func run() async throws {
-            let layout = target.layout
             let chainSpec: ChainSpec
             if let spec {
                 chainSpec = try JSONDecoder().decode(ChainSpec.self, from: Data(contentsOf: URL(fileURLWithPath: spec)))
@@ -248,31 +243,24 @@ struct Child: AsyncParsableCommand {
             } catch {
                 throw CtlError(genesis == nil ? "--premine-to: \(error)" : "the genesis: \(error)")
             }
-            // The node keeps the spec (under specs/) and creates the chain
-            // from it: now when it runs, at its next start when stopped.
-            let inline = HostedChain(
+            // The node keeps the spec (under specs/), once; hosting the path
+            // then mines the chain from it: now when the node runs, at its
+            // next start when stopped.
+            let chain = HostedChain(
                 path: path, spec: chainSpec, premineTo: premineTo,
                 genesisTransactions: try genesisTransactions.map {
                     try JSONDecoder().decode([SubmitTransactionRequest].self, from: Data(contentsOf: URL(fileURLWithPath: $0)))
                 },
                 policyModules: modules.isEmpty ? nil : modules.keys.sorted().compactMap { modules[$0] }
             )
-            let entry = try JSONSerialization.jsonObject(with: JSONEncoder().encode(inline))
-            let response = try await target.editFragment(operatorFragment) { object, current in
-                // A chain is created once: its spec fixes its genesis.
-                guard !current.status.chains.contains(where: { $0.path == path }),
-                      !FileManager.default.fileExists(atPath: layout.childSpec(for: path).path) else {
-                    throw CtlError("\(path) already exists; a child chain is created once")
-                }
-                object["hostedChains"] = (object["hostedChains"] as? [Any] ?? []) + [entry]
+            try await target.createChain(chain)
+            let response = try await target.editFragment(operatorFragment) { object, _ in
+                var chains = object["hostedChains"] as? [Any] ?? []
+                if !chains.contains(where: { $0 as? String == path }) { chains.append(path) }
+                object["hostedChains"] = chains
             }
             try report(response, chain: path)
             print("\(path): created; genesis mined from its spec in the next template that carries it")
         }
     }
-}
-
-/// The path of a `hostedChains` entry: a path, or an object naming one.
-func hostedPath(_ entry: Any) -> String? {
-    entry as? String ?? (entry as? [String: Any])?["path"] as? String
 }
