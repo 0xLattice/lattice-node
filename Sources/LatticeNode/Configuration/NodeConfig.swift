@@ -241,19 +241,24 @@ public struct ConfigResponse: Codable, Sendable {
 }
 
 public struct ConfigStatus: Codable, Sendable {
-    /// One chain a layer lists, or that the node hosts though none does.
+    /// One chain the configuration hosts (`HostedTree`), or that the node
+    /// hosts though the configuration does not.
     public struct Chain: Codable, Sendable {
         public let path: String
-        /// The layers that list it.
+        /// The layers that list it; empty when it is implied.
         public let from: [String]
+        /// When no layer lists it: the listed chains under it, which keep it
+        /// hosted. Absent for a listed chain.
+        public let impliedBy: [String]?
         /// `hosted` or `notHosted`.
         public let actual: String
-        /// Why it is not hosted as listed.
+        /// Why it is not hosted as configured.
         public let error: String?
 
-        public init(path: String, from: [String], actual: String, error: String? = nil) {
+        public init(path: String, from: [String], impliedBy: [String]? = nil, actual: String, error: String? = nil) {
             self.path = path
             self.from = from
+            self.impliedBy = impliedBy
             self.actual = actual
             self.error = error
         }

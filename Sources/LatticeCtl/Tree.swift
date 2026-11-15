@@ -117,8 +117,9 @@ struct Status: AsyncParsableCommand {
         }
         if let data = try? await send(rpc: rpc, "GET", "config"),
            let config = try? JSONDecoder().decode(ConfigResponse.self, from: data) {
-            for chain in config.status.chains where chain.error != nil {
-                print("\(chain.path): not hosted: \(chain.error!)")
+            for chain in config.status.chains {
+                if let below = chain.impliedBy { print("\(chain.path): implied by \(below.joined(separator: ", "))") }
+                if let error = chain.error { print("\(chain.path): not hosted: \(error)") }
             }
             if !config.status.pendingRestart.isEmpty {
                 print("waiting for a restart: \(config.status.pendingRestart.joined(separator: ", "))")

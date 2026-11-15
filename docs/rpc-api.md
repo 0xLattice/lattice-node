@@ -706,14 +706,20 @@ layer has `lattice.json`'s keys, and they merge:
 A key set to `null` is as if the layer did not set it: it does not unset an
 earlier layer's value (remove the key from the layer that sets it).
 
-A `hostedChains` entry is a chain's path. A path created on this node (its
-spec under `<root>/specs/`, written by [`POST /chains`](#post-chains)) is
-mined from that spec; any other is synced from its peers. A chain whose
-parent is not hosted, or that does not start, is not hosted and its status
-says why. A setting for a chain that is not hosted (its `peers`,
-`stateWindows` or `finalityWindows` entry), or a state window while `state`
-is not `recent`, is inert: left out and listed in `status.inert`, not an
-error. Anything else wrong (a file that is not one JSON object, an unknown
+A `hostedChains` entry is a chain's path. A child chain runs only under its
+parent (its blocks ride in the parent's, and validating it reads the
+parent's state), so the node hosts the smallest tree rooted at Nexus that
+holds every listed chain: the listed chains and their ancestors. An
+ancestor no layer lists is hosted implied by the listed chains under it, as
+apt installs a package's dependencies: a chain stops only once no layer
+lists it or any chain under it. A path created on this node (its spec under
+`<root>/specs/`, written by [`POST /chains`](#post-chains)) is mined from
+that spec; any other is synced from its peers. A chain that does not start
+is not hosted and its status says why. A chain's settings (its `peers`,
+`stateWindows` and `finalityWindows` entries) apply wherever it is in the
+tree, listed or implied. A setting for a chain not in the tree, or a state
+window while `state` is not `recent`, is inert: left out and listed in
+`status.inert`, not an error. Anything else wrong (a file that is not one JSON object, an unknown
 key, a merged result that does not check) is the whole configuration's: the
 node does not start (exit 78), and a change that would make it so is `400`.
 
@@ -723,13 +729,8 @@ re-read is checked as a change is, and one that does not check is not used.
 Hosted chains and child chains' peers apply at once; every other key (ports,
 Nexus's peers, retention, listeners, serving limits, relay fee, ...) at the
 next start, listed as `pendingRestart` until [`POST /restart`](#post-restart).
-A running chain stops only once no layer lists it: a change that would stop
-it otherwise (removing its parent) is `400`. A change applies every layer as
-it is on disk, so this is checked against what is in use: a file edited by
-hand, not applied yet, that would stop such a chain makes every change
-`400`, naming that file, until it is fixed. A restart is held to the same
-rule (`409`). A node started with flags has
-no configuration of its own: these routes answer `409` there.
+A node started with flags has no configuration of its own: these routes
+answer `409` there.
 
 ### `GET /config`
 
@@ -738,15 +739,19 @@ no configuration of its own: these routes answer `409` there.
  "fragments": ["lattice", "deploy", "hostmarket", "operator"],
  "status": {
    "chains": [{"path": "Nexus/Alpha", "from": ["deploy"], "actual": "hosted"},
+              {"path": "Nexus/Beta", "from": [], "impliedBy": ["Nexus/Beta/Gamma"], "actual": "hosted"},
               {"path": "Nexus/Beta/Gamma", "from": ["operator"], "actual": "notHosted",
-               "error": "waiting for Nexus/Beta, which is not hosted"}],
+               "error": "did not start: ..."}],
    "pendingRestart": ["stateWindow"],
    "errors": ["operatorListen: 10.0.0.5:8090 did not open: ..."],
    "inert": ["peers for Nexus/Beta: not hosted"]}}
 ```
 
-`spec.hostedChains` lists the chains that can be hosted; `status.chains`
-lists every chain a layer names, with the layers that name it. `errors` holds
+`spec.hostedChains` lists the chains the tree holds, parent first.
+`status.chains` lists each of them: a listed chain with the layers that
+list it (`from`), an implied one with `from` empty and the listed chains
+under it that keep it (`impliedBy`); and any chain still running that the
+tree no longer holds, with an `error`. `errors` holds
 what else does not match: a re-read (`SIGHUP`) the node could not use (it
 keeps the configuration it had), an operator listener that could not open
 (the node runs on without it, reachable on loopback). `inert` holds what the
@@ -780,8 +785,9 @@ read none.
 
 Removes the fragment, answering as `GET /config`; `400` when what is left
 does not check, `404` when there is none, `412` as for `PUT` with an
-`If-Match` that is not its version. A chain no layer lists any more stops;
-what it stored stays, and hosting it again resumes it.
+`If-Match` that is not its version. A chain no layer lists any more stops,
+unless a chain listed under it keeps it, implied; what it stored stays, and
+hosting it again resumes it.
 
 ### `POST /chains`
 
@@ -798,9 +804,10 @@ Creates a child chain, once: the body is what fixes its genesis,
 checked as `lattice child create` checks it and kept under `<root>/specs/`.
 `200 {"path": "Nexus/Beta", "created": true}`; `created` is false when the
 chain was created with exactly this already. `409` when it was created with
-something else, or the node already follows it without a spec (a layer
-lists it, running or not, or its storage holds the chain's blocks: a spec
-would mine a rival genesis); `400` when the body does not check. Creating
+something else, or the node already follows it without a spec (it is in the
+hosted tree, listed or implied, running or not, or its storage holds the
+chain's blocks: a spec would mine a rival genesis); `400` when the body does
+not check. Creating
 does not host the chain: list its path in a fragment's `hostedChains` to
 mine its genesis and then its blocks. A created spec stays even if the
 chain is never hosted or never starts: to create the path otherwise, remove
@@ -812,9 +819,10 @@ its files under `<root>/specs/` by hand while the node is stopped.
 {"chains": ["Nexus/Alpha"], "configured": ["Nexus/Alpha", "Nexus/Beta"]}
 ```
 
-The child chains running, parent first, and those a layer lists: the
-`actual` and `from` of `GET /config`'s `status.chains`, which this
-summarises. `configured` is absent on a node started with flags.
+The child chains running, parent first, and those the configuration hosts
+(the tree: listed or implied, `spec.hostedChains` of `GET /config`, whose
+`status.chains` this summarises). `configured` is absent on a node started
+with flags.
 
 A peer that connects afterwards is told the new list in the hello. A peer
 already connected learns a newly hosted chain from its provider record, and a

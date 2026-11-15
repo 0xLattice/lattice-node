@@ -21,7 +21,7 @@ only says which node it mines through.
 
 | Command | Effect |
 |---|---|
-| `lattice status` | Each hosted chain's phase and tip, configured chains not running, keys waiting for a restart. |
+| `lattice status` | Each hosted chain's phase and tip, the chains hosted only for a chain listed under them, configured chains not running, keys waiting for a restart. |
 | `lattice config get [a.b.c]` | The configuration, or one key of it. |
 | `lattice config set a.b.c=value ...` | Change keys (a value that parses as JSON is JSON, else a string), or `--patch '<merge patch>'`. |
 | `lattice config unset a.b.c ...` | Remove keys. |
@@ -299,8 +299,8 @@ hosts it from its next start. `child create` has the node keep the spec
 (with its premine recipient, genesis transactions and modules) under
 `specs/`, once, then adds the path to the `operator` fragment's
 `hostedChains`; creating the same path with anything else is refused, as is
-a spec for a chain this node already follows without one (listed by a layer,
-or held in its storage), stopped or running. A spec that never started stays
+a spec for a chain this node already follows without one (in its hosted
+tree, listed or implied, or held in its storage), stopped or running. A spec that never started stays
 until its files under `specs/` are removed by hand. `child unhost` removes a chain from the
 `operator` fragment; a chain another fragment lists is refused, naming it. Remotely,
 `--spec`, `--genesis-transactions` and `--policy-module` are files on the
@@ -312,9 +312,12 @@ To stop hosting one:
 lattice child unhost Nexus/Alpha --root /var/lib/lattice
 ```
 
-It refuses while a chain below it is hosted. Its peers and windows, if any
-layer sets them, stay where they are, inert until it is hosted again. What
-it stored stays; hosting it again resumes it.
+A child runs only under its parent, so the node hosts every listed chain's
+ancestors too: a chain stays hosted, implied, while a chain under it is
+listed, and `unhost` says so (`Nexus/Alpha: no longer listed; still hosted
+for Nexus/Alpha/Beta`); it stops once those are unhosted too. Its peers and
+windows, if any layer sets them, stay where they are, inert until it is
+hosted again. What it stored stays; hosting it again resumes it.
 
 ### Committing a child block on its parent
 

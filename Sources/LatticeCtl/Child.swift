@@ -46,20 +46,26 @@ struct Child: AsyncParsableCommand {
         var path: String
 
         func run() async throws {
-            try await target.editFragment(operatorFragment) { object, current in
+            let response = try await target.editFragment(operatorFragment) { object, current in
                 let chains = object["hostedChains"] as? [Any] ?? []
                 guard chains.contains(where: { $0 as? String == path }) else {
-                    let owners = current.status.chains.first { $0.path == path }?.from ?? []
+                    let chain = current.status.chains.first { $0.path == path }
+                    if let below = chain?.impliedBy {
+                        throw CtlError("\(path) is not listed: it is hosted for \(below.joined(separator: ", ")); unhost those")
+                    }
+                    let owners = chain?.from ?? []
                     throw CtlError(owners.isEmpty
                         ? "\(path) is not hosted"
                         : "\(path) is listed by \(owners.joined(separator: ", ")), not by \(operatorFragment): change it there")
                 }
-                if let child = current.status.chains.first(where: { $0.path.hasPrefix(path + "/") }) {
-                    throw CtlError("\(child.path) is hosted under \(path); unhost it first")
-                }
                 object["hostedChains"] = chains.filter { $0 as? String != path }
             }
-            print("\(path): no longer hosted")
+            // A chain listed under it keeps it, as its parent.
+            if let kept = response.status.chains.first(where: { $0.path == path }), let below = kept.impliedBy {
+                print("\(path): no longer listed; still hosted for \(below.joined(separator: ", ")), until they are unhosted")
+            } else {
+                print("\(path): no longer hosted")
+            }
         }
     }
 

@@ -1,4 +1,5 @@
 import Foundation
+import Ivy
 import Lattice
 import LatticeNode
 import LatticeNodeAPI
@@ -13,6 +14,7 @@ final class OperatorConfigTests: XCTestCase {
     private final class FakeRuntime: HostingRuntime, @unchecked Sendable {
         private let lock = NSLock()
         private var hosted: [[String]] = []
+        private var peers: [[String]: [PeerEndpoint]] = [:]
         private var inFlight = 0
         private var most = 0
         private var count = 0
@@ -24,6 +26,9 @@ final class OperatorConfigTests: XCTestCase {
         init(failing: Set<String> = []) { self.failing = failing }
 
         var hostedChildren: [[String]] { lock.withLock { hosted } }
+        var running: Set<String> { Set(hostedChildren.map { $0.joined(separator: "/") }) }
+        /// The child chains' peers it was last given.
+        var seedPeers: [[String]: [PeerEndpoint]] { lock.withLock { peers } }
 
         func host(_ next: HostedChildren) async throws {
             lock.withLock {
@@ -35,6 +40,7 @@ final class OperatorConfigTests: XCTestCase {
             let started = next.children.filter { !failing.contains($0.joined(separator: "/")) }
             lock.withLock {
                 hosted = started
+                peers = next.seedPeers
                 inFlight -= 1
             }
             if started.count != next.children.count { throw OperatorConfigError.invalid("level failed to start") }
@@ -159,27 +165,71 @@ final class OperatorConfigTests: XCTestCase {
         XCTAssertTrue(kept.status.errors.contains { $0.hasPrefix("reload:") }, "\(kept.status.errors)")
     }
 
-    /// A running chain stops only once no layer lists it: a change (or a
-    /// re-read) that would stop it otherwise is refused, the chain kept.
-    func testARunningChainStopsOnlyWhenNoLayerListsIt() async throws {
+    /// A chain under a parent keeps the parent hosted: dropping Nexus/A
+    /// from deploy, while operator lists Nexus/A/B, stops neither, whether
+    /// by PUT, DELETE, a hand edit and SIGHUP, or a restart.
+    func testAParentStaysWhileAChainUnderItIsListed() async throws {
         let runtime = FakeRuntime()
         let (config, layout) = try make(runtime: runtime)
+        let both: Set<String> = ["Nexus/A", "Nexus/A/B"]
         _ = try await put(config, "deploy", #"{"hostedChains":["Nexus/A"]}"#)
         _ = try await put(config, "operator", #"{"hostedChains":["Nexus/A/B"]}"#)
-        do {
-            _ = try await config.delete("deploy", ifMatch: nil, remote: false)
-            XCTFail("removing Nexus/A would stop Nexus/A/B, which operator lists")
-        } catch OperatorConfigError.invalid {}
-        // The same rule holds for a re-read: the hand edit is not used.
+        XCTAssertEqual(runtime.running, both)
+        // PUT
+        let dropped = try await put(config, "deploy", "{}")
+        XCTAssertEqual(runtime.running, both)
+        let a = try XCTUnwrap(dropped.status.chains.first { $0.path == "Nexus/A" })
+        XCTAssertEqual(a.from, [])
+        XCTAssertEqual(a.impliedBy, ["Nexus/A/B"])
+        XCTAssertEqual(a.actual, "hosted")
+        // DELETE
+        _ = try await put(config, "deploy", #"{"hostedChains":["Nexus/A"]}"#)
+        _ = try await config.delete("deploy", ifMatch: nil, remote: false)
+        XCTAssertEqual(runtime.running, both)
+        // A hand edit, read on SIGHUP
+        try data(#"{"hostedChains":["Nexus/A"]}"#).write(to: ConfigFragments.file(root: layout.root, name: "deploy"))
+        await config.reload()
         try data("{}").write(to: ConfigFragments.file(root: layout.root, name: "deploy"))
         await config.reload()
-        let kept = try await config.current()
-        XCTAssertTrue(kept.status.errors.contains { $0.hasPrefix("reload:") && $0.contains("Nexus/A/B") }, "\(kept.status.errors)")
-        XCTAssertEqual(Set(runtime.hostedChildren.map { $0.joined(separator: "/") }), ["Nexus/A", "Nexus/A/B"])
-        // Removed from every layer, it stops.
-        try data(#"{"hostedChains":["Nexus/A"]}"#).write(to: ConfigFragments.file(root: layout.root, name: "deploy"))
-        _ = try await config.delete("operator", ifMatch: nil, remote: false)
-        XCTAssertEqual(runtime.hostedChildren.map { $0.joined(separator: "/") }, ["Nexus/A"])
+        let reloaded = try await config.current()
+        XCTAssertEqual(reloaded.status.errors, [])
+        XCTAssertEqual(runtime.running, both)
+        // A restart: allowed, and the new process hosts both.
+        try await config.checkRestart()
+        let merged = try MergedConfig.load(root: layout.root)
+        let arguments = merged.topology.nodeArguments(layout: layout)
+        XCTAssertTrue(zip(arguments, arguments.dropFirst()).contains { $0 == ("--host-chain", "Nexus/A") }, "\(arguments)")
+        let restarted = FakeRuntime()
+        let fresh = OperatorConfig(layout: layout, desired: merged, started: merged.topology, runtime: restarted)
+        await fresh.reload()
+        XCTAssertEqual(restarted.running, both)
+    }
+
+    /// Once no layer lists a chain or any chain under it, it stops, and so
+    /// do the ancestors it alone kept.
+    func testRemovingTheLastListingStopsALeafAndTheAncestorsItKept() async throws {
+        let runtime = FakeRuntime()
+        let (config, _) = try make(runtime: runtime)
+        _ = try await put(config, "deploy", #"{"hostedChains":["Nexus/C"]}"#)
+        _ = try await put(config, "operator", #"{"hostedChains":["Nexus/A/B","Nexus/C/D"]}"#)
+        XCTAssertEqual(runtime.running, ["Nexus/A", "Nexus/A/B", "Nexus/C", "Nexus/C/D"])
+        let after = try await put(config, "operator", "{}")
+        XCTAssertEqual(runtime.running, ["Nexus/C"], "Nexus/C is still listed by deploy")
+        XCTAssertEqual(after.status.chains.map(\.path), ["Nexus/C"])
+        XCTAssertEqual(after.spec.hostedChains, ["Nexus/C"])
+    }
+
+    /// An implied ancestor's settings apply as a listed chain's do.
+    func testSettingsOfAnImpliedParentApply() async throws {
+        let runtime = FakeRuntime()
+        let (config, _) = try make(runtime: runtime)
+        let key = String(repeating: "ab", count: 33)
+        let response = try await put(
+            config, "operator", #"{"hostedChains":["Nexus/A/B"],"peers":{"Nexus/A":["\#(key)@10.0.0.1:4001"]}}"#
+        )
+        XCTAssertEqual(response.status.inert, [])
+        XCTAssertEqual(response.spec.peers?.byChain["Nexus/A"], ["\(key)@10.0.0.1:4001"])
+        XCTAssertEqual(runtime.seedPeers[["Nexus", "A"]]?.count, 1)
     }
 
     /// A setting for a chain not hosted, or a state window without `state:
@@ -294,64 +344,20 @@ final class OperatorConfigTests: XCTestCase {
         } catch OperatorConfigError.notFound {}
     }
 
-    /// A chain listed but not running (its parent waiting) takes no spec
-    /// through the API either.
-    func testALiveCreateOfAListedChainNotRunningIsRefused() async throws {
-        let runtime = FakeRuntime()
+    /// A chain in the hosted tree takes no spec through the API, running or
+    /// not, listed or implied.
+    func testALiveCreateOfAChainInTheTreeIsRefused() async throws {
+        let runtime = FakeRuntime(failing: ["Nexus/A/B"])
         let (config, layout) = try make(runtime: runtime)
         let listed = try await put(config, "operator", #"{"hostedChains":["Nexus/A/B"]}"#)
         XCTAssertEqual(listed.status.chains.first { $0.path == "Nexus/A/B" }?.actual, "notHosted")
-        do {
-            _ = try await config.create(HostedChain(path: "Nexus/A/B", spec: spec))
-            XCTFail("a listed chain took a spec")
-        } catch OperatorConfigError.conflict {}
-        XCTAssertFalse(ChainCreation.isCreated("Nexus/A/B", layout: layout))
-    }
-
-    /// Converging applies every layer as it is on disk: a file changed by
-    /// hand and not applied yet that would stop a running, listed chain
-    /// holds every change back, and the refusal names it. The chain runs on.
-    func testAnUnappliedEditThatWouldStopAChainIsNamed() async throws {
-        let runtime = FakeRuntime()
-        let (config, layout) = try make(runtime: runtime)
-        _ = try await put(config, "deploy", #"{"hostedChains":["Nexus/A"]}"#)
-        _ = try await put(config, "operator", #"{"hostedChains":["Nexus/A/B"]}"#)
-        // By hand, not read yet: deploy no longer lists Nexus/A.
-        try data("{}").write(to: ConfigFragments.file(root: layout.root, name: "deploy"))
-        do {
-            _ = try await put(config, "hostmarket", #"{"minRelayFee":4}"#)
-            XCTFail("a change that applies the edit, stopping Nexus/A/B, was accepted")
-        } catch OperatorConfigError.invalid(let reason) {
-            XCTAssertTrue(reason.contains("config.d/deploy.json (not applied)") && reason.contains("Nexus/A/B"), reason)
+        for path in ["Nexus/A/B", "Nexus/A"] {
+            do {
+                _ = try await config.create(HostedChain(path: path, spec: spec))
+                XCTFail("\(path) took a spec")
+            } catch OperatorConfigError.conflict {}
+            XCTAssertFalse(ChainCreation.isCreated(path, layout: layout))
         }
-        XCTAssertEqual(Set(runtime.hostedChildren.map { $0.joined(separator: "/") }), ["Nexus/A", "Nexus/A/B"])
-        XCTAssertFalse(FileManager.default.fileExists(atPath: ConfigFragments.file(root: layout.root, name: "hostmarket").path))
-        // Fixed, the change goes through.
-        try data(#"{"hostedChains":["Nexus/A"]}"#).write(to: ConfigFragments.file(root: layout.root, name: "deploy"))
-        let applied = try await put(config, "hostmarket", #"{"minRelayFee":4}"#)
-        XCTAssertEqual(applied.spec.minRelayFee, 4)
-        // A change that itself would stop it is refused as such.
-        do {
-            _ = try await config.delete("deploy", ifMatch: nil, remote: false)
-            XCTFail("removing Nexus/A, which Nexus/A/B needs, was accepted")
-        } catch OperatorConfigError.invalid(let reason) {
-            XCTAssertTrue(reason.hasPrefix("this change would stop Nexus/A/B"), reason)
-        }
-    }
-
-    /// A restart is held to the same rule: it may not stop a running chain
-    /// a layer still lists.
-    func testARestartThatWouldStopAListedChainIsRefused() async throws {
-        let runtime = FakeRuntime()
-        let (config, layout) = try make(runtime: runtime)
-        _ = try await put(config, "deploy", #"{"hostedChains":["Nexus/A"]}"#)
-        _ = try await put(config, "operator", #"{"hostedChains":["Nexus/A/B"]}"#)
-        try await config.checkRestart()
-        try data("{}").write(to: ConfigFragments.file(root: layout.root, name: "deploy"))
-        do {
-            try await config.checkRestart()
-            XCTFail("a restart that stops Nexus/A/B was allowed")
-        } catch OperatorConfigError.invalid {}
     }
 
     /// `If-None-Match: *` writes a fragment only while there is none.

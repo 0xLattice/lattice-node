@@ -228,9 +228,7 @@ struct NodeTarget: ParsableArguments {
         ConfigResponse(
             spec: merged.topology, fragments: merged.layers,
             status: ConfigStatus(
-                chains: merged.declaredBy.keys.sorted().map {
-                    ConfigStatus.Chain(path: $0, from: merged.declaredBy[$0] ?? [], actual: "notHosted", error: merged.chainErrors[$0])
-                },
+                chains: merged.tree.status(running: [], errors: [:]),
                 pendingRestart: [], errors: [], inert: merged.inert
             )
         )

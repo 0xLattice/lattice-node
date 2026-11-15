@@ -16,8 +16,9 @@ public enum ChainCreation {
         }
     }
 
-    /// The chain is followed here without a spec: listed by a layer, or held
-    /// in storage. A spec now would mine a rival genesis.
+    /// The chain is followed here without a spec: in the hosted tree (listed
+    /// by a layer, or implied by a chain listed under it), or held in
+    /// storage. A spec now would mine a rival genesis.
     public struct Synced: Error, CustomStringConvertible {
         public let path: String
         public let reason: String
@@ -64,13 +65,13 @@ public enum ChainCreation {
             guard sameSpec, premine == chain.premineTo, genesis == genesisData else { throw Exists(path: chain.path) }
             return false
         }
-        // A chain already followed here takes no spec, running or not (its
-        // parent waiting, failed to start, unhosted with its data kept).
-        let listedBy = try ConfigFragments.layers(root: layout.root).filter {
-            ($0.object["hostedChains"] as? [Any] ?? []).contains { $0 as? String == chain.path }
-        }.map(\.name)
-        if !listedBy.isEmpty {
-            throw Synced(path: chain.path, reason: "listed by \(listedBy.joined(separator: ", "))")
+        // A chain already followed here takes no spec, running or not (in
+        // the hosted tree, listed or implied; failed to start; unhosted with
+        // its data kept).
+        if let followed = try MergedConfig.load(root: layout.root).tree[chain.path] {
+            throw Synced(path: chain.path, reason: followed.listedBy.isEmpty
+                ? "hosted for \(followed.impliedBy.joined(separator: ", "))"
+                : "listed by \(followed.listedBy.joined(separator: ", "))")
         }
         // Fails closed: a store that cannot be read refuses the creation.
         let holds: Bool

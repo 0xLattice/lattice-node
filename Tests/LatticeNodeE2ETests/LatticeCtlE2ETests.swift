@@ -314,7 +314,7 @@ final class LatticeCtlE2ETests: XCTestCase {
 
     /// The configuration in layers: a fragment applied, one written by hand
     /// and read on SIGHUP, a chain another fragment lists refused to `child
-    /// unhost`; and an operator listener whose port is taken reported, not
+    /// unhost`, one a chain under it keeps said to stay; and an operator listener whose port is taken reported, not
     /// fatal.
     func testFragmentsAndAnOperatorListenerThatCannotOpen() async throws {
         #if canImport(Darwin)
@@ -351,6 +351,13 @@ final class LatticeCtlE2ETests: XCTestCase {
         XCTAssertTrue(fragment.contains("Nexus/Beta"), fragment)
         let refused = try await runCtl(["child", "unhost", "Nexus/Beta"], root: host.root, expectFailure: true)
         XCTAssertTrue(refused.contains("listed by hostmarket"), refused)
+        // A chain listed under it keeps it hosted: said, not refused.
+        _ = try await runCtl(["child", "host", "Nexus/Delta/Eps"], root: host.root)
+        _ = try await runCtl(["child", "host", "Nexus/Delta"], root: host.root)
+        let kept = try await runCtl(["child", "unhost", "Nexus/Delta"], root: host.root)
+        XCTAssertTrue(kept.contains("still hosted for Nexus/Delta/Eps"), kept)
+        let implied = try await runCtl(["status"], root: host.root)
+        XCTAssertTrue(implied.contains("Nexus/Delta: implied by Nexus/Delta/Eps"), implied)
 
         // A fragment written by hand is read on SIGHUP, and a later one wins.
         try Data(#"{"minRelayFee":9}"#.utf8).write(to: ConfigFragments.file(root: host.root, name: "zz-hand"))

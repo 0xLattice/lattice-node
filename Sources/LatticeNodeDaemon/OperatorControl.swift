@@ -38,8 +38,9 @@ protocol HostingRuntime: Sendable {
 /// fragment through its API, and converges to what they say: hosted chains
 /// and their peers at once, every other key at its next start (reported as
 /// pending a restart). It writes the fragments it is sent, and never
-/// lattice.json. Changes are applied one at a time, in arrival order, and a
-/// running chain stops only once no layer lists it.
+/// lattice.json. Changes are applied one at a time, in arrival order. The
+/// chains hosted are the merged tree (`HostedTree`): a chain stops only once
+/// no layer lists it or any chain under it.
 actor OperatorConfig {
     let layout: HostLayout
     /// What this process started with: a key that differs from it and takes
@@ -65,22 +66,11 @@ actor OperatorConfig {
 
     func current() throws -> ConfigResponse {
         let running = Set(runtime.hostedChildren.map { $0.joined(separator: "/") })
-        let depth = { (path: String) in path.split(separator: "/").count }
-        let listed = desired.declaredBy.keys.sorted { (depth($0), $0) < (depth($1), $1) }
-        var chains = listed.map { path in
-            ConfigStatus.Chain(
-                path: path, from: desired.declaredBy[path] ?? [],
-                actual: running.contains(path) ? "hosted" : "notHosted",
-                error: desired.chainErrors[path] ?? hostErrors[path]
-            )
-        }
-        for path in running.subtracting(listed).sorted() {
-            chains.append(ConfigStatus.Chain(path: path, from: [], actual: "hosted", error: "no layer lists it, and it did not stop"))
-        }
         return ConfigResponse(
             spec: desired.topology, fragments: desired.layers,
             status: ConfigStatus(
-                chains: chains, pendingRestart: try desired.topology.restartRequired(comparedTo: started),
+                chains: desired.tree.status(running: running, errors: hostErrors),
+                pendingRestart: try desired.topology.restartRequired(comparedTo: started),
                 errors: problems.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" },
                 inert: desired.inert
             )
@@ -130,7 +120,7 @@ actor OperatorConfig {
             if ifNoneMatch?.trimmingCharacters(in: .whitespaces) == "*", FileManager.default.fileExists(atPath: file.path) {
                 throw OperatorConfigError.changed("\(name) was created since it was read (If-None-Match); read it again")
             }
-            let next = try vet(remote: remote, writing: name) {
+            let next = try checked(remote: remote) {
                 try MergedConfig.merge(ConfigFragments.layers(root: layout.root, replacing: name, with: object))
             }
             try writeDurably(data, to: file)
@@ -148,7 +138,7 @@ actor OperatorConfig {
                 throw OperatorConfigError.notFound("no fragment \(name)")
             }
             try precondition(file, ifMatch)
-            let next = try vet(remote: remote, writing: name) {
+            let next = try checked(remote: remote) {
                 try MergedConfig.merge(ConfigFragments.layers(root: layout.root, replacing: name, with: nil))
             }
             try removeDurably(file)
@@ -164,7 +154,7 @@ actor OperatorConfig {
     func reload() async {
         await serially {
             do {
-                desired = try vet(remote: false, writing: nil) { try MergedConfig.load(root: layout.root) }
+                desired = try checked(remote: false) { try MergedConfig.load(root: layout.root) }
                 problems["reload"] = nil
             } catch {
                 problems["reload"] = "\(error)"
@@ -201,18 +191,11 @@ actor OperatorConfig {
 
     /// Refuses a restart the configuration on disk would not survive: a
     /// node that cannot start is out of reach of this API.
-    /// A restart is held to the rule a change is: it may not stop a
-    /// running chain that a layer still lists.
     func checkRestart() throws {
-        let next: MergedConfig
         do {
-            next = try MergedConfig.load(root: layout.root)
-            try checkPlan(next.topology)
+            try checkPlan(MergedConfig.load(root: layout.root).topology)
         } catch {
             throw OperatorConfigError.invalid("the configuration would not start the node: \(error); fix it before restarting")
-        }
-        if let stopped = stopsListed(next) {
-            throw OperatorConfigError.invalid("the configuration would stop \(stopped.description) at a restart; fix it first")
         }
     }
 
@@ -227,35 +210,9 @@ actor OperatorConfig {
         }
     }
 
-    /// A running chain that the configuration in use hosts and `next`
-    /// would stop although a layer of `next` still lists it; nil when there
-    /// is none.
-    private func stopsListed(_ next: MergedConfig) -> (path: String, description: String)? {
-        let hostedNow = Set(desired.topology.hostedChains ?? [])
-        let hostedNext = Set(next.topology.hostedChains ?? [])
-        return runtime.hostedChildren.map { $0.joined(separator: "/") }.sorted().first {
-            hostedNow.contains($0) && !hostedNext.contains($0) && next.declaredBy[$0] != nil
-        }.map { ($0, "\($0), which runs and is still listed (\(next.chainErrors[$0] ?? "not hosted"))") }
-    }
-
-    /// The files changed on disk since the configuration in use was read,
-    /// `except` the one being written.
-    private func unapplied(except name: String?) -> [String] {
-        guard let layers = try? ConfigFragments.layers(root: layout.root) else { return [] }
-        let onDisk = Set(layers.map(\.name))
-        let changed = layers.filter { $0.name != name && desired.sources[$0.name] != $0.canonical }.map(\.fileName)
-        let removed = desired.sources.keys.filter { $0 != name && !onDisk.contains($0) }.sorted()
-            .map { ConfigLayer(name: $0, object: [:]).fileName }
-        return changed + removed
-    }
-
-    /// The configuration `make` makes, if the node may converge to it: it
-    /// would start, a remote client named no file of this node's disk, and
-    /// it stops no running chain that a layer still lists. Converging
-    /// applies every layer as it is on disk, so a stop is refused whatever
-    /// causes it; when a file changed by hand and not applied yet causes it
-    /// too, the refusal names that file.
-    private func vet(remote: Bool, writing name: String?, _ make: () throws -> MergedConfig) throws -> MergedConfig {
+    /// The configuration `make` makes, if the node may take it: it would
+    /// start, and a remote client named no file on this node's disk.
+    private func checked(remote: Bool, _ make: () throws -> MergedConfig) throws -> MergedConfig {
         let next: MergedConfig
         do {
             next = try make()
@@ -265,16 +222,6 @@ actor OperatorConfig {
         }
         if remote, next.topology.operatorTokens != desired.topology.operatorTokens {
             throw OperatorConfigError.invalid("the operator listener takes no file paths: operatorTokens is set beside the node")
-        }
-        if let stopped = stopsListed(next) {
-            let changed = unapplied(except: name)
-            if !changed.isEmpty, let onDisk = try? MergedConfig.load(root: layout.root),
-               stopsListed(onDisk)?.path == stopped.path {
-                throw OperatorConfigError.invalid(
-                    "\(changed.joined(separator: ", ")) (not applied) would stop \(stopped.description); fix it first"
-                )
-            }
-            throw OperatorConfigError.invalid("this change would stop \(stopped.description)")
         }
         return next
     }
@@ -297,7 +244,7 @@ actor OperatorConfig {
         return try await body()
     }
 
-    /// Hosts what `desired` lists: a path created here (its files under
+    /// Hosts the tree `desired` makes: a path created here (its files under
     /// `specs/`) is mined from its spec, any other synced from its peers.
     /// One that does not start is reported, with its children.
     private func converge() async {
@@ -474,10 +421,10 @@ func addOperatorControlRoutes(
     writes service: any OperatorWrites,
     remote: Bool
 ) {
-    // The child chains this node hosts, and those its configuration lists:
-    // what `GET /config` reports in its status.
+    // The child chains this node hosts, and those its configuration hosts
+    // (listed or implied): what `GET /config` reports.
     router.get("hosted-chains") { request, context in
-        guard let status = try await control.config?.current().status else {
+        guard let config = try await control.config?.current() else {
             return try json(
                 HostedChainsResponse(chains: service.hostedChildren.map { $0.joined(separator: "/") }, configured: nil),
                 request: request, context: context
@@ -485,8 +432,8 @@ func addOperatorControlRoutes(
         }
         return try json(
             HostedChainsResponse(
-                chains: status.chains.filter { $0.actual == "hosted" }.map(\.path),
-                configured: status.chains.filter { !$0.from.isEmpty }.map(\.path)
+                chains: config.status.chains.filter { $0.actual == "hosted" }.map(\.path),
+                configured: config.spec.hostedChains ?? []
             ),
             request: request, context: context
         )

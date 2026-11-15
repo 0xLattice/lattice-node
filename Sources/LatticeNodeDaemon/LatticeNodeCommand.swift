@@ -177,9 +177,6 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             logLine("warning: \(Topology.retiredMiningWarning)")
         }
         try performRequestedWipe(layout)
-        for (path, error) in merged.chainErrors.sorted(by: { $0.key < $1.key }) {
-            logLine("not hosting \(path): \(error)")
-        }
         for note in merged.inert { logLine("configuration: \(note)") }
         let topology = merged.topology
         var command: LatticeNodeCommand

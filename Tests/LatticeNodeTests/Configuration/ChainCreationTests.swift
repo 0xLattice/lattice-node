@@ -20,15 +20,17 @@ final class ChainCreationTests: XCTestCase {
         return HostLayout(root: root.path)
     }
 
-    func testAPathALayerListsTakesNoSpec() throws {
+    func testAPathInTheHostedTreeTakesNoSpec() throws {
         let layout = try root()
         try FileManager.default.createDirectory(at: ConfigFragments.directory(root: layout.root), withIntermediateDirectories: true)
-        // Listed but not hosted: its parent waits.
+        // Listed, and its parent implied: both are followed, neither created.
         try Data(#"{"hostedChains":["Nexus/A/B"]}"#.utf8).write(to: ConfigFragments.file(root: layout.root, name: "operator"))
-        XCTAssertThrowsError(try ChainCreation.create(HostedChain(path: "Nexus/A/B", spec: spec), layout: layout)) {
-            XCTAssertTrue($0 is ChainCreation.Synced, "\($0)")
+        for path in ["Nexus/A/B", "Nexus/A"] {
+            XCTAssertThrowsError(try ChainCreation.create(HostedChain(path: path, spec: spec), layout: layout)) {
+                XCTAssertTrue($0 is ChainCreation.Synced, "\($0)")
+            }
+            XCTAssertFalse(ChainCreation.isCreated(path, layout: layout))
         }
-        XCTAssertFalse(ChainCreation.isCreated("Nexus/A/B", layout: layout))
         XCTAssertTrue(try ChainCreation.create(HostedChain(path: "Nexus/C", spec: spec), layout: layout))
     }
 

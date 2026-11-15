@@ -12,12 +12,13 @@
 //   and `operatorAllowedOrigins`: the union of every layer's;
 // - `stateWindows` and `finalityWindows`: per chain path, the later layer's.
 // A key set to null is as if the layer did not set it: it does not unset
-// an earlier layer's value. A chain whose parent no layer hosts is left
-// unhosted, reported. A setting for a chain not hosted (its peers, its
-// windows), or a state window while `state` is not `recent`, is inert:
-// reported, not applied, not an error. Any other problem (a file that is
-// not JSON, an unknown key, a merged result that does not check) is the
-// whole configuration's: the node does not start, and a change is refused.
+// an earlier layer's value. The listed chains, with their ancestors, make
+// the tree the node hosts (`HostedTree`). A setting for a chain not in it
+// (its peers, its windows), or a state window while `state` is not
+// `recent`, is inert: reported, not applied, not an error. Any other
+// problem (a file that is not JSON, an unknown key, a merged result that
+// does not check) is the whole configuration's: the node does not start,
+// and a change is refused.
 
 import Foundation
 import Lattice
@@ -33,16 +34,6 @@ public struct ConfigLayer {
     public init(name: String, object: [String: Any]) {
         self.name = name
         self.object = object
-    }
-
-    /// The layer's file as named in messages.
-    public var fileName: String {
-        name == ConfigFragments.baseName ? Topology.fileName : "\(ConfigFragments.directoryName)/\(name).json"
-    }
-
-    /// Its object, keys sorted: equal for equal content.
-    public var canonical: Data {
-        (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data()
     }
 }
 
@@ -126,25 +117,22 @@ public enum ConfigFragments {
     }
 }
 
+
 /// The configuration every layer makes together.
 public struct MergedConfig: Sendable {
-    /// The merged configuration, checked: its `hostedChains` are the chains
-    /// that can be hosted (parent first), the ones in `chainErrors` left out,
-    /// and the inert settings left out.
+    /// The merged configuration, checked, as the node's flags take it: its
+    /// `hostedChains`, `peers`, `stateWindows` and `finalityWindows` are the
+    /// tree's, the inert settings left out.
     public let topology: Topology
-    /// The layers that list each chain, in merge order.
-    public let declaredBy: [String: [String]]
-    /// The chains listed but not hosted, and why.
-    public let chainErrors: [String: String]
+    /// The chains hosted: what the layers list, with their ancestors, and
+    /// each chain's settings.
+    public let tree: HostedTree
     /// What the layers set that does not apply, and why: settings for chains
-    /// not hosted, state windows without `state: recent`, files of config.d
-    /// that are not read.
+    /// not in the tree, state windows without `state: recent`, files of
+    /// config.d that are not read.
     public let inert: [String]
     /// The layers merged, in order.
     public let layers: [String]
-    /// Each layer's content as merged (its JSON object, keys sorted), to
-    /// tell which file changed since.
-    public let sources: [String: Data]
 
     public static func load(root: URL) throws -> MergedConfig {
         let merged = try merge(ConfigFragments.layers(root: root))
@@ -152,85 +140,66 @@ public struct MergedConfig: Sendable {
             "\(ConfigFragments.directoryName)/\($0) is not read: a fragment is <name>.json, the name lowercase letters, digits, ., _ and -"
         }
         guard !ignored.isEmpty else { return merged }
-        return MergedConfig(
-            topology: merged.topology, declaredBy: merged.declaredBy, chainErrors: merged.chainErrors,
-            inert: merged.inert + ignored, layers: merged.layers, sources: merged.sources
-        )
+        return MergedConfig(topology: merged.topology, tree: merged.tree, inert: merged.inert + ignored, layers: merged.layers)
     }
 
     private static let unionLists: Set<String> = ["rpcAllowedOrigins", "operatorAllowedOrigins"]
-    private static let chainMaps: Set<String> = ["stateWindows", "finalityWindows"]
+    private static let chainKeys: Set<String> = ["hostedChains", "peers", "stateWindows", "finalityWindows", Topology.retiredMiningKey]
 
     public static func merge(_ layers: [ConfigLayer]) throws -> MergedConfig {
         var merged: [String: Any] = [:]
-        var chains: [String] = []
-        var declaredBy: [String: [String]] = [:]
-        var chainErrors: [String: String] = [:]
-        var peers: [String: [String]] = [:]
+        var listedBy: [String: [String]] = [:]
+        var settings: [String: ChainSettings] = [:]
         var lists: [String: [String]] = [:]
-        var maps: [String: [String: Any]] = [:]
         for layer in layers {
-            for path in try check(layer) {
-                if declaredBy[path] == nil { chains.append(path) }
-                if declaredBy[path]?.contains(layer.name) != true { declaredBy[path, default: []].append(layer.name) }
+            let (paths, parsed) = try check(layer)
+            for path in paths where listedBy[path]?.contains(layer.name) != true {
+                listedBy[path, default: []].append(layer.name)
             }
-            for (key, value) in layer.object where key != "hostedChains" && key != Topology.retiredMiningKey {
-                if value is NSNull { continue }
-                if key == "peers" {
-                    let byChain = (value as? [String]).map { [ChainAddress.nexus: $0] } ?? (value as? [String: [String]] ?? [:])
-                    for (chain, list) in byChain { peers[chain] = union(peers[chain] ?? [], list) }
-                } else if unionLists.contains(key) {
+            for (chain, list) in parsed.peers?.byChain ?? [:] {
+                settings[chain, default: ChainSettings()].peers = union(settings[chain]?.peers ?? [], list)
+            }
+            for (chain, window) in parsed.stateWindows ?? [:] { settings[chain, default: ChainSettings()].stateWindow = window }
+            for (chain, window) in parsed.finalityWindows ?? [:] { settings[chain, default: ChainSettings()].finalityWindow = window }
+            for (key, value) in layer.object where !chainKeys.contains(key) && !(value is NSNull) {
+                if unionLists.contains(key) {
                     lists[key] = union(lists[key] ?? [], value as? [String] ?? [])
-                } else if chainMaps.contains(key) {
-                    maps[key, default: [:]].merge(value as? [String: Any] ?? [:]) { _, later in later }
                 } else {
                     merged[key] = value
                 }
             }
         }
-        // Parent first; a chain whose parent is not hosted waits for it.
-        var hosted: [String] = []
-        var hostable: Set<String> = [ChainAddress.nexus]
-        let depth = { (path: String) in path.split(separator: "/").count }
-        for path in chains.sorted(by: { (depth($0), $0) < (depth($1), $1) }) {
-            guard let parent = ChainAddress(string: path)?.parent?.key, hostable.contains(parent) else {
-                let parent = ChainAddress(string: path)?.parent?.key ?? "its parent"
-                chainErrors[path] = "waiting for \(parent), which is not hosted"
-                continue
-            }
-            hostable.insert(path)
-            hosted.append(path)
-        }
-        if !chains.isEmpty { merged["hostedChains"] = hosted }
+        for (key, list) in lists { merged[key] = list }
         // A zero window is wrong wherever it is, inert or not.
-        if merged["stateWindow"] as? Int == 0 || (maps["stateWindows"] ?? [:]).values.contains(where: { $0 as? Int == 0 }) {
+        if merged["stateWindow"] as? Int == 0 || settings.values.contains(where: { $0.stateWindow == 0 }) {
             throw CtlError("a state window is at least 1 block")
         }
-        // A setting for a chain not hosted waits, inert, until it is.
         var inert: [String] = []
-        for chain in peers.keys.sorted() where !hostable.contains(chain) {
-            inert.append("peers for \(chain): not hosted")
-            peers[chain] = nil
+        let state = merged["state"] as? String ?? "all"
+        if state != "recent" {
+            if settings.values.contains(where: { $0.stateWindow != nil }) {
+                inert.append("stateWindows: state is \(state), not recent")
+                for chain in settings.keys { settings[chain]?.stateWindow = nil }
+            }
+            if merged["stateWindow"] != nil {
+                inert.append("stateWindow: state is \(state), not recent")
+                merged["stateWindow"] = nil
+            }
         }
+        let tree = HostedTree(listedBy: listedBy, settings: settings)
+        // A setting for a chain not in the tree waits, inert, until it is.
+        for (chain, setting) in settings.sorted(by: { $0.key < $1.key }) where tree[chain] == nil {
+            if setting.peers != nil { inert.append("peers for \(chain): not hosted") }
+            if setting.stateWindow != nil { inert.append("stateWindows for \(chain): not hosted") }
+            if setting.finalityWindow != nil { inert.append("finalityWindows for \(chain): not hosted") }
+        }
+        if !tree.children.isEmpty { merged["hostedChains"] = tree.children }
+        let peers = tree.chains.reduce(into: [String: [String]]()) { $0[$1.path] = $1.settings.peers }
+        let stateWindows = tree.chains.reduce(into: [String: UInt64]()) { $0[$1.path] = $1.settings.stateWindow }
+        let finalityWindows = tree.chains.reduce(into: [String: UInt64]()) { $0[$1.path] = $1.settings.finalityWindow }
         if !peers.isEmpty { merged["peers"] = peers }
-        for (key, list) in lists { merged[key] = list }
-        let recent = (merged["state"] as? String ?? "all") == "recent"
-        for key in chainMaps.sorted() {
-            guard var map = maps[key] else { continue }
-            for chain in map.keys.sorted() where ChainAddress(string: chain) != nil && !hostable.contains(chain) {
-                inert.append("\(key) for \(chain): not hosted")
-                map[chain] = nil
-            }
-            if key == "stateWindows", !recent, !map.isEmpty {
-                inert.append("stateWindows: state is \(merged["state"] as? String ?? "all"), not recent")
-                map = [:]
-            }
-            if !map.isEmpty { merged[key] = map }
-        }
-        if !recent, merged["stateWindow"] != nil {
-            inert.append("stateWindow: state is \(merged["state"] as? String ?? "all"), not recent")
-            merged["stateWindow"] = nil
-        }
+        if !stateWindows.isEmpty { merged["stateWindows"] = stateWindows }
+        if !finalityWindows.isEmpty { merged["finalityWindows"] = finalityWindows }
         for key in ["listen", "rpc"] where merged[key] == nil {
             throw CtlError("no layer sets \(key) (\(layers.map(\.name).joined(separator: ", ")))")
         }
@@ -240,15 +209,12 @@ public struct MergedConfig: Sendable {
         } catch {
             throw CtlError("the merged configuration (\(layers.map(\.name).joined(separator: ", "))) does not check: \(error)")
         }
-        return MergedConfig(
-            topology: topology, declaredBy: declaredBy, chainErrors: chainErrors, inert: inert,
-            layers: layers.map(\.name), sources: Dictionary(uniqueKeysWithValues: layers.map { ($0.name, $0.canonical) })
-        )
+        return MergedConfig(topology: topology, tree: tree, inert: inert, layers: layers.map(\.name))
     }
 
-    /// The layer's hosted chains, after checking every key the layer sets
-    /// as lattice.json's.
-    private static func check(_ layer: ConfigLayer) throws -> [String] {
+    /// The layer's hosted chains, and the layer read as lattice.json (its
+    /// per-chain settings), after checking every key it sets.
+    private static func check(_ layer: ConfigLayer) throws -> ([String], Topology) {
         let name = layer.name == ConfigFragments.baseName ? Topology.fileName : "\(ConfigFragments.directoryName)/\(layer.name).json"
         var paths: [String] = []
         for entry in layer.object["hostedChains"] as? [Any] ?? [] {
@@ -268,12 +234,22 @@ public struct MergedConfig: Sendable {
         for (key, value) in probe where value is NSNull { probe[key] = nil }
         if probe["listen"] == nil { probe["listen"] = 1 }
         if probe["rpc"] == nil { probe["rpc"] = 1 }
+        let parsed: Topology
         do {
-            _ = try Topology.load(data: JSONSerialization.data(withJSONObject: probe))
+            parsed = try Topology.load(data: JSONSerialization.data(withJSONObject: probe))
         } catch {
             throw CtlError("\(name): \(error)")
         }
-        return paths
+        // A per-chain setting names a chain path (one not hosted is inert).
+        for (key, chains) in [
+            ("peers", parsed.peers?.byChain.keys.sorted()), ("stateWindows", parsed.stateWindows?.keys.sorted()),
+            ("finalityWindows", parsed.finalityWindows?.keys.sorted()),
+        ] {
+            if let chain = (chains ?? []).first(where: { ChainAddress(string: $0)?.key != $0 }) {
+                throw CtlError("\(name): \(key) names \(chain), which is not a chain path")
+            }
+        }
+        return (paths, parsed)
     }
 
     private static func union(_ first: [String], _ second: [String]) -> [String] {
