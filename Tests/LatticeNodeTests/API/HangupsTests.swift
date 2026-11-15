@@ -2,22 +2,19 @@ import Foundation
 import XCTest
 @testable import LatticeNodeDaemon
 
-/// SIGHUP is caught from the process's start: one that comes before the
-/// node can reload is kept, and acted on once it can.
+/// A SIGHUP caught before the node can reload is kept, and acted on once it
+/// can. (The signal's delivery to a running node is the E2E's.)
 final class HangupsTests: XCTestCase {
-    func testAnEarlySIGHUPIsActedOnOnceTheNodeCanReload() async throws {
+    func testAnEarlySIGHUPIsActedOnOnceTheNodeCanReload() {
         let hangups = Hangups()
-        hangups.install()
-        XCTAssertEqual(kill(getpid(), SIGHUP), 0, "the process survives it: caught, not its default")
-        // The signal source hands it over on its own queue.
-        try await Task.sleep(for: .milliseconds(300))
+        hangups.hangUp()
         let reloaded = expectation(description: "the early SIGHUP is acted on")
         hangups.onHangup { reloaded.fulfill() }
-        await fulfillment(of: [reloaded], timeout: 5)
-        // A later one goes straight to the action.
+        wait(for: [reloaded], timeout: 1)
+        // Acted on once; a later one goes straight to the action.
         let again = expectation(description: "a later SIGHUP")
         hangups.onHangup { again.fulfill() }
-        XCTAssertEqual(kill(getpid(), SIGHUP), 0)
-        await fulfillment(of: [again], timeout: 5)
+        hangups.hangUp()
+        wait(for: [again], timeout: 1)
     }
 }

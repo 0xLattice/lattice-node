@@ -1729,7 +1729,8 @@ final class Hangups: @unchecked Sendable {
         if caught { action() }
     }
 
-    private func hangUp() {
+    /// What a caught SIGHUP does (the signal source calls it).
+    func hangUp() {
         let action = lock.withLock { () -> (@Sendable () -> Void)? in
             if self.action == nil { missed = true }
             return self.action
