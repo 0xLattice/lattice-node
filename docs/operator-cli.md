@@ -384,10 +384,11 @@ the next round with no restart; a file that no longer checks is logged and
 the last good settings kept. An unknown key is refused.
 
 While there is no `miner.json`, the miner reads the `mine` object an older
-`lattice.json` in the same root still holds (its `enabled` ignored) and warns
-to move it, so a host upgraded with no edits keeps mining. Move it: the node
-drops that object the next time it writes `lattice.json` (any configuration
-change), and a miner started after that finds no settings.
+`lattice.json` in the same root still holds (its `enabled` ignored) and copies
+it to `miner.json` once, saying so (never over a `miner.json` already there),
+so a host upgraded with no edits keeps mining. The node drops that object the
+next time it writes `lattice.json`; the copy is what the miner reads from then
+on.
 
 `worker` is `cpu` for the bundled worker or an executable path implementing
 the worker contract. `recipients` sends each chain's reward and fees to an

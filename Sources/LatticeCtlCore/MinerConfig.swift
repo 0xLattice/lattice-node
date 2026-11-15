@@ -182,8 +182,10 @@ extension MinerConfig {
 
     /// The settings under `root`: its miner.json, or, while there is none,
     /// the `mine` object a lattice.json there still holds from before mining
-    /// was a process of its own (its `enabled` ignored), with a warning to
-    /// move it. Nil warning when read from miner.json.
+    /// was a process of its own (its `enabled` ignored). That object is
+    /// copied to miner.json the first time (never over one already there),
+    /// so the node dropping it from lattice.json later strands nothing; the
+    /// note says so. Nil note when read from miner.json.
     public static func load(root: URL) throws -> (config: MinerConfig, warning: String?) {
         let file = root.appendingPathComponent(fileName)
         if FileManager.default.fileExists(atPath: file.path) { return (try load(file: file), nil) }
@@ -194,9 +196,15 @@ extension MinerConfig {
             return (try load(file: file), nil)
         }
         mine["enabled"] = nil
+        let config = try load(mine, source: "\(topologyFile.path) (mine)")
+        let copy = try JSONSerialization.data(withJSONObject: mine, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+        guard try createDurably(copy, at: file) else {
+            // Another miner copied it first: read what is there.
+            return (try load(file: file), nil)
+        }
         return (
-            try load(mine, source: "\(topologyFile.path) (mine)"),
-            "mining with the mine object in \(topologyFile.path); move it to \(file.path), which the miner reads first (the node no longer uses it)"
+            config,
+            "copied the mine object in \(topologyFile.path) to \(file.path), which the miner reads from now on (the node no longer uses it)"
         )
     }
 
