@@ -55,21 +55,25 @@ Nexus bootstrap set.
 
 ```bash
 swift run lattice up --root ./node-data
+```
+
+The node runs in the foreground and logs to the terminal. From another shell:
+
+```bash
 swift run lattice status --root ./node-data
 curl -s http://127.0.0.1:8080/health | jq
 ```
 
-Stop it with:
+Stop it with Ctrl-C, or from another shell:
 
 ```bash
 swift run lattice down --root ./node-data
 ```
 
-For foreground/container operation:
-
-```bash
-swift run lattice up --root ./node-data --foreground
-```
+`lattice restart` makes the node exit 75 for a process manager to start it
+again; run by hand, start it again yourself. For a service, see
+`lattice emit-systemd` and `lattice emit-launchd`
+([Operator CLI](operator-cli.md#systemd-launchd-containers)).
 
 ## Add a child
 

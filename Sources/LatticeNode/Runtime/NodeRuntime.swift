@@ -210,8 +210,7 @@ public final class NodeRuntime: Sendable {
                 do {
                     try await runtime.webSocket.listen(port: port)
                 } catch {
-                    FileHandle.standardError.write(Data(
-                        "lattice-node: not listening for WebSocket and STUN on port \(port): \(error)\n".utf8))
+                    logLine("lattice-node: not listening for WebSocket and STUN on port \(port): \(error)")
                 }
             }
         } catch {
@@ -348,7 +347,7 @@ public final class NodeRuntime: Sendable {
         var punchOptions = PunchConnector.Options()
         punchOptions.autoUpgrade = false
         // One line for each attempt, saying how it ended.
-        punchOptions.log = { FileHandle.standardError.write(Data("lattice-node: \($0)\n".utf8)) }
+        punchOptions.log = { logLine("lattice-node: \($0)") }
         let punch = PunchConnector(
             ivy: ivy, localKey: configuration.processPublicKey,
             forwardingTo: delegate, options: punchOptions)
@@ -1156,7 +1155,7 @@ extension NodeRuntime {
             self[keyPath: waits][key] = reason
             let line = "waiting: body of \(key.cid): \(reason) (\(detail))"
             SyncTrace.log(chain: key.path, line)
-            FileHandle.standardError.write(Data("lattice-node [\(key.path.joined(separator: "/"))] \(line)\n".utf8))
+            logLine("lattice-node [\(key.path.joined(separator: "/"))] \(line)")
         }
 
         /// Republish the read view when the act-on chain, the pool or the

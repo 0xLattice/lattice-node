@@ -40,8 +40,8 @@ swift build
 
 mkdir -p node-data
 swift run lattice init --root node-data
-swift run lattice up --root node-data
-swift run lattice status --root node-data
+swift run lattice up --root node-data       # the node, in the foreground
+swift run lattice status --root node-data   # from another shell
 ```
 
 `lattice init` writes a flat `lattice.json`:

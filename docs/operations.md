@@ -159,10 +159,28 @@ that chain runs short of peers or stops progressing.
 ## Process lifecycle
 
 ```bash
-lattice up --root /var/lib/lattice
-lattice status --root /var/lib/lattice
+lattice up --root /var/lib/lattice        # runs the node in the foreground
+lattice status --root /var/lib/lattice    # from another shell
 lattice down --root /var/lib/lattice
 ```
+
+The node is run by a process manager, which starts it again after a failure.
+It exits 0 when asked to stop (`lattice down`, SIGTERM), 75 when asked to
+restart (`lattice restart`, `lattice wipe`) and 78 when its configuration
+does not check. The manager restarts it on a failure: systemd
+`Restart=on-failure` (the checked-in unit, and `lattice emit-systemd`),
+launchd `KeepAlive` with `SuccessfulExit` false (`lattice emit-launchd`),
+Docker `--restart on-failure`. Only systemd can be told to leave 78 alone
+(`RestartPreventExitStatus=78`); launchd and Docker restart it on 78 too,
+throttled, and it exits 78 again until the configuration is fixed. On Fly,
+every exit but 0 counts toward the Machine's restart limit (`max_retries`,
+10 by default), so run the node from an entrypoint that starts it again on
+75 itself ([Operator CLI](operator-cli.md#systemd-launchd-containers)). Give
+an orderly stop time: systemd `TimeoutStopSec=90`, Fly `kill_timeout` of
+60 s or more with `[[restart]] policy = "on-failure"`. The
+node logs to standard error, which the manager keeps (`journalctl`, `docker
+logs`, `fly logs`); `lattice logs` reads the running node's last lines from
+its memory.
 
 For systemd, install the checked-in units and a topology:
 

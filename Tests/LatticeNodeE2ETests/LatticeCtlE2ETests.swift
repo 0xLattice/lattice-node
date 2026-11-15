@@ -19,6 +19,7 @@ final class LatticeCtlE2ETests: XCTestCase {
     private struct CtlHost {
         let root: URL
         let nexusRPC: UInt16
+        let supervisor: NodeSupervisor
     }
 
     private var hosts: [CtlHost] = []
@@ -45,6 +46,7 @@ final class LatticeCtlE2ETests: XCTestCase {
         for host in hosts {
             _ = try? await runCtl(["mine", "stop"], root: host.root)
             _ = try? await runCtl(["down"], root: host.root)
+            host.supervisor.stop()
             if failed {
                 print("lattice-ctl E2E artifacts retained at \(host.root.path)")
             } else {
@@ -281,8 +283,11 @@ final class LatticeCtlE2ETests: XCTestCase {
             try FileManager.default.removeItem(at: file)
         }
 
-        _ = try await runCtl(["up"], root: root)
-        let host = CtlHost(root: root, nexusRPC: ports[1])
+        let host = CtlHost(
+            root: root, nexusRPC: ports[1],
+            supervisor: NodeSupervisor(lattice: try binary("E2E_CTL_BIN", "lattice"), root: root)
+        )
+        try host.supervisor.start()
         hosts.append(host)
         try await waitFor("Nexus active") {
             await self.health(host.nexusRPC)?["phase"] as? String == "active"
@@ -305,44 +310,6 @@ final class LatticeCtlE2ETests: XCTestCase {
         var recipients = try MinerConfig.load(file: file).recipients ?? [:]
         recipients[chain] = address
         try writeMinerConfig(root, recipients: recipients)
-    }
-
-    /// The descriptors `pid` holds open, or nil where this cannot be read.
-    private func openDescriptors(_ pid: Int32) -> Int? {
-        try? FileManager.default
-            .contentsOfDirectory(atPath: "/proc/\(pid)/fd").count
-    }
-
-    /// `up --foreground` is a container's PID 1: it checks on the node every
-    /// second for as long as the node runs. A descriptor kept from each check
-    /// reaches the process's limit within hours, after which the supervisor
-    /// can read nothing, takes the node for dead and exits.
-    func testTheForegroundSupervisorHoldsNoMoreDescriptorsAsItWatches() async throws {
-        let host = try await bringUpMiningHost(miner: nil)
-        let supervisor = Process()
-        supervisor.executableURL = try binary("E2E_CTL_BIN", "lattice")
-        supervisor.arguments = ["up", "--foreground", "--root", host.root.path]
-        supervisor.standardOutput = FileHandle.nullDevice
-        supervisor.standardError = FileHandle.nullDevice
-        try supervisor.run()
-        defer {
-            supervisor.terminate()
-            supervisor.waitUntilExit()
-        }
-        try XCTSkipIf(
-            openDescriptors(ProcessInfo.processInfo.processIdentifier) == nil,
-            "no /proc here to count another process's descriptors"
-        )
-        // Past start-up, where descriptors are still being opened.
-        try await Task.sleep(for: .seconds(5))
-        let before = try XCTUnwrap(openDescriptors(supervisor.processIdentifier))
-        try await Task.sleep(for: .seconds(15))
-        XCTAssertTrue(supervisor.isRunning, "the supervisor is still watching")
-        let after = try XCTUnwrap(openDescriptors(supervisor.processIdentifier))
-        XCTAssertLessThanOrEqual(
-            after, before + 3,
-            "fifteen checks on the node left \(after - before) more descriptors open"
-        )
     }
 
     func testNexusMiningAndTransferThroughTheCLI() async throws {
@@ -623,8 +590,11 @@ final class LatticeCtlE2ETests: XCTestCase {
         }
         let before = await height(host.nexusRPC, chain: alpha)
         _ = try await runCtl(["mine", "stop"], root: host.root)
+        // Asked to stop, the node exits 0 and its process manager leaves it.
         _ = try await runCtl(["down"], root: host.root)
-        _ = try await runCtl(["up"], root: host.root)
+        try await waitFor("the node exits") { !host.supervisor.isRunning }
+        XCTAssertEqual(host.supervisor.exits.last, 0)
+        try host.supervisor.start()
         try await waitFor("Alpha resumes where it was") {
             await self.height(host.nexusRPC, chain: alpha) >= before
         }
@@ -852,15 +822,6 @@ extension LatticeCtlE2ETests {
         return (response as? HTTPURLResponse)?.statusCode ?? 0
     }
 
-    /// Gone, or a zombie nobody reaps: a CI container's PID 1 never reaps an
-    /// adopted orphan, and a zombie still answers kill(pid, 0).
-    private static func isGone(_ pid: Int32) -> Bool {
-        guard kill(pid, 0) == 0 else { return true }
-        guard let stat = try? String(contentsOfFile: "/proc/\(pid)/stat", encoding: .utf8),
-              let close = stat.lastIndex(of: ")") else { return false }
-        return stat[stat.index(after: close)...].trimmingCharacters(in: .whitespaces).hasPrefix("Z")
-    }
-
     func testAStandingSurvivesARestartAndIsLoweredByWhatIsServed() async throws {
         // Nothing is mined, so once the reader holds the holder's genesis it
         // fetches from the holder only what is asked of it here.
@@ -897,17 +858,13 @@ extension LatticeCtlE2ETests {
         XCTAssertEqual(try JSONDecoder().decode(ServingCredit.self, from: credited).standing, funded)
 
         // MARK: killed and restarted on the same data directory
-        let layout = HostLayout(root: holder.root.path)
-        let pidText = try String(contentsOf: layout.pidFile(for: "lattice-node"), encoding: .utf8)
-        let pid = try XCTUnwrap(pidText.split(separator: " ").first.flatMap { Int32($0) })
+        let pid = try XCTUnwrap(holder.supervisor.pid)
         XCTAssertEqual(kill(pid, SIGKILL), 0)
         try await waitFor("the holder is gone") {
             let answering = await self.health(holder.nexusRPC) != nil
-            return Self.isGone(pid) && !answering
+            return !holder.supervisor.isRunning && !answering
         }
-        // What a crash leaves: a pidfile naming a dead process.
-        layout.removePidFile(for: "lattice-node", ifNaming: pid)
-        _ = try await runCtl(["up"], root: holder.root)
+        try holder.supervisor.start()
         try await waitFor("the holder is active again") {
             await self.health(holder.nexusRPC)?["phase"] as? String == "active"
         }
@@ -982,6 +939,21 @@ extension LatticeCtlE2ETests {
         return output
     }
 
+    /// SIGTERM is a stop (0); a configuration that does not check is 78,
+    /// with the reason in what the process manager collects.
+    func testTheExitStatusTellsTheProcessManagerWhatNext() async throws {
+        let host = try await bringUpMiningHost(miner: nil)
+        host.supervisor.stop()
+        try await waitFor("the stop is recorded") { host.supervisor.exits.count == 1 }
+        XCTAssertEqual(host.supervisor.exits.last, 0, "SIGTERM is a stop")
+        try Data("{not json".utf8).write(to: host.root.appendingPathComponent(Topology.fileName))
+        try host.supervisor.start()
+        try await waitFor("the node exits") { host.supervisor.exits.count == 2 }
+        XCTAssertEqual(host.supervisor.exits.last, 78, "a broken lattice.json is a configuration error")
+        let collected = try String(contentsOf: host.root.appendingPathComponent("log/lattice-node.log"), encoding: .utf8)
+        XCTAssertTrue(collected.contains(Topology.fileName), collected)
+    }
+
     func testANodeIsOperatedRemotelyThroughItsOperatorListener() async throws {
         let alpha = "Nexus/Alpha"
         let scratch = FileManager.default.temporaryDirectory
@@ -1054,6 +1026,9 @@ extension LatticeCtlE2ETests {
         XCTAssertTrue(set.contains("announceLifetime"), set)
         let before = await height(host.nexusRPC, chain: alpha)
         _ = try await remote(["restart"])
+        XCTAssertEqual(host.supervisor.exits.last, 75, "a restart is an exit its process manager starts again")
+        let collected = try String(contentsOf: host.root.appendingPathComponent("log/lattice-node.log"), encoding: .utf8)
+        XCTAssertTrue(collected.contains("stopped to restart (exit 75)"), "the last line reaches the process manager")
         let config = try await remote(["config", "get"])
         XCTAssertTrue(config.contains(alpha) && config.contains("900"), config)
         XCTAssertFalse(config.contains("\"mine\""), "the node keeps no mining settings: \(config)")
@@ -1062,8 +1037,10 @@ extension LatticeCtlE2ETests {
         try await waitFor("Alpha advances after the restart", seconds: 180) {
             await self.height(host.nexusRPC, chain: alpha) > before
         }
+        // The log is the restarted process's output, from its memory.
         let logs = try await remote(["logs", "--tail", "50"])
-        XCTAssertTrue(logs.contains("lattice-node"), logs)
+        XCTAssertTrue(logs.contains("lattice-node (node runtime)"), logs)
+        XCTAssertFalse(logs.contains("stopped to restart"), "the earlier process's output is not this one's: \(logs)")
 
         // Tokens: a read token reads and changes nothing; revoked, it is refused.
         let readFile = scratch.appendingPathComponent("read.token")
@@ -1079,9 +1056,85 @@ extension LatticeCtlE2ETests {
         _ = try await runCtl(["mine", "stop"], root: minerRoot)
         let height = await self.height(host.nexusRPC, chain: "Nexus")
         _ = try await remote(["wipe"])
+        XCTAssertEqual(host.supervisor.exits.suffix(2), [75, 75], "a wipe restarts the node")
         let after = await self.height(host.nexusRPC, chain: "Nexus")
         XCTAssertLessThan(after, height, "Nexus starts again from genesis")
         let hosted = try await remote(["config", "get", "hostedChains"])
         XCTAssertTrue(hosted.contains(alpha), hosted)
+
+        // Stopped remotely, it stays stopped.
+        _ = try await remote(["down"])
+        try await waitFor("the node exits") { !host.supervisor.isRunning }
+        XCTAssertEqual(host.supervisor.exits.last, 0)
+    }
+}
+
+/// What runs a node in these tests, as a process manager would: `lattice up`
+/// in the foreground, started again when it exits 75 (a restart asked for),
+/// left stopped on any other exit. Its output goes to <root>/log.
+private final class NodeSupervisor: @unchecked Sendable {
+    private let lattice: URL
+    private let root: URL
+    private let lock = NSLock()
+    private var process: Process?
+    private var stopping = false
+    private var exitStatuses: [Int32] = []
+
+    init(lattice: URL, root: URL) {
+        self.lattice = lattice
+        self.root = root
+    }
+
+    /// Every exit so far, in order.
+    var exits: [Int32] { lock.withLock { exitStatuses } }
+    var pid: Int32? { lock.withLock { process.map(\.processIdentifier) } }
+    var isRunning: Bool { lock.withLock { process?.isRunning ?? false } }
+
+    func start() throws {
+        try lock.withLock {
+            stopping = false
+            try launch()
+        }
+    }
+
+    /// Stops the node (SIGTERM) and waits for it; it is not started again.
+    func stop() {
+        let running = lock.withLock { () -> Process? in
+            stopping = true
+            return process
+        }
+        guard let running, running.isRunning else { return }
+        running.terminate()
+        running.waitUntilExit()
+    }
+
+    /// Called with the lock held.
+    private func launch() throws {
+        let log = root.appendingPathComponent("log/lattice-node.log")
+        try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if !FileManager.default.fileExists(atPath: log.path) {
+            _ = FileManager.default.createFile(atPath: log.path, contents: nil)
+        }
+        let output = try FileHandle(forWritingTo: log)
+        output.seekToEndOfFile()
+        let process = Process()
+        process.executableURL = lattice
+        process.arguments = ["up", "--root", root.path]
+        process.standardOutput = output
+        process.standardError = output
+        process.terminationHandler = { [weak self] ended in
+            try? output.close()
+            self?.exited(ended)
+        }
+        try process.run()
+        self.process = process
+    }
+
+    private func exited(_ ended: Process) {
+        lock.withLock {
+            exitStatuses.append(ended.terminationReason == .exit ? ended.terminationStatus : -ended.terminationStatus)
+            guard ended === process, !stopping, ended.terminationReason == .exit, ended.terminationStatus == 75 else { return }
+            try? launch()
+        }
     }
 }

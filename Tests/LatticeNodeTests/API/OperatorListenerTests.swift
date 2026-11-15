@@ -20,9 +20,11 @@ final class OperatorListenerTests: XCTestCase {
     private struct Node {
         let app: Application<RouterResponder<BasicRequestContext>>
         let tokens: TokenStore
+        let lifecycle: NodeLifecycle
+        let log: NodeLog
     }
 
-    private func node(remote: Bool = true, origins: Set<String> = []) async throws -> Node {
+    private func node(remote: Bool = true, origins: Set<String> = [], root: HostLayout? = nil) async throws -> Node {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-operator-listener-\(UUID().uuidString)"
         )
@@ -43,14 +45,24 @@ final class OperatorListenerTests: XCTestCase {
                 "GET /status", "POST /mining/templates", "POST /mining/work",
             ]),
         ]), file: directory.appendingPathComponent("tokens.json"))
-        let control = OperatorControl(tokens: tokens, storagePath: directory)
+        let lifecycle = NodeLifecycle()
+        let log = NodeLog()
+        let config = try root.map {
+            OperatorConfig(
+                layout: $0, started: try Topology.load(root: $0.root).validated(), runtime: service,
+                startCheck: { _, _, _ in }
+            )
+        }
+        let control = OperatorControl(
+            config: config, tokens: tokens, lifecycle: lifecycle, storagePath: directory, log: log
+        )
         let app = remote
             ? makeApplication(
                 service: service, host: "10.0.0.5", port: 8090,
                 auth: .remote(tokens, allowedOrigins: origins), control: control
             )
             : makeApplication(service: service, host: "127.0.0.1", port: 8080, control: control)
-        return Node(app: app, tokens: tokens)
+        return Node(app: app, tokens: tokens, lifecycle: lifecycle, log: log)
     }
 
     private static func bearer(_ token: String) -> HTTPFields { [.authorization: "Bearer \(token)"] }
@@ -87,6 +99,7 @@ final class OperatorListenerTests: XCTestCase {
             }
             for (uri, method) in [
                 ("/config", HTTPRequest.Method.patch), ("/hosted-chains", .get), ("/transactions", .post), ("/restart", .post),
+                ("/stop", .post), ("/logs", .get),
             ] {
                 try await client.execute(uri: uri, method: method, headers: Self.bearer(Self.miner)) {
                     XCTAssertEqual($0.status, .forbidden, uri)
@@ -132,7 +145,9 @@ final class OperatorListenerTests: XCTestCase {
                     XCTAssertEqual($0.status, .ok, "\(uri): \(String(buffer: $0.body))")
                 }
             }
-            for (uri, method) in [("/restart", HTTPRequest.Method.post), ("/config", .patch), ("/tokens", .get)] {
+            for (uri, method) in [
+                ("/restart", HTTPRequest.Method.post), ("/stop", .post), ("/wipe", .post), ("/config", .patch), ("/tokens", .get),
+            ] {
                 try await client.execute(uri: uri, method: method, headers: Self.bearer(Self.reader)) {
                     XCTAssertEqual($0.status, .forbidden, uri)
                 }
@@ -330,6 +345,107 @@ final class OperatorListenerTests: XCTestCase {
                 XCTAssertNoThrow(try command.plan(), listen)
             } else {
                 XCTAssertThrowsError(try command.plan(), listen)
+            }
+        }
+    }
+
+    /// `POST /stop` and `POST /restart` stop the node as SIGTERM does; what
+    /// was asked decides its exit (0 or 75), and the first request stands.
+    func testStopAndRestartAreAskedOfTheLifecycle() async throws {
+        for (route, expected) in [("/stop", NodeLifecycle.Request.stop), ("/restart", .restart)] {
+            let node = try await node()
+            try await node.app.test(.router) { client in
+                try await client.execute(uri: route, method: .post, headers: Self.bearer(Self.admin)) {
+                    XCTAssertEqual($0.status, .accepted, String(buffer: $0.body))
+                }
+            }
+            await node.lifecycle.waitForRequest()
+            XCTAssertEqual(node.lifecycle.requested, expected, route)
+            try await node.app.test(.router) { client in
+                try await client.execute(uri: "/restart", method: .post, headers: Self.bearer(Self.admin)) {
+                    XCTAssertEqual($0.status, .conflict, "a restart is refused once one is under way")
+                }
+            }
+            XCTAssertFalse(node.lifecycle.ask(.restart))
+            XCTAssertEqual(node.lifecycle.requested, expected, "the first request stands")
+        }
+    }
+
+    /// A wipe runs at the next start, so none is taken once a stop is under
+    /// way; before one, it is kept for that start and the node restarts.
+    func testAWipeIsRefusedOnceAStopIsUnderWay() async throws {
+        for stopFirst in [true, false] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("wipe-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+            try Data(#"{"listen":4001,"rpc":4003,"peers":[]}"#.utf8).write(to: root.appendingPathComponent(Topology.fileName))
+            let layout = HostLayout(root: root.path)
+            let node = try await node(root: layout)
+            try await node.app.test(.router) { client in
+                if stopFirst {
+                    try await client.execute(uri: "/stop", method: .post, headers: Self.bearer(Self.admin)) {
+                        XCTAssertEqual($0.status, .accepted)
+                    }
+                }
+                try await client.execute(uri: "/wipe", method: .post, headers: Self.bearer(Self.admin)) {
+                    XCTAssertEqual($0.status, stopFirst ? .conflict : .accepted, String(buffer: $0.body))
+                }
+            }
+            XCTAssertEqual(FileManager.default.fileExists(atPath: layout.wipeRequest.path), !stopFirst)
+            XCTAssertEqual(node.lifecycle.requested, stopFirst ? .stop : .restart)
+        }
+    }
+
+    /// A stop and a wipe at once: whichever is recorded first, a refused
+    /// wipe leaves no marker and an accepted one leaves it.
+    func testARefusedWipeNeverLeavesAWipePending() async throws {
+        for _ in 0..<20 {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("wipe-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+            try Data(#"{"listen":4001,"rpc":4003,"peers":[]}"#.utf8).write(to: root.appendingPathComponent(Topology.fileName))
+            let layout = HostLayout(root: root.path)
+            let node = try await node(root: layout)
+            let wipe = try await node.app.test(.router) { client in
+                try await withThrowingTaskGroup(of: HTTPResponse.Status?.self) { group in
+                    group.addTask {
+                        try await client.execute(uri: "/stop", method: .post, headers: Self.bearer(Self.admin)) { _ in }
+                        return nil
+                    }
+                    group.addTask {
+                        try await client.execute(uri: "/wipe", method: .post, headers: Self.bearer(Self.admin)) { $0.status }
+                    }
+                    return try await group.compactMap { $0 }.first { _ in true }
+                }
+            }
+            let marked = FileManager.default.fileExists(atPath: layout.wipeRequest.path)
+            switch wipe {
+            case .accepted?:
+                XCTAssertTrue(marked)
+                XCTAssertEqual(node.lifecycle.requested, .restart)
+            case .conflict?:
+                XCTAssertFalse(marked, "a 409 leaves no wipe pending")
+                XCTAssertEqual(node.lifecycle.requested, .stop)
+            default:
+                XCTFail("wipe answered \(String(describing: wipe))")
+            }
+        }
+    }
+
+    /// `GET /logs` serves the node's own recent output from memory.
+    func testLogsAreTheNodesRecentOutput() async throws {
+        let node = try await node()
+        node.log.append("one\ntwo\nthree")
+        try await node.app.test(.router) { client in
+            try await client.execute(uri: "/logs?tail=2", method: .get, headers: Self.bearer(Self.reader)) {
+                XCTAssertEqual($0.status, .ok)
+                XCTAssertEqual(String(buffer: $0.body), "two\nthree\n")
+            }
+            try await client.execute(uri: "/logs?file=node", method: .get, headers: Self.bearer(Self.reader)) {
+                XCTAssertEqual(String(buffer: $0.body), "one\ntwo\nthree\n")
+            }
+            try await client.execute(uri: "/logs?file=mine", method: .get, headers: Self.bearer(Self.reader)) {
+                XCTAssertEqual($0.status, .notFound, "a client's log is not the node's")
             }
         }
     }

@@ -494,3 +494,148 @@ func nodeAnswersTemplates(
           let http = response as? HTTPURLResponse else { return false }
     return http.statusCode == 200
 }
+
+// MARK: - The mining loop's background process (`mine start`, `mine stop`)
+//
+// Recorded by a pidfile under <root>/run, with its output in <root>/log.
+
+/// A live pid is only "ours" if the command name still matches what the
+/// pidfile recorded: pids recycle, and killing a stranger is worse than a
+/// stale file.
+func runningPid(_ layout: HostLayout, _ path: String) -> Int32? {
+    guard let recorded = recordedPid(layout, path),
+          isAlive(recorded.pid, named: recorded.name) else {
+        return nil
+    }
+    return recorded.pid
+}
+
+/// The pid and command name a pidfile records.
+private func recordedPid(
+    _ layout: HostLayout, _ path: String
+) -> (pid: Int32, name: String?)? {
+    guard let text = try? String(
+        contentsOf: layout.pidFile(for: path), encoding: .utf8
+    ) else { return nil }
+    let parts = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        .split(separator: " ", maxSplits: 1)
+    guard let pid = parts.first.flatMap({ Int32($0) }) else { return nil }
+    return (pid, parts.count == 2 ? String(parts[1]) : nil)
+}
+
+/// Whether `pid` is alive and, when a name was recorded, still runs that
+/// command.
+private func isAlive(_ pid: Int32, named expected: String?) -> Bool {
+    guard kill(pid, 0) == 0 else { return false }
+    if let expected {
+        let probe = Process()
+        probe.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        probe.arguments = ["ps", "-o", "comm=", "-p", String(pid)]
+        let out = Pipe()
+        probe.standardOutput = out
+        probe.standardError = FileHandle.nullDevice
+        guard (try? probe.run()) != nil else { return true }
+        // Closed here, not left to the pipe's deallocation: a read end left
+        // open each time uses up the process's descriptors.
+        try? out.fileHandleForWriting.close()
+        defer { try? out.fileHandleForReading.close() }
+        // Captured while the probe is alive, for the same reason the bounded
+        // wait does it: a group derived after the child is reaped is gone.
+        let teardown = ProcessTeardownTarget.capture(
+            pid: probe.processIdentifier
+        )
+        // Bounded, and never `waitUntilExit()`: a pid-name probe must not
+        // outlive the question it answers (#62). This bound is a local
+        // liveness allowance, not a round parameter -- `ps` has none.
+        let read = readToEndBounded(
+            fileDescriptor: out.fileHandleForReading.fileDescriptor,
+            deadline: ContinuousClock.now + .seconds(5)
+        )
+        if !read.complete {
+            terminateProcessGroup(teardown)
+            if teardown.isDegraded {
+                // Do not report a clean teardown we did not perform: only the
+                // pid could be signalled, so anything the probe spawned is
+                // still running.
+                FileHandle.standardError.write(Data(
+                    "warning: pid probe \(probe.processIdentifier) could not be torn down as a group; its descendants may still be running\n".utf8
+                ))
+            }
+            // A probe that timed out says NOTHING about the pid, and a
+            // truncated name would fail the suffix check below and report a
+            // live node as stopped -- which invites a double spawn. Same
+            // convention as the run() failure above: assume running.
+            return true
+        }
+        let name = String(decoding: read.data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard name.hasSuffix(expected) else { return false }
+    }
+    return true
+}
+
+func writePidFile(
+    _ layout: HostLayout, _ path: String, pid: Int32, name: String
+) throws {
+    try Data("\(pid) \(name)".utf8).write(
+        to: layout.pidFile(for: path), options: .atomic
+    )
+}
+
+/// Exclusive per-root lock so concurrent `mine start`s cannot double-spawn.
+func withSpawnLock<T>(
+    _ layout: HostLayout, _ body: () async throws -> T
+) async throws -> T {
+    let lockURL = layout.pidFile(for: "spawn-lock")
+    try FileManager.default.createDirectory(
+        at: lockURL.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    _ = FileManager.default.createFile(atPath: lockURL.path, contents: nil)
+    let descriptor = open(lockURL.path, O_RDWR)
+    guard descriptor >= 0, flock(descriptor, LOCK_EX) == 0 else {
+        if descriptor >= 0 { close(descriptor) }
+        throw CtlError("could not take the spawn lock at \(lockURL.path)")
+    }
+    defer {
+        flock(descriptor, LOCK_UN)
+        close(descriptor)
+    }
+    return try await body()
+}
+
+/// Stops a process by pidfile: SIGTERM, then SIGKILL if it lingers, then
+/// waits until it is gone, so a spawn after this finds its locks and ports
+/// free. Watches the pid it signalled, never a re-read pidfile, and
+/// removes the pidfile only while it still names that pid. `grace` is how
+/// long SIGTERM gets; `onKill` runs right after the SIGKILL, for anything
+/// else the killed process leaves behind. Callers hold the spawn lock.
+/// Returns false when the process was not running.
+@discardableResult
+func stopProcess(
+    _ layout: HostLayout, _ name: String,
+    grace: Duration = .seconds(30),
+    onKill: () -> Void = {}
+) async throws -> Bool {
+    guard let recorded = recordedPid(layout, name),
+          isAlive(recorded.pid, named: recorded.name) else { return false }
+    let pid = recorded.pid
+    let alive = { isAlive(pid, named: recorded.name) }
+    kill(pid, SIGTERM)
+    let deadline = ContinuousClock.now + grace
+    while alive(), ContinuousClock.now < deadline {
+        try await Task.sleep(for: .milliseconds(100))
+    }
+    if alive() {
+        kill(pid, SIGKILL)
+        onKill()
+        for _ in 0..<100 where alive() {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard !alive() else {
+            throw CtlError("\(name) (pid \(pid)) survived SIGKILL for 10s")
+        }
+    }
+    layout.removePidFile(for: name, ifNaming: pid)
+    return true
+}

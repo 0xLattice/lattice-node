@@ -65,6 +65,6 @@ final class VolumeBundleCache: @unchecked Sendable {
 
     private func report(_ message: String) {
         guard lock.withLock({ reported ? false : { reported = true; return true }() }) else { return }
-        FileHandle.standardError.write(Data("lattice-node volume-bundles: \(message)\n".utf8))
+        logLine("lattice-node volume-bundles: \(message)")
     }
 }

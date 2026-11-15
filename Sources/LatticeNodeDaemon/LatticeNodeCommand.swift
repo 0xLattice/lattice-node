@@ -161,21 +161,33 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         // comes from lattice.json.
         let given = CommandLine.arguments.dropFirst()
         guard given.allSatisfy({ !$0.hasPrefix("-") || $0 == "--root" || $0.hasPrefix("--root=") }) else {
-            throw ValidationError("--root takes every setting from lattice.json; give no other flag with it")
+            throw configurationFault("--root takes every setting from lattice.json; give no other flag with it")
         }
         let layout = HostLayout(root: root)
         let topology: Topology
         do {
             topology = try Topology.load(root: layout.root).validated()
         } catch {
-            throw ValidationError("\(layout.root.appendingPathComponent(Topology.fileName).path): \(error). The node starts only from a valid configuration; fix the file by hand while the node is stopped (`lattice config set` edits it then too).")
+            throw configurationFault("\(layout.root.appendingPathComponent(Topology.fileName).path): \(error). The node starts only from a valid configuration; fix the file by hand while the node is stopped (`lattice config set` edits it then too).")
         }
         if Topology.holdsRetiredMining(root: layout.root) {
-            FileHandle.standardError.write(Data("warning: \(Topology.retiredMiningWarning)\n".utf8))
+            logLine("warning: \(Topology.retiredMiningWarning)")
         }
         try performRequestedWipe(layout)
-        var command = try LatticeNodeCommand.parse(topology.nodeArguments(layout: layout))
+        var command: LatticeNodeCommand
+        do {
+            command = try LatticeNodeCommand.parse(topology.nodeArguments(layout: layout))
+        } catch {
+            throw configurationFault(LatticeNodeCommand.message(for: error))
+        }
         try await command.start(owner: (layout, topology))
+    }
+
+    /// A configuration the node cannot start from: said, then the exit status
+    /// that tells a process manager so (78, sysexits' EX_CONFIG).
+    private func configurationFault(_ reason: String) -> ExitCode {
+        logLine("lattice-node: \(reason)")
+        return ExitCode(exitConfigurationError)
     }
 
     /// Runs the node with these flags; `owner` is the host root and the
@@ -183,7 +195,14 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     mutating func start(owner: (layout: HostLayout, topology: Topology)?) async throws {
         let processStartTime = Date()
         let address = ChainAddress([ChainAddress.nexus])!
-        let plan = try plan()
+        // A fault in lattice.json (`--root`) is the configuration's: 78. One
+        // in the flags is the command line's: 64, as ArgumentParser exits.
+        let isOwned = owner != nil
+        func fault(_ reason: String) -> Error {
+            isOwned ? configurationFault(reason) : ValidationError(reason)
+        }
+        let plan: StartPlan
+        do { plan = try self.plan() } catch { throw fault("\(error)") }
         let storage = try storageURL(for: address)
         let keyURL = identityKey.map { URL(fileURLWithPath: $0) }
             ?? storage.appendingPathComponent("storage.key")
@@ -196,7 +215,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             configured: configuredPeers,
             environment: ProcessInfo.processInfo.environment
         ) {
-            throw ValidationError(
+            throw fault(
                 "\(DefaultBootstrapPeers.forbidEnvironmentKey)=1: pass --peer or --no-default-peers"
             )
         }
@@ -212,44 +231,49 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         let hosted = plan.hosted
         let webSocket = plan.webSocket, blockBodies = plan.blockBodies, state = plan.state
         let publicReadLimits = plan.publicReadLimits, operatorListener = plan.operatorListener
-        let configuration = try NodeConfiguration(
-            chainPath: address.components,
-            storagePath: storage,
-            privateKeyHex: privateKeyHex,
-            listenPort: listenPort,
-            rpcPort: rpcPort,
-            webSocket: webSocket,
-            bootstrapPeers: overlayPeers,
-            seedPeers: seedPeers,
-            fixedSeedPeers: fixedSeedPeers,
-            childSeedPeers: hosted.seedPeers,
-            peerTarget: peerTarget,
-            peersBeforeSeeds: peersBeforeSeeds,
-            minPeerKeyBits: minimumPeerKeyBits,
-            overlayMaxConnectionsPerNetgroup: overlayMaxConnectionsPerNetgroup,
-            contentServing: ContentServingLimits(
-                maxConcurrent: servingMaxConcurrent,
-                maxInFlightVolumeBytes: servingMaxInFlightVolumeBytes
-            ),
-            externalAddress: externalAddress,
-            peerSearchInterval: peerSearchInterval,
-            announceLifetime: announceLifetime,
-            announcePins: announcePins,
-            providerWalkSessions: providerWalkSessions,
-            resourcePolicy: NodeResourcePolicy(maximumAcquisitionBytes: maxAcquisitionBytes),
-            blockBodies: blockBodies,
-            state: state,
-            hostedChildren: hosted.children,
-            childSpecs: hosted.specs,
-            childPremineRecipients: hosted.premineRecipients,
-            childGenesisTransactions: hosted.genesisTransactions,
-            policyModules: hosted.policyModules,
-            publicReadURL: publicReadUrl,
-            publicSubmit: publicSubmit,
-            minRelayFee: minRelayFee,
-            finality: plan.finality,
-            stateWindows: plan.stateWindows
-        )
+        let configuration: NodeConfiguration
+        do {
+            configuration = try NodeConfiguration(
+                chainPath: address.components,
+                storagePath: storage,
+                privateKeyHex: privateKeyHex,
+                listenPort: listenPort,
+                rpcPort: rpcPort,
+                webSocket: webSocket,
+                bootstrapPeers: overlayPeers,
+                seedPeers: seedPeers,
+                fixedSeedPeers: fixedSeedPeers,
+                childSeedPeers: hosted.seedPeers,
+                peerTarget: peerTarget,
+                peersBeforeSeeds: peersBeforeSeeds,
+                minPeerKeyBits: minimumPeerKeyBits,
+                overlayMaxConnectionsPerNetgroup: overlayMaxConnectionsPerNetgroup,
+                contentServing: ContentServingLimits(
+                    maxConcurrent: servingMaxConcurrent,
+                    maxInFlightVolumeBytes: servingMaxInFlightVolumeBytes
+                ),
+                externalAddress: externalAddress,
+                peerSearchInterval: peerSearchInterval,
+                announceLifetime: announceLifetime,
+                announcePins: announcePins,
+                providerWalkSessions: providerWalkSessions,
+                resourcePolicy: NodeResourcePolicy(maximumAcquisitionBytes: maxAcquisitionBytes),
+                blockBodies: blockBodies,
+                state: state,
+                hostedChildren: hosted.children,
+                childSpecs: hosted.specs,
+                childPremineRecipients: hosted.premineRecipients,
+                childGenesisTransactions: hosted.genesisTransactions,
+                policyModules: hosted.policyModules,
+                publicReadURL: publicReadUrl,
+                publicSubmit: publicSubmit,
+                minRelayFee: minRelayFee,
+                finality: plan.finality,
+                stateWindows: plan.stateWindows
+            )
+        } catch {
+            throw fault("\(error)")
+        }
         let cookieFile = rpcCookieFile.map { URL(fileURLWithPath: $0) }
             ?? storage.appendingPathComponent(".cookie")
         try await runNodeRuntime(

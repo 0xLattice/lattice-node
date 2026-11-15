@@ -34,9 +34,7 @@ final class PeerCapabilities: @unchecked Sendable {
         // Said once per session: a fleet falling back to the base protocol
         // must be visible.
         guard taken else { return }
-        FileHandle.standardError.write(Data(
-            "lattice-node: \(capability) no longer asked of \(session.key.hex.prefix(12)) this session\n".utf8
-        ))
+        logLine("lattice-node: \(capability) no longer asked of \(session.key.hex.prefix(12)) this session")
     }
 
     /// A chain's current peers: the open sessions that serve it. Nexus

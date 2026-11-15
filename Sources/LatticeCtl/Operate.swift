@@ -97,7 +97,7 @@ struct Config: AsyncParsableCommand {
 
 struct Restart: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Restart the node in place (same process, same arguments), applying what waits for a restart."
+        abstract: "Restart the node, applying what waits for a restart: it stops cleanly and exits 75, and whatever runs it starts it again."
     )
 
     @OptionGroup var target: NodeTarget
@@ -108,7 +108,10 @@ struct Restart: AsyncParsableCommand {
 }
 
 struct Logs: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Print the node's recent log lines, or the local mining loop's.")
+    static let configuration = CommandConfiguration(
+        abstract: "Print the running node's recent log lines (GET /logs), or the local mining loop's.",
+        discussion: "The node logs to standard error and keeps its recent lines in memory; a stopped node's log is wherever its process manager put it (journalctl, the launchd log file, docker logs)."
+    )
 
     @OptionGroup var target: NodeTarget
 
@@ -120,14 +123,15 @@ struct Logs: AsyncParsableCommand {
 
     func run() async throws {
         // The miner is a process of its own: its log is on this machine.
-        if !miner, let rpc = try await target.running() {
-            let data = try await send(rpc: rpc, "GET", "logs?file=node&tail=\(tail)")
-            FileHandle.standardOutput.write(data)
-        } else {
-            let file = target.layout.logFile(for: miner ? "mine" : "lattice-node")
+        if miner {
+            let file = target.layout.logFile(for: "mine")
             let lines = try String(contentsOf: file, encoding: .utf8).split(separator: "\n", omittingEmptySubsequences: false)
-            print(lines.suffix(tail + 1).joined(separator: "\n"), terminator: "")
+            return print(lines.suffix(tail + 1).joined(separator: "\n"), terminator: "")
         }
+        guard let rpc = try await target.running() else {
+            throw CtlError("the node is not running; its log is wherever its process manager put it (journalctl -u lattice-tree for `lattice emit-systemd`'s unit or -u lattice-node for the checked-in one, the launchd log file, docker logs)")
+        }
+        FileHandle.standardOutput.write(try await send(rpc: rpc, "GET", "logs?tail=\(tail)"))
     }
 }
 
