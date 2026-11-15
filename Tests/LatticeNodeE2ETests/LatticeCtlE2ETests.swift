@@ -1049,21 +1049,29 @@ extension LatticeCtlE2ETests {
             )
             let events = URLSession.shared.dataTask(with: stream)
             events.resume()
-            // New connections throughout, each closed after its answer.
+            // New connections throughout, each closed after its answer. Ended
+            // by a flag, never by cancelling a task mid-request: on Linux,
+            // cancelling an in-flight `URLSession.data(for:)` can deadlock
+            // against the session completing it.
+            let arrive = Arrivals()
             let arriving = (0..<8).map { _ in
                 Task {
                     var probe = URLRequest(url: URL(string: "\(node)/health")!)
                     probe.setValue("close", forHTTPHeaderField: "Connection")
                     probe.cachePolicy = .reloadIgnoringLocalCacheData
                     probe.timeoutInterval = 5
-                    while !Task.isCancelled { _ = try? await URLSession.shared.data(for: probe) }
+                    while await arrive.going {
+                        _ = try? await URLSession.shared.data(for: probe)
+                        try? await Task.sleep(for: .milliseconds(20))
+                    }
                 }
             }
             try await Task.sleep(for: .seconds(1))
             let (status, _) = try await postJSON("\(node)/\(route)", [String: String](), cookie: cookie)
             XCTAssertEqual(status, 202, route)
             try await waitFor("the node exits after /\(route)") { host.supervisor.exits.count > before }
-            arriving.forEach { $0.cancel() }
+            await arrive.stop()
+            for probe in arriving { await probe.value }
             events.cancel()
             let log = try String(contentsOf: host.root.appendingPathComponent("log/lattice-node.log"), encoding: .utf8)
             XCTAssertEqual(host.supervisor.exits[before], expected, "/\(route): \(log.suffix(2_000))")
@@ -1074,6 +1082,65 @@ extension LatticeCtlE2ETests {
                 }
             }
         }
+    }
+
+    /// A client that stalls mid-request holds a restart's drain only up to
+    /// its cap: the node still exits 75, without a trap.
+    func testARestartIsNotHeldOpenByAStalledClient() async throws {
+        let host = try await bringUpMiningHost(miner: nil)
+        let cookieFile = HostLayout(root: host.root.path).rpcCookie
+        let authorization = "Basic " + Data(try String(contentsOf: cookieFile, encoding: .utf8).utf8).base64EncodedString()
+        // A request whose body never finishes: read, so the drain waits on it.
+        let stalled = try sendRaw(port: host.nexusRPC, """
+            POST /transactions HTTP/1.1\r
+            Host: 127.0.0.1\r
+            Authorization: \(authorization)\r
+            Content-Type: application/json\r
+            Content-Length: 1000\r
+            \r
+            {"tra
+            """)
+        defer { close(stalled) }
+        try await Task.sleep(for: .seconds(1))
+        let before = host.supervisor.exits.count
+        let asked = ContinuousClock.now
+        let (status, _) = try await postJSON("http://127.0.0.1:\(host.nexusRPC)/restart", [String: String](), cookie: cookieFile)
+        XCTAssertEqual(status, 202)
+        try await waitFor("the node exits", seconds: 90) { host.supervisor.exits.count > before }
+        let took = ContinuousClock.now - asked
+        let log = try String(contentsOf: host.root.appendingPathComponent("log/lattice-node.log"), encoding: .utf8)
+        XCTAssertEqual(host.supervisor.exits[before], 75, String(log.suffix(2_000)))
+        XCTAssertFalse(log.contains("Fatal error"), log)
+        XCTAssertGreaterThan(took, .seconds(25), "the stalled request held the drain until the cap")
+        XCTAssertLessThan(took, .seconds(60), "and no longer")
+        try await waitFor("Nexus active after the restart") {
+            await self.health(host.nexusRPC)?["phase"] as? String == "active"
+        }
+    }
+
+    /// A loopback connection to `port` that has sent `text` and is left open.
+    private func sendRaw(port: UInt16, _ text: String) throws -> Int32 {
+        #if canImport(Darwin)
+        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+        #else
+        let descriptor = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        #endif
+        guard descriptor >= 0 else { throw CtlE2EError("socket: \(errno)") }
+        var address = sockaddr_in()
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = port.bigEndian
+        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        let connected = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        let bytes = Array(text.utf8)
+        guard connected == 0, write(descriptor, bytes, bytes.count) == bytes.count else {
+            close(descriptor)
+            throw CtlE2EError("could not send to port \(port): \(errno)")
+        }
+        return descriptor
     }
 
     func testANodeIsOperatedRemotelyThroughItsOperatorListener() async throws {
@@ -1223,6 +1290,8 @@ private final class NodeSupervisor: @unchecked Sendable {
     }
 
     /// Stops the node (SIGTERM) and waits for it; it is not started again.
+    /// One still running past its shutdown cap (30 s) and a margin is
+    /// killed, so a hung stop fails its test instead of the whole run.
     func stop() {
         let running = lock.withLock { () -> Process? in
             stopping = true
@@ -1230,6 +1299,9 @@ private final class NodeSupervisor: @unchecked Sendable {
         }
         guard let running, running.isRunning else { return }
         running.terminate()
+        let deadline = Date().addingTimeInterval(60)
+        while running.isRunning, Date() < deadline { usleep(100_000) }
+        if running.isRunning { kill(running.processIdentifier, SIGKILL) }
         running.waitUntilExit()
     }
 
@@ -1264,4 +1336,10 @@ private final class NodeSupervisor: @unchecked Sendable {
             try? launch()
         }
     }
+}
+
+/// Whether the test's arriving connections keep coming.
+private actor Arrivals {
+    private(set) var going = true
+    func stop() { going = false }
 }
