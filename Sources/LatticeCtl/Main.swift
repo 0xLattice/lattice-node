@@ -21,7 +21,7 @@ struct LatticeCtl: AsyncParsableCommand {
         subcommands: [
             Init.self, Up.self, Down.self, Status.self,
             Identity.self, Key.self, Wipe.self, Mine.self, Tx.self, Child.self,
-            Config.self, Restart.self, Logs.self, Pins.self, Tokens.self,
+            Config.self, Apply.self, Restart.self, Logs.self, Pins.self, Tokens.self,
             EmitSystemd.self, EmitLaunchd.self,
         ]
     )

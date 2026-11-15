@@ -164,12 +164,10 @@ public struct Topology: Codable, Sendable {
 
     public static let fileName = "lattice.json"
 
+    /// The configuration lattice.json and the fragments of config.d make
+    /// together (`MergedConfig`), checked.
     public static func load(root: URL) throws -> Topology {
-        let url = root.appendingPathComponent(fileName)
-        guard let data = try? Data(contentsOf: url) else {
-            throw CtlError("no \(fileName) in \(root.path); run `lattice init` first")
-        }
-        return try load(data: data)
+        try MergedConfig.load(root: root).topology
     }
 
     /// The `mine` object a lattice.json written before mining was a process

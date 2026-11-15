@@ -22,7 +22,7 @@ extension LatticeNodeCommand {
         configuration: NodeConfiguration,
         cookieFile: URL,
         operatorListener: OperatorListener?,
-        owner: (layout: HostLayout, topology: Topology)?,
+        owner: NodeOwner?,
         publicReadLimits: PublicReadRateLimits,
         processStartTime: Date
     ) async throws {
@@ -45,7 +45,10 @@ extension LatticeNodeCommand {
             log: nodeLog
         )
         if let owner {
-            control.config = OperatorConfig(layout: owner.layout, started: owner.topology, runtime: runtime)
+            control.config = OperatorConfig(
+                layout: owner.layout, desired: owner.merged, started: owner.started, failures: owner.failures,
+                runtime: runtime
+            )
         }
         // The loopback API and the remote operator listener: one set of
         // routes, each listener with its own credentials.
@@ -121,12 +124,33 @@ extension LatticeNodeCommand {
         if let operatorListener {
             logLine("  operator: http://\(operatorListener.host):\(operatorListener.port) (bearer tokens, \(operatorListener.tokens.count) listed)")
         }
+        // SIGHUP: read the configuration again (as nginx and systemd do).
+        signal(SIGHUP, SIG_IGN)
+        let hangup = DispatchSource.makeSignalSource(signal: SIGHUP)
+        let config = control.config
+        hangup.setEventHandler { Task { await config?.reload() } }
+        hangup.resume()
+        defer { hangup.cancel() }
         let result: Result<Void, any Error>
         do {
             try await withThrowingTaskGroup(of: Void.self) { group in
                 group.addTask { try await app.runService() }
                 if let publicReadApp { group.addTask { try await publicReadApp.runService() } }
-                if let remoteApp { group.addTask { try await remoteApp.runService() } }
+                if let remoteApp, let operatorListener {
+                    // A remote listener that cannot open (its port taken) is
+                    // reported, not fatal: the node stays reachable on
+                    // loopback to fix it.
+                    group.addTask {
+                        do {
+                            try await remoteApp.runService()
+                        } catch where !Task.isCancelled {
+                            let problem = "\(operatorListener.host):\(operatorListener.port) did not open: \(error)"
+                            logLine("operator listener \(problem)")
+                            await config?.report("operatorListen", problem)
+                            while !Task.isCancelled { try? await Task.sleep(for: .seconds(3_600)) }
+                        }
+                    }
+                }
                 group.addTask { await lifecycle.waitForRequest() }
                 do {
                     _ = try await group.next()

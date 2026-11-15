@@ -10,7 +10,7 @@ import LatticeNode
 ///
 /// ```json
 /// [{ "name": "ops", "sha256": "<hex>", "role": "admin" },
-///  { "name": "seller", "sha256": "<hex>", "routes": ["GET /hosted-chains", "POST /hosted-chains"] }]
+///  { "name": "seller", "sha256": "<hex>", "routes": ["GET /config", "PUT /config/fragments/{name}"] }]
 /// ```
 ///
 /// `admin` may use every route, `read` every GET; a route is the method and

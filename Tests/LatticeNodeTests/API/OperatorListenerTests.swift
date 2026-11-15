@@ -37,7 +37,7 @@ final class OperatorListenerTests: XCTestCase {
         let service = try await startRuntime(storage)
         let tokens = TokenStore(try OperatorTokens([
             .init(name: "seller", sha256: OperatorTokens.hash(Self.token), routes: [
-                "GET /hosted-chains", "post /hosted-chains", "GET /api/state/account/{addr}", "POST /tokens",
+                "GET /hosted-chains", "put /config/fragments/{name}", "GET /api/state/account/{addr}", "POST /tokens",
             ]),
             .init(name: "ops", sha256: OperatorTokens.hash(Self.admin), role: "admin"),
             .init(name: "viewer", sha256: OperatorTokens.hash(Self.reader), role: "read"),
@@ -48,10 +48,8 @@ final class OperatorListenerTests: XCTestCase {
         let lifecycle = NodeLifecycle()
         let log = NodeLog()
         let config = try root.map {
-            OperatorConfig(
-                layout: $0, started: try Topology.load(root: $0.root).validated(), runtime: service,
-                startCheck: { _, _, _ in }
-            )
+            let merged = try MergedConfig.load(root: $0.root)
+            return OperatorConfig(layout: $0, desired: merged, started: merged.topology, runtime: service)
         }
         let control = OperatorControl(
             config: config, tokens: tokens, lifecycle: lifecycle, storagePath: directory, log: log
@@ -78,6 +76,13 @@ final class OperatorListenerTests: XCTestCase {
                 uri: "/api/state/account/\(String(repeating: "a", count: 40))", method: .get,
                 headers: Self.bearer(Self.token)
             ) { XCTAssertNotEqual($0.status, .forbidden) }
+            // A fragment route is listed as registered, its name in braces;
+            // a node started with flags has no configuration to change (409).
+            try await client.execute(
+                uri: "/config/fragments/hostmarket", method: .put,
+                headers: [.authorization: "Bearer \(Self.token)", .contentType: "application/json"],
+                body: ByteBuffer(string: "{}")
+            ) { XCTAssertEqual($0.status, .conflict, String(buffer: $0.body)) }
         }
     }
 
@@ -172,19 +177,6 @@ final class OperatorListenerTests: XCTestCase {
                     XCTAssertEqual($0.status, .unauthorized, authorization)
                 }
             }
-        }
-    }
-
-    /// A node started with flags takes no chains from the remote listener:
-    /// their flag form names files on its disk.
-    func testFlagFormHostedChainsAreRefusedRemotely() async throws {
-        let app = try await node().app
-        try await app.test(.router) { client in
-            try await client.execute(
-                uri: "/hosted-chains", method: .post,
-                headers: [.authorization: "Bearer \(Self.token)", .contentType: "application/json"],
-                body: ByteBuffer(string: #"{"hostChain":["Nexus/Alpha=/etc/spec.json"]}"#)
-            ) { XCTAssertEqual($0.status, .conflict, String(buffer: $0.body)) }
         }
     }
 

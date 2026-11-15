@@ -24,15 +24,13 @@ struct Child: AsyncParsableCommand {
         var path: String
 
         func run() async throws {
-            try await target.changeConfig(api: { rpc in
-                try await sendChange(rpc: rpc, "POST", "hosted-chains", json: JSONEncoder().encode(HostedChain(path: path)))
-                print("\(path): hosted; synced from its peers")
-            }, stopped: { topology in
-                if !(topology.hostedChains ?? []).contains(path) {
-                    topology.hostedChains = (topology.hostedChains ?? []) + [path]
-                }
-                print("\(path): hosted from the next start; synced from its peers")
-            })
+            let response = try await target.editFragment(operatorFragment) { object, _ in
+                var chains = object["hostedChains"] as? [Any] ?? []
+                if !chains.contains(where: { hostedPath($0) == path }) { chains.append(path) }
+                object["hostedChains"] = chains
+            }
+            try report(response, chain: path)
+            print("\(path): hosted; synced from its peers")
         }
     }
 
@@ -48,21 +46,24 @@ struct Child: AsyncParsableCommand {
         var path: String
 
         func run() async throws {
-            try await target.changeConfig(api: { rpc in
-                guard let query = path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else {
-                    throw CtlError("bad chain path")
+            try await target.editFragment(operatorFragment) { object, current in
+                let chains = object["hostedChains"] as? [Any] ?? []
+                guard chains.contains(where: { hostedPath($0) == path }) else {
+                    let owners = current.status.chains.first { $0.path == path }?.from ?? []
+                    throw CtlError(owners.isEmpty
+                        ? "\(path) is not hosted"
+                        : "\(path) is listed by \(owners.joined(separator: ", ")), not by \(operatorFragment): change it there")
                 }
-                try await sendChange(rpc: rpc, "DELETE", "hosted-chains?chainPath=\(query)")
-                print("\(path): no longer hosted")
-            }, stopped: { topology in
-                let hosted = topology.hostedChains ?? []
-                guard hosted.contains(path) else { throw CtlError("\(path) is not hosted") }
-                if let child = hosted.first(where: { $0.hasPrefix(path + "/") }) {
-                    throw CtlError("\(child) is hosted under \(path); unhost it first")
+                if let child = current.status.chains.first(where: { $0.path.hasPrefix(path + "/") }) {
+                    throw CtlError("\(child.path) is hosted under \(path); unhost it first")
                 }
-                topology = topology.removingChains([path])
-                print("\(path): not hosted from the next start")
-            })
+                object["hostedChains"] = chains.filter { hostedPath($0) != path }
+                if var peers = object["peers"] as? [String: Any] {
+                    peers[path] = nil
+                    object["peers"] = peers
+                }
+            }
+            print("\(path): no longer hosted")
         }
     }
 
@@ -247,8 +248,8 @@ struct Child: AsyncParsableCommand {
             } catch {
                 throw CtlError(genesis == nil ? "--premine-to: \(error)" : "the genesis: \(error)")
             }
-            // Running (or remote): the node keeps the spec and hosts the
-            // chain. Stopped: written here, and hosted from the next start.
+            // The node keeps the spec (under specs/) and creates the chain
+            // from it: now when it runs, at its next start when stopped.
             let inline = HostedChain(
                 path: path, spec: chainSpec, premineTo: premineTo,
                 genesisTransactions: try genesisTransactions.map {
@@ -256,41 +257,22 @@ struct Child: AsyncParsableCommand {
                 },
                 policyModules: modules.isEmpty ? nil : modules.keys.sorted().compactMap { modules[$0] }
             )
-            try await target.changeConfig(api: { rpc in
-                try await sendChange(rpc: rpc, "POST", "hosted-chains", json: JSONEncoder().encode(inline))
-                print("\(path): created; genesis mined from its spec in the next template that carries it")
-            }, stopped: { topology in
+            let entry = try JSONSerialization.jsonObject(with: JSONEncoder().encode(inline))
+            let response = try await target.editFragment(operatorFragment) { object, current in
                 // A chain is created once: its spec fixes its genesis.
-                guard !(topology.hostedChains ?? []).contains(path),
+                guard !current.status.chains.contains(where: { $0.path == path }),
                       !FileManager.default.fileExists(atPath: layout.childSpec(for: path).path) else {
                     throw CtlError("\(path) already exists; a child chain is created once")
                 }
-                topology.hostedChains = (topology.hostedChains ?? []) + [path]
-                _ = try topology.validated()
-                let encoder = JSONEncoder()
-                encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-                let file = layout.childSpec(for: path)
-                try FileManager.default.createDirectory(
-                    at: file.deletingLastPathComponent(), withIntermediateDirectories: true
-                )
-                // The recipient first: the spec marks the chain created, so a
-                // spec never stands without the recipient its genesis pays.
-                if let premineTo {
-                    try Data(premineTo.utf8).write(to: layout.premineRecipient(for: path), options: .atomic)
-                }
-                if let genesis {
-                    try genesis.bytes.write(to: layout.genesisTransactions(for: path), options: .atomic)
-                }
-                try encoder.encode(chainSpec).write(to: file, options: .atomic)
-                if !modules.isEmpty {
-                    let directory = layout.policyModules(for: path)
-                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                    for (cid, bytes) in modules {
-                        try bytes.write(to: directory.appendingPathComponent(cid + ".wasm"), options: .atomic)
-                    }
-                }
-                print("\(path): spec \(file.path); genesis mined from it in the next template that carries it")
-            })
+                object["hostedChains"] = (object["hostedChains"] as? [Any] ?? []) + [entry]
+            }
+            try report(response, chain: path)
+            print("\(path): created; genesis mined from its spec in the next template that carries it")
         }
     }
+}
+
+/// The path of a `hostedChains` entry: a path, or an object naming one.
+func hostedPath(_ entry: Any) -> String? {
+    entry as? String ?? (entry as? [String: Any])?["path"] as? String
 }

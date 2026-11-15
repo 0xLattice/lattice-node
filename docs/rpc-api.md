@@ -63,11 +63,11 @@ same handlers), but:
   and the path as the node registers it, a parameter in braces:
   `GET /api/state/account/{addr}`, `GET /fetch/{cid}`. `?chainPath=` is not
   part of a route; a token reaches every chain the node hosts. Only `admin`
-  reaches `/tokens`. A token allowed `PATCH /config`, `POST /restart`,
-  `POST /stop` or `POST /wipe` controls the node as fully as `admin` does,
-  short of tokens: give those routes only where `admin` would do.
-- No field may name a file on the node's disk: the flag form of
-  `POST /hosted-chains` is `409`, and `PATCH /config` that changes
+  reaches `/tokens`. A token allowed `PUT /config/fragments/{name}`,
+  `POST /restart`, `POST /stop` or `POST /wipe` controls the node as fully as
+  `admin` does, short of tokens: give those routes only where `admin` would
+  do.
+- No field may name a file on the node's disk: a fragment that changes
   `operatorTokens` is `400`. That is set beside the node.
 - A request with an `Origin` header is `403` unless `operatorAllowedOrigins`
   lists that exact origin; a listed one gets CORS preflight answers and
@@ -81,7 +81,7 @@ earlier nodes read, still reads):
 
 ```json
 [{"name": "ops", "sha256": "<hex SHA-256 of the token>", "role": "admin"},
- {"name": "seller", "sha256": "<hex>", "routes": ["GET /hosted-chains", "POST /hosted-chains"]}]
+ {"name": "seller", "sha256": "<hex>", "routes": ["GET /config", "PUT /config/fragments/{name}"]}]
 ```
 
 Tokens are made and revoked through the API ([Tokens](#tokens)); a change
@@ -546,7 +546,7 @@ data: 3f2a...
 
 The digest is the one `/status` and every template carry. It changes when a
 hosted level's act-on tip moves, when what any hosted level's next block
-would carry changes, and when the hosted chains change (`POST /hosted-chains`).
+would carry changes, and when the hosted chains change.
 A client fetches a template (`POST /mining/templates`) when it sees a new
 digest; work it already holds stays valid until the Nexus tip moves.
 
@@ -682,73 +682,19 @@ its state is not readable here.
 ## Operator control
 
 A node started as `lattice-node --root <root>` (what `lattice up` runs) takes
-every setting from `<root>/lattice.json` and is that file's only writer while
-it runs. These routes change it, on the operator port and the remote
-listener. A node started with flags has no configuration of its own:
-`GET`/`PATCH /config` answer `409` there, and `POST /hosted-chains` keeps its
-earlier whole-set form (below).
+its configuration from layers, as systemd drop-ins and `sudoers.d` do:
+`<root>/lattice.json`, then each `<root>/config.d/<name>.json` in name order.
+Each writer owns one fragment (a deploy script `deploy`, a hosting seller its
+own, people and `lattice config set` `operator`); the node never writes
+`lattice.json`. Every layer has `lattice.json`'s keys, and they merge:
 
-Every change is applied one at a time, in arrival order: checked (the
-resulting file must be valid, a spec must parse, a module must load), applied to the running node, then written
-atomically, and answered:
+- a value (a port, a rate, a mode): the later layer's;
+- `hostedChains`, each chain's `peers`, `rpcAllowedOrigins`,
+  `operatorAllowedOrigins`: the union of every layer's;
+- `stateWindows`, `finalityWindows`: per chain path, the later layer's.
 
-```json
-{"config": {"...": "lattice.json as now written"},
- "applied": ["hostedChains"],
- "failed": [{"key": "hostedChains", "chain": "Nexus/Beta", "error": "..."}],
- "restartRequired": ["listen"]}
-```
-
-`400` when the change does not check (nothing was applied or written),
-including a configuration the node would not start from: its start-time
-checks are run on it (flags, peers, windows, listeners), and a listener port
-it newly names must be free now;
-`409` when `lattice.json` was edited by hand since the node last wrote it
-(stop the node to edit it, or `lattice restart` to load the edit); `200`
-when all of it took effect; `500` with the same body when part of it failed:
-what failed is left out of what is written (a chain that did not start is not
-listed, nor are the peers that name it).
-
-Live keys apply at once: `hostedChains` and `peers` for child chains. Every
-other key (ports, `peers.Nexus`, retention, listeners, serving limits,
-relay fee, ...) is written and listed in `restartRequired` until
-[`POST /restart`](#post-restart).
-
-### `GET /config`
-
-`{"config": {...}, "restartRequired": [...]}`: the configuration as written,
-and the keys written since start that wait for a restart. Specs, genesis
-transactions and modules are files under `<root>/specs/`, named by path, not
-sent here.
-
-### `PATCH /config`
-
-An [RFC 7396](https://www.rfc-editor.org/rfc/rfc7396) merge patch of
-`lattice.json` (`Content-Type: application/merge-patch+json` or
-`application/json`): a member replaces, `null` removes, an object merges.
-
-```json
-{"peers": {"Nexus/Alpha": ["<public-key>@host:port"], "Nexus/Beta": null},
- "announceLifetime": 900}
-```
-
-`lattice.json` holds no mining settings; a patch adding `mine` is `400`. A
-`mine` object left in the file by an earlier release is ignored (the node
-warns at start) and not written back; `{"mine": null}` removes it.
-
-### `GET /hosted-chains`
-
-```json
-{"chains": ["Nexus/Alpha"], "configured": ["Nexus/Alpha", "Nexus/Beta"]}
-```
-
-The child chains running, parent first, and those configured
-(`hostedChains`); a configured chain not running failed to start.
-`configured` is absent on a node started with flags.
-
-### `POST /hosted-chains`
-
-One chain:
+A `hostedChains` entry is a chain's path (synced from the node's peers) or an
+object that creates the chain:
 
 ```json
 {"path": "Nexus/Beta",
@@ -758,32 +704,72 @@ One chain:
  "policyModules": ["<base64 WASM module>"]}
 ```
 
-Only `path` is required: a chain named by path is synced from the node's
-peers. The rest creates a new chain, whose genesis the node mines from it:
-the node keeps them under `<root>/specs/` (as `lattice child create` does)
-and adds the path to `hostedChains`. Sent again with the same spec it
-changes nothing (`applied: []`); with another spec it is `409`: a child chain
-is created once. Its parent must be hosted. Answers as a configuration change.
+The node keeps what creates a chain under `<root>/specs/` (as `lattice child
+create` does) and mines its genesis from it; a chain is created once. Two
+layers that create one chain differently, a creation the node refuses, a
+chain whose parent is not hosted, or a chain that does not start: that chain
+is not hosted and its status says why, and the rest of the configuration
+holds. Anything else wrong (a file that is not one JSON object, an unknown
+key, a merged result that does not check) is the whole configuration's: the
+node does not start (exit 78), and a change that would make it so is `400`.
 
-On a node started with flags the body is the whole set, each entry read as
-the start flag of the same name, whose files are on the node's disk:
+The node reads the layers at its start, again on `SIGHUP`, and after each
+change of a fragment through this API. Hosted chains and child chains' peers
+apply at once; every other key (ports, Nexus's peers, retention, listeners,
+serving limits, relay fee, ...) at the next start, listed as
+`pendingRestart` until [`POST /restart`](#post-restart). A node started with
+flags has no configuration of its own: these routes answer `409` there.
+
+### `GET /config`
 
 ```json
-{"hostChain": ["Nexus/Alpha", "Nexus/Beta=/path/to/spec.json"],
- "premineTo": ["Nexus/Beta=<address>"],
- "chainPeer": ["Nexus/Alpha=<public-key>@host:port"],
- "policyModule": ["/path/to/module.wasm"]}
+{"spec": {"...": "the merged configuration, as lattice.json holds one"},
+ "fragments": ["lattice", "deploy", "hostmarket", "operator"],
+ "status": {
+   "chains": [{"path": "Nexus/Alpha", "from": ["deploy"], "actual": "hosted"},
+              {"path": "Nexus/Beta", "from": ["hostmarket", "operator"], "actual": "notHosted",
+               "error": "hostmarket and operator create Nexus/Beta differently"}],
+   "pendingRestart": ["stateWindow"],
+   "errors": ["operatorListen: 10.0.0.5:8090 did not open: ..."]}}
 ```
 
-It hosts those and only those until the next start. A chain left out stops
-with every chain below it; what it stored stays. A `hostChain` body sent to a
-node started with `--root` is `400` (update `lattice`).
+`spec.hostedChains` lists the chains that can be hosted; `status.chains`
+lists every chain a layer names, with the layers that name it. `errors` holds
+what else does not match: a re-read (`SIGHUP`) the node could not use (it
+keeps the configuration it had), an operator listener that could not open
+(the node runs on without it, reachable on loopback).
 
-### `DELETE /hosted-chains?chainPath=Nexus/Beta`
+### `GET /config/fragments/{name}`
 
-Stops hosting the chain and removes it from the configuration, with the
-peers that name it. `409` while a chain below it
-is hosted. What it stored stays: hosting it again resumes it.
+The fragment's file as it is (`application/json`); `lattice` is
+`lattice.json`. `404` when there is none.
+
+### `PUT /config/fragments/{name}`
+
+Replaces the fragment with the body, one JSON object
+(`Content-Type: application/json`), and answers as `GET /config`. A name is
+lowercase letters, digits, `.`, `_` and `-`, starting with a letter or digit
+(`deploy`, `50-hostmarket`); `lattice.json` is not written here. `400` when
+the configuration it makes does not check, including one the node would not
+start from (its start-time checks are run on it): nothing is written. A
+chain that does not start is reported in `status`, not refused. On the
+remote listener a fragment may not change `operatorTokens` (a file on the
+node's disk): `400`.
+
+### `DELETE /config/fragments/{name}`
+
+Removes the fragment, answering as `GET /config`; `400` when what is left
+does not check, `404` when there is none. A chain no layer lists any more
+stops; what it stored stays, and hosting it again resumes it.
+
+### `GET /hosted-chains`
+
+```json
+{"chains": ["Nexus/Alpha"], "configured": ["Nexus/Alpha", "Nexus/Beta"]}
+```
+
+The child chains running, parent first, and those the configuration lists
+(`spec.hostedChains`); `configured` is absent on a node started with flags.
 
 A peer that connects afterwards is told the new list in the hello. A peer
 already connected learns a newly hosted chain from its provider record, and a
@@ -813,8 +799,8 @@ Bytes per store in the data directory, and the free bytes on its volume.
 
 ### `POST /restart`
 
-`409` when `lattice.json` as it is on disk would not start the node (it is
-read and checked as a start would), or when a stop or restart is already
+`409` when the configuration as it is on disk would not start the node (it
+is read and checked as a start would), or when a stop or restart is already
 under way. Otherwise `202 {"restarting": true}`,
 then the node stops as on SIGTERM and exits with status 75 (`EX_TEMPFAIL`).
 Its process manager starts it again (systemd `Restart=on-failure`, launchd

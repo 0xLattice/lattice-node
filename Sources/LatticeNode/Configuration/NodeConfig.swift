@@ -1,8 +1,6 @@
-// lattice.json as the node's own configuration: the node started with
-// `--root` reads it at start and is its only writer while it runs. This file
-// holds what both sides need of it: the node flags it stands for, changes to
-// it (RFC 7396 merge patches), which keys apply live, and the operator API's
-// shapes for reading and changing it.
+// The node's configuration (lattice.json and config.d, merged): the node
+// flags it stands for, which keys apply live, and the operator API's shapes
+// for reading and changing it.
 
 import Foundation
 import Lattice
@@ -71,19 +69,14 @@ extension Topology {
     /// This configuration with `patch` (an RFC 7396 JSON merge patch: an
     /// object's members replace, `null` removes, anything else replaces the
     /// whole value) applied. Not validated.
-    public func applying(mergePatch patch: Data) throws -> Topology {
+    /// `object` changed by an RFC 7396 merge patch.
+    public static func applying(mergePatch patch: Data, to object: [String: Any]) throws -> [String: Any] {
         guard let changes = try? JSONSerialization.jsonObject(with: patch) as? [String: Any] else {
-            throw CtlError("a configuration change is one JSON object (a merge patch of \(Self.fileName))")
+            throw CtlError("a configuration change is one JSON object (a merge patch)")
         }
-        // Removing it (`null`, `lattice config unset mine`) is cleanup.
-        guard changes[Self.retiredMiningKey] == nil || changes[Self.retiredMiningKey] is NSNull else {
-            throw CtlError("\(Self.fileName) holds no mining settings: the miner is a separate process and reads its own miner.json")
-        }
-        let merged = Self.merge(try jsonObject(), changes)
-        return try Self.load(data: JSONSerialization.data(withJSONObject: merged))
+        return merge(object, changes) as? [String: Any] ?? [:]
     }
 
-    /// This configuration as a JSON object.
     public func jsonObject() throws -> [String: Any] {
         try JSONSerialization.jsonObject(with: JSONEncoder().encode(self)) as? [String: Any] ?? [:]
     }
@@ -134,11 +127,6 @@ extension Topology {
     }
 
     /// The top-level keys whose values differ between the two.
-    public func changedKeys(from other: Topology) throws -> [String] {
-        let (mine, theirs) = (try jsonObject(), try other.jsonObject())
-        return Set(mine.keys).union(theirs.keys).sorted().filter { !Self.equalJSON(mine[$0], theirs[$0]) }
-    }
-
     static func equalJSON(_ lhs: Any?, _ rhs: Any?) -> Bool {
         func bytes(_ value: Any?) -> Data? {
             guard let value else { return nil }
@@ -237,50 +225,55 @@ public enum ConfigAssignment {
 
 /// `GET /config`: the node's configuration as it keeps it, and the keys
 /// changed since its start that take a restart to apply.
+/// `GET /config`, and the answer to a change of a fragment: the merged
+/// configuration (`spec`), the layers it was merged from, in order, and how
+/// the running node compares with it.
 public struct ConfigResponse: Codable, Sendable {
-    public let config: Topology
-    public let restartRequired: [String]
+    public let spec: Topology
+    public let fragments: [String]
+    public let status: ConfigStatus
 
-    public init(config: Topology, restartRequired: [String]) {
-        self.config = config
-        self.restartRequired = restartRequired
+    public init(spec: Topology, fragments: [String], status: ConfigStatus) {
+        self.spec = spec
+        self.fragments = fragments
+        self.status = status
     }
 }
 
-/// One part of a change the node could not apply: the key and, for a
-/// hosted chain, its path.
-public struct ConfigFailure: Codable, Sendable {
-    public let key: String
-    public let chain: String?
-    public let error: String
+public struct ConfigStatus: Codable, Sendable {
+    /// One chain a layer lists, or that the node hosts though none does.
+    public struct Chain: Codable, Sendable {
+        public let path: String
+        /// The layers that list it.
+        public let from: [String]
+        /// `hosted` or `notHosted`.
+        public let actual: String
+        /// Why it is not hosted as listed.
+        public let error: String?
 
-    public init(key: String, chain: String? = nil, error: String) {
-        self.key = key
-        self.chain = chain
-        self.error = error
+        public init(path: String, from: [String], actual: String, error: String? = nil) {
+            self.path = path
+            self.from = from
+            self.actual = actual
+            self.error = error
+        }
+    }
+
+    public let chains: [Chain]
+    /// The keys whose value differs from what the node started with and
+    /// applies only at its next start.
+    public let pendingRestart: [String]
+    /// What else does not match: a re-read the node could not use, a
+    /// listener it could not open.
+    public let errors: [String]
+
+    public init(chains: [Chain], pendingRestart: [String], errors: [String]) {
+        self.chains = chains
+        self.pendingRestart = pendingRestart
+        self.errors = errors
     }
 }
 
-/// The answer to a configuration change (`PATCH /config`, `POST` and
-/// `DELETE /hosted-chains`): the configuration as now kept, which is what
-/// took effect; the changed keys applied now; what failed (left out of the
-/// kept configuration); and the keys waiting for a restart.
-public struct ConfigChangeResponse: Codable, Sendable {
-    public let config: Topology
-    public let applied: [String]
-    public let failed: [ConfigFailure]
-    public let restartRequired: [String]
-
-    public init(config: Topology, applied: [String], failed: [ConfigFailure], restartRequired: [String]) {
-        self.config = config
-        self.applied = applied
-        self.failed = failed
-        self.restartRequired = restartRequired
-    }
-}
-
-/// `GET /hosted-chains`: the child chains running now, parent first, and
-/// the ones the configuration lists (absent for a node started with flags).
 public struct HostedChainsResponse: Codable, Sendable {
     public let chains: [String]
     public let configured: [String]?

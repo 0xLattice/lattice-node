@@ -79,11 +79,11 @@ final class HostChainsRuntimeTests: XCTestCase {
         } catch NodeConfigurationError.invalidChainPath {}
         XCTAssertEqual(follower.runtime.hostedChildren, [])
 
-        // Through the operator API, as `lattice` asks: Alpha's reads answer
-        // on the same running listener once it is hosted, and not after.
+        // Alpha's reads answer on the same running listener once it is
+        // hosted, and not after.
         let app = makeApplication(service: follower.runtime, host: "127.0.0.1", port: 0)
+        try await follower.runtime.host([Self.alpha])
         try await app.test(.router) { client in
-            try await Self.hostedChains(client, ["Nexus/Alpha"])
             try await client.execute(
                 uri: "/hosted-chains", method: .get, headers: [.authorization: testOperatorAuthorization]
             ) { XCTAssertEqual(String(buffer: $0.body), #"{"chains":["Nexus\/Alpha"]}"#) }
@@ -108,8 +108,8 @@ final class HostChainsRuntimeTests: XCTestCase {
                 .contains { $0.key.hex == follower.endpoint.publicKey }
         }
 
+        try await follower.runtime.host([])
         try await app.test(.router) { client in
-            try await Self.hostedChains(client, [])
             try await Self.alphaHealth(client, .notFound)
         }
         XCTAssertNil(follower.runtime.levelReads[Self.alpha])
@@ -141,16 +141,6 @@ final class HostChainsRuntimeTests: XCTestCase {
         let rehostedEvent = await events.next()
         let rehosted = try XCTUnwrap(rehostedEvent)
         XCTAssertNotEqual(rehosted, unhosted)
-    }
-
-    private static func hostedChains(_ client: some TestClientProtocol, _ chains: [String]) async throws {
-        try await client.execute(
-            uri: "/hosted-chains", method: .post,
-            headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
-            body: ByteBuffer(bytes: try JSONEncoder().encode(HostedChainsRequest(
-                hostChain: chains, premineTo: nil, genesisTransactions: nil, chainPeer: nil, policyModule: nil
-            )))
-        ) { XCTAssertEqual($0.status, .ok, String(buffer: $0.body)) }
     }
 
     private static func alphaHealth(_ client: some TestClientProtocol, _ status: HTTPResponse.Status) async throws {

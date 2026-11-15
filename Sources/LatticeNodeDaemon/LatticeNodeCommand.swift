@@ -19,7 +19,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         version: LatticeNodeVersion.current
     )
 
-    @Option(help: "A host root made by `lattice init`: the node runs as <root>/lattice.json says (storage, identity, ports, hosted chains...) and is that file's only writer while it runs, changing it through its operator API (GET/PATCH /config) and applying each change live or at the next restart. Give no other flag with it.")
+    @Option(help: "A host root made by `lattice init`: the node runs as <root>/lattice.json and the fragments in <root>/config.d say together (storage, identity, ports, hosted chains...), reads them again on SIGHUP and when a fragment changes through its operator API (PUT /config/fragments/<name>), and applies each change live or at the next restart. Give no other flag with it.")
     var root: String?
 
     @Option(help: "Hosted-tree storage directory; defaults to ~/.lattice/chains/Nexus")
@@ -62,7 +62,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(name: .customLong("operator-listen"), help: "host:port of an operator listener for clients on other machines, e.g. 10.0.0.5:8090. It serves the loopback API's routes, each request carrying Authorization: Bearer <token> for a token in --operator-tokens allowed that route; the cookie is not accepted there, and nothing sent there may name a file on this node's disk. Plain HTTP: put it on a private network or behind a TLS proxy. Requires --operator-tokens.")
     var operatorListen: String?
 
-    @Option(name: .customLong("operator-tokens"), help: "The --operator-listen tokens: a JSON array of {\"name\", \"sha256\": hex SHA-256 of the token, and \"role\": \"admin\" or \"read\", or \"routes\": [\"POST /hosted-chains\", ...]}. Created by the first POST /tokens when absent; changed through /tokens while the node runs.")
+    @Option(name: .customLong("operator-tokens"), help: "The --operator-listen tokens: a JSON array of {\"name\", \"sha256\": hex SHA-256 of the token, and \"role\": \"admin\" or \"read\", or \"routes\": [\"PUT /config/fragments/{name}\", ...]}. Created by the first POST /tokens when absent; changed through /tokens while the node runs.")
     var operatorTokens: String?
 
     @Option(name: .customLong("operator-allowed-origin"), help: "A browser origin allowed on the --operator-listen listener, exactly as the browser sends it, e.g. https://dashboard.example (repeatable). Requests with any other Origin are refused; an allowed origin gets CORS answers and still needs a token.")
@@ -158,29 +158,35 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             return
         }
         // Only `--root` (and its value) on the command line: everything else
-        // comes from lattice.json.
+        // comes from lattice.json and config.d.
         let given = CommandLine.arguments.dropFirst()
         guard given.allSatisfy({ !$0.hasPrefix("-") || $0 == "--root" || $0.hasPrefix("--root=") }) else {
-            throw configurationFault("--root takes every setting from lattice.json; give no other flag with it")
+            throw configurationFault("--root takes every setting from lattice.json and config.d; give no other flag with it")
         }
         let layout = HostLayout(root: root)
-        let topology: Topology
+        let merged: MergedConfig
         do {
-            topology = try Topology.load(root: layout.root).validated()
+            merged = try MergedConfig.load(root: layout.root)
         } catch {
-            throw configurationFault("\(layout.root.appendingPathComponent(Topology.fileName).path): \(error). The node starts only from a valid configuration; fix the file by hand while the node is stopped (`lattice config set` edits it then too).")
+            throw configurationFault("\(layout.root.path): \(error). The node starts only from a configuration that checks.")
         }
         if Topology.holdsRetiredMining(root: layout.root) {
             logLine("warning: \(Topology.retiredMiningWarning)")
         }
         try performRequestedWipe(layout)
+        // A chain that cannot be created starts without it, reported.
+        let failures = prepareCreates(merged, layout: layout).failures
+        for (path, error) in (merged.chainErrors.merging(failures) { first, _ in first }).sorted(by: { $0.key < $1.key }) {
+            logLine("not hosting \(path): \(error)")
+        }
+        let topology = merged.topology.removingChains(Set(failures.keys))
         var command: LatticeNodeCommand
         do {
             command = try LatticeNodeCommand.parse(topology.nodeArguments(layout: layout))
         } catch {
             throw configurationFault(LatticeNodeCommand.message(for: error))
         }
-        try await command.start(owner: (layout, topology))
+        try await command.start(owner: NodeOwner(layout: layout, started: topology, merged: merged, failures: failures))
     }
 
     /// A configuration the node cannot start from: said, then the exit status
@@ -192,7 +198,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
 
     /// Runs the node with these flags; `owner` is the host root and the
     /// configuration it was started from, when it runs under `--root`.
-    mutating func start(owner: (layout: HostLayout, topology: Topology)?) async throws {
+    mutating func start(owner: NodeOwner?) async throws {
         let processStartTime = Date()
         let address = ChainAddress([ChainAddress.nexus])!
         // A fault in lattice.json (`--root`) is the configuration's: 78. One
@@ -438,7 +444,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
 
 /// The child chains `--host-chain`, `--premine-to`, `--genesis-transactions`,
 /// `--chain-peer` and `--policy-module` name: read the same at start and when
-/// the operator changes them on a running node (`POST /hosted-chains`). Each
+/// its configuration changes on a running node (`OperatorConfig`). Each
 /// spec file is read once, so the paths and specs agree.
 struct HostedChildren {
     var children: [[String]] = []
@@ -578,22 +584,8 @@ protocol OperatorWrites: Sendable {
     func fetchVolume(_ root: String) async throws -> SerializedVolume?
     func unpinVolume(_ root: String) async throws
     func pinnedVolumes() async -> [String]
-    func hostChains(_ request: HostedChainsRequest) async throws
     var hostedChildren: [[String]] { get }
     var servingLedger: ServingLedger { get }
-}
-
-/// `POST /hosted-chains` on a node started with flags: the child chains it
-/// hosts from now on, in the shape of the flags that name them at start
-/// (`--host-chain`, ...), until its next start. A chain left out stops; its
-/// data stays. (Under `--root` the node keeps its chains in its
-/// configuration; see `OperatorConfig`.)
-struct HostedChainsRequest: Codable, Sendable {
-    let hostChain: [String]
-    let premineTo: [String]?
-    let genesisTransactions: [String]?
-    let chainPeer: [String]?
-    let policyModule: [String]?
 }
 
 /// `POST /pins`: the Volume an operator pins, by its root CID.
@@ -614,15 +606,7 @@ struct PinsResponse: Codable, Sendable {
     let pins: [String]
 }
 
-extension NodeRuntime: OperatorWrites {
-    func hostChains(_ request: HostedChainsRequest) async throws {
-        try await host(try HostedChildren(
-            hostChain: request.hostChain, premineTo: request.premineTo ?? [],
-            genesisTransactions: request.genesisTransactions ?? [],
-            chainPeer: request.chainPeer ?? [], policyModule: request.policyModule ?? []
-        ))
-    }
-}
+extension NodeRuntime: OperatorWrites {}
 
 /// The public listener's `POST /transactions`, when its operator turned it on.
 typealias PublicSubmit = @Sendable (SubmitTransactionRequest) async throws -> SubmitTransactionResponse

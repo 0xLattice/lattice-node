@@ -109,16 +109,13 @@ final class LatticeCtlTopologyTests: XCTestCase {
     }
 
     /// A lattice.json from before mining was a process of its own still
-    /// starts the node, which ignores its `mine` and never writes it back;
-    /// a change adding `mine` is refused.
+    /// starts the node, which ignores its `mine` and never writes it back.
     func testAnOlderLatticeJSONWithMineStillLoads() throws {
         let topology = try Topology.load(data: Data(
             #"{"listen":4001,"rpc":4003,"mine":{"enabled":true,"workers":1,"recipients":{"Nexus":"x"}}}"#.utf8
         )).validated()
         XCTAssertEqual(topology.rpc, 4003)
         XCTAssertFalse(String(decoding: try topology.canonicalData(), as: UTF8.self).contains("mine"))
-        XCTAssertThrowsError(try topology.applying(mergePatch: Data(#"{"mine":{"workers":2}}"#.utf8)))
-        XCTAssertNoThrow(try topology.applying(mergePatch: Data(#"{"mine":null}"#.utf8)), "removing it is cleanup")
         XCTAssertThrowsError(try Topology.load(data: Data(#"{"listen":4001,"rpc":4003,"nope":1}"#.utf8)))
     }
 
@@ -340,23 +337,28 @@ final class LatticeCtlTopologyTests: XCTestCase {
         }
     }
 
-    /// A configuration change is an RFC 7396 merge patch: members replace,
-    /// null removes, an unknown key is refused.
+    /// A configuration change is an RFC 7396 merge patch of a fragment:
+    /// members replace, null removes.
     func testAMergePatchChangesOnlyWhatItNames() throws {
+        let fragment: [String: Any] = [
+            "hostedChains": ["Nexus/A"], "peers": ["Nexus": [String](), "Nexus/A": ["k@a.example:4001"]], "minRelayFee": 3,
+        ]
+        let next = try Topology.applying(
+            mergePatch: Data(#"{"peers":{"Nexus":null},"stateWindow":null,"listen":5001}"#.utf8), to: fragment
+        )
+        XCTAssertEqual(next["listen"] as? Int, 5001)
+        XCTAssertEqual(next["minRelayFee"] as? Int, 3)
+        XCTAssertEqual(next["peers"] as? [String: [String]], ["Nexus/A": ["k@a.example:4001"]])
+        XCTAssertEqual(next["hostedChains"] as? [String], ["Nexus/A"])
+        XCTAssertNil(next["stateWindow"])
+        XCTAssertThrowsError(try Topology.applying(mergePatch: Data("[1]".utf8), to: fragment))
         let topology = try Topology.load(data: Data(
-            #"{"listen":4001,"rpc":4003,"hostedChains":["Nexus/A"],"peers":{"Nexus":[],"Nexus/A":["k@a.example:4001"]},"minRelayFee":3}"#.utf8
+            #"{"listen":4001,"rpc":4003,"hostedChains":["Nexus/A"],"peers":{"Nexus":[],"Nexus/A":["k@a.example:4001"]}}"#.utf8
         ))
-        let next = try topology.applying(mergePatch: Data(
-            #"{"peers":{"Nexus":null},"stateWindow":null,"listen":5001}"#.utf8
+        let changed = try Topology.load(data: Data(
+            #"{"listen":5001,"rpc":4003,"hostedChains":["Nexus/A"],"peers":{"Nexus/A":["k@a.example:4001"]}}"#.utf8
         ))
-        XCTAssertEqual(next.listen, 5001)
-        XCTAssertEqual(next.minRelayFee, 3)
-        XCTAssertEqual(next.peers?.byChain, ["Nexus/A": ["k@a.example:4001"]])
-        XCTAssertEqual(next.hostedChains, ["Nexus/A"])
-        XCTAssertThrowsError(try topology.applying(mergePatch: Data(#"{"nope":1}"#.utf8)))
-        XCTAssertThrowsError(try topology.applying(mergePatch: Data("[1]".utf8)))
-        XCTAssertEqual(try next.restartRequired(comparedTo: topology), ["listen", "peers"])
-        XCTAssertEqual(try next.changedKeys(from: topology), ["listen", "peers"])
+        XCTAssertEqual(try changed.restartRequired(comparedTo: topology), ["listen", "peers"])
         // A chain's removal takes what requires it hosted with it.
         let removed = topology.removingChains(["Nexus/A"])
         XCTAssertEqual(removed.hostedChains, [])

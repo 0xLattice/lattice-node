@@ -4,8 +4,9 @@
 in the foreground, which hosts the Nexus-rooted tree its `lattice.json`
 describes, and every other command asks that node, over its operator API.
 Starting the node again after it exits is the job of a process manager
-(systemd, launchd, a container runtime), not of `lattice` or the node. The node owns
-`lattice.json` while it runs ([Operator control](rpc-api.md#operator-control)).
+(systemd, launchd, a container runtime), not of `lattice` or the node. The
+node's configuration is `lattice.json` and the fragments of `config.d`, merged
+([Operator control](rpc-api.md#operator-control)).
 
 Every command accepts `--root <directory>` (the current directory is the
 default). Every command that operates a node also accepts `--node <url>
@@ -34,15 +35,25 @@ only says which node it mines through.
 | `lattice tokens list/create/revoke` | Remote operator tokens. |
 | `lattice logs [--miner] [--tail N]` | The running node's recent log lines, from its memory (`--miner`: the local mining loop's, read from `log/mine.log` under `--root`). |
 
-A running node applies hosted chains and child-chain peers at once;
-it writes every other key and lists it as waiting for a restart until
-`lattice restart` (refused while `lattice.json` would not start the node). A
-change the node would not start from (a peer that does not parse, a port in
-use) is refused before it is kept. A change to a stopped node is written to `lattice.json`
-directly, checked first, under the node's storage lock. A running node refuses a
-change when `lattice.json` was edited by hand since it last wrote it: stop it
-to edit the file by hand, or `lattice restart` to load the edit. A file that
-does not check stops the node at start with the reason.
+`config set`, `config unset` and `child create/host/unhost` change the
+`operator` fragment (`config.d/operator.json`), which comes after every other
+layer; `lattice apply -f <file> --fragment <name>` replaces any one fragment,
+for a tool or script that owns it:
+
+```bash
+lattice apply -f deploy.json --fragment deploy --root /var/lib/lattice
+lattice config get --fragment deploy --root /var/lib/lattice
+```
+
+A running node applies hosted chains and child-chain peers at once, and every
+other key at its next start: `lattice status` lists what waits, until
+`lattice restart` (refused while the configuration would not start the node).
+A change that would not check, or that the node would not start from, is
+refused and nothing is written. A change to a stopped node is written to its
+fragment file directly, checked first, under the node's storage lock. A file
+edited by hand is read at the next start, or on `SIGHUP`
+(`systemctl reload`, `kill -HUP`). A configuration that does not check stops
+the node at start with the reason (exit 78).
 
 Remote control, from an operator's machine:
 
@@ -271,10 +282,11 @@ lattice child host Nexus/Alpha --root /var/lib/lattice
 ```
 
 A running node starts it at once and syncs it from its peers; a stopped one
-hosts it from its next start. `child create` on a running node sends the spec
-(with its premine recipient, genesis transactions and modules) inline in
-[`POST /hosted-chains`](rpc-api.md#post-hosted-chains), and the node keeps
-them under `specs/`; a second create of the same path is refused. Remotely,
+hosts it from its next start. `child create` adds the spec (with its premine
+recipient, genesis transactions and modules) inline to the `operator`
+fragment's `hostedChains`, and the node keeps them under `specs/`; a second
+create of the same path is refused. `child unhost` removes a chain from the
+`operator` fragment; a chain another fragment lists is refused, naming it. Remotely,
 `--spec`, `--genesis-transactions` and `--policy-module` are files on the
 machine running `lattice`.
 
