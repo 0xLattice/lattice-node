@@ -1032,6 +1032,50 @@ extension LatticeCtlE2ETests {
         XCTAssertNil(onOld, "and no longer on the old one")
     }
 
+    /// A restart or stop asked through the API ends the node with its exit
+    /// status, not a trap, while a response streams and connections keep
+    /// arriving: its listeners shut down gracefully, serving and closing
+    /// every connection they accepted.
+    func testARestartOrStopUnderOpenConnectionsExitsCleanly() async throws {
+        let host = try await bringUpMiningHost(miner: nil)
+        let node = "http://127.0.0.1:\(host.nexusRPC)"
+        let cookie = HostLayout(root: host.root.path).rpcCookie
+        for (route, expected) in [("restart", Int32(75)), ("stop", 0)] {
+            let before = host.supervisor.exits.count
+            var stream = URLRequest(url: URL(string: "\(node)/mining/events")!)
+            stream.setValue(
+                "Basic " + Data(try String(contentsOf: cookie, encoding: .utf8).utf8).base64EncodedString(),
+                forHTTPHeaderField: "Authorization"
+            )
+            let events = URLSession.shared.dataTask(with: stream)
+            events.resume()
+            // New connections throughout, each closed after its answer.
+            let arriving = (0..<8).map { _ in
+                Task {
+                    var probe = URLRequest(url: URL(string: "\(node)/health")!)
+                    probe.setValue("close", forHTTPHeaderField: "Connection")
+                    probe.cachePolicy = .reloadIgnoringLocalCacheData
+                    probe.timeoutInterval = 5
+                    while !Task.isCancelled { _ = try? await URLSession.shared.data(for: probe) }
+                }
+            }
+            try await Task.sleep(for: .seconds(1))
+            let (status, _) = try await postJSON("\(node)/\(route)", [String: String](), cookie: cookie)
+            XCTAssertEqual(status, 202, route)
+            try await waitFor("the node exits after /\(route)") { host.supervisor.exits.count > before }
+            arriving.forEach { $0.cancel() }
+            events.cancel()
+            let log = try String(contentsOf: host.root.appendingPathComponent("log/lattice-node.log"), encoding: .utf8)
+            XCTAssertEqual(host.supervisor.exits[before], expected, "/\(route): \(log.suffix(2_000))")
+            XCTAssertFalse(log.contains("Fatal error"), log)
+            if route == "restart" {
+                try await waitFor("Nexus active after the restart") {
+                    await self.health(host.nexusRPC)?["phase"] as? String == "active"
+                }
+            }
+        }
+    }
+
     func testANodeIsOperatedRemotelyThroughItsOperatorListener() async throws {
         let alpha = "Nexus/Alpha"
         let scratch = FileManager.default.temporaryDirectory
