@@ -32,16 +32,30 @@ final class ChainCreationTests: XCTestCase {
         XCTAssertTrue(try ChainCreation.create(HostedChain(path: "Nexus/C", spec: spec), layout: layout))
     }
 
-    func testAPathStorageHoldsTakesNoSpec() throws {
+    func testAPathStorageHoldsTakesNoSpec() async throws {
         let layout = try root()
-        let directory = layout.chainDirectory(for: ChainAddress.nexus)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let database = try NodeSQLite(path: directory.appendingPathComponent("state.db").path)
-        try database.execute("CREATE TABLE accepted_blocks (chain_path TEXT NOT NULL)")
-        try database.execute("INSERT INTO accepted_blocks (chain_path) VALUES ('Nexus/A')")
+        let storage = layout.chainDirectory(for: ChainAddress.nexus)
+        try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
+        let store = try NodeStore(databasePath: NodeStore.databasePath(storage: storage), nexusGenesisCID: "genesis")
+        try await store.persistAcceptedBlockRows(
+            [AcceptedBlockRecord(blockCID: "block-a", parentCID: nil)], at: "Nexus/A", admissionSequence: 1, status: .header
+        )
+        XCTAssertTrue(try NodeStore.holdsBlocks(of: "Nexus/A", storage: storage))
+        XCTAssertFalse(try NodeStore.holdsBlocks(of: "Nexus/B", storage: storage))
         XCTAssertThrowsError(try ChainCreation.create(HostedChain(path: "Nexus/A", spec: spec), layout: layout)) {
             XCTAssertTrue($0 is ChainCreation.Synced, "\($0)")
         }
         XCTAssertTrue(try ChainCreation.create(HostedChain(path: "Nexus/B", spec: spec), layout: layout))
+    }
+
+    /// A store that cannot be read refuses the creation: it might hold the
+    /// chain.
+    func testAnUnreadableStoreRefusesTheCreation() throws {
+        let layout = try root()
+        let storage = layout.chainDirectory(for: ChainAddress.nexus)
+        try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
+        try Data("not a database".utf8).write(to: NodeStore.databasePath(storage: storage))
+        XCTAssertThrowsError(try ChainCreation.create(HostedChain(path: "Nexus/A", spec: spec), layout: layout))
+        XCTAssertFalse(ChainCreation.isCreated("Nexus/A", layout: layout))
     }
 }

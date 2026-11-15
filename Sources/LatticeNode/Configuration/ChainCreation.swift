@@ -72,7 +72,14 @@ public enum ChainCreation {
         if !listedBy.isEmpty {
             throw Synced(path: chain.path, reason: "listed by \(listedBy.joined(separator: ", "))")
         }
-        if holdsBlocks(chain.path, layout: layout) {
+        // Fails closed: a store that cannot be read refuses the creation.
+        let holds: Bool
+        do {
+            holds = try NodeStore.holdsBlocks(of: chain.path, storage: layout.chainDirectory(for: ChainAddress.nexus))
+        } catch {
+            throw CtlError("\(chain.path): whether this node holds the chain could not be read (\(error)); not created")
+        }
+        if holds {
             throw Synced(path: chain.path, reason: "held in this node's storage")
         }
         var modules: [String: Data] = [:]
@@ -112,16 +119,5 @@ public enum ChainCreation {
         // without what its genesis is built from.
         try writeDurably(specData, to: specFile)
         return true
-    }
-
-    /// Whether this node's storage holds blocks of `path`.
-    static func holdsBlocks(_ path: String, layout: HostLayout) -> Bool {
-        let database = layout.chainDirectory(for: ChainAddress.nexus).appendingPathComponent("state.db")
-        guard FileManager.default.fileExists(atPath: database.path),
-              let sqlite = try? NodeSQLite(path: database.path),
-              let rows = try? sqlite.query(
-                  "SELECT 1 FROM accepted_blocks WHERE chain_path = ?1 LIMIT 1", params: [.text(path)]
-              ) else { return false }
-        return !rows.isEmpty
     }
 }

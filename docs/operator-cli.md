@@ -42,7 +42,9 @@ and `hostmarket`, before `zz-...`; number fragments to order them). These
 edits send the version they read (`If-Match`, or `If-None-Match: *` when
 there was none) and redo the change when another writer changed the
 fragment meanwhile; on a stopped node they read and write it under the
-storage lock. `lattice apply -f <file>
+storage lock. They start from the configuration as it merges: when a layer
+on disk does not merge (a file broken by hand), they fail with the reason;
+fix that file by hand, or replace it whole with `lattice apply`. `lattice apply -f <file>
 --fragment <name>` replaces any one fragment, for a tool or script that owns
 it:
 

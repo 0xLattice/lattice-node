@@ -724,9 +724,11 @@ Hosted chains and child chains' peers apply at once; every other key (ports,
 Nexus's peers, retention, listeners, serving limits, relay fee, ...) at the
 next start, listed as `pendingRestart` until [`POST /restart`](#post-restart).
 A running chain stops only once no layer lists it: a change that would stop
-it otherwise (removing its parent) is `400`. Only the change itself is held
-to this: a file edited by hand that would stop a chain does not hold back
-another writer's change. A restart is held to it too (`409`). A node started with flags has
+it otherwise (removing its parent) is `400`. A change applies every layer as
+it is on disk, so this is checked against what is in use: a file edited by
+hand, not applied yet, that would stop such a chain makes every change
+`400`, naming that file, until it is fixed. A restart is held to the same
+rule (`409`). A node started with flags has
 no configuration of its own: these routes answer `409` there.
 
 ### `GET /config`

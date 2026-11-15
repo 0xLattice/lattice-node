@@ -130,7 +130,7 @@ actor OperatorConfig {
             if ifNoneMatch?.trimmingCharacters(in: .whitespaces) == "*", FileManager.default.fileExists(atPath: file.path) {
                 throw OperatorConfigError.changed("\(name) was created since it was read (If-None-Match); read it again")
             }
-            let next = try vet(remote: remote, before: onDisk()) {
+            let next = try vet(remote: remote, writing: name) {
                 try MergedConfig.merge(ConfigFragments.layers(root: layout.root, replacing: name, with: object))
             }
             try writeDurably(data, to: file)
@@ -148,7 +148,7 @@ actor OperatorConfig {
                 throw OperatorConfigError.notFound("no fragment \(name)")
             }
             try precondition(file, ifMatch)
-            let next = try vet(remote: remote, before: onDisk()) {
+            let next = try vet(remote: remote, writing: name) {
                 try MergedConfig.merge(ConfigFragments.layers(root: layout.root, replacing: name, with: nil))
             }
             try removeDurably(file)
@@ -164,7 +164,7 @@ actor OperatorConfig {
     func reload() async {
         await serially {
             do {
-                desired = try vet(remote: false, before: desired) { try MergedConfig.load(root: layout.root) }
+                desired = try vet(remote: false, writing: nil) { try MergedConfig.load(root: layout.root) }
                 problems["reload"] = nil
             } catch {
                 problems["reload"] = "\(error)"
@@ -211,8 +211,8 @@ actor OperatorConfig {
         } catch {
             throw OperatorConfigError.invalid("the configuration would not start the node: \(error); fix it before restarting")
         }
-        if let stopped = stopsListed(before: desired, next: next) {
-            throw OperatorConfigError.invalid("the configuration would not start \(stopped); fix it before restarting")
+        if let stopped = stopsListed(next) {
+            throw OperatorConfigError.invalid("the configuration would stop \(stopped.description) at a restart; fix it first")
         }
     }
 
@@ -227,29 +227,35 @@ actor OperatorConfig {
         }
     }
 
-    /// The configuration as the files on disk make it now, or (when they do
-    /// not check) the one in use.
-    private func onDisk() -> MergedConfig {
-        (try? MergedConfig.load(root: layout.root)) ?? desired
-    }
-
-    /// A running chain that `before` hosts and `next` would stop although a
-    /// layer of `next` still lists it, with why; nil when there is none.
-    /// Only the change from `before` counts: a chain another edit already
-    /// stops does not hold this one back.
-    private func stopsListed(before: MergedConfig, next: MergedConfig) -> String? {
-        let hostedBefore = Set(before.topology.hostedChains ?? [])
+    /// A running chain that the configuration in use hosts and `next`
+    /// would stop although a layer of `next` still lists it; nil when there
+    /// is none.
+    private func stopsListed(_ next: MergedConfig) -> (path: String, description: String)? {
+        let hostedNow = Set(desired.topology.hostedChains ?? [])
         let hostedNext = Set(next.topology.hostedChains ?? [])
         return runtime.hostedChildren.map { $0.joined(separator: "/") }.sorted().first {
-            hostedBefore.contains($0) && !hostedNext.contains($0) && next.declaredBy[$0] != nil
-        }.map { "\($0), which runs and is still listed (\(next.chainErrors[$0] ?? "not hosted"))" }
+            hostedNow.contains($0) && !hostedNext.contains($0) && next.declaredBy[$0] != nil
+        }.map { ($0, "\($0), which runs and is still listed (\(next.chainErrors[$0] ?? "not hosted"))") }
+    }
+
+    /// The files changed on disk since the configuration in use was read,
+    /// `except` the one being written.
+    private func unapplied(except name: String?) -> [String] {
+        guard let layers = try? ConfigFragments.layers(root: layout.root) else { return [] }
+        let onDisk = Set(layers.map(\.name))
+        let changed = layers.filter { $0.name != name && desired.sources[$0.name] != $0.canonical }.map(\.fileName)
+        let removed = desired.sources.keys.filter { $0 != name && !onDisk.contains($0) }.sorted()
+            .map { ConfigLayer(name: $0, object: [:]).fileName }
+        return changed + removed
     }
 
     /// The configuration `make` makes, if the node may converge to it: it
     /// would start, a remote client named no file of this node's disk, and
-    /// it stops no running chain, hosted in `before`, that a layer still
-    /// lists.
-    private func vet(remote: Bool, before: MergedConfig, _ make: () throws -> MergedConfig) throws -> MergedConfig {
+    /// it stops no running chain that a layer still lists. Converging
+    /// applies every layer as it is on disk, so a stop is refused whatever
+    /// causes it; when a file changed by hand and not applied yet causes it
+    /// too, the refusal names that file.
+    private func vet(remote: Bool, writing name: String?, _ make: () throws -> MergedConfig) throws -> MergedConfig {
         let next: MergedConfig
         do {
             next = try make()
@@ -260,8 +266,15 @@ actor OperatorConfig {
         if remote, next.topology.operatorTokens != desired.topology.operatorTokens {
             throw OperatorConfigError.invalid("the operator listener takes no file paths: operatorTokens is set beside the node")
         }
-        if let stopped = stopsListed(before: before, next: next) {
-            throw OperatorConfigError.invalid("this change would stop \(stopped)")
+        if let stopped = stopsListed(next) {
+            let changed = unapplied(except: name)
+            if !changed.isEmpty, let onDisk = try? MergedConfig.load(root: layout.root),
+               stopsListed(onDisk)?.path == stopped.path {
+                throw OperatorConfigError.invalid(
+                    "\(changed.joined(separator: ", ")) (not applied) would stop \(stopped.description); fix it first"
+                )
+            }
+            throw OperatorConfigError.invalid("this change would stop \(stopped.description)")
         }
         return next
     }

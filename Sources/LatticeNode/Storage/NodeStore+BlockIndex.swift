@@ -72,6 +72,23 @@ struct AcceptedBlockRow: NodeStoreRecord {
 }
 
 extension NodeStore {
+    /// The store's database in a node's storage directory.
+    static func databasePath(storage: URL) -> URL {
+        storage.appendingPathComponent("state.db")
+    }
+
+    /// Whether the store in `storage` holds blocks of `chainPath`, read
+    /// without writing or creating anything: false when there is no store
+    /// yet, an error when there is one that cannot be read.
+    static func holdsBlocks(of chainPath: String, storage: URL) throws -> Bool {
+        let path = databasePath(storage: storage)
+        guard FileManager.default.fileExists(atPath: path.path) else { return false }
+        let database = try NodeSQLite(path: path.path, readOnly: true)
+        return !(try database.query(
+            "SELECT 1 FROM accepted_blocks WHERE chain_path = ?1 LIMIT 1", params: [.text(chainPath)]
+        )).isEmpty
+    }
+
     func hasAcceptedBlock(
         _ blockCID: String,
         at chainPath: [String] = ["Nexus"]

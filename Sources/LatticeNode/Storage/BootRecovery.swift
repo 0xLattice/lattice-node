@@ -88,7 +88,7 @@ enum BootRecovery {
         let durableMempoolOwner = retentionScope + ":durable-mempool"
         let liveMempoolOwner = retentionScope + ":live-mempool"
         let store = try NodeStore(
-            databasePath: configuration.storagePath.appendingPathComponent("state.db"),
+            databasePath: NodeStore.databasePath(storage: configuration.storagePath),
             nexusGenesisCID: configuration.nexusGenesisCID
         )
         return Stores(

@@ -308,25 +308,35 @@ final class OperatorConfigTests: XCTestCase {
         XCTAssertFalse(ChainCreation.isCreated("Nexus/A/B", layout: layout))
     }
 
-    /// Only the write's own change is held to the rule: a hand edit that
-    /// would stop a chain does not block another writer.
-    func testOnlyAWritesOwnChangeIsVetted() async throws {
+    /// Converging applies every layer as it is on disk: a file changed by
+    /// hand and not applied yet that would stop a running, listed chain
+    /// holds every change back, and the refusal names it. The chain runs on.
+    func testAnUnappliedEditThatWouldStopAChainIsNamed() async throws {
         let runtime = FakeRuntime()
         let (config, layout) = try make(runtime: runtime)
         _ = try await put(config, "deploy", #"{"hostedChains":["Nexus/A"]}"#)
         _ = try await put(config, "operator", #"{"hostedChains":["Nexus/A/B"]}"#)
         // By hand, not read yet: deploy no longer lists Nexus/A.
         try data("{}").write(to: ConfigFragments.file(root: layout.root, name: "deploy"))
-        let other = try await put(config, "hostmarket", #"{"minRelayFee":4}"#)
-        XCTAssertEqual(other.spec.minRelayFee, 4, "another writer is not held back")
-        // This write's own change is: unlisting Nexus/A again would stop it.
+        do {
+            _ = try await put(config, "hostmarket", #"{"minRelayFee":4}"#)
+            XCTFail("a change that applies the edit, stopping Nexus/A/B, was accepted")
+        } catch OperatorConfigError.invalid(let reason) {
+            XCTAssertTrue(reason.contains("config.d/deploy.json (not applied)") && reason.contains("Nexus/A/B"), reason)
+        }
+        XCTAssertEqual(Set(runtime.hostedChildren.map { $0.joined(separator: "/") }), ["Nexus/A", "Nexus/A/B"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ConfigFragments.file(root: layout.root, name: "hostmarket").path))
+        // Fixed, the change goes through.
         try data(#"{"hostedChains":["Nexus/A"]}"#).write(to: ConfigFragments.file(root: layout.root, name: "deploy"))
-        _ = try await put(config, "hostmarket", #"{"hostedChains":["Nexus/A","Nexus/A/B"]}"#)
+        let applied = try await put(config, "hostmarket", #"{"minRelayFee":4}"#)
+        XCTAssertEqual(applied.spec.minRelayFee, 4)
+        // A change that itself would stop it is refused as such.
         do {
             _ = try await config.delete("deploy", ifMatch: nil, remote: false)
-            _ = try await config.delete("hostmarket", ifMatch: nil, remote: false)
-            XCTFail("removing the last listing of Nexus/A, which Nexus/A/B needs, was accepted")
-        } catch OperatorConfigError.invalid {}
+            XCTFail("removing Nexus/A, which Nexus/A/B needs, was accepted")
+        } catch OperatorConfigError.invalid(let reason) {
+            XCTAssertTrue(reason.hasPrefix("this change would stop Nexus/A/B"), reason)
+        }
     }
 
     /// A restart is held to the same rule: it may not stop a running chain

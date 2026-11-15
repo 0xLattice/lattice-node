@@ -143,7 +143,7 @@ struct NodeTarget: ParsableArguments {
         guard let rpc = try await running() else {
             // Read and written under the node's storage lock, so neither a
             // node nor another edit comes in between.
-            guard case .stopped(let lock) = localNode(layout) else { throw CtlError("the node started meanwhile; try again") }
+            guard case .stopped(let lock) = localNode(layout) else { throw CtlError("the storage lock is held: the node started meanwhile, or another lattice command holds it; try again") }
             defer { _ = lock }
             var object: [String: Any] = [:]
             let file = ConfigFragments.file(root: layout.root, name: name)
@@ -190,7 +190,7 @@ struct NodeTarget: ParsableArguments {
             ).created
         }
         // Under the node's storage lock, so no node starts meanwhile.
-        guard case .stopped(let lock) = localNode(layout) else { throw CtlError("the node started meanwhile; try again") }
+        guard case .stopped(let lock) = localNode(layout) else { throw CtlError("the storage lock is held: the node started meanwhile, or another lattice command holds it; try again") }
         defer { _ = lock }
         return try ChainCreation.create(chain, layout: layout)
     }
@@ -207,7 +207,7 @@ struct NodeTarget: ParsableArguments {
             )
         }
         // Under the node's storage lock, so no node starts meanwhile.
-        guard case .stopped(let lock) = localNode(layout) else { throw CtlError("the node started meanwhile; try again") }
+        guard case .stopped(let lock) = localNode(layout) else { throw CtlError("the storage lock is held: the node started meanwhile, or another lattice command holds it; try again") }
         defer { _ = lock }
         return try saveStopped(name, object)
     }

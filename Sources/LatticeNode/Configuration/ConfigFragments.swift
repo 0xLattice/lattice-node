@@ -34,6 +34,16 @@ public struct ConfigLayer {
         self.name = name
         self.object = object
     }
+
+    /// The layer's file as named in messages.
+    public var fileName: String {
+        name == ConfigFragments.baseName ? Topology.fileName : "\(ConfigFragments.directoryName)/\(name).json"
+    }
+
+    /// Its object, keys sorted: equal for equal content.
+    public var canonical: Data {
+        (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data()
+    }
 }
 
 public enum ConfigFragments {
@@ -132,6 +142,9 @@ public struct MergedConfig: Sendable {
     public let inert: [String]
     /// The layers merged, in order.
     public let layers: [String]
+    /// Each layer's content as merged (its JSON object, keys sorted), to
+    /// tell which file changed since.
+    public let sources: [String: Data]
 
     public static func load(root: URL) throws -> MergedConfig {
         let merged = try merge(ConfigFragments.layers(root: root))
@@ -141,7 +154,7 @@ public struct MergedConfig: Sendable {
         guard !ignored.isEmpty else { return merged }
         return MergedConfig(
             topology: merged.topology, declaredBy: merged.declaredBy, chainErrors: merged.chainErrors,
-            inert: merged.inert + ignored, layers: merged.layers
+            inert: merged.inert + ignored, layers: merged.layers, sources: merged.sources
         )
     }
 
@@ -229,7 +242,7 @@ public struct MergedConfig: Sendable {
         }
         return MergedConfig(
             topology: topology, declaredBy: declaredBy, chainErrors: chainErrors, inert: inert,
-            layers: layers.map(\.name)
+            layers: layers.map(\.name), sources: Dictionary(uniqueKeysWithValues: layers.map { ($0.name, $0.canonical) })
         )
     }
 

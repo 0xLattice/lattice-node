@@ -37,12 +37,13 @@ enum NodeSQLiteValue {
 final class NodeSQLite: @unchecked Sendable {
     private let handle: OpaquePointer
 
-    init(path: String) throws {
+    /// `readOnly`: opened for reading only, and never created.
+    init(path: String, readOnly: Bool = false) throws {
         var database: OpaquePointer?
         let result = sqlite3_open_v2(
             path,
             &database,
-            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+            (readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE) | SQLITE_OPEN_FULLMUTEX,
             nil
         )
         guard result == SQLITE_OK, let database else {
