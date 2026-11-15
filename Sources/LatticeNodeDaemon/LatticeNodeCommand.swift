@@ -1511,7 +1511,7 @@ func serviceCall<Value: Encodable, Context: RequestContext>(
         throw HTTPError(.notFound, message: "unknownChain")
     } catch NodeRuntimeError.busy {
         throw HTTPError(.serviceUnavailable, headers: [.retryAfter: "1"], message: "busy")
-    } catch NodeStorageError.missingMaterializedVolume {
+    } catch NodeStorageError.missingMaterializedVolume, BrokerError.missingRetainedRoot {
         throw HTTPError(.notFound, message: "notHeld")
     } catch let error as ValidationError {
         throw HTTPError(.badRequest, message: error.message)
@@ -1521,8 +1521,6 @@ func serviceCall<Value: Encodable, Context: RequestContext>(
         throw HTTPError(.badRequest, message: "invalidVolume")
     } catch BrokerError.conflictingVolume {
         throw HTTPError(.conflict, message: "conflictingVolume")
-    } catch BrokerError.missingRetainedRoot {
-        throw HTTPError(.serviceUnavailable, message: "contextChanged")
     } catch let error as ServingLedgerError where error == .notSaved {
         throw HTTPError(.serviceUnavailable, message: reason(error))
     } catch let error as ServingLedgerError {
