@@ -293,4 +293,64 @@ final class OperatorConfigTests: XCTestCase {
             XCTFail("found")
         } catch OperatorConfigError.notFound {}
     }
+
+    /// A chain listed but not running (its parent waiting) takes no spec
+    /// through the API either.
+    func testALiveCreateOfAListedChainNotRunningIsRefused() async throws {
+        let runtime = FakeRuntime()
+        let (config, layout) = try make(runtime: runtime)
+        let listed = try await put(config, "operator", #"{"hostedChains":["Nexus/A/B"]}"#)
+        XCTAssertEqual(listed.status.chains.first { $0.path == "Nexus/A/B" }?.actual, "notHosted")
+        do {
+            _ = try await config.create(HostedChain(path: "Nexus/A/B", spec: spec))
+            XCTFail("a listed chain took a spec")
+        } catch OperatorConfigError.conflict {}
+        XCTAssertFalse(ChainCreation.isCreated("Nexus/A/B", layout: layout))
+    }
+
+    /// Only the write's own change is held to the rule: a hand edit that
+    /// would stop a chain does not block another writer.
+    func testOnlyAWritesOwnChangeIsVetted() async throws {
+        let runtime = FakeRuntime()
+        let (config, layout) = try make(runtime: runtime)
+        _ = try await put(config, "deploy", #"{"hostedChains":["Nexus/A"]}"#)
+        _ = try await put(config, "operator", #"{"hostedChains":["Nexus/A/B"]}"#)
+        // By hand, not read yet: deploy no longer lists Nexus/A.
+        try data("{}").write(to: ConfigFragments.file(root: layout.root, name: "deploy"))
+        let other = try await put(config, "hostmarket", #"{"minRelayFee":4}"#)
+        XCTAssertEqual(other.spec.minRelayFee, 4, "another writer is not held back")
+        // This write's own change is: unlisting Nexus/A again would stop it.
+        try data(#"{"hostedChains":["Nexus/A"]}"#).write(to: ConfigFragments.file(root: layout.root, name: "deploy"))
+        _ = try await put(config, "hostmarket", #"{"hostedChains":["Nexus/A","Nexus/A/B"]}"#)
+        do {
+            _ = try await config.delete("deploy", ifMatch: nil, remote: false)
+            _ = try await config.delete("hostmarket", ifMatch: nil, remote: false)
+            XCTFail("removing the last listing of Nexus/A, which Nexus/A/B needs, was accepted")
+        } catch OperatorConfigError.invalid {}
+    }
+
+    /// A restart is held to the same rule: it may not stop a running chain
+    /// a layer still lists.
+    func testARestartThatWouldStopAListedChainIsRefused() async throws {
+        let runtime = FakeRuntime()
+        let (config, layout) = try make(runtime: runtime)
+        _ = try await put(config, "deploy", #"{"hostedChains":["Nexus/A"]}"#)
+        _ = try await put(config, "operator", #"{"hostedChains":["Nexus/A/B"]}"#)
+        try await config.checkRestart()
+        try data("{}").write(to: ConfigFragments.file(root: layout.root, name: "deploy"))
+        do {
+            try await config.checkRestart()
+            XCTFail("a restart that stops Nexus/A/B was allowed")
+        } catch OperatorConfigError.invalid {}
+    }
+
+    /// `If-None-Match: *` writes a fragment only while there is none.
+    func testACreateOnlyWriteIsRefusedOnceTheFragmentExists() async throws {
+        let (config, _) = try make()
+        _ = try await config.put("operator", data(#"{"minRelayFee":1}"#), ifMatch: nil, ifNoneMatch: "*", remote: false)
+        do {
+            _ = try await config.put("operator", data(#"{"minRelayFee":2}"#), ifMatch: nil, ifNoneMatch: "*", remote: false)
+            XCTFail("a create-only write replaced a fragment")
+        } catch OperatorConfigError.changed {}
+    }
 }

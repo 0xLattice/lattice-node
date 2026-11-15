@@ -231,7 +231,7 @@ struct OperatorTokenMiddleware<Context: RequestContext>: RouterMiddleware {
             // real request may send.
             var headers = cors
             headers[.accessControlAllowMethods] = "GET, HEAD, POST, PUT, DELETE"
-            headers[.accessControlAllowHeaders] = "Authorization, Content-Type, If-Match"
+            headers[.accessControlAllowHeaders] = "Authorization, Content-Type, If-Match, If-None-Match"
             headers[.accessControlMaxAge] = "600"
             return Response(status: .noContent, headers: headers)
         }

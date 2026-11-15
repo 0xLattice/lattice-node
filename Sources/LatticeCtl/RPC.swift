@@ -141,11 +141,15 @@ struct NodeTarget: ParsableArguments {
         _ name: String, _ edit: (inout [String: Any], ConfigResponse) throws -> Void
     ) async throws -> ConfigResponse {
         guard let rpc = try await running() else {
+            // Read and written under the node's storage lock, so neither a
+            // node nor another edit comes in between.
+            guard case .stopped(let lock) = localNode(layout) else { throw CtlError("the node started meanwhile; try again") }
+            defer { _ = lock }
             var object: [String: Any] = [:]
             let file = ConfigFragments.file(root: layout.root, name: name)
             if FileManager.default.fileExists(atPath: file.path) { object = try ConfigFragments.object(at: file) }
-            try edit(&object, try await config())
-            return try await putFragment(name, object)
+            try edit(&object, stoppedResponse(try MergedConfig.load(root: layout.root)))
+            return try saveStopped(name, object)
         }
         let path = "config/fragments/\(name)"
         for _ in 0..<5 {
@@ -164,8 +168,9 @@ struct NodeTarget: ParsableArguments {
             }
             try edit(&object, current)
             let body = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+            // The version read, or (none read) that there is none yet.
             let (putStatus, answer, _) = try await exchange(
-                rpc: rpc, "PUT", path, json: body, headers: version.map { ["If-Match": $0] } ?? [:]
+                rpc: rpc, "PUT", path, json: body, headers: version.map { ["If-Match": $0] } ?? ["If-None-Match": "*"]
             )
             if putStatus == 412 { continue }
             guard (200..<300).contains(putStatus) else { throw failure("PUT", path, putStatus, answer) }
@@ -201,13 +206,20 @@ struct NodeTarget: ParsableArguments {
                 ConfigResponse.self, from: try await send(rpc: rpc, "PUT", "config/fragments/\(name)", json: data)
             )
         }
-        guard ConfigFragments.isValidName(name) else { throw CtlError("\(name) is not a fragment's name") }
         // Under the node's storage lock, so no node starts meanwhile.
         guard case .stopped(let lock) = localNode(layout) else { throw CtlError("the node started meanwhile; try again") }
+        defer { _ = lock }
+        return try saveStopped(name, object)
+    }
+
+    /// Writes fragment `name` of a stopped node, once the configuration it
+    /// makes checks; the caller holds the storage lock.
+    private func saveStopped(_ name: String, _ object: [String: Any]) throws -> ConfigResponse {
+        guard ConfigFragments.isValidName(name) else { throw CtlError("\(name) is not a fragment's name") }
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
         let merged = try MergedConfig.merge(ConfigFragments.layers(root: layout.root, replacing: name, with: object))
         try FileManager.default.createDirectory(at: ConfigFragments.directory(root: layout.root), withIntermediateDirectories: true)
         try writeDurably(data, to: ConfigFragments.file(root: layout.root, name: name))
-        _ = lock
         print("saved \(ConfigFragments.directoryName)/\(name).json; the node reads it at its next start")
         return stoppedResponse(merged)
     }
@@ -226,7 +238,8 @@ struct NodeTarget: ParsableArguments {
 }
 
 /// The fragment `lattice config set`, `lattice child ...` and the dashboard
-/// edit: people's, after every other layer.
+/// edit: people's. Layers merge in name order alone, so it comes after
+/// `deploy` and `hostmarket` and before any name sorting after it.
 let operatorFragment = "operator"
 
 /// Prints what a change left to do, and fails when `chain` (if given) did

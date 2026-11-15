@@ -39,8 +39,10 @@ only says which node it mines through.
 fragment (`config.d/operator.json`). Layers merge in name order alone
 (`lattice.json`, then `config.d` by name: `operator` comes after `deploy`
 and `hostmarket`, before `zz-...`; number fragments to order them). These
-edits send the version they read (`If-Match`) and redo the change when
-another writer changed the fragment meanwhile. `lattice apply -f <file>
+edits send the version they read (`If-Match`, or `If-None-Match: *` when
+there was none) and redo the change when another writer changed the
+fragment meanwhile; on a stopped node they read and write it under the
+storage lock. `lattice apply -f <file>
 --fragment <name>` replaces any one fragment, for a tool or script that owns
 it:
 
@@ -295,7 +297,9 @@ hosts it from its next start. `child create` has the node keep the spec
 (with its premine recipient, genesis transactions and modules) under
 `specs/`, once, then adds the path to the `operator` fragment's
 `hostedChains`; creating the same path with anything else is refused, as is
-a spec for a chain already synced without one. `child unhost` removes a chain from the
+a spec for a chain this node already follows without one (listed by a layer,
+or held in its storage), stopped or running. A spec that never started stays
+until its files under `specs/` are removed by hand. `child unhost` removes a chain from the
 `operator` fragment; a chain another fragment lists is refused, naming it. Remotely,
 `--spec`, `--genesis-transactions` and `--policy-module` are files on the
 machine running `lattice`.

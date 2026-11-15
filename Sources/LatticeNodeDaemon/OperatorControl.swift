@@ -109,7 +109,10 @@ actor OperatorConfig {
     /// configuration it makes checks as a start would check it. A `remote`
     /// client may not name a file on this node's disk (`operatorTokens`).
     /// With `ifMatch`, only while the fragment is still that version.
-    func put(_ name: String, _ data: Data, ifMatch: String?, remote: Bool) async throws -> ConfigResponse {
+    /// With `ifNoneMatch` `*`, only while there is no such fragment yet.
+    func put(
+        _ name: String, _ data: Data, ifMatch: String?, ifNoneMatch: String? = nil, remote: Bool
+    ) async throws -> ConfigResponse {
         guard ConfigFragments.isValidName(name) else {
             throw OperatorConfigError.invalid(name == ConfigFragments.baseName
                 ? "\(Topology.fileName) is not written through the API; a fragment of \(ConfigFragments.directoryName) is"
@@ -124,7 +127,10 @@ actor OperatorConfig {
         return try await serially {
             let file = ConfigFragments.file(root: layout.root, name: name)
             try precondition(file, ifMatch)
-            let next = try vet(remote: remote) {
+            if ifNoneMatch?.trimmingCharacters(in: .whitespaces) == "*", FileManager.default.fileExists(atPath: file.path) {
+                throw OperatorConfigError.changed("\(name) was created since it was read (If-None-Match); read it again")
+            }
+            let next = try vet(remote: remote, before: onDisk()) {
                 try MergedConfig.merge(ConfigFragments.layers(root: layout.root, replacing: name, with: object))
             }
             try writeDurably(data, to: file)
@@ -142,7 +148,7 @@ actor OperatorConfig {
                 throw OperatorConfigError.notFound("no fragment \(name)")
             }
             try precondition(file, ifMatch)
-            let next = try vet(remote: remote) {
+            let next = try vet(remote: remote, before: onDisk()) {
                 try MergedConfig.merge(ConfigFragments.layers(root: layout.root, replacing: name, with: nil))
             }
             try removeDurably(file)
@@ -158,7 +164,7 @@ actor OperatorConfig {
     func reload() async {
         await serially {
             do {
-                desired = try vet(remote: false) { try MergedConfig.load(root: layout.root) }
+                desired = try vet(remote: false, before: desired) { try MergedConfig.load(root: layout.root) }
                 problems["reload"] = nil
             } catch {
                 problems["reload"] = "\(error)"
@@ -175,15 +181,11 @@ actor OperatorConfig {
     /// created with exactly these already.
     func create(_ chain: HostedChain) async throws -> Bool {
         try await serially {
-            let running = Set(runtime.hostedChildren.map { $0.joined(separator: "/") })
-            if running.contains(chain.path), !ChainCreation.isCreated(chain.path, layout: layout) {
-                throw OperatorConfigError.conflict(
-                    "\(chain.path) is hosted as an existing chain, synced from its peers; it takes no spec"
-                )
-            }
             do {
                 return try ChainCreation.create(chain, layout: layout)
             } catch let error as ChainCreation.Exists {
+                throw OperatorConfigError.conflict(error.description)
+            } catch let error as ChainCreation.Synced {
                 throw OperatorConfigError.conflict(error.description)
             } catch {
                 throw OperatorConfigError.invalid("\(error)")
@@ -199,11 +201,18 @@ actor OperatorConfig {
 
     /// Refuses a restart the configuration on disk would not survive: a
     /// node that cannot start is out of reach of this API.
+    /// A restart is held to the rule a change is: it may not stop a
+    /// running chain that a layer still lists.
     func checkRestart() throws {
+        let next: MergedConfig
         do {
-            try checkPlan(try MergedConfig.load(root: layout.root).topology)
+            next = try MergedConfig.load(root: layout.root)
+            try checkPlan(next.topology)
         } catch {
             throw OperatorConfigError.invalid("the configuration would not start the node: \(error); fix it before restarting")
+        }
+        if let stopped = stopsListed(before: desired, next: next) {
+            throw OperatorConfigError.invalid("the configuration would not start \(stopped); fix it before restarting")
         }
     }
 
@@ -218,10 +227,29 @@ actor OperatorConfig {
         }
     }
 
+    /// The configuration as the files on disk make it now, or (when they do
+    /// not check) the one in use.
+    private func onDisk() -> MergedConfig {
+        (try? MergedConfig.load(root: layout.root)) ?? desired
+    }
+
+    /// A running chain that `before` hosts and `next` would stop although a
+    /// layer of `next` still lists it, with why; nil when there is none.
+    /// Only the change from `before` counts: a chain another edit already
+    /// stops does not hold this one back.
+    private func stopsListed(before: MergedConfig, next: MergedConfig) -> String? {
+        let hostedBefore = Set(before.topology.hostedChains ?? [])
+        let hostedNext = Set(next.topology.hostedChains ?? [])
+        return runtime.hostedChildren.map { $0.joined(separator: "/") }.sorted().first {
+            hostedBefore.contains($0) && !hostedNext.contains($0) && next.declaredBy[$0] != nil
+        }.map { "\($0), which runs and is still listed (\(next.chainErrors[$0] ?? "not hosted"))" }
+    }
+
     /// The configuration `make` makes, if the node may converge to it: it
     /// would start, a remote client named no file of this node's disk, and
-    /// no chain that runs would stop while a layer still lists it.
-    private func vet(remote: Bool, _ make: () throws -> MergedConfig) throws -> MergedConfig {
+    /// it stops no running chain, hosted in `before`, that a layer still
+    /// lists.
+    private func vet(remote: Bool, before: MergedConfig, _ make: () throws -> MergedConfig) throws -> MergedConfig {
         let next: MergedConfig
         do {
             next = try make()
@@ -232,12 +260,8 @@ actor OperatorConfig {
         if remote, next.topology.operatorTokens != desired.topology.operatorTokens {
             throw OperatorConfigError.invalid("the operator listener takes no file paths: operatorTokens is set beside the node")
         }
-        let hosted = Set(next.topology.hostedChains ?? [])
-        for path in runtime.hostedChildren.map({ $0.joined(separator: "/") }).sorted()
-        where !hosted.contains(path) && next.declaredBy[path] != nil {
-            throw OperatorConfigError.invalid(
-                "\(path) runs and is still listed, but would stop: \(next.chainErrors[path] ?? "not hosted")"
-            )
+        if let stopped = stopsListed(before: before, next: next) {
+            throw OperatorConfigError.invalid("this change would stop \(stopped)")
         }
         return next
     }
@@ -489,7 +513,10 @@ func addOperatorControlRoutes(
         let name = context.parameters.get("name") ?? ""
         return try await configChange(request: request, context: context) {
             guard let config = control.config else { throw OperatorConfigError.notOwned }
-            return try await config.put(name, Data(buffer: body), ifMatch: request.headers[.ifMatch], remote: remote)
+            return try await config.put(
+                name, Data(buffer: body), ifMatch: request.headers[.ifMatch], ifNoneMatch: request.headers[.ifNoneMatch],
+                remote: remote
+            )
         }
     }
     router.delete("config/fragments/:name") { request, context in

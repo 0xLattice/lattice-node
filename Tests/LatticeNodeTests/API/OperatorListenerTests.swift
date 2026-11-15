@@ -266,6 +266,7 @@ final class OperatorListenerTests: XCTestCase {
                 let methods = ($0.headers[.accessControlAllowMethods] ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
                 XCTAssertTrue(methods.contains("PUT") && !methods.contains("PATCH"), "\(methods)")
                 XCTAssertTrue($0.headers[.accessControlAllowHeaders]?.contains("If-Match") == true)
+                XCTAssertTrue($0.headers[.accessControlAllowHeaders]?.contains("If-None-Match") == true)
             }
             try await client.execute(uri: "/status", method: .get, headers: [.origin: "https://dash.example"]) {
                 XCTAssertEqual($0.status, .unauthorized)

@@ -131,10 +131,14 @@ final class LoopbackRPCAuthTests: XCTestCase {
                 XCTAssertEqual(response.status, .noContent)
                 XCTAssertEqual(response.headers[.accessControlAllowOrigin], Self.extensionOrigin)
                 XCTAssertTrue(response.headers[.accessControlAllowMethods]?.contains("POST") == true)
-                // An allowed origin may unpin, and change settings or mining.
+                // An allowed origin may unpin, and write a fragment (PUT, with
+                // If-Match its version); nothing takes PATCH.
                 XCTAssertTrue(response.headers[.accessControlAllowMethods]?.contains("DELETE") == true)
-                XCTAssertTrue(response.headers[.accessControlAllowMethods]?.contains("PATCH") == true)
+                XCTAssertTrue(response.headers[.accessControlAllowMethods]?.contains("PUT") == true)
+                XCTAssertFalse(response.headers[.accessControlAllowMethods]?.contains("PATCH") == true)
                 XCTAssertTrue(response.headers[.accessControlAllowHeaders]?.contains("Authorization") == true)
+                XCTAssertTrue(response.headers[.accessControlAllowHeaders]?.contains("If-Match") == true)
+                XCTAssertTrue(response.headers[.accessControlAllowHeaders]?.contains("If-None-Match") == true)
             }
             try await client.execute(uri: "/status", method: .get, headers: [.origin: Self.extensionOrigin]) { response in
                 XCTAssertEqual(response.status, .unauthorized)

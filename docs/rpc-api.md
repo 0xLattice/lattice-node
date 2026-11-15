@@ -64,7 +64,8 @@ same handlers), but:
   `GET /api/state/account/{addr}`, `GET /fetch/{cid}`. A route without a
   parameter may name one path instead: `PUT /config/fragments/hostmarket`
   reaches that fragment and no other, while `PUT /config/fragments/{name}`
-  reaches every one. `?chainPath=` is not
+  reaches every one. A fragment is the unit of scope: a token that may write
+  a fragment may set any key in it, not some keys only. `?chainPath=` is not
   part of a route; a token reaches every chain the node hosts. Only `admin`
   reaches `/tokens`. A token allowed `PUT /config/fragments/{name}`,
   `POST /restart`, `POST /stop` or `POST /wipe` controls the node as fully as
@@ -723,7 +724,9 @@ Hosted chains and child chains' peers apply at once; every other key (ports,
 Nexus's peers, retention, listeners, serving limits, relay fee, ...) at the
 next start, listed as `pendingRestart` until [`POST /restart`](#post-restart).
 A running chain stops only once no layer lists it: a change that would stop
-it otherwise (removing its parent) is `400`. A node started with flags has
+it otherwise (removing its parent) is `400`. Only the change itself is held
+to this: a file edited by hand that would stop a chain does not hold back
+another writer's change. A restart is held to it too (`409`). A node started with flags has
 no configuration of its own: these routes answer `409` there.
 
 ### `GET /config`
@@ -766,7 +769,10 @@ remote listener a fragment may not change `operatorTokens` (a file on the
 node's disk): `400`. With `If-Match` (the `ETag` a `GET` answered, or `*`
 for any version), it is written only while the fragment is still that
 version: `412` otherwise, nothing written; read it again and redo the change.
-A client that edits a fragment others write too sends it.
+With `If-None-Match: *`, it is written only while there is no such fragment
+yet (`412` otherwise). A client that edits a fragment others write too sends
+one of them: `If-Match` for the version it read, `If-None-Match: *` when it
+read none.
 
 ### `DELETE /config/fragments/{name}`
 
@@ -790,10 +796,13 @@ Creates a child chain, once: the body is what fixes its genesis,
 checked as `lattice child create` checks it and kept under `<root>/specs/`.
 `200 {"path": "Nexus/Beta", "created": true}`; `created` is false when the
 chain was created with exactly this already. `409` when it was created with
-something else, or is hosted already without a spec (synced from its peers:
-a spec would mine a rival genesis); `400` when the body does not check.
-Creating does not host the chain: list its path in a fragment's
-`hostedChains` to mine its genesis and then its blocks.
+something else, or the node already follows it without a spec (a layer
+lists it, running or not, or its storage holds the chain's blocks: a spec
+would mine a rival genesis); `400` when the body does not check. Creating
+does not host the chain: list its path in a fragment's `hostedChains` to
+mine its genesis and then its blocks. A created spec stays even if the
+chain is never hosted or never starts: to create the path otherwise, remove
+its files under `<root>/specs/` by hand while the node is stopped.
 
 ### `GET /hosted-chains`
 

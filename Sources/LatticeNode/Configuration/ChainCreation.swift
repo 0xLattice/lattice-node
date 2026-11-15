@@ -16,6 +16,16 @@ public enum ChainCreation {
         }
     }
 
+    /// The chain is followed here without a spec: listed by a layer, or held
+    /// in storage. A spec now would mine a rival genesis.
+    public struct Synced: Error, CustomStringConvertible {
+        public let path: String
+        public let reason: String
+        public var description: String {
+            "\(path) is \(reason) without a spec, synced from its peers; it takes no spec"
+        }
+    }
+
     /// Whether `path` was created here (its spec is under `specs/`).
     public static func isCreated(_ path: String, layout: HostLayout) -> Bool {
         FileManager.default.fileExists(atPath: layout.childSpec(for: path).path)
@@ -54,6 +64,17 @@ public enum ChainCreation {
             guard sameSpec, premine == chain.premineTo, genesis == genesisData else { throw Exists(path: chain.path) }
             return false
         }
+        // A chain already followed here takes no spec, running or not (its
+        // parent waiting, failed to start, unhosted with its data kept).
+        let listedBy = try ConfigFragments.layers(root: layout.root).filter {
+            ($0.object["hostedChains"] as? [Any] ?? []).contains { $0 as? String == chain.path }
+        }.map(\.name)
+        if !listedBy.isEmpty {
+            throw Synced(path: chain.path, reason: "listed by \(listedBy.joined(separator: ", "))")
+        }
+        if holdsBlocks(chain.path, layout: layout) {
+            throw Synced(path: chain.path, reason: "held in this node's storage")
+        }
         var modules: [String: Data] = [:]
         for bytes in chain.policyModules ?? [] {
             let cid = try WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: bytes)).rawCID
@@ -91,5 +112,16 @@ public enum ChainCreation {
         // without what its genesis is built from.
         try writeDurably(specData, to: specFile)
         return true
+    }
+
+    /// Whether this node's storage holds blocks of `path`.
+    static func holdsBlocks(_ path: String, layout: HostLayout) -> Bool {
+        let database = layout.chainDirectory(for: ChainAddress.nexus).appendingPathComponent("state.db")
+        guard FileManager.default.fileExists(atPath: database.path),
+              let sqlite = try? NodeSQLite(path: database.path),
+              let rows = try? sqlite.query(
+                  "SELECT 1 FROM accepted_blocks WHERE chain_path = ?1 LIMIT 1", params: [.text(path)]
+              ) else { return false }
+        return !rows.isEmpty
     }
 }
