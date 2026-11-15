@@ -19,7 +19,8 @@ struct Mine: AsyncParsableCommand {
         The miner is a client of a node, not part of it: it asks the node for \
         templates and submits work (POST /mining/templates, POST /mining/work, \
         GET /status), and the node knows nothing of it. Its settings are its own \
-        file, <root>/miner.json (or --config): worker, workers, batchSize, \
+        file, <root>/miner.json (or --config; while there is none, the mine \
+        object an older <root>/lattice.json holds, with a warning): worker, workers, batchSize, \
         recipients (chain path -> address; a chain left out burns its reward and \
         fees), minWork, minBlockIntervalSeconds, templateTimeoutSeconds, \
         roundDeadlineMultiplier. The loop reads it again before every round. \
@@ -39,7 +40,7 @@ struct Mine: AsyncParsableCommand {
 
         func run() async throws {
             let layout = options.layout
-            _ = try minerSettings(options)
+            if let warning = try minerSettings(options).warning { print("warning: \(warning)") }
             try await withSpawnLock(layout) {
                 try self.startLocked(layout)
             }
@@ -108,7 +109,8 @@ struct Mine: AsyncParsableCommand {
 
         func run() async throws {
             let layout = options.layout
-            let mine = try MinerConfig.load(file: options.configFile)
+            let (mine, warning) = try options.loadConfig()
+            if let warning { print("warning: \(warning)") }
             let running = runningPid(layout, "mine").map { "running (pid \($0))" }
                 ?? "stopped"
             print("mining: \(running)")
@@ -152,6 +154,7 @@ struct Mine: AsyncParsableCommand {
             var longestCompletedRound = Duration.zero
             var nodeAnswered = false
             var unusableTemplateSince: ContinuousClock.Instant?
+            if let warning = settings.warning { log("warning: \(warning)") }
             log("mining loop start, node \(settings.rpc.baseURL)"
                 + (settings.mine.minBlockIntervalSeconds.map {
                     ", pacing parent blocks at least \($0)s apart"
@@ -312,20 +315,23 @@ struct Mine: AsyncParsableCommand {
 struct MinerOptions: ParsableArguments {
     @OptionGroup var target: NodeTarget
 
-    @Option(name: .long, help: "The miner's settings file (default: <root>/\(MinerConfig.fileName)).")
+    @Option(name: .long, help: "The miner's settings file (default: <root>/\(MinerConfig.fileName), or while there is none the mine object an older <root>/\(Topology.fileName) holds).")
     var config: String?
 
     var layout: HostLayout { target.layout }
 
-    var configFile: URL {
-        config.map { URL(fileURLWithPath: $0) }
-            ?? layout.root.appendingPathComponent(MinerConfig.fileName)
+    /// The miner's settings, and a warning when they came from an older
+    /// lattice.json's `mine` object.
+    func loadConfig() throws -> (config: MinerConfig, warning: String?) {
+        if let config { return (try MinerConfig.load(file: URL(fileURLWithPath: config)), nil) }
+        return try MinerConfig.load(root: layout.root)
     }
 
     /// These options as `mine run` takes them, every path absolute: the
     /// background loop runs from another directory.
     var runArguments: [String] {
-        var arguments = ["--root", layout.root.path, "--config", configFile.standardizedFileURL.path]
+        var arguments = ["--root", layout.root.path]
+        if let config { arguments += ["--config", URL(fileURLWithPath: config).standardizedFileURL.path] }
         if let node = target.node, let tokenFile = target.tokenFile {
             arguments += [
                 "--node", node,
@@ -343,12 +349,14 @@ struct MinerSettings {
     /// or the local node's cookie file.
     let coordinatorAuthentication: [String]
     let workerExecutable: URL
+    /// Set when the settings came from an older lattice.json's `mine`.
+    let warning: String?
 }
 
 /// The node to mine through (a remote one with its token, or the one under
 /// --root with its cookie) and the miner's own settings.
 func minerSettings(_ options: MinerOptions) throws -> MinerSettings {
-    let mine = try MinerConfig.load(file: options.configFile)
+    let (mine, warning) = try options.loadConfig()
     let rpc: NodeRPC
     let authentication: [String]
     if let remote = try options.target.remote(), let tokenFile = options.target.tokenFile {
@@ -370,7 +378,8 @@ func minerSettings(_ options: MinerOptions) throws -> MinerSettings {
         throw CtlError("worker is not executable: \(worker.path)")
     }
     return MinerSettings(
-        mine: mine, rpc: rpc, coordinatorAuthentication: authentication, workerExecutable: worker
+        mine: mine, rpc: rpc, coordinatorAuthentication: authentication, workerExecutable: worker,
+        warning: warning
     )
 }
 

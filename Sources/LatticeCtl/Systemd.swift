@@ -38,7 +38,7 @@ struct EmitSystemd: AsyncParsableCommand {
         """)
         guard FileManager.default.fileExists(
             atPath: layout.root.appendingPathComponent(MinerConfig.fileName).path
-        ) else { return }
+        ) || Topology.holdsRetiredMining(root: layout.root) else { return }
         print("""
 
         # lattice-mine.service

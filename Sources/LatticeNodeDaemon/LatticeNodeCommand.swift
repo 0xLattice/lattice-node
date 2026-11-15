@@ -171,6 +171,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         } catch {
             throw ValidationError("\(layout.root.appendingPathComponent(Topology.fileName).path): \(error). The node starts only from a valid configuration; fix the file by hand while the node is stopped (`lattice config set` edits it then too).")
         }
+        if Topology.holdsRetiredMining(root: layout.root) {
+            FileHandle.standardError.write(Data("warning: \(Topology.retiredMiningWarning)\n".utf8))
+        }
         try performRequestedWipe(layout)
         var command = try LatticeNodeCommand.parse(topology.nodeArguments(layout: layout))
         try await command.start(owner: (layout, topology))

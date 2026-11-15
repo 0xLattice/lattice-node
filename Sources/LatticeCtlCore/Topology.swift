@@ -177,16 +177,30 @@ public struct Topology: Codable, Sendable {
         return try load(data: data)
     }
 
-    /// A `lattice.json`'s content, refusing a key this release does not know.
+    /// The `mine` object a lattice.json written before mining was a process
+    /// of its own may hold. The node ignores it and never writes it back;
+    /// the miner reads it while there is no miner.json.
+    public static let retiredMiningKey = "mine"
+
+    /// The warning for a lattice.json that still holds `mine`.
+    public static let retiredMiningWarning =
+        "mine in \(fileName) is no longer used by the node; the miner reads \(MinerConfig.fileName)"
+
+    /// Whether the lattice.json under `root` still holds `mine`.
+    public static func holdsRetiredMining(root: URL) -> Bool {
+        guard let data = try? Data(contentsOf: root.appendingPathComponent(fileName)),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        return object[retiredMiningKey] != nil
+    }
+
+    /// A `lattice.json`'s content, refusing a key this release does not know
+    /// (`mine` is ignored: see `retiredMiningKey`).
     public static func load(data: Data) throws -> Topology {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw CtlError("\(fileName) must contain one JSON object")
         }
         let known = Set(CodingKeys.allCases.map(\.rawValue))
-        let unknown = Set(object.keys).subtracting(known).sorted()
-        if unknown.contains("mine") {
-            throw CtlError("\(fileName) holds no mining settings: the miner is a separate process with its own file; move the \"mine\" object to \(MinerConfig.fileName) beside it (`lattice mine start` reads it)")
-        }
+        let unknown = Set(object.keys).subtracting(known).subtracting([retiredMiningKey]).sorted()
         guard unknown.isEmpty else {
             throw CtlError("unknown \(fileName) key(s): \(unknown.joined(separator: ", "))")
         }

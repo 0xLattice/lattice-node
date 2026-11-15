@@ -735,7 +735,9 @@ An [RFC 7396](https://www.rfc-editor.org/rfc/rfc7396) merge patch of
  "announceLifetime": 900}
 ```
 
-`lattice.json` holds no mining settings; a patch adding `mine` is `400`.
+`lattice.json` holds no mining settings; a patch adding `mine` is `400`. A
+`mine` object left in the file by an earlier release is ignored (the node
+warns at start) and not written back.
 
 ### `GET /hosted-chains`
 

@@ -133,8 +133,9 @@ This is intentionally one schema:
   [Remote operator listener](rpc-api.md#remote-operator-listener)); absent is
   off; `operatorAllowedOrigins` lists the browser origins it answers;
 - it holds no mining settings: the miner is a separate process with its own
-  file ([Mining](#mining)), and a `mine` object here is refused with a pointer
-  there.
+  file ([Mining](#mining)). A `mine` object left from an earlier release is
+  ignored by the node (with a warning at start) and dropped the next time the
+  node writes the file; a change adding one is refused.
 
 ## Lifecycle
 
@@ -382,6 +383,12 @@ The loop reads it again before each round, so a changed recipient applies to
 the next round with no restart; a file that no longer checks is logged and
 the last good settings kept. An unknown key is refused.
 
+While there is no `miner.json`, the miner reads the `mine` object an older
+`lattice.json` in the same root still holds (its `enabled` ignored) and warns
+to move it, so a host upgraded with no edits keeps mining. Move it: the node
+drops that object the next time it writes `lattice.json` (any configuration
+change), and a miner started after that finds no settings.
+
 `worker` is `cpu` for the bundled worker or an executable path implementing
 the worker contract. `recipients` sends each chain's reward and fees to an
 address; each template request carries them, and an omitted path burns that
@@ -443,7 +450,7 @@ also returns 404 for an unhosted path.
 
 Generate foreground units from the configured topology (and a
 `lattice-mine.service` running `lattice mine run --root <root>` when the root
-holds a `miner.json`):
+holds miner settings):
 
 ```bash
 lattice emit-systemd --root /var/lib/lattice \
