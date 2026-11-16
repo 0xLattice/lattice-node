@@ -76,8 +76,8 @@ public struct ChildProofJob: Sendable {
 
     /// The check: a root whose hash misses the block's target comes back
     /// with no contribution, which `proofVerified` judges a failure.
-    public func run(_ block: Block) async -> Result<VerifiedChildEvidence, ChildProofVerificationFailure> {
-        await proof.verifySecuringWork(child: block, chainPath: chainPath)
+    public func run(_ block: Block) -> Result<VerifiedChildEvidence, ChildProofVerificationFailure> {
+        proof.verifySecuringWork(child: block, chainPath: chainPath)
     }
 
     /// A proof's content identity: the hash of its canonical bytes.
@@ -119,7 +119,7 @@ public struct ChildDeriveJob: Sendable {
             guard let id = ChildProofJob.id(of: proof) else { continue }
             var check = ChildProofJob(childCID: childCID, block: self.block, proof: proof, proofID: id, chainPath: chainPath)
             check.derived = true
-            checks.append((check, await check.run(block)))
+            checks.append((check, check.run(block)))
         }
         return ChildDerivation(job: self, checks: checks)
     }

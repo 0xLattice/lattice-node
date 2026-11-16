@@ -279,7 +279,7 @@ final class ChildLevelRestartTests: XCTestCase {
             let proof = try await ChildBlockProof.generate(
                 rootHeader: BlockHeader(node: carrier), childDirectory: name, fetcher: content
             )
-            let evidence = try await proof.verifySecuringWork(child: childGenesis, chainPath: path).get()
+            let evidence = try proof.verifySecuringWork(child: childGenesis, chainPath: path).get()
             let childResolved = try await childGenesis.children.resolve(fetcher: content).node
             carried.append(.init(
                 path: path, block: childGenesis, children: try XCTUnwrap(childResolved),

@@ -302,7 +302,7 @@ final class LevelSimulationTests: XCTestCase {
                     }
                 case .level(let path, .verifyProof(let job)):
                     let block = try XCTUnwrap(job.block ?? world.blocks[path]?[job.childCID]?.block)
-                    queue.append(.level(path, .proofVerified(job, await job.run(block))))
+                    queue.append(.level(path, .proofVerified(job, job.run(block))))
                 case .level(let path, .fetchByCID(_, let cid)):
                     queue.append(.level(path, .childIndexFetched(
                         peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
@@ -364,7 +364,7 @@ final class LevelSimulationTests: XCTestCase {
                     }
                 case .level(let path, .verifyProof(let job)):
                     let block = try XCTUnwrap(job.block ?? world.blocks[path]?[job.childCID]?.block)
-                    queue.append(.level(path, .proofVerified(job, await job.run(block))))
+                    queue.append(.level(path, .proofVerified(job, job.run(block))))
                 case .level(let path, .fetchByCID(_, let cid)):
                     queue.append(.level(path, .childIndexFetched(
                         peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
@@ -425,7 +425,7 @@ final class LevelSimulationTests: XCTestCase {
                 case .level(let path, .verifyProof(let job)):
                     XCTAssertTrue(asked.contains(job.childCID), "a check spent on a header not asked for")
                     let block = try XCTUnwrap(job.block ?? world.blocks[path]?[job.childCID]?.block)
-                    queue.append(.level(path, .proofVerified(job, await job.run(block))))
+                    queue.append(.level(path, .proofVerified(job, job.run(block))))
                 case .level(let path, .fetchByCID(_, let cid)):
                     queue.append(.level(path, .childIndexFetched(
                         peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
@@ -489,7 +489,7 @@ final class LevelSimulationTests: XCTestCase {
                         }
                     case .level(let path, .verifyProof(let job)):
                         let block = try XCTUnwrap(job.block ?? world.blocks[path]?[job.childCID]?.block)
-                        queue.append(.level(path, .proofVerified(job, await job.run(block))))
+                        queue.append(.level(path, .proofVerified(job, job.run(block))))
                     case .level(let path, .fetchByCID(_, let cid)):
                         queue.append(.level(path, .childIndexFetched(
                             peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
@@ -545,7 +545,7 @@ final class LevelSimulationTests: XCTestCase {
                         }
                     case .level(let path, .verifyProof(let job)):
                         let block = try XCTUnwrap(job.block ?? world.blocks[path]?[job.childCID]?.block)
-                        queue.append(.level(path, .proofVerified(job, await job.run(block))))
+                        queue.append(.level(path, .proofVerified(job, job.run(block))))
                     case .level(let path, .fetchByCID(_, let cid)):
                         queue.append(.level(path, .childIndexFetched(
                             peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)

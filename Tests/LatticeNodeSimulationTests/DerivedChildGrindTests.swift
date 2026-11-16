@@ -124,7 +124,7 @@ final class DerivedChildGrindTests: XCTestCase {
                     case .level(let path, .verifyProof(let job)):
                         guard let block = job.block ?? store.levels[path]?.headers[job.childCID]?.block else { break }
                         checks.append(Check(path: path, cid: job.childCID, root: job.proof.rootCID))
-                        let answer = NodeEvent.level(path, .proofVerified(job, await job.run(block)))
+                        let answer = NodeEvent.level(path, .proofVerified(job, job.run(block)))
                         if deferChecks { deferred.append(answer) } else { queue.append(answer) }
                     case .level(let path, .deriveProof(let job)):
                         // From this host's own content only.
@@ -900,7 +900,7 @@ final class DerivedChildGrindTests: XCTestCase {
         let proof = try await ChildBlockProof.generate(
             rootHeader: BlockHeader(node: b.block), childDirectory: Self.alpha[1], fetcher: world.cas
         )
-        guard case .success(let walked) = await proof.verifySecuringWork(child: c.block, chainPath: Self.alpha) else {
+        guard case .success(let walked) = proof.verifySecuringWork(child: c.block, chainPath: Self.alpha) else {
             return XCTFail("the path walk passes the proof")
         }
         XCTAssertNil(walked.contribution, "with no work")

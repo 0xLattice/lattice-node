@@ -460,7 +460,7 @@ public struct LevelWorld: Sendable {
                 let composed = proof.map { $0.composing(hop: hop) } ?? hop
                 proof = composed
                 carrier = block.block
-                let evidence = try await composed.verifySecuringWork(child: block.block, chainPath: path).get()
+                let evidence = try composed.verifySecuringWork(child: block.block, chainPath: path).get()
                 if outcome != .zeroWork, evidence.contribution == nil {
                     throw SimulationError.malformedWorld("a mined proof carries no work")
                 }

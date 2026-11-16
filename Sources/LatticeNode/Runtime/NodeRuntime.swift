@@ -1763,7 +1763,7 @@ extension NodeRuntime {
                     break
                 }
                 enqueue(RuntimeJob(path: path, tipCID: nil) {
-                    [.level(path, .proofVerified(job, await job.run(block)))]
+                    [.level(path, .proofVerified(job, job.run(block)))]
                 })
                 startJobs()
             case .readTransactions(let blocks):

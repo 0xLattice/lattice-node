@@ -41,7 +41,7 @@ final class ChildGenesisSpecTests: XCTestCase {
                     ], hasMore: false))))
                 case .level(let path, .verifyProof(let job)) where verify:
                     let block = job.block ?? genesis.block
-                    queue.append(.level(path, .proofVerified(job, await job.run(block))))
+                    queue.append(.level(path, .proofVerified(job, job.run(block))))
                 default:
                     break
                 }
