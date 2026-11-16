@@ -38,10 +38,13 @@ Per-level reducers remain small:
 
 - header sync owns pending headers, range paging, and proof waits;
 - body acquisition owns candidate/provider/dependency scheduling;
-- mining owns mempool state and epoch-fenced template jobs.
+- mining owns mempool state and the preflight and template jobs, each
+  naming the tip it reads.
 
 Worker tasks never mutate the core. They return events to the serial loop, and
-stale epoch work is discarded before it runs.
+a pooled transaction's recheck whose tip is no longer the mining tip is
+discarded before it runs. A verdict or template on a tip is a fact about that
+tip, so nothing else is discarded or refused because the tip moved.
 
 ## Content boundary
 

@@ -175,7 +175,9 @@ final class AdmissionWhileSyncingTests: XCTestCase {
             let synced = try await node(
                 keyByte: keyByte, peers: [source.endpoint], workers: 1, bodyWindow: window
             ) { kind, effect in
-                let catchingUp = await probe.level(\.synced) != true
+                // Nil, the level unreadable (a job still running once the
+                // loop has stopped), is not catching up.
+                let catchingUp = await probe.level(\.synced) == false
                 switch (kind, effect) {
                 case (.connect, _):
                     await probe.count("connect")

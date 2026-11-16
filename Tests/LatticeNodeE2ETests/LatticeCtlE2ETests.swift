@@ -195,8 +195,7 @@ final class LatticeCtlE2ETests: XCTestCase {
     }
 
     /// `lattice tx …` against the host; false when the node refused the
-    /// transaction — a stale nonce, an unfunded credit, or the tip moving
-    /// under the preflight. Swap legs retry on that.
+    /// transaction.
     ///
     /// The reason is kept, because every other failure looks identical here:
     /// a wrong key path or a chain missing from the topology would otherwise
@@ -215,12 +214,16 @@ final class LatticeCtlE2ETests: XCTestCase {
     private var lastTxFailure: String?
 
     /// Retry a `tx` submit until the node accepts it, reporting the last
-    /// refusal if it never does.
+    /// refusal if it never does. The funding balance a test waits for is
+    /// read on the act-on tip, which the pool's tip may trail by one step
+    /// (it first reads the entered blocks' transactions), so the first
+    /// submit can be refused as unfunded. That is the only refusal retried
+    /// for, and it clears within a step: a tip moving never refuses one.
     private func submitUntilAccepted(
         _ label: String,
         _ host: CtlHost,
         _ arguments: [String],
-        seconds: Int = 240
+        seconds: Int = 30
     ) async throws {
         lastTxFailure = nil
         do {

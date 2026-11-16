@@ -34,8 +34,8 @@ public enum NodeRuntimeError: Error, Equatable, Sendable {
 /// - `wakeAt` → one timer that posts `tick`.
 /// - `mining` → the pool delta persisted like `persist` (fail-stop), RPC
 ///   replies answered by reply ID, announces to every ready peer, and the
-///   preflight and template jobs on the worker pool (a recheck or build whose
-///   tip epoch moved before it starts runs nothing).
+///   preflight and template jobs on the worker pool (a recheck whose tip is
+///   no longer the mining tip when it starts runs nothing).
 ///
 /// RPC writes (`submitTransaction`, `miningTemplate`, `submitWork`) are
 /// mining events with reply IDs, one per RPC in flight; RPC reads
@@ -1686,7 +1686,7 @@ extension NodeRuntime {
                 let held = job.block ?? storage.store.header(job.childCID)?.block
                 let parent = Array(path.dropLast())
                 let (storage, failStop) = (storage, failStop)
-                enqueue(RuntimeJob(path: path, epoch: nil) {
+                enqueue(RuntimeJob(path: path, tipCID: nil) {
                     var upstream: [ChildBlockProof] = []
                     if parent.count > 1 {
                         do {
@@ -1706,7 +1706,7 @@ extension NodeRuntime {
                     inputs.yield(.event(.level(path, .proofDropped(job))))
                     break
                 }
-                enqueue(RuntimeJob(path: path, epoch: nil) {
+                enqueue(RuntimeJob(path: path, tipCID: nil) {
                     [.level(path, .proofVerified(job, await job.run(block)))]
                 })
                 startJobs()
@@ -1853,7 +1853,7 @@ extension NodeRuntime {
         /// Queue `job`, behind `observeJob` when a test watches the pool.
         private mutating func enqueue(_ job: RuntimeJob, _ effect: MiningEffect? = nil) {
             guard let observeJob else { return queued.append(job) }
-            queued.append(RuntimeJob(path: job.path, epoch: job.epoch, kind: job.kind) {
+            queued.append(RuntimeJob(path: job.path, tipCID: job.tipCID, kind: job.kind) {
                 await observeJob(job.kind, effect)
                 return await job.run()
             })

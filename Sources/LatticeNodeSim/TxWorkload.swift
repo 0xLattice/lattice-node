@@ -444,7 +444,7 @@ public struct TxWorkload {
         mix(Self.describe(event))
         switch event {
         case .preflighted(let job, _, _):
-            runningPreflights.remove("\(job.tipEpoch)/" + job.cid)
+            runningPreflights.remove("\(job.tipCID)/" + job.cid)
         case .transactionReceived:
             admissionSources += 1
         case .tipMoved(let move):
@@ -484,9 +484,10 @@ public struct TxWorkload {
         case .templateIssued(let replyID, let template):
             try answer(replyID)
             report.templates += 1
-            // DST 5: work comes only from the executed tip.
-            guard template.tipCID == mining.tipCID, template.block.parent?.rawCID == mining.tipCID else {
-                throw fail("template issued off the executed tip")
+            // DST 5: work builds on the executed tip its job read, which may
+            // have moved since: a solution on it is a side block.
+            guard template.block.parent?.rawCID == template.tipCID else {
+                throw fail("template issued off the tip its job read")
             }
             let nonce = Self.grind(template.block, below: template.searchTarget)
             schedule(at: now + delay(), .event(.submitWork(
@@ -514,20 +515,20 @@ public struct TxWorkload {
     }
 
     /// The executor's side of the job contract: an admission always runs,
-    /// on the tip it was issued on; a recheck is skipped iff its tip epoch is
-    /// not `MiningState.tipEpoch` when it is dequeued.
+    /// on the tip it was issued on; a recheck is skipped iff its tip is not
+    /// `MiningState.tipCID` when it is dequeued.
     mutating func run(_ job: PreflightJob) async throws {
         if !job.checksPolicies {
-            guard job.tipEpoch == mining.tipEpoch else {
+            guard job.tipCID == mining.tipCID else {
                 report.skippedJobs += 1
                 return
             }
-            guard runningPreflights.insert("\(job.tipEpoch)/" + job.cid).inserted else {
-                throw fail("recheck of \(job.cid) ran twice at once in tip epoch \(job.tipEpoch)")
+            guard runningPreflights.insert("\(job.tipCID)/" + job.cid).inserted else {
+                throw fail("recheck of \(job.cid) ran twice at once on tip \(job.tipCID)")
             }
             preflightsOnTip += 1
             guard preflightsOnTip <= poolAtMove else {
-                throw fail("\(preflightsOnTip) rechecks in tip epoch \(job.tipEpoch): more than one tip's worth")
+                throw fail("\(preflightsOnTip) rechecks on tip \(job.tipCID): more than one tip's worth")
             }
         }
         let (verdict, balances) = try await classify(job)
@@ -535,10 +536,6 @@ public struct TxWorkload {
     }
 
     mutating func run(_ job: TemplateJob) async throws {
-        guard job.tipEpoch == mining.tipEpoch else {
-            report.skippedJobs += 1
-            return
-        }
         let build = try await assemble(job)
         schedule(at: now + delay(), .event(.templateBuilt(job, build)))
     }

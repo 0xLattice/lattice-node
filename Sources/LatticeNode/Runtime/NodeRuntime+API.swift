@@ -164,7 +164,7 @@ struct ParentContinuity: ParentChainFacts {
 
 /// The hosted levels as the loop holds them, read from a job: `read` runs
 /// on the loop between steps, as Bitcoin reads its live block index under
-/// `cs_main`, and is nil once the loop has stopped. A job's tip epoch still
+/// `cs_main`, and is nil once the loop has stopped. A recheck's tip still
 /// decides whether it runs; what it reads live is the answer at the step the
 /// read runs, and an anchor depends only on a block's ancestry.
 struct LiveLevels: Sendable {
@@ -625,9 +625,9 @@ extension NodeRuntime {
 
     // MARK: - Jobs
 
-    /// A worker job. One with a tip epoch is skipped at dequeue when its
-    /// level's mining tip epoch has moved: it runs nothing, posts nothing.
-    /// `kind` decides its queue (`JobQueues`).
+    /// A worker job. One with a tip is skipped at dequeue when it is not its
+    /// level's mining tip: it runs nothing, posts nothing. `kind` decides its
+    /// queue (`JobQueues`).
     struct RuntimeJob: Sendable {
         /// Its queue (`JobQueues`).
         enum Kind: Sendable {
@@ -639,12 +639,12 @@ extension NodeRuntime {
         }
 
         let path: ChainPath
-        let epoch: UInt64?
+        let tipCID: String?
         var kind = Kind.other
         let run: @Sendable () async -> [NodeEvent]
 
         func isCurrent(in core: NodeCore) -> Bool {
-            epoch.map { core.levels[path]?.mining.tipEpoch == $0 } ?? true
+            tipCID.map { core.levels[path]?.mining.tipCID == $0 } ?? true
         }
     }
 
@@ -655,8 +655,8 @@ extension NodeRuntime {
     /// while a node syncs a tree of chains, and no level goes ahead of
     /// another; then (C) everything else in arrival order: proof checks,
     /// derivations, reads, rechecks, and a peer's or a returned
-    /// transaction's admission. A recheck or build whose tip epoch moved is
-    /// dropped at dequeue: it runs nothing, posts nothing.
+    /// transaction's admission. A recheck whose tip is not the current one
+    /// is dropped at dequeue: it runs nothing, posts nothing.
     struct JobQueues {
         var answered: [RuntimeJob] = []
         var connects: [RuntimeJob] = []
@@ -712,7 +712,7 @@ extension NodeRuntime {
     /// The worker job for a mining effect that needs one: Lattice preflight
     /// and the template assembly on the job's `basis`, child templates
     /// reading the live `levels`, and the read of a tip move's blocks, which
-    /// is tied to no epoch (a returned transaction is a candidate on any tip,
+    /// is tied to no tip (a returned transaction is a candidate on any tip,
     /// and its preflight decides).
     static func miningJob(
         _ effect: MiningEffect,
@@ -730,7 +730,7 @@ extension NodeRuntime {
             // An admission always runs: its verdict counts on any tip
             // (`PreflightJob`).
             return RuntimeJob(
-                path: path, epoch: job.checksPolicies ? nil : job.tipEpoch, kind: job.awaited ? .answered : .other
+                path: path, tipCID: job.checksPolicies ? nil : job.tipCID, kind: job.awaited ? .answered : .other
             ) {
                 guard let basis else { preconditionFailure("every hosted level's tree carries a context: a preflight has a basis") }
                 // A child withdrawal is proven against the parent's executed
@@ -773,7 +773,8 @@ extension NodeRuntime {
                 return [.level(path, .mining(.preflighted(job, verdict, balances: balances)))]
             }
         case .buildTemplate(let job):
-            return RuntimeJob(path: path, epoch: job.tipEpoch, kind: .answered) {
+            // A build always runs: it is answered on any tip (`TemplateJob`).
+            return RuntimeJob(path: path, tipCID: nil, kind: .answered) {
                 let (built, refused) = await reading(job.tipCID, at: path, storage: storage, remote: remote) { fetcher in
                     var refused: [PolicyRefusal] = []
                     let built = await buildTemplate(
@@ -786,7 +787,7 @@ extension NodeRuntime {
                     + [.level(path, .mining(.templateBuilt(job, built)))]
             }
         case .returnTransactions(let left, let carried):
-            return RuntimeJob(path: path, epoch: nil) {
+            return RuntimeJob(path: path, tipCID: nil) {
                 var returned: [NodeEvent] = []
                 for cid in left {
                     for transaction in await transactions(ofLeftBlock: cid, at: path, storage: storage, remote: remote)
@@ -857,7 +858,7 @@ extension NodeRuntime {
         storage: NodeStorage,
         remote: IvyRootContentSource? = nil
     ) -> RuntimeJob {
-        RuntimeJob(path: path, epoch: nil, kind: .connect) {
+        RuntimeJob(path: path, tipCID: nil, kind: .connect) {
             await reading(job.blockHash, at: path, storage: storage, remote: remote) { fetcher in
                 let verdict = await ChainTree.connect(
                     job,
@@ -882,7 +883,7 @@ extension NodeRuntime {
     /// `ChainEffect.readTransactions`: each block's transaction IDs.
     static func readJob(_ blocks: [String], at path: ChainPath, storage: NodeStorage) -> RuntimeJob {
         let fetcher = storage.localFetcher
-        return RuntimeJob(path: path, epoch: nil) {
+        return RuntimeJob(path: path, tipCID: nil) {
             var read: [String: [String]] = [:]
             for cid in blocks { read[cid] = await transactionIDs(ofBlock: cid, fetcher: fetcher) }
             return [.level(path, .transactionsRead(read))]

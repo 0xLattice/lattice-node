@@ -437,6 +437,35 @@ final class NodeRuntimeTests: XCTestCase {
         }
     }
 
+    /// Work issued before the tip moves stays known: its solution is a side
+    /// block on the old tip, never `unknownWork` (Bitcoin's `submitblock`
+    /// checks no tip).
+    func testWorkIssuedBeforeATipMoveIsAcceptedAsASideBlock() async throws {
+        let node = try host(keyByte: 0x38)
+        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let runtime = try await NodeRuntime.start(
+            storage: storage, configuration: node.configuration, overlay: node.overlay
+        )
+        let genesis = try XCTUnwrap(runtime.published.value?.actOnTip)
+        let recipient = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
+        let old = try await runtime.miningTemplate(MiningTemplateRequest(recipients: [
+            MiningRecipient(chainPath: ["Nexus"], address: recipient),
+        ]))
+        XCTAssertEqual(old.block.parent?.rawCID, genesis)
+        // Two blocks past genesis: the old work's block is lighter than the tip.
+        _ = try await runtime.mineBlock()
+        let tipCID = try BlockHeader(node: try await runtime.mineBlock()).rawCID
+        XCTAssertEqual(runtime.published.value?.actOnTip, tipCID)
+
+        var nonce: UInt64 = 0
+        while Self.block(old.block, nonce: nonce).proofOfWorkHash() > old.searchTarget { nonce += 1 }
+        let side = try await runtime.submitWork(SubmitWorkRequest(workID: old.workID, nonce: nonce))
+        XCTAssertTrue(side.accepted)
+        XCTAssertEqual(side.disposition, .acceptedSide)
+        XCTAssertEqual(runtime.published.value?.actOnTip, tipCID, "a side block leaves the tip")
+        await runtime.stop()
+    }
+
     /// `miningEvents()` sends the status digest at once, then a new one when
     /// the root tip moves and when the pool changes what the next block
     /// carries; never the same digest twice in a row. It ends with the
