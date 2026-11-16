@@ -483,7 +483,7 @@ extension ChainCore {
         if let proof { turn.indexed.append(StoredProof(childCID: cid, proof: proof.proof)) }
         drain(&turn)
         if !isRoot { proofWork(&turn) }
-        return finish(turn)
+        return finish(turn, own: true)
     }
 
     /// Credit this level with its parent's attributed runs (hierarchical

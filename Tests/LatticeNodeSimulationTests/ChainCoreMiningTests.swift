@@ -355,6 +355,33 @@ final class ChainCoreMiningTests: XCTestCase {
         guard case .templateRefused(1, .buildFailed)? = answered.first else { return XCTFail("\(answered)") }
     }
 
+    /// A block this node produced is pushed whether or not the level is
+    /// synced: it may be canonical, and it adds weight (Bitcoin Core
+    /// announces a block it found even during initial download).
+    func testAMinedBlockIsPushedBeforeTheSyncLatch() throws {
+        let path = world.bootstrap.tree.context!.path
+        let subscriber = PeerID(key: "subscriber", session: 1)
+        var host = NodeCore(root: world.bootstrap.tree.detached(), hosted: [])
+        _ = host.step(.peerReady(subscriber), now: Self.now)
+        let (logID, count) = try XCTUnwrap(host.levels[path].map { ($0.sync.log.id, $0.sync.log.count) })
+        _ = host.step(.received(subscriber, path, .getStream(
+            requestID: 1, logID: logID, after: count, own: ""
+        )), now: Self.now)
+        XCTAssertEqual(host.levels[path]?.sync.peers[subscriber]?.subscribed, true)
+        XCTAssertEqual(host.levels[path]?.synced, false, "the subscriber's log is not read")
+
+        let grind = MinedGrind(root: chain[0].block, rootChildren: chain[0].children, carried: [])
+        let effects = host.step(.mined(grind, replyID: nil), now: Self.now)
+        let pushed = effects.compactMap { effect -> [String]? in
+            if case .level(_, .send(subscriber, .stream(let page))) = effect, page.requestID == 0 {
+                return page.entries.map(\.entry.cid)
+            }
+            return nil
+        }
+        XCTAssertEqual(pushed, [[chain[0].cid]], "\(effects)")
+        XCTAssertEqual(host.levels[path]?.synced, false)
+    }
+
     func testAMinedRootIsAnsweredOnceItExecutes() async throws {
         let path = world.bootstrap.tree.context!.path
         var host = NodeCore(root: world.bootstrap.tree.detached(), hosted: [])

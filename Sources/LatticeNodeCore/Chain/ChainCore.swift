@@ -527,8 +527,8 @@ public struct ChainCore: Sendable {
     /// mining effects last: nothing a step makes visible precedes the write
     /// that makes it durable. Every step ends by scheduling the body window,
     /// whatever moved it, and a move of the act-on tip reaches the mempool
-    /// in the same step.
-    mutating func finish(_ turn: Turn) -> [ChainEffect] {
+    /// in the same step. `own`: the step weighed this node's own block.
+    mutating func finish(_ turn: Turn, own: Bool = false) -> [ChainEffect] {
         var turn = turn
         scheduleBodies(&turn)
         moveMiningTip(&turn)
@@ -560,10 +560,12 @@ public struct ChainCore: Sendable {
         // Push what was appended to every peer that read our log to its end:
         // the stream's tail is the relay. Relaying a header is not acting on
         // its weight: only tip announces and templates act, and they come
-        // from the executed tip. Not before `synced`, as Bitcoin Core does
-        // not announce blocks during initial download: a peer still pulls
-        // our log, and the first push after the latch has it pull the gap.
-        if synced, !appended.entries.isEmpty {
+        // from the executed tip. A block learned from peers is not pushed
+        // before `synced`, as Bitcoin Core announces none during initial
+        // download, but one this node produced always is: it may be
+        // canonical and it adds weight. A peer still pulls our log, and a
+        // push past its position has it pull the gap.
+        if synced || own, !appended.entries.isEmpty {
             for peer in sync.peers.keys.sorted() where sync.peers[peer]?.subscribed == true {
                 effects.append(.send(peer, .stream(StreamPage(
                     requestID: 0, logID: sync.log.id, entries: appended.entries, hasMore: appended.hasMore
