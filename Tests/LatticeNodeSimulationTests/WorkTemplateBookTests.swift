@@ -53,13 +53,12 @@ final class WorkTemplateBookTests: XCTestCase {
         let conflicting = work(block, searchTarget: UInt256(7))
         XCTAssertEqual(book.issue(conflicting).searchTarget, first.searchTarget)
 
-        book.invalidateAll()
+        book.discard(workID: first.workID)
         XCTAssertEqual(book.issue(conflicting).searchTarget, conflicting.searchTarget)
     }
 
     /// Proof-of-work arrivals are memoryless: no amount of time makes issued
-    /// work unknown. Only a flush (the tip moving) or the capacity backstop
-    /// does.
+    /// work unknown. Only the capacity bound does.
     func testIssuedWorkNeverExpiresOnAClock() async throws {
         var book = WorkTemplateBook()
         let template = book.issue(work(try await candidateBlock()))

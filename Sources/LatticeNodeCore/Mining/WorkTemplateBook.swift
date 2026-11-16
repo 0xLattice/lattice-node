@@ -48,9 +48,6 @@ public enum TemplateError: Error, Sendable, Equatable {
     case buildFailed
     /// Too many template requests are waiting.
     case busy
-    /// Retriable: the executed tip moved more than `maxReissues` times while
-    /// the request waited (the actor's `templateContextChanged`).
-    case contextChanged
 }
 
 /// The work cache for external miners. It never searches a nonce. An issued
@@ -58,10 +55,11 @@ public enum TemplateError: Error, Sendable, Equatable {
 ///
 /// Work never expires on a clock: proof-of-work arrivals are memoryless, so
 /// time spent on a template says nothing about when the next tip comes.
-/// Every template issued on the current tip is kept, so a pool or hosted
-/// descendant change never makes earlier work unknown; the tip moving
-/// flushes them all (`invalidateAll`, Stratum's `clean_jobs`). `capacity` is
-/// only a backstop, least-recently-issued first out.
+/// Nor does the tip moving make it unknown: work on an old tip is still work
+/// on that tip, and its solution a side block (Bitcoin's `submitblock` checks
+/// no tip). Stratum's `clean_jobs` tells a miner to stop searching old work;
+/// it does not make the server forget it. `capacity` is the only bound,
+/// least-recently-issued first out.
 public struct WorkTemplateBook: Sendable {
     public let capacity: Int
     private var templates: [String: WorkTemplate] = [:]
@@ -108,11 +106,6 @@ public struct WorkTemplateBook: Sendable {
             throw TemplateError.missesSearchTarget
         }
         return candidate
-    }
-
-    public mutating func invalidateAll() {
-        templates.removeAll(keepingCapacity: true)
-        order.removeAll(keepingCapacity: true)
     }
 }
 

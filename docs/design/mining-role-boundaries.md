@@ -74,9 +74,10 @@ The worker does not define a second proof-of-work encoding.
 The coordinator submits a result to the node, not a sealed block to peers. The
 node validates that `workID` still names issued work,
 that the nonce satisfies the node-computed target, and that the submission
-has not already been accepted. Stale, malformed, wrong-chain, wrong-target, and
+has not already been accepted. Malformed, wrong-chain, wrong-target, and
 duplicate submissions are rejected without mutating canonical state or
-publishing a block.
+publishing a block. Work on a tip that has since moved is still valid work on
+that tip: its block is accepted as a side block.
 
 After a valid submission, the node seals the block with the submitted nonce,
 generates any required merged-mining proof material, accepts and persists the

@@ -448,8 +448,9 @@ lattice-mining-coordinator \
 ```
 
 The node fingerprints the complete hosted tree. A new transaction, child
-candidate, or accepted child block invalidates stale work even when the Nexus
-tip did not change. Submitted work is persisted only for child levels whose
+candidate, or accepted child block changes the template digest, sending the
+coordinator for new work, even when the Nexus tip did not change. Work already
+issued stays submittable; a solution on an old tip is a side block. Submitted work is persisted only for child levels whose
 target the hash actually meets.
 
 Alert when:

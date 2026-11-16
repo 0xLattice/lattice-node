@@ -8,14 +8,12 @@ import Lattice
 // consults the best chain, and only when a window is set.
 
 /// What readers see: the best header tip and the tip a node acts on — the
-/// heaviest executed tip — with the mining tip epoch (a
-/// worker skips a job whose epoch is not this one) and the pool's size.
+/// heaviest executed tip — and the pool's size.
 public struct ChainSnapshot: Sendable, Equatable {
     public let bestHeaderTip: String
     public let bestHeaderHeight: UInt64
     public let actOnTip: String
     public let actOnHeight: UInt64
-    public let miningEpoch: UInt64
     public let mempoolCount: Int
     public let mempoolBytes: Int
 }
@@ -95,7 +93,6 @@ extension ChainCore {
             bestHeaderHeight: tree.headerSnapshot(of: tree.canonicalTip)?.tipHeight ?? 0,
             actOnTip: actOn.hash,
             actOnHeight: actOn.height,
-            miningEpoch: mining.tipEpoch,
             mempoolCount: mining.mempool.count,
             mempoolBytes: mining.mempool.byteCount
         )

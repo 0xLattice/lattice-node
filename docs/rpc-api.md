@@ -539,10 +539,18 @@ candidate, changes the digest, even if the Nexus tip did not move.
 
 Issued work never expires on a clock: proof-of-work arrivals are memoryless,
 so the time spent on a template says nothing about when the next tip comes.
-Every template issued on the current Nexus tip stays valid; the tip moving
-retires all of them (Stratum's `clean_jobs`). A pool or child change never
-retires earlier work; only past 512 templates on one tip are the least
-recently issued dropped.
+Nor does the tip moving retire it: work on an old tip is still work on that
+tip, and a solution for it is accepted as a side block (`acceptedSide`), as
+Bitcoin's `submitblock` checks no tip. The digest pushed on `GET
+/mining/events` tells a miner to fetch new work (Stratum's `clean_jobs`
+tells it to stop searching, not the server to forget). The node keeps the
+last 512 templates issued, least recently issued dropped first.
+
+A template request is never refused because the tip moved while it was
+built: it is answered with the template its build produced, on the tip the
+build read, and the digest push that followed the move sends the miner back
+for work on the new tip. The only refusals are `busy` (503, too many
+requests waiting on builds) and `buildFailed`.
 
 ### `GET /mining/events`
 
@@ -559,7 +567,8 @@ The digest is the one `/status` and every template carry. It changes when a
 hosted level's act-on tip moves, when what any hosted level's next block
 would carry changes, and when the hosted chains change.
 A client fetches a template (`POST /mining/templates`) when it sees a new
-digest; work it already holds stays valid until the Nexus tip moves.
+digest; work it already holds stays submittable, a solution on an old tip
+being a side block.
 
 A client that reads slowly skips to the latest digest: the node holds only
 the newest one for it, never a queue. A comment line `: keepalive` every 15

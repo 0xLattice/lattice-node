@@ -82,7 +82,6 @@ final class ChainCoreMiningTests: XCTestCase {
         let applied = try await executeFirst(&core, transactions: [cid])
         XCTAssertEqual(core.snapshot.actOnTip, chain[0].cid)
         XCTAssertEqual(core.mining.tipCID, chain[0].cid)
-        XCTAssertEqual(core.snapshot.miningEpoch, 1)
         // The connect result named its transactions: the move confirms the
         // waiting submit in the same step, before any verdict on the new tip.
         XCTAssertTrue(mining(applied).contains {
@@ -285,23 +284,23 @@ final class ChainCoreMiningTests: XCTestCase {
         }, "\(local)")
     }
 
-    func testATemplateBuildWaitingOnTheOldTipIsIssuedAgainOnTheNewOne() async throws {
+    /// A build on the old tip is neither thrown away nor issued again when
+    /// the tip moves: its result answers the request.
+    func testATemplateBuildWaitingOnTheOldTipAnswersWhenItLands() async throws {
         var core = weighed(Array(chain.prefix(2)))
         let requested = mining(core.step(
             .mining(.templateRequested(replyID: 1, TemplateRequest(rewardRecipient: nil))), now: Self.now
         ))
         guard case .buildTemplate(let first)? = requested.first else { return XCTFail("\(requested)") }
         XCTAssertEqual(first.tipCID, world.genesis.cid)
-        XCTAssertEqual(first.tipEpoch, 0)
 
         let applied = mining(try await executeFirst(&core))
-        guard case .buildTemplate(let again)? = applied.first(where: {
-            if case .buildTemplate = $0 { true } else { false }
-        }) else { return XCTFail("\(applied)") }
-        XCTAssertEqual(again.tipCID, chain[0].cid)
-        XCTAssertEqual(again.tipEpoch, core.snapshot.miningEpoch)
-        // The old build's result issues nothing.
-        XCTAssertTrue(mining(core.step(.mining(.templateBuilt(first, nil)), now: Self.now)).isEmpty)
+        XCTAssertEqual(core.mining.tipCID, chain[0].cid)
+        XCTAssertFalse(applied.contains { if case .buildTemplate = $0 { true } else { false } }, "\(applied)")
+        XCTAssertFalse(applied.contains { if case .templateRefused = $0 { true } else { false } }, "\(applied)")
+        let answered = mining(core.step(.mining(.templateBuilt(first, nil)), now: Self.now))
+        XCTAssertEqual(answered.count, 1, "\(answered)")
+        guard case .templateRefused(1, .buildFailed)? = answered.first else { return XCTFail("\(answered)") }
     }
 
     func testAMinedRootIsAnsweredOnceItExecutes() async throws {

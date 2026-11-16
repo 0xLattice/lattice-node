@@ -61,11 +61,11 @@ public struct TipMove: Sendable {
 ///   on (`id`): one for an admission the move confirmed or closed does
 ///   nothing. A tip move never reissues an admission's job.
 /// - A pooled transaction's recheck: the executor MUST skip the job iff
-///   `tipEpoch` differs from `MiningState.tipEpoch` read when it dequeues the
-///   job, and the core drops a verdict iff the same holds when it arrives.
-///   The epoch moves on every tip move, so a tip that moves away and back
-///   (A, B, A) still makes the job stale. The move already issued the
-///   recheck again.
+///   `tipCID` is not `MiningState.tipCID` read when it dequeues the job, and
+///   the core drops a verdict iff the same holds when it arrives, as geth
+///   coalesces resets to the latest head. A verdict on a tip is a fact about
+///   that tip, so a tip that moves away and back (A, B, A) takes the job's
+///   verdict. Each move issues the recheck again on its tip.
 ///
 /// `awaited` marks an admission an RPC is waiting on (a local or public
 /// submit among its origins): the executor runs those ahead of other work.
@@ -82,7 +82,6 @@ public struct PreflightJob: Sendable {
     public let cid: String
     public let transaction: Transaction
     public let tipCID: String
-    public let tipEpoch: UInt64
     public let poolVersion: UInt64
     public let checksPolicies: Bool
     public let awaited: Bool
@@ -133,14 +132,15 @@ public struct TemplateRequest: Sendable, Equatable {
 /// job preflights each against the carrier's `prevState`, as the shell's
 /// assembler does today.
 ///
-/// Job contract: as for `PreflightJob`, an executor MUST skip the job iff
-/// `tipEpoch` differs from `MiningState.tipEpoch` read at dequeue, and the core
-/// drops its result iff the same holds; the tip move already issued the
-/// build again for the same requests.
+/// Job contract: an executor always runs it, and its build is answered and
+/// issued whatever the tip is when it lands. A template on a tip that has
+/// since moved is still valid work on that tip (a solution is a side block),
+/// and the template digest pushed on the move tells the miner to ask again
+/// (Bitcoin Core's `getblocktemplate` likewise never refuses because the tip
+/// moved).
 public struct TemplateJob: Sendable {
     public let id: UInt64
     public let tipCID: String
-    public let tipEpoch: UInt64
     public let poolVersion: UInt64
     public let transactions: [Transaction]
     public let request: TemplateRequest
@@ -251,12 +251,6 @@ public struct MiningConfig: Sendable {
     /// Public-listener submits waiting on a verdict. Over it a submit is
     /// answered `.full` rather than dropped silently.
     public var maxPendingSubmitted: Int
-    /// Tip moves a template request may wait through. One more and it is
-    /// answered with a retriable `.contextChanged`, so replies stay bounded
-    /// while the tip churns. A transaction is never refused for waiting: its
-    /// admission's verdict is applied whatever tip it was read on
-    /// (`PreflightJob`).
-    public var maxReissues: Int
     /// Template requests waiting on a build.
     public var maxWaitingTemplateRequests: Int
     public var mempool: MempoolLimits
@@ -267,7 +261,6 @@ public struct MiningConfig: Sendable {
         maxPendingPerPeer: Int = 64,
         maxPendingReturned: Int = MempoolLimits().maxCount,
         maxPendingSubmitted: Int = 256,
-        maxReissues: Int = 3,
         maxWaitingTemplateRequests: Int = 64,
         mempool: MempoolLimits = MempoolLimits(),
         templateCapacity: Int = 512
@@ -276,7 +269,6 @@ public struct MiningConfig: Sendable {
         self.maxPendingPerPeer = maxPendingPerPeer
         self.maxPendingReturned = maxPendingReturned
         self.maxPendingSubmitted = maxPendingSubmitted
-        self.maxReissues = maxReissues
         self.maxWaitingTemplateRequests = maxWaitingTemplateRequests
         self.mempool = mempool
         self.templateCapacity = templateCapacity
@@ -287,18 +279,18 @@ public struct MiningConfig: Sendable {
 /// one synchronous `step`. No IO, no awaits.
 ///
 /// Jobs replace the leases and fences: a preflight or template job names the
-/// executed tip it ran on. A recheck's or a build's result for a tip that
-/// has since moved is dropped, and the tip move itself reissues every
-/// recheck the pool needs, and every waiting build, on the new tip. An
-/// admission's verdict is applied whatever tip it was read on, then
-/// rechecked on the current one (`PreflightJob`).
+/// executed tip it ran on. A recheck's result for a tip that is not the
+/// current one is dropped, and the tip move itself reissues every recheck
+/// the pool needs on the new tip. An admission's verdict is applied
+/// whatever tip it was read on, then rechecked on the current one
+/// (`PreflightJob`). A build is answered whatever tip it was read on
+/// (`TemplateJob`).
 public struct MiningState: Sendable {
     public private(set) var mempool: Mempool
     public private(set) var templates: WorkTemplateBook
-    /// The executed tip transactions and templates build on.
+    /// The executed tip transactions and templates build on, and what makes
+    /// a recheck stale (`PreflightJob`).
     public private(set) var tipCID: String
-    /// Moves on every tip move: what makes a job stale (see `PreflightJob`).
-    public private(set) var tipEpoch: UInt64 = 0
     /// The spec of the tip's genesis root; nil while the level executed no
     /// root, when the pool admits nothing.
     public internal(set) var spec: ChainSpec?
@@ -331,20 +323,12 @@ public struct MiningState: Sendable {
         }
     }
 
-    /// A template request waiting on a build, and the tip moves it has waited
-    /// through.
-    private struct Waiting {
-        let replyID: UInt64
-        var reissues = 0
-    }
-
     /// Transactions awaiting a verdict before admission.
     private var admissions: [String: Admission] = [:]
     /// Each pending admission's outstanding preflight, by job ID: at most
     /// one, outstanding across tip moves until its verdict lands.
     private var admitting: [String: UInt64] = [:]
-    /// Pooled transactions with a recheck outstanding on the current tip
-    /// epoch.
+    /// Pooled transactions with a recheck outstanding on the current tip.
     private var rechecking: Set<String> = []
     /// What the next block can carry: what a template is handed, and what
     /// the status digest names.
@@ -352,7 +336,8 @@ public struct MiningState: Sendable {
 
     /// Pooled transactions in the local journal.
     public private(set) var journaled: Set<String> = []
-    private var builds: [UInt64: (job: TemplateJob, replies: [Waiting])] = [:]
+    /// Each running build's job and the template requests waiting on it.
+    private var builds: [UInt64: (job: TemplateJob, replies: [UInt64])] = [:]
     private var nextJobID: UInt64 = 1
 
     public init(tipCID: String, spec: ChainSpec?, config: MiningConfig = MiningConfig()) {
@@ -387,7 +372,7 @@ public struct MiningState: Sendable {
         case .tipMoved(let move):
             tipMoved(move, &turn)
         case .templateRequested(let replyID, let request):
-            requestTemplate(request, waiting: [Waiting(replyID: replyID)], &turn)
+            requestTemplate(request, replyID: replyID, &turn)
         case .templateBuilt(let job, let build):
             built(job, build, &turn)
         case .policyRefused(let refusedOn, let cids):
@@ -551,7 +536,7 @@ public struct MiningState: Sendable {
         admitting[cid] = issue(cid, transaction, checksPolicies: true, awaited: awaited, &turn)
     }
 
-    /// Issue a pooled transaction's recheck on this tip epoch.
+    /// Issue a pooled transaction's recheck on this tip.
     private mutating func recheck(_ item: MempoolItem, _ turn: inout Turn) {
         guard rechecking.insert(item.cid).inserted else { return }
         issue(item.cid, item.transaction, checksPolicies: false, awaited: false, &turn)
@@ -564,7 +549,7 @@ public struct MiningState: Sendable {
         let id = nextJobID
         nextJobID += 1
         turn.jobs.append(.preflight(PreflightJob(
-            id: id, cid: cid, transaction: transaction, tipCID: tipCID, tipEpoch: tipEpoch,
+            id: id, cid: cid, transaction: transaction, tipCID: tipCID,
             poolVersion: mempool.version, checksPolicies: checksPolicies, awaited: awaited
         )))
         return id
@@ -585,14 +570,14 @@ public struct MiningState: Sendable {
             // it arrived before the move, and the pooled transaction is
             // checked again on this tip, as every move checks the pool. Its
             // balances are the old tip's: they shed nothing.
-            let stale = job.tipEpoch != tipEpoch
+            let stale = job.tipCID != tipCID
             admit(admission, cid: job.cid, disposition, balances: stale ? nil : balances, now: now, &turn)
             if stale, let item = mempool.item(job.cid) { recheck(item, &turn) }
             return
         }
-        // A recheck on a tip that has moved is dropped: the move reissued it
-        // on the new tip.
-        guard job.tipEpoch == tipEpoch, rechecking.remove(job.cid) != nil else { return }
+        // A recheck on a tip that is not the current one is dropped: the move
+        // reissued it on the new tip.
+        guard job.tipCID == tipCID, rechecking.remove(job.cid) != nil else { return }
         // It left the pool and arrived again: its admission's own job, which
         // checks the policies, judges it.
         guard admissions[job.cid] == nil else { return }
@@ -746,10 +731,9 @@ public struct MiningState: Sendable {
 
     private mutating func tipMoved(_ move: TipMove, _ turn: inout Turn) {
         tipCID = move.tipCID
-        tipEpoch &+= 1
-        // Work on the old tip is gone (Stratum's `clean_jobs`); a pool or
-        // descendant change never flushes it.
-        templates.invalidateAll()
+        // Issued work stays known: a solution on the old tip is a side block
+        // (Bitcoin's `submitblock` checks no tip). A waiting build is
+        // answered when it lands.
         confirm(move.confirmed, &turn)
         // Returned transactions within their bound; a deep reorg spills the
         // rest.
@@ -760,7 +744,7 @@ public struct MiningState: Sendable {
             open(cid, Admission(transaction: transaction, origins: [.returned], slot: .returned))
         }
         // Every verdict the pool holds was for the old tip: rechecks still
-        // out will be dropped, and each is issued again here. The move
+        // out on another tip will be dropped, and each is issued again here. The move
         // confirmed first, so no verdict refuses what it carries. An
         // admission's outstanding job is left alone: its verdict is applied
         // whenever it lands (`PreflightJob`). One with no job (returned, or
@@ -775,58 +759,42 @@ public struct MiningState: Sendable {
         if !move.left.isEmpty {
             turn.jobs.append(.returnTransactions(left: move.left, carried: move.confirmed))
         }
-        // Every waiting build was for the old tip: issue it again on this
-        // one, or refuse a request that has waited through too many moves.
-        let stale = builds.sorted { $0.key < $1.key }
-        builds.removeAll()
-        for (_, entry) in stale {
-            var again: [Waiting] = []
-            for var waiting in entry.replies {
-                waiting.reissues += 1
-                if waiting.reissues > config.maxReissues {
-                    turn.replies.append(.templateRefused(replyID: waiting.replyID, .contextChanged))
-                } else {
-                    again.append(waiting)
-                }
-            }
-            if !again.isEmpty { requestTemplate(entry.job.request, waiting: again, &turn) }
-        }
     }
 
     // MARK: - Templates
 
-    private mutating func requestTemplate(_ request: TemplateRequest, waiting: [Waiting], _ turn: inout Turn) {
+    private mutating func requestTemplate(_ request: TemplateRequest, replyID: UInt64, _ turn: inout Turn) {
         // A build of this plan on this tip from this pool is already running.
         if let (id, _) = builds.first(where: {
-            $0.value.job.tipEpoch == tipEpoch && $0.value.job.poolVersion == mempool.version
+            $0.value.job.tipCID == tipCID && $0.value.job.poolVersion == mempool.version
                 && $0.value.job.request == request
         }) {
-            builds[id]?.replies += waiting
+            builds[id]?.replies.append(replyID)
             return
         }
-        guard waitingTemplateRequests + waiting.count <= config.maxWaitingTemplateRequests else {
-            for entry in waiting { turn.replies.append(.templateRefused(replyID: entry.replyID, .busy)) }
+        guard waitingTemplateRequests < config.maxWaitingTemplateRequests else {
+            turn.replies.append(.templateRefused(replyID: replyID, .busy))
             return
         }
         let job = TemplateJob(
             id: nextJobID,
             tipCID: tipCID,
-            tipEpoch: tipEpoch,
             poolVersion: mempool.version,
             transactions: nextBlock,
             request: request
         )
         nextJobID += 1
-        builds[job.id] = (job, waiting)
+        builds[job.id] = (job, [replyID])
         turn.jobs.append(.buildTemplate(job))
     }
 
     private mutating func built(_ job: TemplateJob, _ build: TemplateBuild?, _ turn: inout Turn) {
-        // A build for an old tip epoch is dropped: the move issued it again.
-        guard job.tipEpoch == tipEpoch, let waiting = builds.removeValue(forKey: job.id) else { return }
+        // Answered whatever the tip is now: work on the tip it read is valid
+        // work on that tip (`TemplateJob`).
+        guard let waiting = builds.removeValue(forKey: job.id) else { return }
         guard let build else {
-            for entry in waiting.replies {
-                turn.replies.append(.templateRefused(replyID: entry.replyID, .buildFailed))
+            for replyID in waiting.replies {
+                turn.replies.append(.templateRefused(replyID: replyID, .buildFailed))
             }
             return
         }
@@ -840,8 +808,8 @@ public struct MiningState: Sendable {
             digest: build.digest,
             chains: build.chains
         ))
-        for entry in waiting.replies {
-            turn.replies.append(.templateIssued(replyID: entry.replyID, issued))
+        for replyID in waiting.replies {
+            turn.replies.append(.templateIssued(replyID: replyID, issued))
         }
     }
 }
