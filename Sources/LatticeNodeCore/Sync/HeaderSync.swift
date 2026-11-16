@@ -23,6 +23,9 @@ public struct PeerSync: Sendable, Equatable {
     public internal(set) var askedAt: Int64 = .min
     /// This peer read our log to its end: we push what we append.
     public internal(set) var subscribed = false
+    /// We read this peer's log to its end at least once (a page we asked
+    /// for said nothing more follows): what `ChainCore.synced` waits for.
+    public internal(set) var readToEnd = false
     /// The ancestors asked for by CID (a parent this peer's header named).
     public internal(set) var parentRequest: InFlightHeader?
     /// The child index asked for by CID (one wait per peer).
@@ -40,6 +43,7 @@ public struct PeerSync: Sendable, Equatable {
         lhs.stream == rhs.stream && lhs.more == rhs.more && lhs.taken == rhs.taken
             && lhs.holes == rhs.holes && lhs.requested == rhs.requested
             && lhs.data == rhs.data && lhs.askedAt == rhs.askedAt && lhs.subscribed == rhs.subscribed
+            && lhs.readToEnd == rhs.readToEnd
             && lhs.parentRequest == rhs.parentRequest
             && lhs.childIndex == rhs.childIndex && lhs.serving == rhs.serving
             && lhs.queued.count == rhs.queued.count

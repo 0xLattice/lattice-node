@@ -278,6 +278,12 @@ public struct ChainCore: Sendable {
     public internal(set) var sync = HeaderSync()
     public internal(set) var bodies = BodyPipeline()
     public private(set) var published: ChainSnapshot?
+    /// Whether this level has caught up since it started: set the first time
+    /// a peer's log has been read to its end and applied here, and the act-on
+    /// tip is the best header tip. Never unset while the process runs, never
+    /// persisted (geth's `handler.synced`, set when its downloader completes
+    /// a sync cycle). Until then a peer's transaction is ignored.
+    public internal(set) var synced = false
     public let config: ChainCoreConfig
     /// The level's mempool and template book, on the act-on tip.
     public internal(set) var mining: MiningState
@@ -407,6 +413,11 @@ public struct ChainCore: Sendable {
     /// One event. A child level is handed its parent level's tree for the
     /// step alone (`parentTree`).
     public mutating func step(_ event: ChainEvent, now: Int64, parent: ChainTree? = nil) -> [ChainEffect] {
+        // A peer's transaction is ignored until the level has caught up
+        // (`synced`), as Bitcoin Core ignores `tx` during initial block
+        // download: its verdict would be read on a tip about to move. Never
+        // blamed.
+        if case .mining(.transactionReceived(_, origin: .peer)) = event, !synced { return [] }
         parentTree = parent
         defer { parentTree = nil }
         var turn = Turn(now: now)
@@ -526,6 +537,7 @@ public struct ChainCore: Sendable {
                 proofs: turn.indexed, cursors: turn.cursors
             )))
         }
+        latchSynced()
         let current = snapshot
         // A best tip that moved down moved the finality window with it: what
         // was declined just past the old window may be inside the new one.
@@ -736,6 +748,9 @@ public struct ChainCore: Sendable {
             }
             sync.peers[peer]?.taken = item.position
             if !applied(item.entry) { sync.peers[peer]?.holes.append(item) }
+        }
+        if page.requestID != 0, !page.hasMore, sync.peers[peer]?.more == false {
+            sync.peers[peer]?.readToEnd = true
         }
         advanceCursor(of: peer, &turn)
         pump(peer, &turn)

@@ -47,12 +47,28 @@ public struct TipMove: Sendable {
 /// Classify one transaction against the executed tip `tipCID` (Lattice's
 /// `preflightTransaction`). Built from `poolVersion`.
 ///
-/// Job contract: an executor MUST skip the job iff `tipEpoch` differs from
-/// `MiningState.tipEpoch` read when it dequeues the job, and the core drops a
-/// verdict iff the same holds when it arrives. The epoch moves on every tip
-/// move, so a tip that moves away and back (A, B, A) still makes the job
-/// stale. The move already issued the job again, so a backlog never runs
-/// more than one tip's worth of preflights.
+/// Job contract, two kinds by `checksPolicies`:
+///
+/// - An admission (`checksPolicies`): an executor always runs it, on the
+///   basis it was issued with, and the core never drops its verdict for a
+///   tip move. A verdict on a tip that has since moved is applied as though
+///   it had arrived before the move (geth's legacypool: `Add` validates
+///   against `pool.currentState`, and the reorg that follows demotes what no
+///   longer executes): ready, the transaction is pooled and its submitter
+///   answered, with no account shed for balances read on the old tip, and
+///   one ordinary recheck is issued on the current tip; otherwise it is
+///   refused, once. A verdict counts only for the job its admission waits
+///   on (`id`): one for an admission the move confirmed or closed does
+///   nothing. A tip move never reissues an admission's job.
+/// - A pooled transaction's recheck: the executor MUST skip the job iff
+///   `tipEpoch` differs from `MiningState.tipEpoch` read when it dequeues the
+///   job, and the core drops a verdict iff the same holds when it arrives.
+///   The epoch moves on every tip move, so a tip that moves away and back
+///   (A, B, A) still makes the job stale. The move already issued the
+///   recheck again.
+///
+/// `awaited` marks an admission an RPC is waiting on (a local or public
+/// submit among its origins): the executor runs those ahead of other work.
 ///
 /// `checksPolicies` is false for a pooled transaction: the chain's policies
 /// accepted it on admission, and every template, root or child, judges it
@@ -60,12 +76,16 @@ public struct TipMove: Sendable {
 /// refuse (`MiningEvent.policyRefused`). So a tip move costs the pool its
 /// state checks, never a policy evaluation per pooled transaction.
 public struct PreflightJob: Sendable {
+    /// Which job this is: a verdict counts only for the job its admission
+    /// waits on.
+    public let id: UInt64
     public let cid: String
     public let transaction: Transaction
     public let tipCID: String
     public let tipEpoch: UInt64
     public let poolVersion: UInt64
     public let checksPolicies: Bool
+    public let awaited: Bool
 }
 
 /// The parent level's provisional carrier a child candidate builds under:
@@ -231,9 +251,11 @@ public struct MiningConfig: Sendable {
     /// Public-listener submits waiting on a verdict. Over it a submit is
     /// answered `.full` rather than dropped silently.
     public var maxPendingSubmitted: Int
-    /// Tip moves a local submit or a template request may wait through. One
-    /// more and it is answered with a retriable `.contextChanged`, so replies
-    /// stay bounded while the tip churns.
+    /// Tip moves a template request may wait through. One more and it is
+    /// answered with a retriable `.contextChanged`, so replies stay bounded
+    /// while the tip churns. A transaction is never refused for waiting: its
+    /// admission's verdict is applied whatever tip it was read on
+    /// (`PreflightJob`).
     public var maxReissues: Int
     /// Template requests waiting on a build.
     public var maxWaitingTemplateRequests: Int
@@ -265,9 +287,11 @@ public struct MiningConfig: Sendable {
 /// one synchronous `step`. No IO, no awaits.
 ///
 /// Jobs replace the leases and fences: a preflight or template job names the
-/// executed tip it ran on, and a result for a tip that has since moved is
-/// dropped. The tip move itself reissues every preflight the pool still
-/// needs, and every waiting template build, on the new tip.
+/// executed tip it ran on. A recheck's or a build's result for a tip that
+/// has since moved is dropped, and the tip move itself reissues every
+/// recheck the pool needs, and every waiting build, on the new tip. An
+/// admission's verdict is applied whatever tip it was read on, then
+/// rechecked on the current one (`PreflightJob`).
 public struct MiningState: Sendable {
     public private(set) var mempool: Mempool
     public private(set) var templates: WorkTemplateBook
@@ -294,8 +318,17 @@ public struct MiningState: Sendable {
         let transaction: Transaction
         var origins: [TransactionOrigin]
         var slot: Slot
-        /// Tip moves this admission has waited through.
-        var reissues = 0
+
+        /// An RPC waits on its verdict: a local or public submit is among
+        /// its origins (a restored row is not waited on).
+        var isAwaited: Bool { origins.contains(where: Self.isAnswered) }
+
+        static func isAnswered(_ origin: TransactionOrigin) -> Bool {
+            switch origin {
+            case .local, .submitted: true
+            case .peer, .returned, .restored: false
+            }
+        }
     }
 
     /// A template request waiting on a build, and the tip moves it has waited
@@ -307,8 +340,12 @@ public struct MiningState: Sendable {
 
     /// Transactions awaiting a verdict before admission.
     private var admissions: [String: Admission] = [:]
-    /// Transactions with a preflight outstanding on the current tip epoch.
-    private var preflighting: Set<String> = []
+    /// Each pending admission's outstanding preflight, by job ID: at most
+    /// one, outstanding across tip moves until its verdict lands.
+    private var admitting: [String: UInt64] = [:]
+    /// Pooled transactions with a recheck outstanding on the current tip
+    /// epoch.
+    private var rechecking: Set<String> = []
     /// What the next block can carry: what a template is handed, and what
     /// the status digest names.
     public var nextBlock: [Transaction] { spec.map(mempool.nextBlock) ?? [] }
@@ -338,7 +375,7 @@ public struct MiningState: Sendable {
     /// Whether `cid` awaits its preflight verdict.
     public func isPending(_ cid: String) -> Bool { admissions[cid] != nil }
     public var waitingTemplateRequests: Int { builds.values.reduce(0) { $0 + $1.replies.count } }
-    public var outstandingPreflights: Int { preflighting.count }
+    public var outstandingPreflights: Int { admitting.count + rechecking.count }
 
     public mutating func step(_ event: MiningEvent, now: Int64) -> [MiningEffect] {
         var turn = Turn()
@@ -417,12 +454,30 @@ public struct MiningState: Sendable {
             // A peer's origin is never read: recording a resend would only
             // grow the admission.
             if case .peer = origin { return }
-            admission.origins.append(origin)
-            if slot == .local, admission.slot != .local {
+            // A local origin takes the admission into its own bound, a public
+            // submit a peer's or a returned one into its. One that now has an
+            // RPC waiting is judged by a job run ahead of other work: the
+            // job out is let go, and its verdict no longer counts.
+            let upgrades = Admission.isAnswered(origin) && !admission.isAwaited
+            let reslots = slot != admission.slot
+                && (slot == .local || (slot == .submitted && admission.slot != .local))
+            if reslots {
+                guard hasRoom(for: slot) else {
+                    if case .submitted(let replyID) = origin {
+                        turn.replies.append(.transactionRefused(replyID: replyID, .full))
+                    }
+                    return
+                }
                 count(admission.slot, -1)
-                admission.slot = .local
+                admission.slot = slot
+                count(slot, 1)
             }
+            admission.origins.append(origin)
             admissions[cid] = admission
+            if upgrades {
+                admitting[cid] = nil
+                preflight(cid, admission.transaction, &turn)
+            }
             return
         }
         // Over its bound, a peer's or a returned arrival is dropped: never
@@ -480,20 +535,39 @@ public struct MiningState: Sendable {
         count(admission.slot, 1)
     }
 
+    /// Its outstanding job goes with it: one received again later (a
+    /// reorg's return) gets a job of its own.
     private mutating func close(_ cid: String) -> Admission? {
+        admitting[cid] = nil
         guard let admission = admissions.removeValue(forKey: cid) else { return nil }
         count(admission.slot, -1)
         return admission
     }
 
-    private mutating func preflight(
-        _ cid: String, _ transaction: Transaction, checksPolicies: Bool = true, _ turn: inout Turn
-    ) {
-        guard preflighting.insert(cid).inserted else { return }
+    /// Issue `cid`'s admission preflight, unless one is outstanding.
+    private mutating func preflight(_ cid: String, _ transaction: Transaction, _ turn: inout Turn) {
+        guard admitting[cid] == nil else { return }
+        let awaited = admissions[cid]?.isAwaited ?? false
+        admitting[cid] = issue(cid, transaction, checksPolicies: true, awaited: awaited, &turn)
+    }
+
+    /// Issue a pooled transaction's recheck on this tip epoch.
+    private mutating func recheck(_ item: MempoolItem, _ turn: inout Turn) {
+        guard rechecking.insert(item.cid).inserted else { return }
+        issue(item.cid, item.transaction, checksPolicies: false, awaited: false, &turn)
+    }
+
+    @discardableResult
+    private mutating func issue(
+        _ cid: String, _ transaction: Transaction, checksPolicies: Bool, awaited: Bool, _ turn: inout Turn
+    ) -> UInt64 {
+        let id = nextJobID
+        nextJobID += 1
         turn.jobs.append(.preflight(PreflightJob(
-            cid: cid, transaction: transaction, tipCID: tipCID, tipEpoch: tipEpoch,
-            poolVersion: mempool.version, checksPolicies: checksPolicies
+            id: id, cid: cid, transaction: transaction, tipCID: tipCID, tipEpoch: tipEpoch,
+            poolVersion: mempool.version, checksPolicies: checksPolicies, awaited: awaited
         )))
+        return id
     }
 
     private mutating func preflighted(
@@ -503,21 +577,25 @@ public struct MiningState: Sendable {
         now: Int64,
         _ turn: inout Turn
     ) {
-        // A verdict on a tip that has moved is dropped: the move reissued the
-        // job on the new tip.
-        guard job.tipEpoch == tipEpoch else { return }
-        preflighting.remove(job.cid)
-        if let admission = admissions[job.cid] {
-            // A tip move's check skips policies; an admission is judged by
-            // them.
-            guard job.checksPolicies else {
-                preflight(job.cid, admission.transaction, &turn)
-                return
-            }
-            _ = close(job.cid)
-            admit(admission, cid: job.cid, disposition, balances: balances, now: now, &turn)
+        if job.checksPolicies {
+            // Only the job its admission waits on counts: one for an
+            // admission closed since (confirmed, say) touches nothing.
+            guard admitting[job.cid] == job.id, let admission = close(job.cid) else { return }
+            // A verdict read on a tip that has since moved is applied as if
+            // it arrived before the move, and the pooled transaction is
+            // checked again on this tip, as every move checks the pool. Its
+            // balances are the old tip's: they shed nothing.
+            let stale = job.tipEpoch != tipEpoch
+            admit(admission, cid: job.cid, disposition, balances: stale ? nil : balances, now: now, &turn)
+            if stale, let item = mempool.item(job.cid) { recheck(item, &turn) }
             return
         }
+        // A recheck on a tip that has moved is dropped: the move reissued it
+        // on the new tip.
+        guard job.tipEpoch == tipEpoch, rechecking.remove(job.cid) != nil else { return }
+        // It left the pool and arrived again: its admission's own job, which
+        // checks the policies, judges it.
+        guard admissions[job.cid] == nil else { return }
         // The pool holds only what executes on the tip: a pooled transaction
         // that no longer does, or that this node can no longer judge (a
         // receipt or deposit a reorg took), leaves, freeing what it claims.
@@ -531,11 +609,12 @@ public struct MiningState: Sendable {
         }
     }
 
+    /// `balances` nil: none read on this tip, so no account is shed.
     private mutating func admit(
         _ admission: Admission,
         cid: String,
         _ disposition: MempoolDisposition,
-        balances: [String: UInt64],
+        balances: [String: UInt64]?,
         now: Int64,
         _ turn: inout Turn
     ) {
@@ -672,24 +751,6 @@ public struct MiningState: Sendable {
         // descendant change never flushes it.
         templates.invalidateAll()
         confirm(move.confirmed, &turn)
-        // A local submit that has waited through too many moves is answered
-        // with a retriable refusal; the admission goes on for any other origin.
-        for cid in admissions.keys.sorted() {
-            guard var admission = admissions[cid] else { continue }
-            admission.reissues += 1
-            admissions[cid] = admission
-            guard admission.reissues > config.maxReissues,
-                  admission.origins.contains(where: Self.isAnswered)
-            else { continue }
-            for origin in admission.origins {
-                if case .local(let replyID) = origin {
-                    turn.replies.append(.transactionRefused(replyID: replyID, .contextChanged))
-                } else if case .submitted(let replyID) = origin {
-                    turn.replies.append(.transactionRefused(replyID: replyID, .contextChanged))
-                }
-            }
-            reslot(cid, keeping: admission.origins.filter { !Self.isAnswered($0) })
-        }
         // Returned transactions within their bound; a deep reorg spills the
         // rest.
         for transaction in move.returned where hasRoom(for: .returned) {
@@ -698,12 +759,15 @@ public struct MiningState: Sendable {
                   !mempool.contains(cid), admissions[cid] == nil else { continue }
             open(cid, Admission(transaction: transaction, origins: [.returned], slot: .returned))
         }
-        // Every verdict the pool holds or awaits was for the old tip: those
-        // still out will be dropped, and each is issued again here. The
-        // move confirmed first, so no verdict refuses what it carries.
-        preflighting.removeAll()
+        // Every verdict the pool holds was for the old tip: rechecks still
+        // out will be dropped, and each is issued again here. The move
+        // confirmed first, so no verdict refuses what it carries. An
+        // admission's outstanding job is left alone: its verdict is applied
+        // whenever it lands (`PreflightJob`). One with no job (returned, or
+        // restored before the first tip) is issued one.
+        rechecking.removeAll()
         for item in mempool.items {
-            preflight(item.cid, item.transaction, checksPolicies: false, &turn)
+            recheck(item, &turn)
         }
         for (cid, admission) in admissions.sorted(by: { $0.key < $1.key }) {
             preflight(cid, admission.transaction, &turn)
@@ -727,26 +791,6 @@ public struct MiningState: Sendable {
             }
             if !again.isEmpty { requestTemplate(entry.job.request, waiting: again, &turn) }
         }
-    }
-
-    /// An origin waiting on an RPC answer.
-    private static func isAnswered(_ origin: TransactionOrigin) -> Bool {
-        switch origin {
-        case .local, .submitted: true
-        case .peer, .returned, .restored: false
-        }
-    }
-
-    /// Keep `cid`'s admission for `origins` alone, under the bound they
-    /// count against; with none left, or no room, it is closed.
-    private mutating func reslot(_ cid: String, keeping origins: [TransactionOrigin]) {
-        guard var admission = close(cid), let first = origins.first else { return }
-        let slot = origins.contains(where: { if case .restored = $0 { true } else { false } })
-            ? Slot.local : Self.slot(of: first)
-        guard hasRoom(for: slot) else { return }
-        admission.origins = origins
-        admission.slot = slot
-        open(cid, admission)
     }
 
     // MARK: - Templates

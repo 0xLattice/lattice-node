@@ -1,14 +1,15 @@
 import Foundation
 import Lattice
-import LatticeNodeCore
+@testable import LatticeNodeCore
 import XCTest
 @testable import LatticeNode
 import cashew
 
 /// A tip move's read of its blocks against the runtime's job ordering: one
-/// worker, execution first, mining jobs in the order the core emitted them,
-/// each built by `NodeRuntime.miningJob` and skipped at dequeue when its
-/// epoch moved, over a real `NodeStorage` and Lattice preflight.
+/// worker, mining jobs in the order the core emitted them, each built by
+/// `NodeRuntime.miningJob` and, a recheck or a build, skipped at dequeue
+/// when its epoch moved, over a real `NodeStorage` and Lattice preflight;
+/// and the queues' order (`JobQueues`).
 final class NodeRuntimeJobOrderTests: XCTestCase {
     private struct Harness {
         var host: NodeCore
@@ -109,10 +110,7 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
             privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32)
         )
         let storage = try await NodeStorage.open(configuration: configuration)
-        // The submit waits through every move here; none is refused as
-        // retriable for waiting too long.
-        var config = ChainCoreConfig(bodyWindow: bodyWindow)
-        config.mining.maxReissues = 16
+        let config = ChainCoreConfig(bodyWindow: bodyWindow)
         return Harness(
             host: try await NodeRuntime.boot(
                 storage: storage, configuration: configuration, coreConfig: config
@@ -305,9 +303,8 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
     }
 
     /// A job queued on one tip epoch is discarded at the runtime's dequeue
-    /// (`NodeRuntime.nextJob`, what `startJobs` takes from) once the tip
-    /// moves: it is never handed to a worker, and the current job behind it
-    /// is.
+    /// (`JobQueues.next`, what `startJobs` takes from) once the tip moves: it
+    /// is never handed to a worker, and the current job behind it is.
     func testAJobWhoseTipEpochMovedIsDiscarded() async throws {
         var harness = try await harness(keyByte: 0x46)
         let clock = TestBlockClock()
@@ -320,13 +317,13 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
         try await mine(&harness, on: genesis, timestamp: clock.next())
         let epoch = harness.mining.tipEpoch
         XCTAssertNotEqual(stale.epoch, epoch, "the tip moved")
-        let current = NodeRuntime.RuntimeJob(path: root, epoch: epoch) { [] }
-        var execution: [NodeRuntime.RuntimeJob] = []
-        var mining = [stale, current]
-        let next = NodeRuntime.nextJob(execution: &execution, mining: &mining, in: harness.host)
+        var queues = NodeRuntime.JobQueues()
+        queues.append(stale)
+        queues.append(NodeRuntime.RuntimeJob(path: root, epoch: epoch, kind: .answered) { [] })
+        let next = queues.next(in: harness.host)
         XCTAssertEqual(next?.epoch, epoch, "the stale job is skipped for the current one")
-        XCTAssertTrue(mining.isEmpty, "the stale job is dropped")
-        XCTAssertNil(NodeRuntime.nextJob(execution: &execution, mining: &mining, in: harness.host))
+        XCTAssertTrue(queues.isEmpty, "the stale job is dropped")
+        XCTAssertNil(queues.next(in: harness.host))
     }
 
     /// A level's next block runs ahead of the proof checks queued before
@@ -336,13 +333,11 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
     /// few minutes. The checks keep their order behind it.
     func testALevelsNextBlockRunsAheadOfQueuedProofChecks() async throws {
         let harness = try await harness(keyByte: 0x47)
-        var execution = (0..<1_000).map { Self.job("check-\($0)", depth: 2) }
-            + [Self.job("root-block", depth: 1, connects: true)]
-        var mining: [NodeRuntime.RuntimeJob] = []
+        var queues = NodeRuntime.JobQueues()
+        for index in 0..<1_000 { queues.append(Self.job("check-\(index)", depth: 2)) }
+        queues.append(Self.job("root-block", depth: 1, kind: .connect))
         var order: [String] = []
-        while let next = NodeRuntime.nextJob(execution: &execution, mining: &mining, in: harness.host) {
-            order.append(next.path.last ?? "")
-        }
+        while let next = queues.next(in: harness.host) { order.append(next.path.last ?? "") }
         XCTAssertEqual(order, ["root-block"] + (0..<1_000).map { "check-\($0)" })
     }
 
@@ -351,27 +346,145 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
     /// block and other work still run in their turn.
     func testADeeperLevelsNextBlockRunsUnderSteadyShallowerWork() async throws {
         let harness = try await harness(keyByte: 0x48)
-        var execution = [Self.job("grand-block", depth: 3, connects: true), Self.job("grand-check", depth: 3)]
-        var mining: [NodeRuntime.RuntimeJob] = []
+        var queues = NodeRuntime.JobQueues()
+        queues.append(Self.job("grand-block", depth: 3, kind: .connect))
+        queues.append(Self.job("grand-check", depth: 3))
         var ran: [String] = []
         for step in 0..<10 {
             // Each turn the root queues more work, a next block among it.
-            execution += [Self.job("root-check-\(step)", depth: 1), Self.job("root-block-\(step)", depth: 1, connects: true)]
-            if let next = NodeRuntime.nextJob(execution: &execution, mining: &mining, in: harness.host) {
-                ran.append(next.path.last ?? "")
-            }
+            queues.append(Self.job("root-check-\(step)", depth: 1))
+            queues.append(Self.job("root-block-\(step)", depth: 1, kind: .connect))
+            if let next = queues.next(in: harness.host) { ran.append(next.path.last ?? "") }
         }
         XCTAssertEqual(ran.first, "grand-block", "the grandchild's next block, queued first, runs first")
         XCTAssertEqual(Array(ran.dropFirst()), (0..<9).map { "root-block-\($0)" }, "then each next block in turn")
         XCTAssertEqual(ran.count, 10)
-        XCTAssertEqual(execution.first?.path.last, "grand-check", "the other work keeps its place, first in line")
+        XCTAssertEqual(queues.rest.first?.path.last, "grand-check", "the other work keeps its place, first in line")
+    }
+
+    /// The queues' rule: (A) what an RPC waits on, an awaited admission or a
+    /// template build, then (B) connects, then (C) the rest, each first in,
+    /// first out. A stale recheck or build is skipped; a peer's admission
+    /// never goes ahead of a queued connect.
+    func testJobsRunAnsweredThenConnectsThenTheRestEachInArrivalOrder() async throws {
+        let harness = try await harness(keyByte: 0x4A)
+        let epoch = harness.mining.tipEpoch
+        let ran = Ran()
+        // Each job, as queued, runs only to say its name.
+        func named(_ name: String, _ job: NodeRuntime.RuntimeJob) -> NodeRuntime.RuntimeJob {
+            NodeRuntime.RuntimeJob(path: job.path, epoch: job.epoch, kind: job.kind) { await ran.add(name); return [] }
+        }
+        func preflight(_ name: String, awaited: Bool, checksPolicies: Bool = true, epoch tipEpoch: UInt64 = epoch) throws
+            -> NodeRuntime.RuntimeJob {
+            let job = PreflightJob(
+                id: 0, cid: name, transaction: try transaction(), tipCID: "", tipEpoch: tipEpoch, poolVersion: 0,
+                checksPolicies: checksPolicies, awaited: awaited
+            )
+            return named(name, NodeRuntime.miningJob(
+                .preflight(job), at: harness.host.rootPath, basis: nil, storage: harness.storage
+            ))
+        }
+        func build(epoch tipEpoch: UInt64) -> NodeRuntime.RuntimeJob {
+            named(tipEpoch == epoch ? "build-0" : "stale-build",
+                  NodeRuntime.RuntimeJob(path: harness.host.rootPath, epoch: tipEpoch, kind: .answered) { [] })
+        }
+        func other(_ name: String, kind: NodeRuntime.RuntimeJob.Kind = .other) -> NodeRuntime.RuntimeJob {
+            named(name, Self.job(name, depth: 1, kind: kind))
+        }
+        var queues = NodeRuntime.JobQueues()
+        queues.append(other("check-0"))
+        queues.append(try preflight("peer-0", awaited: false))
+        queues.append(other("connect-0", kind: .connect))
+        queues.append(try preflight("recheck-0", awaited: false, checksPolicies: false))
+        queues.append(try preflight("stale-recheck", awaited: false, checksPolicies: false, epoch: epoch &+ 7))
+        queues.append(build(epoch: epoch &+ 7))
+        queues.append(try preflight("submit-0", awaited: true))
+        queues.append(other("connect-1", kind: .connect))
+        queues.append(build(epoch: epoch))
+        queues.append(try preflight("submit-1", awaited: true))
+        queues.append(other("read-0"))
+        while let next = queues.next(in: harness.host) { _ = await next.run() }
+        let order = await ran.names
+        XCTAssertEqual(order, [
+            "submit-0", "build-0", "submit-1",
+            "connect-0", "connect-1",
+            "check-0", "peer-0", "recheck-0", "read-0",
+        ])
+    }
+
+    /// Restored journal rows at boot are nobody's wait: their admissions
+    /// queue behind a connect queued after them (C), never ahead (A).
+    func testRestoredRowsQueueBehindConnects() async throws {
+        var harness = try await harness(keyByte: 0x4B)
+        let root = harness.host.rootPath
+        for nonce in 0..<6 {
+            try await harness.step(.level(root, .mining(.transactionReceived(
+                try transaction(nonce: UInt64(nonce)), origin: .restored(addedAt: 1)
+            ))))
+        }
+        XCTAssertEqual(harness.jobs.count, 6)
+        let ran = Ran()
+        var queues = NodeRuntime.JobQueues()
+        for (index, job) in harness.jobs.enumerated() {
+            XCTAssertEqual(job.kind, .other)
+            queues.append(NodeRuntime.RuntimeJob(path: job.path, epoch: job.epoch, kind: job.kind) {
+                await ran.add("restored-\(index)"); return []
+            })
+        }
+        queues.append(NodeRuntime.RuntimeJob(path: root, epoch: nil, kind: .connect) { await ran.add("connect"); return [] })
+        while let next = queues.next(in: harness.host) { _ = await next.run() }
+        let order = await ran.names
+        XCTAssertEqual(order, ["connect"] + (0..<6).map { "restored-\($0)" })
+    }
+
+    /// One worker, the tip moving while a submit's job waits: the job runs
+    /// on the tip it was spawned on, its ready verdict, stale, is applied and
+    /// answered once, and the pooled transaction is checked once more on the
+    /// current tip. Two preflights in all, never a refusal.
+    func testAStaleReadyVerdictIsAdmittedAndRecheckedOnceOnTheCurrentTip() async throws {
+        var harness = try await harness(keyByte: 0x49)
+        let clock = TestBlockClock()
+        let root = harness.host.rootPath
+        var tip = try await harness.tipBlock()
+        let spawnedOn = harness.actOnTip
+        let tx = try transaction()
+        let cid = try Mempool.cid(of: tx)
+        try await harness.step(.level(root, .mining(.transactionReceived(tx, origin: .local(replyID: 1)))))
+        // More moves than `maxReissues` while its job waits in the queue.
+        for _ in 0..<5 { tip = try await mine(&harness, on: tip, timestamp: clock.next()) }
+        XCTAssertFalse(harness.refused(1), "\(harness.replies)")
+
+        var verdicts: [(tip: String, checksPolicies: Bool)] = []
+        while !harness.jobs.isEmpty {
+            let job = harness.jobs.removeFirst()
+            guard job.isCurrent(in: harness.host) else { continue }
+            for event in await job.run() {
+                if case .level(_, .mining(.preflighted(let job, _, _))) = event, job.cid == cid {
+                    verdicts.append((job.tipCID, job.checksPolicies))
+                }
+                try await harness.step(event)
+            }
+        }
+        XCTAssertEqual(verdicts.map(\.tip), [spawnedOn, harness.actOnTip], "\(verdicts)")
+        XCTAssertEqual(verdicts.map(\.checksPolicies), [true, false])
+        XCTAssertTrue(harness.admitted(1), "\(harness.replies)")
+        XCTAssertFalse(harness.refused(1), "\(harness.replies)")
+        XCTAssertTrue(harness.mining.mempool.contains(cid), "pooled on the final tip")
+        XCTAssertEqual(harness.mining.outstandingPreflights, 0)
+    }
+
+    private actor Ran {
+        var names: [String] = []
+        func add(_ name: String) { names.append(name) }
     }
 
     /// A job told apart by its path's last element, at `depth`; no tip
     /// epoch, so it is always current.
-    private static func job(_ name: String, depth: Int, connects: Bool = false) -> NodeRuntime.RuntimeJob {
+    private static func job(
+        _ name: String, depth: Int, kind: NodeRuntime.RuntimeJob.Kind = .other
+    ) -> NodeRuntime.RuntimeJob {
         let path = Array(["Nexus", "Child", "Grand"].prefix(depth - 1)) + [name]
-        return NodeRuntime.RuntimeJob(path: path, epoch: nil, connects: connects) { [] }
+        return NodeRuntime.RuntimeJob(path: path, epoch: nil, kind: kind) { [] }
     }
 
     /// A job reads the levels on the running loop, and once the loop has

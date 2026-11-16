@@ -34,8 +34,8 @@ public enum NodeRuntimeError: Error, Equatable, Sendable {
 /// - `wakeAt` → one timer that posts `tick`.
 /// - `mining` → the pool delta persisted like `persist` (fail-stop), RPC
 ///   replies answered by reply ID, announces to every ready peer, and the
-///   preflight and template jobs on the worker pool (a job whose tip epoch
-///   moved before it starts runs nothing).
+///   preflight and template jobs on the worker pool (a recheck or build whose
+///   tip epoch moved before it starts runs nothing).
 ///
 /// RPC writes (`submitTransaction`, `miningTemplate`, `submitWork`) are
 /// mining events with reply IDs, one per RPC in flight; RPC reads
@@ -157,6 +157,27 @@ public final class NodeRuntime: Sendable {
         // persists is validated by the core, so peer input cannot reach it.
         failStop: @escaping @Sendable (any Error) -> Void = { fatalError("node runtime: persist failed: \($0)") }
     ) async throws -> NodeRuntime {
+        try await start(
+            storage: storage, configuration: configuration, overlay: overlay, coreConfig: coreConfig,
+            workers: workers, failStop: failStop, observeJob: nil
+        )
+    }
+
+    /// What a test sees of each job, awaited on its worker before it runs:
+    /// its queue class and, for a mining job, its effect.
+    typealias JobObserver = @Sendable (RuntimeJob.Kind, MiningEffect?) async -> Void
+
+    /// `start`, with `observeJob` awaited on each job's worker before the
+    /// job runs (a test's view of the worker pool).
+    static func start(
+        storage: NodeStorage,
+        configuration: NodeConfiguration,
+        overlay: IvyConfig? = nil,
+        coreConfig: ChainCoreConfig = ChainCoreConfig(),
+        workers: Int = max(1, ProcessInfo.processInfo.activeProcessorCount - 1),
+        failStop: @escaping @Sendable (any Error) -> Void = { fatalError("node runtime: persist failed: \($0)") },
+        observeJob: JobObserver?
+    ) async throws -> NodeRuntime {
         var coreConfig = coreConfig
         coreConfig.mining.mempool.minRelayFee = configuration.minRelayFee
         coreConfig.finality = configuration.finality
@@ -181,7 +202,8 @@ public final class NodeRuntime: Sendable {
             relays: overlay.relayEnabled,
             helloTimeout: overlay.requestTimeout,
             workers: workers,
-            failStop: failStop
+            failStop: failStop,
+            observeJob: observeJob
         )
         await runtime.ivy.installNodeRuntime(
             delegate: runtime.punch,
@@ -278,7 +300,8 @@ public final class NodeRuntime: Sendable {
         relays: Bool,
         helloTimeout: Duration,
         workers: Int,
-        failStop: @escaping @Sendable (any Error) -> Void
+        failStop: @escaping @Sendable (any Error) -> Void,
+        observeJob: JobObserver?
     ) {
         let (stream, inputs) = AsyncStream<Input>.makeStream()
         let published = PublishedValue(core.levels[core.rootPath]?.snapshot)
@@ -380,6 +403,7 @@ public final class NodeRuntime: Sendable {
             remote: remote,
             workers: max(1, workers),
             failStop: failStop,
+            observeJob: observeJob,
             peerMemory: peerMemory
         ))
         loop = Task {
@@ -504,6 +528,7 @@ extension NodeRuntime {
         let remote: IvyRootContentSource
         let workers: Int
         let failStop: @Sendable (any Error) -> Void
+        let observeJob: JobObserver?
         let peerMemory: PeerMemory?
         /// Each hosted child level's last template block, reused while
         /// nothing it was built from changes (`ChildTemplateCache`).
@@ -543,10 +568,8 @@ extension NodeRuntime {
         /// store go: a job reading from peers can outlast a step.
         var jobs: [UInt64: Task<Void, Never>] = [:]
         var nextJob: UInt64 = 0
-        /// Two FIFOs: execution (connect, proof verification) runs before
-        /// mining jobs.
-        var executionJobs: [RuntimeJob] = []
-        var miningJobs: [RuntimeJob] = []
+        /// The jobs waiting for a worker (`JobQueues`).
+        var queued = JobQueues()
         /// RPCs waiting on their answer, by reply ID.
         var replies: [UInt64: (path: ChainPath, reply: CheckedContinuation<NodeRuntimeReply, any Error>)] = [:]
         var nextReply: UInt64 = 1
@@ -659,6 +682,7 @@ extension NodeRuntime {
             remote: IvyRootContentSource,
             workers: Int,
             failStop: @escaping @Sendable (any Error) -> Void,
+            observeJob: JobObserver?,
             peerMemory: PeerMemory?
         ) {
             self.peerMemory = peerMemory
@@ -679,6 +703,7 @@ extension NodeRuntime {
             self.remote = remote
             self.workers = workers
             self.failStop = failStop
+            self.observeJob = observeJob
         }
 
         /// Returns false once the loop must end.
@@ -1406,6 +1431,8 @@ extension NodeRuntime {
         /// fetched and not recently fetched, within the cap on concurrent
         /// fetches; anything else is dropped, never blamed.
         private mutating func fetchAnnounced(_ cid: String, from session: Session) {
+            // No hosted level would take it yet (`ChainCore.synced`).
+            guard core.levels.values.contains(where: \.synced) else { return }
             let pools = core.levels.sorted { $0.key.lexicographicallyPrecedes($1.key) }.map(\.value.mining)
             // A fetched transaction may be worth fetching again once any
             // hosted chain moves: a child's tip moves without the root's.
@@ -1531,7 +1558,7 @@ extension NodeRuntime {
                     _ = await ivy.disconnectSession(ifCurrent: session.peer)
                 }
             case .connect(let path, let job):
-                executionJobs.append(NodeRuntime.connectJob(
+                enqueue(NodeRuntime.connectJob(
                     job, at: path, levels: LiveLevels(inputs: inputs), storage: storage, remote: remote
                 ))
                 startJobs()
@@ -1659,7 +1686,7 @@ extension NodeRuntime {
                 let held = job.block ?? storage.store.header(job.childCID)?.block
                 let parent = Array(path.dropLast())
                 let (storage, failStop) = (storage, failStop)
-                executionJobs.append(RuntimeJob(path: path, epoch: nil) {
+                enqueue(RuntimeJob(path: path, epoch: nil) {
                     var upstream: [ChildBlockProof] = []
                     if parent.count > 1 {
                         do {
@@ -1679,12 +1706,12 @@ extension NodeRuntime {
                     inputs.yield(.event(.level(path, .proofDropped(job))))
                     break
                 }
-                executionJobs.append(RuntimeJob(path: path, epoch: nil) {
+                enqueue(RuntimeJob(path: path, epoch: nil) {
                     [.level(path, .proofVerified(job, await job.run(block)))]
                 })
                 startJobs()
             case .readTransactions(let blocks):
-                executionJobs.append(NodeRuntime.readJob(blocks, at: path, storage: storage))
+                enqueue(NodeRuntime.readJob(blocks, at: path, storage: storage))
                 startJobs()
             case .lookupProofs(let cids):
                 // Read off the loop, as a served page is; each block's
@@ -1761,21 +1788,23 @@ extension NodeRuntime {
                     }
                 }
             case .preflight:
+                // An admission's job must run, else its submit is never
+                // answered and its cid stays admitting.
                 guard let basis = core.levels[path].flatMap({
                     NodeRuntime.miningBasis(effect, tree: $0.tree, parent: core.levels[Array(path.dropLast())])
-                }) else { break }
-                miningJobs.append(NodeRuntime.miningJob(effect, at: path, basis: basis, storage: storage, remote: remote))
+                }) else { preconditionFailure("every hosted level's tree carries a context: a preflight has a basis") }
+                enqueue(NodeRuntime.miningJob(effect, at: path, basis: basis, storage: storage, remote: remote), effect)
                 startJobs()
             case .buildTemplate:
                 guard let basis = core.levels[path].flatMap({ NodeRuntime.miningBasis(effect, tree: $0.tree) }) else { break }
-                miningJobs.append(NodeRuntime.miningJob(
+                enqueue(NodeRuntime.miningJob(
                     effect, at: path, basis: basis, storage: storage, remote: remote,
                     children: childTemplateInputs(below: path), levels: LiveLevels(inputs: inputs),
                     cache: childTemplates
-                ))
+                ), effect)
                 startJobs()
             case .returnTransactions:
-                miningJobs.append(NodeRuntime.miningJob(effect, at: path, basis: nil, storage: storage, remote: remote))
+                enqueue(NodeRuntime.miningJob(effect, at: path, basis: nil, storage: storage, remote: remote), effect)
                 startJobs()
             }
             return true
@@ -1813,13 +1842,21 @@ extension NodeRuntime {
         /// The worker pool: at most `workers` jobs run; each result posts
         /// back as an event that frees its slot.
         private mutating func startJobs() {
-            while runningJobs < workers,
-                  let job = NodeRuntime.nextJob(execution: &executionJobs, mining: &miningJobs, in: core) {
+            while runningJobs < workers, let job = queued.next(in: core) {
                 runningJobs += 1
                 nextJob += 1
                 let (inputs, id) = (inputs, nextJob)
                 jobs[id] = Task { inputs.yield(.jobDone(id, await job.run())) }
             }
+        }
+
+        /// Queue `job`, behind `observeJob` when a test watches the pool.
+        private mutating func enqueue(_ job: RuntimeJob, _ effect: MiningEffect? = nil) {
+            guard let observeJob else { return queued.append(job) }
+            queued.append(RuntimeJob(path: job.path, epoch: job.epoch, kind: job.kind) {
+                await observeJob(job.kind, effect)
+                return await job.run()
+            })
         }
 
         /// The working set, when the operator keeps no bodies beyond it:

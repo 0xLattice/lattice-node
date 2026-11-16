@@ -29,10 +29,6 @@ public enum MempoolError: Error, Sendable, Equatable {
     /// This node cannot judge it now (state, a policy module, or a
     /// withdrawal's receipt it does not hold yet). Retriable.
     case unavailable
-    /// Retriable: the executed tip moved more than `maxReissues` times while
-    /// the submit waited for its verdict (the actor's
-    /// `templateContextChanged`).
-    case contextChanged
 }
 
 /// Lattice's classification of a transaction against one executed tip. Only
@@ -309,13 +305,16 @@ public struct Mempool: Sendable {
 
     /// Pool a transaction preflight found ready. `balances` holds, for each
     /// account it debits, the balance preflight read on the tip; one
-    /// missing counts as empty.
+    /// missing counts as empty. Nil when none was read on the tip (a verdict
+    /// from a tip since moved): it is pooled only into free room, displacing,
+    /// shedding and evicting nothing, else refused `.full`; the recheck that
+    /// follows rebalances (`rebalance(_:)`).
     @discardableResult
     public mutating func submit(
         _ transaction: Transaction,
         spec: ChainSpec,
         addedAt: Int64,
-        balances: [String: UInt64]
+        balances: [String: UInt64]?
     ) throws -> MempoolMutation {
         let measured = try measure(transaction, spec: spec)
         let cid = measured.cid
@@ -348,6 +347,15 @@ public struct Mempool: Sendable {
             if let holder = claimants[claim], let existing = entries[holder] { displaced[holder] = existing }
         }
         let claimsConflict = !displaced.isEmpty
+        guard let balances else {
+            guard !claimsConflict, entries.count < limits.maxCount, entry.size <= limits.maxBytes - byteCount else {
+                throw MempoolError.full
+            }
+            insert(entry)
+            var mutation = MempoolMutation(transactionCID: cid)
+            mutation.inserted = Self.item(entry)
+            return mutation
+        }
         for (account, debit) in entry.debits.sorted(by: { $0.key < $1.key }) {
             guard let shed = shed(account, toFit: debit, in: balances[account, default: 0], besides: displaced) else {
                 throw MempoolError.insufficientFunds

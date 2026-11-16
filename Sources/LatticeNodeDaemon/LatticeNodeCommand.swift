@@ -1497,8 +1497,6 @@ func serviceCall<Value: Encodable, Context: RequestContext>(
         throw HTTPError(.badRequest, message: reason(error))
     } catch MempoolError.full {
         throw HTTPError(.tooManyRequests, message: "full")
-    } catch let error as MempoolError where error == .contextChanged {
-        throw HTTPError(.serviceUnavailable, message: reason(error))
     } catch let error as MempoolError {
         throw HTTPError(.badRequest, message: reason(error))
     } catch let error as TemplateError where error == .busy || error == .contextChanged {
