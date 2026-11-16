@@ -307,8 +307,8 @@ extension ChainCore {
     /// (persisted, indexed, relayed), on a pending header when it is weighed,
     /// and a waiting header enters the pending queue with it. A proof that
     /// fails — malformed, or no work for this block — is a proof-of-work
-    /// failure: the peer that sent it is disconnected; the index's and a
-    /// derived proof's blame no one.
+    /// failure: the peer that sent it is disconnected; a derived proof
+    /// blames no one.
     mutating func proofVerified(
         _ job: ChildProofJob,
         _ result: Result<VerifiedChildEvidence, ChildProofVerificationFailure>,
