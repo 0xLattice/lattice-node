@@ -47,8 +47,6 @@ final class DerivedChildGrindTests: XCTestCase {
         var disconnects: [PeerID] = []
         /// Child indexes asked for by CID, and of whom.
         var fetches: [(peer: PeerID, cid: String)] = []
-        /// Blocks looked up in the evidence index, in order.
-        var lookups: [String] = []
         /// Each peer's log position, per level.
         var position: [ChainPath: [PeerID: UInt64]] = [:]
         /// Blocks whose bodies the content layer never serves.
@@ -128,11 +126,6 @@ final class DerivedChildGrindTests: XCTestCase {
                         checks.append(Check(path: path, cid: job.childCID, root: job.proof.rootCID))
                         let answer = NodeEvent.level(path, .proofVerified(job, await job.run(block)))
                         if deferChecks { deferred.append(answer) } else { queue.append(answer) }
-                    case .level(let path, .lookupProofs(let cids)):
-                        lookups += cids
-                        for cid in cids where !store.proofs(path, cid).isEmpty {
-                            queue.append(.level(path, .proofsFound(childCID: cid, store.proofs(path, cid))))
-                        }
                     case .level(let path, .deriveProof(let job)):
                         // From this host's own content only.
                         derived.append(Derived(path: path, cid: job.childCID, carrier: job.carrier))
@@ -714,16 +707,19 @@ final class DerivedChildGrindTests: XCTestCase {
 
     /// One peer fills the whole waiting pool: there is no per-peer cap. An
     /// honest header from another peer still gets in, evicting the oldest
-    /// entry not held.
+    /// entry not held. Every proof is over the operator's size cap, so no
+    /// entry has a check and each waits idle.
     func testOnePeerFillingTheWaitingPoolCannotKeepAnotherOut() async throws {
         let fixture = try await committedWorld()
         var config = ChainCoreConfig()
         config.proofs.maxAwaiting = fixture.d.count
+        let size = try await ChildBlockProof.generate(
+            rootHeader: BlockHeader(node: fixture.b.block), childDirectory: Self.alpha[1], fetcher: fixture.world.cas
+        ).serialize().count
+        config.proofs.maxProofBytes = size - 1
         var (host, proof) = try await provedHost(fixture, config: config)
-        host.deferChecks = true
         for block in fixture.d {
-            host.core.levels[Self.alpha]?.sync.proofs.wanted.insert(block.cid)
-            await host.relay(block, at: Self.alpha, from: Self.alphaHost)
+            await host.relay(block, at: Self.alpha, from: Self.alphaHost, proofs: [proof])
         }
         XCTAssertEqual(Set(try XCTUnwrap(host.core.levels[Self.alpha]?.sync.proofs.awaiting).keys), Set(fixture.d.map(\.cid)),
                        "one peer fills the pool")
@@ -736,9 +732,11 @@ final class DerivedChildGrindTests: XCTestCase {
     }
 
     /// One peer sends C with more proof bytes than the queue's budget: what
-    /// fits is queued, the rest dropped without blame, and once the queue
-    /// drains C is looked up again and credited with the dropped grind.
-    func testProofsPastTheQueueBudgetAreDroppedAndLookedUpAgain() async throws {
+    /// fits is queued, the rest dropped without blame, and C is credited
+    /// with the dropped grind when a peer sends it again. The evidence index
+    /// holds only proofs this level credited, so it never names the dropped
+    /// one.
+    func testProofsPastTheQueueBudgetAreDroppedAndTakenWhenSentAgain() async throws {
         let fixture = try await committedWorld()
         var proofs: [ChildBlockProof] = []
         for carrier in [fixture.b, fixture.sibling] {
@@ -764,14 +762,13 @@ final class DerivedChildGrindTests: XCTestCase {
             XCTAssertLessThanOrEqual(held, config.proofs.maxQueuedBytes, "within the budget")
         }
         host.deferChecks = false
-        host.lookups = []
         let answers = host.deferred
         host.deferred = []
         for answer in answers { await host.step(answer) }
         await host.step(.tick)
-        XCTAssertTrue(host.lookups.contains(fixture.c.cid), "C is looked up again")
-        // The evidence index names the dropped proof.
-        await host.step(.level(Self.alpha, .proofsFound(childCID: fixture.c.cid, proofs)))
+        let taken = try XCTUnwrap(try host.digest(Self.alpha).blocks[fixture.c.cid]?.grinds)
+        XCTAssertEqual(taken.count, 1, "the dropped grind is not taken until it is sent again")
+        for proof in proofs { await host.relayProof(fixture.c, proof, at: Self.alpha, from: Self.alphaHost) }
         let grinds = try XCTUnwrap(try host.digest(Self.alpha).blocks[fixture.c.cid]?.grinds)
         XCTAssertEqual(Set(grinds.keys), [fixture.b.cid, fixture.sibling.cid], "both grinds credit")
         XCTAssertTrue(host.disconnects.isEmpty, "a budget, never blame")

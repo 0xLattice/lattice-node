@@ -198,7 +198,7 @@ public enum LevelInvariants {
         // The plain proof caps.
         let proofs = core.sync.proofs, bounds = core.config.proofs
         let held = proofs.queued + Array(proofs.verifying.values)
-        if proofs.checks(index: false) > bounds.maxChecks || proofs.checks(index: true) > bounds.indexChecks {
+        if proofs.verifying.count > bounds.maxChecks {
             throw fail("proof checks in flight exceed their bounds")
         }
         if proofs.awaiting.count > bounds.maxAwaiting {

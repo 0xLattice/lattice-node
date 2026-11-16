@@ -109,8 +109,8 @@ final class LevelSimulationTests: XCTestCase {
     }
 
     /// The proof withholder shows headers with no proofs: every node waits
-    /// (a liveness wait, never blame), looks the proofs up when the evidence
-    /// index changes, and weighs the branch once they are public.
+    /// (a liveness wait, never blame) and weighs the branch once they are
+    /// public.
     func testAProofWithholderIsWaitedForAndNeverBlamed() async throws {
         let (simulator, report) = try await simulate(config(0x1D_1E) {
             $0.withholder = true
@@ -120,7 +120,6 @@ final class LevelSimulationTests: XCTestCase {
         let withheld = simulator.world.grinds.filter(\.withheld).flatMap(\.mined.carried)
         XCTAssertEqual(withheld.count, 2)
         XCTAssertTrue(report.disconnects.isEmpty, "\(report.disconnects)")
-        XCTAssertGreaterThan(report.lookups, 0)
         for (core, digests) in report.digests {
             for carried in withheld {
                 let cid = try BlockHeader(node: carried.block).rawCID
@@ -217,7 +216,7 @@ final class LevelSimulationTests: XCTestCase {
             $0.flooders = 1
             $0.doubleProbability = 0.5
             $0.pageSize = 12
-            $0.proofs = ChildProofConfig(maxChecks: 4, indexChecks: 1, maxAwaiting: 64)
+            $0.proofs = ChildProofConfig(maxChecks: 4, maxAwaiting: 64)
             $0.withholder = false
             $0.zeroWork = false
             $0.scheduleLiar = false
@@ -234,7 +233,7 @@ final class LevelSimulationTests: XCTestCase {
     /// proof is credited everywhere within a bounded latency, no honest peer
     /// is blamed, and state stays within the caps (checked every step).
     func testSybilFloodersAreDisconnectedAndCannotStarveHonestProofs() async throws {
-        let proofs = ChildProofConfig(maxChecks: 4, indexChecks: 1, maxAwaiting: 64)
+        let proofs = ChildProofConfig(maxChecks: 4, maxAwaiting: 64)
         let flooders = proofs.maxChecks + 1
         let (_, report) = try await simulate(config(0x5B11) {
             $0.flooders = flooders
@@ -322,6 +321,62 @@ final class LevelSimulationTests: XCTestCase {
         XCTAssertTrue(level.sync.proofs.awaiting.isEmpty)
         XCTAssertEqual(askedCIDs.values.filter { $0 > 1 }.count, 0, "a header asked of the peer twice")
         XCTAssertEqual(asked[LevelWorld.nexus]?.count, 1, "the root level asks for a whole page at once")
+    }
+
+    /// The evidence index holds only the proofs this level credited: every
+    /// proof a step indexes credits its root at a weighed block once the
+    /// step is done, in the batch of the facts that credit it. So the index
+    /// has nothing to give back, and the node never asks it.
+    func testEveryIndexedChildProofIsAlreadyCredited() async throws {
+        var rng = SplitMix64(state: 0x5E1F)
+        let world = try await LevelWorld.generate(
+            rng: &rng, levels: 2, grinds: 60, forkProbability: 0, shareProbability: 0,
+            doubleProbability: 0, withholdDelay: 1_000
+        )
+        let now = World.genesisTime + 1_000_000
+        let config = ChainCoreConfig()
+        let alpha = LevelWorld.alpha
+        var host = NodeCore(root: world.rootBootstrap.tree.detached(), hosted: world.hosted, config: config)
+        var source = LevelSource(name: "source", config: config)
+        let peer = PeerID(key: "source", session: 1)
+        var queue: [NodeEvent] = world.grinds.prefix(3).map { .mined($0.mined) } + [.peerReady(peer)]
+        var indexed = 0
+        while !queue.isEmpty {
+            for effect in host.step(queue.removeFirst(), now: now) {
+                switch effect {
+                case .persist(let batch):
+                    let tree = try XCTUnwrap(host.levels[alpha]).tree
+                    for (path, level) in batch.levels where path == alpha {
+                        for stored in level.proofs {
+                            indexed += 1
+                            XCTAssertTrue(tree.contains(blockHash: stored.childCID), "an indexed proof's block is weighed")
+                            XCTAssertNotNil(
+                                tree.workContribution(id: stored.proof.rootCID, at: stored.childCID),
+                                "an indexed proof credits its root"
+                            )
+                        }
+                    }
+                case .level(let path, .send(_, let message)):
+                    for case .send(_, let path, let reply) in source.received(
+                        message, at: path, from: PeerID(key: "node", session: 1), now: now, world: world
+                    ) {
+                        queue.append(.received(peer, path, reply))
+                    }
+                case .level(let path, .verifyProof(let job)):
+                    let block = try XCTUnwrap(job.block ?? world.blocks[path]?[job.childCID]?.block)
+                    queue.append(.level(path, .proofVerified(job, await job.run(block))))
+                case .level(let path, .fetchByCID(_, let cid)):
+                    queue.append(.level(path, .childIndexFetched(
+                        peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
+                    )))
+                default:
+                    break
+                }
+            }
+        }
+        let weighed = TreeDigest(try XCTUnwrap(host.levels[alpha]).tree).blocks
+        XCTAssertGreaterThan(weighed.count, 50, "the child chain was not weighed")
+        XCTAssertGreaterThan(indexed, 50, "no credited proof was indexed")
     }
 
     /// A peer answers each child-level `getData` with every header it has,

@@ -159,8 +159,8 @@ public struct LevelSource: LevelScript {
 }
 
 /// The proof withholder: its Alpha log is its own side branch's headers as
-/// they are released, served WITHOUT proofs, and each proof once public
-/// (the evidence index learns them only then). A node waits for them and
+/// they are released, served WITHOUT proofs, and each proof once public.
+/// A node waits for them and
 /// never blames it.
 public struct ProofWithholder: LevelScript {
     public let name: String

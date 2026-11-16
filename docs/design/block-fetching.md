@@ -70,6 +70,6 @@ ready and is retried when the co-hosted parent advances.
    transaction commits.
 
 Child work proof acquisition is a separate concern. A child header carries
-bounded inline `ChildBlockProof` values, while `ChildProofSync` can consult the
-durable local evidence index for proofs this node already learned. Peers supply
+bounded inline `ChildBlockProof` values; the durable local evidence index holds
+only proofs this node already credited, to serve them. Peers supply
 verifiable bytes, never a validity verdict or remote parent-state authority.
