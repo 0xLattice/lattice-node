@@ -273,8 +273,10 @@ final class ChildBlockBuildTests: XCTestCase {
             var mined: String? = first
             switch twist {
             case .staleTip:
+                // The stale commit is mined past, never mined for: until the
+                // miner evicts it, mining a block for it would move the tip
+                // a second time (it can no longer be carried).
                 _ = try await miner.mine(try XCTUnwrap(past))
-                mined = nil
             case .none:
                 _ = try await miner.mineBlock(pair.mining)
             case .overwritten:
