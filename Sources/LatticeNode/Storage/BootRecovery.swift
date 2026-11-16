@@ -127,16 +127,14 @@ enum BootRecovery {
         return constantRoots
     }
 
-    /// Stage 4: the leaf flags repaired and the pins settled. The journal's
-    /// derived rows are written in the journal row's own transaction, so
-    /// nothing is re-derived from the journal here. Pins are in the store
-    /// and stay as a start finds them, and content a fact names and the
-    /// store lacks is no fault. The constants are pinned.
+    /// Stage 4: the pins settled. The facts' derived rows are written in
+    /// the facts' own transaction, so nothing is re-derived here. Pins are
+    /// in the store and stay as a start finds them, and content a fact
+    /// names and the store lacks is no fault. The constants are pinned.
     private static func settleRetention(
         _ stores: Stores,
         constantRoots: [String]
     ) async throws {
-        try await stores.store.repairLeafFlags()
         let broker = stores.broker
         let scopes = RetentionScopes(chain: stores.retentionScope)
         try await broker.mergeRetainedRoots(scope: scopes.chain, roots: constantRoots)

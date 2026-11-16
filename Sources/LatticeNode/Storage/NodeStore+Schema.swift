@@ -103,21 +103,6 @@ extension NodeStore {
         }
     }
 
-    /// Every index, `IF NOT EXISTS`, run at every open (new and existing
-    /// stores alike) so an index introduced later still materializes.
-    /// Owner: NodeStore.init — runs before the store exists, on every open.
-    static func ensureIndexes(in database: NodeSQLite) throws {
-        try database.execute(
-            "CREATE INDEX IF NOT EXISTS accepted_blocks_by_parent ON accepted_blocks (chain_path, parent_cid, admission_seq, block_cid)"
-        )
-        // The frontier (cursor-less) page: the leaves, newest first. Partial
-        // on `leaf = 1` so on a fork-free chain the page is one index entry,
-        // never a scan of the accepted history filtered per row.
-        try database.execute(
-            "CREATE INDEX IF NOT EXISTS accepted_blocks_frontier ON accepted_blocks (chain_path, admission_seq DESC, block_cid DESC) WHERE leaf = 1"
-        )
-    }
-
     private static func createDataTables(in database: NodeSQLite) throws {
         // Every fact once, by id (`UNIQUE`), kept forever. `seq` is the
         // level's staged batch that first held it and `ord` its place in
@@ -143,7 +128,6 @@ extension NodeStore {
                 parent_cid TEXT,
                 admission_seq INTEGER NOT NULL,
                 validated INTEGER NOT NULL DEFAULT \(BlockStatus.executed.rawValue),
-                leaf INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY (chain_path, block_cid)
             ) WITHOUT ROWID
             """)

@@ -6,10 +6,9 @@ import XCTest
 
 /// Safety net: what boot does with one damaged row in each table it reads.
 ///
-/// "Boot" is `NodeStorage.open`: `NodeStore.init` (node_metadata), the leaf
-/// flag repair (accepted_blocks.leaf) and the local mempool
-/// (local_mempool_transactions); then `NodeRuntime.boot`, which replays each
-/// hosted level's facts (admission_facts.payload).
+/// "Boot" is `NodeStorage.open`: `NodeStore.init` (node_metadata) and the
+/// local mempool (local_mempool_transactions); then `NodeRuntime.boot`, which
+/// replays each hosted level's facts (admission_facts.payload).
 ///
 /// Every case starts from one valid fixture (Nexus, two mined blocks), damages
 /// exactly one row through SQL, reopens, and records what boot did. The
@@ -24,7 +23,6 @@ import XCTest
 /// - A row boot does not read: opened. The derived rows (accepted_blocks)
 ///   are written in their facts' own transaction, so boot does not
 ///   re-derive them; the read that reads a damaged row refuses it then.
-/// - accepted_blocks.leaf disagreeing with the parent links: repaired at boot.
 /// - A Volume a fact names gone from volumes.db: opened. Content is fetched
 ///   when read; its absence is no damage.
 ///
@@ -145,38 +143,6 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         XCTAssertEqual(observed, .opened)
     }
 
-    /// A leaf flag that disagrees with the parent links is a derived index
-    /// and is REPAIRED at boot, not refused.
-    func testBootRepairsDisagreeingLeafFlag() async throws {
-        let fixture = try await buildFixture()
-        // A flipped flag and an out-of-range flag are both a derived index to
-        // repair, never a refusal.
-        for damage in [
-            "UPDATE accepted_blocks SET leaf = 1 - leaf",
-            "UPDATE accepted_blocks SET leaf = 2",
-        ] {
-            let root = try damagedCopy(of: fixture, applying: [damage])
-            if damage.hasSuffix("1 - leaf") {
-                let flipped = try leafFlags(at: root)
-                XCTAssertTrue(
-                    flipped.values.contains(true) && flipped.values.contains(false),
-                    "fixture guard: the flip must leave both leaf values present"
-                )
-            }
-            let observed = await observeBoot(at: root)
-            XCTAssertEqual(observed, .opened, "accepted_blocks.leaf after \(damage)")
-            let repaired = try leafFlags(at: root)
-            let parents = try parentLinks(at: root)
-            for (cid, leaf) in repaired {
-                let hasChildren = parents.values.contains(cid)
-                XCTAssertEqual(
-                    leaf, !hasChildren,
-                    "accepted_blocks.leaf for \(cid) was not repaired from the parent links after \(damage)"
-                )
-            }
-        }
-    }
-
     // MARK: - Harness
 
     private func assertBoot(
@@ -258,25 +224,6 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             )
         }
         return copy
-    }
-
-    private func leafFlags(at root: URL) throws -> [String: Bool] {
-        var flags: [String: Bool] = [:]
-        for row in try NodeSQLite(path: root.appendingPathComponent("state.db").path)
-            .query("SELECT block_cid, leaf FROM accepted_blocks") {
-            flags[try XCTUnwrap(row["block_cid"]?.textValue)] = row["leaf"]?.intValue == 1
-        }
-        return flags
-    }
-
-    private func parentLinks(at root: URL) throws -> [String: String] {
-        var links: [String: String] = [:]
-        for row in try NodeSQLite(path: root.appendingPathComponent("state.db").path)
-            .query("SELECT block_cid, parent_cid FROM accepted_blocks WHERE parent_cid IS NOT NULL") {
-            links[try XCTUnwrap(row["block_cid"]?.textValue)] =
-                try XCTUnwrap(row["parent_cid"]?.textValue)
-        }
-        return links
     }
 
     private func configuration(_ storage: URL) throws -> NodeConfiguration {
