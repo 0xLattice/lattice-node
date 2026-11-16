@@ -19,7 +19,8 @@ struct NodeMetadataRow: NodeStoreRecord {
 extension NodeStore {
     /// Epoch 48: each fact is kept once, by id, with the staged batch that
     /// first held it; the batch journal is gone and boot restores from the
-    /// facts.
+    /// facts. A block fact no longer carries its state diff: `state_diffs`
+    /// keeps it for the state window.
     /// Epoch 47: block facts record the block's `parentState`, which an
     /// attributed run checks before crediting a child block (§9.10). Older
     /// child-chain facts lack it and would read as the empty state.
@@ -72,6 +73,7 @@ extension NodeStore {
         "headers",
         "child_indexes",
         "child_proofs",
+        "state_diffs",
     ]
 
     /// Owner: NodeStore.init — runs before the store exists, on an empty database.
@@ -118,7 +120,9 @@ extension NodeStore {
         // Every fact once, by id (`UNIQUE`), kept forever. `seq` is the
         // level's staged batch that first held it and `ord` its place in
         // that batch: a level reads back as one key range in its weigh
-        // order, and appends at its end.
+        // order, and appends at its end. A row is stored whole in its
+        // b-tree page up to about 1,000 bytes: a block fact, without its
+        // state diff, is about 750.
         try database.execute("""
             CREATE TABLE IF NOT EXISTS admission_facts (
                 chain_path TEXT NOT NULL,
@@ -171,6 +175,12 @@ extension NodeStore {
         )
         try database.execute(
             "CREATE TABLE IF NOT EXISTS child_proofs (chain TEXT NOT NULL, child TEXT NOT NULL, root TEXT NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (chain, child, root))"
+        )
+        // Undo data: each executed block's state diff, which moves the
+        // counts of a chain's state on `recent`, kept for the state window
+        // only (Bitcoin's `rev*.dat`). No fact carries it.
+        try database.execute(
+            "CREATE TABLE IF NOT EXISTS state_diffs (chain_path TEXT NOT NULL, block_cid TEXT NOT NULL, height INTEGER NOT NULL, diff BLOB NOT NULL, PRIMARY KEY (chain_path, block_cid))"
         )
     }
 }

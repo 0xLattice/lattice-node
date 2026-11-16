@@ -81,7 +81,8 @@ extension NodeStorage {
                 facts: level.facts,
                 headers: level.headers,
                 proofs: level.proofs,
-                cursors: level.cursors
+                cursors: level.cursors,
+                keepsStateDiffs: configuration.state == .recent
             ))
         }
         try await storage.commit()

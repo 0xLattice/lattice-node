@@ -263,6 +263,13 @@ final class StateWindowTests: XCTestCase {
             try await self.windowHeights(storage) == [6, 7, 8]
         }
         await runtime.stop()
+        // The undo data goes with the window: the facts stay.
+        let kept = try await storage.store.database.rows(
+            from: "state_diffs", "SELECT height FROM state_diffs ORDER BY height"
+        ).map { try $0.int("height") }
+        XCTAssertEqual(kept, [6, 7, 8])
+        let facts = try await storage.store.storedFacts(at: ["Nexus"]).facts
+        XCTAssertEqual(facts.filter { if case .block = $0 { true } else { false } }.count, 9)
     }
 
     /// Every node of the state of `block` with the places it holds in it,
@@ -308,7 +315,10 @@ final class StateWindowTests: XCTestCase {
                 guard block == at.cursor.cid else { throw TestWaitError.timedOut("the cursor is not on the tip's chain") }
                 break
             }
-            for (cid, count) in NodeStore.net(held.stateDiff).replaced { expected[cid, default: 0] += count }
+            let diff = try await storage.store.stateDiff(block, at: path)
+            for (cid, count) in NodeStore.net(try XCTUnwrap(diff, "the window keeps \(block)'s diff")).replaced {
+                expected[cid, default: 0] += count
+            }
             block = try XCTUnwrap(held.parentBlockHash)
         }
         return (at, counts, expected)
@@ -807,8 +817,8 @@ final class StateWindowTests: XCTestCase {
         var tip = ""
         for _ in 0..<3 { tip = try BlockHeader(node: try await runtime.mineBlock(paid)).rawCID }
         try await eventually("the counts reach the tip") { try await self.settled(storage, at: tip) }
-        let fact = try await storage.store.blockFact(tip, at: ["Nexus"])
-        var diff = try XCTUnwrap(fact?.stateDiff)
+        let kept = try await storage.store.stateDiff(tip, at: ["Nexus"])
+        var diff = try XCTUnwrap(kept)
         XCTAssertFalse(NodeStore.net(diff).replaced.isEmpty, "the block replaced something")
         diff.replaced = [:]
         try await storage.store.rewriteStateDiff(of: tip, at: ["Nexus"], to: diff)
@@ -1139,22 +1149,12 @@ extension NodeStore {
         _ = try database.execute("INSERT INTO core_meta (key, value) VALUES ('state_tip:Nexus', 'x')")
     }
 
-    /// Rewrites the stored fact of `block` to carry `diff`, as a fact an
-    /// older binary wrote with an inexact diff.
+    /// Rewrites the kept state diff of `block` to `diff`, as an older
+    /// binary wrote an inexact one.
     func rewriteStateDiff(of block: String, at chainPath: [String], to diff: StateDiff) throws {
-        let old = try XCTUnwrap(try blockFact(block, at: chainPath))
-        let fact = ChainBlockFact(
-            blockHash: old.blockHash, parentBlockHash: old.parentBlockHash, blockHeight: old.blockHeight,
-            postStateCID: old.postStateCID, prevStateCID: old.prevStateCID, parentStateCID: old.parentStateCID,
-            specCID: old.specCID, target: old.target, nextTarget: old.nextTarget, timestamp: old.timestamp,
-            stateDiff: diff, childCommitments: old.childCommitments
-        )
         let changed = try database.execute(
-            "UPDATE admission_facts SET payload = ?3 WHERE chain_path = ?1 AND fact_id = ?2",
-            params: [
-                .text(chainPath.joined(separator: "/")), .blob(try Self.encode(ChainFactID.block(block))),
-                .blob(try Self.encode(ChainFact.block(fact))),
-            ]
+            "UPDATE state_diffs SET diff = ?3 WHERE chain_path = ?1 AND block_cid = ?2",
+            params: [.text(chainPath.joined(separator: "/")), .text(block), .blob(try Self.encode(diff))]
         )
         XCTAssertEqual(changed, 1)
     }

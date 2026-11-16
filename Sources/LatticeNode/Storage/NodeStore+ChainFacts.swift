@@ -10,6 +10,9 @@ struct NodeFactBatch: Sendable {
     var headers: [StoredHeader] = []
     var proofs: [StoredProof] = []
     let cursors: [String: StreamCursor]
+    /// Keep the state diffs of the blocks these facts executed, for the
+    /// state window (`state: recent`). A block fact never carries one.
+    var keepsStateDiffs = false
 }
 
 extension NodeStore {
@@ -21,6 +24,7 @@ extension NodeStore {
             let facts: [(id: Data, payload: Data)]
             let blocks: [AcceptedBlockRecord]
             let validated: [String]
+            let diffs: [(block: String, height: UInt64, diff: Data)]
         }
         struct PreparedLevel {
             let path: String
@@ -42,17 +46,27 @@ extension NodeStore {
             }
             var rows: [PreparedRow] = []
             for batch in level.facts {
-                var validated: [String] = []
+                let validated = batch.facts.compactMap { fact -> String? in
+                    guard case .validation(let validation) = fact else { return nil }
+                    return validation.blockHash
+                }
+                var diffs: [(block: String, height: UInt64, diff: Data)] = []
                 let facts = try batch.facts.map { fact -> (id: Data, payload: Data) in
-                    if case .validation(let validation) = fact {
-                        validated.append(validation.blockHash)
+                    guard case .block(let block) = fact else {
+                        return (try Self.encode(fact.id), try Self.encode(fact))
                     }
-                    return (try Self.encode(fact.id), try Self.encode(fact))
+                    // An executed block's diff is in the batch that
+                    // validates it.
+                    if level.keepsStateDiffs, validated.contains(block.blockHash) {
+                        diffs.append((block.blockHash, block.blockHeight, try Self.encode(block.stateDiff)))
+                    }
+                    return (try Self.encode(fact.id), try Self.encode(ChainFact.block(Self.withoutStateDiff(block))))
                 }
                 rows.append(PreparedRow(
                     facts: facts,
                     blocks: try Self.acceptedBlocks(in: batch),
-                    validated: validated
+                    validated: validated,
+                    diffs: diffs
                 ))
             }
             return PreparedLevel(
@@ -97,16 +111,9 @@ extension NodeStore {
                         ) else {
                             throw NodeStoreError.corrupt("an admission fact was neither stored nor held")
                         }
-                        guard try existing.payload != fact.payload else { continue }
-                        guard try Self.restatesWeighedBlock(existing.payload, as: fact.payload) else {
+                        guard try existing.payload == fact.payload else {
                             throw NodeStoreError.conflictingImportFact
                         }
-                        // The executed block's fact, in its place: the
-                        // seq it was first staged in stays.
-                        try database.execute(
-                            "UPDATE admission_facts SET payload = ?3 WHERE chain_path = ?1 AND fact_id = ?2",
-                            params: [.text(level.path), .blob(fact.id), .blob(fact.payload)]
-                        )
                     }
                     if added { seq += 1 }
                     try persistAcceptedBlockRows(
@@ -115,6 +122,15 @@ extension NodeStore {
                         admissionSequence: max(seq, 1),
                         status: .header
                     )
+                    for diff in row.diffs {
+                        try database.execute(
+                            "INSERT OR REPLACE INTO state_diffs (chain_path, block_cid, height, diff) VALUES (?1, ?2, ?3, ?4)",
+                            params: [
+                                .text(level.path), .text(diff.block),
+                                .int(Int64(clamping: diff.height)), .blob(diff.diff),
+                            ]
+                        )
+                    }
                     for cid in row.validated {
                         try database.execute(
                             "UPDATE accepted_blocks SET validated = ?1 WHERE chain_path = ?2 AND block_cid = ?3 AND validated = ?4",
@@ -192,25 +208,24 @@ extension NodeStore {
         })
     }
 
-    /// A block's execution re-states its block fact with the state diff it
-    /// produced. Only that change is a re-statement.
-    static func restatesWeighedBlock(_ existing: Data, as new: Data) throws -> Bool {
-        guard case .block(let weighed) = try decode(ChainFact.self, from: existing),
-              case .block(let executed) = try decode(ChainFact.self, from: new),
-              weighed.stateDiff.isEmpty else { return false }
-        return weighed == ChainBlockFact(
-            blockHash: executed.blockHash,
-            parentBlockHash: executed.parentBlockHash,
-            blockHeight: executed.blockHeight,
-            postStateCID: executed.postStateCID,
-            prevStateCID: executed.prevStateCID,
-            parentStateCID: executed.parentStateCID,
-            specCID: executed.specCID,
-            target: executed.target,
-            nextTarget: executed.nextTarget,
-            timestamp: executed.timestamp,
+    /// The block fact as stored: its execution's state diff is undo data,
+    /// kept apart for the state window, so the fact a block's execution
+    /// re-states is the one its weighing staged.
+    static func withoutStateDiff(_ fact: ChainBlockFact) -> ChainBlockFact {
+        guard !fact.stateDiff.isEmpty else { return fact }
+        return ChainBlockFact(
+            blockHash: fact.blockHash,
+            parentBlockHash: fact.parentBlockHash,
+            blockHeight: fact.blockHeight,
+            postStateCID: fact.postStateCID,
+            prevStateCID: fact.prevStateCID,
+            parentStateCID: fact.parentStateCID,
+            specCID: fact.specCID,
+            target: fact.target,
+            nextTarget: fact.nextTarget,
+            timestamp: fact.timestamp,
             stateDiff: .empty,
-            childCommitments: executed.childCommitments
+            childCommitments: fact.childCommitments
         )
     }
 }
