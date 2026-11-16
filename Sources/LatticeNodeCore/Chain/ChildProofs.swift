@@ -431,9 +431,10 @@ extension ChainCore {
     /// Start queued checks in arrival order while slots are free (peers'
     /// and the index's apart), dropping proofs whose block is gone or
     /// already credited by that root; then ask the evidence index in one
-    /// batch: for every child header weighed this step (another host's
-    /// grinds), every waiting header with no proof queued or in flight, and
-    /// every weighed block queued for another lookup.
+    /// batch: for every waiting header with no proof queued or in flight,
+    /// and every weighed block queued for another lookup. A header weighed
+    /// this step is not asked: the index holds only proofs this level
+    /// credited, written with the facts that credit them.
     mutating func proofWork(_ turn: inout Turn) {
         var peerChecks = sync.proofs.checks(index: false)
         var indexChecks = sync.proofs.checks(index: true)
@@ -456,7 +457,7 @@ extension ChainCore {
             )))
         }
         sync.proofs.queued = kept
-        var wanted = Set(turn.headers.map(\.blockCID))
+        var wanted: Set<String> = []
         for (cid, held) in sync.proofs.awaiting where !held.lookedUp && !sync.proofs.holds(cid) {
             sync.proofs.awaiting[cid]?.lookedUp = true
             wanted.insert(cid)

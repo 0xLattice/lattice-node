@@ -78,7 +78,6 @@ public struct LevelSimReport: Sendable {
     /// Per mined handoff: the persists its step emitted and the levels the
     /// one batch covered.
     public var minedBatches: [(persists: Int, levels: Int)] = []
-    public var lookups = 0
     public var verifications = 0
     public var executions = 0
     /// The longest any core took to credit a public honest proof of a
@@ -486,7 +485,6 @@ public struct LevelSimulator {
                 throw Invariants.fail(name, "published tip \(tip) at \(path) is not durable")
             }
         case .lookupProofs(let cids):
-            report.lookups += 1
             for cid in cids {
                 // Each node's evidence index holds the proofs it credited.
                 let found = node.store.proofs(path, cid)
