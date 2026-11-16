@@ -17,13 +17,18 @@ struct NodeMetadataRow: NodeStoreRecord {
 }
 
 extension NodeStore {
+    /// Epoch 48: each fact is kept once, by id, with the staged batch that
+    /// first held it; the batch journal is gone and boot restores from the
+    /// facts. A block fact no longer carries its state diff: `state_diffs`
+    /// keeps it for the state window. A child proof names its entries by
+    /// CID.
     /// Epoch 47: block facts record the block's `parentState`, which an
     /// attributed run checks before crediting a child block (§9.10). Older
     /// child-chain facts lack it and would read as the empty state.
     /// Epoch 46: weighed header material and credited child proofs live in
     /// this store, written with their facts. Older stores must be wiped; Nexus
     /// deterministically recreates the configured exact genesis.
-    static let currentSchemaEpoch: Int64 = 47
+    static let currentSchemaEpoch: Int64 = 48
 
     static func validateMetadata(
         in database: NodeSQLite,
@@ -61,7 +66,6 @@ extension NodeStore {
 
     static let expectedTables: Set<String> = [
         "node_metadata",
-        "admission_batches",
         "admission_facts",
         "accepted_blocks",
         "local_mempool_transactions",
@@ -70,6 +74,8 @@ extension NodeStore {
         "headers",
         "child_indexes",
         "child_proofs",
+        "proof_entries",
+        "state_diffs",
     ]
 
     /// Owner: NodeStore.init — runs before the store exists, on an empty database.
@@ -97,42 +103,25 @@ extension NodeStore {
         }
     }
 
-    /// Every index, `IF NOT EXISTS`, run at every open (new and existing
-    /// stores alike) so an index introduced later still materializes.
-    /// Owner: NodeStore.init — runs before the store exists, on every open.
-    static func ensureIndexes(in database: NodeSQLite) throws {
-        try database.execute(
-            "CREATE INDEX IF NOT EXISTS accepted_blocks_by_parent ON accepted_blocks (chain_path, parent_cid, admission_seq, block_cid)"
-        )
-        // The frontier (cursor-less) page: the leaves, newest first. Partial
-        // on `leaf = 1` so on a fork-free chain the page is one index entry,
-        // never a scan of the accepted history filtered per row.
-        try database.execute(
-            "CREATE INDEX IF NOT EXISTS accepted_blocks_frontier ON accepted_blocks (chain_path, admission_seq DESC, block_cid DESC) WHERE leaf = 1"
-        )
-        // One level's journal in order (boot and a hot-hosted start): read
-        // in pages by seq range, so any sort is bounded to one page.
-        try database.execute(
-            "CREATE INDEX IF NOT EXISTS admission_batches_by_level ON admission_batches (chain_path, seq)"
-        )
-    }
-
     private static func createDataTables(in database: NodeSQLite) throws {
-        try database.execute("""
-            CREATE TABLE IF NOT EXISTS admission_batches (
-                seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                chain_path TEXT NOT NULL,
-                payload BLOB NOT NULL,
-                volume_roots BLOB NOT NULL,
-                UNIQUE (chain_path, payload)
-            )
-            """)
+        // Every fact once, by id (`UNIQUE`), kept forever. `seq` is the
+        // level's staged batch that first held it and `ord` its place in
+        // that batch: a level reads back as one key range in its weigh
+        // order, and appends at its end. A row is stored whole in its
+        // b-tree page up to about 1,000 bytes: a block fact, without its
+        // state diff, is about 750. The exception is a parent block that
+        // commits many children: each adds about 85 bytes, so a Nexus/testnet
+        // block fact with about 13 is about 1.75 KB and overflows (about a
+        // tenth of that chain's rows).
         try database.execute("""
             CREATE TABLE IF NOT EXISTS admission_facts (
                 chain_path TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                ord INTEGER NOT NULL,
                 fact_id BLOB NOT NULL,
                 payload BLOB NOT NULL,
-                PRIMARY KEY (chain_path, fact_id)
+                PRIMARY KEY (chain_path, seq, ord),
+                UNIQUE (chain_path, fact_id)
             ) WITHOUT ROWID
             """)
         try database.execute("""
@@ -142,7 +131,6 @@ extension NodeStore {
                 parent_cid TEXT,
                 admission_seq INTEGER NOT NULL,
                 validated INTEGER NOT NULL DEFAULT \(BlockStatus.executed.rawValue),
-                leaf INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY (chain_path, block_cid)
             ) WITHOUT ROWID
             """)
@@ -174,8 +162,21 @@ extension NodeStore {
         try database.execute(
             "CREATE TABLE IF NOT EXISTS child_indexes (cid TEXT PRIMARY KEY, bytes BLOB NOT NULL)"
         )
+        // A credited proof names its entries by CID: the block nodes and
+        // child indexes `headers` and `child_indexes` hold are read from
+        // there, and only the rest (a carrier's node and child index when
+        // no level weighed it) is kept in `proof_entries`, once per CID.
         try database.execute(
-            "CREATE TABLE IF NOT EXISTS child_proofs (chain TEXT NOT NULL, child TEXT NOT NULL, root TEXT NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (chain, child, root))"
+            "CREATE TABLE IF NOT EXISTS child_proofs (chain TEXT NOT NULL, child TEXT NOT NULL, root TEXT NOT NULL, entries TEXT NOT NULL, PRIMARY KEY (chain, child, root))"
+        )
+        try database.execute(
+            "CREATE TABLE IF NOT EXISTS proof_entries (cid TEXT PRIMARY KEY, bytes BLOB NOT NULL)"
+        )
+        // Undo data: each executed block's state diff, which moves the
+        // counts of a chain's state on `recent`, kept for the state window
+        // only (Bitcoin's `rev*.dat`). No fact carries it.
+        try database.execute(
+            "CREATE TABLE IF NOT EXISTS state_diffs (chain_path TEXT NOT NULL, block_cid TEXT NOT NULL, height INTEGER NOT NULL, diff BLOB NOT NULL, PRIMARY KEY (chain_path, block_cid))"
         )
     }
 }

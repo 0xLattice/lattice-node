@@ -227,7 +227,7 @@ final class DerivedChildGrindTests: XCTestCase {
         mutating func restart() throws {
             core = try NodeCore.restore(
                 root: try XCTUnwrap(store.records[DerivedChildGrindTests.nexus]),
-                facts: store.levels.mapValues(\.facts),
+                facts: store.levels.mapValues { StoredFacts($0.facts) },
                 specs: store.levels.mapValues { $0.headers.values.compactMap(\.spec) },
                 hosted: core.hosted,
                 config: config
@@ -439,7 +439,7 @@ final class DerivedChildGrindTests: XCTestCase {
                 await host.step(.unhost(Self.alpha))
                 let stored = try XCTUnwrap(host.store.levels[Self.alpha])
                 await host.step(.host(
-                    Self.alpha, facts: stored.facts, specs: stored.headers.values.compactMap(\.spec), cursors: [:]
+                    Self.alpha, facts: StoredFacts(stored.facts), specs: stored.headers.values.compactMap(\.spec), cursors: [:]
                 ))
             default:
                 var core = try XCTUnwrap(host.core.levels[Self.alpha])
@@ -1194,7 +1194,7 @@ final class DerivedChildGrindTests: XCTestCase {
     /// Host Alpha now and hear its blocks from a peer that has them: G with
     /// N1's proof, C with its first carrier's.
     private func catchUp(_ host: inout Host, _ fixture: Carriers) async throws {
-        await host.step(.host(Self.alpha, facts: [], specs: [], cursors: [:]))
+        await host.step(.host(Self.alpha, facts: .empty, specs: [], cursors: [:]))
         await host.meet(Self.alphaHost)
         let genesisProof = try XCTUnwrap(fixture.setup[1].carried.first).proof
         await host.relay(fixture.g, at: Self.alpha, from: Self.alphaHost, proofs: [genesisProof], spec: fixture.world.specs[Self.alpha])
@@ -1431,7 +1431,7 @@ final class DerivedChildGrindTests: XCTestCase {
         mutating func rehost() async throws {
             let stored = try XCTUnwrap(host.store.levels[DerivedChildGrindTests.alpha])
             await host.step(.host(
-                DerivedChildGrindTests.alpha, facts: stored.facts, specs: stored.headers.values.compactMap(\.spec), cursors: [:]
+                DerivedChildGrindTests.alpha, facts: StoredFacts(stored.facts), specs: stored.headers.values.compactMap(\.spec), cursors: [:]
             ))
         }
 

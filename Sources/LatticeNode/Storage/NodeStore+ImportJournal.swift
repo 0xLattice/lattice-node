@@ -1,115 +1,46 @@
 import Foundation
-import Ivy
 import Lattice
-import UInt256
-import VolumeBroker
-import cashew
+import LatticeNodeCore
 
-struct StagedImport: Sendable, Equatable {
-    let sequence: Int64
-    let chainPath: [String]
-    let batch: BlockImportBatch
-    let volumeRoots: [String]
-}
-
-/// `admission_batches`: one immutable admission batch; `payload` and
-/// `volumeRoots` are the JSON bytes, decoded by the caller so a decode
-/// failure stays `corrupt`.
-struct ImportBatchRow: NodeStoreRecord {
-    static let table = "admission_batches"
-    private let row: Row
-
-    init(_ row: Row) { self.row = row }
-
-    var sequence: Int64 { get throws { try row.int("seq") } }
-    var chainPath: String { get throws { try row.nonEmptyText("chain_path") } }
-    var payload: Data { get throws { try row.blob("payload") } }
-    var volumeRoots: Data { get throws { try row.blob("volume_roots") } }
-}
-
-/// `admission_facts`: one normalized fact of an admission batch.
+/// `admission_facts`: one fact, kept once by id, with the staged batch that
+/// first held it.
 struct ImportFactRow: NodeStoreRecord {
     static let table = "admission_facts"
     private let row: Row
 
     init(_ row: Row) { self.row = row }
 
-    var chainPath: String { get throws { try row.nonEmptyText("chain_path") } }
-    var factID: Data { get throws { try row.blob("fact_id") } }
     var payload: Data { get throws { try row.blob("payload") } }
 }
 
 extension NodeStore {
-    func stagedImports(at chainPath: [String]? = nil) async throws -> [StagedImport] {
-        try loadStagedImports(at: chainPath)
-    }
-
-    /// Whether anything is journaled: one row read, not the journal.
+    /// Whether any fact is stored: one row read, not the facts.
     func hasStagedImports() throws -> Bool {
-        try !database.query("SELECT 1 FROM admission_batches LIMIT 1").isEmpty
+        try !database.query("SELECT 1 FROM admission_facts LIMIT 1").isEmpty
     }
 
-    /// One page of a level's journal after a seq, through
-    /// `admission_batches_by_level` (named: the planner otherwise prefers the
-    /// covering (chain_path, payload) unique index). Some SQLite versions
-    /// still sort before the first row, so a read is paged: a sort never
-    /// holds more than one page of payloads.
-    static let levelBatchesSQL =
-        "SELECT seq, payload FROM admission_batches INDEXED BY admission_batches_by_level WHERE chain_path = ?1 AND seq > ?2 ORDER BY seq ASC LIMIT ?3"
+    /// One level's facts in the order it first took them: by seq, then by
+    /// place in the batch, one primary-key range read with no sort. Each is
+    /// decoded as its row is read: no other level's rows are read, and the
+    /// rows are never held.
+    static let levelFactsSQL =
+        "SELECT seq, payload FROM admission_facts WHERE chain_path = ?1 ORDER BY seq, ord"
 
-    static let levelBatchesPage: Int64 = 512
-
-    /// One level's journaled batches, in order, each decoded as its row is
-    /// read: the journal is never held as rows, and no other level's batches
-    /// are read.
-    func importBatches(at chainPath: [String]) throws -> [BlockImportBatch] {
-        var batches: [BlockImportBatch] = []
-        var after: Int64 = 0
-        while true {
-            var read: Int64 = 0
-            try database.forEach(
-                Self.levelBatchesSQL,
-                params: [.text(chainPath.joined(separator: "/")), .int(after), .int(Self.levelBatchesPage)]
-            ) { row in
-                guard let seq = row.int(0) else {
-                    throw NodeStoreError.malformedRow(table: ImportBatchRow.table, column: "seq")
-                }
-                guard let payload = row.blob(1) else {
-                    throw NodeStoreError.malformedRow(table: ImportBatchRow.table, column: "payload")
-                }
-                batches.append(try Self.decode(BlockImportBatch.self, from: payload))
-                after = seq
-                read += 1
+    func storedFacts(at chainPath: [String]) throws -> StoredFacts {
+        var facts: [ChainFact] = []
+        var (batches, last): (UInt64, Int64) = (0, 0)
+        try database.forEach(
+            Self.levelFactsSQL, params: [.text(chainPath.joined(separator: "/"))]
+        ) { row in
+            guard let seq = row.int(0) else {
+                throw NodeStoreError.malformedRow(table: ImportFactRow.table, column: "seq")
             }
-            if read < Self.levelBatchesPage { return batches }
-        }
-    }
-
-    func loadStagedImports(at chainPath: [String]? = nil) throws -> [StagedImport] {
-        let rows: [ImportBatchRow]
-        if let chainPath {
-            rows = try database.rows(
-                ImportBatchRow.self,
-                "SELECT seq, chain_path, payload, volume_roots FROM admission_batches WHERE chain_path = ?1 ORDER BY seq ASC",
-                params: [.text(chainPath.joined(separator: "/"))]
-            )
-        } else {
-            rows = try database.rows(
-                ImportBatchRow.self,
-                "SELECT seq, chain_path, payload, volume_roots FROM admission_batches ORDER BY seq ASC"
-            )
-        }
-        return try rows.map { row in
-            let components = try row.chainPath.split(separator: "/").map(String.init)
-            guard ChainAddress(components) != nil else {
-                throw NodeStoreError.corrupt("an admission batch has an invalid chain path")
+            guard let payload = row.blob(1) else {
+                throw NodeStoreError.malformedRow(table: ImportFactRow.table, column: "payload")
             }
-            return StagedImport(
-                sequence: try row.sequence,
-                chainPath: components,
-                batch: try Self.decode(BlockImportBatch.self, from: try row.payload),
-                volumeRoots: try Self.decode([String].self, from: try row.volumeRoots)
-            )
+            if seq != last { (batches, last) = (batches + 1, seq) }
+            facts.append(try Self.decode(ChainFact.self, from: payload))
         }
+        return StoredFacts(facts: facts, batches: batches)
     }
 }

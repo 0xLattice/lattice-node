@@ -62,12 +62,12 @@ final class RevisionFloorRestoreTests: XCTestCase {
         let bare = try ChainTree.restore(replaying: batches, context: Self.context)
         XCTAssertLessThan(bare.currentRevision(), exposed)
 
-        let restored = try ChainCore.restore(replaying: batches, context: Self.context, specs: [])
+        let restored = try ChainCore.restore(StoredFacts(batches), context: Self.context, specs: [])
         XCTAssertGreaterThanOrEqual(restored.tree.currentRevision(), exposed)
         XCTAssertEqual(restored.tree.workContribution(id: Self.grind, at: Self.genesis)?.work, 3)
 
         // A second restart of the same facts exposes the same revision.
-        let again = try ChainCore.restore(replaying: batches, context: Self.context, specs: [])
+        let again = try ChainCore.restore(StoredFacts(batches), context: Self.context, specs: [])
         XCTAssertEqual(again.tree.currentRevision(), restored.tree.currentRevision())
     }
 }

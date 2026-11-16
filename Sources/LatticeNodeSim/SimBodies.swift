@@ -190,7 +190,7 @@ extension Simulator {
         }
         node.fetching = []
         let restored = try ChainCore.restore(
-            replaying: node.store.facts,
+            StoredFacts(node.store.facts),
             context: world.context,
             specs: [world.spec],
             config: node.core.config,

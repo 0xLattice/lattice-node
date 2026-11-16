@@ -65,10 +65,10 @@ final class WeighLogRestoreTests: XCTestCase {
         let (world, host, facts, specs) = try await mined()
         let restored = try NodeCore.restore(
             root: try ChainCore.restore(
-                replaying: facts[LevelWorld.nexus] ?? [], context: try XCTUnwrap(world.rootBootstrap.tree.context),
+                StoredFacts(facts[LevelWorld.nexus] ?? []), context: try XCTUnwrap(world.rootBootstrap.tree.context),
                 specs: [try XCTUnwrap(world.specs[LevelWorld.nexus])]
             ),
-            facts: facts, specs: specs, hosted: world.hosted
+            facts: facts.mapValues { StoredFacts($0) }, specs: specs, hosted: world.hosted
         )
         XCTAssertEqual(Set(restored.levels.keys), Set(host.levels.keys))
         for (path, level) in host.levels {

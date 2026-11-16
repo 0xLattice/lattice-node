@@ -115,7 +115,7 @@ though it were a complete boundary.
 
 ```text
 <storage>/
-  state.db             facts, headers, child proofs, indexes, cursors, local mempool
+  state.db             facts, headers, child proofs, indexes, cursors, state diffs, local mempool
   volumes.db           shared materialized content and retained roots
   volume-bundles.db    cache: per block, the Volume roots served together
 ```
@@ -151,13 +151,16 @@ chain's act-on tip plus the places the blocks above a cursor, a window below
 the tip, replaced, and the scope's marker names the cursor and the tip. Each
 step moves the counts to the tip in one adjustment, computed from the facts
 of the blocks entering and leaving the act-on chain and of the blocks the
-cursor passes, under a compare-and-swap of the marker, so the counts, the
+cursor passes (each executed block's state diff, which `state.db` keeps for
+the state window), under a compare-and-swap of the marker, so the counts, the
 cursor and the tip are written together or not at all; the windows are let
 go of only once the counts reached the tip. The store refuses to count a
 node it does not hold, so what the counts name is held. Counts that cannot
-follow (a reorganization below the cursor, a missing fact) or that the store
+follow (a reorganization below the cursor, a missing fact or diff) or that the store
 refuses are replaced by a state sync, as snap sync does: the state of an
-act-on block a few below the tip is walked off the loop, every node pinned
+act-on block a few below the tip (or of the tip itself when a block between
+them kept no diff, as after a move to `recent` or onto a fork whose window
+went) is walked off the loop, every node pinned
 under a staging scope as it is visited and read from peers when missing,
 then the difference from the counts, moved on to the tip, is written in one
 adjustment. A start checks each chain's counts against the store first, and
@@ -170,8 +173,7 @@ state read) reads it from peers. Pins are in the store and a start leaves
 them as it finds them, but for the scopes earlier versions kept a tip's
 state under, which it lets go of, the counts of a chain no longer hosted or
 no longer kept on `recent`, and staging the counts no longer need, and
-sweeps what no scope names. The journal still lists the roots
-each batch stored, and nothing reads that list.
+sweeps what no scope names.
 
 A fact does not depend on its content being held, so a store that lacks
 content its facts name is not damaged.
@@ -196,14 +198,23 @@ content its facts name is not damaged.
 
 Every entry is checked against its CID. A read nobody can serve is no
 verdict: a block parks and is asked for again, and a template is not built.
-Boot retains the journal's roots the store holds and does not ask that it
-hold them all; it stores the Nexus genesis block again when the store lacks
-it, since nothing else can supply that block's own node. Retaining a root
-that has gone since it was fetched retains the rest.
+Boot reads no content to restore: it stores the Nexus genesis block again
+when the store lacks it, since nothing else can supply that block's own
+node.
 
-`BootRecovery` validates the databases before networking starts. `NodeRuntime.boot` then rebuilds every `ChainCore` from one ordered
-scan grouped by path. Saved child proofs must decode and match their indexes;
-each commits in the transaction of the work fact it produced.
+`state.db` keeps each fact once, by id, with the level's staged batch that
+first held it and its place in that batch: the block index Bitcoin keeps
+for good. Facts are never deleted. A block fact carries no state diff; on
+`recent` each executed block's diff is undo data, kept in `state_diffs` for
+the state window only. `BootRecovery` validates the databases before
+networking starts. `NodeRuntime.boot` then rebuilds each hosted level's
+`ChainCore`, parent before child, from that level's facts read in the order
+it first took them (`ChainTree.restore(facts:)`): one key range per level,
+and the weigh log rebuilt from it keeps every position a peer's stream
+cursor names. A saved child proof names its entries by CID: block nodes and
+child indexes are read from `headers` and `child_indexes`, and the rest
+from `proof_entries`, so it is served byte for byte as credited. Each
+commits in the transaction of the work fact it produced.
 
 There are no storage migrations. `state.db` and `volumes.db` are one recovery
 unit and must be wiped together on a schema cutover.

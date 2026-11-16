@@ -2,8 +2,9 @@ import Foundation
 import Lattice
 
 /// What the counts of a chain's current state, on `recent`, are moved by:
-/// the facts of its executed blocks, each naming its parent, its height
-/// and how its execution changed the places of the state's nodes. Also
+/// the facts of its executed blocks, each naming its parent and its height,
+/// and how each one's execution changed the places of the state's nodes
+/// (its state diff, kept for the state window). Also
 /// the counts earlier versions kept (rows of `core_meta`), which a start
 /// forgets.
 extension NodeStore {
@@ -11,10 +12,29 @@ extension NodeStore {
     func blockFact(_ blockCID: String, at chainPath: [String]) throws -> ChainBlockFact? {
         guard let row = try database.row(
             ImportFactRow.self,
-            "SELECT chain_path, fact_id, payload FROM admission_facts WHERE chain_path = ?1 AND fact_id = ?2",
+            "SELECT payload FROM admission_facts WHERE chain_path = ?1 AND fact_id = ?2",
             params: [.text(chainPath.joined(separator: "/")), .blob(try Self.encode(ChainFactID.block(blockCID)))]
         ), case .block(let fact) = try Self.decode(ChainFact.self, from: try row.payload) else { return nil }
         return fact
+    }
+
+    /// The state diff of an executed block, while the state window keeps
+    /// it: nil once it is let go of, or never kept.
+    func stateDiff(_ blockCID: String, at chainPath: [String]) throws -> StateDiff? {
+        guard let row = try database.row(
+            from: "state_diffs",
+            "SELECT diff FROM state_diffs WHERE chain_path = ?1 AND block_cid = ?2",
+            params: [.text(chainPath.joined(separator: "/")), .text(blockCID)]
+        ) else { return nil }
+        return try Self.decode(StateDiff.self, from: try row.blob("diff"))
+    }
+
+    /// Lets go of the state diffs of the chain's blocks below `height`.
+    func dropStateDiffs(at chainPath: [String], below height: UInt64) throws {
+        try database.execute(
+            "DELETE FROM state_diffs WHERE chain_path = ?1 AND height < ?2",
+            params: [.text(chainPath.joined(separator: "/")), .int(Int64(clamping: height))]
+        )
     }
 
     /// The change that moves a chain's counts from `marker` to `tip`, an
@@ -24,10 +44,10 @@ extension NodeStore {
     /// cursor passes replaced. `known` is the counts' chain, the blocks
     /// from the cursor up to their tip, as the last change returned it;
     /// without it (or not matching the marker) it is walked again. Only the
-    /// facts of the blocks entering, leaving and passed are read. Nil when
-    /// the counts cannot follow: a fact is missing, or the cursor's block is
-    /// not on the tip's chain (the tip is below it, or forked from below
-    /// it).
+    /// facts and diffs of the blocks entering, leaving and passed are read.
+    /// Nil when the counts cannot follow: a fact or diff is missing, or the
+    /// cursor's block is not on the tip's chain (the tip is below it, or
+    /// forked from below it).
     func countedChange(
         at chainPath: [String], from marker: CountedMarker, to tip: String, window: UInt64, known: [String]? = nil
     ) throws -> CountedChange? {
@@ -55,20 +75,21 @@ extension NodeStore {
         let meet = Int(fact.blockHeight - base)
         var deltas: [String: Int] = [:]
         for cid in chain[(meet + 1)...] {
-            guard let left = try blockFact(cid, at: chainPath) else { return nil }
-            for (cid, count) in Self.net(left.stateDiff).created { deltas[cid, default: 0] -= count }
+            guard let left = try stateDiff(cid, at: chainPath) else { return nil }
+            for (cid, count) in Self.net(left).created { deltas[cid, default: 0] -= count }
         }
-        var facts: [String: ChainBlockFact] = [:]
+        var diffs: [String: StateDiff] = [:]
         for fact in entering {
-            facts[fact.blockHash] = fact
-            for (cid, count) in Self.net(fact.stateDiff).created { deltas[cid, default: 0] += count }
+            guard let diff = try stateDiff(fact.blockHash, at: chainPath) else { return nil }
+            diffs[fact.blockHash] = diff
+            for (cid, count) in Self.net(diff).created { deltas[cid, default: 0] += count }
         }
         chain = Array(chain[...meet]) + entering.reversed().map(\.blockHash)
         let top = base + UInt64(chain.count - 1)
         let passed = Int(max(base, top >= window ? top - window : 0) - base)
         for cid in chain[1..<(passed + 1)] {
-            guard let crossed = try facts[cid] ?? blockFact(cid, at: chainPath) else { return nil }
-            for (cid, count) in Self.net(crossed.stateDiff).replaced { deltas[cid, default: 0] -= count }
+            guard let crossed = try diffs[cid] ?? stateDiff(cid, at: chainPath) else { return nil }
+            for (cid, count) in Self.net(crossed).replaced { deltas[cid, default: 0] -= count }
         }
         return CountedChange(
             deltas: deltas.filter { $0.value != 0 },

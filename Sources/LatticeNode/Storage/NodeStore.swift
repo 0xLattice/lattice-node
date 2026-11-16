@@ -68,9 +68,6 @@ actor NodeStore {
                 throw NodeStoreError.wipeRequired("schema tables are missing or unexpected")
             }
         }
-        // Indexes are ensured on BOTH branches: an existing store runs no
-        // other DDL, so an index added after its creation would never exist.
-        try Self.ensureIndexes(in: database)
         try database.configureDurability()
 
         self.database = database

@@ -127,7 +127,7 @@ final class ConsensusEdgeSimulationTests: XCTestCase {
             let store = try XCTUnwrap(relayed.durable(core))
             let restored = try NodeCore.restore(
                 root: try XCTUnwrap(store.records[LevelWorld.nexus]),
-                facts: store.levels.mapValues(\.facts),
+                facts: store.levels.mapValues { StoredFacts($0.facts) },
                 specs: store.levels.mapValues { $0.headers.values.compactMap(\.spec) },
                 hosted: world.hosted,
                 config: relayed.coreConfig,
@@ -245,7 +245,7 @@ final class ConsensusEdgeSimulationTests: XCTestCase {
 
         let log = [world.bootstrap.facts] + persisted(all)
         let restored = try ChainCore.restore(
-            replaying: log, context: world.context, specs: [world.spec], config: ChainCoreConfig(bodyWindow: 4)
+            StoredFacts(log), context: world.context, specs: [world.spec], config: ChainCoreConfig(bodyWindow: 4)
         )
         let after = TreeDigest(restored.tree)
         XCTAssertEqual(after, before, "the restart rebuilds the same weighed graph")

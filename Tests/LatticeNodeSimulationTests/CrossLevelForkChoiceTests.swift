@@ -67,7 +67,7 @@ final class CrossLevelForkChoiceTests: XCTestCase {
         func restored() throws -> NodeCore {
             try NodeCore.restore(
                 root: try XCTUnwrap(store.records[LevelWorld.nexus]),
-                facts: store.levels.mapValues(\.facts),
+                facts: store.levels.mapValues { StoredFacts($0.facts) },
                 specs: store.levels.mapValues { $0.headers.values.compactMap(\.spec) },
                 hosted: world.hosted,
                 cursors: store.levels.mapValues(\.cursors)
@@ -313,7 +313,7 @@ final class CrossLevelForkChoiceTests: XCTestCase {
         }
         var node = try NodeCore.restore(
             root: try XCTUnwrap(store.records[LevelWorld.nexus]),
-            facts: store.levels.mapValues(\.facts),
+            facts: store.levels.mapValues { StoredFacts($0.facts) },
             specs: store.levels.mapValues { $0.headers.values.compactMap(\.spec) },
             hosted: world.hosted,
             cursors: store.levels.mapValues(\.cursors)

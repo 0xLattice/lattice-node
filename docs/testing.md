@@ -61,9 +61,9 @@ Tests require, among other things, that:
 - Nexus reconstructs to the exact configured genesis CID;
 - one `NodeBatch` commits facts and stream cursors for every affected path in
   one SQLite transaction;
-- restart rebuilds Nexus and hosted children from the tree-wide journal;
-- saved proof bytes decode and match their path, child, and grind indexes;
-- normalized fact and accepted-block indexes exactly match immutable batches;
+- restart rebuilds Nexus and hosted children from the stored facts, with
+  every weigh-log position unchanged;
+- a saved proof, kept as its entries' CIDs, reads back byte for byte;
 - an unknown hosted path is a 404 and `/v1/...` routes do not exist;
 - a nested child genesis waits until its parent has executed a block of its
   own;

@@ -10,7 +10,7 @@ import cashew
 extension NodeStore {
     struct PreparedEvidence {
         var headers: [(cid: String, block: Data, childrenCID: String, children: Data)] = []
-        var proofs: [(child: String, root: String, bytes: Data)] = []
+        var proofs: [(child: String, root: String, entries: [(cid: String, data: Data)])] = []
     }
 
     static func prepareEvidence(
@@ -30,7 +30,12 @@ extension NodeStore {
                   proof.directoryPath == Array(path.dropFirst()) else {
                 throw NodeStoreError.corrupt("a child proof does not match its chain path")
             }
-            prepared.proofs.append((stored.childCID, proof.rootCID, try proof.serialize()))
+            // What `serialize` refuses is refused here too.
+            _ = try proof.serialize()
+            guard proof.entries.allSatisfy({ CIDIdentity.isCanonical($0.cid) }) else {
+                throw NodeStoreError.corrupt("a child proof names an entry by a non-canonical CID")
+            }
+            prepared.proofs.append((stored.childCID, proof.rootCID, proof.entries))
         }
         return prepared
     }
@@ -48,14 +53,26 @@ extension NodeStore {
             )
         }
         for row in evidence.proofs {
+            for entry in row.entries where try database.query(
+                "SELECT 1 FROM headers WHERE cid = ?1 AND block = ?2 UNION ALL SELECT 1 FROM child_indexes WHERE cid = ?1 AND bytes = ?2 LIMIT 1",
+                params: [.text(entry.cid), .blob(entry.data)]
+            ).isEmpty {
+                try database.execute(
+                    "INSERT OR IGNORE INTO proof_entries (cid, bytes) VALUES (?1, ?2)",
+                    params: [.text(entry.cid), .blob(entry.data)]
+                )
+            }
             try database.execute(
                 // A verified proof is fixed by its block, root and path, so
-                // a good copy only ever replaces a bad row's bytes.
+                // a good copy only ever replaces a bad row's entries.
                 """
-                INSERT INTO child_proofs (chain, child, root, bytes) VALUES (?1, ?2, ?3, ?4)
-                ON CONFLICT (chain, child, root) DO UPDATE SET bytes = excluded.bytes
+                INSERT INTO child_proofs (chain, child, root, entries) VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT (chain, child, root) DO UPDATE SET entries = excluded.entries
                 """,
-                params: [.text(path), .text(row.child), .text(row.root), .blob(row.bytes)]
+                params: [
+                    .text(path), .text(row.child), .text(row.root),
+                    .text(row.entries.map(\.cid).joined(separator: " ")),
+                ]
             )
         }
     }
@@ -78,10 +95,10 @@ extension NodeStore {
             let marks = (2...(chunk.count + 1)).map { "?\($0)" }.joined(separator: ", ")
             for row in try database.rows(
                 from: "child_proofs",
-                "SELECT rowid, child, root, bytes FROM child_proofs WHERE chain = ?1 AND child IN (\(marks)) ORDER BY child, root",
+                "SELECT rowid, child, root, entries FROM child_proofs WHERE chain = ?1 AND child IN (\(marks)) ORDER BY child, root",
                 params: [.text(path.joined(separator: "/"))] + chunk.map { .text($0) }
             ) {
-                if let saved = Self.savedProof(row, at: path) {
+                if let saved = try savedProof(row, at: path) {
                     proofs[saved.child, default: []].append(saved.proof)
                 } else if let rowid = try? row.int("rowid") {
                     bad.append(rowid)
@@ -96,14 +113,24 @@ extension NodeStore {
         return proofs
     }
 
-    /// A `child_proofs` row as the proof it names, or nil if it is not one.
-    private static func savedProof(_ row: Row, at path: ChainPath) -> (child: String, proof: ChildBlockProof)? {
+    /// A `child_proofs` row as the proof it names, each entry read by its
+    /// CID, or nil if it is not one: an entry not held, or not named by a
+    /// CID. The proof is the one written, byte for byte.
+    private nonisolated func savedProof(_ row: Row, at path: ChainPath) throws -> (child: String, proof: ChildBlockProof)? {
         guard let child = try? row.nonEmptyText("child"), let root = try? row.nonEmptyText("root"),
-              let proof = (try? row.blob("bytes")).flatMap(ChildBlockProof.deserialize),
+              let cids = (try? row.text("entries")).map({ $0.split(separator: " ").map(String.init) }),
               CIDIdentity.isCanonical(child), CIDIdentity.isCanonical(root),
-              proof.directoryPath == Array(path.dropFirst()),
-              proof.rootCID == root else { return nil }
-        return (child, proof)
+              cids.allSatisfy(CIDIdentity.isCanonical) else { return nil }
+        var entries: [(cid: String, data: Data)] = []
+        for cid in cids {
+            guard let bytes = try database.row(
+                from: "proof_entries",
+                "SELECT bytes FROM proof_entries WHERE cid = ?1 UNION ALL SELECT block FROM headers WHERE cid = ?1 UNION ALL SELECT bytes FROM child_indexes WHERE cid = ?1 LIMIT 1",
+                params: [.text(cid)]
+            )?.blob("bytes") else { return nil }
+            entries.append((cid, bytes))
+        }
+        return (child, ChildBlockProof(rootCID: root, directoryPath: Array(path.dropFirst()), entries: entries))
     }
 
     /// Best effort: delete each row of `path` that still does not read back
@@ -114,9 +141,9 @@ extension NodeStore {
         for rowid in rowids {
             guard let row = try? database.row(
                 from: "child_proofs",
-                "SELECT rowid, child, root, bytes FROM child_proofs WHERE rowid = ?1 AND chain = ?2",
+                "SELECT rowid, child, root, entries FROM child_proofs WHERE rowid = ?1 AND chain = ?2",
                 params: [.int(rowid), .text(chain)]
-            ), Self.savedProof(row, at: path) == nil else { continue }
+            ), let unread = try? savedProof(row, at: path) == nil, unread else { continue }
             _ = try? database.execute(
                 "DELETE FROM child_proofs WHERE rowid = ?1 AND chain = ?2",
                 params: [.int(rowid), .text(chain)]

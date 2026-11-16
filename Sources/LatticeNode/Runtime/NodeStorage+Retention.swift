@@ -232,9 +232,9 @@ extension NodeStorage {
     // MARK: - State: recent
 
     /// With a state window: what executions stored at heights more than a
-    /// window below `height`, the tip's, goes. On `recent` what the counts
-    /// name stays; on `none` what a newer block still names is read from
-    /// peers when something reads it.
+    /// window below `height`, the tip's, goes, and their state diffs. On
+    /// `recent` what the counts name stays; on `none` what a newer block
+    /// still names is read from peers when something reads it.
     nonisolated func letGoOfState(at path: ChainPath, below height: UInt64) async {
         guard let window = configuration.stateWindow(for: path) else { return }
         guard height >= window else { return }
@@ -243,6 +243,7 @@ extension NodeStorage {
             for scope in try await broker.retainedScopes(prefix: scopes.windowPrefix(at: path)) where scope < kept {
                 try await release(scope: scope)
             }
+            try await store.dropStateDiffs(at: path, below: height - window + 1)
         } catch {
             syncTrace("state below \(height) not let go of: \(error)")
         }
@@ -367,8 +368,8 @@ extension NodeStorage {
                 return Dictionary(resolved.map { ($0.rawCID, Self.children(of: $0)) }) { first, _ in first }
             }
             for cid in chain.dropFirst() {
-                guard let fact = try await store.blockFact(cid, at: path) else { return nil }
-                for (cid, count) in NodeStore.net(fact.stateDiff).replaced { expected[cid, default: 0] += count }
+                guard let diff = try await store.stateDiff(cid, at: path) else { return nil }
+                for (cid, count) in NodeStore.net(diff).replaced { expected[cid, default: 0] += count }
             }
             let stored = try await broker.countedState(scope: scopes.counted(at: path))
             return stored.marker == marker && stored.counts == expected ? chain : nil
@@ -381,12 +382,20 @@ extension NodeStorage {
     /// The block a state sync of the chain at `path` reads the state of: a
     /// few below `tip` on its chain, so a short reorganization leaves it on
     /// the act-on chain, and within the window, whose scopes still hold
-    /// what the blocks above it created.
+    /// what the blocks above it created. The counts move on from it to the
+    /// tip with the diffs of the blocks above it; when one is not kept (a
+    /// block executed before the node kept diffs, or one whose window went),
+    /// it is the tip itself, whose state needs no diff to reach it: snap
+    /// sync's pivot at the head.
     nonisolated func countedSyncBlock(at path: ChainPath, below tip: String, window: UInt64) async throws -> CountedMarker.Block {
-        guard let block = try await store.ancestor(of: tip, depth: min(6, window / 2), at: path) else {
+        guard let top = try await store.ancestor(of: tip, depth: 0, at: path),
+              let block = try await store.ancestor(of: tip, depth: min(6, window / 2), at: path) else {
             throw NodeStorageError.missingBlockFact(tip)
         }
-        return block
+        let follows = try await store.countedChange(
+            at: path, from: CountedMarker(cursor: block, tip: block), to: tip, window: window, known: [block.cid]
+        ) != nil
+        return follows ? block : top
     }
 
     /// The state sync of the chain at `path`: every node of the state of

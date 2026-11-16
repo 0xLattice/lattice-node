@@ -47,7 +47,7 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   `LevelSimulator` ("published tip … is not durable", "served … before it
   was durable", "relayed … before it was durable").
 - **NODE-STORAGE-002.c** — Content stays because a scope names it, and a
-  start leaves pins as it finds them: nothing is rebuilt from the journal.
+  start leaves pins as it finds them: nothing is rebuilt from the facts.
   A block's body is named by that block on its chain, what executions read
   and create by the chain. A start sweeps what no scope names. Pinned by
   `RetentionRulesTests`,

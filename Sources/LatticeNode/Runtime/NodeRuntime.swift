@@ -111,8 +111,8 @@ public final class NodeRuntime: Sendable {
     enum Input: Sendable {
         case network(NodeRuntimeNetworkInput)
         case event(NodeEvent)
-        /// A body is held locally, in these Volume roots.
-        case bodyStored(ChainPath, cid: String, roots: [String])
+        /// A body is held locally.
+        case bodyStored(ChainPath, cid: String)
         /// A body's fetch failed and is being retried: why, and the error
         /// for the log.
         case bodyWaiting(ChainPath, cid: String, BodyWait, detail: String)
@@ -276,13 +276,13 @@ public final class NodeRuntime: Sendable {
         var started = ContinuousClock.now
         let rootFacts = try await storage.nodeFacts(at: configuration.chainPath)
         level = (
-            configuration.chainPath, rootFacts.count, rootFacts.reduce(0) { $0 + $1.facts.count },
+            configuration.chainPath, Int(rootFacts.batches), rootFacts.facts.count,
             started.duration(to: .now), .now
         )
         // The context pins the Nexus genesis: a store holding another root
         // fails the restore.
         let root = try ChainCore.restore(
-            replaying: consume rootFacts,
+            consume rootFacts,
             context: try configuration.runtimeContext,
             specs: [NexusGenesis.spec],
             config: coreConfig,
@@ -298,13 +298,13 @@ public final class NodeRuntime: Sendable {
             started = .now
             let facts = try await storage.nodeFacts(at: path)
             var specs: [ChainSpec] = []
-            for case .block(let block) in facts.flatMap(\.facts) where block.parentBlockHash == nil {
+            for case .block(let block) in facts.facts where block.parentBlockHash == nil {
                 guard let spec = try await storage.chainGenesisSpec(block.blockHash) else {
                     throw NodeStorageError.missingMaterializedVolume(block.blockHash)
                 }
                 specs.append(spec)
             }
-            level = (path, facts.count, facts.reduce(0) { $0 + $1.facts.count }, started.duration(to: .now), .now)
+            level = (path, Int(facts.batches), facts.facts.count, started.duration(to: .now), .now)
             return (facts, specs)
         }
         logRestored()
@@ -640,9 +640,6 @@ extension NodeRuntime {
         /// Levels with a `reproject` timer pending.
         var reprojections: Set<ChainPath> = []
         var bodies: [BodyKey: Task<Void, Never>] = [:]
-        /// The Volume roots each fetched body was stored in, until the
-        /// validation fact that references them is persisted with them.
-        var bodyRoots: [BodyKey: [String]] = [:]
         /// Why each body being fetched has not arrived, while its fetch runs.
         var fetchWaits: [BodyKey: BodyWait] = [:]
         /// Why each held block's connect ended without a verdict, until the
@@ -735,11 +732,10 @@ extension NodeRuntime {
             case .event(let event):
                 if case .tick = event { wake = nil }
                 return await step(event)
-            case .bodyStored(let path, let cid, let roots):
+            case .bodyStored(let path, let cid):
                 let key = BodyKey(path: path, cid: cid)
                 bodies[key] = nil
                 fetchWaits[key] = nil
-                bodyRoots[key] = roots
                 return await step(.level(path, .bodyFetched(cid: cid)))
             case .bodyWaiting(let path, let cid, let reason, let detail):
                 let key = BodyKey(path: path, cid: cid)
@@ -920,7 +916,6 @@ extension NodeRuntime {
             for key in bodies.keys where core.levels[key.path] == nil {
                 bodies.removeValue(forKey: key)?.cancel()
             }
-            bodyRoots = bodyRoots.filter { core.levels[$0.key.path] != nil }
             fetchWaits = fetchWaits.filter { core.levels[$0.key.path] != nil }
             connectWaits = connectWaits.filter { core.levels[$0.key.path] != nil }
             for (id, entry) in replies where core.levels[entry.path] == nil {
@@ -967,7 +962,7 @@ extension NodeRuntime {
         private mutating func start(_ path: ChainPath, specs operatorSpecs: [ChainPath: ChainSpec]) async throws {
             let facts = try await storage.nodeFacts(at: path)
             var specs: [ChainSpec] = []
-            for case .block(let block) in facts.flatMap(\.facts) where block.parentBlockHash == nil {
+            for case .block(let block) in facts.facts where block.parentBlockHash == nil {
                 guard let spec = try await storage.chainGenesisSpec(block.blockHash, operatorSpecs: operatorSpecs) else {
                     throw NodeStorageError.missingMaterializedVolume(block.blockHash)
                 }
@@ -1536,23 +1531,15 @@ extension NodeRuntime {
         private mutating func execute(_ effect: NodeEffect) async -> Bool {
             switch effect {
             case .persist(let batch):
-                var roots: [ChainPath: [String]] = [:]
                 var persistedBodyKeys: [BodyKey] = []
                 for (path, levelBatch) in batch.levels.sorted(by: { $0.path.count < $1.path.count }) {
-                    // A validated block's body roots are journaled with its
-                    // validation, so they stay retained across restarts.
-                    let keys = levelBatch.facts.flatMap(\.facts).compactMap { fact -> BodyKey? in
+                    persistedBodyKeys += levelBatch.facts.flatMap(\.facts).compactMap { fact -> BodyKey? in
                         guard case .validation(let validation) = fact else { return nil }
                         return BodyKey(path: path, cid: validation.blockHash)
                     }
-                    persistedBodyKeys.append(contentsOf: keys)
-                    roots[path] = keys.flatMap { bodyRoots[$0] ?? [] }
                 }
                 do {
-                    try await storage.persistNodeBatch(
-                        batch, logID: core.logID, bodyRoots: roots
-                    )
-                    for key in persistedBodyKeys { bodyRoots[key] = nil }
+                    try await storage.persistNodeBatch(batch, logID: core.logID)
                     if configuration.blockBodies == .none { executedThisStep.append(contentsOf: persistedBodyKeys) }
                     readsDone.append(contentsOf: persistedBodyKeys)
                     // A block found invalid is no block: its body goes.
@@ -1693,11 +1680,10 @@ extension NodeRuntime {
                             path, cid: cid, BodyWait(fetchFailure: error), detail: "\(error)"
                         ))
                     }
-                    if let roots { inputs.yield(.bodyStored(path, cid: cid, roots: roots)) }
+                    if roots != nil { inputs.yield(.bodyStored(path, cid: cid)) }
                 }
             case .cancelBody(let cid):
                 bodies.removeValue(forKey: BodyKey(path: path, cid: cid))?.cancel()
-                bodyRoots[BodyKey(path: path, cid: cid)] = nil
                 fetchWaits[BodyKey(path: path, cid: cid)] = nil
             case .deriveProof(let job):
                 // From this node's own content only, never peers: the block

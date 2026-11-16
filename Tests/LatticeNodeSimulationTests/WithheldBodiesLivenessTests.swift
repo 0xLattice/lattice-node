@@ -401,7 +401,7 @@ final class WithheldBodiesLivenessTests: XCTestCase {
         let (honest, _) = try await net.mine(by: 0)
         XCTAssertEqual(net.snapshot(0).actOnTip, honest.cid)
         let restored = try ChainCore.restore(
-            replaying: net.facts[0], context: net.world.context, specs: [net.world.spec],
+            StoredFacts(net.facts[0]), context: net.world.context, specs: [net.world.spec],
             config: ChainCoreConfig(bodyWindow: 8)
         )
         XCTAssertEqual(restored.snapshot.actOnTip, honest.cid)

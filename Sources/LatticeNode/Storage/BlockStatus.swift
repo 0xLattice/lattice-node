@@ -4,8 +4,7 @@
 ///
 /// - `header`: boundary only (in the batch scope); enters fork choice on
 ///   verified work, not executed.
-/// - `executed`: executed at import; body + state inside
-///   `admission_batches.volume_roots`.
+/// - `executed`: executed at import.
 /// - `executedAndPinned`: executed by the execution walk; body + state under
 ///   the block's owner pin.
 enum BlockStatus: Int64, Sendable, CaseIterable {

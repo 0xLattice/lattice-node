@@ -66,9 +66,6 @@ struct AcceptedBlockRow: NodeStoreRecord {
             return status
         }
     }
-    /// A derived index repaired from the parent links at boot, so any stored
-    /// integer is read (only 1 means leaf) rather than refused.
-    var leaf: Bool { get throws { try row.int("leaf") == 1 } }
 }
 
 extension NodeStore {
@@ -164,12 +161,8 @@ extension NodeStore {
                 }
                 continue
             }
-            // Leaf-ness is incremental: a new row is a leaf unless a child
-            // row already exists (accepted rows arrive out of order for
-            // disconnected segments), and inserting a child retires its
-            // parent's leaf flag.
             try database.execute(
-                "INSERT INTO accepted_blocks (chain_path, block_cid, parent_cid, admission_seq, validated, leaf) VALUES (?1, ?2, ?3, ?4, ?5, CASE WHEN EXISTS (SELECT 1 FROM accepted_blocks WHERE chain_path = ?1 AND parent_cid = ?2) THEN 0 ELSE 1 END)",
+                "INSERT INTO accepted_blocks (chain_path, block_cid, parent_cid, admission_seq, validated) VALUES (?1, ?2, ?3, ?4, ?5)",
                 params: [
                     .text(chainPath),
                     .text(block.blockCID),
@@ -178,20 +171,6 @@ extension NodeStore {
                     status.sqlValue,
                 ]
             )
-            if let parentCID = block.parentCID {
-                try database.execute(
-                    "UPDATE accepted_blocks SET leaf = 0 WHERE chain_path = ?1 AND block_cid = ?2 AND leaf = 1",
-                    params: [.text(chainPath), .text(parentCID)]
-                )
-            }
         }
-    }
-
-    /// The leaf flag is a derived index over the parent links, written in
-    /// the journal's transaction; boot repairs a row that disagrees (an
-    /// edited or damaged store) in one statement, never a wipe.
-    func repairLeafFlags() throws {
-        let leaf = "NOT EXISTS (SELECT 1 FROM accepted_blocks AS child WHERE child.chain_path = accepted_blocks.chain_path AND child.parent_cid = accepted_blocks.block_cid)"
-        try database.execute("UPDATE accepted_blocks SET leaf = \(leaf) WHERE leaf IS NOT \(leaf)")
     }
 }

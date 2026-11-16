@@ -263,6 +263,13 @@ final class StateWindowTests: XCTestCase {
             try await self.windowHeights(storage) == [6, 7, 8]
         }
         await runtime.stop()
+        // The undo data goes with the window: the facts stay.
+        let kept = try await storage.store.database.rows(
+            from: "state_diffs", "SELECT height FROM state_diffs ORDER BY height"
+        ).map { try $0.int("height") }
+        XCTAssertEqual(kept, [6, 7, 8])
+        let facts = try await storage.store.storedFacts(at: ["Nexus"]).facts
+        XCTAssertEqual(facts.filter { if case .block = $0 { true } else { false } }.count, 9)
     }
 
     /// Every node of the state of `block` with the places it holds in it,
@@ -308,7 +315,10 @@ final class StateWindowTests: XCTestCase {
                 guard block == at.cursor.cid else { throw TestWaitError.timedOut("the cursor is not on the tip's chain") }
                 break
             }
-            for (cid, count) in NodeStore.net(held.stateDiff).replaced { expected[cid, default: 0] += count }
+            let diff = try await storage.store.stateDiff(block, at: path)
+            for (cid, count) in NodeStore.net(try XCTUnwrap(diff, "the window keeps \(block)'s diff")).replaced {
+                expected[cid, default: 0] += count
+            }
             block = try XCTUnwrap(held.parentBlockHash)
         }
         return (at, counts, expected)
@@ -593,6 +603,45 @@ final class StateWindowTests: XCTestCase {
         XCTAssertEqual(marker?.cursor.cid, forked.main[3], "the cursor stays at the fork point")
     }
 
+    /// A node that kept all state moves to `recent`: no block it executed
+    /// kept a diff, so a state sync a few below the tip could not move on to
+    /// it. It syncs at the tip itself, which needs none, and the counts
+    /// reach the tip with no new block.
+    func testANodeMovingToRecentSyncsAtItsTip() async throws {
+        let (producer, producerRuntime, blocks) = try await produce(0xa1, paying: CryptoUtils.generateKeyPair(), 5)
+        var node = try host(keyByte: 0xa2, peers: [producer.endpoint])
+        do {
+            let (runtime, _) = try await start(node)
+            try await eventually("the node follows the producer") { runtime.published.value?.actOnTip == blocks[4] }
+            await runtime.stop()
+        }
+        await producerRuntime.stop()
+        node = try host(keyByte: 0xa2, storageDirectory: node.configuration.storagePath, state: .recent, stateWindow: 4)
+        let (runtime, storage) = try await start(node)
+        try await eventually("the counts reach the tip") { try await self.settled(storage, at: blocks[4]) }
+        await runtime.stop()
+        let marker = try await counted(storage).marker
+        XCTAssertEqual(marker?.cursor.cid, blocks[4], "synced at the tip")
+        try await assertCountsHold(storage, "after moving to recent")
+    }
+
+    /// A fork whose diffs the window let go of becomes the act-on tip again
+    /// with no new block (inherited weight, late work): the counts cannot
+    /// move to it, and a state sync a few below it could not either. It
+    /// syncs at the fork's tip itself.
+    func testAForkWhoseDiffsWentSyncsAtItsTip() async throws {
+        let forked = try await forkedStore(keyBytes: (0xa3, 0xa4), window: 50)
+        let counts = CountsDriver(test: self, storage: forked.storage, remote: forked.remote)
+        try await counts.settle(forked.main[9], 2)
+        // What letGoOfState drops at 9 with a window of 2.
+        try await forked.storage.store.dropStateDiffs(at: ["Nexus"], below: 8)
+        let outcome = try await counts.settle(forked.fork[1], 2)
+        guard case .resync = outcome else { return XCTFail("the counts cannot move to the fork: \(outcome)") }
+        try await counts.resync(forked.fork[1], 2)
+        let cursor = try await counts.cursor()
+        XCTAssertEqual(cursor, forked.fork[1], "synced at the fork's tip")
+    }
+
     /// One store holding two forks' executed blocks, every node of them
     /// kept by a window wider than both: a producer's chain `main` (genesis,
     /// then 9 blocks) and `fork` (4' and 5', from main's 3), which the node
@@ -807,8 +856,8 @@ final class StateWindowTests: XCTestCase {
         var tip = ""
         for _ in 0..<3 { tip = try BlockHeader(node: try await runtime.mineBlock(paid)).rawCID }
         try await eventually("the counts reach the tip") { try await self.settled(storage, at: tip) }
-        let fact = try await storage.store.blockFact(tip, at: ["Nexus"])
-        var diff = try XCTUnwrap(fact?.stateDiff)
+        let kept = try await storage.store.stateDiff(tip, at: ["Nexus"])
+        var diff = try XCTUnwrap(kept)
         XCTAssertFalse(NodeStore.net(diff).replaced.isEmpty, "the block replaced something")
         diff.replaced = [:]
         try await storage.store.rewriteStateDiff(of: tip, at: ["Nexus"], to: diff)
@@ -1139,22 +1188,12 @@ extension NodeStore {
         _ = try database.execute("INSERT INTO core_meta (key, value) VALUES ('state_tip:Nexus', 'x')")
     }
 
-    /// Rewrites the stored fact of `block` to carry `diff`, as a fact an
-    /// older binary wrote with an inexact diff.
+    /// Rewrites the kept state diff of `block` to `diff`, as an older
+    /// binary wrote an inexact one.
     func rewriteStateDiff(of block: String, at chainPath: [String], to diff: StateDiff) throws {
-        let old = try XCTUnwrap(try blockFact(block, at: chainPath))
-        let fact = ChainBlockFact(
-            blockHash: old.blockHash, parentBlockHash: old.parentBlockHash, blockHeight: old.blockHeight,
-            postStateCID: old.postStateCID, prevStateCID: old.prevStateCID, parentStateCID: old.parentStateCID,
-            specCID: old.specCID, target: old.target, nextTarget: old.nextTarget, timestamp: old.timestamp,
-            stateDiff: diff, childCommitments: old.childCommitments
-        )
         let changed = try database.execute(
-            "UPDATE admission_facts SET payload = ?3 WHERE chain_path = ?1 AND fact_id = ?2",
-            params: [
-                .text(chainPath.joined(separator: "/")), .blob(try Self.encode(ChainFactID.block(block))),
-                .blob(try Self.encode(ChainFact.block(fact))),
-            ]
+            "UPDATE state_diffs SET diff = ?3 WHERE chain_path = ?1 AND block_cid = ?2",
+            params: [.text(chainPath.joined(separator: "/")), .text(block), .blob(try Self.encode(diff))]
         )
         XCTAssertEqual(changed, 1)
     }
