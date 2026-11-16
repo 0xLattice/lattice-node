@@ -159,6 +159,7 @@ extension LatticeNodeCommand {
         // (systemd's TimeoutStopSec, Fly's kill_timeout).
         listening.maximumGracefulShutdownDuration = .seconds(30)
         let group = ServiceGroup(configuration: listening)
+        logLine(String(format: "lattice-node: serving, %.3f s after process start", Date().timeIntervalSince(processStartTime)))
         let result: Result<Void, any Error>
         do {
             try await withThrowingTaskGroup(of: Void.self) { tasks in

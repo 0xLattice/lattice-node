@@ -178,6 +178,7 @@ public final class NodeRuntime: Sendable {
         failStop: @escaping @Sendable (any Error) -> Void = { fatalError("node runtime: persist failed: \($0)") },
         observeJob: JobObserver?
     ) async throws -> NodeRuntime {
+        let started = ContinuousClock.now
         var coreConfig = coreConfig
         coreConfig.mining.mempool.minRelayFee = configuration.minRelayFee
         coreConfig.finality = configuration.finality
@@ -243,6 +244,7 @@ public final class NodeRuntime: Sendable {
         // dials the peers it remembers, and its seeds if those are not enough
         // (the overlay itself dials only configured peers).
         runtime.inputs.yield(.maintenance)
+        logLine("lattice-node: runtime started in \(seconds(started.duration(to: .now)))")
         return runtime
     }
 
@@ -262,10 +264,25 @@ public final class NodeRuntime: Sendable {
         for path in [configuration.chainPath] + configuration.hostedChildren {
             cursors[path] = try await storage.chainCursors(at: path)
         }
+        // One line per level once it is restored: its journal read, then
+        // its restore, which ends when the next level's read starts.
+        var level: (path: ChainPath, batches: Int, facts: Int, read: Duration, readEnd: ContinuousClock.Instant)
+        func logRestored() {
+            logLine(
+                "lattice-node: boot: \(level.path.joined(separator: "/")): \(level.batches) batches, \(level.facts) facts:"
+                    + " read \(seconds(level.read)), restore \(seconds(level.readEnd.duration(to: .now)))"
+            )
+        }
+        var started = ContinuousClock.now
+        let rootFacts = try await storage.nodeFacts(at: configuration.chainPath)
+        level = (
+            configuration.chainPath, rootFacts.count, rootFacts.reduce(0) { $0 + $1.facts.count },
+            started.duration(to: .now), .now
+        )
         // The context pins the Nexus genesis: a store holding another root
         // fails the restore.
         let root = try ChainCore.restore(
-            replaying: try await storage.nodeFacts(at: configuration.chainPath),
+            replaying: consume rootFacts,
             context: try configuration.runtimeContext,
             specs: [NexusGenesis.spec],
             config: coreConfig,
@@ -277,6 +294,8 @@ public final class NodeRuntime: Sendable {
             root: consume root, hosted: Set(configuration.hostedChildren), config: coreConfig,
             logID: logID, cursors: cursors
         ) { path in
+            logRestored()
+            started = .now
             let facts = try await storage.nodeFacts(at: path)
             var specs: [ChainSpec] = []
             for case .block(let block) in facts.flatMap(\.facts) where block.parentBlockHash == nil {
@@ -285,8 +304,10 @@ public final class NodeRuntime: Sendable {
                 }
                 specs.append(spec)
             }
+            level = (path, facts.count, facts.reduce(0) { $0 + $1.facts.count }, started.duration(to: .now), .now)
             return (facts, specs)
         }
+        logRestored()
         return core
     }
 

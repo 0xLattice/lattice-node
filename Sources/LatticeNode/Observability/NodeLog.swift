@@ -63,8 +63,16 @@ public final class NodeLog: @unchecked Sendable {
 /// The node's log.
 public let nodeLog = NodeLog()
 
-/// One line of the node's log: on its standard error, and kept for `/logs`.
+/// One line of the node's log, stamped with the time (ISO 8601, UTC): on its
+/// standard error, and kept for `/logs`.
 public func logLine(_ line: String) {
+    let line = ISO8601DateFormatter().string(from: Date()) + " " + line
     FileHandle.standardError.write(Data((line + "\n").utf8))
     nodeLog.append(line)
+}
+
+/// `duration` in seconds, for a log line.
+func seconds(_ duration: Duration) -> String {
+    let (whole, fraction) = duration.components
+    return String(format: "%.3f s", Double(whole) + Double(fraction) / 1e18)
 }

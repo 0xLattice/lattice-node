@@ -31,6 +31,7 @@ enum BootRecovery {
     }
 
     static func run(configuration: NodeConfiguration) async throws -> Result {
+        let started = ContinuousClock.now
         let directoryLock = try lockStorageDirectory(configuration: configuration)
         let stores = try openStores(configuration: configuration)
         let constantRoots = try await materializeConstantRoots(stores, configuration: configuration)
@@ -41,6 +42,7 @@ enum BootRecovery {
         // write a crash cut short, a pool entry of the last run) goes now,
         // while nothing is being stored.
         try await stores.broker.sweep()
+        logLine("lattice-node: boot recovery done in \(seconds(started.duration(to: .now)))")
         return Result(
             store: stores.store,
             broker: stores.broker,
