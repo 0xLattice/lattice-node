@@ -197,20 +197,21 @@ extension NodeStorage {
         }
     }
 
-    /// What a body session reserves: four times `maxBlockSize` plus 8 MiB,
-    /// at most `allowance` (the whole allowance when the spec is not held).
+    /// What a body session reserves: four times `maxBlockSize`, at most
+    /// `allowance` (the whole allowance when the spec is not held).
     /// `maxBlockSize` counts the data of the block's own Volume and its
     /// transactions. Holding an entry costs its CID and
     /// `retainedEntryOverhead` beside its data, and each transaction adds
     /// the state its validation reads: a body of minimal transactions at
-    /// 1 MB costs about 3.7 times its size to hold, hence four. The 8 MiB
-    /// is for the rest the walk reads that `maxBlockSize` does not count:
-    /// the header, the spec, policy modules. Only a body past that (one of
-    /// unusually small entries) is fetched a second time.
+    /// 1 MB costs about 3.7 times its size to hold, hence four. The spec and
+    /// policy modules cost the session nothing once this node holds them
+    /// (stored with the chain's genesis, then with each block): the walk
+    /// reads the store first. Only a body past that (one of unusually small
+    /// entries, or one whose spec or modules are not held yet) is fetched a
+    /// second time.
     static func bodyReservation(maxBlockSize: Int?, allowance: Int) -> Int {
-        let fixed = 8 * 1_024 * 1_024
-        guard let maxBlockSize, maxBlockSize < (allowance - fixed) / 4 else { return allowance }
-        return 4 * max(maxBlockSize, 0) + fixed
+        guard let maxBlockSize, maxBlockSize < allowance / 4 else { return allowance }
+        return 4 * max(maxBlockSize, 0)
     }
 
     private nonisolated func fetchChainBody(

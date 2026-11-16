@@ -902,6 +902,21 @@ final class BundledBlockFetchTests: XCTestCase {
 
     private static let typicalTransactionCount = 1_500
 
+    /// A body past its session's reservation (here four bytes, below the
+    /// block's own Volume) is fetched once more under the whole allowance,
+    /// and arrives; both reservations are given back.
+    func testABodyPastItsReservationIsFetchedAgainUnderTheWholeAllowance() async throws {
+        let producer = try await storage(keyByte: 0xA0)
+        let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
+        let recorded = await producer.volumeBundle(cid)
+        let remote = remote(producer, requests: Requests())
+
+        let stored = try await storage(keyByte: 0xA1).fetchChainBody(cid, remote: remote, maxBlockSize: 1)
+
+        XCTAssertEqual(Set(stored), Set(recorded))
+        XCTAssertEqual(remote.budget.reserved, 0)
+    }
+
     /// A body fetch that fails leaves nothing it was sent to stand for the
     /// block's Volume: a peer's short Volume for the block is not kept, and
     /// the block's connect asks peers again and completes.
