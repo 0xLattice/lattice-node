@@ -199,7 +199,7 @@ public struct Simulator {
     /// DST 7: the store alone rebuilds an equal tree.
     func checkReplay(_ name: String, _ node: CoreNode, _ digest: TreeDigest) throws {
         let restored = try ChainCore.restore(
-            replaying: node.store.facts,
+            StoredFacts(node.store.facts),
             context: world.context,
             specs: [world.spec],
             config: node.core.config,

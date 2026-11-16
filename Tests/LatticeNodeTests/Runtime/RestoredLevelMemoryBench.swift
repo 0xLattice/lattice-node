@@ -80,7 +80,7 @@ final class RestoredLevelMemoryBench: XCTestCase {
         withExtendedLifetime(tree) {}
 
         start = Self.heapInUse()
-        let core = try ChainCore.restore(replaying: facts, context: context, specs: [])
+        let core = try ChainCore.restore(StoredFacts(facts), context: context, specs: [])
         let coreBytes = Self.heapInUse() - start
         XCTAssertEqual(core.sync.log.count, UInt64(3 * held))
         withExtendedLifetime((core, facts)) {}

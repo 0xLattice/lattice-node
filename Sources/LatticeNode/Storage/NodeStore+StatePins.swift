@@ -11,7 +11,7 @@ extension NodeStore {
     func blockFact(_ blockCID: String, at chainPath: [String]) throws -> ChainBlockFact? {
         guard let row = try database.row(
             ImportFactRow.self,
-            "SELECT chain_path, fact_id, payload FROM admission_facts WHERE chain_path = ?1 AND fact_id = ?2",
+            "SELECT payload FROM admission_facts WHERE chain_path = ?1 AND fact_id = ?2",
             params: [.text(chainPath.joined(separator: "/")), .blob(try Self.encode(ChainFactID.block(blockCID)))]
         ), case .block(let fact) = try Self.decode(ChainFact.self, from: try row.payload) else { return nil }
         return fact

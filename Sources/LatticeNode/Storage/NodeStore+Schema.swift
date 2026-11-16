@@ -17,13 +17,16 @@ struct NodeMetadataRow: NodeStoreRecord {
 }
 
 extension NodeStore {
+    /// Epoch 48: each fact is kept once, by id, with the staged batch that
+    /// first held it; the batch journal is gone and boot restores from the
+    /// facts.
     /// Epoch 47: block facts record the block's `parentState`, which an
     /// attributed run checks before crediting a child block (§9.10). Older
     /// child-chain facts lack it and would read as the empty state.
     /// Epoch 46: weighed header material and credited child proofs live in
     /// this store, written with their facts. Older stores must be wiped; Nexus
     /// deterministically recreates the configured exact genesis.
-    static let currentSchemaEpoch: Int64 = 47
+    static let currentSchemaEpoch: Int64 = 48
 
     static func validateMetadata(
         in database: NodeSQLite,
@@ -61,7 +64,6 @@ extension NodeStore {
 
     static let expectedTables: Set<String> = [
         "node_metadata",
-        "admission_batches",
         "admission_facts",
         "accepted_blocks",
         "local_mempool_transactions",
@@ -110,29 +112,22 @@ extension NodeStore {
         try database.execute(
             "CREATE INDEX IF NOT EXISTS accepted_blocks_frontier ON accepted_blocks (chain_path, admission_seq DESC, block_cid DESC) WHERE leaf = 1"
         )
-        // One level's journal in order (boot and a hot-hosted start): read
-        // in pages by seq range, so any sort is bounded to one page.
-        try database.execute(
-            "CREATE INDEX IF NOT EXISTS admission_batches_by_level ON admission_batches (chain_path, seq)"
-        )
     }
 
     private static func createDataTables(in database: NodeSQLite) throws {
-        try database.execute("""
-            CREATE TABLE IF NOT EXISTS admission_batches (
-                seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                chain_path TEXT NOT NULL,
-                payload BLOB NOT NULL,
-                volume_roots BLOB NOT NULL,
-                UNIQUE (chain_path, payload)
-            )
-            """)
+        // Every fact once, by id (`UNIQUE`), kept forever. `seq` is the
+        // level's staged batch that first held it and `ord` its place in
+        // that batch: a level reads back as one key range in its weigh
+        // order, and appends at its end.
         try database.execute("""
             CREATE TABLE IF NOT EXISTS admission_facts (
                 chain_path TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                ord INTEGER NOT NULL,
                 fact_id BLOB NOT NULL,
                 payload BLOB NOT NULL,
-                PRIMARY KEY (chain_path, fact_id)
+                PRIMARY KEY (chain_path, seq, ord),
+                UNIQUE (chain_path, fact_id)
             ) WITHOUT ROWID
             """)
         try database.execute("""

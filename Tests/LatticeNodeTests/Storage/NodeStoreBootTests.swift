@@ -90,31 +90,39 @@ final class NodeStoreBootTests: XCTestCase {
         }
     }
 
-    /// Boot and a hot-hosted start read one level's journal in seq order,
-    /// in pages through `admission_batches_by_level`: whatever the SQLite
-    /// version's plan, a sort never holds more than one page of payloads.
-    func testALevelsJournalIsReadInPagesInSeqOrder() async throws {
+    /// Boot and a hot-hosted start read one level's facts in the order it
+    /// took them, as one primary-key range with no sort: each batch's new
+    /// facts in place, a fact staged again keeping its first seq, and a
+    /// re-stated block fact read at its first place with its new bytes.
+    func testALevelsFactsAreReadInStagedOrderByTheKey() async throws {
         let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         let store = try store(path)
-        let alphaRows = Int(NodeStore.levelBatchesPage) + 3
-        var expected: [BlockImportBatch] = []
-        for index in 0..<(2 * alphaRows) {
-            let level = index.isMultiple(of: 2) ? ["Nexus"] : ["Nexus", "Alpha"]
-            try await store.stageChainFacts(
-                [blockBatch("block-\(index)")], volumeRoots: [], logID: "log", at: level
-            )
-            if level.count == 2 { expected.append(blockBatch("block-\(index)")) }
+        let alpha: ChainPath = ["Nexus", "Alpha"]
+        var expected: [ChainFact] = []
+        for index in 0..<6 {
+            let level = index.isMultiple(of: 2) ? ["Nexus"] : alpha
+            try await store.stageChainFacts([blockBatch("block-\(index)")], logID: "log", at: level)
+            if level == alpha { expected += blockBatch("block-\(index)").facts }
         }
+        // Staged again with a new fact: only the new fact takes a new seq.
+        let validation = ChainFact.validation(ChainValidationFact(blockHash: "block-1"))
+        try await store.stageChainFacts(
+            [BlockImportBatch(facts: blockBatch("block-1").facts + [validation])], logID: "log", at: alpha
+        )
+        expected.append(validation)
+        // Staged again whole: no new seq.
+        try await store.stageChainFacts([blockBatch("block-3")], logID: "log", at: alpha)
+
         let database = try NodeSQLite(path: path.path)
         _ = try database.execute("ANALYZE")
         let plan = try database.query(
-            "EXPLAIN QUERY PLAN " + NodeStore.levelBatchesSQL,
-            params: [.text("Nexus/Alpha"), .int(0), .int(NodeStore.levelBatchesPage)]
+            "EXPLAIN QUERY PLAN " + NodeStore.levelFactsSQL, params: [.text("Nexus/Alpha")]
         ).compactMap { $0["detail"]?.textValue }.joined(separator: "\n")
-        XCTAssertTrue(plan.contains("admission_batches_by_level"), plan)
-        XCTAssertTrue(plan.contains("seq>?"), plan)
-        let batches = try await store.importBatches(at: ["Nexus", "Alpha"])
-        XCTAssertEqual(batches, expected)
+        XCTAssertTrue(plan.contains("PRIMARY KEY"), plan)
+        XCTAssertFalse(plan.contains("TEMP B-TREE"), plan)
+        let stored = try await store.storedFacts(at: alpha)
+        XCTAssertEqual(stored.facts, expected)
+        XCTAssertEqual(stored.batches, 4)
     }
 
     func testStreamCursorsCommitWithFactsAndSurviveReopen() async throws {
@@ -125,7 +133,7 @@ final class NodeStoreBootTests: XCTestCase {
             "peer-b": StreamCursor(logID: "other-log", position: 4),
         ]
         try await initial.stageChainFacts(
-            [blockBatch("accepted")], volumeRoots: [], logID: "local-log",
+            [blockBatch("accepted")], logID: "local-log",
             cursors: cursors
         )
 
@@ -135,7 +143,7 @@ final class NodeStoreBootTests: XCTestCase {
 
         let advanced = StreamCursor(logID: "remote-log", position: 23)
         try await reopened.stageChainFacts(
-            [], volumeRoots: [], logID: "local-log",
+            [], logID: "local-log",
             cursors: ["peer-a": advanced]
         )
         let updated = try await reopened.chainCursors()
@@ -150,7 +158,7 @@ final class NodeStoreBootTests: XCTestCase {
         let child: ChainPath = ["Nexus", "testnet"]
         let ended = ["peer": StreamCursor(logID: "", position: 0)]
         try await store(path).stageNodeFacts([
-            NodeFactBatch(path: child, facts: [], volumeRoots: [], cursors: ended),
+            NodeFactBatch(path: child, facts: [], cursors: ended),
         ], logID: "local-log")
         let restored = try await store(path).chainCursors(at: child)
         XCTAssertEqual(restored, ended)
@@ -163,12 +171,11 @@ final class NodeStoreBootTests: XCTestCase {
             try await store.stageNodeFacts([
                 NodeFactBatch(
                     path: ["Nexus"], facts: [blockBatch("root")],
-                    volumeRoots: [], cursors: [:]
+                    cursors: [:]
                 ),
                 NodeFactBatch(
                     path: ["Nexus", "Alpha"], facts: [blockBatch("child")],
                     proofs: [alphaProof],
-                    volumeRoots: [],
                     cursors: ["": StreamCursor(logID: "remote-log", position: 1)]
                 ),
             ], logID: "local-log")
@@ -178,8 +185,8 @@ final class NodeStoreBootTests: XCTestCase {
             XCTFail("unexpected error: \(error)")
         }
 
-        let staged = try await store.stagedImports()
-        XCTAssertTrue(staged.isEmpty)
+        let held = try await store.hasStagedImports()
+        XCTAssertFalse(held)
         let logID = try await store.chainLogID()
         XCTAssertNil(logID)
         XCTAssertTrue(try store.savedProofs(at: ["Nexus", "Alpha"], for: [alphaProof.childCID]).isEmpty)
@@ -191,7 +198,7 @@ final class NodeStoreBootTests: XCTestCase {
         try await store(path).stageNodeFacts([
             NodeFactBatch(
                 path: alpha, facts: [blockBatch("child")], proofs: [alphaProof],
-                volumeRoots: [], cursors: [:]
+                cursors: [:]
             ),
         ], logID: "local-log")
         let saved = try store(path).savedProofs(at: alpha, for: [alphaProof.childCID])
@@ -212,7 +219,7 @@ final class NodeStoreBootTests: XCTestCase {
         } + [alphaProof]
         let store = try store(path)
         try await store.stageNodeFacts([
-            NodeFactBatch(path: alpha, facts: [blockBatch("child")], proofs: proofs, volumeRoots: [], cursors: [:]),
+            NodeFactBatch(path: alpha, facts: [blockBatch("child")], proofs: proofs, cursors: [:]),
         ], logID: "local-log")
         // Past one query chunk, with blocks that have no proofs.
         let asked = (0..<600).map { "absent-\($0)" } + [other, alphaProof.childCID]
@@ -257,7 +264,7 @@ final class NodeStoreBootTests: XCTestCase {
 
         let fresh = StoredProof(childCID: child, proof: ChildBlockProof(rootCID: badRoot, directoryPath: ["Alpha"], entries: []))
         try await store.stageNodeFacts([
-            NodeFactBatch(path: alpha, facts: [blockBatch("child")], proofs: [fresh], volumeRoots: [], cursors: [:]),
+            NodeFactBatch(path: alpha, facts: [blockBatch("child")], proofs: [fresh], cursors: [:]),
         ], logID: "local-log")
         let rewritten = try store.savedProofs(at: alpha, for: [child])
         XCTAssertEqual(rewritten.mapValues { $0.map(\.rootCID) }, [child: [goodRoot, badRoot].sorted()])
@@ -288,7 +295,7 @@ final class NodeStoreBootTests: XCTestCase {
                         rootCID: NexusGenesis.expectedBlockHash, directoryPath: ["Alpha"], entries: []
                     ))
                 },
-                volumeRoots: [], cursors: [:]
+                cursors: [:]
             ),
         ], logID: "local-log")
         var page = SavedProofPage(store: store, path: alpha, cids: cids)

@@ -9,7 +9,7 @@ import cashew
 
 /// A hosted child level across a restart: a child genesis weighed by its
 /// proof but not yet executed (its body never fetched) restores from the
-/// header store, and boot keeps every root the child journal names.
+/// header store, and boot keeps the content its facts name.
 final class ChildLevelRestartTests: XCTestCase {
     private let alpha = ["Nexus", "Alpha"]
 
@@ -38,13 +38,10 @@ final class ChildLevelRestartTests: XCTestCase {
         )
         XCTAssertTrue(restored.levels[alpha]?.tree.contains(blockHash: genesisCID) ?? false)
         XCTAssertFalse(restored.levels[alpha]?.tree.isExecuted(blockHash: genesisCID) ?? true)
-        let childRoots = try await reopened.store.stagedImports(at: alpha)
-            .flatMap(\.volumeRoots)
-        XCTAssertFalse(childRoots.isEmpty)
-        for root in childRoots {
-            let volume = await reopened.volume(root)
-            XCTAssertNotNil(volume, "child root \(root) was swept")
-        }
+        let fact = try await reopened.store.blockFact(genesisCID, at: alpha)
+        let spec = try XCTUnwrap(fact?.specCID)
+        let volume = await reopened.volume(spec)
+        XCTAssertNotNil(volume, "the child genesis's spec \(spec) was swept")
     }
 
     /// One grind is one transaction across every level it touches.
@@ -72,8 +69,8 @@ final class ChildLevelRestartTests: XCTestCase {
             listenPort: NetworkTransportTestPorts.allocate(), rpcPort: NetworkTransportTestPorts.allocate()
         )
         let reopened = try await NodeStorage.open(configuration: unhosted)
-        let alphaRows = try await reopened.store.stagedImports(at: alpha)
-        XCTAssertFalse(alphaRows.isEmpty, "fixture guard: Alpha's journal must still be present")
+        let alphaRows = try await reopened.store.storedFacts(at: alpha)
+        XCTAssertFalse(alphaRows.facts.isEmpty, "fixture guard: Alpha's facts must still be present")
         let restored = try await NodeRuntime.boot(
             storage: reopened, configuration: unhosted, coreConfig: .init()
         )
@@ -98,11 +95,11 @@ final class ChildLevelRestartTests: XCTestCase {
         let logID = try XCTUnwrap(storedLogID)
         try await store.stageNodeFacts([
             NodeFactBatch(
-                path: ["Nexus"], facts: [], volumeRoots: [],
+                path: ["Nexus"], facts: [],
                 cursors: ["peer-a": StreamCursor(logID: "remote", position: 3)]
             ),
             NodeFactBatch(
-                path: alpha, facts: [], volumeRoots: [],
+                path: alpha, facts: [],
                 cursors: ["peer-a": StreamCursor(logID: "remote", position: 1), "peer-b": StreamCursor(logID: "", position: 0)]
             ),
             NodeFactBatch(
@@ -112,7 +109,7 @@ final class ChildLevelRestartTests: XCTestCase {
                     prevStateCID: "previous-state", specCID: "spec", target: "target", nextTarget: "next-target",
                     timestamp: 0, stateDiff: .empty
                 ))])],
-                volumeRoots: [], cursors: [:]
+                cursors: [:]
             ),
         ], logID: logID)
 
@@ -121,12 +118,14 @@ final class ChildLevelRestartTests: XCTestCase {
             storage: reopened, configuration: configuration, coreConfig: .init()
         )
 
-        let journal = Dictionary(grouping: try await reopened.store.stagedImports(), by: \.chainPath)
-            .mapValues { $0.map(\.batch) }
-        XCTAssertNotNil(journal[orphan], "fixture guard: the unrestored level's rows are journaled")
+        var journal: [ChainPath: StoredFacts] = [:]
+        for path in [["Nexus"], alpha, beta, leaf, orphan] {
+            journal[path] = try await reopened.store.storedFacts(at: path)
+        }
+        XCTAssertFalse(journal[orphan]?.facts.isEmpty ?? true, "fixture guard: the unrestored level's facts are stored")
         var specs: [ChainPath: [ChainSpec]] = [:]
         for path in [alpha, beta] {
-            for case .block(let block) in (journal[path] ?? []).flatMap(\.facts) where block.parentBlockHash == nil {
+            for case .block(let block) in (journal[path]?.facts ?? []) where block.parentBlockHash == nil {
                 let spec = try await reopened.chainGenesisSpec(block.blockHash)
                 specs[path, default: []].append(try XCTUnwrap(spec))
             }
@@ -138,7 +137,7 @@ final class ChildLevelRestartTests: XCTestCase {
         XCTAssertEqual(cursors[alpha]?.count, 2, "fixture guard: cursors are journaled")
         let whole = try NodeCore.restore(
             root: try ChainCore.restore(
-                replaying: journal[["Nexus"]] ?? [], context: try configuration.runtimeContext,
+                journal[["Nexus"]] ?? .empty, context: try configuration.runtimeContext,
                 specs: [NexusGenesis.spec], cursors: cursors[["Nexus"]] ?? [:]
             ),
             facts: journal, specs: specs, hosted: [alpha, beta, leaf],
@@ -151,13 +150,13 @@ final class ChildLevelRestartTests: XCTestCase {
         var asked: [ChainPath] = []
         let skipping = try await NodeCore.restore(
             root: try ChainCore.restore(
-                replaying: journal[["Nexus"]] ?? [], context: try configuration.runtimeContext,
+                journal[["Nexus"]] ?? .empty, context: try configuration.runtimeContext,
                 specs: [NexusGenesis.spec]
             ),
             hosted: [alpha, beta, leaf, orphan]
         ) { path in
             asked.append(path)
-            return (journal[path] ?? [], specs[path] ?? [])
+            return (journal[path] ?? .empty, specs[path] ?? [])
         }
         XCTAssertEqual(asked, [alpha, beta, leaf])
         XCTAssertNil(skipping.levels[orphan])
@@ -181,7 +180,7 @@ final class ChildLevelRestartTests: XCTestCase {
         let configuration = try configuration()
         let genesisCID = try await weighChildGenesis(configuration)
         let reopened = try await NodeStorage.open(configuration: configuration)
-        let work = try await reopened.store.stagedImports(at: alpha).flatMap(\.batch.facts)
+        let work = try await reopened.store.storedFacts(at: alpha).facts
             .compactMap { fact -> String? in
                 guard case .work(let work) = fact, work.blockHash == genesisCID else { return nil }
                 return work.contribution.id

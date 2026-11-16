@@ -17,7 +17,7 @@ import LatticeNodeAPI
 final class MergedMiningTests: XCTestCase {
     /// The saved proofs of every block `path` credited work to.
     private static func savedProofs(_ storage: NodeStorage, at path: ChainPath) async throws -> [String: [ChildBlockProof]] {
-        let blocks = try await storage.store.stagedImports(at: path).flatMap(\.batch.facts)
+        let blocks = try await storage.store.storedFacts(at: path).facts
             .compactMap { fact -> String? in
                 guard case .work(let work) = fact else { return nil }
                 return work.blockHash

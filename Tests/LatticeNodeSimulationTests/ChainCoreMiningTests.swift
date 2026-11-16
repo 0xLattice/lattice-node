@@ -240,7 +240,7 @@ final class ChainCoreMiningTests: XCTestCase {
         let store = try XCTUnwrap(sim.durable("core0"))
         var restored = try NodeCore.restore(
             root: store.records[LevelWorld.nexus]!,
-            facts: store.levels.mapValues(\.facts),
+            facts: store.levels.mapValues { StoredFacts($0.facts) },
             specs: store.levels.mapValues { $0.headers.values.compactMap(\.spec) },
             hosted: sim.world.hosted,
             config: sim.coreConfig,

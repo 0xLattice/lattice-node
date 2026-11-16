@@ -9,7 +9,6 @@ struct NodeFactBatch: Sendable {
     let facts: [BlockImportBatch]
     var headers: [StoredHeader] = []
     var proofs: [StoredProof] = []
-    let volumeRoots: [String]
     let cursors: [String: StreamCursor]
 }
 
@@ -19,7 +18,6 @@ extension NodeStore {
     /// row, and cursor for the step becomes visible atomically.
     func stageNodeFacts(_ levels: [NodeFactBatch], logID: String) throws {
         struct PreparedRow {
-            let payload: Data
             let facts: [(id: Data, payload: Data)]
             let blocks: [AcceptedBlockRecord]
             let validated: [String]
@@ -27,7 +25,6 @@ extension NodeStore {
         struct PreparedLevel {
             let path: String
             let evidence: PreparedEvidence
-            let rootsPayload: Data
             let rows: [PreparedRow]
             let cursors: [String: StreamCursor]
         }
@@ -53,7 +50,6 @@ extension NodeStore {
                     return (try Self.encode(fact.id), try Self.encode(fact))
                 }
                 rows.append(PreparedRow(
-                    payload: try Self.encode(batch),
                     facts: facts,
                     blocks: try Self.acceptedBlocks(in: batch),
                     validated: validated
@@ -64,7 +60,6 @@ extension NodeStore {
                 evidence: try Self.prepareEvidence(
                     headers: level.headers, proofs: level.proofs, at: level.path
                 ),
-                rootsPayload: try Self.encode(Array(Set(level.volumeRoots)).sorted()),
                 rows: rows,
                 cursors: level.cursors
             )
@@ -79,61 +74,45 @@ extension NodeStore {
             }
             for level in prepared {
                 try Self.writeEvidence(level.evidence, at: level.path, in: database)
+                // Each batch that adds a fact takes the level's next seq; a
+                // fact already held keeps the seq it was first staged in.
+                var seq = try Self.lastSeq(at: level.path, in: database)
                 for row in level.rows {
-                    if try database.row(
-                        ImportBatchRow.self,
-                        "SELECT seq, chain_path, payload, volume_roots FROM admission_batches WHERE chain_path = ?1 AND payload = ?2",
-                        params: [.text(level.path), .blob(row.payload)]
-                    ) != nil { continue }
-
-                    var restated: [(id: Data, payload: Data)] = []
-                    for fact in row.facts {
-                        if let existing = try database.row(
-                            ImportFactRow.self,
-                            "SELECT chain_path, fact_id, payload FROM admission_facts WHERE chain_path = ?1 AND fact_id = ?2",
-                            params: [.text(level.path), .blob(fact.id)]
-                        ), try existing.payload != fact.payload {
-                            guard try Self.restatesWeighedBlock(
-                                existing.payload, as: fact.payload
-                            ) else {
-                                throw NodeStoreError.conflictingImportFact
-                            }
-                            restated.append(fact)
+                    var added = false
+                    for (ord, fact) in row.facts.enumerated() {
+                        if try database.execute(
+                            "INSERT INTO admission_facts (chain_path, seq, ord, fact_id, payload) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (chain_path, fact_id) DO NOTHING",
+                            params: [
+                                .text(level.path), .int(seq + 1), .int(Int64(ord)),
+                                .blob(fact.id), .blob(fact.payload),
+                            ]
+                        ) == 1 {
+                            added = true
+                            continue
                         }
-                    }
-                    for fact in restated {
+                        guard let existing = try database.row(
+                            ImportFactRow.self,
+                            "SELECT payload FROM admission_facts WHERE chain_path = ?1 AND fact_id = ?2",
+                            params: [.text(level.path), .blob(fact.id)]
+                        ) else {
+                            throw NodeStoreError.corrupt("an admission fact was neither stored nor held")
+                        }
+                        guard try existing.payload != fact.payload else { continue }
+                        guard try Self.restatesWeighedBlock(existing.payload, as: fact.payload) else {
+                            throw NodeStoreError.conflictingImportFact
+                        }
+                        // The executed block's fact, in its place: the
+                        // seq it was first staged in stays.
                         try database.execute(
                             "UPDATE admission_facts SET payload = ?3 WHERE chain_path = ?1 AND fact_id = ?2",
-                            params: [
-                                .text(level.path), .blob(fact.id), .blob(fact.payload),
-                            ]
+                            params: [.text(level.path), .blob(fact.id), .blob(fact.payload)]
                         )
                     }
-                    try database.execute(
-                        "INSERT INTO admission_batches (chain_path, payload, volume_roots) VALUES (?1, ?2, ?3)",
-                        params: [
-                            .text(level.path), .blob(row.payload), .blob(level.rootsPayload),
-                        ]
-                    )
-                    guard let sequence = try database.row(
-                        ImportBatchRow.self,
-                        "SELECT seq, chain_path, payload, volume_roots FROM admission_batches WHERE chain_path = ?1 AND payload = ?2",
-                        params: [.text(level.path), .blob(row.payload)]
-                    )?.sequence else {
-                        throw NodeStoreError.corrupt("missing newly staged admission batch")
-                    }
-                    for fact in row.facts {
-                        try database.execute(
-                            "INSERT OR IGNORE INTO admission_facts (chain_path, fact_id, payload) VALUES (?1, ?2, ?3)",
-                            params: [
-                                .text(level.path), .blob(fact.id), .blob(fact.payload),
-                            ]
-                        )
-                    }
+                    if added { seq += 1 }
                     try persistAcceptedBlockRows(
                         row.blocks,
                         at: level.path,
-                        admissionSequence: sequence,
+                        admissionSequence: max(seq, 1),
                         status: .header
                     )
                     for cid in row.validated {
@@ -170,7 +149,6 @@ extension NodeStore {
     /// Convenience for seeding and focused store tests.
     func stageChainFacts(
         _ batches: [BlockImportBatch],
-        volumeRoots: [String],
         logID: String,
         cursors: [String: StreamCursor] = [:],
         at path: ChainPath = ["Nexus"]
@@ -179,10 +157,18 @@ extension NodeStore {
             NodeFactBatch(
                 path: path,
                 facts: batches,
-                volumeRoots: volumeRoots,
                 cursors: cursors
             ),
         ], logID: logID)
+    }
+
+    /// The level's newest seq, 0 when it holds no fact.
+    static func lastSeq(at path: String, in database: NodeSQLite) throws -> Int64 {
+        try database.row(
+            from: "admission_facts",
+            "SELECT COALESCE(MAX(seq), 0) AS seq FROM admission_facts WHERE chain_path = ?1",
+            params: [.text(path)]
+        )?.int("seq") ?? 0
     }
 
     /// The host weigh-log id recorded with the first fact, if any.

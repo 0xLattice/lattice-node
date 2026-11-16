@@ -203,7 +203,7 @@ enum BootRecovery {
         try await stores.broker.mergeRetainedRoots(scope: stores.retentionScope, roots: roots)
         guard !seeded else { return }
         try await stores.store.stageChainFacts(
-            [boot.facts], volumeRoots: roots, logID: UUID().uuidString.lowercased()
+            [boot.facts], logID: UUID().uuidString.lowercased()
         )
     }
 }

@@ -532,7 +532,7 @@ public struct LevelSimulator {
     func checkReplay(_ name: String, _ node: HostNode) throws {
         let restored = try NodeCore.restore(
             root: node.store.records[LevelWorld.nexus]!,
-            facts: node.store.levels.mapValues(\.facts),
+            facts: node.store.levels.mapValues { StoredFacts($0.facts) },
             specs: node.store.levels.mapValues { $0.headers.values.compactMap(\.spec) },
             hosted: world.hosted,
             config: coreConfig,

@@ -334,7 +334,7 @@ final class ChainCoreBodyTests: XCTestCase {
         XCTAssertEqual(core.snapshot.actOnTip, chain[1].cid)
 
         var restored = try ChainCore.restore(
-            replaying: log, context: world.context, specs: [world.spec], config: ChainCoreConfig(bodyWindow: 4)
+            StoredFacts(log), context: world.context, specs: [world.spec], config: ChainCoreConfig(bodyWindow: 4)
         )
         XCTAssertEqual(restored.snapshot.actOnTip, chain[1].cid)
         let effects = restored.step(.tick, now: Self.now)

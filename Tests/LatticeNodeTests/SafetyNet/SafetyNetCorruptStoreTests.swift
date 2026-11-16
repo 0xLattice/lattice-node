@@ -9,7 +9,7 @@ import XCTest
 /// "Boot" is `NodeStorage.open`: `NodeStore.init` (node_metadata), the leaf
 /// flag repair (accepted_blocks.leaf) and the local mempool
 /// (local_mempool_transactions); then `NodeRuntime.boot`, which replays each
-/// hosted level's journal (admission_batches.payload).
+/// hosted level's facts (admission_facts.payload).
 ///
 /// Every case starts from one valid fixture (Nexus, two mined blocks), damages
 /// exactly one row through SQL, reopens, and records what boot did. The
@@ -20,11 +20,10 @@ import XCTest
 /// - A column that cannot be read as its table declares it: refused with
 ///   `NodeStoreError.malformedRow(table:column:)` naming exactly the damaged
 ///   table and column.
-/// - An undecodable batch: refused with `NodeStoreError.corrupt`.
-/// - A row boot does not read: opened. The journal's derived rows
-///   (admission_facts, accepted_blocks) and its volume roots are written in
-///   the batch's own transaction, so boot does not re-derive them; the read
-///   that reads a damaged row refuses it then.
+/// - An undecodable fact: refused with `NodeStoreError.corrupt`.
+/// - A row boot does not read: opened. The derived rows (accepted_blocks)
+///   are written in their facts' own transaction, so boot does not
+///   re-derive them; the read that reads a damaged row refuses it then.
 /// - accepted_blocks.leaf disagreeing with the parent links: repaired at boot.
 /// - A Volume a fact names gone from volumes.db: opened. Content is fetched
 ///   when read; its absence is no damage.
@@ -68,24 +67,14 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
     /// Refused with `NodeStoreError.corrupt`.
     private static let refusedAsCorrupt: [Damage] = [
         Damage(
-            table: "admission_batches", column: "payload",
-            description: "malformed JSON in the newest batch",
-            sql: ["UPDATE admission_batches SET payload = X'00' WHERE seq = (SELECT MAX(seq) FROM admission_batches)"]
+            table: "admission_facts", column: "payload",
+            description: "malformed JSON in one fact",
+            sql: ["UPDATE admission_facts SET payload = X'00' WHERE fact_id = (SELECT MIN(fact_id) FROM admission_facts)"]
         ),
     ]
 
     /// Opened: boot does not read these rows.
     private static let unread: [Damage] = [
-        Damage(
-            table: "admission_batches", column: "volume_roots",
-            description: "malformed JSON in the newest batch",
-            sql: ["UPDATE admission_batches SET volume_roots = X'00' WHERE seq = (SELECT MAX(seq) FROM admission_batches)"]
-        ),
-        Damage(
-            table: "admission_facts", column: "payload",
-            description: "one fact's bytes no longer match its batch",
-            sql: ["UPDATE admission_facts SET payload = X'00' WHERE fact_id = (SELECT MIN(fact_id) FROM admission_facts)"]
-        ),
         Damage(
             table: "accepted_blocks", column: "parent_cid",
             description: "empty parent CID on a non-genesis block",

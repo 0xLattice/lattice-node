@@ -22,7 +22,7 @@ public enum NodeEvent: Sendable {
     case mined(MinedGrind, replyID: UInt64? = nil)
     /// Start hosting a child level while running, over what it journaled
     /// when it was last hosted (nothing for a new one).
-    case host(ChainPath, facts: [BlockImportBatch], specs: [ChainSpec], cursors: [String: StreamCursor])
+    case host(ChainPath, facts: StoredFacts, specs: [ChainSpec], cursors: [String: StreamCursor])
     /// Stop hosting a child level and every level below it. What they
     /// journaled stays.
     case unhost(ChainPath)
@@ -220,7 +220,7 @@ public struct NodeCore: Sendable {
     /// derived from its restored parent, never read.
     public static func restore(
         root record: ChainLevelRecord,
-        facts: [ChainPath: [BlockImportBatch]],
+        facts: [ChainPath: StoredFacts],
         specs: [ChainPath: [ChainSpec]] = [:],
         hosted: Set<ChainPath>,
         pins: [ChainPath: String] = [:],
@@ -229,7 +229,7 @@ public struct NodeCore: Sendable {
         cursors: [ChainPath: [String: StreamCursor]] = [:]
     ) throws -> NodeCore {
         let restoredRoot = try ChainCore.restore(
-            replaying: facts[record.path] ?? [],
+            facts[record.path] ?? .empty,
             context: try ChainRuntimeContext(path: record.path, genesisCID: record.genesis.blockCID),
             specs: [record.spec]
         )
@@ -244,7 +244,7 @@ public struct NodeCore: Sendable {
     /// takes the root level over: the caller hands over its only reference.
     public static func restore(
         root restoredRoot: consuming ChainCore,
-        facts: [ChainPath: [BlockImportBatch]],
+        facts: [ChainPath: StoredFacts],
         specs: [ChainPath: [ChainSpec]] = [:],
         hosted: Set<ChainPath>,
         pins: [ChainPath: String] = [:],
@@ -256,7 +256,7 @@ public struct NodeCore: Sendable {
             root: consume restoredRoot, hosted: hosted, pins: pins, config: config, logID: logID, cursors: cursors
         )
         for path in host.ordered where path != host.rootPath {
-            try host.restoreChild(path, facts: facts[path] ?? [], specs: specs[path] ?? [], cursors: cursors[path] ?? [:])
+            try host.restoreChild(path, facts: facts[path] ?? .empty, specs: specs[path] ?? [], cursors: cursors[path] ?? [:])
         }
         return host
     }
@@ -272,7 +272,7 @@ public struct NodeCore: Sendable {
         config: ChainCoreConfig = ChainCoreConfig(),
         logID: String = "",
         cursors: [ChainPath: [String: StreamCursor]] = [:],
-        level: (ChainPath) async throws -> (facts: [BlockImportBatch], specs: [ChainSpec])
+        level: (ChainPath) async throws -> (facts: StoredFacts, specs: [ChainSpec])
     ) async throws -> NodeCore {
         var host = restoring(root: consume restoredRoot, hosted: hosted, config: config, logID: logID, cursors: cursors)
         for path in host.ordered where path != host.rootPath {
@@ -311,7 +311,7 @@ public struct NodeCore: Sendable {
     /// One child level restored over its restored parent, parent before
     /// child. `init` runs only the hosted levels whose parent it runs.
     private mutating func restoreChild(
-        _ path: ChainPath, facts: [BlockImportBatch], specs: [ChainSpec], cursors: [String: StreamCursor]
+        _ path: ChainPath, facts: StoredFacts, specs: [ChainSpec], cursors: [String: StreamCursor]
     ) throws {
         // The restored parent serves this level's runs (the empty one
         // `init` served is gone).
@@ -321,8 +321,8 @@ public struct NodeCore: Sendable {
     }
 
     /// Every block `facts` weigh.
-    static func blocks(of facts: [BlockImportBatch]) -> Set<String> {
-        Set(facts.flatMap(\.facts).compactMap {
+    static func blocks(of stored: StoredFacts) -> Set<String> {
+        Set(stored.facts.compactMap {
             guard case .block(let block) = $0 else { return nil }
             return block.blockHash
         })
@@ -331,10 +331,10 @@ public struct NodeCore: Sendable {
     /// One child level over its journaled facts and its restored parent.
     func restoreLevel(
         _ path: ChainPath, parent: ChainCore,
-        facts: [BlockImportBatch], specs: [ChainSpec], cursors: [String: StreamCursor]
+        facts: StoredFacts, specs: [ChainSpec], cursors: [String: StreamCursor]
     ) throws -> ChainCore {
         try ChainCore.restore(
-            replaying: facts,
+            facts,
             context: try ChainRuntimeContext(path: path),
             specs: specs,
             parent: parent.tree,
@@ -522,7 +522,7 @@ public struct NodeCore: Sendable {
     /// current peer. A level whose parent is not hosted, or one already
     /// hosted, is left as it is.
     mutating func host(
-        _ path: ChainPath, facts: [BlockImportBatch], specs: [ChainSpec],
+        _ path: ChainPath, facts: StoredFacts, specs: [ChainSpec],
         cursors: [String: StreamCursor], _ turn: inout Turn
     ) {
         guard levels[path] == nil, levels[Array(path.dropLast())] != nil, serve(path),

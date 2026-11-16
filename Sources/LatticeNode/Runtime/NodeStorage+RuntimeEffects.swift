@@ -8,9 +8,9 @@ import cashew
 /// Volume broker of an opened `NodeStorage`, used as the effect executor's
 /// persistence and content layer. Nothing here decides anything.
 extension NodeStorage {
-    /// One level's journaled facts, in order.
-    nonisolated func nodeFacts(at path: ChainPath) async throws -> [BlockImportBatch] {
-        try await store.importBatches(at: path)
+    /// One level's stored facts, in the order it took them.
+    nonisolated func nodeFacts(at path: ChainPath) async throws -> StoredFacts {
+        try await store.storedFacts(at: path)
     }
 
     /// Policy modules an operator supplies while the node runs, stored as
@@ -37,15 +37,10 @@ extension NodeStorage {
     /// `NodeEffect.persist`: content first — every affected level's Volumes
     /// in one volumes.db transaction, then retained — then the complete node
     /// step's headers, proofs, facts and cursors in one state.db transaction.
-    nonisolated func persistNodeBatch(
-        _ batch: NodeBatch,
-        logID: String,
-        bodyRoots: [ChainPath: [String]] = [:]
-    ) async throws {
+    nonisolated func persistNodeBatch(_ batch: NodeBatch, logID: String) async throws {
         var durable: [NodeFactBatch] = []
         // What this step's executions created. An executed block's body was
-        // pinned under its block's name by the job that executed it, and the
-        // journal still names it.
+        // pinned under its block's name by the job that executed it.
         var stored: [String] = []
         // With recent state kept, or none: the state each level's
         // executions stored, under the height of its newest block.
@@ -81,13 +76,11 @@ extension NodeStorage {
                 states[path] = (height, executed)
                 stored.append(contentsOf: specs)
             }
-            let roots = created + (bodyRoots[path] ?? [])
             durable.append(NodeFactBatch(
                 path: path,
                 facts: level.facts,
                 headers: level.headers,
                 proofs: level.proofs,
-                volumeRoots: roots,
                 cursors: level.cursors
             ))
         }

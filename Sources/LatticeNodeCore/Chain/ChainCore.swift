@@ -2,6 +2,28 @@ import Lattice
 import UInt256
 import cashew
 
+/// A level's durable facts as restore takes them: in the order the store
+/// first took each (its staged batch, then its place in that batch), and
+/// the number of staged batches that added them. The weigh log is that
+/// order, each object once, so a restart keeps every log position.
+public struct StoredFacts: Sendable {
+    public let facts: [ChainFact]
+    public let batches: UInt64
+
+    public init(facts: [ChainFact], batches: UInt64) {
+        self.facts = facts
+        self.batches = batches
+    }
+
+    /// A store that kept the staged batches themselves: their facts in
+    /// order, copies included (restore and the log take each once).
+    public init(_ batches: [BlockImportBatch]) {
+        self.init(facts: batches.flatMap(\.facts), batches: UInt64(batches.count))
+    }
+
+    public static let empty = StoredFacts(facts: [], batches: 0)
+}
+
 /// What the shell hands the core. Time is not an event: every `step` takes
 /// the shell's `now` (milliseconds since the epoch).
 public enum ChainEvent: Sendable {
@@ -347,8 +369,7 @@ public struct ChainCore: Sendable {
     /// child genesis weighs by its proofs like any child header. The fact
     /// log is the one source of truth; attributed runs are derived and never
     /// facts.
-    static func logEntries(of batches: [BlockImportBatch], isRoot: Bool) -> [LogEntry] {
-        let facts = batches.flatMap(\.facts)
+    static func logEntries(of facts: [ChainFact], isRoot: Bool) -> [LogEntry] {
         let rootGenesis: Set<String> = isRoot ? Set(facts.compactMap {
             guard case .block(let block) = $0, block.parentBlockHash == nil else { return nil }
             return block.blockHash
@@ -370,17 +391,18 @@ public struct ChainCore: Sendable {
     /// an empty tree. A child level passes its restored `parent`, serving
     /// its directory, so its attributed runs are derived.
     ///
-    /// The revision floor is the number of durable batches. On a root level
-    /// each batch the store holds is distinct and takes at most one revision,
-    /// so no revision exposed before the restart exceeds it. Replay alone can
-    /// count fewer: its sort can apply a batch that re-states a grind's final
-    /// quantity before the work batches that raised it, which then replay as
-    /// duplicates (§12.5.11). A child level also takes a revision for each
-    /// raised attributed run (`applyParentRun`), which no durable row
-    /// records and restore re-derives once, so there the floor can still
-    /// fall short. The node exposes no revision to clients.
+    /// The revision floor is the number of staged batches that added a
+    /// fact. On a root level each batch that took a revision added at least
+    /// one new fact, so no revision exposed before the restart exceeds it.
+    /// Replay alone can count fewer: its sort can apply a batch that
+    /// re-states a grind's final quantity before the work batches that
+    /// raised it, which then replay as duplicates (§12.5.11). A child level
+    /// also takes a revision for each raised attributed run
+    /// (`applyParentRun`), which no durable row records and restore
+    /// re-derives once, so there the floor can still fall short. The node
+    /// exposes no revision to clients.
     public static func restore(
-        replaying facts: [BlockImportBatch],
+        _ stored: StoredFacts,
         context: ChainRuntimeContext,
         specs: [ChainSpec],
         parent: ChainTree? = nil,
@@ -388,16 +410,16 @@ public struct ChainCore: Sendable {
         logID: String = "",
         cursors: [String: StreamCursor] = [:]
     ) throws -> ChainCore {
-        let tree = facts.isEmpty
+        let tree = stored.facts.isEmpty
             ? ChainTree.empty(context: context)
             : try ChainTree.restore(
-                replaying: facts,
-                revisionFloor: UInt64(facts.count),
+                facts: stored.facts,
+                revisionFloor: stored.batches,
                 context: context,
                 specs: specs,
                 parent: parent
             )
-        let roots = facts.flatMap(\.facts).compactMap { fact -> String? in
+        let roots = stored.facts.compactMap { fact -> String? in
             guard case .block(let block) = fact, block.parentBlockHash == nil else { return nil }
             return block.blockHash
         }
@@ -405,7 +427,7 @@ public struct ChainCore: Sendable {
             tree: tree,
             roots: roots,
             config: config,
-            log: WeighLog(id: logID, entries: logEntries(of: facts, isRoot: context.isRoot), in: tree),
+            log: WeighLog(id: logID, entries: logEntries(of: stored.facts, isRoot: context.isRoot), in: tree),
             cursors: cursors
         )
     }
@@ -528,7 +550,7 @@ public struct ChainCore: Sendable {
         // The weigh log follows the fact log: a header precedes its proofs,
         // a parent its children.
         let start = sync.log.count
-        for entry in Self.logEntries(of: turn.facts, isRoot: isRoot) { sync.log.append(entry, in: tree) }
+        for entry in Self.logEntries(of: turn.facts.flatMap(\.facts), isRoot: isRoot) { sync.log.append(entry, in: tree) }
         // At most a page is pushed; `hasMore` has the peer pull the rest.
         let appended = sync.log.page(after: start, limit: config.maxHeadersPerPage, bytes: config.maxPageBytes)
         if !turn.facts.isEmpty || !turn.indexed.isEmpty || !turn.cursors.isEmpty {
