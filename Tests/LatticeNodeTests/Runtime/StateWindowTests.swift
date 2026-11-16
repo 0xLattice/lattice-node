@@ -603,6 +603,45 @@ final class StateWindowTests: XCTestCase {
         XCTAssertEqual(marker?.cursor.cid, forked.main[3], "the cursor stays at the fork point")
     }
 
+    /// A node that kept all state moves to `recent`: no block it executed
+    /// kept a diff, so a state sync a few below the tip could not move on to
+    /// it. It syncs at the tip itself, which needs none, and the counts
+    /// reach the tip with no new block.
+    func testANodeMovingToRecentSyncsAtItsTip() async throws {
+        let (producer, producerRuntime, blocks) = try await produce(0xa1, paying: CryptoUtils.generateKeyPair(), 5)
+        var node = try host(keyByte: 0xa2, peers: [producer.endpoint])
+        do {
+            let (runtime, _) = try await start(node)
+            try await eventually("the node follows the producer") { runtime.published.value?.actOnTip == blocks[4] }
+            await runtime.stop()
+        }
+        await producerRuntime.stop()
+        node = try host(keyByte: 0xa2, storageDirectory: node.configuration.storagePath, state: .recent, stateWindow: 4)
+        let (runtime, storage) = try await start(node)
+        try await eventually("the counts reach the tip") { try await self.settled(storage, at: blocks[4]) }
+        await runtime.stop()
+        let marker = try await counted(storage).marker
+        XCTAssertEqual(marker?.cursor.cid, blocks[4], "synced at the tip")
+        try await assertCountsHold(storage, "after moving to recent")
+    }
+
+    /// A fork whose diffs the window let go of becomes the act-on tip again
+    /// with no new block (inherited weight, late work): the counts cannot
+    /// move to it, and a state sync a few below it could not either. It
+    /// syncs at the fork's tip itself.
+    func testAForkWhoseDiffsWentSyncsAtItsTip() async throws {
+        let forked = try await forkedStore(keyBytes: (0xa3, 0xa4), window: 50)
+        let counts = CountsDriver(test: self, storage: forked.storage, remote: forked.remote)
+        try await counts.settle(forked.main[9], 2)
+        // What letGoOfState drops at 9 with a window of 2.
+        try await forked.storage.store.dropStateDiffs(at: ["Nexus"], below: 8)
+        let outcome = try await counts.settle(forked.fork[1], 2)
+        guard case .resync = outcome else { return XCTFail("the counts cannot move to the fork: \(outcome)") }
+        try await counts.resync(forked.fork[1], 2)
+        let cursor = try await counts.cursor()
+        XCTAssertEqual(cursor, forked.fork[1], "synced at the fork's tip")
+    }
+
     /// One store holding two forks' executed blocks, every node of them
     /// kept by a window wider than both: a producer's chain `main` (genesis,
     /// then 9 blocks) and `fork` (4' and 5', from main's 3), which the node

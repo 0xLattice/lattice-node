@@ -576,7 +576,10 @@ or a block's diff missing) or that the store refuses (a count below zero), and a
 (the first start on `recent`, a chain newly hosted), are replaced by a state
 sync: the node walks the state of a block a few below its tip, node by node,
 reading what it lacks from peers, then replaces the counts with that state's
-in one write and moves them on to the tip. A node the counts would start
+in one write and moves them on to the tip with the diffs of the blocks
+between. When one of those blocks kept no diff (the node kept all state or
+none when it executed it, or it is on a fork whose window went) the node
+walks the tip's own state instead, and there is nothing to move on. A node the counts would start
 counting and the store lacks is read from peers first, then the counts move.
 What a state sync or such a read fetched is held until the counts name it,
 and a state sync that fails lets go of what it held beyond where it reached.

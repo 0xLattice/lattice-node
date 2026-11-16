@@ -158,7 +158,9 @@ go of only once the counts reached the tip. The store refuses to count a
 node it does not hold, so what the counts name is held. Counts that cannot
 follow (a reorganization below the cursor, a missing fact or diff) or that the store
 refuses are replaced by a state sync, as snap sync does: the state of an
-act-on block a few below the tip is walked off the loop, every node pinned
+act-on block a few below the tip (or of the tip itself when a block between
+them kept no diff, as after a move to `recent` or onto a fork whose window
+went) is walked off the loop, every node pinned
 under a staging scope as it is visited and read from peers when missing,
 then the difference from the counts, moved on to the tip, is written in one
 adjustment. A start checks each chain's counts against the store first, and
