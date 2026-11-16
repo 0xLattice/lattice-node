@@ -143,6 +143,38 @@ final class HostChainsRuntimeTests: XCTestCase {
         XCTAssertNotEqual(rehosted, unhosted)
     }
 
+    /// A child catching up is left out of the template, which its tip
+    /// moving does not rebuild: mining on its history makes blocks nobody
+    /// uses. It joins the template once it latches (`ChainCore.catchingUp`).
+    func testAChildJoinsTheTemplateOnceItLatches() async throws {
+        let host = try await start(keyByte: 0x85, hosted: [Self.alpha])
+        let recipient = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
+        let plan = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: Self.alpha, address: recipient)])
+        let hostAlpha = try XCTUnwrap(host.runtime.levelReads[Self.alpha])
+        while (await hostAlpha.readSnapshot().height ?? 0) < 6 { _ = try await host.runtime.mineBlock(plan) }
+
+        let follower = try await start(keyByte: 0x86, hosted: [Self.alpha], peers: [host.endpoint])
+        let levels = LiveLevels(inputs: follower.runtime.inputs)
+        func alphaCatchingUp() async -> Bool { await levels.read { $0[Self.alpha]?.catchingUp } == true }
+        func carriesAlpha(_ template: MiningTemplateResponse) -> Bool {
+            template.chains?.contains { $0.chainPath == Self.alpha } == true
+        }
+        // Before it meets a peer, Alpha has nothing to catch up from.
+        try await eventually("the follower's Alpha meets the host") {
+            await levels.read { $0[Self.alpha]?.sync.peers.isEmpty == false } == true
+        }
+        try await eventually("a template carries Alpha once it latches", within: .seconds(30)) {
+            let before = await alphaCatchingUp()
+            guard let template = try? await follower.runtime.miningTemplate(plan) else { return false }
+            // Latched is never unset: catching up after the build means
+            // catching up when it was built.
+            if before, await alphaCatchingUp() { XCTAssertFalse(carriesAlpha(template)) }
+            return carriesAlpha(template)
+        }
+        let synced = await levels.read { $0[Self.alpha]?.synced }
+        XCTAssertEqual(synced, true)
+    }
+
     private static func alphaHealth(_ client: some TestClientProtocol, _ status: HTTPResponse.Status) async throws {
         try await client.execute(
             uri: "/health?chainPath=Nexus/Alpha", method: .get, headers: [.authorization: testOperatorAuthorization]

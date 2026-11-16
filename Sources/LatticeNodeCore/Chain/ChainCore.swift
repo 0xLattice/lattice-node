@@ -299,6 +299,13 @@ public struct ChainCore: Sendable {
     /// persisted (geth's `handler.synced`, set when its downloader completes
     /// a sync cycle). Until then a peer's transaction is ignored.
     public internal(set) var synced = false
+    /// Whether this level is catching up: it has peers and has not yet
+    /// `synced`. Its tip is history, so no template carries it, and its tip
+    /// moving rebuilds none, as Bitcoin Core's `getblocktemplate` refuses
+    /// during initial download and geth's miner pauses while its downloader
+    /// syncs. A level with no peers has nothing to catch up from and is
+    /// mined, as geth's miner mines until a sync starts.
+    public var catchingUp: Bool { !synced && !sync.peers.isEmpty }
     public let config: ChainCoreConfig
     /// The level's mempool and template book, on the act-on tip.
     public internal(set) var mining: MiningState
@@ -433,6 +440,9 @@ public struct ChainCore: Sendable {
         // download: its verdict would be read on a tip about to move. Never
         // blamed.
         if case .mining(.transactionReceived(_, origin: .peer)) = event, !synced { return [] }
+        if case .mining(.templateRequested(let replyID, _)) = event, catchingUp {
+            return [.mining(.templateRefused(replyID: replyID, .syncing))]
+        }
         parentTree = parent
         defer { parentTree = nil }
         var turn = Turn(now: now)

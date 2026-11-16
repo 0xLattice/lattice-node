@@ -1499,7 +1499,7 @@ func serviceCall<Value: Encodable, Context: RequestContext>(
         throw HTTPError(.tooManyRequests, message: "full")
     } catch let error as MempoolError {
         throw HTTPError(.badRequest, message: reason(error))
-    } catch let error as TemplateError where error == .busy {
+    } catch let error as TemplateError where error == .busy || error == .syncing {
         throw HTTPError(.serviceUnavailable, message: reason(error))
     } catch let error as TemplateError {
         throw HTTPError(.badRequest, message: reason(error))

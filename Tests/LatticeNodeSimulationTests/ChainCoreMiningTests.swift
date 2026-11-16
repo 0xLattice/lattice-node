@@ -155,8 +155,10 @@ final class ChainCoreMiningTests: XCTestCase {
 
     /// The sync latch: a peer's transaction is dropped (no effect, nothing
     /// pending, no blame) until a peer's log has been read to its end and
-    /// the act-on tip has reached the best header; every other origin and a
-    /// template request is served meanwhile. Once set it stays set when the
+    /// the act-on tip has reached the best header; every other origin is
+    /// served meanwhile. A template request is refused while the level
+    /// catches up, as Bitcoin Core's `getblocktemplate` is during initial
+    /// download, and built once it latches. Once set it stays set when the
     /// gap reopens. A core started again, or one whose tip is current but
     /// that has read no peer's log, is unsynced.
     func testAPeerTransactionWaitsForTheSyncLatch() async throws {
@@ -190,12 +192,18 @@ final class ChainCoreMiningTests: XCTestCase {
         let template = mining(core.step(
             .mining(.templateRequested(replyID: 9, TemplateRequest(rewardRecipient: nil))), now: Self.now
         ))
-        XCTAssertTrue(template.contains { if case .buildTemplate = $0 { true } else { false } }, "\(template)")
+        guard case .templateRefused(9, .syncing)? = template.first, template.count == 1 else {
+            return XCTFail("\(template)")
+        }
 
         try await execute(Array(chain.prefix(3)), world: world, content: content, on: &core)
         XCTAssertFalse(core.synced, "one block short")
         try await execute([chain[3]], world: world, content: content, on: &core)
         XCTAssertTrue(core.synced)
+        let latched = mining(core.step(
+            .mining(.templateRequested(replyID: 10, TemplateRequest(rewardRecipient: nil))), now: Self.now
+        ))
+        XCTAssertTrue(latched.contains { if case .buildTemplate = $0 { true } else { false } }, "\(latched)")
         XCTAssertTrue(try peerArrival(&core, nonce: 9).contains { if case .preflight = $0 { true } else { false } })
 
         // The gap reopens: the latch stays.
@@ -209,6 +217,12 @@ final class ChainCoreMiningTests: XCTestCase {
         var restarted = ChainCore(tree: core.tree.detached(), config: ChainCoreConfig(bodyWindow: 8))
         XCTAssertFalse(restarted.synced)
         XCTAssertTrue(try peerArrival(&restarted, nonce: 11).isEmpty)
+        // With no peer it has nothing to catch up from: it is mined.
+        XCTAssertFalse(restarted.catchingUp)
+        let peerless = mining(restarted.step(
+            .mining(.templateRequested(replyID: 11, TemplateRequest(rewardRecipient: nil))), now: Self.now
+        ))
+        XCTAssertTrue(peerless.contains { if case .buildTemplate = $0 { true } else { false } }, "\(peerless)")
     }
 
     /// The stream's tail is pushed only once the level is synced, as Bitcoin
@@ -354,6 +368,8 @@ final class ChainCoreMiningTests: XCTestCase {
     /// the tip moves: its result answers the request.
     func testATemplateBuildWaitingOnTheOldTipAnswersWhenItLands() async throws {
         var core = weighed(Array(chain.prefix(2)))
+        // Its peer gone, the level is not catching up: it is mined.
+        _ = core.step(.peerGone(peer), now: Self.now)
         let requested = mining(core.step(
             .mining(.templateRequested(replyID: 1, TemplateRequest(rewardRecipient: nil))), now: Self.now
         ))

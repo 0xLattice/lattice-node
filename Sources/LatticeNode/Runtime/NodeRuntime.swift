@@ -1268,10 +1268,15 @@ extension NodeRuntime {
                     || currentPeers[path]?.contains($0.peer.id.publicKey) == true)
             }.count
             let pool = level.mining.mempool
+            // The levels a template carries: a level catching up neither
+            // carries nor moves it.
+            let carried = path != core.rootPath || carries(path)
             let children = path == core.rootPath
-                ? core.ordered.dropFirst().compactMap { child in core.levels[child].map { (path: child, level: $0) } }
+                ? core.ordered.dropFirst().filter(carries).compactMap { child in
+                    core.levels[child].map { (path: child, level: $0) }
+                }
                 : []
-            let key = ([("", tip.hash, "", pool.version)] + children.map {
+            let key = ([("", carried ? tip.hash : "", "", carried ? pool.version : 0)] + children.map {
                 ($0.path.joined(separator: "/"), $0.level.snapshot.actOnTip, $0.level.snapshot.bestHeaderTip,
                  $0.level.mining.mempool.version)
             }).map { "\($0.0):\($0.1)/\($0.2)/\($0.3)" }.joined(separator: "\n")
@@ -1280,7 +1285,7 @@ extension NodeRuntime {
                 digest = cached.digest
             } else {
                 digest = NodeRuntime.templateDigest(
-                    tip: tip.hash, carrying: level.mining.nextBlock,
+                    tip: carried ? tip.hash : "", carrying: carried ? level.mining.nextBlock : [],
                     levels: children.map {
                         ($0.path, $0.level.snapshot.actOnTip, $0.level.snapshot.bestHeaderTip, $0.level.mining.nextBlock)
                     }
@@ -1849,9 +1854,17 @@ extension NodeRuntime {
             return true
         }
 
-        /// Every hosted level below `path`, as a template job reads it.
+        /// Whether a template carries the hosted level `path`: neither it nor
+        /// any hosted level above it is catching up (`ChainCore.catchingUp`).
+        /// One joins once it and those above have latched.
+        func carries(_ path: ChainPath) -> Bool {
+            (core.rootPath.count...path.count).allSatisfy { core.levels[Array(path.prefix($0))]?.catchingUp == false }
+        }
+
+        /// Every hosted level below `path` a template carries, as a template
+        /// job reads it.
         func childTemplateInputs(below path: ChainPath) -> [ChildTemplateInput] {
-            core.ordered.filter { $0.count > path.count && $0.starts(with: path) }.compactMap { child -> ChildTemplateInput? in
+            core.ordered.filter { $0.count > path.count && $0.starts(with: path) && carries($0) }.compactMap { child -> ChildTemplateInput? in
                 guard let level = core.levels[child] else { return nil }
                 let snapshot = level.snapshot
                 let executed = !snapshot.actOnTip.isEmpty

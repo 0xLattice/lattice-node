@@ -161,9 +161,9 @@ final class AdmissionWhileSyncingTests: XCTestCase {
     /// transactions: no peer admission runs before the level's sync latch is
     /// set (`ChainCore.synced`), which it is once caught up; its connects are those of a quiet sync, and once
     /// caught up it pools a peer's transaction. A miner polling for
-    /// templates meanwhile is served on the old tip (Bitcoin Core refuses
-    /// `getblocktemplate` during initial block download); the builds it
-    /// costs are printed.
+    /// templates meanwhile is refused and costs no build, as Bitcoin Core
+    /// refuses `getblocktemplate` during initial block download
+    /// (`ChainCore.catchingUp`); once caught up it is served.
     func testACatchingUpNodeIgnoresPeerTransactionsWithoutSlowingItsConnects() async throws {
         let window = 4
         let blocks = UInt64(3 * window + 4)
@@ -177,7 +177,7 @@ final class AdmissionWhileSyncingTests: XCTestCase {
             ) { kind, effect in
                 // Nil, the level unreadable (a job still running once the
                 // loop has stopped), is not catching up.
-                let catchingUp = await probe.level(\.synced) == false
+                let catchingUp = await probe.level(\.catchingUp) == true
                 switch (kind, effect) {
                 case (.connect, _):
                     await probe.count("connect")
@@ -197,6 +197,12 @@ final class AdmissionWhileSyncingTests: XCTestCase {
                 }
             }
             let polling = Task {
+                // From when the level meets its peer: before that it has
+                // nothing to catch up from, and is mined.
+                while flood, !Task.isCancelled, await probe.level(\.catchingUp) != true {
+                    if await probe.level(\.synced) == true { return }
+                    try? await Task.sleep(nanoseconds: 10_000_000)
+                }
                 while flood, !Task.isCancelled {
                     _ = try? await synced.runtime.miningTemplate(MiningTemplateRequest())
                     try? await Task.sleep(nanoseconds: 100_000_000)
@@ -215,6 +221,9 @@ final class AdmissionWhileSyncingTests: XCTestCase {
             if flood {
                 try await eventually("a peer's transaction pooled once caught up", within: .seconds(60)) {
                     (synced.runtime.published.value?.mempoolCount ?? 0) > 0
+                }
+                try await eventually("a template once caught up", within: .seconds(60)) {
+                    (try? await synced.runtime.miningTemplate(MiningTemplateRequest())) != nil
                 }
             }
             announcing.cancel()
@@ -235,6 +244,7 @@ final class AdmissionWhileSyncingTests: XCTestCase {
                 + "template builds while catching up \(builds); peer admissions after \(admitted)"
         )
         XCTAssertEqual(early, 0)
+        XCTAssertEqual(builds, 0, "a level catching up builds no template")
         XCTAssertGreaterThan(admitted, 0, "peer transactions are admitted once caught up")
         XCTAssertEqual(quietConnects, Int(blocks))
         XCTAssertEqual(connects, quietConnects, "the flood costs the sync no connect")
