@@ -152,6 +152,7 @@ struct Mine: AsyncParsableCommand {
             // can never widen the bound that would have caught it.
             var longestCompletedRound = Duration.zero
             var nodeAnswered = false
+            var syncPaused = false
             var unusableTemplateSince: ContinuousClock.Instant?
             if let warning = settings.warning { log("warning: \(warning)") }
             log("mining loop start, node \(settings.rpc.baseURL)"
@@ -186,7 +187,7 @@ struct Mine: AsyncParsableCommand {
                         // The node adopts each request's plan for its
                         // descendants, so the probe sends the coordinator's
                         // own body: any other would churn their candidates.
-                        nodeAnswered = await nodeAnswersTemplates(
+                        (nodeAnswered, syncPaused) = await nodeAnswersTemplates(
                             settings.rpc,
                             body: templateRequestBody,
                             timeoutSeconds: templateTimeout
@@ -200,9 +201,10 @@ struct Mine: AsyncParsableCommand {
                         //
                         // State the OBSERVATION, not a cause: no usable answer
                         // covers a timeout, a transport failure, a non-200
-                        // (the node answers 409 while bootstrapping and 503
-                        // when the mempool or parent is unavailable -- both
-                        // fast). Naming any one
+                        // (the node answers 409 while bootstrapping, 503
+                        // `syncing` while it pauses mining until the chain has
+                        // synced, and 503 when the mempool or parent is
+                        // unavailable -- all fast). Naming any one
                         // of them would send an operator after the wrong thing.
                         // Elapsed, not an attempt count: an attempt here spans
                         // anywhere from milliseconds (a fast non-200) to the
@@ -214,7 +216,11 @@ struct Mine: AsyncParsableCommand {
                         // exists to carry.
                         let downFor = (unusableTemplateSince ?? ContinuousClock.now)
                             .duration(to: ContinuousClock.now)
-                        log("NOT MINING: no usable template answer from the node (no reply within \(templateTimeout)s, or a non-200). Stopped for \(downFor.components.seconds)s so far; check `POST /mining/templates` on this node.")
+                        if syncPaused {
+                            log("NOT MINING: the node pauses mining while the chain syncs (503 syncing). Stopped for \(downFor.components.seconds)s so far. If it never finishes syncing (a best header whose body never arrives, or a peer that never ends its log), turn the pause off: pauseMiningWhileSyncing=false (--no-pause-mining-while-syncing).")
+                        } else {
+                            log("NOT MINING: no usable template answer from the node (no reply within \(templateTimeout)s, or a non-200). Stopped for \(downFor.components.seconds)s so far; check `POST /mining/templates` on this node.")
+                        }
                         try? await Task.sleep(for: .seconds(5))
                         continue
                     }
@@ -484,15 +490,17 @@ func runCoordinatorOnce(
 /// once it does. Nothing in the answer is read.
 func nodeAnswersTemplates(
     _ rpc: NodeRPC, body: Data, timeoutSeconds: UInt64
-) async -> Bool {
-    guard var request = try? rpc.request("mining/templates") else { return false }
+) async -> (answered: Bool, syncPaused: Bool) {
+    guard var request = try? rpc.request("mining/templates") else { return (false, false) }
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = body
     request.timeoutInterval = TimeInterval(timeoutSeconds)
-    guard let (_, response) = try? await URLSession.shared.data(for: request),
-          let http = response as? HTTPURLResponse else { return false }
-    return http.statusCode == 200
+    guard let (data, response) = try? await URLSession.shared.data(for: request),
+          let http = response as? HTTPURLResponse else { return (false, false) }
+    // The node pauses mining while a chain syncs (`pauseMiningWhileSyncing`).
+    let paused = http.statusCode == 503 && String(decoding: data, as: UTF8.self).contains("syncing")
+    return (http.statusCode == 200, paused)
 }
 
 // MARK: - The mining loop's background process (`mine start`, `mine stop`)

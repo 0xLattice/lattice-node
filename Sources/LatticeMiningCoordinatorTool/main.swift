@@ -103,9 +103,23 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
             "lattice-mining-coordinator starting - node=\(node) " +
             "workers=\(workerCount) batchSize=\(resolvedBatchSize)"
         )
+        var waiting = false
         while !Task.isCancelled {
             let result = await coordinator.runBatch()
             try failClosedIfNeeded(result)
+            if case .backoff = result {
+                // Said once per wait: the node retries are silent.
+                if !waiting {
+                    print(
+                        "No template from the node (409 while it bootstraps; 503 while it pauses mining until " +
+                        "the chain syncs, or its mempool or parent is unavailable); retrying. A sync pause that " +
+                        "never ends is turned off with pauseMiningWhileSyncing=false (--no-pause-mining-while-syncing)."
+                    )
+                }
+                waiting = true
+            } else {
+                waiting = false
+            }
             switch result {
             case .backoff, .nodeFailed:
                 try? await Task.sleep(nanoseconds: 250_000_000)

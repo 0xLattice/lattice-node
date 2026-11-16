@@ -211,6 +211,7 @@ public final class NodeRuntime: Sendable {
         var coreConfig = coreConfig
         coreConfig.mining.mempool.minRelayFee = configuration.minRelayFee
         coreConfig.finality = configuration.finality
+        coreConfig.pauseMiningWhileSyncing = configuration.pauseMiningWhileSyncing
         let core = try await boot(
             storage: storage, configuration: configuration,
             coreConfig: coreConfig

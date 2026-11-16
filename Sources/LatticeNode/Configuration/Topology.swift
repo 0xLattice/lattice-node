@@ -40,7 +40,7 @@ public struct Topology: Codable, Sendable {
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case listen, rpc, webSocket, peers, publicRead, externalAddress
         case publicReadRate, publicReadExpensiveRate, publicReadMaxRate, publicReadFetches
-        case publicReadURL, publicSubmit, publicSubmitRate, minRelayFee
+        case publicReadURL, publicSubmit, publicSubmitRate, minRelayFee, pauseMiningWhileSyncing
         case servingMaxConcurrent, servingMaxInFlightVolumeBytes, maxAcquisitionBytes, blockBodies, state, stateWindow, stateWindows, finalityWindow, finalityWindows, announceLifetime
         case hostedChains, rpcAllowedOrigins, operatorListen, operatorTokens, operatorAllowedOrigins
     }
@@ -87,6 +87,13 @@ public struct Topology: Codable, Sendable {
     /// The smallest fee the node admits to its pool (`--min-relay-fee`; node
     /// policy, never consensus). Absent = the node's default, 0.
     public var minRelayFee: UInt64?
+    /// Pause mining on each hosted chain until it has synced
+    /// (`--[no-]pause-mining-while-syncing`). Absent or true = on; false =
+    /// off. Stall risks, which false escapes: a best header whose body never
+    /// arrives, or a peer that keeps saying more follows, keeps a chain from
+    /// ever syncing, so it is never mined here, even a chain this node alone
+    /// hosts.
+    public var pauseMiningWhileSyncing: Bool?
     /// Content-serving limits (`--serving-max-*`). Absent = the node's defaults.
     public var servingMaxConcurrent: Int?
     public var servingMaxInFlightVolumeBytes: Int?
@@ -349,6 +356,7 @@ public struct Topology: Codable, Sendable {
             arguments += ["--public-submit-rate", String(publicSubmitRate)]
         }
         if let minRelayFee { arguments += ["--min-relay-fee", String(minRelayFee)] }
+        if pauseMiningWhileSyncing == false { arguments.append("--no-pause-mining-while-syncing") }
         return arguments
     }
 }

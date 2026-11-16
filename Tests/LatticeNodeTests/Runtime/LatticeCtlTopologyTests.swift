@@ -312,6 +312,23 @@ final class LatticeCtlTopologyTests: XCTestCase {
         }
     }
 
+    /// The sync mining pause is on unless the operator turns it off.
+    func testPauseMiningWhileSyncingIsOnUnlessTurnedOff() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ctl-sync-pause-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cases: [(String, [String])] = [
+            (#"{"listen":4001,"rpc":4003}"#, []),
+            (#"{"listen":4001,"rpc":4003,"pauseMiningWhileSyncing":true}"#, []),
+            (#"{"listen":4001,"rpc":4003,"pauseMiningWhileSyncing":false}"#, ["--no-pause-mining-while-syncing"]),
+        ]
+        for (body, flags) in cases {
+            try Data(body.utf8).write(to: root.appendingPathComponent(Topology.fileName))
+            XCTAssertEqual(try Topology.load(root: root).validated().publicSubmissionArguments, flags, body)
+        }
+    }
+
     /// The remote operator listener: both keys or neither, the token file
     /// under the root when relative, a port of its own.
     func testOperatorListenerLoadsFromConfigAndProducesNodeFlags() throws {

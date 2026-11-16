@@ -212,6 +212,16 @@ public struct ChainCoreConfig: Sendable {
     /// node then does not follow a reorganization deeper than the window. A
     /// chain with no window keeps everything.
     public var finality = FinalityWindows()
+    /// Mining pauses at a level until it latches (`ChainCore.catchingUp`).
+    /// On by default; the operator can turn it off: it is a heuristic, not a
+    /// rule. Its stall risks, which turning it off escapes: a best header
+    /// whose body never arrives (withheld, or a coordinator's own block lost)
+    /// keeps a level from latching, so it is never mined, though mining on
+    /// the executed tip is the only way past such a header; and a peer that
+    /// keeps answering `hasMore` keeps a level from latching, which stops
+    /// even a chain's sole host mining it. Until a level latches, the
+    /// template also follows peers coming and going.
+    public var pauseMiningWhileSyncing = true
 
     public init(
         maxHeadersPerPage: Int = 2_000,
@@ -299,15 +309,17 @@ public struct ChainCore: Sendable {
     /// persisted (geth's `handler.synced`, set when its downloader completes
     /// a sync cycle). Until then a peer's transaction is ignored.
     public internal(set) var synced = false
-    /// Whether this level is catching up: it has not yet `synced`, and a
-    /// peer serves its log. Its tip is history, so no template carries it,
-    /// and its tip moving rebuilds none, as Bitcoin Core's `getblocktemplate`
+    /// Whether templates leave this level out: the operator set
+    /// `pauseMiningWhileSyncing`, the level has not yet `synced`, and a peer
+    /// serves its log. Its tip is then history, so no template carries it and
+    /// its tip moving rebuilds none, as Bitcoin Core's `getblocktemplate`
     /// refuses during initial download and geth's miner pauses while its
     /// downloader syncs. A level no peer serves (a lone node, a chain's sole
     /// host) has nothing to catch up from and is mined, as geth's miner
     /// mines until a sync starts.
     public var catchingUp: Bool {
-        !synced && sync.peers.keys.contains { sync.cursors[$0.key]?.logID.isEmpty == false }
+        config.pauseMiningWhileSyncing && !synced
+            && sync.peers.keys.contains { sync.cursors[$0.key]?.logID.isEmpty == false }
     }
     public let config: ChainCoreConfig
     /// The level's mempool and template book, on the act-on tip.

@@ -143,6 +143,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "The smallest fee (a transaction's balance excess) this node admits to its pool, at every hosted level. Node relay policy, never consensus: blocks carrying cheaper transactions stay valid. Reported as minRelayFee by GET /api/chain/info. 0 admits any fee, and pool space is then free to hold.")
     var minRelayFee: UInt64 = 1
 
+    @Flag(inversion: .prefixedNo, help: "Pause mining on each hosted chain until it has synced (default on). While a chain has not yet synced from a peer that serves it, templates leave it out and its tip moving rebuilds none; for the root, a template is refused (503 syncing), so miners wait. It saves rebuilding templates on history during sync. Stall risks: a best header whose body never arrives keeps a chain from ever syncing, so it is never mined here, though mining on the executed tip is the only way past such a header; a peer that keeps saying more follows does the same, even to a chain this node alone hosts. --no-pause-mining-while-syncing turns the pause off and is the escape from either stall.")
+    var pauseMiningWhileSyncing = true
+
     @Option(name: .customLong("finality-window"), help: "Node-local finality, in blocks: headers and work more than this many blocks below a chain's best tip are declined — never stored, never blamed. A fork from a block that deep can never connect, which keeps out the blocks an easy schedule makes nearly free: a fork d blocks deep is at most 2^(d / halfLife) cheaper than the tip, so a few half-lives is enough. The cost is this node's own: it will not follow a reorganization deeper than the window, even a heavier one, until its operator intervenes. A bare number sets every hosted chain; chain-path=blocks sets one chain, e.g. Nexus/Alpha=500, and 0 turns it off there (repeatable). Without it, everything is kept. A child chain's window should be at least its parent's: a parent reorganization can reorganize the child.")
     var finalityWindow: [String] = []
 
@@ -273,6 +276,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                 publicReadURL: publicReadUrl,
                 publicSubmit: publicSubmit,
                 minRelayFee: minRelayFee,
+                pauseMiningWhileSyncing: pauseMiningWhileSyncing,
                 finality: plan.finality,
                 stateWindows: plan.stateWindows
             )

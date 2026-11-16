@@ -225,6 +225,10 @@ public struct NodeConfiguration: Sendable {
     /// hosts. Node relay policy, never consensus: a block carrying a
     /// cheaper transaction stays valid. 0 admits any fee.
     public let minRelayFee: UInt64
+    /// Mining pauses at each level until it latches
+    /// (`ChainCoreConfig.pauseMiningWhileSyncing`); on unless the operator
+    /// turns it off.
+    public let pauseMiningWhileSyncing: Bool
 
     /// Node-local finality, per chain: the node declines headers
     /// and work landing more than a chain's window behind that chain's best
@@ -285,6 +289,7 @@ public struct NodeConfiguration: Sendable {
         publicReadURL: String? = nil,
         publicSubmit: Bool = false,
         minRelayFee: UInt64 = 0,
+        pauseMiningWhileSyncing: Bool = true,
         finality: FinalityWindows = FinalityWindows(),
         stateWindows: FinalityWindows = FinalityWindows()
     ) throws {
@@ -355,6 +360,7 @@ public struct NodeConfiguration: Sendable {
         self.publicReadURL = publicReadURL
         self.publicSubmit = publicSubmit
         self.minRelayFee = minRelayFee
+        self.pauseMiningWhileSyncing = pauseMiningWhileSyncing
         self.finality = finality
         self.stateWindows = stateWindows
     }

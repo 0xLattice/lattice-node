@@ -27,8 +27,10 @@ final class ChainCoreMiningTests: XCTestCase {
 
     /// A core that weighed `blocks` from `peer`'s log: a page of their IDs,
     /// then the objects it asks for.
-    private func weighed(_ blocks: [SimBlock], bodyWindow: Int = 4) -> ChainCore {
-        var core = ChainCore(tree: world.bootstrap.tree.detached(), config: ChainCoreConfig(bodyWindow: bodyWindow))
+    private func weighed(_ blocks: [SimBlock], bodyWindow: Int = 4, pauseMining: Bool = true) -> ChainCore {
+        var config = ChainCoreConfig(bodyWindow: bodyWindow)
+        config.pauseMiningWhileSyncing = pauseMining
+        var core = ChainCore(tree: world.bootstrap.tree.detached(), config: config)
         let asked = core.step(.peerReady(peer), now: Self.now).compactMap { effect -> UInt64? in
             if case .send(_, .getStream(let id, _, _, _)) = effect { return id }
             return nil
@@ -387,10 +389,12 @@ final class ChainCoreMiningTests: XCTestCase {
 
     /// A build on the old tip is neither thrown away nor issued again when
     /// the tip moves: its result answers the request.
+    /// With the operator's sync pause off, as before it existed, a level
+    /// still catching up is mined.
     func testATemplateBuildWaitingOnTheOldTipAnswersWhenItLands() async throws {
-        var core = weighed(Array(chain.prefix(2)))
-        // Its peer gone, the level is not catching up: it is mined.
-        _ = core.step(.peerGone(peer), now: Self.now)
+        var core = weighed(Array(chain.prefix(2)), pauseMining: false)
+        XCTAssertFalse(core.synced)
+        XCTAssertFalse(core.catchingUp, "the pause is off")
         let requested = mining(core.step(
             .mining(.templateRequested(replyID: 1, TemplateRequest(rewardRecipient: nil))), now: Self.now
         ))
