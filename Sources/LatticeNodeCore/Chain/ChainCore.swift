@@ -1123,7 +1123,9 @@ public struct ChainCore: Sendable {
             ))
             turn.facts += update.batches
             weighed += update.weighed
-            // No announcer: submitted here (`ChainEvent.submitted`).
+            // No announcer: submitted here (`ChainEvent.submitted`), or a
+            // peer header whose announcers all left before it was weighed.
+            // The latter costs one early push of a page, nothing more.
             if header.announcers.isEmpty { turn.own = true }
             creditRemainingProofs(of: header, &turn)
             for child in waiting { dirty(child, &turn) }
