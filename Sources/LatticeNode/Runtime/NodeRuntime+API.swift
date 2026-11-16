@@ -176,7 +176,7 @@ struct LiveLevels: Sendable {
     static let none = LiveLevels { $0(nil) }
 
     /// The levels the loop that `inputs` feeds holds.
-    init(inputs: AsyncStream<NodeRuntime.Input>.Continuation) {
+    init(inputs: NodeRuntime.Inputs) {
         self.init { read in
             // A read the stopped loop will never see is answered here.
             if case .terminated = inputs.yield(.read(read)) { read(nil) }
@@ -641,6 +641,8 @@ extension NodeRuntime {
         let path: ChainPath
         let tipCID: String?
         var kind = Kind.other
+        /// When it was queued, while tracing.
+        var queued = 0.0
         let run: @Sendable () async -> [NodeEvent]
 
         func isCurrent(in core: NodeCore) -> Bool {

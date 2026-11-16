@@ -96,13 +96,85 @@ public enum NodeEffect: Sendable {
 }
 
 extension NodeEffect {
-    /// A diagnostic label whose cost is bounded by the effect's own fields.
+    /// A diagnostic label: the effect's kind and level, never its payload.
     public var traceLabel: String {
-        guard case .connect(let path, let job) = self else {
-            return String(describing: self)
+        switch self {
+        case .persist: "persist"
+        case .level(let path, let effect): "\(effect.traceName) \(path.joined(separator: "/"))"
+        case .connect(let path, _): "connect \(path.joined(separator: "/"))"
+        case .disconnect: "disconnect"
+        case .wakeAt: "wakeAt"
         }
-        return "connect(\(path), blockHash: \(job.blockHash))"
     }
+}
+
+extension NodeEvent {
+    /// A diagnostic label: the event's kind and level, never its payload.
+    public var traceLabel: String {
+        switch self {
+        case .peerReady: "peerReady"
+        case .peerGone: "peerGone"
+        case .received(_, let path, let message): "received.\(traceCase(message)) \(path.joined(separator: "/"))"
+        case .level(let path, let event): "\(event.traceName) \(path.joined(separator: "/"))"
+        case .tick: "tick"
+        case .mined: "mined"
+        case .host(let path, _, _, _): "host \(path.joined(separator: "/"))"
+        case .unhost(let path): "unhost \(path.joined(separator: "/"))"
+        }
+    }
+}
+
+extension ChainEvent {
+    /// The event's kind, for a trace line.
+    var traceName: String {
+        switch self {
+        case .peerReady: "peerReady"
+        case .peerGone: "peerGone"
+        case .received(_, let message): "received.\(traceCase(message))"
+        case .childIndexFetched: "childIndexFetched"
+        case .headersServed: "headersServed"
+        case .bodyFetched: "bodyFetched"
+        case .connected: "connected"
+        case .transactionsRead: "transactionsRead"
+        case .parentFactsPresent: "parentFactsPresent"
+        case .tick: "tick"
+        case .proofDropped: "proofDropped"
+        case .proofVerified: "proofVerified"
+        case .derived: "derived"
+        case .submitted: "submitted"
+        case .mining(let event): "mining.\(traceCase(event))"
+        }
+    }
+}
+
+extension ChainEffect {
+    /// The effect's kind, for a trace line.
+    var traceName: String {
+        switch self {
+        case .send(_, let message): "send.\(traceCase(message))"
+        case .serveHeaders: "serveHeaders"
+        case .fetchByCID: "fetchByCID"
+        case .fetchBody: "fetchBody"
+        case .cancelBody: "cancelBody"
+        case .connect: "connect"
+        case .disconnect: "disconnect"
+        case .persist: "persist"
+        case .publish: "publish"
+        case .wakeAt: "wakeAt"
+        case .verifyProof: "verifyProof"
+        case .deriveProof: "deriveProof"
+        case .workSubmitted: "workSubmitted"
+        case .readTransactions: "readTransactions"
+        case .mining(let effect): "mining.\(traceCase(effect))"
+        }
+    }
+}
+
+/// An enum value's case name, never its payload: a case with a payload
+/// names it as its mirror's one child, a case without one describes as its
+/// name. For the rarer messages and mining events only.
+private func traceCase(_ value: Any) -> String {
+    Mirror(reflecting: value).children.first?.label ?? String(describing: value)
 }
 
 /// The root level a host runs: its chain, its configured genesis and spec,

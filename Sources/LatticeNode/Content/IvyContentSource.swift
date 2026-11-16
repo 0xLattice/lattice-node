@@ -99,6 +99,8 @@ public struct IvyRootContentSource: Sendable {
         private var reservation: Task<Int?, Never>?
         /// The session's task was cancelled: it reserves nothing more.
         private var cancelled = false
+        /// When its reservation was granted, while tracing.
+        private var granted: Double?
         /// The bytes the session may hold: what it reserved, once it has.
         private var maximumStorageBytes = 0
         private let broker = MemoryBroker()
@@ -141,8 +143,15 @@ public struct IvyRootContentSource: Sendable {
             let task: Task<Int?, Never>? = lock.withLock {
                 if let reservation { return reservation }
                 guard !cancelled else { return nil }
-                let task = Task { [budget = self.budget, bytes = self.reservingBytes, priority = self.priority] in
-                    await budget.reserve(bytes, priority: priority)
+                let task = Task { [budget = self.budget, bytes = self.reservingBytes, priority = self.priority, rootCID] in
+                    let asked = SyncTrace.now()
+                    let reserved = await budget.reserve(bytes, priority: priority)
+                    if SyncTrace.enabled {
+                        let granted = SyncTrace.now()
+                        lock.withLock { self.granted = granted }
+                        SyncTrace.log(chain: [], "budget \(rootCID) \(priority.traceLabel) wait \(SyncTrace.ms(asked, granted)) ms \(budget.occupancy)")
+                    }
+                    return reserved
                 }
                 reservation = task
                 return task
@@ -171,7 +180,12 @@ public struct IvyRootContentSource: Sendable {
             // Still waiting only when a reader the session no longer waits
             // for (one whose operation ended or threw first) is waiting.
             task.cancel()
-            if let reserved = await task.value { budget.release(reserved) }
+            if let reserved = await task.value {
+                budget.release(reserved)
+                if SyncTrace.enabled, let granted = lock.withLock({ self.granted }) {
+                    SyncTrace.log(chain: [], "budget \(rootCID) held \(SyncTrace.ms(granted, SyncTrace.now())) ms \(budget.occupancy)")
+                }
+            }
         }
 
         func reserve(rootCID: String) -> Bool {

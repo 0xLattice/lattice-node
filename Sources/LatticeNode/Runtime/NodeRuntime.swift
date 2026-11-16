@@ -3,6 +3,7 @@ import Ivy
 import IvyWebSocket
 import Lattice
 import LatticeNodeCore
+import Synchronization
 import cashew
 
 public enum NodeRuntimeError: Error, Equatable, Sendable {
@@ -83,7 +84,7 @@ public final class NodeRuntime: Sendable {
     let storage: NodeStorage
     /// What the open sessions' hellos advertised, as the content layer reads it.
     let peerCapabilities: PeerCapabilities
-    let inputs: AsyncStream<Input>.Continuation
+    let inputs: Inputs
     private let loop: Task<Void, Never>
     let ivy: Ivy
     /// Moves a peer met through another peer onto a connection of its own.
@@ -111,15 +112,17 @@ public final class NodeRuntime: Sendable {
     enum Input: Sendable {
         case network(NodeRuntimeNetworkInput)
         case event(NodeEvent)
-        /// A body is held locally.
-        case bodyStored(ChainPath, cid: String)
+        /// A body is held locally; when it was asked for and held, while
+        /// tracing.
+        case bodyStored(ChainPath, cid: String, asked: Double, held: Double)
         /// A body's fetch failed and is being retried: why, and the error
         /// for the log.
         case bodyWaiting(ChainPath, cid: String, BodyWait, detail: String)
         /// A session's hello deadline passed.
         case helloDeadline(peerKey: String, session: UInt64)
-        /// A worker finished: its slot frees, then its results step.
-        case jobDone(UInt64, [NodeEvent])
+        /// A worker finished: its slot frees, then its results step. When it
+        /// was queued, started and done, while tracing.
+        case jobDone(UInt64, [NodeEvent], TraceTimes?)
         /// An RPC: its mining event under a fresh reply ID.
         case request(ChainPath, @Sendable (UInt64) -> MiningEvent, CheckedContinuation<NodeRuntimeReply, any Error>)
         /// An RPC answered outside a step (the shell could not run its part).
@@ -144,6 +147,32 @@ public final class NodeRuntime: Sendable {
         /// A job's read of the live levels (`LiveLevels`).
         case read(@Sendable ([ChainPath: ChainCore]?) -> Void)
         case stop
+    }
+
+    /// The loop's inputs. While tracing, they count how many wait for the
+    /// loop, which each step's line reads.
+    struct Inputs: Sendable {
+        final class Waiting: Sendable {
+            let count = Atomic<Int>(0)
+        }
+
+        let continuation: AsyncStream<Input>.Continuation
+        let waiting = Waiting()
+
+        @discardableResult
+        func yield(_ input: Input) -> AsyncStream<Input>.Continuation.YieldResult {
+            if SyncTrace.enabled { waiting.count.add(1, ordering: .relaxed) }
+            return continuation.yield(input)
+        }
+
+        func finish() { continuation.finish() }
+
+        /// The loop took an input.
+        func taken() {
+            if SyncTrace.enabled { waiting.count.subtract(1, ordering: .relaxed) }
+        }
+
+        var depth: Int { waiting.count.load(ordering: .relaxed) }
     }
 
     /// Boot replay, then start the loop and the overlay.
@@ -324,7 +353,8 @@ public final class NodeRuntime: Sendable {
         failStop: @escaping @Sendable (any Error) -> Void,
         observeJob: JobObserver?
     ) {
-        let (stream, inputs) = AsyncStream<Input>.makeStream()
+        let (stream, continuation) = AsyncStream<Input>.makeStream()
+        let inputs = Inputs(continuation: continuation)
         let published = PublishedValue(core.levels[core.rootPath]?.snapshot)
         let readView = PublishedValue<NodeReadView>()
         self.published = published
@@ -445,6 +475,7 @@ public final class NodeRuntime: Sendable {
             // finishes, so no RPC waits forever.
             var running = true
             for await input in stream {
+                inputs.taken()
                 if running {
                     running = await state.handle(input)
                 } else if case .request(_, _, let reply) = input {
@@ -543,7 +574,7 @@ extension NodeRuntime {
         let levelReads: PublishedValue<[ChainPath: ChainReads]>
         let hosted: PublishedValue<Set<ChainPath>>
         let templateDigest: PublishedValue<String>
-        let inputs: AsyncStream<Input>.Continuation
+        let inputs: Inputs
         let gate: NodeRuntimeInputGate
         let helloTimeout: Duration
         let remote: IvyRootContentSource
@@ -694,7 +725,7 @@ extension NodeRuntime {
             levelReads: PublishedValue<[ChainPath: ChainReads]>,
             hosted: PublishedValue<Set<ChainPath>>,
             templateDigest: PublishedValue<String>,
-            inputs: AsyncStream<Input>.Continuation,
+            inputs: Inputs,
             gate: NodeRuntimeInputGate,
             helloTimeout: Duration,
             remote: IvyRootContentSource,
@@ -732,7 +763,11 @@ extension NodeRuntime {
             case .event(let event):
                 if case .tick = event { wake = nil }
                 return await step(event)
-            case .bodyStored(let path, let cid):
+            case .bodyStored(let path, let cid, let asked, let held):
+                SyncTrace.log(
+                    chain: path,
+                    "body \(cid) fetch \(SyncTrace.ms(asked, held)) loop \(SyncTrace.ms(held, SyncTrace.now())) ms"
+                )
                 let key = BodyKey(path: path, cid: cid)
                 bodies[key] = nil
                 fetchWaits[key] = nil
@@ -748,7 +783,11 @@ extension NodeRuntime {
                 sessions[key] = nil
                 _ = await ivy.disconnectSession(ifCurrent: session.peer)
                 return true
-            case .jobDone(let id, let events):
+            case .jobDone(let id, let events, let times):
+                if let times {
+                    let label = events.first?.traceLabel ?? "empty"
+                    SyncTrace.log(chain: core.rootPath, "job \(label) \(times.line(taken: SyncTrace.now()))")
+                }
                 runningJobs -= 1
                 jobs[id] = nil
                 startJobs()
@@ -1479,8 +1518,17 @@ extension NodeRuntime {
         // MARK: - Step and effects
 
         private mutating func step(_ event: NodeEvent) async -> Bool {
+            let started = SyncTrace.now()
             let effects = core.step(event, now: NodeRuntime.now())
-            SyncTrace.log(chain: core.rootPath, "node-runtime step \(String(describing: event).prefix(160)) -> \(effects.map { $0.traceLabel.prefix(80) })")
+            let stepped = SyncTrace.now()
+            defer {
+                if SyncTrace.enabled {
+                    SyncTrace.log(
+                        chain: core.rootPath,
+                        "node-runtime step \(event.traceLabel) core \(SyncTrace.ms(started, stepped)) ms total \(SyncTrace.ms(started, SyncTrace.now())) ms depth \(inputs.depth) -> \(effects.map(\.traceLabel))"
+                    )
+                }
+            }
             // The facts transaction, then publish, then everything else, each
             // in order.
             func rank(_ effect: NodeEffect) -> Int {
@@ -1670,6 +1718,7 @@ extension NodeRuntime {
                 // peers: a hint for whom to ask for the bundle.
                 let rendezvous = ChainHosts.of(path, nexusGenesisCID: configuration.nexusGenesisCID)
                 let maxBlockSize = core.levels[path]?.maxBlockSize(of: cid)
+                let asked = SyncTrace.now()
                 bodies[key] = Task {
                     let roots = await NodeRuntime.retryingBody { bundle in
                         try await storage.fetchChainBody(
@@ -1680,7 +1729,7 @@ extension NodeRuntime {
                             path, cid: cid, BodyWait(fetchFailure: error), detail: "\(error)"
                         ))
                     }
-                    if roots != nil { inputs.yield(.bodyStored(path, cid: cid)) }
+                    if roots != nil { inputs.yield(.bodyStored(path, cid: cid, asked: asked, held: SyncTrace.now())) }
                 }
             case .cancelBody(let cid):
                 bodies.removeValue(forKey: BodyKey(path: path, cid: cid))?.cancel()
@@ -1835,15 +1884,23 @@ extension NodeRuntime {
             while runningJobs < workers, let job = queued.next(in: core) {
                 runningJobs += 1
                 nextJob += 1
-                let (inputs, id) = (inputs, nextJob)
-                jobs[id] = Task { inputs.yield(.jobDone(id, await job.run())) }
+                let (inputs, id, started) = (inputs, nextJob, SyncTrace.now())
+                jobs[id] = Task {
+                    let events = await job.run()
+                    let times = SyncTrace.enabled ? TraceTimes(queued: job.queued, started: started, done: SyncTrace.now()) : nil
+                    inputs.yield(.jobDone(id, events, times))
+                }
             }
         }
 
         /// Queue `job`, behind `observeJob` when a test watches the pool.
         private mutating func enqueue(_ job: RuntimeJob, _ effect: MiningEffect? = nil) {
-            guard let observeJob else { return queued.append(job) }
-            queued.append(RuntimeJob(path: job.path, tipCID: job.tipCID, kind: job.kind) {
+            guard let observeJob else {
+                var job = job
+                job.queued = SyncTrace.now()
+                return queued.append(job)
+            }
+            queued.append(RuntimeJob(path: job.path, tipCID: job.tipCID, kind: job.kind, queued: SyncTrace.now()) {
                 await observeJob(job.kind, effect)
                 return await job.run()
             })
