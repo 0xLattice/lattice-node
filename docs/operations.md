@@ -474,7 +474,8 @@ storage.lock
 ```
 
 `state.db` holds path-keyed facts, weighed headers, saved child proofs,
-indexes, durable sync cursors, and the local mempool journal. `volumes.db`
+indexes, durable sync cursors, the state diffs of the state window, and the
+local mempool journal. `volumes.db`
 holds content and retained roots. Those two are the recovery unit.
 `volume-bundles.db` is a cache of which Volume roots are served together for a
 block: it may be lost or deleted while the node is stopped, and is rebuilt
@@ -496,7 +497,9 @@ served, or built on before the write that makes it durable returns.
 
 ### What a node keeps
 
-Facts and headers are kept for good. Content is kept because a rule says so.
+Facts, headers and child proofs are kept for good: they grow with the
+number of blocks weighed, as Bitcoin's block index does. Content is kept
+because a rule says so.
 Two rules are built in: a node always holds each hosted chain's genesis
 block, and the body of each chain's tip, so that a new block can be passed
 on. A body fetched for a block waiting to execute is read into memory, not
@@ -557,7 +560,8 @@ of the chain reads them, so they are not state that a window lets go of.
 
 On `recent` a node counts, for each chain, the places each node holds in the
 state of the chain's tip, plus the places the blocks above a cursor replaced,
-and keeps every node it counts: the counts are kept in `volumes.db`, written
+and keeps every node it counts, and the state diff of each block it executed
+within the window (in `state.db`): the counts are kept in `volumes.db`, written
 with the cursor and the tip they were moved to in one transaction, so a stop
 never leaves them half moved. As the tip moves, the counts move with it in one
 write: what the blocks entering the chain created is added, what the blocks
@@ -568,7 +572,7 @@ is so kept until the tip is a window past that block, and a reorganization
 that does not reach below the cursor is undone from the counts.
 
 Counts that cannot follow the tip (a reorganization below the cursor, a fact
-missing) or that the store refuses (a count below zero), and a chain with none
+or a block's diff missing) or that the store refuses (a count below zero), and a chain with none
 (the first start on `recent`, a chain newly hosted), are replaced by a state
 sync: the node walks the state of a block a few below its tip, node by node,
 reading what it lacks from peers, then replaces the counts with that state's
@@ -648,11 +652,10 @@ systemctl start lattice-node lattice-mining-coordinator
 Startup fails closed when:
 
 - the schema epoch or Nexus genesis does not match;
-- a journal/index audit disagrees;
+- a stored fact does not decode, or a hosted level's facts do not restore;
 - a hosted child chain's genesis spec is in neither `volumes.db` nor the
   node's own `specs`, or one of the node's own pending transactions is
   missing from `volumes.db`;
-- saved child proofs do not decode or do not match their index;
 - another process owns the storage lock.
 
 Do not repair or combine database files by hand. Restore one matched snapshot
@@ -692,10 +695,13 @@ in that state mines the losing side.
 Guidance:
 
 - Leave it off on miners, backbones, and nodes that explorers read.
-- A leaf or wallet node that wants bounded storage should use at least 240 on
-  Nexus: 240 blocks is two half-lives (120 blocks each) at a 1 h block time,
-  about 10 days, and a fork 240 deep costs at most about 4× less than the tip. Choose a window far longer than
-  any outage you expect.
+- A leaf or wallet node that wants to keep out cheap deep forks should use at
+  least 240 on Nexus: 240 blocks is two half-lives (120 blocks each) at a 1 h
+  block time, about 10 days, and a fork 240 deep costs at most about 4× less
+  than the tip. Choose a window far longer than any outage you expect. The
+  window does not bound storage: it declines new forks below it, and deletes
+  nothing. What a node stores grows with the blocks it weighs; `blockBodies`
+  and `state` bound bodies and state.
 - Give each child chain a window at least as long as its parent's: a parent
   reorganization can reorganize the child.
 
