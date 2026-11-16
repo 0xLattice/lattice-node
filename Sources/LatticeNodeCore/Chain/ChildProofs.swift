@@ -74,12 +74,10 @@ public struct ChildProofJob: Sendable {
 
     public var key: ChildProofKey { ChildProofKey(childCID: childCID, proofID: proofID) }
 
-    /// The cheap test first: the claimed root's hash meets the block's
-    /// target. Only a proof whose sender did that work reaches the path walk.
+    /// The check: a root whose hash misses the block's target comes back
+    /// with no contribution, which `proofVerified` judges a failure.
     public func run(_ block: Block) async -> Result<VerifiedChildEvidence, ChildProofVerificationFailure> {
-        guard let root = proof.entries.first(where: { $0.cid == proof.rootCID }).flatMap({ Block(data: $0.data) }),
-              block.validateProofOfWork(nexusHash: root.proofOfWorkHash()) else { return .failure(.malformedEvidence) }
-        return await proof.verifySecuringWork(child: block, chainPath: chainPath)
+        await proof.verifySecuringWork(child: block, chainPath: chainPath)
     }
 
     /// A proof's content identity: the hash of its canonical bytes.

@@ -876,11 +876,10 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertTrue(host.disconnects.isEmpty, "no one is blamed")
     }
 
-    /// A peer's proof whose claimed root misses C's target fails the cheap
-    /// test before the path walk: the walk alone would pass it (with no
-    /// work), the check rejects it, and its sender is blamed. An honest node
-    /// never sends one: it serves only proofs that credited work.
-    func testAProofWhoseRootMissesTheTargetFailsBeforeThePathWalk() async throws {
+    /// A peer's proof whose claimed root misses C's target: the walk passes
+    /// it with no work, which weighs nothing, and its sender is blamed. An
+    /// honest node never sends one: it serves only proofs that credited work.
+    func testAProofWhoseRootMissesTheTargetBlamesItsSender() async throws {
         var builder = try await LevelWorld.Builder(levels: 2)
         let n0 = try await builder.grind(on: try XCTUnwrap(builder.geneses[Self.nexus]), carrying: [], at: Self.t + Self.interval / 2, outcome: .block)
         let entering = n0.root.block.postState
@@ -902,16 +901,9 @@ final class DerivedChildGrindTests: XCTestCase {
             rootHeader: BlockHeader(node: b.block), childDirectory: Self.alpha[1], fetcher: world.cas
         )
         guard case .success(let walked) = await proof.verifySecuringWork(child: c.block, chainPath: Self.alpha) else {
-            return XCTFail("the path walk alone passes the proof")
+            return XCTFail("the path walk passes the proof")
         }
         XCTAssertNil(walked.contribution, "with no work")
-        let job = ChildProofJob(
-            childCID: c.cid, block: c.block, proof: proof, proofID: try XCTUnwrap(ChildProofJob.id(of: proof)),
-            chainPath: Self.alpha
-        )
-        guard case .failure(.malformedEvidence) = await job.run(c.block) else {
-            return XCTFail("the cheap test rejects it before the walk")
-        }
 
         var host = Host(world)
         await host.step(.mined(n0.grind))
