@@ -914,6 +914,56 @@ final class BundledBlockFetchTests: XCTestCase {
         let stored = try await storage(keyByte: 0xA1).fetchChainBody(cid, remote: remote, maxBlockSize: 1)
 
         XCTAssertEqual(Set(stored), Set(recorded))
+        XCTAssertEqual(remote.budget.peakReserved, remote.maximumStorageBytes, "the second attempt ran under the whole allowance")
+        XCTAssertEqual(remote.budget.reserved, 0)
+    }
+
+    /// A near-full look-ahead body whose parent this node has not executed:
+    /// the walk reads the pre-state its transactions touch from peers, which
+    /// costs more than the body itself (about 4.9 MB beside its 0.97 MB),
+    /// and the session's reservation still holds it: one fetch, nothing left
+    /// reserved.
+    func testANearFullLookAheadBodyOnUnheldStateIsFetchedOnce() async throws {
+        let producer = try await storage(keyByte: 0xA2)
+        let joiner = try await storage(keyByte: 0xA3)
+        let genesisCID = NexusGenesis.expectedBlockHash
+        let genesisData = await producer.content([genesisCID])[genesisCID]
+        let genesis = try XCTUnwrap(Block(data: try XCTUnwrap(genesisData)))
+        let keys = (0..<Self.typicalTransactionCount).map { _ in CryptoUtils.generateKeyPair() }
+        func transactions(nonce: UInt64) throws -> [Transaction] {
+            try keys.map { key in
+                let bodyHeader = try HeaderImpl(node: TransactionBody(
+                    accountActions: [], actions: [], depositActions: [],
+                    receiptActions: [], withdrawalActions: [],
+                    signers: [CryptoUtils.createAddress(from: key.publicKey)],
+                    nonce: nonce, chainPath: ["Nexus"]
+                ))
+                return Transaction(
+                    signatures: [key.publicKey: try XCTUnwrap(TransactionSigning.sign(
+                        bodyHeader: bodyHeader, privateKeyHex: key.privateKey
+                    ))],
+                    body: bodyHeader
+                )
+            }
+        }
+        // The parent writes a nonce for each signer; the body reads them all.
+        let parent = try await mined(on: genesis, try transactions(nonce: 0), by: producer)
+        let block = try await mined(on: parent, try transactions(nonce: 1), by: producer)
+        let cid = try BlockHeader(node: block).rawCID
+        let maxBlockSize = NexusGenesis.spec.maxBlockSize
+        let size = try await block.logicalContentByteSize(fetcher: producer)
+        XCTAssertLessThanOrEqual(size, maxBlockSize)
+        let parentState = await joiner.volume(block.prevState.rawCID)
+        XCTAssertNil(parentState, "the joiner has not executed the parent")
+        let remote = remote(producer, requests: Requests())
+
+        let stored = try await joiner.fetchChainBody(cid, remote: remote, maxBlockSize: maxBlockSize)
+
+        let recorded = await producer.volumeBundle(cid)
+        XCTAssertEqual(Set(stored), Set(recorded))
+        let held = await joiner.readCache.heldBytes
+        XCTAssertGreaterThan(held, 4 * maxBlockSize, "the touched pre-state is past four times maxBlockSize")
+        XCTAssertEqual(remote.budget.peakReserved, 6 * maxBlockSize, "the first reservation held it: no second fetch")
         XCTAssertEqual(remote.budget.reserved, 0)
     }
 
