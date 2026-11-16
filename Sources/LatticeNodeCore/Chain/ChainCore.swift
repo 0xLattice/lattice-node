@@ -560,8 +560,10 @@ public struct ChainCore: Sendable {
         // Push what was appended to every peer that read our log to its end:
         // the stream's tail is the relay. Relaying a header is not acting on
         // its weight: only tip announces and templates act, and they come
-        // from the executed tip.
-        if !appended.entries.isEmpty {
+        // from the executed tip. Not before `synced`, as Bitcoin Core does
+        // not announce blocks during initial download: a peer still pulls
+        // our log, and the first push after the latch has it pull the gap.
+        if synced, !appended.entries.isEmpty {
             for peer in sync.peers.keys.sorted() where sync.peers[peer]?.subscribed == true {
                 effects.append(.send(peer, .stream(StreamPage(
                     requestID: 0, logID: sync.log.id, entries: appended.entries, hasMore: appended.hasMore

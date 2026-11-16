@@ -166,9 +166,22 @@ final class ChainCoreSyncTests: XCTestCase {
         return all
     }
 
-    /// A core that weighed `blocks`, relayed by `peer`.
-    private func weighed(_ blocks: [SimBlock], pageSize: Int = 4) -> ChainCore {
+    /// `core`, at its genesis tip, reads a peer's empty log to its end: it
+    /// is synced, so it pushes what it appends (`ChainCore.synced`).
+    private func latch(_ core: inout ChainCore) {
+        let source = PeerID(key: "latch", session: 1)
+        guard let request = requests(core.step(.peerReady(source), now: Self.now)).first else { return XCTFail("no stream request") }
+        _ = core.step(.received(source, .stream(StreamPage(
+            requestID: request.requestID, logID: "latch", entries: [], hasMore: false
+        ))), now: Self.now)
+        XCTAssertTrue(core.synced)
+    }
+
+    /// A core that weighed `blocks`, relayed by `peer`; `synced` latches it
+    /// first.
+    private func weighed(_ blocks: [SimBlock], pageSize: Int = 4, synced: Bool = false) -> ChainCore {
         var core = core(pageSize: pageSize)
+        if synced { latch(&core) }
         ready(&core, peer)
         relay(&core, blocks.map { entry($0) }, from: peer)
         for block in blocks { XCTAssertTrue(core.tree.contains(blockHash: block.cid)) }
@@ -196,7 +209,7 @@ final class ChainCoreSyncTests: XCTestCase {
     /// applied, the cursor advances, the next page is asked, and what was
     /// weighed is persisted (with its log entries), published and pushed.
     func testAStreamPageAsksOnlyForWhatItLacksAndAdvancesTheCursor() throws {
-        var core = weighed(Array(chain[0..<2]))
+        var core = weighed(Array(chain[0..<2]), synced: true)
         ready(&core, other)
         let request = try XCTUnwrap(requests(ready(&core, PeerID(key: "server", session: 1))).first)
         let server = PeerID(key: "server", session: 1)
@@ -319,7 +332,7 @@ final class ChainCoreSyncTests: XCTestCase {
     }
 
     func testWrongSpecOrPrevStateIsWeighedExcludedAndRelayedNeverBlamed() throws {
-        var core = weighed(Array(chain[0..<3]))
+        var core = weighed(Array(chain[0..<3]), synced: true)
         ready(&core, other)
         let tip = core.tree.canonicalTip
         let invalid = [world.lies[.wrongSpec]!, world.lies[.wrongPrevState]!, world.excludedChild]
@@ -351,6 +364,7 @@ final class ChainCoreSyncTests: XCTestCase {
 
     func testAnUnknownParentIsFetchedWithItsAncestorsFromTheSender() throws {
         var core = core()
+        latch(&core)
         ready(&core, peer)
         ready(&core, other)
         let orphan = world.blocks[world.orphan]!
@@ -392,6 +406,7 @@ final class ChainCoreSyncTests: XCTestCase {
     /// headers beside them are as if not sent.
     func testADataAnswerIsTakenOnlyForWhatWasAsked() throws {
         var core = core()
+        latch(&core)
         let request = try XCTUnwrap(requests(ready(&core, peer)).first)
         var effects = core.step(.received(peer, .stream(StreamPage(
             requestID: request.requestID, logID: "log", entries: [StreamEntry(position: 1, entry: .header(chain[0].cid))], hasMore: false
@@ -482,6 +497,7 @@ final class ChainCoreSyncTests: XCTestCase {
         let cid = carrier.block.children.rawCID
         for answer in ["honest", "mismatched", "missing"] {
             var core = core()
+            latch(&core)
             ready(&core, peer)
             ready(&core, other)
             let effects = relay(&core, [entry(carrier, inline: false)], from: other)
@@ -757,6 +773,7 @@ final class ChainCoreSyncTests: XCTestCase {
     /// a peer honours it by pulling the rest.
     func testAPushBeyondAPageCarriesHasMoreAndIsPulled() throws {
         var server = core(pageSize: 4)
+        latch(&server)
         ready(&server, peer)
         ready(&server, other)
         let orphan = relay(&server, [entry(chain[9])], from: peer)
@@ -840,6 +857,7 @@ final class ChainCoreSyncTests: XCTestCase {
     func testDuplicatesAcrossPeersCostIDsNotObjects() throws {
         var first = weighed(Array(chain[0..<12]))
         var second = ChainCore(tree: world.bootstrap.tree.detached(), config: first.config, log: WeighLog(id: "second"))
+        latch(&second)
         ready(&second, peer)
         relay(&second, chain[0..<12].reversed().map { entry($0) }, from: peer)
         var client = keeping(core())
@@ -861,6 +879,7 @@ final class ChainCoreSyncTests: XCTestCase {
         try link(&server, &client, session: 1)
         XCTAssertEqual(client.sync.cursors["server"], StreamCursor(logID: "S1", position: 10))
         var reset = ChainCore(tree: world.bootstrap.tree.detached(), config: core().config, log: WeighLog(id: "S2"))
+        latch(&reset)
         ready(&reset, peer)
         relay(&reset, chain[0..<3].map { entry($0) }, from: peer)
         try link(&reset, &client, session: 2)

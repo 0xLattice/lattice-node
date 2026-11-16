@@ -107,16 +107,19 @@ final class ChainCoreMiningTests: XCTestCase {
     /// Show `blocks` as `peer`'s log, positions from `from`: the page
     /// answers the stream request in flight (or is pushed), and the headers
     /// it asks for are sent.
-    private func show(_ blocks: [SimBlock], from: UInt64, to core: inout ChainCore) {
+    @discardableResult
+    private func show(_ blocks: [SimBlock], from: UInt64, to core: inout ChainCore) -> [ChainEffect] {
         let ids = blocks.enumerated().map { StreamEntry(position: from + UInt64($0.offset), entry: .header($0.element.cid)) }
         let page = core.step(.received(peer, .stream(StreamPage(
             requestID: core.sync.peers[peer]?.stream?.requestID ?? 0, logID: "peer", entries: ids, hasMore: false
         ))), now: Self.now)
+        var effects = page
         for case .send(_, .getData(let id, _)) in page {
-            _ = core.step(.received(peer, .headers(HeadersResponse(
+            effects += core.step(.received(peer, .headers(HeadersResponse(
                 requestID: id, entries: blocks.map { HeaderEntry(block: $0.block, children: $0.children) }, hasMore: false
             ))), now: Self.now)
         }
+        return effects
     }
 
     /// Execute `blocks` in order, each body delivered and its connect run.
@@ -200,6 +203,55 @@ final class ChainCoreMiningTests: XCTestCase {
         var restarted = ChainCore(tree: core.tree.detached(), config: ChainCoreConfig(bodyWindow: 8))
         XCTAssertFalse(restarted.synced)
         XCTAssertTrue(try peerArrival(&restarted, nonce: 11).isEmpty)
+    }
+
+    /// The stream's tail is pushed only once the level is synced, as Bitcoin
+    /// Core announces no block during initial download. A peer that read our
+    /// log to its end before the latch misses what was weighed meanwhile; the
+    /// first push after the latch lies past its position, so it pulls the gap.
+    func testTheStreamIsPushedOnlyOnceSynced() async throws {
+        var rng = SplitMix64(state: 0x5E7C)
+        let world = try await World.generate(rng: &rng, honestBlocks: 6, forkProbability: 0, spamBlocks: 0)
+        let chain = world.honest.compactMap { world.blocks[$0] }
+        let content = SimCAS(world.genesisContent)
+        let subscriber = PeerID(key: "subscriber", session: 1)
+        func pushes(_ effects: [ChainEffect]) -> [StreamPage] {
+            effects.compactMap { if case .send(subscriber, .stream(let page)) = $0, page.requestID == 0 { page } else { nil } }
+        }
+
+        var core = ChainCore(tree: world.bootstrap.tree.detached(), config: ChainCoreConfig(bodyWindow: 8))
+        _ = core.step(.peerReady(peer), now: Self.now)
+        _ = core.step(.peerReady(subscriber), now: Self.now)
+        let subscribedAt = core.sync.log.count
+        _ = core.step(.received(subscriber, .getStream(requestID: 1, logID: core.sync.log.id, after: subscribedAt, own: "")), now: Self.now)
+        XCTAssertEqual(core.sync.peers[subscriber]?.subscribed, true)
+
+        XCTAssertTrue(pushes(show(Array(chain.prefix(4)), from: 1, to: &core)).isEmpty, "unsynced: nothing is pushed")
+        XCTAssertFalse(core.synced)
+        try await execute(Array(chain.prefix(4)), world: world, content: content, on: &core)
+        XCTAssertTrue(core.synced)
+        let missed = core.sync.log.count
+        XCTAssertGreaterThan(missed, subscribedAt)
+        let push = try XCTUnwrap(pushes(show(Array(chain[4...]), from: 5, to: &core)).first, "synced: the tail is pushed")
+        XCTAssertEqual(push.entries.first?.position, missed + 1)
+
+        // The subscriber, at `subscribedAt` in our log, pulls the gap.
+        let server = PeerID(key: "server", session: 1)
+        var client = ChainCore(tree: world.bootstrap.tree.detached(), config: ChainCoreConfig(bodyWindow: 8))
+        let first = client.step(.peerReady(server), now: Self.now)
+        let id = try XCTUnwrap(first.lazy.compactMap { effect -> UInt64? in
+            if case .send(server, .getStream(let id, _, _, _)) = effect { return id }
+            return nil
+        }.first)
+        _ = client.step(.received(server, .stream(StreamPage(
+            requestID: id, logID: core.sync.log.id, entries: [], hasMore: false
+        ))), now: Self.now)
+        let resumed = client.step(.received(server, .stream(push)), now: Self.now)
+        let pulls = resumed.compactMap { effect -> UInt64? in
+            if case .send(server, .getStream(_, let logID, let after, _)) = effect, logID == core.sync.log.id { return after }
+            return nil
+        }
+        XCTAssertEqual(pulls, [subscribedAt], "the gap is pulled from where the subscriber stood")
     }
 
     /// The same latch at a child level, through the level simulator's
