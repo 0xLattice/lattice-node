@@ -34,8 +34,20 @@ enum NodeSQLiteValue {
 }
 
 /// The small SQLite surface needed by the immutable node store.
+///
+/// Each SQL text is prepared once and its statement reused: a call takes the
+/// statement out of `statements`, binds and steps it, then resets it and puts
+/// it back. The SQL texts are fixed by the code, so the set stays bounded
+/// (the most varied is `savedProofs`' IN list, one text per chunk length).
+/// A connection is used from more than one thread (`NodeStore`'s nonisolated
+/// reads), and a body of `forEach` may run SQL on the same connection, so a
+/// statement is never shared while in use: a call that finds its SQL already
+/// taken prepares its own, which is finalized if the slot is filled again by
+/// the time it is done.
 final class NodeSQLite: @unchecked Sendable {
     private let handle: OpaquePointer
+    private let lock = NSLock()
+    private var statements: [String: OpaquePointer] = [:]
 
     /// `create`: created when there is none (otherwise opening one that is
     /// not there fails).
@@ -57,6 +69,7 @@ final class NodeSQLite: @unchecked Sendable {
     }
 
     deinit {
+        for statement in statements.values { sqlite3_finalize(statement) }
         sqlite3_close(handle)
     }
 
@@ -68,7 +81,7 @@ final class NodeSQLite: @unchecked Sendable {
     @discardableResult
     func execute(_ sql: String, params: [NodeSQLiteValue] = []) throws -> Int {
         let statement = try prepare(sql, params: params)
-        defer { sqlite3_finalize(statement) }
+        defer { release(statement, for: sql) }
         let result = sqlite3_step(statement)
         guard result == SQLITE_DONE || result == SQLITE_ROW else {
             throw NodeSQLiteError.execute(String(cString: sqlite3_errmsg(handle)))
@@ -81,7 +94,7 @@ final class NodeSQLite: @unchecked Sendable {
         params: [NodeSQLiteValue] = []
     ) throws -> [[String: NodeSQLiteValue]] {
         let statement = try prepare(sql, params: params)
-        defer { sqlite3_finalize(statement) }
+        defer { release(statement, for: sql) }
         var rows: [[String: NodeSQLiteValue]] = []
         while true {
             switch sqlite3_step(statement) {
@@ -122,7 +135,7 @@ final class NodeSQLite: @unchecked Sendable {
         _ body: (NodeSQLiteStep) throws -> Void
     ) throws {
         let statement = try prepare(sql, params: params)
-        defer { sqlite3_finalize(statement) }
+        defer { release(statement, for: sql) }
         while true {
             switch sqlite3_step(statement) {
             case SQLITE_ROW:
@@ -151,10 +164,17 @@ final class NodeSQLite: @unchecked Sendable {
         _ sql: String,
         params: [NodeSQLiteValue]
     ) throws -> OpaquePointer {
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK,
-              let statement else {
-            throw NodeSQLiteError.prepare(String(cString: sqlite3_errmsg(handle)))
+        let cached = lock.withLock { statements.removeValue(forKey: sql) }
+        let statement: OpaquePointer
+        if let cached {
+            statement = cached
+        } else {
+            var prepared: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &prepared, nil) == SQLITE_OK,
+                  let prepared else {
+                throw NodeSQLiteError.prepare(String(cString: sqlite3_errmsg(handle)))
+            }
+            statement = prepared
         }
         do {
             for (offset, value) in params.enumerated() {
@@ -190,9 +210,22 @@ final class NodeSQLite: @unchecked Sendable {
             }
             return statement
         } catch {
-            sqlite3_finalize(statement)
+            release(statement, for: sql)
             throw error
         }
+    }
+
+    /// Resets `statement` (ending its read, dropping its bindings) and keeps
+    /// it for the next call of `sql`, unless another is already kept.
+    private func release(_ statement: OpaquePointer, for sql: String) {
+        sqlite3_reset(statement)
+        sqlite3_clear_bindings(statement)
+        let kept = lock.withLock {
+            guard statements[sql] == nil else { return false }
+            statements[sql] = statement
+            return true
+        }
+        if !kept { sqlite3_finalize(statement) }
     }
 }
 
