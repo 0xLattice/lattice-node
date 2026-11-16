@@ -299,13 +299,16 @@ public struct ChainCore: Sendable {
     /// persisted (geth's `handler.synced`, set when its downloader completes
     /// a sync cycle). Until then a peer's transaction is ignored.
     public internal(set) var synced = false
-    /// Whether this level is catching up: it has peers and has not yet
-    /// `synced`. Its tip is history, so no template carries it, and its tip
-    /// moving rebuilds none, as Bitcoin Core's `getblocktemplate` refuses
-    /// during initial download and geth's miner pauses while its downloader
-    /// syncs. A level with no peers has nothing to catch up from and is
-    /// mined, as geth's miner mines until a sync starts.
-    public var catchingUp: Bool { !synced && !sync.peers.isEmpty }
+    /// Whether this level is catching up: it has not yet `synced`, and a
+    /// peer serves its log. Its tip is history, so no template carries it,
+    /// and its tip moving rebuilds none, as Bitcoin Core's `getblocktemplate`
+    /// refuses during initial download and geth's miner pauses while its
+    /// downloader syncs. A level no peer serves (a lone node, a chain's sole
+    /// host) has nothing to catch up from and is mined, as geth's miner
+    /// mines until a sync starts.
+    public var catchingUp: Bool {
+        !synced && sync.peers.keys.contains { sync.cursors[$0.key]?.logID.isEmpty == false }
+    }
     public let config: ChainCoreConfig
     /// The level's mempool and template book, on the act-on tip.
     public internal(set) var mining: MiningState
@@ -780,7 +783,9 @@ public struct ChainCore: Sendable {
             sync.peers[peer]?.taken = item.position
             if !applied(item.entry) { sync.peers[peer]?.holes.append(item) }
         }
-        if page.requestID != 0, !page.hasMore, sync.peers[peer]?.more == false {
+        // A peer that does not host the chain answers with no log (`logID`
+        // empty): there is nothing of it to have read.
+        if page.requestID != 0, !page.hasMore, sync.peers[peer]?.more == false, !page.logID.isEmpty {
             sync.peers[peer]?.readToEnd = true
         }
         advanceCursor(of: peer, &turn)

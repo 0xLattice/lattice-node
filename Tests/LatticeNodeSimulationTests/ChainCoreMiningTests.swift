@@ -225,6 +225,27 @@ final class ChainCoreMiningTests: XCTestCase {
         XCTAssertTrue(peerless.contains { if case .buildTemplate = $0 { true } else { false } }, "\(peerless)")
     }
 
+    /// A peer that does not host the chain answers with no log: reading it
+    /// sets no latch, and a level no peer serves (a chain's sole host) has
+    /// nothing to catch up from, so it is mined.
+    func testAPeerWithNoLogNeitherLatchesNorHoldsTheTemplate() throws {
+        var core = ChainCore(tree: world.bootstrap.tree.detached(), config: ChainCoreConfig(bodyWindow: 4))
+        let asked = try XCTUnwrap(core.step(.peerReady(peer), now: Self.now).compactMap { effect -> UInt64? in
+            if case .send(_, .getStream(let id, _, _, _)) = effect { return id }
+            return nil
+        }.first)
+        _ = core.step(.received(peer, .stream(StreamPage(
+            requestID: asked, logID: "", entries: [], hasMore: false
+        ))), now: Self.now)
+        XCTAssertEqual(core.snapshot.actOnTip, core.snapshot.bestHeaderTip)
+        XCTAssertFalse(core.synced)
+        XCTAssertFalse(core.catchingUp)
+        let template = mining(core.step(
+            .mining(.templateRequested(replyID: 1, TemplateRequest(rewardRecipient: nil))), now: Self.now
+        ))
+        XCTAssertTrue(template.contains { if case .buildTemplate = $0 { true } else { false } }, "\(template)")
+    }
+
     /// The stream's tail is pushed only once the level is synced, as Bitcoin
     /// Core announces no block during initial download. A peer that read our
     /// log to its end before the latch misses what was weighed meanwhile.

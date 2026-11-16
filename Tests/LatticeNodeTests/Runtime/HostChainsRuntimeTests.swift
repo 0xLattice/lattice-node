@@ -159,9 +159,10 @@ final class HostChainsRuntimeTests: XCTestCase {
         func carriesAlpha(_ template: MiningTemplateResponse) -> Bool {
             template.chains?.contains { $0.chainPath == Self.alpha } == true
         }
-        // Before it meets a peer, Alpha has nothing to catch up from.
-        try await eventually("the follower's Alpha meets the host") {
-            await levels.read { $0[Self.alpha]?.sync.peers.isEmpty == false } == true
+        // Until the host serves it Alpha's log, Alpha has nothing to catch
+        // up from.
+        try await eventually("the host serves the follower Alpha's log") {
+            await levels.read { $0[Self.alpha].map { $0.catchingUp || $0.synced } } == true
         }
         try await eventually("a template carries Alpha once it latches", within: .seconds(30)) {
             let before = await alphaCatchingUp()
