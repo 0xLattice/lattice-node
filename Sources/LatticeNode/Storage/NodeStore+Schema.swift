@@ -20,7 +20,8 @@ extension NodeStore {
     /// Epoch 48: each fact is kept once, by id, with the staged batch that
     /// first held it; the batch journal is gone and boot restores from the
     /// facts. A block fact no longer carries its state diff: `state_diffs`
-    /// keeps it for the state window.
+    /// keeps it for the state window. A child proof names its entries by
+    /// CID.
     /// Epoch 47: block facts record the block's `parentState`, which an
     /// attributed run checks before crediting a child block (§9.10). Older
     /// child-chain facts lack it and would read as the empty state.
@@ -73,6 +74,7 @@ extension NodeStore {
         "headers",
         "child_indexes",
         "child_proofs",
+        "proof_entries",
         "state_diffs",
     ]
 
@@ -173,8 +175,15 @@ extension NodeStore {
         try database.execute(
             "CREATE TABLE IF NOT EXISTS child_indexes (cid TEXT PRIMARY KEY, bytes BLOB NOT NULL)"
         )
+        // A credited proof names its entries by CID: the block nodes and
+        // child indexes `headers` and `child_indexes` hold are read from
+        // there, and only the rest (a carrier's node and child index when
+        // no level weighed it) is kept in `proof_entries`, once per CID.
         try database.execute(
-            "CREATE TABLE IF NOT EXISTS child_proofs (chain TEXT NOT NULL, child TEXT NOT NULL, root TEXT NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (chain, child, root))"
+            "CREATE TABLE IF NOT EXISTS child_proofs (chain TEXT NOT NULL, child TEXT NOT NULL, root TEXT NOT NULL, entries TEXT NOT NULL, PRIMARY KEY (chain, child, root))"
+        )
+        try database.execute(
+            "CREATE TABLE IF NOT EXISTS proof_entries (cid TEXT PRIMARY KEY, bytes BLOB NOT NULL)"
         )
         // Undo data: each executed block's state diff, which moves the
         // counts of a chain's state on `recent`, kept for the state window

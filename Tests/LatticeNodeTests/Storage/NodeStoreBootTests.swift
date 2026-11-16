@@ -93,7 +93,7 @@ final class NodeStoreBootTests: XCTestCase {
     /// Boot and a hot-hosted start read one level's facts in the order it
     /// took them, as one primary-key range with no sort: each batch's new
     /// facts in place, a fact staged again keeping its first seq, and a
-    /// re-stated block fact read at its first place with its new bytes.
+    /// block fact staged again with a new fact read at its first place.
     func testALevelsFactsAreReadInStagedOrderByTheKey() async throws {
         let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         let store = try store(path)
@@ -234,26 +234,23 @@ final class NodeStoreBootTests: XCTestCase {
     /// and deleted, never a failure: the block's good proofs are still
     /// served, and a good copy written later is read back.
     func testACorruptSavedChildProofIsDeletedAndCanBeWrittenAgain() async throws {
-        try await expectBadRowReplaced { _ in Data("not a proof".utf8) }
+        try await expectBadRowReplaced(entries: "not a cid")
     }
 
-    func testASavedChildProofThatDoesNotMatchItsIndexIsDeletedAndCanBeWrittenAgain() async throws {
-        try await expectBadRowReplaced { _ in
-            try ChildBlockProof(rootCID: NexusGenesis.expectedBlockHash, directoryPath: ["Alpha"], entries: []).serialize()
-        }
+    func testASavedChildProofWhoseEntryIsNotHeldIsDeletedAndCanBeWrittenAgain() async throws {
+        try await expectBadRowReplaced(entries: try cid("an entry nothing holds"))
     }
 
-    private func expectBadRowReplaced(_ badBytes: (String) throws -> Data) async throws {
+    private func expectBadRowReplaced(entries badEntries: String) async throws {
         let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         let store = try store(path)
         let database = try NodeSQLite(path: path.path)
         let alpha: ChainPath = ["Nexus", "Alpha"]
         let (child, goodRoot, badRoot) = (try cid("child"), NexusGenesis.expectedBlockHash, try cid("bad root"))
-        let good = ChildBlockProof(rootCID: goodRoot, directoryPath: ["Alpha"], entries: [])
-        for (root, bytes) in [(goodRoot, try good.serialize()), (badRoot, try badBytes(badRoot))] {
+        for (root, entries) in [(goodRoot, ""), (badRoot, badEntries)] {
             _ = try database.execute(
-                "INSERT INTO child_proofs (chain, child, root, bytes) VALUES (?1, ?2, ?3, ?4)",
-                params: [.text("Nexus/Alpha"), .text(child), .text(root), .blob(bytes)]
+                "INSERT INTO child_proofs (chain, child, root, entries) VALUES (?1, ?2, ?3, ?4)",
+                params: [.text("Nexus/Alpha"), .text(child), .text(root), .text(entries)]
             )
         }
         let saved = try store.savedProofs(at: alpha, for: [child])

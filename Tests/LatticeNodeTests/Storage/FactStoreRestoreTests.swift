@@ -8,7 +8,8 @@ import XCTest
 /// state.db keeps each fact once, by id, at the staged batch that first held
 /// it. A host's every step written through it and read back restores the
 /// trees the host built and its weigh logs entry for entry: a peer's stream
-/// cursor resumes at the same position after a restart.
+/// cursor resumes at the same position after a restart. Every credited
+/// proof, kept as the CIDs of its entries, reads back byte for byte.
 final class FactStoreRestoreTests: XCTestCase {
     private static let now = World.genesisTime + 1_000_000
 
@@ -24,6 +25,7 @@ final class FactStoreRestoreTests: XCTestCase {
             try await store.stageChainFacts([world.rootBootstrap.facts], logID: "log", at: LevelWorld.nexus)
             var host = NodeCore(root: world.rootBootstrap.tree.detached(), hosted: world.hosted)
             var specs: [ChainPath: [ChainSpec]] = [:]
+            var proofs: [ChainPath: [StoredProof]] = [:]
             var staged: [ChainPath: Int] = [LevelWorld.nexus: world.rootBootstrap.facts.facts.count]
             for grind in world.grinds {
                 for batch in try await run(&host, .mined(grind.mined), world) {
@@ -35,6 +37,7 @@ final class FactStoreRestoreTests: XCTestCase {
                     }, logID: "log")
                     for level in batch.levels {
                         specs[level.path, default: []] += level.batch.headers.compactMap(\.spec)
+                        proofs[level.path, default: []] += level.batch.proofs
                         staged[level.path, default: 0] += level.batch.facts.flatMap(\.facts).count
                     }
                 }
@@ -67,6 +70,22 @@ final class FactStoreRestoreTests: XCTestCase {
                 host.levels[LevelWorld.alpha]?.sync.log.entries.contains { $0.kind == .proof } ?? false,
                 "fixture guard: the child level logged proofs"
             )
+
+            var entries = Set<String>()
+            for (level, written) in proofs {
+                let read = try reopened.savedProofs(at: level, for: written.map(\.childCID))
+                for stored in written {
+                    let served = try XCTUnwrap(
+                        read[stored.childCID]?.first { $0.rootCID == stored.proof.rootCID },
+                        "seed \(seed) \(level): \(stored.childCID) by \(stored.proof.rootCID)"
+                    )
+                    XCTAssertEqual(try served.serialize(), try stored.proof.serialize(), "seed \(seed) \(level): the proof's bytes")
+                    entries.formUnion(stored.proof.entries.map(\.cid))
+                }
+            }
+            XCTAssertTrue(proofs[LevelWorld.beta]?.isEmpty == false, "fixture guard: a grandchild's proofs are composed")
+            let kept = try await reopened.database.rows(from: "proof_entries", "SELECT cid FROM proof_entries").count
+            XCTAssertLessThan(kept, entries.count, "seed \(seed): entries the header tables hold are not kept again")
         }
     }
 
