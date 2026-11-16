@@ -216,7 +216,7 @@ final class LevelSimulationTests: XCTestCase {
             $0.flooders = 1
             $0.doubleProbability = 0.5
             $0.pageSize = 12
-            $0.proofs = ChildProofConfig(maxChecks: 4, indexChecks: 1, maxAwaiting: 64)
+            $0.proofs = ChildProofConfig(maxChecks: 4, maxAwaiting: 64)
             $0.withholder = false
             $0.zeroWork = false
             $0.scheduleLiar = false
@@ -233,7 +233,7 @@ final class LevelSimulationTests: XCTestCase {
     /// proof is credited everywhere within a bounded latency, no honest peer
     /// is blamed, and state stays within the caps (checked every step).
     func testSybilFloodersAreDisconnectedAndCannotStarveHonestProofs() async throws {
-        let proofs = ChildProofConfig(maxChecks: 4, indexChecks: 1, maxAwaiting: 64)
+        let proofs = ChildProofConfig(maxChecks: 4, maxAwaiting: 64)
         let flooders = proofs.maxChecks + 1
         let (_, report) = try await simulate(config(0x5B11) {
             $0.flooders = flooders

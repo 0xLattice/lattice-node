@@ -923,7 +923,7 @@ public struct ChainCore: Sendable {
             return nil
         }
         if tree.contains(blockHash: cid) {
-            if !isRoot { offer(entry.proofs, cid: cid, from: peer) }
+            if !isRoot, let peer { offer(entry.proofs, cid: cid, from: peer) }
             return cid
         }
         if sync.declined.contains(cid) { return cid }
@@ -957,7 +957,7 @@ public struct ChainCore: Sendable {
             if held.spec == nil, let spec = Self.bound(entry.spec, by: entry.block) {
                 sync.pending.entries[cid]?.spec = spec
             }
-            if !isRoot { offer(entry.proofs, cid: cid, from: peer) }
+            if !isRoot, let peer { offer(entry.proofs, cid: cid, from: peer) }
             dirty(cid, &turn)
             return cid
         }

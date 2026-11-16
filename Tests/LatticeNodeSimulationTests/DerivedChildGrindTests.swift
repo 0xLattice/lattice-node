@@ -47,7 +47,6 @@ final class DerivedChildGrindTests: XCTestCase {
         var disconnects: [PeerID] = []
         /// Child indexes asked for by CID, and of whom.
         var fetches: [(peer: PeerID, cid: String)] = []
-        /// Blocks looked up in the evidence index, in order.
         /// Each peer's log position, per level.
         var position: [ChainPath: [PeerID: UInt64]] = [:]
         /// Blocks whose bodies the content layer never serves.
@@ -767,6 +766,8 @@ final class DerivedChildGrindTests: XCTestCase {
         host.deferred = []
         for answer in answers { await host.step(answer) }
         await host.step(.tick)
+        let taken = try XCTUnwrap(try host.digest(Self.alpha).blocks[fixture.c.cid]?.grinds)
+        XCTAssertEqual(taken.count, 1, "the dropped grind is not taken until it is sent again")
         for proof in proofs { await host.relayProof(fixture.c, proof, at: Self.alpha, from: Self.alphaHost) }
         let grinds = try XCTUnwrap(try host.digest(Self.alpha).blocks[fixture.c.cid]?.grinds)
         XCTAssertEqual(Set(grinds.keys), [fixture.b.cid, fixture.sibling.cid], "both grinds credit")
