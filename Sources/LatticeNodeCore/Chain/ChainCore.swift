@@ -49,9 +49,6 @@ public enum ChainEvent: Sendable {
     /// connects lacked.
     case parentFactsPresent([String])
     case tick
-    /// A child level: the evidence index's proofs for a block
-    /// (`ChainEffect.lookupProofs`).
-    case proofsFound(childCID: String, [ChildBlockProof])
     /// A child level: a `verifyProof` job the shell could not run (its block
     /// is not held): its slot frees, blaming no one.
     case proofDropped(ChildProofJob)
@@ -62,8 +59,6 @@ public enum ChainEvent: Sendable {
     /// A child level: a header submitted on this node (its author's push),
     /// taken as the same header gossiped from no peer.
     case submitted(HeaderEntry)
-    /// A child level: the evidence index's proofs changed for these blocks.
-    case evidenceChanged(childCIDs: [String])
     /// The level's mempool and miner work: transactions, preflight and
     /// template results, template requests and submitted work.
     case mining(MiningEvent)
@@ -133,8 +128,6 @@ public enum ChainEffect: Sendable {
     case persist(ChainBatch)
     case publish(ChainSnapshot)
     case wakeAt(Int64)
-    /// A child level: ask the evidence index for these blocks' proofs.
-    case lookupProofs([String])
     /// A child level: run `ChildBlockProof.verifySecuringWork`, a pure job,
     /// and answer `proofVerified`.
     case verifyProof(ChildProofJob)
@@ -479,12 +472,8 @@ public struct ChainCore: Sendable {
             parentFactsPresent(blocks)
         case .tick:
             tick(&turn)
-        case .proofsFound(let cid, let proofs):
-            proofsFound(proofs, for: cid, &turn)
         case .proofDropped(let job):
-            if sync.proofs.verifying.removeValue(forKey: job.key) != nil {
-                skipped(job.childCID)
-            }
+            sync.proofs.verifying.removeValue(forKey: job.key)
         case .proofVerified(let job, let result):
             proofVerified(job, result, &turn)
         case .derived(let derivation):
@@ -496,8 +485,6 @@ public struct ChainCore: Sendable {
         case .submitted(let entry):
             guard !isRoot else { break }
             _ = accept(entry, from: nil, &turn)
-        case .evidenceChanged(let cids):
-            evidenceChanged(cids)
         case .mining(let event):
             turn.mining += mining.step(event, now: turn.now)
         }

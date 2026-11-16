@@ -323,10 +323,11 @@ final class LevelSimulationTests: XCTestCase {
         XCTAssertEqual(asked[LevelWorld.nexus]?.count, 1, "the root level asks for a whole page at once")
     }
 
-    /// The evidence index holds only the proofs this level credited, written
-    /// with the facts that credit them: a header weighed in a step is never
-    /// looked up there for itself, so no index answer comes back for it.
-    func testAWeighedChildHeaderIsNotLookedUpInItsOwnIndex() async throws {
+    /// The evidence index holds only the proofs this level credited: every
+    /// proof a step indexes credits its root at a weighed block once the
+    /// step is done, in the batch of the facts that credit it. So the index
+    /// has nothing to give back, and the node never asks it.
+    func testEveryIndexedChildProofIsAlreadyCredited() async throws {
         var rng = SplitMix64(state: 0x5E1F)
         let world = try await LevelWorld.generate(
             rng: &rng, levels: 2, grinds: 60, forkProbability: 0, shareProbability: 0,
@@ -339,15 +340,21 @@ final class LevelSimulationTests: XCTestCase {
         var source = LevelSource(name: "source", config: config)
         let peer = PeerID(key: "source", session: 1)
         var queue: [NodeEvent] = world.grinds.prefix(3).map { .mined($0.mined) } + [.peerReady(peer)]
-        var index: [String: [ChildBlockProof]] = [:]
-        var weighedLookups: [String] = []
-        var found = 0
+        var indexed = 0
         while !queue.isEmpty {
             for effect in host.step(queue.removeFirst(), now: now) {
                 switch effect {
                 case .persist(let batch):
+                    let tree = try XCTUnwrap(host.levels[alpha]).tree
                     for (path, level) in batch.levels where path == alpha {
-                        for stored in level.proofs { index[stored.childCID, default: []].append(stored.proof) }
+                        for stored in level.proofs {
+                            indexed += 1
+                            XCTAssertTrue(tree.contains(blockHash: stored.childCID), "an indexed proof's block is weighed")
+                            XCTAssertNotNil(
+                                tree.workContribution(id: stored.proof.rootCID, at: stored.childCID),
+                                "an indexed proof credits its root"
+                            )
+                        }
                     }
                 case .level(let path, .send(_, let message)):
                     for case .send(_, let path, let reply) in source.received(
@@ -362,14 +369,6 @@ final class LevelSimulationTests: XCTestCase {
                     queue.append(.level(path, .childIndexFetched(
                         peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
                     )))
-                case .level(let path, .lookupProofs(let cids)) where path == alpha:
-                    let tree = try XCTUnwrap(host.levels[alpha]).tree
-                    weighedLookups += cids.filter { tree.contains(blockHash: $0) }
-                    for cid in cids {
-                        guard let proofs = index[cid] else { continue }
-                        found += 1
-                        queue.append(.level(path, .proofsFound(childCID: cid, proofs)))
-                    }
                 default:
                     break
                 }
@@ -377,9 +376,7 @@ final class LevelSimulationTests: XCTestCase {
         }
         let weighed = TreeDigest(try XCTUnwrap(host.levels[alpha]).tree).blocks
         XCTAssertGreaterThan(weighed.count, 50, "the child chain was not weighed")
-        XCTAssertFalse(index.isEmpty, "no credited proof was indexed")
-        XCTAssertEqual(weighedLookups.count, 0, "a weighed header was looked up in its own index")
-        XCTAssertEqual(found, 0, "the index answered for a block this level credited")
+        XCTAssertGreaterThan(indexed, 50, "no credited proof was indexed")
     }
 
     /// A peer answers each child-level `getData` with every header it has,

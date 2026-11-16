@@ -1720,23 +1720,6 @@ extension NodeRuntime {
             case .readTransactions(let blocks):
                 enqueue(NodeRuntime.readJob(blocks, at: path, storage: storage))
                 startJobs()
-            case .lookupProofs(let cids):
-                // Read off the loop, as a served page is; each block's
-                // proofs come back as an event, in the order asked.
-                let (storage, inputs, failStop) = (storage, inputs, failStop)
-                spawn {
-                    let found: [String: [ChildBlockProof]]
-                    do {
-                        found = try storage.store.savedProofs(at: path, for: cids)
-                    } catch {
-                        failStop(error)
-                        return
-                    }
-                    for cid in cids {
-                        guard let roots = found[cid] else { continue }
-                        inputs.yield(.event(.level(path, .proofsFound(childCID: cid, roots))))
-                    }
-                }
             case .mining(let effect):
                 return await execute(effect, at: path)
             case .workSubmitted(let replyID, let outcome):

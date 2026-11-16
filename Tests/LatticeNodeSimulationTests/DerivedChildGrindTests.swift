@@ -127,10 +127,6 @@ final class DerivedChildGrindTests: XCTestCase {
                         checks.append(Check(path: path, cid: job.childCID, root: job.proof.rootCID))
                         let answer = NodeEvent.level(path, .proofVerified(job, await job.run(block)))
                         if deferChecks { deferred.append(answer) } else { queue.append(answer) }
-                    case .level(let path, .lookupProofs(let cids)):
-                        for cid in cids where !store.proofs(path, cid).isEmpty {
-                            queue.append(.level(path, .proofsFound(childCID: cid, store.proofs(path, cid))))
-                        }
                     case .level(let path, .deriveProof(let job)):
                         // From this host's own content only.
                         derived.append(Derived(path: path, cid: job.childCID, carrier: job.carrier))
@@ -712,16 +708,19 @@ final class DerivedChildGrindTests: XCTestCase {
 
     /// One peer fills the whole waiting pool: there is no per-peer cap. An
     /// honest header from another peer still gets in, evicting the oldest
-    /// entry not held.
+    /// entry not held. Every proof is over the operator's size cap, so no
+    /// entry has a check and each waits idle.
     func testOnePeerFillingTheWaitingPoolCannotKeepAnotherOut() async throws {
         let fixture = try await committedWorld()
         var config = ChainCoreConfig()
         config.proofs.maxAwaiting = fixture.d.count
+        let size = try await ChildBlockProof.generate(
+            rootHeader: BlockHeader(node: fixture.b.block), childDirectory: Self.alpha[1], fetcher: fixture.world.cas
+        ).serialize().count
+        config.proofs.maxProofBytes = size - 1
         var (host, proof) = try await provedHost(fixture, config: config)
-        host.deferChecks = true
         for block in fixture.d {
-            host.core.levels[Self.alpha]?.sync.proofs.wanted.insert(block.cid)
-            await host.relay(block, at: Self.alpha, from: Self.alphaHost)
+            await host.relay(block, at: Self.alpha, from: Self.alphaHost, proofs: [proof])
         }
         XCTAssertEqual(Set(try XCTUnwrap(host.core.levels[Self.alpha]?.sync.proofs.awaiting).keys), Set(fixture.d.map(\.cid)),
                        "one peer fills the pool")

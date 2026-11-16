@@ -119,8 +119,8 @@ public struct HostStore: Sendable {
 }
 
 /// A deterministic network of host cores, each running every level it
-/// hosts, beside scripted peers; an evidence index the cores and the
-/// withholder publish to; and a content layer holding every body, which
+/// hosts, beside scripted peers; each node's evidence index of the proofs
+/// it credited; and a content layer holding every body, which
 /// answers each level's body window and runs its connect jobs. Every step
 /// runs `NodeCore.step`, executes its effects, then checks the invariants at
 /// every level.
@@ -483,14 +483,6 @@ public struct LevelSimulator {
             for tip in [snapshot.bestHeaderTip, snapshot.actOnTip]
             where !tip.isEmpty && node.store.levels[path]?.blockFacts.contains(tip) != true {
                 throw Invariants.fail(name, "published tip \(tip) at \(path) is not durable")
-            }
-        case .lookupProofs(let cids):
-            for cid in cids {
-                // Each node's evidence index holds the proofs it credited.
-                let found = node.store.proofs(path, cid)
-                if !found.isEmpty {
-                    schedule(at: delay(), to: name, .host(.level(path, .proofsFound(childCID: cid, found))))
-                }
             }
         case .verifyProof(let job):
             report.verifications += 1

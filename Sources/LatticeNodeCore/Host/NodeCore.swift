@@ -13,7 +13,7 @@ public enum NodeEvent: Sendable {
     /// A sync message for one level.
     case received(PeerID, ChainPath, SyncMessage)
     /// An answer for one level: a children map fetched, a page served,
-    /// proofs found or verified, an evidence index change.
+    /// proofs verified.
     case level(ChainPath, ChainEvent)
     case tick
     /// This host's own grind: a level's `MiningEffect.mined`, its content

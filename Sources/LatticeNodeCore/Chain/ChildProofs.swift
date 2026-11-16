@@ -5,8 +5,8 @@ import UInt256
 /// A child level's proof bounds: plain caps. A peer whose proof fails
 /// proof-of-work is disconnected, so no fairness machinery is needed.
 public struct ChildProofConfig: Sendable {
-    /// Peers' proof checks in flight at once, and the evidence index's own
-    /// allowance beside them (so this node's lookups always progress).
+    /// Peers' proof checks in flight at once, and this node's own
+    /// allowance beside them (so a local submit's checks always progress).
     public var maxChecks: Int
     public var indexChecks: Int
     /// Proofs taken from one header, and the largest proof taken at all.
@@ -17,10 +17,6 @@ public struct ChildProofConfig: Sendable {
     public var maxQueuedBytes: Int
     /// Headers awaiting their first proof that weighs, at once.
     public var maxAwaiting: Int
-    /// Blocks the evidence index named that this node does not hold: a
-    /// header without proofs is taken only for one of these (or a parent a
-    /// waiting header names).
-    public var maxWanted: Int
 
     public init(
         maxChecks: Int = 256,
@@ -28,8 +24,7 @@ public struct ChildProofConfig: Sendable {
         maxPerHeader: Int = 8,
         maxProofBytes: Int = 64 * 1_024,
         maxQueuedBytes: Int = 16 * 1_024 * 1_024,
-        maxAwaiting: Int = 1_024,
-        maxWanted: Int = 4_096
+        maxAwaiting: Int = 1_024
     ) {
         self.maxChecks = maxChecks
         self.indexChecks = indexChecks
@@ -37,7 +32,6 @@ public struct ChildProofConfig: Sendable {
         self.maxProofBytes = maxProofBytes
         self.maxQueuedBytes = maxQueuedBytes
         self.maxAwaiting = maxAwaiting
-        self.maxWanted = maxWanted
     }
 }
 
@@ -58,7 +52,7 @@ public struct ChildProofKey: Hashable, Comparable, Sendable {
 }
 
 /// A proof not yet checked or in flight: for a block, from a source (nil:
-/// the evidence index), with its serialized size.
+/// a local submit), with its serialized size.
 public struct QueuedChildProof: Sendable {
     public let cid: String
     public let proof: ChildBlockProof
@@ -165,8 +159,6 @@ public struct AwaitingChildProof: Sendable {
     /// A genesis's spec, as its first announcer sent it.
     public internal(set) var spec: ChainSpec?
     public internal(set) var announcers: [PeerID]
-    /// Whether its proofs were looked up since the evidence index changed.
-    public internal(set) var lookedUp = false
     let sequence: UInt64
 
     var source: PeerID? { announcers.first }
@@ -178,10 +170,6 @@ public struct ChildProofSync: Sendable {
     public internal(set) var awaiting: [String: AwaitingChildProof] = [:]
     public internal(set) var queued: [QueuedChildProof] = []
     public internal(set) var verifying: [ChildProofKey: QueuedChildProof] = [:]
-    /// Weighed blocks to look up in the evidence index again.
-    var relookup: Set<String> = []
-    var wanted: Set<String> = []
-    var wantedOrder: [String] = []
     var sequence: UInt64 = 0
     /// Derivations in flight, counted by the block derived (a waiting
     /// header with one is never evicted). Soft: in memory only, gone on
@@ -214,14 +202,6 @@ public struct ChildProofSync: Sendable {
         queued.removeAll { $0.source == peer }
         for (key, proof) in verifying where proof.source == peer { verifying[key] = nil }
     }
-
-    mutating func want(_ cid: String, _ config: ChildProofConfig) {
-        guard wanted.insert(cid).inserted else { return }
-        wantedOrder.append(cid)
-        while wantedOrder.count > config.maxWanted {
-            wanted.remove(wantedOrder.removeFirst())
-        }
-    }
 }
 
 /// A child level's header is its block and a `ChildBlockProof` per root that
@@ -231,9 +211,8 @@ public struct ChildProofSync: Sendable {
 /// `addWork`. Blame only when proof-of-work fails: a proof a peer sent that
 /// fails `verifySecuringWork` (malformed, or no work for that block)
 /// disconnects the peer, which honest peers never risk, since they relay
-/// only proofs they verified; the evidence index's proofs are not
-/// attributable and blame no one. A missing proof is a liveness wait,
-/// looked up in the evidence index again when it changes.
+/// only proofs they verified; a local submit's proofs blame no one. A
+/// missing proof is a liveness wait until a peer sends it.
 extension ChainCore {
     var isRoot: Bool { tree.context?.isRoot ?? true }
 
@@ -251,9 +230,9 @@ extension ChainCore {
     // MARK: - Taking proofs
 
     /// A child header nobody weighed yet: it waits for a proof. A header with
-    /// no proofs is taken only when wanted (the evidence index named it, a
-    /// waiting header names it as parent, or a parent-level block commits
-    /// it, whose grinds are then derived); otherwise it is dropped, so
+    /// no proofs is taken only when wanted (a pending or waiting header
+    /// names it as parent, or a parent-level block commits it, whose grinds
+    /// are then derived); otherwise it is dropped, so
     /// strangers cannot spend this node's lookups. One from no peer (a
     /// local submit) has no announcer.
     mutating func awaitProof(_ entry: HeaderEntry, cid: String, from peer: PeerID?, _ turn: inout Turn) {
@@ -265,7 +244,7 @@ extension ChainCore {
             offer(entry.proofs, cid: cid, from: peer)
             return
         }
-        let wanted = sync.proofs.wanted.contains(cid) || sync.pending.childrenOf[cid] != nil
+        let wanted = sync.pending.childrenOf[cid] != nil
             || sync.proofs.awaiting.values.contains { $0.block.parent?.rawCID == cid }
             || parentTree.map { !$0.committers(of: cid, directory: chainPath[chainPath.count - 1]).isEmpty } == true
         guard !entry.proofs.isEmpty || wanted else { return }
@@ -275,7 +254,6 @@ extension ChainCore {
             blockCID: cid, block: entry.block, children: entry.children, spec: Self.bound(entry.spec, by: entry.block),
             announcers: peer.map { [$0] } ?? [], sequence: sync.proofs.sequence
         )
-        sync.proofs.wanted.remove(cid)
         arrived.append(cid)
         offer(entry.proofs, cid: cid, from: peer)
     }
@@ -293,8 +271,8 @@ extension ChainCore {
 
     /// Queue each new proof (by content) of a waiting, pending or weighed
     /// header, up to `maxPerHeader` from one header, within the queue's byte
-    /// budget; over it, a proof is dropped without blame and the block is
-    /// looked up again later. Checks start in `proofWork`.
+    /// budget; over it, a proof is dropped without blame, taken again only
+    /// if a peer sends it again. Checks start in `proofWork`.
     mutating func offer(_ proofs: [ChildBlockProof], cid: String, from source: PeerID?) {
         // Work crediting a block beyond the finality window is declined.
         if pastFinality(cid) { return }
@@ -311,45 +289,15 @@ extension ChainCore {
             guard sync.proofs.verifying[queued.key] == nil,
                   !sync.proofs.queued.contains(where: { $0.key == queued.key }),
                   !credits(proof.rootCID, at: cid) else { continue }
-            guard held + queued.bytes <= proofConfig.maxQueuedBytes else {
-                skipped(cid)
-                continue
-            }
+            guard held + queued.bytes <= proofConfig.maxQueuedBytes else { continue }
             held += queued.bytes
             sync.proofs.queued.append(queued)
-        }
-    }
-
-    /// A proof this node could not keep: look the block up again later.
-    mutating func skipped(_ cid: String) {
-        if sync.proofs.awaiting[cid] != nil {
-            sync.proofs.awaiting[cid]?.lookedUp = false
-        } else if sync.pending.entries[cid] != nil || tree.contains(blockHash: cid) {
-            sync.proofs.relookup.insert(cid)
         }
     }
 
     mutating func credits(_ grind: String, at cid: String) -> Bool {
         sync.pending.entries[cid]?.evidence[grind] != nil
             || (tree.contains(blockHash: cid) && tree.workContribution(id: grind, at: cid) != nil)
-    }
-
-    /// The evidence index's proofs for a block.
-    mutating func proofsFound(_ proofs: [ChildBlockProof], for cid: String, _ turn: inout Turn) {
-        guard sync.proofs.awaiting[cid] != nil || sync.pending.entries[cid] != nil || tree.contains(blockHash: cid) else { return }
-        offer(proofs, cid: cid, from: nil)
-    }
-
-    mutating func evidenceChanged(_ cids: [String]) {
-        for cid in Set(cids).sorted() {
-            if sync.proofs.awaiting[cid] != nil {
-                sync.proofs.awaiting[cid]?.lookedUp = false
-            } else if sync.pending.entries[cid] != nil || tree.contains(blockHash: cid) {
-                sync.proofs.relookup.insert(cid)
-            } else {
-                sync.proofs.want(cid, proofConfig)
-            }
-        }
     }
 
     /// A peer is gone (for any reason): its announcements end, and its
@@ -383,9 +331,6 @@ extension ChainCore {
         guard case .success(let evidence) = result, evidence.childCID == cid,
               let work = evidence.contribution, work.work > .zero else {
             if let peer = source { disconnect(peer, .proofOfWorkInvalid, &turn) }
-            if sync.proofs.awaiting[cid] != nil, !sync.proofs.holds(cid) {
-                sync.proofs.awaiting[cid]?.lookedUp = false
-            }
             return
         }
         if tree.contains(blockHash: cid) {
@@ -429,12 +374,10 @@ extension ChainCore {
     // MARK: - Each step
 
     /// Start queued checks in arrival order while slots are free (peers'
-    /// and the index's apart), dropping proofs whose block is gone or
-    /// already credited by that root; then ask the evidence index in one
-    /// batch: for every waiting header with no proof queued or in flight,
-    /// and every weighed block queued for another lookup. A header weighed
-    /// this step is not asked: the index holds only proofs this level
-    /// credited, written with the facts that credit them.
+    /// and this node's apart), dropping proofs whose block is gone or
+    /// already credited by that root. The evidence index is never asked: it
+    /// holds only proofs this level credited, written with the facts that
+    /// credit them, so a proof comes from a peer, a submit or a derivation.
     mutating func proofWork(_ turn: inout Turn) {
         var peerChecks = sync.proofs.checks(index: false)
         var indexChecks = sync.proofs.checks(index: true)
@@ -457,14 +400,6 @@ extension ChainCore {
             )))
         }
         sync.proofs.queued = kept
-        var wanted: Set<String> = []
-        for (cid, held) in sync.proofs.awaiting where !held.lookedUp && !sync.proofs.holds(cid) {
-            sync.proofs.awaiting[cid]?.lookedUp = true
-            wanted.insert(cid)
-        }
-        wanted.formUnion(sync.proofs.relookup)
-        sync.proofs.relookup = []
-        if !wanted.isEmpty { turn.effects.append(.lookupProofs(wanted.sorted())) }
     }
 
     // MARK: - Weighing

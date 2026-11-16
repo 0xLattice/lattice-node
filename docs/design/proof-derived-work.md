@@ -157,7 +157,7 @@ this design forbids.
   serving state, not portable authority.
 - Proofs learned from peers or produced by local merged mining are verified
   before credit. A node can later serve the exact saved proof with the child
-  header or find it through its local evidence index.
+  header.
 - Gossip, sync, acquisition, and persistence may run asynchronously.
   Chain insertion and fork choice consume only complete, durable import
   batches.
