@@ -46,4 +46,17 @@ final class NodeEffectTraceLabelTests: XCTestCase {
         XCTAssertEqual(Set(childConnects).count, 1)
         XCTAssertLessThan(last, 200)
     }
+
+    /// A step's line names each event and effect by kind and level, never
+    /// by its payload.
+    func testLabelsNameKindAndLevelOnly() {
+        let child: ChainPath = ["Nexus", "Alpha"]
+        XCTAssertEqual(NodeEvent.level(child, .bodyFetched(cid: "bafy")).traceLabel, "bodyFetched Nexus/Alpha")
+        XCTAssertEqual(NodeEvent.level(child, .tick).traceLabel, "tick Nexus/Alpha")
+        XCTAssertEqual(NodeEvent.tick.traceLabel, "tick")
+        XCTAssertEqual(NodeEvent.unhost(child).traceLabel, "unhost Nexus/Alpha")
+        XCTAssertEqual(NodeEffect.level(child, .fetchBody(cid: "bafy")).traceLabel, "fetchBody Nexus/Alpha")
+        XCTAssertEqual(NodeEffect.wakeAt(42).traceLabel, "wakeAt")
+        XCTAssertEqual(NodeEvent.level(child, .mining(.policyRefused(tipCID: "bafy", cids: []))).traceLabel, "mining.policyRefused Nexus/Alpha")
+    }
 }

@@ -27,6 +27,13 @@ public final class AcquisitionBudget: @unchecked Sendable {
         /// its depth while the block is one a chain can connect next
         /// (`prioritize`).
         case body(String, depth: Int = 0)
+
+        var traceLabel: String {
+            switch self {
+            case .ownWork: "ownWork"
+            case .body(_, let depth): "body depth \(depth)"
+            }
+        }
     }
 
     /// Read and written under `lock` only.
@@ -65,6 +72,11 @@ public final class AcquisitionBudget: @unchecked Sendable {
 
     /// The sessions waiting now.
     var waiting: Int { lock.withLock { waiters.count } }
+
+    /// Reserved of capacity and the sessions waiting, for a trace line.
+    var occupancy: String {
+        lock.withLock { "used \(used >> 20)/\(capacity >> 20) MiB waiting \(waiters.count)" }
+    }
 
     /// The blocks each chain can connect next: their body fetches wait
     /// ahead of look-ahead.

@@ -39,11 +39,36 @@ enum SyncTrace {
 
     static var enabled: Bool { destination != nil }
 
+    /// The time a line is stamped with, read only while tracing (0
+    /// otherwise), so durations between lines' stamps and these agree.
+    static func now() -> Double {
+        enabled ? Date().timeIntervalSince1970 : 0
+    }
+
+    /// Milliseconds from `start` to `end`, for a line.
+    static func ms(_ start: Double, _ end: Double) -> String {
+        String(format: "%.1f", (end - start) * 1_000)
+    }
+
     static func log(chain: [String], _ message: @autoclosure () -> String) {
         guard let destination else { return }
         destination.append(
             "sync-trace \(Date().timeIntervalSince1970) \(ProcessInfo.processInfo.processIdentifier) [\(chain.joined(separator: "/"))] \(message())\n"
         )
+    }
+}
+
+/// When one piece of work was queued, started and done, stamped while
+/// tracing only.
+struct TraceTimes: Sendable {
+    var queued: Double
+    var started: Double
+    var done: Double
+
+    /// The line's part for this work's life once the loop takes it at
+    /// `taken`: waiting to start, running, then waiting for the loop.
+    func line(taken: Double) -> String {
+        "queued \(SyncTrace.ms(queued, started)) run \(SyncTrace.ms(started, done)) loop \(SyncTrace.ms(done, taken)) ms"
     }
 }
 
