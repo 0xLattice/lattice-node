@@ -497,9 +497,12 @@ served, or built on before the write that makes it durable returns.
 
 ### What a node keeps
 
-Facts, headers and child proofs are kept for good: they grow with the
-number of blocks weighed, as Bitcoin's block index does. Content is kept
-because a rule says so.
+Facts and headers are kept for good, and so is each credited child proof
+unless it no longer reads back (an entry it names is gone, or a row is
+damaged): then it is deleted when read, the block is served without it,
+and a peer's copy is taken again while the block still waits for proof.
+They grow with the number of blocks weighed, as Bitcoin's block index
+does. Content is kept because a rule says so.
 Two rules are built in: a node always holds each hosted chain's genesis
 block, and the body of each chain's tip, so that a new block can be passed
 on. A body fetched for a block waiting to execute is read into memory, not

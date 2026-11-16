@@ -109,7 +109,10 @@ extension NodeStore {
         // that batch: a level reads back as one key range in its weigh
         // order, and appends at its end. A row is stored whole in its
         // b-tree page up to about 1,000 bytes: a block fact, without its
-        // state diff, is about 750.
+        // state diff, is about 750. The exception is a parent block that
+        // commits many children: each adds about 85 bytes, so a Nexus/testnet
+        // block fact with about 13 is about 1.75 KB and overflows (about a
+        // tenth of that chain's rows).
         try database.execute("""
             CREATE TABLE IF NOT EXISTS admission_facts (
                 chain_path TEXT NOT NULL,
