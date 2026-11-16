@@ -107,23 +107,30 @@ final class ChainCoreMiningTests: XCTestCase {
     /// Show `blocks` as `peer`'s log, positions from `from`: the page
     /// answers the stream request in flight (or is pushed), and the headers
     /// it asks for are sent.
-    private func show(_ blocks: [SimBlock], from: UInt64, to core: inout ChainCore) {
+    @discardableResult
+    private func show(_ blocks: [SimBlock], from: UInt64, to core: inout ChainCore) -> [ChainEffect] {
         let ids = blocks.enumerated().map { StreamEntry(position: from + UInt64($0.offset), entry: .header($0.element.cid)) }
         let page = core.step(.received(peer, .stream(StreamPage(
             requestID: core.sync.peers[peer]?.stream?.requestID ?? 0, logID: "peer", entries: ids, hasMore: false
         ))), now: Self.now)
+        var effects = page
         for case .send(_, .getData(let id, _)) in page {
-            _ = core.step(.received(peer, .headers(HeadersResponse(
+            effects += core.step(.received(peer, .headers(HeadersResponse(
                 requestID: id, entries: blocks.map { HeaderEntry(block: $0.block, children: $0.children) }, hasMore: false
             ))), now: Self.now)
         }
+        return effects
     }
 
     /// Execute `blocks` in order, each body delivered and its connect run.
-    private func execute(_ blocks: [SimBlock], world: World, content: SimCAS, on core: inout ChainCore) async throws {
+    /// Returns every step's effects.
+    @discardableResult
+    private func execute(_ blocks: [SimBlock], world: World, content: SimCAS, on core: inout ChainCore) async throws -> [ChainEffect] {
+        var all: [ChainEffect] = []
         for block in blocks {
             content.put(world.blocks[block.cid]!.body)
             var effects = core.step(.bodyFetched(cid: block.cid), now: Self.now)
+            all += effects
             while let job = effects.lazy.compactMap({ effect -> ConnectJob? in
                 if case .connect(let job) = effect { return job }
                 return nil
@@ -132,11 +139,13 @@ final class ChainCoreMiningTests: XCTestCase {
                     job, fetcher: content, validationContext: ValidationContext(nowMilliseconds: Self.now)
                 )
                 effects = core.step(.connected(verdict), now: Self.now)
+                all += effects
                 for case .persist(let batch) in effects {
                     for state in batch.states { try await storeMaterialized(state, in: content) }
                 }
             }
         }
+        return all
     }
 
     private func peerArrival(_ core: inout ChainCore, nonce: UInt64) throws -> [MiningEffect] {
@@ -200,6 +209,63 @@ final class ChainCoreMiningTests: XCTestCase {
         var restarted = ChainCore(tree: core.tree.detached(), config: ChainCoreConfig(bodyWindow: 8))
         XCTAssertFalse(restarted.synced)
         XCTAssertTrue(try peerArrival(&restarted, nonce: 11).isEmpty)
+    }
+
+    /// The stream's tail is pushed only once the level is synced, as Bitcoin
+    /// Core announces no block during initial download. A peer that read our
+    /// log to its end before the latch misses what was weighed meanwhile.
+    /// The step that latches (a connect, appending nothing) pushes the log's
+    /// last entry, past the peer's position, so it pulls the gap with no
+    /// further block.
+    func testTheStreamIsPushedOnlyOnceSynced() async throws {
+        var rng = SplitMix64(state: 0x5E7C)
+        let world = try await World.generate(rng: &rng, honestBlocks: 6, forkProbability: 0, spamBlocks: 0)
+        let chain = world.honest.compactMap { world.blocks[$0] }
+        let content = SimCAS(world.genesisContent)
+        let subscriber = PeerID(key: "subscriber", session: 1)
+        func pushes(_ effects: [ChainEffect]) -> [StreamPage] {
+            effects.compactMap { if case .send(subscriber, .stream(let page)) = $0, page.requestID == 0 { page } else { nil } }
+        }
+
+        var core = ChainCore(tree: world.bootstrap.tree.detached(), config: ChainCoreConfig(bodyWindow: 8))
+        _ = core.step(.peerReady(peer), now: Self.now)
+        _ = core.step(.peerReady(subscriber), now: Self.now)
+        let subscribedAt = core.sync.log.count
+        _ = core.step(.received(subscriber, .getStream(requestID: 1, logID: core.sync.log.id, after: subscribedAt, own: "")), now: Self.now)
+        XCTAssertEqual(core.sync.peers[subscriber]?.subscribed, true)
+
+        XCTAssertTrue(pushes(show(Array(chain.prefix(4)), from: 1, to: &core)).isEmpty, "unsynced: nothing is pushed")
+        XCTAssertFalse(core.synced)
+        let early = try await execute(Array(chain.prefix(3)), world: world, content: content, on: &core)
+        XCTAssertTrue(pushes(early).isEmpty)
+        XCTAssertFalse(core.synced)
+        let missed = core.sync.log.count
+        XCTAssertGreaterThan(missed, subscribedAt)
+        let latching = try await execute([chain[3]], world: world, content: content, on: &core)
+        XCTAssertTrue(core.synced)
+        XCTAssertEqual(core.sync.log.count, missed, "the latching step appends nothing")
+        let push = try XCTUnwrap(pushes(latching).first, "the latching step pushes the log's last entry")
+        XCTAssertEqual(push.entries.map(\.position), [missed])
+        let next = try XCTUnwrap(pushes(show(Array(chain[4...]), from: 5, to: &core)).first, "synced: the tail is pushed")
+        XCTAssertEqual(next.entries.first?.position, missed + 1)
+
+        // The subscriber, at `subscribedAt` in our log, pulls the gap.
+        let server = PeerID(key: "server", session: 1)
+        var client = ChainCore(tree: world.bootstrap.tree.detached(), config: ChainCoreConfig(bodyWindow: 8))
+        let first = client.step(.peerReady(server), now: Self.now)
+        let id = try XCTUnwrap(first.lazy.compactMap { effect -> UInt64? in
+            if case .send(server, .getStream(let id, _, _, _)) = effect { return id }
+            return nil
+        }.first)
+        _ = client.step(.received(server, .stream(StreamPage(
+            requestID: id, logID: core.sync.log.id, entries: [], hasMore: false
+        ))), now: Self.now)
+        let resumed = client.step(.received(server, .stream(push)), now: Self.now)
+        let pulls = resumed.compactMap { effect -> UInt64? in
+            if case .send(server, .getStream(_, let logID, let after, _)) = effect, logID == core.sync.log.id { return after }
+            return nil
+        }
+        XCTAssertEqual(pulls, [subscribedAt], "the gap is pulled from where the subscriber stood")
     }
 
     /// The same latch at a child level, through the level simulator's
@@ -301,6 +367,33 @@ final class ChainCoreMiningTests: XCTestCase {
         let answered = mining(core.step(.mining(.templateBuilt(first, nil)), now: Self.now))
         XCTAssertEqual(answered.count, 1, "\(answered)")
         guard case .templateRefused(1, .buildFailed)? = answered.first else { return XCTFail("\(answered)") }
+    }
+
+    /// A block this node produced is pushed whether or not the level is
+    /// synced: it may be canonical, and it adds weight (Bitcoin Core
+    /// announces a block it found even during initial download).
+    func testAMinedBlockIsPushedBeforeTheSyncLatch() throws {
+        let path = world.bootstrap.tree.context!.path
+        let subscriber = PeerID(key: "subscriber", session: 1)
+        var host = NodeCore(root: world.bootstrap.tree.detached(), hosted: [])
+        _ = host.step(.peerReady(subscriber), now: Self.now)
+        let (logID, count) = try XCTUnwrap(host.levels[path].map { ($0.sync.log.id, $0.sync.log.count) })
+        _ = host.step(.received(subscriber, path, .getStream(
+            requestID: 1, logID: logID, after: count, own: ""
+        )), now: Self.now)
+        XCTAssertEqual(host.levels[path]?.sync.peers[subscriber]?.subscribed, true)
+        XCTAssertEqual(host.levels[path]?.synced, false, "the subscriber's log is not read")
+
+        let grind = MinedGrind(root: chain[0].block, rootChildren: chain[0].children, carried: [])
+        let effects = host.step(.mined(grind, replyID: nil), now: Self.now)
+        let pushed = effects.compactMap { effect -> [String]? in
+            if case .level(_, .send(subscriber, .stream(let page))) = effect, page.requestID == 0 {
+                return page.entries.map(\.entry.cid)
+            }
+            return nil
+        }
+        XCTAssertEqual(pushed, [[chain[0].cid]], "\(effects)")
+        XCTAssertEqual(host.levels[path]?.synced, false)
     }
 
     func testAMinedRootIsAnsweredOnceItExecutes() async throws {

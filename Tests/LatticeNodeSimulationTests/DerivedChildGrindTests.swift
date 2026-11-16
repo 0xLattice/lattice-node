@@ -388,6 +388,36 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertTrue(author.disconnects.isEmpty && peer.disconnects.isEmpty)
     }
 
+    /// A child block its author submits here is pushed even before Alpha is
+    /// synced: a block this node was handed to publish may be canonical and
+    /// adds weight. It is weighed later (by B's derived grind), in a step
+    /// that is not `weighOwn`: a weighed header no peer announced is own.
+    func testASubmittedChildBlockIsPushedBeforeTheSyncLatch() async throws {
+        let fixture = try await committedWorld()
+        var author = Host(fixture.world)
+        for grind in fixture.setup { await author.step(.mined(grind)) }
+        await author.step(.peerReady(Self.miner))
+        _ = author.take()
+        await author.relay(fixture.b, at: Self.nexus, from: Self.miner)
+        let subscriber = PeerID(key: "subscriber", session: 3)
+        await author.step(.peerReady(subscriber))
+        let (logID, count) = try XCTUnwrap(author.core.levels[Self.alpha].map { ($0.sync.log.id, $0.sync.log.count) })
+        await author.step(.received(subscriber, Self.alpha, .getStream(requestID: 1, logID: logID, after: count, own: "")))
+        XCTAssertEqual(author.core.levels[Self.alpha]?.sync.peers[subscriber]?.subscribed, true)
+        XCTAssertEqual(author.core.levels[Self.alpha]?.synced, false, "no peer's Alpha log is read")
+        _ = author.take()
+
+        let held = await author.submit(fixture.c, at: Self.alpha)
+        XCTAssertTrue(held)
+        XCTAssertTrue(try author.digest(Self.alpha).blocks[fixture.c.cid] != nil, "C is weighed")
+        let pushed = author.take().compactMap { sent -> [String]? in
+            guard sent.path == Self.alpha, case .stream(let page) = sent.message, page.requestID == 0 else { return nil }
+            return page.entries.map(\.entry.block)
+        }.flatMap { $0 }
+        XCTAssertTrue(pushed.contains(fixture.c.cid), "\(pushed)")
+        XCTAssertEqual(author.core.levels[Self.alpha]?.synced, false)
+    }
+
     /// C submitted before B is weighed has no committer: it is dropped as
     /// the same proofless gossip is, and nothing is derived when B is
     /// weighed. The author submits again and C is credited, as when it

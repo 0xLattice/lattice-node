@@ -515,6 +515,9 @@ public struct ChainCore: Sendable {
         /// Stream cursors this step moved.
         var cursors: [String: StreamCursor] = [:]
         var mining: [MiningEffect] = []
+        /// The step weighed a block this node produced: mined or submitted
+        /// here (`weighOwn`), or a header no peer announced.
+        var own = false
         /// Pending headers to look at again, smallest priority first.
         var dirty = Heap<(priority: UInt256, cid: String)> {
             $0.priority != $1.priority ? $0.priority < $1.priority : $0.cid < $1.cid
@@ -546,7 +549,12 @@ public struct ChainCore: Sendable {
                 proofs: turn.indexed, cursors: turn.cursors
             )))
         }
+        let wasSynced = synced
         latchSynced()
+        // The step that latches pushes at least the log's last entry: a
+        // subscriber from before the latch pulls the gap from its position.
+        let tail = appended.entries.isEmpty && !wasSynced && synced && sync.log.count > 0
+            ? sync.log.page(after: sync.log.count - 1, limit: 1) : appended
         let current = snapshot
         // A best tip that moved down moved the finality window with it: what
         // was declined just past the old window may be inside the new one.
@@ -560,15 +568,19 @@ public struct ChainCore: Sendable {
         // Push what was appended to every peer that read our log to its end:
         // the stream's tail is the relay. Relaying a header is not acting on
         // its weight: only tip announces and templates act, and they come
-        // from the executed tip.
-        if !appended.entries.isEmpty {
+        // from the executed tip. A block learned from peers is not pushed
+        // before `synced`, as Bitcoin Core announces none during initial
+        // download, but one this node produced always is: it may be
+        // canonical and it adds weight. A peer still pulls our log, and a
+        // push past its position has it pull the gap.
+        if synced || turn.own, !tail.entries.isEmpty {
             for peer in sync.peers.keys.sorted() where sync.peers[peer]?.subscribed == true {
                 effects.append(.send(peer, .stream(StreamPage(
-                    requestID: 0, logID: sync.log.id, entries: appended.entries, hasMore: appended.hasMore
+                    requestID: 0, logID: sync.log.id, entries: tail.entries, hasMore: tail.hasMore
                 ))))
                 // A cut push has the peer pull the rest: it is subscribed
                 // again once a pull reaches the end.
-                if appended.hasMore { sync.peers[peer]?.subscribed = false }
+                if tail.hasMore { sync.peers[peer]?.subscribed = false }
             }
         }
         effects += turn.effects
@@ -1111,6 +1123,10 @@ public struct ChainCore: Sendable {
             ))
             turn.facts += update.batches
             weighed += update.weighed
+            // No announcer: submitted here (`ChainEvent.submitted`), or a
+            // peer header whose announcers all left before it was weighed.
+            // The latter costs one early push of a page, nothing more.
+            if header.announcers.isEmpty { turn.own = true }
             creditRemainingProofs(of: header, &turn)
             for child in waiting { dirty(child, &turn) }
         case .duplicate:
