@@ -533,9 +533,7 @@ public struct ChainCore: Sendable {
     /// in the same step.
     mutating func finish(_ turn: Turn) -> [ChainEffect] {
         var turn = turn
-        scheduleBodies(&turn)
-        moveMiningTip(&turn)
-        answerSideMined(&turn)
+        let actOn = followActOnChain(&turn)
         var effects: [ChainEffect] = []
         // The weigh log follows the fact log: a header precedes its proofs,
         // a parent its children.
@@ -555,7 +553,7 @@ public struct ChainCore: Sendable {
         // subscriber from before the latch pulls the gap from its position.
         let tail = appended.entries.isEmpty && !wasSynced && synced && sync.log.count > 0
             ? sync.log.page(after: sync.log.count - 1, limit: 1) : appended
-        let current = snapshot
+        let current = snapshot(actOn: actOn)
         // A best tip that moved down moved the finality window with it: what
         // was declined just past the old window may be inside the new one.
         if let published, current.bestHeaderHeight < published.bestHeaderHeight {

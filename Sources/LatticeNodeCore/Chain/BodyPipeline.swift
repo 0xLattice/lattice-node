@@ -58,8 +58,15 @@ extension ChainCore {
     /// proof-of-work header, so their number is paid for by work: a node
     /// asks for every alternative at a fork on the path it acts on.
     public var bodyWindow: [String] {
-        let forks = forkChildren
-        return forks + bestWindow.filter { !forks.contains($0) }
+        bodyWindow(after: executedPrefix(actOn: actOnTip)).blocks
+    }
+
+    /// The body window after the executed prefix `prefix`, and the best
+    /// chain's look-ahead it ends with.
+    func bodyWindow(after prefix: (hash: String, height: UInt64)) -> (blocks: [String], best: [String]) {
+        let forks = forkChildren(after: prefix.hash)
+        let best = bestWindow(after: prefix)
+        return (forks + best.filter { !forks.contains($0) }, best)
     }
 
     /// Whether this level has a backlog it could execute right now: the
@@ -74,7 +81,7 @@ extension ChainCore {
     /// mined, and an invalid one is excluded when it executes and is no
     /// longer next.
     public var holdsBacklog: Bool {
-        let prefix = tree.executedPrefix()
+        let prefix = executedPrefix(actOn: actOnTip)
         let first = prefix.hash.isEmpty ? 0 : prefix.height + 1
         return [first, first + 1].allSatisfy { height in
             guard let cid = tree.canonicalBlockHash(atHeight: height), bodies.parked[cid] == nil else { return false }
@@ -82,36 +89,48 @@ extension ChainCore {
         }
     }
 
-    /// The window's blocks whose parent is executed: the ones this level
-    /// can connect next once their bodies arrive.
-    public var nextToConnect: [String] {
-        bodyWindow.filter { tree.parent(of: $0).map(tree.isExecuted(blockHash:)) ?? true }
-    }
-
-    /// Each window block's distance, in height, from the block on its own
-    /// branch this level can connect next (`nextToConnect` at 0): the order
-    /// in which their fetched bodies are needed. Per branch, so a fork or a
-    /// root whose body is withheld does not push the blocks this level can
-    /// use behind ones it cannot.
-    public var connectDistances: [String: Int] {
-        let window = bodyWindow
+    /// The window's blocks whose parent is executed (`next`): the ones this
+    /// level can connect next once their bodies arrive. And each window
+    /// block's distance, in height, from the block on its own branch this
+    /// level can connect next (a `next` block is at 0): the order in which
+    /// their fetched bodies are needed. Per branch, so a fork or a root
+    /// whose body is withheld does not push the blocks this level can use
+    /// behind ones it cannot.
+    public var connectOrder: (next: [String], distances: [String: Int]) {
+        let prefix = executedPrefix(actOn: actOnTip)
+        let (window, best) = bodyWindow(after: prefix)
         let inWindow = Set(window)
+        // Each window block's parent, height and whether that parent is
+        // executed. A best-chain block's parent and height are its place
+        // after the executed prefix; only a fork child's are read.
+        var links: [String: (parent: String?, height: UInt64, parentExecuted: Bool)] = [:]
+        let first = prefix.hash.isEmpty ? 0 : prefix.height + 1
+        for (offset, cid) in best.enumerated() {
+            let parent = offset > 0 ? best[offset - 1] : (prefix.hash.isEmpty ? nil : prefix.hash)
+            links[cid] = (parent, first + UInt64(offset), offset == 0 || tree.isExecuted(blockHash: best[offset - 1]))
+        }
+        for cid in window where links[cid] == nil {
+            let parent = tree.parent(of: cid)
+            links[cid] = (parent, tree.height(of: cid) ?? 0, parent.map(tree.isExecuted(blockHash:)) ?? true)
+        }
         // The window block a block's run of unexecuted window ancestors starts at.
         var base: [String: String] = [:]
         func start(of cid: String) -> String {
             if let known = base[cid] { return known }
-            let parent = tree.parent(of: cid)
-            let found = parent.flatMap { inWindow.contains($0) && !tree.isExecuted(blockHash: $0) ? start(of: $0) : nil } ?? cid
+            let link = links[cid]
+            let found = link.flatMap { link in
+                link.parent.flatMap { inWindow.contains($0) && !link.parentExecuted ? start(of: $0) : nil }
+            } ?? cid
             base[cid] = found
             return found
         }
         var distances: [String: Int] = [:]
         for cid in window {
-            let height = tree.height(of: cid) ?? 0
-            let from = tree.height(of: start(of: cid)) ?? height
+            let height = links[cid]?.height ?? 0
+            let from = links[start(of: cid)]?.height ?? height
             distances[cid] = height > from ? Int(height - from) : 0
         }
-        return distances
+        return (window.filter { links[$0]?.parentExecuted ?? true }, distances)
     }
 
     /// The bytes a body of `cid` may count by its chain's spec, when the
@@ -120,10 +139,10 @@ extension ChainCore {
         tree.headerSnapshot(of: cid).flatMap { tree.specs[$0.specCID] }?.maxBlockSize
     }
 
-    /// The best chain's blocks after its executed prefix, up to the count.
-    var bestWindow: [String] {
-        let prefix = tree.executedPrefix()
-        guard let tipHeight = tree.headerSnapshot(of: tree.canonicalTip)?.tipHeight, config.bodyWindow > 0 else { return [] }
+    /// The best chain's blocks after its executed prefix `prefix`, up to the
+    /// count.
+    func bestWindow(after prefix: (hash: String, height: UInt64)) -> [String] {
+        guard config.bodyWindow > 0, let tipHeight = tree.height(of: tree.canonicalTip) else { return [] }
         // A best chain whose genesis root is not executed yet starts there.
         let first = prefix.hash.isEmpty ? 0 : prefix.height + 1
         guard tipHeight >= first else { return [] }
@@ -140,9 +159,8 @@ extension ChainCore {
     /// executed before it is executed too, so of three or more arriving
     /// lightest first more than one is stale. A stale sibling's descendants
     /// are never fetched unless it becomes the tip.
-    var forkChildren: [String] {
+    func forkChildren(after prefix: String) -> [String] {
         var wanted: [String] = []
-        let prefix = tree.executedPrefix().hash
         var candidates = prefix.isEmpty ? tree.genesisRoots : tree.children(of: prefix)
         while true {
             let children = Self.byWeight(candidates.filter {
@@ -224,10 +242,10 @@ extension ChainCore {
     /// (a parked one once its wait is over), cancel bodies the window
     /// left, and start the next connect: the first window block whose body
     /// is here and whose parent is executed.
-    mutating func scheduleBodies(_ turn: inout Turn) {
-        let window = bodyWindow
+    mutating func scheduleBodies(actOn: String, prefix: (hash: String, height: UInt64), _ turn: inout Turn) {
+        let (window, best) = bodyWindow(after: prefix)
         let wanted = Set(window)
-        let mark = BodyPipeline.TreeMark(actOn: actOnTip.hash, window: bestWindow)
+        let mark = BodyPipeline.TreeMark(actOn: actOn, window: best)
         if bodies.seen != mark {
             bodies.seen = mark
             bodies.parked.removeAll()

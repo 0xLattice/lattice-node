@@ -699,6 +699,7 @@ public struct Simulator {
             weightsChanged: weightsChanged
         )
         try Invariants.checkBodies(node: name, core: node.core, digest: digest, now: now, wakes: wakes)
+        try Invariants.checkWindowReference(node: name, core: node.core)
         // Replay costs the whole log, so it runs every `replayInterval`
         // persists that moved weight, and once more at the end of the run
         // (an execution's validation replays with the next one).
