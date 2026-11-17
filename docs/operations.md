@@ -778,15 +778,15 @@ Restore the matched backup or wipe the tree.
 
 ### Damaged `volumes.db` content
 
-The node does not hash what it reads back from `volumes.db`: every entry was
-checked against its CID on its way in. Bytes damaged on disk since are
-caught wherever they are read against their CID. A block whose content they
-are never connects: its fetch and connect wait, again and again, on a
-`cidMismatch` that names the provider, though the bytes are this node's own.
-A peer they are served to rejects them and reports this node; the public
-read routes serve a held Volume's archive as stored, so a reader that does
-not check it gets them. Nothing repairs them in place. Restore the matched
-backup or wipe the tree.
+For its own use the node does not hash what it reads back from `volumes.db`:
+every entry was checked against its CID on its way in. Bytes damaged on disk
+since are caught wherever they are read against their CID. A block whose
+content they are never connects: its fetch and connect wait, again and
+again, on a `cidMismatch` that names the provider, though the bytes are this
+node's own. What the node sends, to a peer or on the public read routes, it
+checks first: a Volume holding damaged bytes is answered as not held, never
+sent. Nothing repairs them in place. Restore the matched backup or wipe the
+tree.
 
 ### Peers connected but height does not advance
 

@@ -144,9 +144,9 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         XCTAssertEqual(observed, .opened)
     }
 
-    /// A Volume's bytes damaged in volumes.db. The store serves what it
-    /// holds without hashing it again, as its bytes were checked on their
-    /// way in, so the damage is caught where a read checks bytes against
+    /// A Volume's bytes damaged in volumes.db. The store serves this node's
+    /// own reads what it holds without hashing it again, as its bytes were
+    /// checked on their way in, so the damage is caught where a read checks bytes against
     /// their CID: the block does not resolve, and the damaged bytes are
     /// never decoded. Nothing repairs them until the right bytes are
     /// stored again.
@@ -166,7 +166,61 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         } catch DataErrors.cidMismatch {}
     }
 
+    /// What this node sends a peer is checked first: a Volume holding
+    /// damaged bytes is answered as not held, never sent.
+    func testDamagedVolumeBytesAreNotSentToAPeer() async throws {
+        let fixture = try await buildFixture()
+        let genesis = try configuration(fixture).nexusGenesisCID
+        let intact = NodeStorageIvyContentSource(
+            storage: try await NodeStorage.open(configuration: try configuration(try damagedCopy(of: fixture, applying: [])))
+        )
+        let sent = await intact.volume(rootCID: genesis, maxDataBytes: .max)
+        XCTAssertFalse(sent.isEmpty, "fixture guard: the intact Volume is sent")
+
+        let damaged = NodeStorageIvyContentSource(storage: try await openDamaged(fixture, cid: genesis))
+        let refused = await damaged.volume(rootCID: genesis, maxDataBytes: .max)
+        XCTAssertTrue(refused.isEmpty)
+    }
+
+    /// What the public read routes send is checked first: a Volume holding
+    /// damaged bytes is answered as not held, on `/volumes/:cid` and on
+    /// `/volumes?cids=`.
+    func testDamagedVolumeBytesAreNotServedOnThePublicReadRoutes() async throws {
+        let fixture = try await buildFixture()
+        let genesis = try configuration(fixture).nexusGenesisCID
+        let intact = reads(try await NodeStorage.open(configuration: try configuration(try damagedCopy(of: fixture, applying: []))))
+        let archive = await intact.completeVolumeArchive(rootCID: genesis)
+        XCTAssertNotNil(archive, "fixture guard: the intact Volume is served")
+
+        let damaged = reads(try await openDamaged(fixture, cid: genesis))
+        let refused = await damaged.completeVolumeArchive(rootCID: genesis)
+        let records = await damaged.completeVolumeRecords(rootCIDs: [genesis])
+        XCTAssertNil(refused)
+        XCTAssertEqual(records, CompleteVolumeRecords(body: Data(), complete: false))
+    }
+
     // MARK: - Harness
+
+    /// A copy of `fixture` whose `cid` bytes in volumes.db are damaged, opened.
+    private func openDamaged(_ fixture: URL, cid: String) async throws -> NodeStorage {
+        let root = try damagedCopy(
+            of: fixture, database: "volumes.db",
+            applying: ["UPDATE cas_data SET data = X'00' WHERE cid = '\(cid)'"]
+        )
+        return try await NodeStorage.open(configuration: try configuration(root))
+    }
+
+    private func reads(_ storage: NodeStorage) -> ChainReads {
+        ChainReads(
+            storage: storage,
+            tip: { ChainStatus(
+                phase: .active, chainPath: ["Nexus"], nexusGenesisCID: storage.configuration.nexusGenesisCID,
+                tipCID: storage.configuration.nexusGenesisCID, height: 0, revision: nil
+            ) },
+            canonicalCID: { _ in nil },
+            mempool: { _ in ChainReads.MempoolListing(count: 0, bytes: 0, cids: []) }
+        )
+    }
 
     private func assertBoot(
         _ damages: [Damage],

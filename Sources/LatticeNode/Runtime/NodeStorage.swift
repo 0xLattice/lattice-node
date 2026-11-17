@@ -150,8 +150,14 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
 
     /// Peer content exchange serves complete local Volumes. Membership is a
     /// storage fact and cannot be reconstructed from an arbitrary CID list.
+    ///
+    /// What this node sends to others, a peer or a reader, is checked
+    /// against its CIDs first: bytes damaged in the store read as absent,
+    /// never handed on. This node's own reads (`fetch`) take them unhashed.
     func volume(_ rootCID: String) async -> SerializedVolume? {
-        await broker.fetchVolumeLocal(root: rootCID)
+        guard let volume = await broker.fetchVolumeLocal(root: rootCID),
+              (try? volume.validate()) != nil else { return nil }
+        return volume
     }
 
     /// The public storage fetch port is deliberately local-only. Network

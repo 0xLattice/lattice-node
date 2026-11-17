@@ -62,9 +62,11 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   stores a block, and only once the block's execution found it valid (a
   fetched body is read into memory until then, and read again whole from
   peers if memory let it go); retaining a root that is gone retains the rest.
-  Content the store holds damaged is not lacked: the store serves it
-  unhashed, and the read that checks it against its CID fails rather than
-  falling through to peers. The checks anyone
+  Content the store holds damaged is not lacked: the store serves this
+  node's own reads it unhashed, and the read that checks it against its CID
+  fails rather than falling through to peers. What the node sends, to a
+  peer or a public reader, is checked first, and damaged content is
+  answered as not held. The checks anyone
   can cause (a submitted transaction, a public read) read this store alone.
   Pinned by `AbsentContentTests` and
   `SafetyNetCorruptStoreTests.testBootOpensAStoreWhoseVolumesAreGone`.

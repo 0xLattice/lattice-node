@@ -632,14 +632,15 @@ struct NodeStorageIvyContentSource: IvyContentSource {
     func volume(rootCID: String, maxDataBytes: Int) async -> [ContentEntry] {
         let volume: SerializedVolume
         if let transient = await transientRootVolume?(rootCID) {
+            // Sent to a peer, so checked first, as `NodeStorage.volume`
+            // checks the Volumes it reads.
+            guard (try? transient.validate()) != nil else { return [] }
             volume = transient
         } else if let stored = await storage.volume(rootCID) {
             volume = stored
         } else {
             return []
         }
-        // This node's own bytes, checked on their way in: the peer checks
-        // them on theirs.
         var remaining = maxDataBytes
         for data in volume.entries.values {
             guard data.count <= remaining else { return [] }
