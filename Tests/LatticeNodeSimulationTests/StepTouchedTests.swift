@@ -20,8 +20,7 @@ final class StepTouchedTests: XCTestCase {
             snapshot = level.snapshot
             bodies = level.bodies
             window = level.bodyWindow
-            next = level.nextToConnect
-            distances = level.connectDistances
+            (next, distances) = level.connectOrder
         }
     }
 

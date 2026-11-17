@@ -1281,13 +1281,23 @@ extension NodeRuntime {
             // backlog to execute names nothing, and it and every level below
             // it are left out of the root's (`mined`).
             let mined = !level.holdsBacklog
+            // A child is mined while neither it nor a level above it holds a
+            // backlog (`NodeRuntime.mined`): parents come first, so each
+            // level's backlog is read once.
+            var unmined: Set<ChainPath> = []
             let children = path == core.rootPath && mined
-                ? core.ordered.dropFirst().filter { self.mined($0) }.compactMap { child in
-                    core.levels[child].map { (path: child, level: $0) }
+                ? core.ordered.dropFirst().filter { child in
+                    guard !unmined.contains(Array(child.dropLast())), core.levels[child]?.holdsBacklog != true else {
+                        unmined.insert(child)
+                        return false
+                    }
+                    return true
+                }.compactMap { child in
+                    core.levels[child].map { (path: child, level: $0, snapshot: $0.snapshot) }
                 }
                 : []
             let key = ([("", tip.hash, "\(mined)", pool.version)] + children.map {
-                ($0.path.joined(separator: "/"), $0.level.snapshot.actOnTip, "\(!$0.level.snapshot.bestHeaderTip.isEmpty)",
+                ($0.path.joined(separator: "/"), $0.snapshot.actOnTip, "\(!$0.snapshot.bestHeaderTip.isEmpty)",
                  $0.level.mining.mempool.version)
             }).map { "\($0.0):\($0.1)/\($0.2)/\($0.3)" }.joined(separator: "\n")
             let digest: String
@@ -1297,7 +1307,7 @@ extension NodeRuntime {
                 digest = NodeRuntime.templateDigest(
                     tip: mined ? tip.hash : "", carrying: mined ? level.mining.nextBlock : [],
                     levels: children.map {
-                        ($0.path, $0.level.snapshot.actOnTip, !$0.level.snapshot.bestHeaderTip.isEmpty, $0.level.mining.nextBlock)
+                        ($0.path, $0.snapshot.actOnTip, !$0.snapshot.bestHeaderTip.isEmpty, $0.level.mining.nextBlock)
                     }
                 )
                 digests[path] = (key, digest)
@@ -1307,9 +1317,12 @@ extension NodeRuntime {
             // (executed, excluded, or no longer asked for) waits no more.
             var waiting: NodeReadView.Waiting?
             if !fetchWaits.isEmpty || !connectWaits.isEmpty {
-                let window = level.bodyWindow
-                connectWaits = connectWaits.filter { $0.key.path != path || window.contains($0.key.cid) }
-                waiting = window.first { (level.parent(of: $0) ?? "") == tip.hash }.flatMap { cid in
+                // The level's window as its last step left it: every window
+                // block has a distance, and one whose parent is the act-on
+                // tip is among those to connect next.
+                let window = windows[path] ?? level.connectOrder
+                connectWaits = connectWaits.filter { $0.key.path != path || window.distances[$0.key.cid] != nil }
+                waiting = window.next.first { (level.parent(of: $0) ?? "") == tip.hash }.flatMap { cid in
                     let key = BodyKey(path: path, cid: cid)
                     return (fetchWaits[key] ?? connectWaits[key]).map { NodeReadView.Waiting(cid: cid, reason: $0) }
                 }
@@ -1536,6 +1549,12 @@ extension NodeRuntime {
             let started = SyncTrace.now()
             let effects = core.step(event, now: NodeRuntime.now())
             let stepped = SyncTrace.now()
+            // Only the step moves a level: its window is read once, here,
+            // before any effect refreshes a view.
+            for path in windows.keys where core.levels[path] == nil { windows[path] = nil }
+            for (path, level) in core.levels where core.touched.contains(path) || windows[path] == nil {
+                windows[path] = level.connectOrder
+            }
             defer {
                 if SyncTrace.enabled {
                     SyncTrace.log(
@@ -1561,10 +1580,6 @@ extension NodeRuntime {
             }
             await settleBodies()
             await settleState()
-            for path in windows.keys where core.levels[path] == nil { windows[path] = nil }
-            for (path, level) in core.levels where core.touched.contains(path) || windows[path] == nil {
-                windows[path] = (level.nextToConnect, level.connectDistances)
-            }
             // The blocks each chain can connect next wait for the content
             // budget ahead of bodies fetched ahead of them. Refreshed only
             // while someone waits: a waiter that arrives between steps is

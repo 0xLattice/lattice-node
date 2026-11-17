@@ -42,6 +42,7 @@ public enum LevelInvariants {
             let name = "\(node)\(path.dropFirst().map { "/" + $0 }.joined())"
             try checkLevel(name, path: path, host: host, core: core, digest: digest,
                            previous: previous[path], store: level, digests: digests, world: world)
+            try Invariants.checkWindowReference(node: name, core: core)
         }
     }
 

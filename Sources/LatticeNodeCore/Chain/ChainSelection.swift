@@ -86,11 +86,13 @@ extension ChainCore {
         if snapshot.actOnTip == snapshot.bestHeaderTip { synced = true }
     }
 
-    public var snapshot: ChainSnapshot {
-        let actOn = actOnTip
+    public var snapshot: ChainSnapshot { snapshot(actOn: actOnTip) }
+
+    func snapshot(actOn: (hash: String, height: UInt64)) -> ChainSnapshot {
+        let bestHeaderTip = tree.canonicalTip
         return ChainSnapshot(
-            bestHeaderTip: tree.canonicalTip,
-            bestHeaderHeight: tree.headerSnapshot(of: tree.canonicalTip)?.tipHeight ?? 0,
+            bestHeaderTip: bestHeaderTip,
+            bestHeaderHeight: tree.height(of: bestHeaderTip) ?? 0,
             actOnTip: actOn.hash,
             actOnHeight: actOn.height,
             mempoolCount: mining.mempool.count,
@@ -102,6 +104,19 @@ extension ChainCore {
 extension ChainCore {
     // MARK: - Mining tip
 
+    /// What every step ends with: the body window scheduled, the mempool
+    /// moved to the act-on tip, and mined blocks the window will not
+    /// execute answered. Returns the act-on tip, read once: none of it
+    /// changes the tree.
+    mutating func followActOnChain(_ turn: inout Turn) -> (hash: String, height: UInt64) {
+        let tip = actOnTip
+        let prefix = executedPrefix(actOn: tip)
+        scheduleBodies(actOn: tip.hash, prefix: prefix, &turn)
+        moveMiningTip(to: tip, &turn)
+        answerSideMined(prefix: prefix.hash, &turn)
+        return tip
+    }
+
     /// When the act-on tip moved, tell the mempool in the same step: the
     /// transactions of the blocks the act-on chain entered are confirmed
     /// (Bitcoin Core's `removeForBlock`), before any verdict on the new tip,
@@ -110,8 +125,7 @@ extension ChainCore {
     /// held is read first (`readTransactions`): the mempool stays on the
     /// old tip until the read answers, since a verdict on the new tip could
     /// not tell a used nonce from a confirmation.
-    mutating func moveMiningTip(_ turn: inout Turn) {
-        let tip = actOnTip
+    mutating func moveMiningTip(to tip: (hash: String, height: UInt64), _ turn: inout Turn) {
         guard tip.hash != mining.tipCID else { return }
         var entered: [String] = []
         var left: [String] = []
@@ -150,9 +164,9 @@ extension ChainCore {
 
     /// Answer each mined block awaiting execution that the body window will
     /// not execute: one off the best chain that is not a fork child.
-    mutating func answerSideMined(_ turn: inout Turn) {
+    mutating func answerSideMined(prefix: String, _ turn: inout Turn) {
         guard !minedReplies.isEmpty else { return }
-        let stepped = forkChildren
+        let stepped = forkChildren(after: prefix)
         for (cid, replyID) in minedReplies.sorted(by: { $0.key < $1.key })
         where tree.contains(blockHash: cid) && !tree.isCanonical(hash: cid) && !stepped.contains(cid) {
             minedReplies[cid] = nil
@@ -160,6 +174,20 @@ extension ChainCore {
         }
     }
 
+}
+
+extension ChainCore {
+    /// The deepest block on the best header chain whose ancestry is executed
+    /// from genesis, read from the act-on tip `actOn`: up to that block the
+    /// act-on descent is fork choice's own, so an act-on tip on the best
+    /// chain is it. Only an act-on tip off the best chain (one that stepped
+    /// into an executed fork child, or descends from another genesis root)
+    /// searches for it. None (an empty hash) while the best chain's genesis
+    /// root is not executed.
+    func executedPrefix(actOn: (hash: String, height: UInt64)) -> (hash: String, height: UInt64) {
+        if !actOn.hash.isEmpty, tree.isCanonical(hash: actOn.hash) { return actOn }
+        return tree.executedPrefix()
+    }
 }
 
 extension ChainTree {

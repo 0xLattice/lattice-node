@@ -104,7 +104,7 @@ final class GenesisForkActOnTests: XCTestCase {
         // branch, however far above the withheld root it is.
         let askedForNext = try await feed([Array(chainGrinds)[2]], to: &host, world: world, withheld: [g2.cid, chain[2].cid])
         alpha = try XCTUnwrap(host.levels[Self.alpha]).held
-        XCTAssertEqual(alpha.connectDistances[chain[2].cid], 0, "G1's next body ranks as next to connect")
+        XCTAssertEqual(alpha.connectOrder.distances[chain[2].cid], 0, "G1's next body ranks as next to connect")
 
         let asked = try await feed(
             [Array(chainGrinds)[3]], to: &host, world: world, withheld: [g2.cid], deliver: [chain[2].cid]
