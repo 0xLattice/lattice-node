@@ -754,7 +754,8 @@ extension NodeRuntime {
                 let judge: @Sendable (any Fetcher) async -> (MempoolDisposition, [String: UInt64]) = { fetcher in
                     let result = await TransactionPreflight.classify(
                         job.transaction, tipCID: job.tipCID, snapshot: basis.snapshot, chainPath: path,
-                        parentState: basis.parentState, fetcher: fetcher, checksPolicies: job.checksPolicies
+                        parentState: basis.parentState, fetcher: fetcher, checksPolicies: job.checksPolicies,
+                        checksSignatures: job.checksPolicies
                     )
                     // A ready transaction brings the balances it was funded
                     // from, read from the same tip state, for the pool's budget.
