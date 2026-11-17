@@ -329,15 +329,8 @@ extension NodeRuntime {
     public func submitChildBlock(_ request: SubmitChildBlockRequest) async throws -> SubmitChildBlockResponse {
         let path = request.chainPath
         guard path.count > 1 else { throw NodeConfigurationError.invalidChainPath }
-        let wire = WireHeaderEntry(block: request.block, children: request.children, proofs: [], spec: request.spec)
-        guard wire.isCanonical, let block = Block(data: request.block),
-              let children = FlatDictionary<BlockHeader>(data: request.children),
-              let cid = try? BlockHeader(node: block).rawCID else { throw NodeAPIError.malformedBlock }
-        let spec = try request.spec.map {
-            guard let spec = ChainSpec(data: $0) else { throw NodeAPIError.malformedBlock }
-            return spec
-        }
-        let entry = HeaderEntry(block: block, children: children, spec: spec)
+        guard let entry = WireHeaderEntry(block: request.block, children: request.children, proofs: [], spec: request.spec).decoded,
+              let cid = entry.cid else { throw NodeAPIError.malformedBlock }
         guard await LiveLevels(inputs: inputs).read({ $0[path] != nil }) == true else {
             throw NodeRuntimeError.unknownChain
         }

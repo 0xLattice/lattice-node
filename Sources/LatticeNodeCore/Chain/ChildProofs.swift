@@ -364,22 +364,19 @@ extension ChainCore {
     // MARK: - Each step
 
     /// Start queued checks in arrival order while slots are free, dropping
-    /// proofs whose block is gone or already credited by that root. The
+    /// proofs whose block is gone or already credited by that root as they
+    /// come up: a step looks at no more of the queue than it starts. The
     /// evidence index is never asked: it holds only proofs this level
     /// credited, written with the facts that credit them, so a proof comes
     /// from a peer or a derivation.
     mutating func proofWork(_ turn: inout Turn) {
-        var checks = sync.proofs.verifying.count
-        var kept: [QueuedChildProof] = []
-        for proof in sync.proofs.queued {
+        var taken = 0
+        while taken < sync.proofs.queued.count, sync.proofs.verifying.count < proofConfig.maxChecks {
+            let proof = sync.proofs.queued[taken]
+            taken += 1
             let known = sync.proofs.awaiting[proof.cid] != nil || sync.pending.entries[proof.cid] != nil
                 || tree.contains(blockHash: proof.cid)
             guard known, !credits(proof.proof.rootCID, at: proof.cid) else { continue }
-            guard checks < proofConfig.maxChecks else {
-                kept.append(proof)
-                continue
-            }
-            checks += 1
             sync.proofs.verifying[proof.key] = proof
             turn.effects.append(.verifyProof(ChildProofJob(
                 childCID: proof.cid,
@@ -387,7 +384,7 @@ extension ChainCore {
                 proof: proof.proof, proofID: proof.id, chainPath: chainPath
             )))
         }
-        sync.proofs.queued = kept
+        sync.proofs.queued.removeFirst(taken)
     }
 
     // MARK: - Weighing

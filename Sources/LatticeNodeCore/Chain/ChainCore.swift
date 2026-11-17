@@ -819,7 +819,10 @@ public struct ChainCore: Sendable {
     /// asked for (an object asked of another peer counts as held, until that
     /// request stalls). A header it holds but has not weighed gains the peer
     /// as an announcer (the peer holds its ancestors). Otherwise the next
-    /// page is pulled. Holes still lacking are asked again on a tick.
+    /// page is pulled, once the holes leave room for half a page: a page is
+    /// served whole, and a pull with room for a few entries would take those
+    /// few and drop the rest (TCP's silly-window avoidance). Holes still
+    /// lacking are asked again on a tick.
     mutating func pump(_ peer: PeerID, _ turn: inout Turn, again: Bool = false) {
         guard let state = sync.peers[peer], state.data == nil, sync.cursors[peer.key] != nil else { return }
         let inFlight = Set(sync.peers.values.flatMap { $0.data?.cids ?? [] })
@@ -836,7 +839,7 @@ public struct ChainCore: Sendable {
         sync.peers[peer]?.requested = requested
         if !cids.isEmpty {
             requestData(cids, from: peer, &turn)
-        } else if state.more, state.stream == nil, state.holes.count < config.maxHeadersPerPage {
+        } else if state.more, state.stream == nil, state.holes.count <= config.maxHeadersPerPage / 2 {
             requestStream(from: peer, &turn)
         }
     }
@@ -873,13 +876,13 @@ public struct ChainCore: Sendable {
         if let data {
             var wanted = Set(data.cids)
             entries = response.entries.filter {
-                guard let cid = try? BlockHeader(node: $0.block).rawCID else { return false }
+                guard let cid = $0.cid else { return false }
                 return wanted.remove(cid) != nil
             }
         } else {
             var next = asked
             for entry in response.entries.prefix(config.maxHeadersPerPage + 1) {
-                guard let cid = try? BlockHeader(node: entry.block).rawCID, cid == next else { break }
+                guard let cid = entry.cid, cid == next else { break }
                 entries.append(entry)
                 next = entry.block.parent?.rawCID
             }
@@ -926,9 +929,9 @@ public struct ChainCore: Sendable {
         // asked for by CID, where the same limit makes it unavailable.
         var entry = entry
         if let children = entry.children, Self.size(of: children) > config.maxChildIndexBytes {
-            entry = HeaderEntry(block: entry.block, children: nil, proofs: entry.proofs, spec: entry.spec)
+            entry = HeaderEntry(block: entry.block, children: nil, proofs: entry.proofs, spec: entry.spec, cid: entry.cid)
         }
-        guard let cid = try? BlockHeader(node: entry.block).rawCID else {
+        guard let cid = entry.cid else {
             if let peer { disconnect(peer, .proofOfWorkInvalid, &turn) }
             return nil
         }

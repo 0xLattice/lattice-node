@@ -30,12 +30,28 @@ public struct HeaderEntry: Sendable {
     public let children: FlatDictionary<BlockHeader>?
     public let proofs: [ChildBlockProof]
     public let spec: ChainSpec?
+    /// The block's CID when it came with the block: a received header's, the
+    /// hash of the bytes it was decoded from, taken where they arrived.
+    private let receivedCID: String?
 
-    public init(block: Block, children: FlatDictionary<BlockHeader>?, proofs: [ChildBlockProof] = [], spec: ChainSpec? = nil) {
+    /// `cid`: the block's CID when already known (a received header's,
+    /// hashed from its bytes); nil has `cid` computed from the node. The core
+    /// keys the header by it unchecked, so it must be the CID of `block`.
+    public init(
+        block: Block, children: FlatDictionary<BlockHeader>?, proofs: [ChildBlockProof] = [], spec: ChainSpec? = nil,
+        cid: String? = nil
+    ) {
         self.block = block
         self.children = children
         self.proofs = proofs
         self.spec = spec
+        self.receivedCID = cid
+    }
+
+    /// The block's CID: a received header's, hashed once from its bytes; a
+    /// header built here, from its node.
+    public var cid: String? {
+        receivedCID ?? (try? BlockHeader(node: block).rawCID)
     }
 }
 
