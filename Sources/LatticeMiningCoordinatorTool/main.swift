@@ -112,8 +112,8 @@ struct LatticeMiningCoordinatorTool: AsyncParsableCommand {
                 if !waiting {
                     print(
                         "No template from the node (409 while it bootstraps; 503 while it pauses mining until " +
-                        "the chain syncs, or its mempool or parent is unavailable); retrying. A sync pause that " +
-                        "never ends is turned off with pauseMiningWhileSyncing=false (--no-pause-mining-while-syncing)."
+                        "the chain syncs, or its mempool or parent is unavailable); retrying. To mine before the chain " +
+                        "has synced, turn the pause off: pauseMiningWhileSyncing=false (--no-pause-mining-while-syncing)."
                     )
                 }
                 waiting = true

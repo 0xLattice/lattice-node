@@ -227,25 +227,74 @@ final class ChainCoreMiningTests: XCTestCase {
         XCTAssertTrue(peerless.contains { if case .buildTemplate = $0 { true } else { false } }, "\(peerless)")
     }
 
-    /// A peer that does not host the chain answers with no log: reading it
-    /// sets no latch, and a level no peer serves (a chain's sole host) has
-    /// nothing to catch up from, so it is mined.
-    func testAPeerWithNoLogNeitherLatchesNorHoldsTheTemplate() throws {
+    /// A peer that does not host the chain answers with no log: it is not
+    /// ahead of us, and a level no peer is ahead of latches, as geth's
+    /// `doneSync` when our head is at least every peer's (a chain's sole
+    /// host). Until that answer, the level is catching up.
+    func testAPeerWithNoLogIsNotAheadSoTheLevelLatches() throws {
         var core = ChainCore(tree: world.bootstrap.tree.detached(), config: ChainCoreConfig(bodyWindow: 4))
         let asked = try XCTUnwrap(core.step(.peerReady(peer), now: Self.now).compactMap { effect -> UInt64? in
             if case .send(_, .getStream(let id, _, _, _)) = effect { return id }
             return nil
         }.first)
+        XCTAssertTrue(core.catchingUp)
         _ = core.step(.received(peer, .stream(StreamPage(
             requestID: asked, logID: "", entries: [], hasMore: false
         ))), now: Self.now)
         XCTAssertEqual(core.snapshot.actOnTip, core.snapshot.bestHeaderTip)
-        XCTAssertFalse(core.synced)
+        XCTAssertTrue(core.synced)
         XCTAssertFalse(core.catchingUp)
         let template = mining(core.step(
             .mining(.templateRequested(replyID: 1, TemplateRequest(rewardRecipient: nil))), now: Self.now
         ))
         XCTAssertTrue(template.contains { if case .buildTemplate = $0 { true } else { false } }, "\(template)")
+    }
+
+    /// F2: an empty page ends the peer's log whatever it claims: a server
+    /// cannot promise more and send nothing. A peer answering `hasMore`
+    /// with no entries does not hold the latch, with the pause on.
+    func testAnEmptyPageClaimingMoreEndsThePeersLog() throws {
+        var core = ChainCore(tree: world.bootstrap.tree.detached(), config: ChainCoreConfig(bodyWindow: 4))
+        let asked = try XCTUnwrap(core.step(.peerReady(peer), now: Self.now).compactMap { effect -> UInt64? in
+            if case .send(_, .getStream(let id, _, _, _)) = effect { return id }
+            return nil
+        }.first)
+        let answer = core.step(.received(peer, .stream(StreamPage(
+            requestID: asked, logID: "peer", entries: [], hasMore: true
+        ))), now: Self.now)
+        XCTAssertFalse(answer.contains { if case .send(_, .getStream) = $0 { true } else { false } }, "\(answer)")
+        XCTAssertTrue(core.synced)
+        XCTAssertFalse(core.catchingUp)
+        let template = mining(core.step(
+            .mining(.templateRequested(replyID: 1, TemplateRequest(rewardRecipient: nil))), now: Self.now
+        ))
+        XCTAssertTrue(template.contains { if case .buildTemplate = $0 { true } else { false } }, "\(template)")
+    }
+
+    /// F1: a best header whose body no peer served does not hold the latch,
+    /// with the pause on: the level latches and is mined on its executed
+    /// tip, as geth's sync cycle completes without a peer that does not
+    /// deliver. The header stays weighed (unavailable is not invalid). No
+    /// clock: the fetch's own outcome decides.
+    func testAnUnobtainableBestBodyLetsTheLevelLatchOnItsExecutedTip() throws {
+        var core = weighed(chain)
+        XCTAssertEqual(core.snapshot.bestHeaderHeight, 4)
+        XCTAssertNotEqual(core.snapshot.actOnTip, core.snapshot.bestHeaderTip)
+        XCTAssertTrue(core.catchingUp)
+        // A body further along the best chain is not what blocks it.
+        _ = core.step(.bodyUnavailable(cid: chain[2].cid), now: Self.now)
+        XCTAssertFalse(core.synced)
+        _ = core.step(.bodyUnavailable(cid: chain[0].cid), now: Self.now)
+        XCTAssertTrue(core.synced)
+        XCTAssertFalse(core.catchingUp)
+        XCTAssertEqual(core.snapshot.bestHeaderHeight, 4, "the header stays weighed")
+        let template = mining(core.step(
+            .mining(.templateRequested(replyID: 1, TemplateRequest(rewardRecipient: nil))), now: Self.now
+        ))
+        guard case .buildTemplate(let build)? = template.first(where: { if case .buildTemplate = $0 { true } else { false } }) else {
+            return XCTFail("\(template)")
+        }
+        XCTAssertEqual(build.tipCID, core.snapshot.actOnTip)
     }
 
     /// The stream's tail is pushed only once the level is synced, as Bitcoin

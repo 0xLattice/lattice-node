@@ -38,6 +38,9 @@ public enum ChainEvent: Sendable {
     case headersServed(PeerID, token: UInt64)
     /// The content layer holds the body Volume of this block locally.
     case bodyFetched(cid: String)
+    /// No peer asked served this block's body (`BodyWait.unavailable`). The
+    /// fetch goes on; the header stays weighed.
+    case bodyUnavailable(cid: String)
     /// A connect job's verdict, with the CIDs of the transactions the block
     /// carries (the job read them from the body it executed): what the act-on
     /// chain confirms when it enters the block.
@@ -214,13 +217,9 @@ public struct ChainCoreConfig: Sendable {
     public var finality = FinalityWindows()
     /// Mining pauses at a level until it latches (`ChainCore.catchingUp`).
     /// On by default; the operator can turn it off: it is a heuristic, not a
-    /// rule. Its stall risks, which turning it off escapes: a best header
-    /// whose body never arrives (withheld, or a coordinator's own block lost)
-    /// keeps a level from latching, so it is never mined, though mining on
-    /// the executed tip is the only way past such a header; and a peer that
-    /// keeps answering `hasMore` keeps a level from latching, which stops
-    /// even a chain's sole host mining it. Until a level latches, the
-    /// template also follows peers coming and going.
+    /// rule. A peer that does not deliver does not hold the latch (see
+    /// `latchSynced`). Before the latch, a level whose last peer leaves is
+    /// mined, and paused again when one arrives.
     public var pauseMiningWhileSyncing = true
 
     public init(
@@ -310,16 +309,13 @@ public struct ChainCore: Sendable {
     /// a sync cycle). Until then a peer's transaction is ignored.
     public internal(set) var synced = false
     /// Whether templates leave this level out: the operator set
-    /// `pauseMiningWhileSyncing`, the level has not yet `synced`, and a peer
-    /// serves its log. Its tip is then history, so no template carries it and
-    /// its tip moving rebuilds none, as Bitcoin Core's `getblocktemplate`
-    /// refuses during initial download and geth's miner pauses while its
-    /// downloader syncs. A level no peer serves (a lone node, a chain's sole
-    /// host) has nothing to catch up from and is mined, as geth's miner
-    /// mines until a sync starts.
+    /// `pauseMiningWhileSyncing`, and the level has peers and has not yet
+    /// `synced`. Its tip is then history, so no template carries it and its
+    /// tip moving rebuilds none, as geth's miner pauses while its downloader
+    /// syncs. A level with no peers has no sync to wait on and is mined, as
+    /// geth's miner mines until a sync starts.
     public var catchingUp: Bool {
-        config.pauseMiningWhileSyncing && !synced
-            && sync.peers.keys.contains { sync.cursors[$0.key]?.logID.isEmpty == false }
+        config.pauseMiningWhileSyncing && !synced && !sync.peers.isEmpty
     }
     public let config: ChainCoreConfig
     /// The level's mempool and template book, on the act-on tip.
@@ -486,6 +482,8 @@ public struct ChainCore: Sendable {
             }
         case .bodyFetched(let cid):
             bodyFetched(cid)
+        case .bodyUnavailable(let cid):
+            latchSynced(blockedBy: cid)
         case .connected(let verdict, let transactions):
             connected(verdict, transactions: transactions, &turn)
         case .transactionsRead(let blocks):
@@ -771,11 +769,14 @@ public struct ChainCore: Sendable {
         if page.requestID != 0 {
             guard state.stream?.requestID == page.requestID else { return }
             sync.peers[peer]?.stream = nil
-            sync.peers[peer]?.more = page.hasMore
+            // An empty page ends the log whatever it says: a server cannot
+            // promise more and send nothing (one always sends at least one
+            // entry while more follows).
+            sync.peers[peer]?.more = page.hasMore && !page.entries.isEmpty
         } else if !reset && state.stream != nil {
             // The answer in flight carries these too.
             return
-        } else if page.hasMore {
+        } else if page.hasMore, !page.entries.isEmpty {
             sync.peers[peer]?.more = true
         }
         if reset {
@@ -795,9 +796,7 @@ public struct ChainCore: Sendable {
             sync.peers[peer]?.taken = item.position
             if !applied(item.entry) { sync.peers[peer]?.holes.append(item) }
         }
-        // A peer that does not host the chain answers with no log (`logID`
-        // empty): there is nothing of it to have read.
-        if page.requestID != 0, !page.hasMore, sync.peers[peer]?.more == false, !page.logID.isEmpty {
+        if page.requestID != 0, sync.peers[peer]?.more == false {
             sync.peers[peer]?.readToEnd = true
         }
         advanceCursor(of: peer, &turn)

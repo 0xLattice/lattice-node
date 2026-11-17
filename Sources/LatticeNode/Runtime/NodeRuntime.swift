@@ -778,6 +778,8 @@ extension NodeRuntime {
                 guard bodies[key] != nil else { return true }
                 wait(key, reason, detail: detail, in: \.fetchWaits)
                 refreshView(path)
+                // A body no peer served does not hold the sync latch.
+                if reason == .unavailable { return await step(.level(path, .bodyUnavailable(cid: cid))) }
                 return true
             case .helloDeadline(let key, let id):
                 guard let session = sessions[key], session.id == id, !session.ready else { return true }

@@ -89,10 +89,8 @@ public struct Topology: Codable, Sendable {
     public var minRelayFee: UInt64?
     /// Pause mining on each hosted chain until it has synced
     /// (`--[no-]pause-mining-while-syncing`). Absent or true = on; false =
-    /// off. Stall risks, which false escapes: a best header whose body never
-    /// arrives, or a peer that keeps saying more follows, keeps a chain from
-    /// ever syncing, so it is never mined here, even a chain this node alone
-    /// hosts.
+    /// off, which mines every chain on its executed tip at once, synced or
+    /// not.
     public var pauseMiningWhileSyncing: Bool?
     /// Content-serving limits (`--serving-max-*`). Absent = the node's defaults.
     public var servingMaxConcurrent: Int?

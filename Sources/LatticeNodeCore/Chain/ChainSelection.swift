@@ -78,12 +78,27 @@ extension ChainCore {
         tree.headerSnapshot(of: tree.heaviestExecutedTip()).flatMap { tree.specs[$0.specCID] }
     }
 
-    /// Set `synced` once a peer's log has been read to its end and applied,
-    /// and the act-on tip is the best header tip.
-    mutating func latchSynced() {
-        guard !synced, sync.peers.values.contains(where: { $0.readToEnd && !$0.more && $0.holes.isEmpty }) else { return }
+    /// Set `synced`, once, as geth sets `handler.synced` (`doneSync`): when
+    /// a sync cycle completes against a peer that serves this level's log
+    /// (its log read to the end and applied), or when no peer is ahead of
+    /// us (every peer has answered, and none serves a log), and the act-on
+    /// tip has reached the best header. A peer that does not deliver stops
+    /// counting: an empty page ends its log, and a best header whose body
+    /// no peer asked served (`blockedBy`, the best chain's next block after
+    /// the act-on tip) does not hold the latch; that header stays weighed.
+    /// No clock and no tip age.
+    mutating func latchSynced(blockedBy unavailable: String? = nil) {
+        guard !synced, !sync.peers.isEmpty else { return }
+        func serves(_ peer: PeerID) -> Bool { sync.cursors[peer.key]?.logID.isEmpty == false }
+        let completed = sync.peers.contains { serves($0.key) && $0.value.readToEnd && !$0.value.more && $0.value.holes.isEmpty }
+        let noneAhead = sync.peers.allSatisfy { !serves($0.key) && $0.value.readToEnd }
+        guard completed || noneAhead else { return }
         let snapshot = snapshot
-        if snapshot.actOnTip == snapshot.bestHeaderTip { synced = true }
+        if snapshot.actOnTip == snapshot.bestHeaderTip {
+            synced = true
+        } else if let unavailable, bestWindow.first == unavailable {
+            synced = true
+        }
     }
 
     public var snapshot: ChainSnapshot {

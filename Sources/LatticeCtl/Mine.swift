@@ -217,7 +217,7 @@ struct Mine: AsyncParsableCommand {
                         let downFor = (unusableTemplateSince ?? ContinuousClock.now)
                             .duration(to: ContinuousClock.now)
                         if syncPaused {
-                            log("NOT MINING: the node pauses mining while the chain syncs (503 syncing). Stopped for \(downFor.components.seconds)s so far. If it never finishes syncing (a best header whose body never arrives, or a peer that never ends its log), turn the pause off: pauseMiningWhileSyncing=false (--no-pause-mining-while-syncing).")
+                            log("NOT MINING: the node pauses mining while the chain syncs (503 syncing). Stopped for \(downFor.components.seconds)s so far. To mine before the chain has synced, turn the pause off: pauseMiningWhileSyncing=false (--no-pause-mining-while-syncing).")
                         } else {
                             log("NOT MINING: no usable template answer from the node (no reply within \(templateTimeout)s, or a non-200). Stopped for \(downFor.components.seconds)s so far; check `POST /mining/templates` on this node.")
                         }
