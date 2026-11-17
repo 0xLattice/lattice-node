@@ -281,6 +281,8 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
         let decoded = try XCTUnwrap(ChainSyncWire.decode(topic: frame.topic, payload: frame.payload))
         guard case .headers(let response) = decoded.message else { return XCTFail("not a headers page") }
         XCTAssertEqual(try response.entries.first?.proofs.map { try $0.serialize() }, try proofs.map { try $0.serialize() })
+        // The block's CID, hashed from the bytes received, is the one its node has.
+        XCTAssertEqual(response.entries.first?.cid, try BlockHeader(node: block).rawCID)
 
         let wire = try HeadersResponseMessage.decoded(frame.payload)
         let entry = try XCTUnwrap(wire.entries.first)
@@ -289,7 +291,9 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
             entries: [WireHeaderEntry(block: entry.block, children: nil, proofs: entry.proofs + [Data("junk".utf8)])],
             hasMore: false
         )
-        XCTAssertThrowsError(try junk.encoded())
+        // A proof that is not canonical is refused where the page is decoded.
+        let payload = try junk.encoded()
+        XCTAssertThrowsError(try ChainSyncWire.decode(topic: frame.topic, payload: payload))
     }
 
     // MARK: - Content fixtures for the binary frames

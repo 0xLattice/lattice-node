@@ -873,13 +873,13 @@ public struct ChainCore: Sendable {
         if let data {
             var wanted = Set(data.cids)
             entries = response.entries.filter {
-                guard let cid = try? BlockHeader(node: $0.block).rawCID else { return false }
+                guard let cid = $0.cid else { return false }
                 return wanted.remove(cid) != nil
             }
         } else {
             var next = asked
             for entry in response.entries.prefix(config.maxHeadersPerPage + 1) {
-                guard let cid = try? BlockHeader(node: entry.block).rawCID, cid == next else { break }
+                guard let cid = entry.cid, cid == next else { break }
                 entries.append(entry)
                 next = entry.block.parent?.rawCID
             }
@@ -926,9 +926,9 @@ public struct ChainCore: Sendable {
         // asked for by CID, where the same limit makes it unavailable.
         var entry = entry
         if let children = entry.children, Self.size(of: children) > config.maxChildIndexBytes {
-            entry = HeaderEntry(block: entry.block, children: nil, proofs: entry.proofs, spec: entry.spec)
+            entry = HeaderEntry(block: entry.block, children: nil, proofs: entry.proofs, spec: entry.spec, cid: entry.cid)
         }
-        guard let cid = try? BlockHeader(node: entry.block).rawCID else {
+        guard let cid = entry.cid else {
             if let peer { disconnect(peer, .proofOfWorkInvalid, &turn) }
             return nil
         }

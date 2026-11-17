@@ -1,3 +1,4 @@
+import Crypto
 import Foundation
 import Lattice
 import LatticeNodeCore
@@ -157,14 +158,30 @@ struct WireHeaderEntry: Codable, Equatable, Sendable {
     let proofs: [Data]
     var spec: Data? = nil
 
-    /// A node's DAG-CBOR decode accepts only bytes its value encodes back
-    /// to, so a decode is the whole canonical check for the block, the
-    /// child index and the spec.
-    var isCanonical: Bool {
-        Block(data: block) != nil
-            && (children.map { FlatDictionary<BlockHeader>(data: $0) != nil } ?? true)
-            && proofs.allSatisfy { (try? ChildBlockProof.deserialize($0)?.serialize()) == $0 }
-            && (spec.map { ChainSpec(data: $0) != nil } ?? true)
+    /// The entry decoded once, nil when any part is not canonical. A node's
+    /// DAG-CBOR decode accepts only bytes its value encodes back to, so a
+    /// decode is the whole canonical check for the block, the child index
+    /// and the spec, and the block's CID is the hash of the bytes received.
+    var decoded: HeaderEntry? {
+        guard let decodedBlock = Block(data: block) else { return nil }
+        var index: FlatDictionary<BlockHeader>?
+        if let children {
+            guard let decodedIndex = FlatDictionary<BlockHeader>(data: children) else { return nil }
+            index = decodedIndex
+        }
+        var decodedProofs: [ChildBlockProof] = []
+        for bytes in proofs {
+            guard let proof = ChildBlockProof.deserialize(bytes), (try? proof.serialize()) == bytes else { return nil }
+            decodedProofs.append(proof)
+        }
+        var decodedSpec: ChainSpec?
+        if let spec {
+            guard let value = ChainSpec(data: spec) else { return nil }
+            decodedSpec = value
+        }
+        return HeaderEntry(
+            block: decodedBlock, children: index, proofs: decodedProofs, spec: decodedSpec, cid: _standardCID(of: block)
+        )
     }
 }
 
@@ -178,10 +195,10 @@ struct HeadersResponseMessage: CanonicalJSONMessage, Equatable, Sendable {
     let entries: [WireHeaderEntry]
     let hasMore: Bool
 
+    /// Each entry's content is checked where it is decoded, once: see
+    /// `ChainSyncWire.decode`.
     func validate() throws {
-        guard _isAbsoluteChainPath(chainPath),
-              entries.count <= Self.maximumEntries,
-              entries.allSatisfy(\.isCanonical) else {
+        guard _isAbsoluteChainPath(chainPath), entries.count <= Self.maximumEntries else {
             throw OverlayWireError.malformed
         }
     }
@@ -265,23 +282,9 @@ enum ChainSyncWire {
             let message = try HeadersResponseMessage.decoded(payload)
             return (message.chainPath, .headers(HeadersResponse(
                 requestID: message.requestID,
-                entries: try message.entries.map { entry in
-                    guard let block = Block(data: entry.block) else { throw OverlayWireError.malformed }
-                    return HeaderEntry(
-                        block: block,
-                        children: try entry.children.map {
-                            guard let index = FlatDictionary<BlockHeader>(data: $0) else { throw OverlayWireError.malformed }
-                            return index
-                        },
-                        proofs: try entry.proofs.map {
-                            guard let proof = ChildBlockProof.deserialize($0) else { throw OverlayWireError.malformed }
-                            return proof
-                        },
-                        spec: try entry.spec.map {
-                            guard let spec = ChainSpec(data: $0) else { throw OverlayWireError.malformed }
-                            return spec
-                        }
-                    )
+                entries: try message.entries.map {
+                    guard let entry = $0.decoded else { throw OverlayWireError.malformed }
+                    return entry
                 },
                 hasMore: message.hasMore
             )))
@@ -303,4 +306,24 @@ func _isSyncWireCID(_ value: String) -> Bool {
 /// A weigh log id: printable ASCII, at most 128 bytes.
 func _isWireLogID(_ value: String) -> Bool {
     value.utf8.count <= 128 && value.utf8.allSatisfy { (0x21...0x7E).contains($0) }
+}
+
+/// The standard CID (CIDv1, dag-cbor, sha2-256) of `bytes`, spelled as
+/// `BlockHeader(node:).rawCID` spells it for the node they encode: multibase
+/// "b", then lowercase unpadded RFC 4648 base32.
+func _standardCID(of bytes: Data) -> String {
+    let alphabet = Array("abcdefghijklmnopqrstuvwxyz234567".utf8)
+    var text = [UInt8(ascii: "b")]
+    var buffer: UInt32 = 0
+    var bits = 0
+    for byte in [0x01, 0x71, 0x12, 0x20] + Array(SHA256.hash(data: bytes)) {
+        buffer = buffer << 8 | UInt32(byte)
+        bits += 8
+        while bits >= 5 {
+            bits -= 5
+            text.append(alphabet[Int(buffer >> UInt32(bits) & 31)])
+        }
+    }
+    if bits > 0 { text.append(alphabet[Int(buffer << UInt32(5 - bits) & 31)]) }
+    return String(decoding: text, as: UTF8.self)
 }
