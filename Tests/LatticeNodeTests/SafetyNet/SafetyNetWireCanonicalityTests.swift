@@ -99,6 +99,11 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
         for iteration in 0..<Self.messagesPerCodec {
             let message = try make(&generator)
             let bytes = try message.encoded()
+            XCTAssertEqual(
+                bytes, try _canonicalJSONEncode(message),
+                "\(name) #\(iteration): encode(m) is not the JSON encoder's spelling",
+                file: file, line: line
+            )
             let decoded = try M.decoded(bytes)
             XCTAssertEqual(
                 decoded, message,
@@ -148,6 +153,25 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
                 },
                 hasMore: self.randomBool(&g)
             )
+        }
+    }
+
+    /// A stream page's own writer spells every page as the JSON encoder
+    /// does: a log id JSON escapes, the widest positions, both kinds.
+    func testCoreStreamPageSpellsLikeTheEncoder() throws {
+        let block = cid("spell-block"), proof = cid("spell-proof")
+        let entries = [
+            WireLogEntry(position: 1, proof: false, cid: block, block: block),
+            WireLogEntry(position: UInt64.max, proof: true, cid: proof, block: block),
+        ]
+        for logID in ["", "log", #"a"b"#, #"a\b"#, "a/b", "~!{}[]:,"] {
+            for page in [entries, []] where !logID.isEmpty || page.isEmpty {
+                let message = StreamPageMessage(
+                    chainPath: ["Nexus", "child"], requestID: .max, logID: logID, entries: page, hasMore: !page.isEmpty
+                )
+                XCTAssertEqual(try message.encoded(), try _canonicalJSONEncode(message), logID)
+                XCTAssertEqual(try StreamPageMessage.decoded(message.encoded()), message, logID)
+            }
         }
     }
 

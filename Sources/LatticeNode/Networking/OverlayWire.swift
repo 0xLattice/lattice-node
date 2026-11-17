@@ -19,12 +19,18 @@ private let _maximumNodeMessageSize = Int(IvyConfig.defaultProtocolMaxFrameSize)
 
 protocol CanonicalJSONMessage: Codable {
     func validate() throws
+    /// The message's one canonical spelling: `_canonicalJSONEncode`'s bytes.
+    func canonicalJSON() throws -> Data
 }
 
 extension CanonicalJSONMessage {
+    func canonicalJSON() throws -> Data {
+        try _canonicalJSONEncode(self)
+    }
+
     func encoded() throws -> Data {
         try validate()
-        let data = try _canonicalJSONEncode(self)
+        let data = try canonicalJSON()
         guard data.count <= _maximumNodeMessageSize else {
             throw OverlayWireError.oversized
         }
@@ -39,7 +45,7 @@ extension CanonicalJSONMessage {
             throw OverlayWireError.malformed
         }
         try value.validate()
-        guard try _canonicalJSONEncode(value) == data else {
+        guard try value.canonicalJSON() == data else {
             throw OverlayWireError.nonCanonical
         }
         return value
