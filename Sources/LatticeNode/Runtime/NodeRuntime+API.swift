@@ -120,7 +120,9 @@ struct PolicyRefusal: Sendable, Equatable {
 struct ChildTemplateInput: Sendable {
     let path: ChainPath
     let tipCID: String?
-    let bestHeaderTip: String
+    /// Whether a block of it is weighed: until one is, a creator mines its
+    /// genesis (`genesisSpec`).
+    let weighed: Bool
     let transactions: [Transaction]
     let anchor: DifficultyAnchor?
     let genesisSpec: ChainSpec?
@@ -466,9 +468,9 @@ extension NodeRuntime {
     }
 
     /// The root's template digest now, then each time it changes: a hosted
-    /// level's act-on tip or next-block transactions, the hosted set, or a
-    /// level holding, or no longer, a backlog to execute (it is left out
-    /// while it does: `ChainCore.holdsBacklog`).
+    /// level's act-on tip or next-block transactions, its first block being
+    /// weighed, the hosted set, or a level holding, or no longer, a backlog
+    /// to execute (it is left out while it does: `ChainCore.holdsBacklog`).
     /// Newest only, so a slow reader skips to the latest. Ends when the
     /// runtime stops.
     public func miningEvents() -> AsyncStream<String> {
@@ -999,7 +1001,7 @@ extension NodeRuntime {
             targets: template.targets,
             digest: templateDigest(
                 tip: job.tipCID, carrying: job.transactions,
-                levels: children.map { ($0.path, $0.tipCID ?? "", $0.bestHeaderTip, $0.transactions) }
+                levels: children.map { ($0.path, $0.tipCID ?? "", $0.weighed, $0.transactions) }
             ),
             chains: MiningTemplateAssembly.committedChains(root: template.block, chainPath: chainPath)
         )
@@ -1319,27 +1321,30 @@ extension NodeRuntime {
     /// The digest of the template a build on `tip` carrying these (each
     /// level's `nextBlock`) would give: status and `GET /mining/events` name
     /// it, so a miner sees its template go stale. Each hosted level is named
-    /// by path, so the hosted set changing changes it too.
+    /// by path, so the hosted set changing changes it too, with what its
+    /// candidate is built from: its act-on tip, its next block, and whether
+    /// any block of it is weighed (until one is, its creator mines its
+    /// genesis). Its best header is not named: no template reads it.
     static func templateDigest(
         tip: String, carrying: [Transaction],
-        levels: [(path: ChainPath, actOn: String, best: String, carrying: [Transaction])] = []
+        levels: [(path: ChainPath, actOn: String, weighed: Bool, carrying: [Transaction])] = []
     ) -> String {
         templateDigest(
             tip: tip,
             transactions: carrying.compactMap { try? Mempool.cid(of: $0) },
-            levels: levels.map { ($0.path, $0.actOn, $0.best, $0.carrying.compactMap { try? Mempool.cid(of: $0) }) }
+            levels: levels.map { ($0.path, $0.actOn, $0.weighed, $0.carrying.compactMap { try? Mempool.cid(of: $0) }) }
         )
     }
 
     static func templateDigest(
         tip: String,
         transactions: [String],
-        levels: [(path: ChainPath, actOn: String, best: String, transactions: [String])]
+        levels: [(path: ChainPath, actOn: String, weighed: Bool, transactions: [String])]
     ) -> String {
         let own = templateDigest(tip: tip, transactions: transactions)
         guard !levels.isEmpty else { return own }
         let lines = [own] + levels.map {
-            "\($0.path.joined(separator: "/")):\($0.actOn)/\($0.best)/"
+            "\($0.path.joined(separator: "/")):\($0.actOn)/\($0.weighed ? "weighed" : "")/"
                 + templateDigest(tip: $0.actOn, transactions: $0.transactions)
         }
         return SHA256.hash(data: Data(lines.joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined()
