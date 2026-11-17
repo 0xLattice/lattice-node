@@ -453,6 +453,14 @@ actor ReadCache: ContentSource {
         return SerializedVolume(root: root, entries: entries)
     }
 
+    /// The whole Volumes a fetch of `block`'s body derived, when held: the
+    /// Volumes storing the block derives.
+    func body(_ block: String) -> [SerializedVolume]? {
+        bodies[block]?.roots.compactMap { root in
+            held[.body(block: block, root: root)].map { SerializedVolume(root: root, entries: $0.entries) }
+        }
+    }
+
     func fetch(_ cids: Set<String>) async -> [String: Data] {
         var found: [String: Data] = [:]
         for cid in cids {

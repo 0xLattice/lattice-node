@@ -108,16 +108,16 @@ extension NodeStorage {
             try await retainHeld(rest)
             return
         }
-        let rules = rest.isEmpty ? [] : await rules(ofBlock: blockCID)
+        let rules = rest.isEmpty ? [] : await rules(ofBlock: blockCID, fetcher: localFetcher)
         try await retainHeld(rest.filter(rules.contains), scope: scopes.rules(at: path))
         try await retainHeld(rest.filter { !rules.contains($0) }, scope: scopes.reads(blockCID, at: path))
     }
 
-    /// The spec a stored block names and the policy modules that spec
-    /// names, read from this store.
-    private nonisolated func rules(ofBlock blockCID: String) async -> Set<String> {
-        guard let block = await chainHeader(blockCID)?.block,
-              let spec = try? await block.spec.resolve(fetcher: localFetcher).node else { return [] }
+    /// The spec a block names and the policy modules that spec names, as
+    /// `fetcher` reads them.
+    nonisolated func rules(ofBlock blockCID: String, fetcher: any Fetcher) async -> Set<String> {
+        guard let block = try? await BlockHeader(rawCID: blockCID).resolve(fetcher: fetcher).node,
+              let spec = try? await block.spec.resolve(fetcher: fetcher).node else { return [] }
         return Set([block.spec.rawCID] + spec.wasmPolicies.map(\.moduleCID))
     }
 

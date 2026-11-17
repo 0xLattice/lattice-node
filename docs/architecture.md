@@ -166,8 +166,9 @@ then the difference from the counts, moved on to the tip, is written in one
 adjustment. A start checks each chain's counts against the store first, and
 a maintenance pass checks again those that moved since. A node
 the counts would start counting and the store lacks is healed the same way
-first. On `recent` and on `none`, what a block reads is named by that block
-until it executes. Kept state is a cache: whatever
+first. On `recent` and on `none`, what a block mined here reads is named by
+that block until it executes; a block found valid is stored without the
+state it read, its parent's, which the counts and windows keep or peers serve. Kept state is a cache: whatever
 reads state the store lacks (execution, a submitted transaction's check, a
 state read) reads it from peers. Pins are in the store and a start leaves
 them as it finds them, but for the scopes earlier versions kept a tip's
