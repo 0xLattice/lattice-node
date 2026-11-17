@@ -159,10 +159,11 @@ final class RetentionRulesTests: XCTestCase {
             let unpinned = try await joiner.broker.retainedRoots(scope: joiner.scopes.body(header.rawCID))
             XCTAssertEqual(unpinned, [], "nothing is stored before the block is found valid")
             let joinerBroker = await joiner.broker
-            try await joiner.storeValidBlock(
+            let transactions = try await joiner.storeValidBlock(
                 header.rawCID, at: ["Nexus"],
                 from: CoalescingFetcher(CompositeContentSource([joinerBroker, joiner.readCache]))
             )
+            XCTAssertEqual(transactions, [try Mempool.cid(of: carried)], "key \(key)")
             let pinned = try await Set(joiner.broker.retainedRoots(scope: joiner.scopes.body(header.rawCID)))
             XCTAssertEqual(pinned, [header.rawCID, try Mempool.cid(of: carried)], "key \(key)")
         }
@@ -200,9 +201,11 @@ final class RetentionRulesTests: XCTestCase {
         var heldBefore = Set<String>()
         for root in fetched where await joiner.volume(root) != nil { heldBefore.insert(root) }
         let joinerBroker = await joiner.broker
-        try await joiner.storeValidBlock(
+        let transactions = try await joiner.storeValidBlock(
             mined, at: ["Nexus"], from: CoalescingFetcher(CompositeContentSource([joinerBroker, joiner.readCache]))
         )
+        XCTAssertEqual(transactions, [carried], "an honest block names its transactions as the pool does")
+        XCTAssertTrue(transactions.allSatisfy(CIDIdentity.isStandard), "the connect job uses them as read")
 
         let body = try await Set(joiner.broker.retainedRoots(scope: joiner.scopes.body(mined)))
         XCTAssertEqual(body, [mined, carried])

@@ -849,7 +849,9 @@ extension NodeRuntime {
     }
 
     /// A level's connect job: `ChainTree.connect`, and for a valid block the
-    /// IDs of the transactions it carries, read from the body it executed.
+    /// IDs of the transactions it carries, read from the body it executed
+    /// (the index storing it walked, or when storing failed or the index
+    /// names a transaction by a non-standard CID, the body).
     /// Execution is the node's own work: what this store lacks is read from
     /// peers. A child level's parent fact is read from the live parent level
     /// (`ParentContinuity`).
@@ -869,14 +871,19 @@ extension NodeRuntime {
                     validationContext: ValidationContext(nowMilliseconds: now())
                 )
                 let valid = verdict.retryFailure == nil && !verdict.provesInvalid
+                var transactions: [String] = []
                 if valid {
                     do {
-                        try await storage.storeValidBlock(job.blockHash, at: path, from: fetcher)
+                        let carried = try await storage.storeValidBlock(job.blockHash, at: path, from: fetcher)
+                        // The pool knows a transaction by its standard CID; an
+                        // index entry may name it by another form of the same bytes.
+                        transactions = carried.allSatisfy(CIDIdentity.isStandard)
+                            ? carried : await transactionIDs(ofBlock: job.blockHash, fetcher: fetcher)
                     } catch {
                         storage.syncTrace("body of \(job.blockHash) not stored: \(error)")
+                        transactions = await transactionIDs(ofBlock: job.blockHash, fetcher: fetcher)
                     }
                 }
-                let transactions = valid ? await transactionIDs(ofBlock: job.blockHash, fetcher: fetcher) : []
                 return [.level(path, .connected(verdict, transactions: transactions))]
             }
         }
