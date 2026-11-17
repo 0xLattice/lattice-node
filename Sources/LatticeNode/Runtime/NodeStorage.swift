@@ -164,6 +164,14 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         try await broker.store(volume: volume)
     }
 
+    /// Stores a Volume Cashew serializes from `volume`'s node, which hashes
+    /// each entry as it does: the broker does not hash it again.
+    private func storeHashed(_ volume: some Volume) async throws {
+        let storage = NodeImportStorage(storage: broker)
+        try await volume.store(storer: storage)
+        try await storage.commit()
+    }
+
     @discardableResult
     func persistLocalTransaction(
         _ transaction: Transaction,
@@ -182,7 +190,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         }) {
             return volume.rawCID
         }
-        try await volume.store(storer: broker)
+        try await storeHashed(volume)
         try Task.checkCancellation()
         try await broker.retain([volume.rawCID], owner: durableMempoolOwner)
         do {
@@ -205,7 +213,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         try await acquireMutationOperation()
         defer { releaseOperation() }
         let volume = try VolumeImpl<Transaction>(node: transaction)
-        try await volume.store(storer: broker)
+        try await storeHashed(volume)
         // Eviction uses the same storage mutation gate, so publishing the
         // complete Volume and its live owner pin is atomic at the node boundary.
         if !livePinnedMempoolRoots.contains(volume.rawCID) {

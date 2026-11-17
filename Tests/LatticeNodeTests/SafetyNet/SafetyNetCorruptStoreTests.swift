@@ -2,6 +2,7 @@ import Foundation
 import Lattice
 import UInt256
 import XCTest
+import cashew
 @testable import LatticeNode
 
 /// Safety net: what boot does with one damaged row in each table it reads.
@@ -141,6 +142,28 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         )
         let observed = await observeBoot(at: root)
         XCTAssertEqual(observed, .opened)
+    }
+
+    /// A Volume's bytes damaged in volumes.db. The store serves what it
+    /// holds without hashing it again, as its bytes were checked on their
+    /// way in, so the damage is caught where a read checks bytes against
+    /// their CID: the block does not resolve, and the damaged bytes are
+    /// never decoded. Nothing repairs them until the right bytes are
+    /// stored again.
+    func testDamagedVolumeBytesAreServedAndFailTheirCIDCheckWhenRead() async throws {
+        let fixture = try await buildFixture()
+        let genesis = try configuration(fixture).nexusGenesisCID
+        let root = try damagedCopy(
+            of: fixture, database: "volumes.db",
+            applying: ["UPDATE cas_data SET data = X'00' WHERE cid = '\(genesis)'"]
+        )
+        let storage = try await NodeStorage.open(configuration: try configuration(root))
+        let served = await storage.fetch([genesis])
+        XCTAssertEqual(served, [genesis: Data([0])])
+        do {
+            _ = try await BlockHeader(rawCID: genesis).resolve(fetcher: storage)
+            XCTFail("damaged bytes resolved")
+        } catch DataErrors.cidMismatch {}
     }
 
     // MARK: - Harness

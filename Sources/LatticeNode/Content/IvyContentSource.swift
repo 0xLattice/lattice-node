@@ -249,7 +249,8 @@ public struct IvyRootContentSource: Sendable {
             lock.withLock { bundle }?.cancel()
         }
 
-        func store(_ volume: SerializedVolume) async -> Bool {
+        func store(_ validated: ValidatedVolume) async -> Bool {
+            let volume = validated.volume
             let fits = lock.withLock {
                 var addedStorageBytes = 0
                 for (cid, data) in volume.entries
@@ -287,7 +288,7 @@ public struct IvyRootContentSource: Sendable {
                 return false
             }
             do {
-                try await broker.store(volume: volume)
+                try await broker.storeVolumesLocal([validated])
                 return true
             } catch {
                 return false
@@ -366,10 +367,10 @@ public struct IvyRootContentSource: Sendable {
                 root: response.rootCID,
                 entries: response.entries
             )
-            let valid = response.rootCID == context.rootCID
-                && (try? volume.validate()) != nil
-                && context.reserve(rootCID: context.rootCID)
-            let complete = valid ? await context.store(volume) : false
+            // A peer's bytes are checked here; the broker stores what passes unhashed.
+            let validated = response.rootCID == context.rootCID ? try? ValidatedVolume(validating: volume) : nil
+            let valid = validated != nil && context.reserve(rootCID: context.rootCID)
+            let complete = if valid, let validated { await context.store(validated) } else { false }
             if complete { await creditServer(of: response, volume: volume) }
             if !valid, let peer = response.servedBy { await report(context.rootCID, peer) }
             context.trace.record(response, complete: complete)
@@ -400,9 +401,10 @@ public struct IvyRootContentSource: Sendable {
                         root: response.rootCID,
                         entries: response.entries
                     )
-                    let valid = response.rootCID == rootCID
-                        && (try? volume.validate()) != nil
-                    let complete = valid ? await context.store(volume) : false
+                    // A peer's bytes are checked here; the broker stores what passes unhashed.
+                    let validated = response.rootCID == rootCID ? try? ValidatedVolume(validating: volume) : nil
+                    let valid = validated != nil
+                    let complete = if let validated { await context.store(validated) } else { false }
                     if complete { await creditServer(of: response, volume: volume) }
                     let blamed = valid ? nil : response.servedBy.flatMap { reported.insert($0).inserted ? $0 : nil }
                     if let blamed { await report(rootCID, blamed) }
@@ -636,7 +638,8 @@ struct NodeStorageIvyContentSource: IvyContentSource {
         } else {
             return []
         }
-        guard (try? volume.validate()) != nil else { return [] }
+        // This node's own bytes, checked on their way in: the peer checks
+        // them on theirs.
         var remaining = maxDataBytes
         for data in volume.entries.values {
             guard data.count <= remaining else { return [] }

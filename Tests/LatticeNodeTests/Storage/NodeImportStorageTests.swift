@@ -23,10 +23,11 @@ final class NodeImportStorageTests: XCTestCase {
         // A failure part-way leaves none of the admission's Volumes.
         let failed = NodeImportStorage(storage: broker)
         try await first.store(storer: failed)
-        await failed.store(volume: SerializedVolume(root: second.rawCID, entries: [second.rawCID: Data([0])]))
+        try await second.store(storer: failed)
+        try await failed.store(volume: SerializedVolume(root: second.rawCID, entries: [second.rawCID: Data([0])]))
         do {
             try await failed.commit()
-            XCTFail("a Volume whose bytes do not match its CID was stored")
+            XCTFail("a Volume whose bytes conflict with another of the admission was stored")
         } catch {}
         let afterFailure = await broker.hasVolume(root: first.rawCID)
         XCTAssertFalse(afterFailure)

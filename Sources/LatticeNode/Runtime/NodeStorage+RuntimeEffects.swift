@@ -180,7 +180,7 @@ extension NodeStorage {
         } else {
             let walked = NodeImportStorage(storage: nil, keepsVolumes: true)
             try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: walked)
-            volumes = await walked.takeVolumes()
+            volumes = await walked.takeVolumes().map(\.volume)
         }
         let resolved: Block?
         if let decoded {
@@ -196,7 +196,7 @@ extension NodeStorage {
         if configuration.state != .all { rest.formIntersection(await rules(of: block, fetcher: fetcher)) }
         let storage = NodeImportStorage(storage: broker)
         for volume in volumes where body.contains(volume.root) || rest.contains(volume.root) {
-            await storage.store(volume: volume)
+            try await storage.store(volume: volume)
         }
         try await storage.commit()
         try await broker.mergeRetainedRoots(scope: scopes.body(cid, at: path), roots: body.sorted())
@@ -276,7 +276,7 @@ extension NodeStorage {
                     try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: walked)
                     // The walk reached the end: the Volumes it derived are the
                     // ones storing the block would, and serve its connect.
-                    await readCache.put(walked.takeVolumes(), block: cid)
+                    await readCache.put(walked.takeVolumes().map(\.volume), block: cid)
                 } catch BlockContentSizeError.exceedsLimit {
                     // Past the chain's own maxBlockSize the block is invalid,
                     // and its execution proves it from what was read: run it
