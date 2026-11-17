@@ -150,8 +150,14 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
 
     /// Peer content exchange serves complete local Volumes. Membership is a
     /// storage fact and cannot be reconstructed from an arbitrary CID list.
+    ///
+    /// What this node sends to others, a peer or a reader, is checked
+    /// against its CIDs first: bytes damaged in the store read as absent,
+    /// never handed on. This node's own reads (`fetch`) take them unhashed.
     func volume(_ rootCID: String) async -> SerializedVolume? {
-        await broker.fetchVolumeLocal(root: rootCID)
+        guard let volume = await broker.fetchVolumeLocal(root: rootCID),
+              (try? volume.validate()) != nil else { return nil }
+        return volume
     }
 
     /// The public storage fetch port is deliberately local-only. Network
@@ -162,6 +168,14 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
 
     public func store(volume: SerializedVolume) async throws {
         try await broker.store(volume: volume)
+    }
+
+    /// Stores a Volume Cashew serializes from `volume`'s node, which hashes
+    /// each entry as it does: the broker does not hash it again.
+    private func storeHashed(_ volume: some Volume) async throws {
+        let storage = NodeImportStorage(storage: broker)
+        try await volume.store(storer: storage)
+        try await storage.commit()
     }
 
     @discardableResult
@@ -182,7 +196,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         }) {
             return volume.rawCID
         }
-        try await volume.store(storer: broker)
+        try await storeHashed(volume)
         try Task.checkCancellation()
         try await broker.retain([volume.rawCID], owner: durableMempoolOwner)
         do {
@@ -205,7 +219,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         try await acquireMutationOperation()
         defer { releaseOperation() }
         let volume = try VolumeImpl<Transaction>(node: transaction)
-        try await volume.store(storer: broker)
+        try await storeHashed(volume)
         // Eviction uses the same storage mutation gate, so publishing the
         // complete Volume and its live owner pin is atomic at the node boundary.
         if !livePinnedMempoolRoots.contains(volume.rawCID) {

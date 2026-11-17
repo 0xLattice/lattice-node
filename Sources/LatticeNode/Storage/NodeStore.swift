@@ -99,7 +99,7 @@ actor NodeStore {
 actor NodeImportStorage: VolumeStorer {
     private let storage: (any VolumeBroker)?
     private let keepsVolumes: Bool
-    private var pending: [SerializedVolume] = []
+    private var pending: [ValidatedVolume] = []
     private var roots = Set<String>()
 
     init(storage: (any VolumeBroker)?, keepsVolumes: Bool = false) {
@@ -107,14 +107,17 @@ actor NodeImportStorage: VolumeStorer {
         self.keepsVolumes = keepsVolumes
     }
 
-    func store(volume: SerializedVolume) {
-        if storage != nil || keepsVolumes { pending.append(volume) }
+    /// Cashew's hook: it hands over each Volume with every entry serialized
+    /// from its node and hashed against its CID, so the broker does not hash
+    /// it again. Only Volumes a Cashew walk produced come here.
+    func store(volume: SerializedVolume) throws {
+        if storage != nil || keepsVolumes { pending.append(try ValidatedVolume(trusting: volume)) }
         roots.insert(volume.root)
     }
 
     /// The Volumes the walk derived and nothing committed: without a
     /// broker, or for a caller that commits them itself.
-    func takeVolumes() -> [SerializedVolume] {
+    func takeVolumes() -> [ValidatedVolume] {
         defer { pending.removeAll() }
         return pending
     }

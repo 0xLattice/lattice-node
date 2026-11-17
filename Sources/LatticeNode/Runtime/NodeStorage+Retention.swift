@@ -216,8 +216,8 @@ extension NodeStorage {
         if await !broker.hasVolume(root: root) {
             guard let entries else { throw NodeStorageError.missingMaterializedVolume(root) }
             let volume = SerializedVolume(root: root, entries: entries)
-            guard (try? volume.validate()) != nil else { throw NodeStorageError.invalidVolume(root) }
-            try await broker.store(volume: volume)
+            guard let validated = try? ValidatedVolume(validating: volume) else { throw NodeStorageError.invalidVolume(root) }
+            try await broker.storeVolumesLocal([validated])
         }
         try await broker.mergeRetainedRoots(scope: scopes.operatorPins, roots: [root])
     }
@@ -499,7 +499,8 @@ extension NodeStorage {
                 await session.volume(rootCID: root)
             }
             guard let volume = read.value else { throw NodeStorageError.missingMaterializedVolume(root) }
-            try await broker.store(volume: volume)
+            // The session holds only what it checked on receipt.
+            try await broker.storeVolumesLocal([try ValidatedVolume(trusting: volume)])
             if let missed = try await retainHeld([root], scope: scope).first {
                 throw NodeStorageError.missingMaterializedVolume(missed)
             }
