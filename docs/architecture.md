@@ -143,13 +143,18 @@ no bodies beyond the ones the node operates on (`blockBodies: none`), when
 another block becomes its chain's tip. When the operator keeps recent
 state (`state: recent`, or `none`, which is a window of one block), what a
 step's executions stored is named by its chain and the height of the
-step's newest block, and is let go of once that height is a state window
-or more below the chain's tip. On `recent` each chain also has a counted
+step's newest block, retained in the transaction that stores it, and is let
+go of, every such height in one transaction, once that height is a state
+window or more below the chain's tip and, on `recent`, the counts (below)
+have moved there. On `recent` each chain also has a counted
 scope, the reference counting with delayed deletion of OpenEthereum's journal
 database: the count of each node is the places it holds in the state of the
 chain's act-on tip plus the places the blocks above a cursor, a window below
-the tip, replaced, and the scope's marker names the cursor and the tip. Each
-step moves the counts to the tip in one adjustment, computed from the facts
+the tip, replaced, and the scope's marker names the cursor and the tip. The
+counts move to the tip in one adjustment once it has climbed a window above
+their own (at once when it is on another branch, and at a start or a
+maintenance pass), so while they follow the tip the windows hold at most
+two windows of executions; each move is computed from the facts
 of the blocks entering and leaving the act-on chain and of the blocks the
 cursor passes (each executed block's state diff, which `state.db` keeps for
 the state window), under a compare-and-swap of the marker, so the counts, the

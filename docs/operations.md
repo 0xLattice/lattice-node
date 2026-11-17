@@ -566,11 +566,14 @@ state of the chain's tip, plus the places the blocks above a cursor replaced,
 and keeps every node it counts, and the state diff of each block it executed
 within the window (in `state.db`): the counts are kept in `volumes.db`, written
 with the cursor and the tip they were moved to in one transaction, so a stop
-never leaves them half moved. As the tip moves, the counts move with it in one
-write: what the blocks entering the chain created is added, what the blocks
-leaving it created is taken away, and what each block the cursor passes
-replaced is taken away, the cursor a window below the tip (a move of the tip
-never takes it down; a state sync may set it lower). A node a block replaced
+never leaves them half moved. As the tip moves, the counts follow it in one
+write once it has climbed a window above them, at once when it is on another
+branch, and at each start and maintenance pass: so while the counts follow the
+tip the node holds at most two windows of executions' state and diffs, and
+pays for a move once per window of blocks rather than per block. Each move adds what the
+blocks entering the chain created, and takes away what the blocks leaving it
+created and what each block the cursor passes replaced, the cursor a window
+below the tip (a move of the tip never takes it down; a state sync may set it lower). A node a block replaced
 is so kept until the tip is a window past that block, and a reorganization
 that does not reach below the cursor is undone from the counts.
 

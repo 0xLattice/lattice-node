@@ -689,8 +689,9 @@ extension NodeRuntime {
         /// the last step that ran it (`NodeCore.touched`): a level no step
         /// ran has the same tree, so the same window.
         var windows: [ChainPath: (next: [String], distances: [String: Int])] = [:]
-        /// Each level's tip the kept state was last moved to, and the blocks
-        /// executed or found invalid this step, whose reads go after it.
+        /// Each level's tip the kept state was last moved to, or held back
+        /// at (none: move it at the next settle), and the blocks executed or
+        /// found invalid this step, whose reads go after it.
         var stateTips: [ChainPath: String] = [:]
         var readsDone: [BodyKey] = []
         /// On `recent`: each chain's counts as this loop last wrote or read
@@ -846,8 +847,9 @@ extension NodeRuntime {
                 // not read.
                 operatorPins = configuration.announcePins ? await storage.operatorPins() : []
                 startNetworkMaintenance()
-                // Counts behind their tip (a store failure on a chain with no
-                // block since, or a repair that failed) are settled again.
+                // Counts behind their tip (a tip less than a window above
+                // them, a store failure on a chain with no block since, or a
+                // repair that failed) are settled again.
                 if configuration.state == .recent {
                     for (path, level) in core.levels {
                         let chain = counted[path]
@@ -1581,8 +1583,9 @@ extension NodeRuntime {
                     await storage.readCache.order(bodies: order)
                 }
             }
-            // What an executed block read goes once the kept state has
-            // counted what of it the tip's state holds.
+            // What an executed block read goes once the kept state holds
+            // what of it the tip's state holds: its execution's window
+            // until the counts reach it.
             for key in readsDone { await storage.releaseReads(key.cid, at: key.path) }
             readsDone.removeAll()
             refreshView(core.touched)
@@ -1947,15 +1950,38 @@ extension NodeRuntime {
         /// with it on `recent`, then what executions stored more than a
         /// window below it goes; on `recent` only once the counts reached
         /// the tip, so the windows hold what the blocks the counts have not
-        /// reached created.
+        /// reached created. A tip that climbed from the counts' own by less
+        /// than a window holds them back, unless a settle was asked for
+        /// (`stateTips` lost the chain: a start, a repair that ended, a
+        /// maintenance pass): a commit of each per window of blocks, not per
+        /// block, with at most two windows of executions held while the
+        /// counts follow the tip.
         mutating func settleState() async {
             guard configuration.state != .all else { return }
             for (path, level) in core.levels where stateTips[path] != level.snapshot.actOnTip {
+                let asked = stateTips[path] == nil
                 stateTips[path] = level.snapshot.actOnTip
+                if !asked, climbedLessThanAWindow(level, at: path) { continue }
                 guard !level.snapshot.actOnTip.isEmpty,
                       await settleCounted(at: path, tip: level.snapshot.actOnTip) else { continue }
                 await storage.letGoOfState(at: path, below: level.snapshot.actOnHeight)
             }
+        }
+
+        /// Whether the act-on tip of the chain at `path` descends from its
+        /// counts' tip, by less than a window: a tip on another branch, or
+        /// counts not kept, never holds a settle back.
+        private func climbedLessThanAWindow(_ level: ChainCore, at path: ChainPath) -> Bool {
+            guard let window = configuration.stateWindow(for: path),
+                  let counts = counted[path]?.marker.flatMap(CountedMarker.init)?.tip else { return false }
+            let height = level.snapshot.actOnHeight
+            guard height > counts.height, height - counts.height < window else { return false }
+            var cid = level.snapshot.actOnTip
+            for _ in 0..<(height - counts.height) {
+                guard let parent = level.parent(of: cid) else { return false }
+                cid = parent
+            }
+            return cid == counts.cid
         }
 
         /// On `recent`: the chain's counts move to its act-on tip, or a

@@ -35,8 +35,9 @@ extension NodeStorage {
     }
 
     /// `NodeEffect.persist`: content first — every affected level's Volumes
-    /// in one volumes.db transaction, then retained — then the complete node
-    /// step's headers, proofs, facts and cursors in one state.db transaction.
+    /// in one volumes.db transaction, retained in the same one — then the
+    /// complete node step's headers, proofs, facts and cursors in one
+    /// state.db transaction.
     nonisolated func persistNodeBatch(_ batch: NodeBatch, logID: String) async throws {
         var durable: [NodeFactBatch] = []
         // What this step's executions created. An executed block's body was
@@ -85,8 +86,9 @@ extension NodeStorage {
                 keepsStateDiffs: configuration.state == .recent
             ))
         }
-        try await storage.commit()
-        try await retainHeld(stored)
+        // Every root retained is one this batch stores.
+        var retaining: [String: [String]] = [:]
+        if !stored.isEmpty { retaining[retentionScope] = stored }
         for (path, state) in states where !state.roots.isEmpty {
             // A state of no known height goes with the newest the chain
             // keeps: kept as long as that, never let go of before it.
@@ -96,8 +98,9 @@ extension NodeStorage {
                 try await broker.retainedScopes(prefix: scopes.windowPrefix(at: path)).max()
                     ?? scopes.window(at: path, height: 0)
             }
-            try await retainHeld(state.roots, scope: scope)
+            retaining[scope, default: []] += state.roots
         }
+        try await broker.storeVolumesLocal(await storage.takeVolumes(), retaining: retaining)
         try await store.stageNodeFacts(durable, logID: logID)
     }
 
