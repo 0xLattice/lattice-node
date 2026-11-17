@@ -854,8 +854,15 @@ extension NodeRuntime {
     /// The transactions a block carries, by CID, as storing the block
     /// finds them: every entry of its transaction index, whatever its key.
     static func carriedTransactionIDs(ofBlock cid: String, fetcher: any Fetcher) async throws -> [String] {
-        guard let block = try await BlockHeader(rawCID: cid).resolve(fetcher: fetcher).node,
-              let index = try await block.transactions.resolve(fetcher: fetcher).node else {
+        guard let block = try await BlockHeader(rawCID: cid).resolve(fetcher: fetcher).node else {
+            throw NodeAPIError.unresolvedTransactionContent
+        }
+        return try await carriedTransactionIDs(of: block, fetcher: fetcher)
+    }
+
+    /// `carriedTransactionIDs(ofBlock:)` of a block already decoded.
+    static func carriedTransactionIDs(of block: Block, fetcher: any Fetcher) async throws -> [String] {
+        guard let index = try await block.transactions.resolve(fetcher: fetcher).node else {
             throw NodeAPIError.unresolvedTransactionContent
         }
         return try await index.boundedKeysAndValues(limit: index.count, fetcher: fetcher).map(\.1.rawCID)
@@ -887,7 +894,9 @@ extension NodeRuntime {
                 var transactions: [String] = []
                 if valid {
                     do {
-                        let carried = try await storage.storeValidBlock(job.blockHash, at: path, from: fetcher)
+                        let carried = try await storage.storeValidBlock(
+                            job.blockHash, decoded: verdict.connectedBlock, at: path, from: fetcher
+                        )
                         // The pool knows a transaction by its standard CID; an
                         // index entry may name it by another form of the same bytes.
                         transactions = carried.allSatisfy(CIDIdentity.isStandard)

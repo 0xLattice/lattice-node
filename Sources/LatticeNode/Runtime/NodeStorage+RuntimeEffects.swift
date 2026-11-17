@@ -1,6 +1,7 @@
 import Foundation
 import Lattice
 import LatticeNodeCore
+import LatticeNodeAPI
 import VolumeBroker
 import cashew
 
@@ -166,9 +167,13 @@ extension NodeStorage {
     /// when the operator keeps all state, or else only its spec and policy
     /// modules: the state it read is its parent's, which the counts and
     /// windows keep or peers serve. Returns the CIDs of the transactions the
-    /// block carries, read once from its transaction index.
+    /// block carries, read once from its transaction index. `decoded` is the
+    /// block's node as its connect decoded it (`ConnectVerdict.connectedBlock`),
+    /// or nil to resolve it through `fetcher`.
     @discardableResult
-    nonisolated func storeValidBlock(_ cid: String, at path: ChainPath, from fetcher: any Fetcher) async throws -> [String] {
+    nonisolated func storeValidBlock(
+        _ cid: String, decoded: Block? = nil, at path: ChainPath, from fetcher: any Fetcher
+    ) async throws -> [String] {
         let volumes: [SerializedVolume]
         if let fetched = await readCache.body(cid) {
             volumes = fetched
@@ -177,11 +182,18 @@ extension NodeStorage {
             try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: walked)
             volumes = await walked.takeVolumes()
         }
-        let transactions = try await NodeRuntime.carriedTransactionIDs(ofBlock: cid, fetcher: fetcher)
+        let resolved: Block?
+        if let decoded {
+            resolved = decoded
+        } else {
+            resolved = try await BlockHeader(rawCID: cid).resolve(fetcher: fetcher).node
+        }
+        guard let block = resolved else { throw NodeAPIError.unresolvedTransactionContent }
+        let transactions = try await NodeRuntime.carriedTransactionIDs(of: block, fetcher: fetcher)
         let body = Set([cid] + transactions)
         let roots = Set(volumes.map(\.root))
         var rest = roots.subtracting(body)
-        if configuration.state != .all { rest.formIntersection(await rules(ofBlock: cid, fetcher: fetcher)) }
+        if configuration.state != .all { rest.formIntersection(await rules(of: block, fetcher: fetcher)) }
         let storage = NodeImportStorage(storage: broker)
         for volume in volumes where body.contains(volume.root) || rest.contains(volume.root) {
             await storage.store(volume: volume)

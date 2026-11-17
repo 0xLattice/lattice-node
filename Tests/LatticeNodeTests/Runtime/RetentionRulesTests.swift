@@ -201,8 +201,11 @@ final class RetentionRulesTests: XCTestCase {
         var heldBefore = Set<String>()
         for root in fetched where await joiner.volume(root) != nil { heldBefore.insert(root) }
         let joinerBroker = await joiner.broker
+        // As the connect job stores it: with the block its connect decoded.
+        let decoded = try await BlockHeader(rawCID: mined).resolve(fetcher: producer.localFetcher).node
         let transactions = try await joiner.storeValidBlock(
-            mined, at: ["Nexus"], from: CoalescingFetcher(CompositeContentSource([joinerBroker, joiner.readCache]))
+            mined, decoded: try XCTUnwrap(decoded), at: ["Nexus"],
+            from: CoalescingFetcher(CompositeContentSource([joinerBroker, joiner.readCache]))
         )
         XCTAssertEqual(transactions, [carried], "an honest block names its transactions as the pool does")
         XCTAssertTrue(transactions.allSatisfy(CIDIdentity.isStandard), "the connect job uses them as read")

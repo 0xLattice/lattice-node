@@ -116,8 +116,13 @@ extension NodeStorage {
     /// The spec a block names and the policy modules that spec names, as
     /// `fetcher` reads them.
     nonisolated func rules(ofBlock blockCID: String, fetcher: any Fetcher) async -> Set<String> {
-        guard let block = try? await BlockHeader(rawCID: blockCID).resolve(fetcher: fetcher).node,
-              let spec = try? await block.spec.resolve(fetcher: fetcher).node else { return [] }
+        guard let block = try? await BlockHeader(rawCID: blockCID).resolve(fetcher: fetcher).node else { return [] }
+        return await rules(of: block, fetcher: fetcher)
+    }
+
+    /// `rules(ofBlock:)` of a block already decoded.
+    nonisolated func rules(of block: Block, fetcher: any Fetcher) async -> Set<String> {
+        guard let spec = try? await block.spec.resolve(fetcher: fetcher).node else { return [] }
         return Set([block.spec.rawCID] + spec.wasmPolicies.map(\.moduleCID))
     }
 
