@@ -1,5 +1,5 @@
 {
-  "originHash" : "ec1d150c074fbbb4ea632f678d08a3cb66e4f820cfbc6f518b1e4637e19c062e",
+  "originHash" : "75dbdb48e39709461e45d26d1c31c81bad9ad7982fea30595bee90c4a1311308",
   "pins" : [
     {
       "identity" : "arraytrie",
@@ -69,8 +69,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/0xLattice/Lattice.git",
       "state" : {
-        "revision" : "7f36f9fba5d2a36d6f6fe8d0c7fb60684c31332b",
-        "version" : "56.3.0"
+        "revision" : "d712376add95ac6be6120ff9e6e3616153922a25",
+        "version" : "57.0.0"
       }
     },
     {
@@ -366,8 +366,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/0xLattice/UInt256.git",
       "state" : {
-        "revision" : "19e20ada50f87beb33f1f073f9c3fba786a4564e",
-        "version" : "1.1.0"
+        "revision" : "ef4c2794277ea7e1e1bd7134fd3cd95e4d347613",
+        "version" : "2.0.0"
       }
     },
     {
