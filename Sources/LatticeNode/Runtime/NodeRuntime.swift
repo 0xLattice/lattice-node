@@ -1287,7 +1287,7 @@ extension NodeRuntime {
                 }
                 : []
             let key = ([("", tip.hash, "\(mined)", pool.version)] + children.map {
-                ($0.path.joined(separator: "/"), $0.level.snapshot.actOnTip, $0.level.snapshot.bestHeaderTip,
+                ($0.path.joined(separator: "/"), $0.level.snapshot.actOnTip, "\(!$0.level.snapshot.bestHeaderTip.isEmpty)",
                  $0.level.mining.mempool.version)
             }).map { "\($0.0):\($0.1)/\($0.2)/\($0.3)" }.joined(separator: "\n")
             let digest: String
@@ -1297,7 +1297,7 @@ extension NodeRuntime {
                 digest = NodeRuntime.templateDigest(
                     tip: mined ? tip.hash : "", carrying: mined ? level.mining.nextBlock : [],
                     levels: children.map {
-                        ($0.path, $0.level.snapshot.actOnTip, $0.level.snapshot.bestHeaderTip, $0.level.mining.nextBlock)
+                        ($0.path, $0.level.snapshot.actOnTip, !$0.level.snapshot.bestHeaderTip.isEmpty, $0.level.mining.nextBlock)
                     }
                 )
                 digests[path] = (key, digest)
@@ -1881,7 +1881,7 @@ extension NodeRuntime {
                 return ChildTemplateInput(
                     path: child,
                     tipCID: executed ? snapshot.actOnTip : nil,
-                    bestHeaderTip: snapshot.bestHeaderTip,
+                    weighed: !snapshot.bestHeaderTip.isEmpty,
                     // Each is checked again against the carrier's state.
                     transactions: level.mining.nextBlock,
                     anchor: executed ? NodeRuntime.anchor(level.tree, snapshot.actOnTip) : nil,

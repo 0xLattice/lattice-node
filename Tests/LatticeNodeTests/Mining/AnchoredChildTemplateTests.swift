@@ -152,7 +152,7 @@ final class AnchoredChildTemplateTests: XCTestCase {
         let tree = host.alpha.tree
         let tip = host.alpha.snapshot.actOnTip
         return ChildTemplateInput(
-            path: Self.alpha, tipCID: tip, bestHeaderTip: host.alpha.snapshot.bestHeaderTip,
+            path: Self.alpha, tipCID: tip, weighed: !host.alpha.snapshot.bestHeaderTip.isEmpty,
             transactions: transactions, anchor: tree.difficultyAnchor(forBlockHash: tip),
             genesisSpec: nil, genesisPremineRecipient: nil, genesisTransactions: [], genesisTarget: .max
         )
