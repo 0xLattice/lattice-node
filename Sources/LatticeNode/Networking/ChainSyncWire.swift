@@ -65,6 +65,52 @@ struct StreamPageMessage: CanonicalJSONMessage, Equatable, Sendable {
             throw OverlayWireError.malformed
         }
     }
+
+    /// `_canonicalJSONEncode`'s bytes, written directly: a page is up to
+    /// thousands of entries, and the generic encoder's cost per field was
+    /// most of serving one. Only strings that are printable ASCII without
+    /// `"` or `\` are written here, the ones JSON spells as they are (a CID
+    /// always is); a page holding any other is left to the encoder.
+    func canonicalJSON() throws -> Data {
+        var out: [UInt8] = []
+        out.reserveCapacity(96 + entries.count * 160)
+        func plain(_ value: String) -> Bool {
+            value.utf8.allSatisfy { $0 >= 0x20 && $0 <= 0x7E && $0 != UInt8(ascii: "\"") && $0 != UInt8(ascii: "\\") }
+        }
+        func raw(_ text: StaticString) {
+            out.append(contentsOf: UnsafeBufferPointer(start: text.utf8Start, count: text.utf8CodeUnitCount))
+        }
+        func quoted(_ value: String) {
+            out.append(UInt8(ascii: "\""))
+            out.append(contentsOf: value.utf8)
+            out.append(UInt8(ascii: "\""))
+        }
+        guard chainPath.allSatisfy(plain), plain(logID),
+              entries.allSatisfy({ plain($0.cid) && plain($0.block) }) else {
+            return try _canonicalJSONEncode(self)
+        }
+        raw(#"{"chainPath":["#)
+        for (index, name) in chainPath.enumerated() {
+            if index > 0 { raw(",") }
+            quoted(name)
+        }
+        raw(#"],"entries":["#)
+        for (index, entry) in entries.enumerated() {
+            raw(index > 0 ? #",{"block":"# : #"{"block":"#)
+            quoted(entry.block)
+            raw(#","cid":"#)
+            quoted(entry.cid)
+            raw(#","position":"#)
+            out.append(contentsOf: String(entry.position).utf8)
+            raw(entry.proof ? #","proof":true}"# : #","proof":false}"#)
+        }
+        raw(hasMore ? #"],"hasMore":true,"logID":"# : #"],"hasMore":false,"logID":"#)
+        quoted(logID)
+        raw(#","requestID":"#)
+        out.append(contentsOf: String(requestID).utf8)
+        raw("}")
+        return Data(out)
+    }
 }
 
 /// `SyncMessage.getData`: weighed headers by CID, with their proofs.
