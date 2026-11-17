@@ -25,11 +25,11 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/0xLattice/Lattice.git",
-            exact: "57.2.0"
+            exact: "57.2.1"
         ),
         .package(
             url: "https://github.com/0xLattice/cashew.git",
-            exact: "5.0.5"
+            exact: "5.0.6"
         ),
         .package(
             url: "https://github.com/0xLattice/Ivy2.git",
@@ -41,7 +41,7 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/0xLattice/VolumeBroker.git",
-            exact: "10.0.2"
+            exact: "10.1.3"
         ),
         // Lattice's own UInt256, declared for the core's and simulator's direct imports.
         .package(url: "https://github.com/0xLattice/UInt256.git", from: "2.0.0"),
