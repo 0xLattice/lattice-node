@@ -112,7 +112,8 @@ actor NodeImportStorage: VolumeStorer {
         roots.insert(volume.root)
     }
 
-    /// The Volumes the walk derived, without a broker to commit them to.
+    /// The Volumes the walk derived and nothing committed: without a
+    /// broker, or for a caller that commits them itself.
     func takeVolumes() -> [SerializedVolume] {
         defer { pending.removeAll() }
         return pending

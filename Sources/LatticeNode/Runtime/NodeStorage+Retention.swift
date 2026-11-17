@@ -232,17 +232,18 @@ extension NodeStorage {
     // MARK: - State: recent
 
     /// With a state window: what executions stored at heights more than a
-    /// window below `height`, the tip's, goes, and their state diffs. On
-    /// `recent` what the counts name stays; on `none` what a newer block
-    /// still names is read from peers when something reads it.
+    /// window below `height`, the tip's, goes, in one commit however many
+    /// heights that is, and their state diffs. On `recent` what the counts
+    /// name stays; on `none` what a newer block still names is read from
+    /// peers when something reads it.
     nonisolated func letGoOfState(at path: ChainPath, below height: UInt64) async {
         guard let window = configuration.stateWindow(for: path) else { return }
         guard height >= window else { return }
         let kept = scopes.window(at: path, height: height - window + 1)
         do {
-            for scope in try await broker.retainedScopes(prefix: scopes.windowPrefix(at: path)) where scope < kept {
-                try await release(scope: scope)
-            }
+            try await broker.releaseRetainedScopes(
+                try await broker.retainedScopes(prefix: scopes.windowPrefix(at: path)).filter { $0 < kept }
+            )
             try await store.dropStateDiffs(at: path, below: height - window + 1)
         } catch {
             syncTrace("state below \(height) not let go of: \(error)")
