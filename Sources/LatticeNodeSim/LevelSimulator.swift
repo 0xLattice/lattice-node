@@ -489,7 +489,7 @@ public struct LevelSimulator {
             guard let block = job.block ?? node.store.levels[path]?.headers[job.childCID]?.block else {
                 throw Invariants.fail(name, "asked to verify a proof of \(job.childCID), which it does not hold")
             }
-            let result = await job.run(block)
+            let result = job.run(block)
             schedule(at: delay(), to: name, .host(.level(path, .proofVerified(job, result))))
         case .readTransactions(let blocks):
             // The simulated chains carry no transactions.

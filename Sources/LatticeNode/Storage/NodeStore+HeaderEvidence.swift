@@ -27,7 +27,9 @@ extension NodeStore {
             let proof = stored.proof
             guard path.count > 1,
                   CIDIdentity.isCanonical(stored.childCID), CIDIdentity.isCanonical(proof.rootCID),
-                  proof.directoryPath == Array(path.dropFirst()) else {
+                  // Byte for byte, as Lattice's check: `String ==` is
+                  // Unicode canonical equivalence, which admits a respelled path.
+                  proof.directoryPath.elementsEqual(path.dropFirst(), by: { $0.utf8.elementsEqual($1.utf8) }) else {
                 throw NodeStoreError.corrupt("a child proof does not match its chain path")
             }
             // What `serialize` refuses is refused here too.

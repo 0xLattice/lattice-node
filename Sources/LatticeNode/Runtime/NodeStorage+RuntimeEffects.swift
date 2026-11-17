@@ -339,7 +339,7 @@ extension NodeStorage {
                 guard let proof = try await ChildBlockProof.extending(
                     proofToCarrier.map { [$0] }, by: BlockHeader(node: carrier), into: directory, fetcher: localFetcher
                 ).first else { continue }
-                guard case .success(let evidence) = await proof.verifySecuringWork(child: block, chainPath: childPath)
+                guard case .success(let evidence) = proof.verifySecuringWork(child: block, chainPath: childPath)
                 else { continue }
                 // A block the grind's work misses is still walked: a carrier
                 // need not meet its own target, so a descendant with an easier
