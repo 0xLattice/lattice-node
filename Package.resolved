@@ -1,10 +1,10 @@
 {
-  "originHash" : "ae817816ab5b3c61c345bab007b0d58ff4b48183f75ceea08bc6e86a6f1713b6",
+  "originHash" : "5506fa97694735d3592f2dcc99d4b0a671e23c131f16022c7b6f11d7c967100a",
   "pins" : [
     {
       "identity" : "arraytrie",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/adalinxx/ArrayTrie.git",
+      "location" : "https://github.com/0xLattice/ArrayTrie.git",
       "state" : {
         "revision" : "8f8d3aacbd86999fffeebd60a0e89a423a41a8dc",
         "version" : "1.0.1"
@@ -24,8 +24,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/0xLattice/cashew.git",
       "state" : {
-        "revision" : "5daec3cdfd3d572d9437daa7a84242f7ae5a96d5",
-        "version" : "5.0.3"
+        "revision" : "6c9bb7eb0fc5624e7bd6597960521b00a3831a15",
+        "version" : "5.0.5"
       }
     },
     {
@@ -69,8 +69,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/0xLattice/Lattice.git",
       "state" : {
-        "revision" : "d712376add95ac6be6120ff9e6e3616153922a25",
-        "version" : "57.0.0"
+        "revision" : "37170e20dce5939b6ce73afa802df6ffce817c01",
+        "version" : "57.2.0"
       }
     },
     {
@@ -375,8 +375,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/0xLattice/VolumeBroker.git",
       "state" : {
-        "revision" : "fcdabb5838497ade37a02b27e8a65a4a1505e26f",
-        "version" : "10.0.0"
+        "revision" : "2bf84b3438d99acf5777a54703a49df9e3f65711",
+        "version" : "10.0.2"
       }
     },
     {
