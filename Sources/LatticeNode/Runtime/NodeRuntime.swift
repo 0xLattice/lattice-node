@@ -193,8 +193,8 @@ public final class NodeRuntime: Sendable {
     }
 
     /// What a test sees of each job, awaited on its worker before it runs:
-    /// its queue class and, for a mining job, its effect.
-    typealias JobObserver = @Sendable (RuntimeJob.Kind, MiningEffect?) async -> Void
+    /// its queue class, its level and, for a mining job, its effect.
+    typealias JobObserver = @Sendable (RuntimeJob.Kind, ChainPath, MiningEffect?) async -> Void
 
     /// `start`, with `observeJob` awaited on each job's worker before the
     /// job runs (a test's view of the worker pool).
@@ -822,9 +822,16 @@ extension NodeRuntime {
                     return true
                 }
                 let id = nextReply
+                let mining = event(id)
+                // A level with a backlog to execute (syncing) has no
+                // template until it has executed it.
+                if case .templateRequested = mining, !mined(path) {
+                    reply.resume(throwing: TemplateError.executing)
+                    return true
+                }
                 nextReply += 1
                 replies[id] = (path, reply)
-                return await step(.level(path, .mining(event(id))))
+                return await step(.level(path, .mining(mining)))
             case .answer(let id, let result):
                 answer(id, result)
                 return true
@@ -1268,10 +1275,16 @@ extension NodeRuntime {
                     || currentPeers[path]?.contains($0.peer.id.publicKey) == true)
             }.count
             let pool = level.mining.mempool
-            let children = path == core.rootPath
-                ? core.ordered.dropFirst().compactMap { child in core.levels[child].map { (path: child, level: $0) } }
+            // The digest names what a template would carry: a level with a
+            // backlog to execute names nothing, and it and every level below
+            // it are left out of the root's (`mined`).
+            let mined = !level.holdsBacklog
+            let children = path == core.rootPath && mined
+                ? core.ordered.dropFirst().filter { self.mined($0) }.compactMap { child in
+                    core.levels[child].map { (path: child, level: $0) }
+                }
                 : []
-            let key = ([("", tip.hash, "", pool.version)] + children.map {
+            let key = ([("", tip.hash, "\(mined)", pool.version)] + children.map {
                 ($0.path.joined(separator: "/"), $0.level.snapshot.actOnTip, $0.level.snapshot.bestHeaderTip,
                  $0.level.mining.mempool.version)
             }).map { "\($0.0):\($0.1)/\($0.2)/\($0.3)" }.joined(separator: "\n")
@@ -1280,7 +1293,7 @@ extension NodeRuntime {
                 digest = cached.digest
             } else {
                 digest = NodeRuntime.templateDigest(
-                    tip: tip.hash, carrying: level.mining.nextBlock,
+                    tip: mined ? tip.hash : "", carrying: mined ? level.mining.nextBlock : [],
                     levels: children.map {
                         ($0.path, $0.level.snapshot.actOnTip, $0.level.snapshot.bestHeaderTip, $0.level.mining.nextBlock)
                     }
@@ -1838,7 +1851,9 @@ extension NodeRuntime {
                 guard let basis = core.levels[path].flatMap({ NodeRuntime.miningBasis(effect, tree: $0.tree) }) else { break }
                 enqueue(NodeRuntime.miningJob(
                     effect, at: path, basis: basis, storage: storage, remote: remote,
-                    children: childTemplateInputs(below: path), levels: LiveLevels(inputs: inputs),
+                    children: childTemplateInputs(below: path),
+                    hosted: core.ordered.filter { $0.count > path.count && $0.starts(with: path) },
+                    levels: LiveLevels(inputs: inputs),
                     cache: childTemplates
                 ), effect)
                 startJobs()
@@ -1849,9 +1864,14 @@ extension NodeRuntime {
             return true
         }
 
-        /// Every hosted level below `path`, as a template job reads it.
+        func mined(_ path: ChainPath) -> Bool {
+            NodeRuntime.mined(path, root: core.rootPath, levels: core.levels)
+        }
+
+        /// Every hosted level below `path` that is mined, as a template job
+        /// reads it.
         func childTemplateInputs(below path: ChainPath) -> [ChildTemplateInput] {
-            core.ordered.filter { $0.count > path.count && $0.starts(with: path) }.compactMap { child -> ChildTemplateInput? in
+            core.ordered.filter { $0.count > path.count && $0.starts(with: path) && mined($0) }.compactMap { child -> ChildTemplateInput? in
                 guard let level = core.levels[child] else { return nil }
                 let snapshot = level.snapshot
                 let executed = !snapshot.actOnTip.isEmpty
@@ -1901,7 +1921,7 @@ extension NodeRuntime {
                 return queued.append(job)
             }
             queued.append(RuntimeJob(path: job.path, tipCID: job.tipCID, kind: job.kind, queued: SyncTrace.now()) {
-                await observeJob(job.kind, effect)
+                await observeJob(job.kind, job.path, effect)
                 return await job.run()
             })
         }

@@ -108,7 +108,7 @@ final class AdmissionWhileSyncingTests: XCTestCase {
             // The connect into the held height waits until the submit does.
             let held: UInt64 = workers == 1 ? blocks - 1 : 0
             let probe = Probe()
-            let syncing = try await node(keyByte: 0x72 + UInt8(workers), peers: [miner.endpoint], workers: workers) { kind, effect in
+            let syncing = try await node(keyByte: 0x72 + UInt8(workers), peers: [miner.endpoint], workers: workers) { kind, _, effect in
                 switch (kind, effect) {
                 case (.connect, _):
                     await probe.count("connect")
@@ -161,7 +161,8 @@ final class AdmissionWhileSyncingTests: XCTestCase {
     /// transactions: no peer admission runs before the level's sync latch is
     /// set (`ChainCore.synced`), which it is once caught up; its connects are those of a quiet sync, and once
     /// caught up it pools a peer's transaction. A miner polling for
-    /// templates meanwhile is served on the old tip (Bitcoin Core refuses
+    /// templates meanwhile is refused (503 "executing") while the node holds
+    /// a backlog to execute, else served on the old tip (Bitcoin Core refuses
     /// `getblocktemplate` during initial block download); the builds it
     /// costs are printed.
     func testACatchingUpNodeIgnoresPeerTransactionsWithoutSlowingItsConnects() async throws {
@@ -174,7 +175,7 @@ final class AdmissionWhileSyncingTests: XCTestCase {
             let probe = Probe()
             let synced = try await node(
                 keyByte: keyByte, peers: [source.endpoint], workers: 1, bodyWindow: window
-            ) { kind, effect in
+            ) { kind, _, effect in
                 // Nil, the level unreadable (a job still running once the
                 // loop has stopped), is not catching up.
                 let catchingUp = await probe.level(\.synced) == false

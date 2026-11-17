@@ -377,7 +377,15 @@ extension NodeRuntime {
         // Down the path to C, as `carriedGrinds` walks a mined root.
         var block = template.block
         for directory in path.dropFirst(configuration.chainPath.count) {
-            guard let child = block.children.node?[directory]?.node else { throw NodeAPIError.noChildCandidate }
+            guard let child = block.children.node?[directory]?.node else {
+                // Left out: it, or a level above it, executes its backlog
+                // first.
+                let root = configuration.chainPath
+                if await LiveLevels(inputs: inputs).read({ NodeRuntime.mined(path, root: root, levels: $0) }) == false {
+                    throw TemplateError.executing
+                }
+                throw NodeAPIError.noChildCandidate
+            }
             block = child
         }
         let fetcher = storage.workFetcher
@@ -458,7 +466,9 @@ extension NodeRuntime {
     }
 
     /// The root's template digest now, then each time it changes: a hosted
-    /// level's act-on tip or next-block transactions, or the hosted set.
+    /// level's act-on tip or next-block transactions, the hosted set, or a
+    /// level holding, or no longer, a backlog to execute (it is left out
+    /// while it does: `ChainCore.holdsBacklog`).
     /// Newest only, so a slow reader skips to the latest. Ends when the
     /// runtime stops.
     public func miningEvents() -> AsyncStream<String> {
@@ -723,6 +733,7 @@ extension NodeRuntime {
         storage: NodeStorage,
         remote: IvyRootContentSource? = nil,
         children: [ChildTemplateInput] = [],
+        hosted: [ChainPath]? = nil,
         levels: LiveLevels = .none,
         cache: ChildTemplateCache? = nil
     ) -> RuntimeJob {
@@ -781,7 +792,7 @@ extension NodeRuntime {
                     var refused: [PolicyRefusal] = []
                     let built = await buildTemplate(
                         job, difficultyAnchor: basis?.anchor, fetcher: fetcher, chainPath: path,
-                        children: children, levels: levels, cache: cache, refused: &refused
+                        children: children, hosted: hosted, levels: levels, cache: cache, refused: &refused
                     )
                     return (built, refused)
                 }
@@ -934,10 +945,14 @@ extension NodeRuntime {
         fetcher: any Fetcher,
         chainPath: [String],
         children: [ChildTemplateInput] = [],
+        hosted: [ChainPath]? = nil,
         levels: LiveLevels = .none,
         cache: ChildTemplateCache? = nil,
         refused: inout [PolicyRefusal]
     ) async -> TemplateBuild? {
+        // Every hosted level, mined or not: a hosted directory is this
+        // node's to mine, and carries no other's commitment.
+        let hosted = hosted ?? children.map(\.path)
         guard job.request.parentCarrier == nil,
               let previous = try? await BlockHeader(rawCID: job.tipCID).resolve(fetcher: fetcher).node,
               let spec = try? await previous.spec.resolve(fetcher: fetcher).node,
@@ -954,14 +969,14 @@ extension NodeRuntime {
         if !refusedHere.isEmpty { refused.append(PolicyRefusal(path: chainPath, tipCID: job.tipCID, cids: refusedHere)) }
         let provided = await childCandidates(
             of: chainPath, among: children, entering: previous.postState, timestamp: timestamp,
-            request: job.request, levels: levels, fetcher: fetcher, cache: cache, refused: &refused
+            request: job.request, hosted: hosted, levels: levels, fetcher: fetcher, cache: cache, refused: &refused
         )
         guard let template = try? await MiningTemplateAssembly.fit(
             chainPath: chainPath,
             previous: previous,
             pooled: pooled,
             provided: provided,
-            hosted: directories(below: chainPath, among: children),
+            hosted: directories(below: chainPath, among: hosted),
             parentCarrier: nil,
             timestamp: timestamp,
             rewardRecipient: job.request.rewardRecipient,
@@ -1093,9 +1108,18 @@ extension NodeRuntime {
         }
     }
 
-    /// The directories directly below `parent` that `inputs` host.
-    static func directories(below parent: ChainPath, among inputs: [ChildTemplateInput]) -> Set<String> {
-        Set(inputs.filter { $0.path.dropLast().elementsEqual(parent) }.compactMap(\.path.last))
+    /// Whether `path` is mined: neither it nor a level above it, up to
+    /// `root`, holds a backlog to execute (`ChainCore.holdsBacklog`). A
+    /// child is carried only under its parent's block.
+    static func mined(_ path: ChainPath, root: ChainPath, levels: [ChainPath: ChainCore]) -> Bool {
+        (root.count...max(root.count, path.count)).allSatisfy {
+            levels[Array(path.prefix($0))]?.holdsBacklog != true
+        }
+    }
+
+    /// The directories directly below `parent` among the hosted `paths`.
+    static func directories(below parent: ChainPath, among paths: [ChainPath]) -> Set<String> {
+        Set(paths.filter { $0.dropLast().elementsEqual(parent) }.compactMap(\.last))
     }
 
     /// Merged mining: a candidate block for each hosted direct child of
@@ -1109,11 +1133,13 @@ extension NodeRuntime {
         entering: LatticeStateHeader,
         timestamp: Int64,
         request: TemplateRequest,
+        hosted: [ChainPath]? = nil,
         levels: LiveLevels,
         fetcher: any Fetcher,
         cache: ChildTemplateCache? = nil,
         refused: inout [PolicyRefusal]
     ) async -> [DirectChildCandidate] {
+        let paths = hosted ?? inputs.map(\.path)
         var candidates: [DirectChildCandidate] = []
         for input in inputs where input.path.dropLast().elementsEqual(parent) {
             let carrier = Block(
@@ -1142,9 +1168,9 @@ extension NodeRuntime {
                 let below = tip != tipCID
                 let grandchildren = below ? [] : await childCandidates(
                     of: input.path, among: inputs, entering: previous.postState, timestamp: time,
-                    request: request, levels: levels, fetcher: fetcher, cache: cache, refused: &refused
+                    request: request, hosted: paths, levels: levels, fetcher: fetcher, cache: cache, refused: &refused
                 )
-                let hosted = directories(below: input.path, among: inputs)
+                let hosted = directories(below: input.path, among: paths)
                 // Built from exactly this before: the block is reused, and
                 // nothing here is judged or assembled again.
                 let key = ChildTemplateCache.Key(

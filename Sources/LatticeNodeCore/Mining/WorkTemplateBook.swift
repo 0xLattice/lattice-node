@@ -48,6 +48,9 @@ public enum TemplateError: Error, Sendable, Equatable {
     case buildFailed
     /// Too many template requests are waiting.
     case busy
+    /// The level holds a backlog of blocks to execute and executes it
+    /// first (`ChainCore.holdsBacklog`): it is syncing.
+    case executing
 }
 
 /// The work cache for external miners. It never searches a nonce. An issued

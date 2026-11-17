@@ -273,6 +273,76 @@ final class ChainCoreBodyTests: XCTestCase {
         XCTAssertEqual(core.bodies.requested.count, 3)
     }
 
+    /// A level holds a backlog while the bodies of the next two blocks after
+    /// its executed prefix on the best chain are here: one block arriving
+    /// at the tip leaves it mined.
+    func testALevelHoldsABacklogOnlyWhileTheNextTwoBodiesAreHere() async throws {
+        var (core, _) = weighed(Array(chain.prefix(3)))
+        XCTAssertFalse(core.holdsBacklog, "no body is here")
+        let job = try XCTUnwrap(jobs(arrive(chain[0].cid, &core)).first)
+        XCTAssertFalse(core.holdsBacklog, "one block, connecting, as at the tip")
+        _ = arrive(chain[1].cid, &core)
+        XCTAssertTrue(core.holdsBacklog, "the next two bodies are here")
+        let effects = core.step(.connected(await run(job)), now: Self.now)
+        try await persist(effects)
+        XCTAssertEqual(core.snapshot.actOnTip, chain[0].cid)
+        XCTAssertFalse(core.holdsBacklog, "executed: the block after the next is not here")
+    }
+
+    /// A withheld body among the next two never holds the level, whatever
+    /// is here after it: the level is mined on its executed tip.
+    func testAWithheldBodyAmongTheNextTwoLeavesTheLevelMined() async throws {
+        var (core, _) = weighed(Array(chain.prefix(3)))
+        _ = arrive(chain[1].cid, &core)
+        _ = arrive(chain[2].cid, &core)
+        XCTAssertTrue(core.bodies.arrived.isSuperset(of: [chain[1].cid, chain[2].cid]))
+        XCTAssertFalse(core.holdsBacklog, "the next body is withheld")
+
+        var (other, _) = weighed(Array(chain.prefix(3)))
+        _ = arrive(chain[0].cid, &other)
+        _ = arrive(chain[2].cid, &other)
+        XCTAssertFalse(other.holdsBacklog, "the body after the next is withheld")
+        _ = arrive(chain[1].cid, &other)
+        XCTAssertTrue(other.holdsBacklog)
+    }
+
+    /// An invalid next body holds the level until it executes, then is
+    /// excluded and is no longer next.
+    func testAnInvalidNextBodyHoldsTheLevelOnlyUntilItIsExecuted() async throws {
+        let invalid = try XCTUnwrap(world.blocks[world.invalidBody])
+        let child = try XCTUnwrap(world.blocks[world.invalidBodyChild])
+        var (core, _) = weighed(Array(chain.prefix(2)) + [invalid, child])
+        _ = try await deliver(chain[0].cid, to: &core)
+        _ = try await deliver(chain[1].cid, to: &core)
+        let job = try XCTUnwrap(jobs(arrive(invalid.cid, &core)).first)
+        _ = arrive(child.cid, &core)
+        XCTAssertTrue(core.holdsBacklog)
+        _ = core.step(.connected(await run(job)), now: Self.now)
+        XCTAssertTrue(core.tree.isExcludedRoot(invalid.cid))
+        XCTAssertFalse(core.holdsBacklog, "excluded, it is not next")
+    }
+
+    /// A next body whose connect could not read its content holds the
+    /// level no more: not when it is asked for again, nor when it arrives
+    /// again.
+    func testANextBodyWhoseContentCouldNotBeReadLeavesTheLevelMined() async throws {
+        var (core, _) = weighed(Array(chain.prefix(3)))
+        let job = try XCTUnwrap(jobs(arrive(chain[0].cid, &core)).first)
+        _ = arrive(chain[1].cid, &core)
+        XCTAssertTrue(core.holdsBacklog)
+        let verdict = await ChainTree.connect(job, fetcher: SimCAS(), validationContext: ValidationContext(nowMilliseconds: Self.now))
+        XCTAssertNotNil(verdict.retryFailure)
+        _ = core.step(.connected(verdict), now: Self.now)
+        XCTAssertFalse(core.holdsBacklog)
+        // Asked for again once its wait is over, it arrives again.
+        let retry = Self.now + 60_000
+        _ = core.step(.tick, now: retry)
+        _ = core.step(.bodyFetched(cid: chain[0].cid), now: retry)
+        XCTAssertTrue(core.bodies.arrived.contains(chain[0].cid) || core.bodies.connecting == chain[0].cid)
+        XCTAssertTrue(core.bodies.arrived.contains(chain[1].cid))
+        XCTAssertFalse(core.holdsBacklog)
+    }
+
     func testAnInvalidBodyIsExcludedItsWorkStillWeighsAndNoOneIsBlamed() async throws {
         let invalid = try XCTUnwrap(world.blocks[world.invalidBody])
         let child = try XCTUnwrap(world.blocks[world.invalidBodyChild])
