@@ -819,7 +819,10 @@ public struct ChainCore: Sendable {
     /// asked for (an object asked of another peer counts as held, until that
     /// request stalls). A header it holds but has not weighed gains the peer
     /// as an announcer (the peer holds its ancestors). Otherwise the next
-    /// page is pulled. Holes still lacking are asked again on a tick.
+    /// page is pulled, once the holes leave room for half a page: a page is
+    /// served whole, and a pull with room for a few entries would take those
+    /// few and drop the rest (TCP's silly-window avoidance). Holes still
+    /// lacking are asked again on a tick.
     mutating func pump(_ peer: PeerID, _ turn: inout Turn, again: Bool = false) {
         guard let state = sync.peers[peer], state.data == nil, sync.cursors[peer.key] != nil else { return }
         let inFlight = Set(sync.peers.values.flatMap { $0.data?.cids ?? [] })
@@ -836,7 +839,7 @@ public struct ChainCore: Sendable {
         sync.peers[peer]?.requested = requested
         if !cids.isEmpty {
             requestData(cids, from: peer, &turn)
-        } else if state.more, state.stream == nil, state.holes.count < config.maxHeadersPerPage {
+        } else if state.more, state.stream == nil, state.holes.count <= config.maxHeadersPerPage / 2 {
             requestStream(from: peer, &turn)
         }
     }
