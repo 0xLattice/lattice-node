@@ -162,8 +162,10 @@ extension NodeStorage {
     /// transactions'), pinned under its name, and, with the chain, the rest
     /// when the operator keeps all state, or else only its spec and policy
     /// modules: the state it read is its parent's, which the counts and
-    /// windows keep or peers serve.
-    nonisolated func storeValidBlock(_ cid: String, at path: ChainPath, from fetcher: any Fetcher) async throws {
+    /// windows keep or peers serve. Returns the CIDs of the transactions the
+    /// block carries, read once from its transaction index.
+    @discardableResult
+    nonisolated func storeValidBlock(_ cid: String, at path: ChainPath, from fetcher: any Fetcher) async throws -> [String] {
         let volumes: [SerializedVolume]
         if let fetched = await readCache.body(cid) {
             volumes = fetched
@@ -172,7 +174,8 @@ extension NodeStorage {
             try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: walked)
             volumes = await walked.takeVolumes()
         }
-        let body = Set([cid] + (try await NodeRuntime.carriedTransactionIDs(ofBlock: cid, fetcher: fetcher)))
+        let transactions = try await NodeRuntime.carriedTransactionIDs(ofBlock: cid, fetcher: fetcher)
+        let body = Set([cid] + transactions)
         let roots = Set(volumes.map(\.root))
         var rest = roots.subtracting(body)
         if configuration.state != .all { rest.formIntersection(await rules(ofBlock: cid, fetcher: fetcher)) }
@@ -184,6 +187,7 @@ extension NodeStorage {
         try await broker.mergeRetainedRoots(scope: scopes.body(cid, at: path), roots: body.sorted())
         try await retainHeld(rest.sorted(), scope: configuration.state == .all ? nil : scopes.rules(at: path))
         bundles.record(root: cid, roots: roots.sorted())
+        return transactions
     }
 
     /// `ChainEffect.fetchBody`: the block's Volume and the nested Volumes its
