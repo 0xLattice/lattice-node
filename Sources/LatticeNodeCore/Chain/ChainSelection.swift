@@ -180,10 +180,10 @@ extension ChainCore {
     /// The deepest block on the best header chain whose ancestry is executed
     /// from genesis, read from the act-on tip `actOn`: up to that block the
     /// act-on descent is fork choice's own, so an act-on tip on the best
-    /// chain is it. Only an act-on tip that stepped off the best chain (an
-    /// executed fork child heavier than the unexecuted rest) searches for
-    /// it. None (an empty hash) while the best chain's genesis root is not
-    /// executed.
+    /// chain is it. Only an act-on tip off the best chain (one that stepped
+    /// into an executed fork child, or descends from another genesis root)
+    /// searches for it. None (an empty hash) while the best chain's genesis
+    /// root is not executed.
     func executedPrefix(actOn: (hash: String, height: UInt64)) -> (hash: String, height: UInt64) {
         if !actOn.hash.isEmpty, tree.isCanonical(hash: actOn.hash) { return actOn }
         return tree.executedPrefix()
