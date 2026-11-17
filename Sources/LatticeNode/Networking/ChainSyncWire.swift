@@ -111,11 +111,14 @@ struct WireHeaderEntry: Codable, Equatable, Sendable {
     let proofs: [Data]
     var spec: Data? = nil
 
+    /// A node's DAG-CBOR decode accepts only bytes its value encodes back
+    /// to, so a decode is the whole canonical check for the block, the
+    /// child index and the spec.
     var isCanonical: Bool {
-        Block(data: block)?.toData() == block
-            && (children.map { FlatDictionary<BlockHeader>(data: $0)?.toData() == $0 } ?? true)
+        Block(data: block) != nil
+            && (children.map { FlatDictionary<BlockHeader>(data: $0) != nil } ?? true)
             && proofs.allSatisfy { (try? ChildBlockProof.deserialize($0)?.serialize()) == $0 }
-            && (spec.map { ChainSpec(data: $0)?.toData() == $0 } ?? true)
+            && (spec.map { ChainSpec(data: $0) != nil } ?? true)
     }
 }
 

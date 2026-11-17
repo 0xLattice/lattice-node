@@ -73,8 +73,11 @@ public struct TipMove: Sendable {
 /// `checksPolicies` is false for a pooled transaction: the chain's policies
 /// accepted it on admission, and every template, root or child, judges it
 /// by them again at the height that would carry it, removing one they
-/// refuse (`MiningEvent.policyRefused`). So a tip move costs the pool its
-/// state checks, never a policy evaluation per pooled transaction.
+/// refuse (`MiningEvent.policyRefused`). Nor are its signatures checked
+/// again: they read nothing but the transaction's own content, which its
+/// CID fixes, and its admission checked them. So a tip move costs the pool
+/// its state checks, never a policy evaluation or a signature verification
+/// per pooled transaction.
 public struct PreflightJob: Sendable {
     /// Which job this is: a verdict counts only for the job its admission
     /// waits on.
@@ -536,7 +539,8 @@ public struct MiningState: Sendable {
         admitting[cid] = issue(cid, transaction, checksPolicies: true, awaited: awaited, &turn)
     }
 
-    /// Issue a pooled transaction's recheck on this tip.
+    /// Issue a pooled transaction's recheck on this tip: its state checks
+    /// alone, without its policies or signatures (`PreflightJob`).
     private mutating func recheck(_ item: MempoolItem, _ turn: inout Turn) {
         guard rechecking.insert(item.cid).inserted else { return }
         issue(item.cid, item.transaction, checksPolicies: false, awaited: false, &turn)
