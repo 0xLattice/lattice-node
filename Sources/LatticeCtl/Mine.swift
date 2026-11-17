@@ -200,9 +200,11 @@ struct Mine: AsyncParsableCommand {
                         //
                         // State the OBSERVATION, not a cause: no usable answer
                         // covers a timeout, a transport failure, a non-200
-                        // (the node answers 409 while bootstrapping and 503
-                        // when the mempool or parent is unavailable -- both
-                        // fast). Naming any one
+                        // (the node answers 409 while bootstrapping, 503
+                        // "executing" while it syncs, holding the next
+                        // blocks of its chain to execute first, and 503 when
+                        // the mempool or parent is unavailable -- all fast).
+                        // Naming any one
                         // of them would send an operator after the wrong thing.
                         // Elapsed, not an attempt count: an attempt here spans
                         // anywhere from milliseconds (a fast non-200) to the

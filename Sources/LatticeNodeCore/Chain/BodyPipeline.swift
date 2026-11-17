@@ -62,6 +62,26 @@ extension ChainCore {
         return forks + bestWindow.filter { !forks.contains($0) }
     }
 
+    /// Whether this level has a backlog it could execute right now: the
+    /// next two blocks after its executed prefix on its best chain have
+    /// their bodies here, waiting on nothing but their connects. While they
+    /// do (it is syncing), the level is not mined: work on its executed tip
+    /// extends a chain it is about to leave. One block arriving at the tip
+    /// leaves it mined. A body not held (withheld or missing), one whose
+    /// content could not be read (it holds the level no more, arrived again
+    /// or not, until its backoff starts over when the act-on tip or best
+    /// window moves), or one waiting on its parent level leaves the level
+    /// mined, and an invalid one is excluded when it executes and is no
+    /// longer next.
+    public var holdsBacklog: Bool {
+        let prefix = tree.executedPrefix()
+        let first = prefix.hash.isEmpty ? 0 : prefix.height + 1
+        return [first, first + 1].allSatisfy { height in
+            guard let cid = tree.canonicalBlockHash(atHeight: height), bodies.parked[cid] == nil else { return false }
+            return bodies.connecting == cid || (bodies.arrived.contains(cid) && bodies.awaitingParent[cid] == nil)
+        }
+    }
+
     /// The window's blocks whose parent is executed: the ones this level
     /// can connect next once their bodies arrive.
     public var nextToConnect: [String] {
