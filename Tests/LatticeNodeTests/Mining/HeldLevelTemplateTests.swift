@@ -47,6 +47,7 @@ final class HeldLevelTemplateTests: XCTestCase {
         peers: [PeerEndpoint] = [],
         hosting alpha: Bool = false,
         creator: Bool = true,
+        coreConfig: ChainCoreConfig = ChainCoreConfig(),
         observe: NodeRuntime.JobObserver? = nil
     ) async throws -> (runtime: NodeRuntime, endpoint: PeerEndpoint, storage: NodeStorage) {
         let port = NetworkTransportTestPorts.allocate()
@@ -66,6 +67,7 @@ final class HeldLevelTemplateTests: XCTestCase {
                 requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
                 mode: .overlay
             ),
+            coreConfig: coreConfig,
             workers: 2,
             observeJob: observe
         )
@@ -253,6 +255,54 @@ final class HeldLevelTemplateTests: XCTestCase {
         let carrying = try await follower.runtime.miningTemplate(MiningTemplateRequest())
         XCTAssertNotNil(carrying.block.children.node?.entries["Alpha"], "Alpha is carried again")
         _ = try await follower.runtime.buildChildBlock(BuildChildBlockRequest(chainPath: Self.alpha, recipient: nil))
+    }
+
+    /// A child's best header moving past its act-on tip leaves the root's
+    /// digest naming only what a template is built from: the act-on tips,
+    /// next blocks, and that a block of the child is weighed. Alpha asks
+    /// for one body at a time and its block 1's connect is held, so it holds
+    /// no backlog and is mined, while Nexus executes the blocks carrying its
+    /// headers 1-3.
+    func testAChildsBestHeaderPastItsActOnTipIsNotInTheDigest() async throws {
+        let miner = try await node(keyByte: 0x87, hosting: true)
+        let minerAlpha = try XCTUnwrap(miner.runtime.levelReads[Self.alpha])
+        // Nexus blocks 1-4 carry Alpha's genesis and blocks 1-3.
+        for height in 0..<4 {
+            _ = try await miner.runtime.mineBlock()
+            try await eventually("Alpha executes its block \(height)") {
+                await minerAlpha.readSnapshot().height == UInt64(height)
+            }
+        }
+        let gate = Gate()
+        await gate.hold()
+        await gate.step()
+        let follower = try await node(
+            keyByte: 0x88, peers: [miner.endpoint], hosting: true, creator: false,
+            coreConfig: ChainCoreConfig(bodyWindow: 1), observe: Self.holding(Self.alpha, at: gate)
+        )
+        let levels = LiveLevels(inputs: follower.runtime.inputs)
+        try await eventually("Nexus is synced, Alpha's best header at 3 with its block 1 held") {
+            guard follower.runtime.published.value?.actOnHeight == 4, await gate.held == 2 else { return false }
+            return await levels.read { $0[Self.alpha]?.snapshot.bestHeaderHeight } == 3
+        }
+        let alpha = await levels.read { levels in
+            levels[Self.alpha].map { ($0.snapshot.actOnHeight, $0.holdsBacklog) }
+        } ?? nil
+        XCTAssertEqual(alpha?.0, 0, "Alpha has executed only its genesis")
+        XCTAssertEqual(alpha?.1, false, "Alpha holds no backlog: it is mined")
+        let expected = await levels.read { levels -> String? in
+            guard let nexus = levels[Self.nexus], let alpha = levels[Self.alpha] else { return nil }
+            return NodeRuntime.templateDigest(
+                tip: nexus.snapshot.actOnTip, carrying: nexus.mining.nextBlock,
+                levels: [(Self.alpha, alpha.snapshot.actOnTip, true, alpha.mining.nextBlock)]
+            )
+        } ?? nil
+        let status = await follower.runtime.status().templateDigest
+        XCTAssertEqual(status, expected, "the digest names Alpha's act-on tip, not its best header")
+        let template = try await follower.runtime.miningTemplate(MiningTemplateRequest())
+        XCTAssertNotNil(template.block.children.node?.entries["Alpha"], "Alpha is carried")
+        XCTAssertEqual(template.templateDigest, status, "the template is the status's")
+        await gate.release()
     }
 
     /// A `child/Alpha` commit from `key` (nonce 0, a fee of 1): `previous`
