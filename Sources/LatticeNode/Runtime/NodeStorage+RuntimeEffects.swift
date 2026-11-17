@@ -155,14 +155,35 @@ extension NodeStorage {
         return roots
     }
 
-    /// Stores a block execution found valid, as `fetcher` reads it, and pins
-    /// it. None of it is in the store before: a body fetched from peers is
-    /// held in memory until then.
+    /// Stores a block execution found valid, and pins it. A body fetched
+    /// from peers is held in memory until then. Its Volumes are the ones its
+    /// body's fetch derived and kept, or else derived again as `fetcher`
+    /// reads them. What is stored is its body (its own Volume and its
+    /// transactions'), pinned under its name, and, with the chain, the rest
+    /// when the operator keeps all state, or else only its spec and policy
+    /// modules: the state it read is its parent's, which the counts and
+    /// windows keep or peers serve.
     nonisolated func storeValidBlock(_ cid: String, at path: ChainPath, from fetcher: any Fetcher) async throws {
-        let roots = try await storingAndRetaining(cid, at: path, from: fetcher) { storage in
-            try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: storage)
+        let volumes: [SerializedVolume]
+        if let fetched = await readCache.body(cid) {
+            volumes = fetched
+        } else {
+            let walked = NodeImportStorage(storage: nil, keepsVolumes: true)
+            try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: walked)
+            volumes = await walked.takeVolumes()
         }
-        bundles.record(root: cid, roots: roots)
+        let body = Set([cid] + (try await NodeRuntime.carriedTransactionIDs(ofBlock: cid, fetcher: fetcher)))
+        let roots = Set(volumes.map(\.root))
+        var rest = roots.subtracting(body)
+        if configuration.state != .all { rest.formIntersection(await rules(ofBlock: cid, fetcher: fetcher)) }
+        let storage = NodeImportStorage(storage: broker)
+        for volume in volumes where body.contains(volume.root) || rest.contains(volume.root) {
+            await storage.store(volume: volume)
+        }
+        try await storage.commit()
+        try await broker.mergeRetainedRoots(scope: scopes.body(cid, at: path), roots: body.sorted())
+        try await retainHeld(rest.sorted(), scope: configuration.state == .all ? nil : scopes.rules(at: path))
+        bundles.record(root: cid, roots: roots.sorted())
     }
 
     /// `ChainEffect.fetchBody`: the block's Volume and the nested Volumes its

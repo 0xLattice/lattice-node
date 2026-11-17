@@ -19,7 +19,9 @@ final class RetentionRulesTests: XCTestCase {
         let endpoint: PeerEndpoint
     }
 
-    private func host(keyByte: UInt8, peers: [PeerEndpoint] = [], storageDirectory reused: URL? = nil) throws -> Host {
+    private func host(
+        keyByte: UInt8, peers: [PeerEndpoint] = [], storageDirectory reused: URL? = nil, state: StateRetention = .all
+    ) throws -> Host {
         let storageDirectory = reused ?? FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-node-rules-\(UUID().uuidString)", isDirectory: true
         )
@@ -31,7 +33,8 @@ final class RetentionRulesTests: XCTestCase {
             privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
             listenPort: port,
             rpcPort: NetworkTransportTestPorts.allocate(),
-            webSocket: .off
+            webSocket: .off,
+            state: state
         )
         return Host(
             configuration: configuration,
@@ -163,6 +166,57 @@ final class RetentionRulesTests: XCTestCase {
             let pinned = try await Set(joiner.broker.retainedRoots(scope: joiner.scopes.body(header.rawCID)))
             XCTAssertEqual(pinned, [header.rawCID, try Mempool.cid(of: carried)], "key \(key)")
         }
+    }
+
+    /// On recent a block found valid is stored without the state it read:
+    /// its body under its name, its spec and policy modules with the chain,
+    /// and nothing else it read is written or pinned.
+    func testOnRecentAValidBlockIsStoredWithoutTheStateItRead() async throws {
+        let producerHost = try host(keyByte: 0x8a)
+        let producer = try await NodeStorage.open(configuration: producerHost.configuration)
+        let runtime = try await NodeRuntime.start(
+            storage: producer, configuration: producerHost.configuration, overlay: producerHost.overlay
+        )
+        let carried = try await runtime.submitTransaction(
+            SubmitTransactionRequest(transaction: try transaction())
+        ).transactionCID
+        let mined = try await mine(runtime)
+        let source = NodeStorageIvyContentSource(storage: producer)
+        let server = PeerID(publicKey: String(repeating: "ab", count: 32))
+        let remote = IvyRootContentSource(fetch: { root in
+            let entries = await source.volume(rootCID: root, maxDataBytes: .max)
+            guard !entries.isEmpty else { return .empty }
+            return AttributedVolumeResponse(
+                rootCID: root,
+                entries: Dictionary(uniqueKeysWithValues: entries.map { ($0.cid, $0.data) }),
+                servedBy: server
+            )
+        }, fetchBundle: { _ in [] })
+
+        let joiner = try await NodeStorage.open(configuration: try host(keyByte: 0x8b, state: .recent).configuration)
+        _ = try await joiner.fetchChainBody(mined, remote: remote)
+        let cached = await joiner.readCache.body(mined)
+        let fetched = try XCTUnwrap(cached).map(\.root)
+        var heldBefore = Set<String>()
+        for root in fetched where await joiner.volume(root) != nil { heldBefore.insert(root) }
+        let joinerBroker = await joiner.broker
+        try await joiner.storeValidBlock(
+            mined, at: ["Nexus"], from: CoalescingFetcher(CompositeContentSource([joinerBroker, joiner.readCache]))
+        )
+
+        let body = try await Set(joiner.broker.retainedRoots(scope: joiner.scopes.body(mined)))
+        XCTAssertEqual(body, [mined, carried])
+        let rules = try await Set(joiner.broker.retainedRoots(scope: joiner.scopes.rules(at: ["Nexus"])))
+        XCTAssertFalse(rules.isEmpty, "the chain keeps the spec the block names")
+        let reads = try await joiner.broker.retainedRoots(scope: joiner.scopes.reads(mined, at: ["Nexus"]))
+        XCTAssertEqual(reads, [])
+        let read = fetched.filter { !body.contains($0) && !rules.contains($0) }
+        XCTAssertFalse(read.isEmpty, "the block read state")
+        for root in fetched where !heldBefore.contains(root) {
+            let held = await joiner.volume(root) != nil
+            XCTAssertEqual(held, body.contains(root) || rules.contains(root), root)
+        }
+        await runtime.stop()
     }
 
     /// What executions created stays with the chain: after a restart, which
