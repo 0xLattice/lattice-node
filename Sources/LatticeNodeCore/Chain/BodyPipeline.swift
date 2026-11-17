@@ -181,13 +181,13 @@ extension ChainCore {
 
     /// Apply a connect verdict. Execution depends only on content, so a
     /// verdict is never stale: a valid block joins the executed set, its
-    /// post-state persisted with its validation; a block execution proved invalid is excluded while its
+    /// body and post-state persisted with its validation; a block execution proved invalid is excluded while its
     /// work still weighs. A verdict lacking a parent fact waits for the
     /// parent level to execute more (`awaitingParent`). Any other verdict
     /// without a decision (content that was not resolvable after all) is an
     /// availability wait: the block parks, and its body is asked for again
     /// after a backoff.
-    mutating func connected(_ verdict: ConnectVerdict, transactions: [String], _ turn: inout Turn) {
+    mutating func connected(_ verdict: ConnectVerdict, transactions: [String], body: StoredBody?, _ turn: inout Turn) {
         let cid = verdict.blockHash
         if bodies.connecting == cid { bodies.connecting = nil }
         switch verdict.retryFailure {
@@ -209,6 +209,7 @@ extension ChainCore {
             turn.facts += update.batches
             weighed += update.weighed
             if !update.excluded {
+                if let body { turn.bodies.append(body) }
                 executedTransactions[cid] = transactions
                 if let meta = tree.getConsensusBlock(hash: cid) {
                     executedChildren.record(meta.childCommitments.keys)

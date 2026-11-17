@@ -6,7 +6,7 @@ import Foundation
 /// the block's own Volume, its transactions', its spec and policy modules,
 /// and the materialized pre-state its validation reads. Never its post-state,
 /// its parent or its child blocks. This is a cache of those roots, so a peer
-/// can be sent them together: recorded when a block is stored, recomputed
+/// can be sent them together: recorded when a block is found valid, recomputed
 /// from local content when a block has no row. It lives in its own file, read
 /// by nothing else, and may be deleted while the node is stopped.
 ///

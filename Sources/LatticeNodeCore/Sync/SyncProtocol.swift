@@ -83,6 +83,19 @@ public struct StoredProof: Sendable {
     }
 }
 
+/// A valid block's body as its connect job read it, written with the
+/// post-state of the step that applies its verdict, in one transaction:
+/// the Volumes, and the roots each retention scope pins (the shell's names).
+public struct StoredBody: Sendable {
+    public let volumes: [SerializedVolume]
+    public let retaining: [String: [String]]
+
+    public init(volumes: [SerializedVolume], retaining: [String: [String]]) {
+        self.volumes = volumes
+        self.retaining = retaining
+    }
+}
+
 /// One weighed object in a node's weigh log: a header, or a proof (a
 /// `ChildBlockProof` grind) it credited at a child block. Only verifiable
 /// objects are logged; validation and exclusion facts and attributed run

@@ -40,8 +40,9 @@ public enum ChainEvent: Sendable {
     case bodyFetched(cid: String)
     /// A connect job's verdict, with the CIDs of the transactions the block
     /// carries (the job read them from the body it executed): what the act-on
-    /// chain confirms when it enters the block.
-    case connected(ConnectVerdict, transactions: [String] = [])
+    /// chain confirms when it enters the block; and for a valid block, its
+    /// body, which the step persists with the block's post-state.
+    case connected(ConnectVerdict, transactions: [String] = [], body: StoredBody? = nil)
     /// The answer to `readTransactions`: each block's transaction CIDs (a
     /// body no longer held reads as none).
     case transactionsRead([String: [String]])
@@ -74,8 +75,8 @@ public enum DisconnectReason: Sendable, Equatable {
     case stalled
 }
 
-/// The durable form of one step: content first — the post-states its
-/// executions produced, stored, pinned and fsynced — then the facts that
+/// The durable form of one step: content first — the bodies and post-states
+/// of its executions, stored, pinned and fsynced — then the facts that
 /// reference it, committed with their headers and credited proofs. The shell writes it before executing any
 /// later effect of the same step. Facts durable without their content is an
 /// ordering violation the shell must prevent: a crash may lose the facts of
@@ -86,6 +87,8 @@ public struct ChainBatch: Sendable {
     /// later execution resolves, written before the validation that
     /// references it.
     public let states: [LatticeState]
+    /// Each executed block's body, written with the states.
+    public let bodies: [StoredBody]
     public let facts: [BlockImportBatch]
     /// A child level: the proofs this step credited, written with the work
     /// facts they produced, so this node serves them.
@@ -97,12 +100,14 @@ public struct ChainBatch: Sendable {
     public init(
         headers: [StoredHeader],
         states: [LatticeState] = [],
+        bodies: [StoredBody] = [],
         facts: [BlockImportBatch],
         proofs: [StoredProof] = [],
         cursors: [String: StreamCursor] = [:]
     ) {
         self.headers = headers
         self.states = states
+        self.bodies = bodies
         self.facts = facts
         self.proofs = proofs
         self.cursors = cursors
@@ -461,8 +466,8 @@ public struct ChainCore: Sendable {
             }
         case .bodyFetched(let cid):
             bodyFetched(cid)
-        case .connected(let verdict, let transactions):
-            connected(verdict, transactions: transactions, &turn)
+        case .connected(let verdict, let transactions, let body):
+            connected(verdict, transactions: transactions, body: body, &turn)
         case .transactionsRead(let blocks):
             readingTransactions.subtract(blocks.keys)
             for (cid, transactions) in blocks where tree.contains(blockHash: cid) {
@@ -508,6 +513,7 @@ public struct ChainCore: Sendable {
         let now: Int64
         var headers: [StoredHeader] = []
         var states: [LatticeState] = []
+        var bodies: [StoredBody] = []
         var facts: [BlockImportBatch] = []
         var effects: [ChainEffect] = []
         /// Child proofs this step credited, to index.
@@ -543,7 +549,7 @@ public struct ChainCore: Sendable {
         let appended = sync.log.page(after: start, limit: config.maxHeadersPerPage, bytes: config.maxPageBytes)
         if !turn.facts.isEmpty || !turn.indexed.isEmpty || !turn.cursors.isEmpty {
             effects.append(.persist(ChainBatch(
-                headers: turn.headers, states: turn.states, facts: turn.facts,
+                headers: turn.headers, states: turn.states, bodies: turn.bodies, facts: turn.facts,
                 proofs: turn.indexed, cursors: turn.cursors
             )))
         }

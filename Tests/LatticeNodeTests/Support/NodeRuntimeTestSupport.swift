@@ -5,7 +5,9 @@ import Darwin
 import Glibc
 #endif
 import Lattice
+import LatticeNodeCore
 import UInt256
+import VolumeBroker
 import cashew
 @testable import LatticeNode
 import LatticeNodeAPI
@@ -95,5 +97,18 @@ enum NetworkTransportTestPorts {
             }
         }
         return bound == 0
+    }
+}
+
+extension NodeStorage {
+    /// A valid block stored as the step that applies its connect's verdict
+    /// stores it: its body written and pinned. Returns its transactions.
+    @discardableResult
+    func storeValidBlock(
+        _ cid: String, decoded: Block? = nil, at path: ChainPath, from fetcher: any Fetcher
+    ) async throws -> [String] {
+        let (transactions, body) = try await validBlockBody(cid, decoded: decoded, at: path, from: fetcher)
+        try await broker.storeVolumesLocal(body.volumes.map(ValidatedVolume.init(trusting:)), retaining: body.retaining)
+        return transactions
     }
 }

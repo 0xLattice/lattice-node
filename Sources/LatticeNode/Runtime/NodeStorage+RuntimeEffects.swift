@@ -35,15 +35,18 @@ extension NodeStorage {
         try await store.chainCursors(at: path)
     }
 
-    /// `NodeEffect.persist`: content first — every affected level's Volumes
-    /// in one volumes.db transaction, retained in the same one — then the
+    /// `NodeEffect.persist`: content first — every affected level's Volumes,
+    /// its executed blocks' bodies and their post-states, in one volumes.db
+    /// transaction, retained in the same one — then the
     /// complete node step's headers, proofs, facts and cursors in one
     /// state.db transaction.
     nonisolated func persistNodeBatch(_ batch: NodeBatch, logID: String) async throws {
         var durable: [NodeFactBatch] = []
-        // What this step's executions created. An executed block's body was
-        // pinned under its block's name by the job that executed it.
+        // What this step's executions created. An executed block's body is
+        // pinned under its block's name, as the job that executed it named.
         var stored: [String] = []
+        var bodies: [ValidatedVolume] = []
+        var retaining: [String: [String]] = [:]
         // With recent state kept, or none: the state each level's
         // executions stored, under the height of its newest block.
         var states: [ChainPath: (height: UInt64?, roots: [String])] = [:]
@@ -62,6 +65,10 @@ extension NodeStorage {
                 try await VolumeImpl<ChainSpec>(node: spec).store(storer: storage)
             }
             let specs = await storage.takeStoredVolumeRoots()
+            for body in level.bodies {
+                bodies += try body.volumes.map(ValidatedVolume.init(trusting:))
+                retaining.merge(body.retaining) { $0 + $1 }
+            }
             let created = executed + specs
             switch configuration.state {
             case .all:
@@ -88,8 +95,7 @@ extension NodeStorage {
             ))
         }
         // Every root retained is one this batch stores.
-        var retaining: [String: [String]] = [:]
-        if !stored.isEmpty { retaining[retentionScope] = stored }
+        if !stored.isEmpty { retaining[retentionScope, default: []] += stored }
         for (path, state) in states where !state.roots.isEmpty {
             // A state of no known height goes with the newest the chain
             // keeps: kept as long as that, never let go of before it.
@@ -101,7 +107,7 @@ extension NodeStorage {
             }
             retaining[scope, default: []] += state.roots
         }
-        try await broker.storeVolumesLocal(await storage.takeVolumes(), retaining: retaining)
+        try await broker.storeVolumesLocal(await storage.takeVolumes() + bodies, retaining: retaining)
         try await store.stageNodeFacts(durable, logID: logID)
     }
 
@@ -159,21 +165,22 @@ extension NodeStorage {
         return roots
     }
 
-    /// Stores a block execution found valid, and pins it. A body fetched
-    /// from peers is held in memory until then. Its Volumes are the ones its
-    /// body's fetch derived and kept, or else derived again as `fetcher`
-    /// reads them. What is stored is its body (its own Volume and its
-    /// transactions'), pinned under its name, and, with the chain, the rest
-    /// when the operator keeps all state, or else only its spec and policy
-    /// modules: the state it read is its parent's, which the counts and
-    /// windows keep or peers serve. Returns the CIDs of the transactions the
-    /// block carries, read once from its transaction index. `decoded` is the
-    /// block's node as its connect decoded it (`ConnectVerdict.connectedBlock`),
-    /// or nil to resolve it through `fetcher`.
-    @discardableResult
-    nonisolated func storeValidBlock(
+    /// A block execution found valid, as the step that applies its verdict
+    /// stores and pins it, with the block's post-state, in one transaction.
+    /// A body fetched from peers is held in memory until then. Its Volumes
+    /// are the ones its body's fetch derived and kept, or else derived again
+    /// as `fetcher` reads them. What is stored is its body (its own Volume
+    /// and its transactions'), pinned under its name, and, with the chain,
+    /// the rest when the operator keeps all state, or else only its spec and
+    /// policy modules: the state it read is its parent's, which the counts
+    /// and windows keep or peers serve. Also returns the CIDs of the
+    /// transactions the block carries, read once from its transaction index.
+    /// `decoded` is the block's node as its connect decoded it
+    /// (`ConnectVerdict.connectedBlock`), or nil to resolve it through
+    /// `fetcher`. Writes nothing but the block's bundle row.
+    nonisolated func validBlockBody(
         _ cid: String, decoded: Block? = nil, at path: ChainPath, from fetcher: any Fetcher
-    ) async throws -> [String] {
+    ) async throws -> (transactions: [String], body: StoredBody) {
         let volumes: [SerializedVolume]
         if let fetched = await readCache.body(cid) {
             volumes = fetched
@@ -194,15 +201,13 @@ extension NodeStorage {
         let roots = Set(volumes.map(\.root))
         var rest = roots.subtracting(body)
         if configuration.state != .all { rest.formIntersection(await rules(of: block, fetcher: fetcher)) }
-        let storage = NodeImportStorage(storage: broker)
-        for volume in volumes where body.contains(volume.root) || rest.contains(volume.root) {
-            try await storage.store(volume: volume)
-        }
-        try await storage.commit()
-        try await broker.mergeRetainedRoots(scope: scopes.body(cid, at: path), roots: body.sorted())
-        try await retainHeld(rest.sorted(), scope: configuration.state == .all ? nil : scopes.rules(at: path))
         bundles.record(root: cid, roots: roots.sorted())
-        return transactions
+        var retaining = [scopes.body(cid, at: path): body.sorted()]
+        if !rest.isEmpty { retaining[configuration.state == .all ? retentionScope : scopes.rules(at: path)] = rest.sorted() }
+        return (transactions, StoredBody(
+            volumes: volumes.filter { body.contains($0.root) || rest.contains($0.root) },
+            retaining: retaining
+        ))
     }
 
     /// `ChainEffect.fetchBody`: the block's Volume and the nested Volumes its

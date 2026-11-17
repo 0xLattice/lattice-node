@@ -794,7 +794,7 @@ extension NodeRuntime {
                 startJobs()
                 for event in events {
                     // A connect without a verdict is a wait with its reason.
-                    if case .level(let path, .connected(let verdict, _)) = event,
+                    if case .level(let path, .connected(let verdict, _, _)) = event,
                        let failure = verdict.retryFailure {
                         wait(
                             BodyKey(path: path, cid: verdict.blockHash), .notConnected(failure),

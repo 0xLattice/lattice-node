@@ -208,6 +208,7 @@ public struct NodeBatch: Sendable {
         levels[index].batch = ChainBatch(
             headers: held.headers + batch.headers,
             states: held.states + batch.states,
+            bodies: held.bodies + batch.bodies,
             facts: held.facts + batch.facts,
             proofs: held.proofs + batch.proofs,
             cursors: held.cursors.merging(batch.cursors) { $1 }

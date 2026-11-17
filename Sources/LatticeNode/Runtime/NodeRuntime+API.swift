@@ -886,9 +886,11 @@ extension NodeRuntime {
                 )
                 let valid = verdict.retryFailure == nil && !verdict.provesInvalid
                 var transactions: [String] = []
+                var body: StoredBody?
                 if valid {
                     do {
-                        let carried = try await storage.storeValidBlock(
+                        let carried: [String]
+                        (carried, body) = try await storage.validBlockBody(
                             job.blockHash, decoded: verdict.connectedBlock, at: path, from: fetcher
                         )
                         // The pool knows a transaction by its standard CID; an
@@ -900,7 +902,7 @@ extension NodeRuntime {
                         transactions = await transactionIDs(ofBlock: job.blockHash, fetcher: fetcher)
                     }
                 }
-                return [.level(path, .connected(verdict, transactions: transactions))]
+                return [.level(path, .connected(verdict, transactions: transactions, body: body))]
             }
         }
     }
