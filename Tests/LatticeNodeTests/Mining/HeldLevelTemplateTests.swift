@@ -4,29 +4,36 @@ import Lattice
 @testable import LatticeNodeCore
 import LatticeNodeAPI
 import XCTest
+import cashew
 @testable import LatticeNode
 
 /// The runtime's wiring of `ChainCore.holdsBacklog`, through the real worker
 /// pool with a level's connects held (`NodeRuntime.start`'s `observeJob`): a
 /// synced root executing one arriving block keeps answering templates, a
 /// root holding a backlog refuses them (503 "executing"), and a child
-/// holding one is left out of the root's template and of its own build.
+/// holding one is left out of the root's template and of its own build
+/// (and its directory still carries no foreign `child/X` commitment).
 final class HeldLevelTemplateTests: XCTestCase {
     private static let nexus: ChainPath = ["Nexus"]
     private static let alpha: ChainPath = ["Nexus", "Alpha"]
 
-    /// Connects at one level, held while `holding`.
+    /// Connects at one level, held while `holding`: the n-th to reach the
+    /// gate passes once `step` has been called n times, or on `release`.
     private actor Gate {
         private(set) var holding = false
         private(set) var held = 0
+        private var steps = 0
 
         func hold() { holding = true }
         func release() { holding = false }
+        /// Lets one more held connect through.
+        func step() { steps += 1 }
         /// Awaited on the connect's worker: waits while held.
         func pass() async {
             guard holding else { return }
             held += 1
-            while holding { try? await Task.sleep(nanoseconds: 5_000_000) }
+            let turn = held
+            while holding && steps < turn { try? await Task.sleep(nanoseconds: 5_000_000) }
         }
     }
 
@@ -41,7 +48,7 @@ final class HeldLevelTemplateTests: XCTestCase {
         hosting alpha: Bool = false,
         creator: Bool = true,
         observe: NodeRuntime.JobObserver? = nil
-    ) async throws -> (runtime: NodeRuntime, endpoint: PeerEndpoint) {
+    ) async throws -> (runtime: NodeRuntime, endpoint: PeerEndpoint, storage: NodeStorage) {
         let port = NetworkTransportTestPorts.allocate()
         let configuration = try NodeConfiguration(
             chainPath: Self.nexus, storagePath: temporaryDirectory(),
@@ -50,8 +57,9 @@ final class HeldLevelTemplateTests: XCTestCase {
             hostedChildren: alpha ? [Self.alpha] : [],
             childSpecs: alpha && creator ? [Self.alpha: MergedMiningTests.alphaSpec] : [:]
         )
+        let storage = try await NodeStorage.open(configuration: configuration)
         let runtime = try await NodeRuntime.start(
-            storage: try await NodeStorage.open(configuration: configuration),
+            storage: storage,
             configuration: configuration,
             overlay: IvyConfig(
                 signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: peers,
@@ -62,7 +70,7 @@ final class HeldLevelTemplateTests: XCTestCase {
             observeJob: observe
         )
         addTeardownBlock { await runtime.stop() }
-        return (runtime, PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port))
+        return (runtime, PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port), storage)
     }
 
     /// Whether `path` on `runtime` has the body of the best chain's block at
@@ -145,32 +153,92 @@ final class HeldLevelTemplateTests: XCTestCase {
         XCTAssertEqual(template.block.height, 5)
     }
 
+    /// A root's digest names no tip while it holds a backlog: it changes
+    /// when the backlog arrives (the tip unmoved), stays the same while
+    /// the root executes it, and changes again once the root is mined.
+    func testARootHoldingABacklogKeepsOneDigestUntilItIsMinedAgain() async throws {
+        let miner = try await node(keyByte: 0x87)
+        for _ in 0..<2 { _ = try await miner.runtime.mineBlock() }
+        let gate = Gate()
+        let follower = try await node(keyByte: 0x88, peers: [miner.endpoint], observe: Self.holding(Self.nexus, at: gate))
+        try await eventually("the follower is synced") { follower.runtime.published.value?.actOnHeight == 2 }
+        let synced = await follower.runtime.status().templateDigest
+
+        await gate.hold()
+        for _ in 0..<4 { _ = try await miner.runtime.mineBlock() }
+        try await eventually("block 3's connect is held with the bodies of blocks 3-6 here") {
+            guard await gate.held == 1 else { return false }
+            for height in UInt64(3)...6 where !(await Self.holds(follower.runtime, Self.nexus, height: height, best: 6)) {
+                return false
+            }
+            return true
+        }
+        let held = await follower.runtime.status().templateDigest
+        XCTAssertNotNil(held)
+        XCTAssertNotEqual(held, synced, "a backlog arriving changes the digest, the tip unmoved")
+        for height in UInt64(3)...4 {
+            await gate.step()
+            try await eventually("the follower executes block \(height)") {
+                follower.runtime.published.value?.actOnHeight == height
+            }
+            let digest = await follower.runtime.status().templateDigest
+            XCTAssertEqual(digest, held, "the digest names no tip while the root holds a backlog (tip \(height))")
+        }
+        await gate.release()
+        try await eventually("the follower is synced") { follower.runtime.published.value?.actOnHeight == 6 }
+        let mined = await follower.runtime.status().templateDigest
+        XCTAssertNotEqual(mined, held, "mined again, the digest names its tip")
+    }
+
     /// A child holding a backlog is left out of the root's template, which
     /// the status names, and its own build is refused, until it has
     /// executed it.
     func testAChildHoldingABacklogIsLeftOutOfTheRootTemplateAndItsBuild() async throws {
+        let payer = CryptoUtils.generateKeyPair()
+        let payerAddress = CryptoUtils.createAddress(from: payer.publicKey)
+        let paying = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: Self.nexus, address: payerAddress)])
         let miner = try await node(keyByte: 0x85, hosting: true)
         let minerAlpha = try XCTUnwrap(miner.runtime.levelReads[Self.alpha])
-        // Nexus blocks 1-3 carry Alpha's genesis and blocks 1 and 2.
-        for height in 0..<3 {
-            _ = try await miner.runtime.mineBlock()
+        // Nexus blocks 1-4 carry Alpha's genesis and blocks 1-3.
+        for height in 0..<4 {
+            _ = try await miner.runtime.mineBlock(paying)
             try await eventually("Alpha executes its block \(height)") {
                 await minerAlpha.readSnapshot().height == UInt64(height)
             }
         }
+        // Alpha's genesis connects; its block 1 is held. Alpha has executed,
+        // so it would be carried were it not left out.
         let gate = Gate()
         await gate.hold()
+        await gate.step()
         let follower = try await node(
             keyByte: 0x86, peers: [miner.endpoint], hosting: true, creator: false,
             observe: Self.holding(Self.alpha, at: gate)
         )
-        try await eventually("the follower's Nexus is synced, Alpha's genesis held with block 1's body here") {
-            guard follower.runtime.published.value?.actOnHeight == 3, await gate.held == 1 else { return false }
-            return await Self.holds(follower.runtime, Self.alpha, height: 1, best: 2)
+        let followerAlpha = try XCTUnwrap(follower.runtime.levelReads[Self.alpha])
+        try await eventually("the follower's Nexus is synced, Alpha's block 1 held with block 2's body here") {
+            guard follower.runtime.published.value?.actOnHeight == 4, await gate.held == 2 else { return false }
+            guard await followerAlpha.readSnapshot().tipCID != nil else { return false }
+            return await Self.holds(follower.runtime, Self.alpha, height: 2, best: 3)
         }
+        let alphaHeight = await followerAlpha.readSnapshot().height
+        XCTAssertEqual(alphaHeight, 0, "Alpha has executed its genesis")
+
+        // A foreign `child/Alpha` commitment, pooled on the follower.
+        let commitment = try await follower.runtime.childCommitment(chainPath: Self.alpha)
+        let foreign = try await follower.runtime.submitTransaction(SubmitTransactionRequest(
+            transaction: try Self.commit(
+                key: payer, previous: commitment.value,
+                to: try XCTUnwrap(follower.runtime.published.value?.actOnTip), at: commitment.parentState
+            )
+        ))
+        XCTAssertEqual(foreign.mempoolCount, 1, "the follower pools the commitment")
+
         let template = try await follower.runtime.miningTemplate(MiningTemplateRequest())
-        XCTAssertEqual(template.block.height, 4, "the root is mined")
+        XCTAssertEqual(template.block.height, 5, "the root is mined")
         XCTAssertNil(template.block.children.node?.entries["Alpha"], "Alpha is left out while it holds a backlog")
+        let carried = try await MiningTemplateAssembly.blockTransactions(in: template.block, fetcher: follower.storage.workFetcher)
+        XCTAssertTrue(carried.isEmpty, "Alpha's directory, left out, is still hosted: no foreign commitment")
         let status = await follower.runtime.status().templateDigest
         XCTAssertEqual(template.templateDigest, status)
         do {
@@ -181,10 +249,30 @@ final class HeldLevelTemplateTests: XCTestCase {
         }
 
         await gate.release()
-        let followerAlpha = try XCTUnwrap(follower.runtime.levelReads[Self.alpha])
-        try await eventually("Alpha executes its backlog") { await followerAlpha.readSnapshot().height == 2 }
+        try await eventually("Alpha executes its backlog") { await followerAlpha.readSnapshot().height == 3 }
         let carrying = try await follower.runtime.miningTemplate(MiningTemplateRequest())
         XCTAssertNotNil(carrying.block.children.node?.entries["Alpha"], "Alpha is carried again")
         _ = try await follower.runtime.buildChildBlock(BuildChildBlockRequest(chainPath: Self.alpha, recipient: nil))
+    }
+
+    /// A `child/Alpha` commit from `key` (nonce 0, a fee of 1): `previous`
+    /// replaced by `block` at `state`.
+    private static func commit(
+        key: (privateKey: String, publicKey: String), previous: String?, to block: String, at state: String
+    ) throws -> Transaction {
+        let address = CryptoUtils.createAddress(from: key.publicKey)
+        let body = try HeaderImpl(node: TransactionBody(
+            accountActions: [AccountAction(owner: address, delta: -1)],
+            actions: [Action(
+                key: CHILD_COMMITMENT_KEY_PREFIX + alpha[1], oldValue: previous,
+                newValue: block + String(UnicodeScalar(CHILD_COMMITMENT_PARENT_STATE_SEPARATOR)) + state
+            )],
+            depositActions: [], receiptActions: [], withdrawalActions: [],
+            signers: [address], nonce: 0, chainPath: nexus
+        ))
+        return Transaction(
+            signatures: [key.publicKey: try XCTUnwrap(TransactionSigning.sign(bodyHeader: body, privateKeyHex: key.privateKey))],
+            body: body
+        )
     }
 }
