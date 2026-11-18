@@ -161,6 +161,36 @@ lattice wipe --root /var/lib/lattice
 lattice up --root /var/lib/lattice
 ```
 
+## Sync benchmark
+
+`Benchmarks/sync/` measures a fresh sync of one recorded chain tree. The tree
+is Nexus, a child Alpha and two grandchildren. Most Alpha blocks are child-only
+shares, secured by their grind proofs; Alpha commits every grandchild block. A
+follower syncs the tree from scratch on Linux (swift:6.1-jammy), with its data
+on the container filesystem, so every SQLite sync is a real fsync. The
+benchmark reports, per block and per level: wall and CPU time, commits, fsyncs,
+bytes written, proof checks against derivations, and the time in weighing (W),
+body fetch (B), execution (E) and the facts transaction (P). Judge the result
+against the floor of 2–7 ms per block.
+
+The scripts need Docker with at least 8 CPUs: the server uses CPUs 4–7. The
+server runs the build under test, so server-side changes show up in fetch and
+wall times. `TRACE=0 run.sh …` turns off the sync trace. That run reports wall,
+CPU and disk without the trace's cost, but without the split. CPU pinning
+applies to the Docker VM's CPUs, and fsync goes to the VM's disk. Compare runs
+from the same machine only.
+
+```bash
+Benchmarks/sync/build.sh /tmp/bench/main main            # release test bundle of a ref
+Benchmarks/sync/record.sh /tmp/bench/main /tmp/dataset   # once: chain.tar + manifest.txt
+Benchmarks/sync/run.sh /tmp/bench/main /tmp/dataset 1 /tmp/runs/main-1cpu
+Benchmarks/sync/report.py /tmp/runs/main-1cpu
+```
+
+Record the dataset once and sync every build from it, so every build syncs the
+same blocks. Record it again only after a storage flag day. A PR that changes
+sync reports `report.py` for its base and its head, at 1 and 2 CPUs.
+
 ## Documentation
 
 Published at [lattice.build/docs](https://lattice.build/docs/):
