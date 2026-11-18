@@ -334,47 +334,123 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
         XCTAssertTrue(build.isCurrent(in: harness.host))
     }
 
-    /// A level's next block runs ahead of the proof checks queued before
-    /// it. Taken first in, first out by one worker (a one-CPU host), the
-    /// root's next block waited behind thousands of child proof checks while
-    /// a node synced a tree of chains, and the root executed a block every
-    /// few minutes. The checks keep their order behind it.
-    func testALevelsNextBlockRunsAheadOfQueuedProofChecks() async throws {
-        let harness = try await harness(keyByte: 0x47)
+    /// The worker is shared by time: with a level's next block always
+    /// queued (a tree of levels catching up on one worker), proof checks
+    /// and other work still run in their turn. Before, connects went
+    /// strictly first and neither ever ran: every level's headers waited
+    /// on proof checks queued for minutes, each a 2 ms run.
+    func testEveryLaneRunsWhileAConnectIsAlwaysQueued() async throws {
+        let harness = try await harness(keyByte: 0x4C)
+        let block = try await harness.tipBlock()
+        let child = ["Nexus", "Child"]
+        let check = ChildProofJob(
+            childCID: "child", block: block,
+            proof: ChildBlockProof(rootCID: "root", directoryPath: ["Child"], entries: []),
+            proofID: "proof", chainPath: child
+        )
+        XCTAssertEqual(NodeRuntime.proofJob(check, block: block, at: child).kind, .check)
         var queues = NodeRuntime.JobQueues()
-        for index in 0..<1_000 { queues.append(Self.job("check-\(index)", depth: 2)) }
-        queues.append(Self.job("root-block", depth: 1, kind: .connect))
-        var order: [String] = []
-        while let next = queues.next(in: harness.host) { order.append(next.path.last ?? "") }
-        XCTAssertEqual(order, ["root-block"] + (0..<1_000).map { "check-\($0)" })
+        for index in 0..<3 {
+            queues.append(Self.job("check-\(index)", depth: 2, kind: .check))
+            queues.append(Self.job("read-\(index)", depth: 2))
+        }
+        var step = 0
+        let ran = Self.drive(&queues, in: harness.host, jobs: 10) { queues in
+            // A level's next block is always queued.
+            if queues.connects.isEmpty {
+                queues.append(Self.job("block-\(step)", depth: 1, kind: .connect))
+                step += 1
+            }
+        }
+        let names = ran.map { $0.path.last ?? "" }
+        XCTAssertTrue(Set((0..<3).flatMap { ["check-\($0)", "read-\($0)"] }).isSubset(of: names), "\(names)")
+        XCTAssertGreaterThanOrEqual(names.filter { $0.hasPrefix("block-") }.count, 2, "\(names)")
+    }
+
+    /// Checks queued without end, as a peer spamming proofs would keep
+    /// them, take no more than their share: connects keep half the worker
+    /// or better, and a connect waits behind at most a connect's worth of
+    /// checks.
+    func testSustainedCheckSpamLeavesConnectsHalfTheWorker() async throws {
+        let harness = try await harness(keyByte: 0x4D)
+        var queues = NodeRuntime.JobQueues()
+        func spam(_ queues: inout NodeRuntime.JobQueues) {
+            if queues.checks.isEmpty { queues.append(Self.job("check", depth: 2, kind: .check)) }
+            if queues.connects.isEmpty { queues.append(Self.job("block", depth: 1, kind: .connect)) }
+        }
+        spam(&queues)
+        let ran = Self.drive(&queues, in: harness.host, jobs: 20_000, refill: spam)
+        let connects = ran.filter { $0.kind == .connect }.count
+        let checks = ran.count - connects
+        let share = Double(connects) * Self.costs[.connect]! / Self.time(of: ran)
+        XCTAssertGreaterThanOrEqual(share, 0.45, "\(connects) connects, \(checks) checks")
+        XCTAssertGreaterThan(checks, 0)
+        XCTAssertLessThanOrEqual(Self.longestRun(of: .check, in: ran), 2_501, "a connect waits a connect's worth at most")
+    }
+
+    /// A lane back from idle earns no credit for it: checks arriving after
+    /// connects had the worker alone start level with them, so the next
+    /// connect waits a connect's worth of checks, not the whole idle time.
+    func testALaneBackFromIdleBanksNoCredit() async throws {
+        let harness = try await harness(keyByte: 0x4E)
+        var queues = NodeRuntime.JobQueues()
+        func connectAlways(_ queues: inout NodeRuntime.JobQueues) {
+            if queues.connects.isEmpty { queues.append(Self.job("block", depth: 1, kind: .connect)) }
+        }
+        connectAlways(&queues)
+        _ = Self.drive(&queues, in: harness.host, jobs: 100, refill: connectAlways)
+        for _ in 0..<100_000 { queues.append(Self.job("check", depth: 2, kind: .check)) }
+        let ran = Self.drive(&queues, in: harness.host, jobs: 10_000, refill: connectAlways)
+        XCTAssertGreaterThanOrEqual(ran.filter { $0.kind == .connect }.count, 3)
+        XCTAssertLessThanOrEqual(Self.longestRun(of: .check, in: ran), 2_501)
+    }
+
+    /// Idle time earns no credit even when every lane drains: checks
+    /// arriving first into an empty worker, after connects had it alone,
+    /// start where connects left off, and a connect queued next waits a
+    /// connect's worth of checks.
+    func testALaneBanksNoCreditWhenEveryLaneDrains() async throws {
+        let harness = try await harness(keyByte: 0x4F)
+        var queues = NodeRuntime.JobQueues()
+        for _ in 0..<100 { queues.append(Self.job("block", depth: 1, kind: .connect)) }
+        _ = Self.drive(&queues, in: harness.host, jobs: 100)
+        XCTAssertTrue(queues.isEmpty)
+        for _ in 0..<100_000 { queues.append(Self.job("check", depth: 2, kind: .check)) }
+        queues.append(Self.job("block", depth: 1, kind: .connect))
+        let ran = Self.drive(&queues, in: harness.host, jobs: 10_000)
+        let connect = try XCTUnwrap(ran.firstIndex { $0.kind == .connect }, "the connect runs")
+        XCTAssertLessThanOrEqual(connect, 2_501)
     }
 
     /// No level goes ahead of another: while a shallower level keeps
     /// queueing work, its own next blocks among it, a deeper level's next
-    /// block and other work still run in their turn.
+    /// block and other work still run in their turn, each lane first in,
+    /// first out.
     func testADeeperLevelsNextBlockRunsUnderSteadyShallowerWork() async throws {
         let harness = try await harness(keyByte: 0x48)
         var queues = NodeRuntime.JobQueues()
         queues.append(Self.job("grand-block", depth: 3, kind: .connect))
-        queues.append(Self.job("grand-check", depth: 3))
-        var ran: [String] = []
-        for step in 0..<10 {
+        queues.append(Self.job("grand-read", depth: 3))
+        var step = 0
+        let ran = Self.drive(&queues, in: harness.host, jobs: 2_000) { queues in
             // Each turn the root queues more work, a next block among it.
-            queues.append(Self.job("root-check-\(step)", depth: 1))
+            queues.append(Self.job("root-read-\(step)", depth: 1))
             queues.append(Self.job("root-block-\(step)", depth: 1, kind: .connect))
-            if let next = queues.next(in: harness.host) { ran.append(next.path.last ?? "") }
+            step += 1
         }
-        XCTAssertEqual(ran.first, "grand-block", "the grandchild's next block, queued first, runs first")
-        XCTAssertEqual(Array(ran.dropFirst()), (0..<9).map { "root-block-\($0)" }, "then each next block in turn")
-        XCTAssertEqual(ran.count, 10)
-        XCTAssertEqual(queues.rest.first?.path.last, "grand-check", "the other work keeps its place, first in line")
+        let names = ran.map { $0.path.last ?? "" }
+        XCTAssertEqual(names.first, "grand-block", "the grandchild's next block, queued first, runs first")
+        XCTAssertEqual(names.filter { $0.contains("-read") }.first, "grand-read", "the other work keeps its place, first in line")
+        let blocks = names.filter { $0.hasPrefix("root-block-") }
+        XCTAssertGreaterThanOrEqual(blocks.count, 2)
+        XCTAssertEqual(blocks, (0..<blocks.count).map { "root-block-\($0)" }, "then each next block in turn")
     }
 
-    /// The queues' rule: (A) what an RPC waits on, an awaited admission or a
-    /// template build, then (B) connects, then (C) the rest, each first in,
-    /// first out. A stale recheck is skipped; a peer's admission never goes
-    /// ahead of a queued connect.
-    func testJobsRunAnsweredThenConnectsThenTheRestEachInArrivalOrder() async throws {
+    /// The queues' rule: what an RPC waits on, an awaited admission or a
+    /// template build, runs first; then, at equal worker time used, checks,
+    /// connects and the rest, each first in, first out. A stale recheck is
+    /// skipped.
+    func testJobsRunAnsweredFirstThenEachLaneInArrivalOrder() async throws {
         let harness = try await harness(keyByte: 0x4A)
         let tip = harness.mining.tipCID
         let ran = Ran()
@@ -399,8 +475,9 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
             named(name, Self.job(name, depth: 1, kind: kind))
         }
         var queues = NodeRuntime.JobQueues()
-        queues.append(other("check-0"))
+        queues.append(other("read-1"))
         queues.append(try preflight("peer-0", awaited: false))
+        queues.append(other("check-0", kind: .check))
         queues.append(other("connect-0", kind: .connect))
         queues.append(try preflight("recheck-0", awaited: false, checksPolicies: false))
         queues.append(try preflight("stale-recheck", awaited: false, checksPolicies: false, tip: "elsewhere"))
@@ -413,14 +490,15 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
         let order = await ran.names
         XCTAssertEqual(order, [
             "submit-0", "build-0", "submit-1",
-            "connect-0", "connect-1",
-            "check-0", "peer-0", "recheck-0", "read-0",
+            "check-0", "connect-0", "connect-1",
+            "read-1", "peer-0", "recheck-0", "read-0",
         ])
     }
 
     /// Restored journal rows at boot are nobody's wait: their admissions
-    /// queue behind a connect queued after them (C), never ahead (A).
-    func testRestoredRowsQueueBehindConnects() async throws {
+    /// share the worker with the other work, never ahead of it as what an
+    /// RPC waits on; at equal use a connect queued after them runs first.
+    func testRestoredRowsAreNotWhatAnRPCWaitsOn() async throws {
         var harness = try await harness(keyByte: 0x4B)
         let root = harness.host.rootPath
         for nonce in 0..<6 {
@@ -482,6 +560,40 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
     private actor Ran {
         var names: [String] = []
         func add(_ name: String) { names.append(name) }
+    }
+
+    /// Worker time, in milliseconds, of each lane's job in the fair-share
+    /// tests: a connect a few seconds, a check a couple of milliseconds.
+    private static let costs: [NodeRuntime.RuntimeJob.Kind: Double] = [.connect: 5_000, .check: 2, .other: 10]
+
+    /// One worker taking `jobs` jobs from `queues`, each charged its lane's
+    /// cost, `refill` after each: the jobs, in the order they ran.
+    private static func drive(
+        _ queues: inout NodeRuntime.JobQueues, in core: NodeCore, jobs: Int,
+        refill: (inout NodeRuntime.JobQueues) -> Void = { _ in }
+    ) -> [NodeRuntime.RuntimeJob] {
+        var ran: [NodeRuntime.RuntimeJob] = []
+        for _ in 0..<jobs {
+            guard let next = queues.next(in: core) else { break }
+            ran.append(next)
+            queues.finished(next.kind, ran: costs[next.kind] ?? 0)
+            refill(&queues)
+        }
+        return ran
+    }
+
+    private static func time(of jobs: [NodeRuntime.RuntimeJob]) -> Double {
+        jobs.reduce(0) { $0 + (costs[$1.kind] ?? 0) }
+    }
+
+    /// The most `kind` jobs run back to back in `jobs`.
+    private static func longestRun(of kind: NodeRuntime.RuntimeJob.Kind, in jobs: [NodeRuntime.RuntimeJob]) -> Int {
+        var (longest, current) = (0, 0)
+        for job in jobs {
+            current = job.kind == kind ? current + 1 : 0
+            longest = max(longest, current)
+        }
+        return longest
     }
 
     /// A job told apart by its path's last element, at `depth`; no tip, so
