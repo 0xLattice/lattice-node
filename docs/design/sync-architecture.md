@@ -45,8 +45,8 @@ Three services belong to the node, not to any chain:
   queues behind work in another, and shared resources have limits, not
   ordering policies.
 - **Store**: a verified cache of what the network holds. Writes are atomic
-  and ordered. Changes are buffered in memory, read from the buffer, and
-  flushed to disk in batches; nothing waits for each write to reach disk
+  and ordered. State changes are buffered in memory, read from the buffer,
+  and flushed to disk in one atomic batch when the buffer reaches its limit; nothing waits for each write to reach disk
   except a promise to the operator.
 - **Progress**: every module reports what it is waiting on, as a typed
   reason.
@@ -70,10 +70,10 @@ established clients are built. The node has no scheduler of its own.
 | What | Runs on | Why |
 |---|---|---|
 | Decisions: every step of the core | One serial loop | It stays deterministic and simulated. The core took 9% to 16% of wall time in the first baseline |
-| Execution of a chain's blocks | One lane per chain, one job at a time: a batch of up to `connectBatch` ready blocks, one commit | A chain executes in order anyway; chains run side by side |
+| Execution of a chain's blocks | One lane per chain, one job at a time: a batch of up to `connectBatch` ready blocks, one atomic change set | A chain executes in order anyway; chains run side by side |
 | Header work: proof checks and derivations | Its own lane per chain | It never queues behind execution. Batched per page |
 | What an RPC waits on | Its own lane | Latency |
-| Storage writes | Buffered in memory, flushed in batches, as Bitcoin Core's coins cache and geth's trie database do | The loop waits on a flush, not on every write |
+| Storage writes | State buffered in memory and flushed in batches on a size limit, as Bitcoin Core's coins cache (`-dbcache`) and geth's trie database do | The loop waits on a flush, not on every write |
 
 The loop only decides. It does not wait on each write, read content, or do
 bookkeeping that is not a decision. Each lane offers only its next job, and
