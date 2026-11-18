@@ -172,7 +172,9 @@ final class ReceiptWitnessTests: XCTestCase {
         let bundle = await storage.volumeBundle(withdrawalBlock)
         XCTAssertTrue(Set(witness).isSubset(of: Set(bundle)), "and served with it")
         let producerAlpha = await alphaReads.readSnapshot()
-        let alphaTip = try XCTUnwrap(producerAlpha.tipCID)
+        // Its height, not its tip: the producer's last carried Alpha block
+        // can connect after this read, and the follower then follows it.
+        let alphaHeight = try XCTUnwrap(producerAlpha.height)
 
         // The follower first follows Nexus alone, past the anchored state,
         // which its window lets go of; then it hosts Alpha, whose sync
@@ -196,7 +198,7 @@ final class ReceiptWitnessTests: XCTestCase {
         let (followerRuntime, followerStorage) = try await start(follower)
         let followerAlpha = try XCTUnwrap(followerRuntime.levelReads[Self.alpha])
         try await eventually("the follower executes Alpha past the withdrawal", within: .seconds(60)) {
-            await followerAlpha.readSnapshot().tipCID == alphaTip
+            (await followerAlpha.readSnapshot().height ?? 0) >= alphaHeight
         }
         // It stored the witness as part of the body it fetched, and on
         // `none` let go of both once the block was no longer its tip.
