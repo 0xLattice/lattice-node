@@ -1970,13 +1970,39 @@ final class DerivedChildGrindTests: XCTestCase {
         return host
     }
 
+    /// Ask for `cid`'s body again (a provider joined), each ask failing,
+    /// until its backoff reaches `bodyRetryCap`; below it Nexus never latches.
+    private func failToCap(_ host: inout Host, _ cid: String) async throws {
+        let config = ChainCoreConfig()
+        for _ in 0..<64 {
+            let parked = try XCTUnwrap(host.core.levels[Self.nexus]?.bodies.parked[cid])
+            if config.bodyRetryWait(afterAttempts: parked.attempts) >= config.bodyRetryCap { return }
+            XCTAssertEqual(host.core.levels[Self.nexus]?.synced, false, "below the cap after \(parked.attempts) attempts")
+            await host.step(.level(Self.nexus, .providerJoined))
+        }
+        XCTFail("the backoff never reached its cap")
+    }
+
+    /// One failed fetch (a transient failure, the body parked at its first
+    /// backoff step) is not unavailability: Nexus does not latch, and Alpha
+    /// stays gated.
+    func testATransientBodyFailureDoesNotLatch() async throws {
+        let fixture = try await gateWorld()
+        var host = try await withheldParentHost(fixture, unavailable: true)
+        XCTAssertEqual(host.core.levels[Self.nexus]?.bodies.parked[fixture.nexus[1].cid]?.attempts, 1)
+        XCTAssertEqual(host.core.levels[Self.nexus]?.synced, false)
+        XCTAssertFalse(host.take().contains { $0.path == Self.alpha }, "Alpha stays gated")
+        XCTAssertTrue(try host.digest(Self.alpha).blocks.isEmpty)
+    }
+
     /// Nexus's heaviest header's body is withheld by every provider: once
-    /// it is found unavailable, Nexus has caught up with what it can have
+    /// its backoff reaches the cap, it is unavailable, and Nexus has caught up with what it can have
     /// and latches `synced` (Bitcoin's `IsInitialBlockDownload` reads the
     /// active chain, never the best header), so Alpha opens and syncs.
     func testAParentWhoseHeaviestBodyIsUnavailableLatchesAndOpensItsChild() async throws {
         let fixture = try await gateWorld()
-        let host = try await withheldParentHost(fixture, unavailable: true)
+        var host = try await withheldParentHost(fixture, unavailable: true)
+        try await failToCap(&host, fixture.nexus[1].cid)
         XCTAssertEqual(host.core.levels[Self.nexus]?.synced, true)
         let alpha = try host.digest(Self.alpha)
         for entry in fixture.alpha { XCTAssertNotNil(alpha.blocks[try XCTUnwrap(entry.cid)], "Alpha opened and weighed") }
@@ -1989,6 +2015,7 @@ final class DerivedChildGrindTests: XCTestCase {
     func testAnUnavailableBodyArrivingAfterTheLatchMovesOnlyForkChoice() async throws {
         let fixture = try await gateWorld()
         var host = try await withheldParentHost(fixture, unavailable: true)
+        try await failToCap(&host, fixture.nexus[1].cid)
         XCTAssertEqual(host.core.levels[Self.nexus]?.synced, true)
         host.unavailableBodies = []
         await host.step(.level(Self.nexus, .providerJoined))
@@ -1996,7 +2023,8 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertEqual(host.core.levels[Self.nexus]?.synced, true)
     }
 
-    /// A body found unavailable and then asked again (a provider joined) is
+    /// A body found unavailable (its backoff at the cap) and then asked
+    /// again (a provider joined) is
     /// in flight, not unavailable: Nexus's log read to its end does not
     /// latch while it is asked.
     func testAnUnavailableBodyAskedAgainDoesNotLatch() async throws {
@@ -2009,7 +2037,7 @@ final class DerivedChildGrindTests: XCTestCase {
         }.first)
         let entries = fixture.nexus.enumerated().map { StreamEntry(position: UInt64($0.offset + 1), entry: .header($0.element.cid)) }
         await host.step(.received(Self.miner, Self.nexus, .stream(StreamPage(requestID: id, logID: "peer", entries: entries, hasMore: true))))
-        XCTAssertNotNil(host.core.levels[Self.nexus]?.bodies.parked[fixture.nexus[1].cid], "N1's body was found unavailable")
+        try await failToCap(&host, fixture.nexus[1].cid)
         host.unavailableBodies = []
         host.withheldBodies = [fixture.nexus[1].cid]
         await host.step(.level(Self.nexus, .providerJoined))
@@ -2028,6 +2056,8 @@ final class DerivedChildGrindTests: XCTestCase {
     func testAParentWhoseHeaviestBodyIsUnavailableAdmitsPeerTransactions() async throws {
         let fixture = try await gateWorld()
         var host = try await withheldParentHost(fixture, unavailable: true)
+        try await failToCap(&host, fixture.nexus[1].cid)
+        XCTAssertEqual(host.core.levels[Self.nexus]?.synced, true)
         let key = CryptoUtils.generateKeyPair()
         let tx = try signed(key, [AccountAction(owner: address(key), delta: -2)], nonce: 0)
         let effects = host.core.step(.level(Self.nexus, .mining(.transactionReceived(tx, origin: .peer(Self.miner)))), now: Self.now)

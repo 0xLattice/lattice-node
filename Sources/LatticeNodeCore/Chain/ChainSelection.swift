@@ -86,8 +86,8 @@ extension ChainCore {
     /// Bitcoin Core's `IsInitialBlockDownload` reads only the active chain,
     /// never the best header, whose data may never come
     /// (`setBlockIndexCandidates` holds only tips with data), a body no
-    /// provider had does not hold the latch: it stays one-way, and a body
-    /// that arrives later moves only fork choice.
+    /// provider had, its backoff at the cap, does not hold the latch: it
+    /// stays one-way, and a body that arrives later moves only fork choice.
     mutating func latchSynced() {
         guard !synced, sync.peers.contains(where: { peer, state in
             state.readToEnd && !state.more && state.holes.isEmpty && sync.cursors[peer.key]?.logID.isEmpty == false
@@ -97,14 +97,16 @@ extension ChainCore {
         if snapshot.actOnTip == snapshot.bestHeaderTip || snapshot.actOnTip == heaviestObtainableTip() { synced = true }
     }
 
-    /// Whether `cid`'s body could not be obtained: its last attempt found
-    /// no provider of it (or its content could not be read), and it waits
-    /// out its backoff (`bodies.parked`), not asked again, arrived or
-    /// executed since. A body in flight, a first ask or one asked again,
-    /// is not.
+    /// Whether `cid`'s body could not be obtained: it failed often enough
+    /// that its backoff reached `bodyRetryCap`, and it waits that out
+    /// (`bodies.parked`), not asked again, arrived or executed since. A
+    /// body in flight, a first ask or one asked again, is not, nor is one
+    /// whose backoff is still below the cap: a transient failure holds the
+    /// latch as a body in flight does.
     func unobtainable(_ cid: String) -> Bool {
-        bodies.parked[cid] != nil && !bodies.requested.contains(cid) && !bodies.arrived.contains(cid)
-            && !tree.isExecuted(blockHash: cid)
+        guard let parked = bodies.parked[cid] else { return false }
+        return config.bodyRetryWait(afterAttempts: parked.attempts) >= config.bodyRetryCap
+            && !bodies.requested.contains(cid) && !bodies.arrived.contains(cid) && !tree.isExecuted(blockHash: cid)
     }
 
     /// Fork choice's tip with every block whose body could not be obtained,

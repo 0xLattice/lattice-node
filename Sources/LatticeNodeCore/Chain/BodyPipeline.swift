@@ -222,9 +222,7 @@ extension ChainCore {
     /// up to `bodyRetryCap`.
     private mutating func park(_ cid: String, now: Int64) {
         let attempts = (bodies.parked[cid]?.attempts ?? 0) + 1
-        let shift = min(attempts - 1, 20)
-        let wait = min(config.bodyRetryCap, config.bodyRetryBase << Int64(shift))
-        bodies.parked[cid] = BodyPipeline.Parked(notBefore: now + wait, attempts: attempts)
+        bodies.parked[cid] = BodyPipeline.Parked(notBefore: now + config.bodyRetryWait(afterAttempts: attempts), attempts: attempts)
     }
 
     /// Apply a connect job's verdicts, in its blocks' order. A job stops at
