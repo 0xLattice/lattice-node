@@ -248,7 +248,7 @@ carries nothing more for the pair.
   routers do. Behind one that gives each connection another port, or with
   no public address known, the pair cannot connect directly: they keep the
   relayed session, as libp2p's DCUtR does. A direct connection is tried
-  once each time a relayed session is made.
+  when a relayed session is made, by each end at most once.
 - A node learns its own public address as before: from `--external-address`
   or from the STUN servers its overlay asks at start.
 - A relaying node carries a pair while they try, and after, when they
