@@ -104,12 +104,10 @@ final class FactStoreRestoreTests: XCTestCase {
                     persisted.append(batch)
                 case .level(let path, .fetchBody(let cid)):
                     queue.append(.level(path, .bodyFetched(cid: cid)))
-                case .connect(let path, let job):
-                    let verdict = await ChainTree.connect(
-                        job, fetcher: world.cas, parentFacts: host.parentFacts(for: path),
-                        validationContext: ValidationContext(nowMilliseconds: Self.now)
-                    )
-                    queue.append(.level(path, .connected(verdict)))
+                case .connect(let path, let jobs):
+                    queue.append(.level(path, await ConnectRun.connected(
+                        jobs, fetcher: world.cas, parentFacts: host.parentFacts(for: path), now: Self.now
+                    )))
                 default:
                     break
                 }

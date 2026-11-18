@@ -953,45 +953,58 @@ extension NodeRuntime {
         return try await index.boundedKeysAndValues(limit: index.count, fetcher: fetcher).map(\.1.rawCID)
     }
 
-    /// A level's connect job: `ChainTree.connect`, and for a valid block the
-    /// IDs of the transactions it carries, read from the body it executed
-    /// (the index storing it walked, or when storing failed or the index
-    /// names a transaction by a non-standard CID, the body).
+    /// A level's connect job (`ChainEffect.connect`): its blocks executed in
+    /// order (`ConnectRun`), each reading the state the previous one
+    /// produced from memory, then the bodies of the valid ones stored in one
+    /// transaction (`storeValidBlocks`), and for each valid block the IDs of
+    /// the transactions it carries, read from the body it executed (the
+    /// index storing it walked, or when storing failed or the index names a
+    /// transaction by a non-standard CID, the body). The verdicts come back
+    /// as one event: the step that applies them commits them once.
     /// Execution is the node's own work: what this store lacks is read from
     /// peers. A child level's parent fact is read from the live parent level
     /// (`ParentContinuity`).
     static func connectJob(
-        _ job: ConnectJob,
+        _ jobs: [ConnectJob],
         at path: ChainPath,
         levels: LiveLevels,
         storage: NodeStorage,
         remote: IvyRootContentSource? = nil
     ) -> RuntimeJob {
         RuntimeJob(path: path, tipCID: nil, kind: .connect) {
-            await reading(job.blockHash, at: path, storage: storage, remote: remote) { fetcher in
-                let verdict = await ChainTree.connect(
-                    job,
+            guard let first = jobs.first else { return [] }
+            return await reading(first.blockHash, at: path, storage: storage, remote: remote) { fetcher in
+                let (verdicts, reads) = await ConnectRun.run(
+                    jobs,
                     fetcher: fetcher,
                     parentFacts: ParentContinuity(levels: levels),
-                    validationContext: ValidationContext(nowMilliseconds: now())
+                    validationContext: { ValidationContext(nowMilliseconds: now()) }
                 )
-                let valid = verdict.retryFailure == nil && !verdict.provesInvalid
-                var transactions: [String] = []
-                if valid {
+                let valid = verdicts.filter(\.isValid).map { (cid: $0.blockHash, decoded: $0.connectedBlock) }
+                var carried: [String: [String]] = [:]
+                if !valid.isEmpty {
                     do {
-                        let carried = try await storage.storeValidBlock(
-                            job.blockHash, decoded: verdict.connectedBlock, at: path, from: fetcher
-                        )
-                        // The pool knows a transaction by its standard CID; an
-                        // index entry may name it by another form of the same bytes.
-                        transactions = carried.allSatisfy(CIDIdentity.isStandard)
-                            ? carried : await transactionIDs(ofBlock: job.blockHash, fetcher: fetcher)
+                        carried = try await storage.storeValidBlocks(valid, at: path, from: reads)
                     } catch {
-                        storage.syncTrace("body of \(job.blockHash) not stored: \(error)")
-                        transactions = await transactionIDs(ofBlock: job.blockHash, fetcher: fetcher)
+                        storage.syncTrace("bodies of \(valid.map(\.cid)) not stored: \(error)")
                     }
                 }
-                return [.level(path, .connected(verdict, transactions: transactions))]
+                var results: [ConnectResult] = []
+                for verdict in verdicts {
+                    guard verdict.isValid else {
+                        results.append(ConnectResult(verdict))
+                        continue
+                    }
+                    // The pool knows a transaction by its standard CID; an
+                    // index entry may name it by another form of the same bytes.
+                    let transactions = if let held = carried[verdict.blockHash], held.allSatisfy(CIDIdentity.isStandard) {
+                        held
+                    } else {
+                        await transactionIDs(ofBlock: verdict.blockHash, fetcher: reads)
+                    }
+                    results.append(ConnectResult(verdict, transactions: transactions))
+                }
+                return [.level(path, .connected(results))]
             }
         }
     }

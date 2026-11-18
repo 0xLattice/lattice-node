@@ -131,12 +131,10 @@ final class DerivedChildGrindTests: XCTestCase {
                         derived.append(Derived(path: path, cid: job.childCID, carrier: job.carrier))
                         guard !lostDerivations.contains(job.carrier) else { break }
                         if holdDerivations { heldDerivations.append((path, job)) } else { queue.append(await derive(job, at: path)) }
-                    case .connect(let path, let job):
-                        let verdict = await ChainTree.connect(
-                            job, fetcher: world.cas, parentFacts: core.parentFacts(for: path),
-                            validationContext: ValidationContext(nowMilliseconds: DerivedChildGrindTests.now)
-                        )
-                        queue.append(.level(path, .connected(verdict)))
+                    case .connect(let path, let jobs):
+                        queue.append(.level(path, await ConnectRun.connected(
+                            jobs, fetcher: world.cas, parentFacts: core.parentFacts(for: path), now: DerivedChildGrindTests.now
+                        )))
                     case .disconnect(let peer, _):
                         disconnects.append(peer)
                     default:

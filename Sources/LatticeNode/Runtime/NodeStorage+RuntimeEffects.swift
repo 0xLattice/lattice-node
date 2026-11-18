@@ -164,51 +164,70 @@ extension NodeStorage {
         return roots
     }
 
-    /// Stores a block execution found valid, and pins it. A body fetched
-    /// from peers is held in memory until then. Its Volumes are the ones its
-    /// body's fetch derived and kept, or else derived again as `fetcher`
-    /// reads them: its content, never the state it read (`storeBlockContent`).
-    /// What is stored is its body (its own Volume and its transactions'),
-    /// pinned under its name, and, with the chain, its spec and policy
-    /// modules. The state it read is its parent's, which this node stored
-    /// executing the parent, and the counts and windows keep or peers
-    /// serve. Returns the CIDs of the transactions the block carries, read
-    /// once from its transaction index. `decoded` is the
-    /// block's node as its connect decoded it (`ConnectVerdict.connectedBlock`),
-    /// or nil to resolve it through `fetcher`.
+    /// Stores a block execution found valid, and pins it
+    /// (`storeValidBlocks` of the one block). Returns the CIDs of the
+    /// transactions the block carries.
     @discardableResult
     nonisolated func storeValidBlock(
         _ cid: String, decoded: Block? = nil, at path: ChainPath, from fetcher: any Fetcher
     ) async throws -> [String] {
-        let volumes: [SerializedVolume]
-        if let fetched = await readCache.body(cid) {
-            volumes = fetched
-        } else {
-            let walked = NodeImportStorage(storage: nil, keepsVolumes: true)
-            try await BlockHeader(rawCID: cid).storeBlockContent(fetcher: fetcher, storer: walked)
-            volumes = await walked.takeVolumes().map(\.volume)
+        try await storeValidBlocks([(cid, decoded)], at: path, from: fetcher)[cid] ?? []
+    }
+
+    /// Stores the blocks of one connect job execution found valid, and pins
+    /// them, in one volumes.db transaction. A body fetched from peers is
+    /// held in memory until then. Each block's Volumes are the ones its
+    /// body's fetch derived and kept, or else derived again as `fetcher`
+    /// reads them: its content, never the state it read
+    /// (`storeBlockContent`). What is stored is its body (its own Volume and
+    /// its transactions'), pinned under its name, and, with the chain, its
+    /// spec and policy modules. The state it read is its parent's, which
+    /// this node stored executing the parent, and the counts and windows
+    /// keep or peers serve. Returns, by block, the CIDs of the transactions
+    /// it carries, read once from its transaction index. `decoded` is the
+    /// block's node as its connect decoded it (`ConnectVerdict.connectedBlock`),
+    /// or nil to resolve it through `fetcher`.
+    nonisolated func storeValidBlocks(
+        _ blocks: [(cid: String, decoded: Block?)], at path: ChainPath, from fetcher: any Fetcher
+    ) async throws -> [String: [String]] {
+        var stored: [String: SerializedVolume] = [:]
+        var retaining: [String: [String]] = [:]
+        var carried: [String: [String]] = [:]
+        var bundled: [(root: String, roots: [String])] = []
+        let rulesScope = configuration.state == .all ? retentionScope : scopes.rules(at: path)
+        for (cid, decoded) in blocks {
+            let volumes: [SerializedVolume]
+            if let fetched = await readCache.body(cid) {
+                volumes = fetched
+            } else {
+                let walked = NodeImportStorage(storage: nil, keepsVolumes: true)
+                try await BlockHeader(rawCID: cid).storeBlockContent(fetcher: fetcher, storer: walked)
+                volumes = await walked.takeVolumes().map(\.volume)
+            }
+            let resolved: Block?
+            if let decoded {
+                resolved = decoded
+            } else {
+                resolved = try await BlockHeader(rawCID: cid).resolve(fetcher: fetcher).node
+            }
+            guard let block = resolved else { throw NodeAPIError.unresolvedTransactionContent }
+            let transactions = try await NodeRuntime.carriedTransactionIDs(of: block, fetcher: fetcher)
+            let body = Set([cid] + transactions)
+            let roots = Set(volumes.map(\.root))
+            var rest = roots.subtracting(body)
+            if configuration.state != .all { rest.formIntersection(await rules(of: block, fetcher: fetcher)) }
+            for volume in volumes where body.contains(volume.root) || rest.contains(volume.root) {
+                stored[volume.root] = volume
+            }
+            retaining[scopes.body(cid, at: path), default: []] += body.sorted()
+            retaining[rulesScope, default: []] += rest.sorted()
+            carried[cid] = transactions
+            bundled.append((cid, roots.sorted()))
         }
-        let resolved: Block?
-        if let decoded {
-            resolved = decoded
-        } else {
-            resolved = try await BlockHeader(rawCID: cid).resolve(fetcher: fetcher).node
-        }
-        guard let block = resolved else { throw NodeAPIError.unresolvedTransactionContent }
-        let transactions = try await NodeRuntime.carriedTransactionIDs(of: block, fetcher: fetcher)
-        let body = Set([cid] + transactions)
-        let roots = Set(volumes.map(\.root))
-        var rest = roots.subtracting(body)
-        if configuration.state != .all { rest.formIntersection(await rules(of: block, fetcher: fetcher)) }
-        let storage = NodeImportStorage(storage: broker)
-        for volume in volumes where body.contains(volume.root) || rest.contains(volume.root) {
-            try await storage.store(volume: volume)
-        }
-        try await storage.commit()
-        try await broker.mergeRetainedRoots(scope: scopes.body(cid, at: path), roots: body.sorted())
-        try await retainHeld(rest.sorted(), scope: configuration.state == .all ? nil : scopes.rules(at: path))
-        bundles.record(root: cid, roots: roots.sorted())
-        return transactions
+        let volumes = try stored.keys.sorted().compactMap { try stored[$0].map(ValidatedVolume.init(trusting:)) }
+        try await broker.storeVolumesLocal(volumes, retaining: retaining.filter { !$0.value.isEmpty })
+        for (root, roots) in bundled { bundles.record(root: root, roots: roots) }
+        return carried
     }
 
     /// `ChainEffect.fetchBody`: the block's content (`storeBlockContent`: its

@@ -86,11 +86,12 @@ public enum NodeEffect: Sendable {
     case persist(NodeBatch)
     /// Every level effect but `connect`.
     case level(ChainPath, ChainEffect)
-    /// Run `ChainTree.connect` on a level's job, reading a child level's
-    /// parent facts from the parent level as it is when the job reads them
-    /// (never a copy of its tree, which the parent keeps mutating), and
-    /// report the verdict as `.level(path, .connected)`.
-    case connect(ChainPath, ConnectJob)
+    /// Run `ChainTree.connect` on a level's jobs, in order, as
+    /// `ChainEffect.connect` says, reading a child level's parent facts
+    /// from the parent level as it is when each job reads them (never a
+    /// copy of its tree, which the parent keeps mutating), and report the
+    /// verdicts as one `.level(path, .connected)`.
+    case connect(ChainPath, [ConnectJob])
     case disconnect(PeerID, DisconnectReason)
     case wakeAt(Int64)
 }
@@ -484,6 +485,12 @@ public struct NodeCore: Sendable {
         }
         dropDisconnected(&turn)
         attributeRuns(&turn)
+        // A child level stepped without its parent's facts (run
+        // attribution, a mined grind) took its blocks needing one as
+        // lacking it: those its parent holds are connected now.
+        for path in ordered where path.count > 1 && turn.touched.contains(path) {
+            wakeAnswered(path, &turn)
+        }
         touched = turn.touched
         return emit(turn)
     }
@@ -550,8 +557,8 @@ public struct NodeCore: Sendable {
                 turn.disconnects[peer] = turn.disconnects[peer] ?? reason
             case .wakeAt(let time):
                 turn.wake = min(turn.wake ?? time, time)
-            case .connect(let job):
-                turn.effects.append(.connect(path, job))
+            case .connect(let jobs):
+                turn.effects.append(.connect(path, jobs))
             default:
                 turn.effects.append(.level(path, effect))
             }

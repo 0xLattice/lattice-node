@@ -78,7 +78,7 @@ struct WindowReference {
         let bodies = core.bodies
         holdsBacklog = [first, first + 1].allSatisfy { height in
             guard let cid = tree.canonicalBlockHash(atHeight: height), bodies.parked[cid] == nil else { return false }
-            return bodies.connecting == cid || (bodies.arrived.contains(cid) && bodies.awaitingParent[cid] == nil)
+            return bodies.connecting.contains(cid) || (bodies.arrived.contains(cid) && bodies.awaitingParent[cid] == nil)
         }
     }
 

@@ -38,6 +38,7 @@ public enum NodeConfigurationError: Error, Equatable, CustomStringConvertible {
     case invalidPorts
     case invalidPublicReadURL
     case invalidAnnounceLifetime
+    case invalidConnectBatch
 
     public var description: String {
         switch self {
@@ -49,6 +50,8 @@ public enum NodeConfigurationError: Error, Equatable, CustomStringConvertible {
             "public read URL must be an absolute http(s) URL with a host and no credentials, query or fragment"
         case .invalidAnnounceLifetime:
             "announce lifetime must be 1 to \(NodeConfiguration.maximumAnnounceLifetime) seconds: peers drop announcements that last longer"
+        case .invalidConnectBatch:
+            "connect batch must be at least 1 block"
         }
     }
 }
@@ -231,6 +234,12 @@ public struct NodeConfiguration: Sendable {
     /// weighed tip, and so does not follow a reorganization deeper than it.
     public let finality: FinalityWindows
 
+    /// How many ready blocks of one chain one connect job executes, with
+    /// one commit for them all (operator choice, `ChainCoreConfig.connectBatch`).
+    public let connectBatch: Int
+    /// Bitcoin's `ActivateBestChainStep` connects up to 32 blocks per step.
+    public static let defaultConnectBatch = 32
+
     /// With `state: recent`, per chain: the blocks below and including a
     /// chain's tip whose executions' state is kept (operator choice).
     public let stateWindows: FinalityWindows
@@ -286,7 +295,8 @@ public struct NodeConfiguration: Sendable {
         publicSubmit: Bool = false,
         minRelayFee: UInt64 = 0,
         finality: FinalityWindows = FinalityWindows(),
-        stateWindows: FinalityWindows = FinalityWindows()
+        stateWindows: FinalityWindows = FinalityWindows(),
+        connectBatch: Int = NodeConfiguration.defaultConnectBatch
     ) throws {
         guard let address = ChainAddress(chainPath), address.isNexus else {
             throw NodeConfigurationError.invalidChainPath
@@ -307,6 +317,7 @@ public struct NodeConfiguration: Sendable {
         guard (1...Self.maximumAnnounceLifetime).contains(announceLifetime) else {
             throw NodeConfigurationError.invalidAnnounceLifetime
         }
+        guard connectBatch >= 1 else { throw NodeConfigurationError.invalidConnectBatch }
 
         self.address = address
         self.storagePath = storagePath
@@ -357,6 +368,7 @@ public struct NodeConfiguration: Sendable {
         self.minRelayFee = minRelayFee
         self.finality = finality
         self.stateWindows = stateWindows
+        self.connectBatch = connectBatch
     }
 
     /// The same node hosting `hostedChildren` instead, with their specs,

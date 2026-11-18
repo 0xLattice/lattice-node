@@ -498,6 +498,27 @@ Persistence order is:
 Every commit is synchronous (`synchronous=FULL`): nothing is announced,
 served, or built on before the write that makes it durable returns.
 
+### Batched execution
+
+A node executes ready blocks of one chain in batches: each block's previous
+block is executed (or earlier in the batch) and, on a child chain, the parent
+state it names is in the parent chain's executed set. A block whose parent
+state is not executed yet is not run; it waits, and no other block waits on
+it. A batch is a run of consecutive blocks on one chain, the heavier branch
+first at a fork; each block reads the state the one before it produced from
+memory. Its valid blocks are stored and committed together, by the order
+above: one `volumes.db` transaction for their bodies, then one step's
+post-states and facts. The batch ends at its first block without a valid
+verdict. Bitcoin Core connects up to 32 blocks per `ActivateBestChainStep`,
+and geth's `insertChain` writes a batch at once.
+
+`connectBatch` in `lattice.json` or a `config.d` fragment
+(`--connect-batch`; default 32, at least 1) is the most blocks one batch
+executes. A larger batch commits less often while a node catches up and
+holds more executed state in memory until its commit. A crash loses at most
+the batch being executed: the node restarts at the last batch committed and
+runs it again. A change takes effect on restart.
+
 ### What a node keeps
 
 Facts and headers are kept for good, and so is each credited child proof

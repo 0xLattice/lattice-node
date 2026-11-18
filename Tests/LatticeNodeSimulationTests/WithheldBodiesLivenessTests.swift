@@ -93,12 +93,9 @@ final class WithheldBodiesLivenessTests: XCTestCase {
                         contents[node].put(known[cid]!.body)
                         next = step(node, .level(path, .bodyFetched(cid: cid)))
                     }
-                case .connect(_, let job):
-                    connected[node].append(job.blockHash)
-                    let verdict = await ChainTree.connect(
-                        job, fetcher: contents[node], validationContext: ValidationContext(nowMilliseconds: now)
-                    )
-                    next = step(node, .level(path, .connected(verdict)))
+                case .connect(_, let jobs):
+                    connected[node] += jobs.map(\.blockHash)
+                    next = step(node, .level(path, await ConnectRun.connected(jobs, fetcher: contents[node], now: now)))
                 default:
                     break
                 }

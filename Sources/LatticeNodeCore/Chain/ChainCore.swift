@@ -46,10 +46,9 @@ public enum ChainEvent: Sendable {
     /// no peer held may be held now, so every waiting body is asked for
     /// again.
     case providerJoined
-    /// A connect job's verdict, with the CIDs of the transactions the block
-    /// carries (the job read them from the body it executed): what the act-on
-    /// chain confirms when it enters the block.
-    case connected(ConnectVerdict, transactions: [String] = [])
+    /// A connect job's verdicts, in its blocks' order, up to the first
+    /// block without a valid one (`ChainEffect.connect`).
+    case connected([ConnectResult])
     /// The answer to `readTransactions`: each block's transaction CIDs (a
     /// body no longer held reads as none).
     case transactionsRead([String: [String]])
@@ -130,9 +129,11 @@ public enum ChainEffect: Sendable {
     case fetchBody(cid: String)
     /// The window no longer wants this body: stop fetching it.
     case cancelBody(cid: String)
-    /// Run `ChainTree.connect` on this job off the core and report its
-    /// verdict as `connected`.
-    case connect(ConnectJob)
+    /// Run `ChainTree.connect` on these jobs off the core, in order (each
+    /// block the previous one's child, reading the state the previous one
+    /// produced), stop after the first without a valid verdict, and report
+    /// the verdicts as one `connected`: one step, one commit for them all.
+    case connect([ConnectJob])
     case disconnect(PeerID, DisconnectReason)
     case persist(ChainBatch)
     case publish(ChainSnapshot)
@@ -207,6 +208,11 @@ public struct ChainCoreConfig: Sendable {
     /// executed prefix, have their bodies asked for at once. Fork children
     /// are asked for besides and are not counted.
     public var bodyWindow: Int
+    /// How many ready blocks of one chain one connect job executes, each
+    /// the previous one's child, with one commit for them all (Bitcoin's
+    /// `ActivateBestChainStep` connects up to 32 per step). An operator
+    /// setting (`connectBatch`, `--connect-batch`); at least 1.
+    public var connectBatch: Int
     /// A body the content layer could not obtain, or a connect with no
     /// verdict (its content was not resolvable), waits this long before its
     /// body is asked for again, doubling per attempt up to
@@ -235,6 +241,7 @@ public struct ChainCoreConfig: Sendable {
         pendingBudget: Int = 16 * 1_024 * 1_024,
         maxFutureDrift: Int64 = 2 * 60 * 60 * 1_000,
         bodyWindow: Int = 64,
+        connectBatch: Int = 32,
         bodyRetryBase: Int64 = 1_000,
         bodyRetryCap: Int64 = 300_000
     ) {
@@ -247,6 +254,7 @@ public struct ChainCoreConfig: Sendable {
         self.maxChildIndexBytes = maxChildIndexBytes
         self.pendingBudget = pendingBudget
         self.bodyWindow = bodyWindow
+        self.connectBatch = connectBatch
         self.bodyRetryBase = bodyRetryBase
         self.bodyRetryCap = bodyRetryCap
     }
@@ -477,8 +485,8 @@ public struct ChainCore: Sendable {
             bodyUnavailable(cid, &turn)
         case .providerJoined:
             providerJoined()
-        case .connected(let verdict, let transactions):
-            connected(verdict, transactions: transactions, &turn)
+        case .connected(let results):
+            connected(results, &turn)
         case .transactionsRead(let blocks):
             readingTransactions.subtract(blocks.keys)
             for (cid, transactions) in blocks where tree.contains(blockHash: cid) {

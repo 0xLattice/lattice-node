@@ -46,13 +46,16 @@ final class AnchoredChildTemplateTests: XCTestCase {
                         } else {
                             queue.append(.level(path, .bodyFetched(cid: cid)))
                         }
-                    case .connect(let path, let job):
-                        let verdict = await ChainTree.connect(
-                            job, fetcher: cas, parentFacts: node.parentFacts(for: path),
-                            validationContext: ValidationContext(nowMilliseconds: AnchoredChildTemplateTests.now)
+                    case .connect(let path, let jobs):
+                        let event = await ConnectRun.connected(
+                            jobs, fetcher: cas, parentFacts: node.parentFacts(for: path), now: AnchoredChildTemplateTests.now
                         )
-                        if let failure = verdict.retryFailure { retries[verdict.blockHash] = failure }
-                        queue.append(.level(path, .connected(verdict)))
+                        if case .connected(let results) = event {
+                            for verdict in results.map(\.verdict) {
+                                if let failure = verdict.retryFailure { retries[verdict.blockHash] = failure }
+                            }
+                        }
+                        queue.append(.level(path, event))
                     default:
                         break
                     }
@@ -270,10 +273,7 @@ final class AnchoredChildTemplateTests: XCTestCase {
 
         XCTAssertFalse(alpha.tree.isExecuted(blockHash: naiveCID), "Lattice refuses the naive block")
         XCTAssertFalse(alpha.tree.isExcludedRoot(naiveCID), "a missing parent fact never excludes")
-        guard case .crossChainEvidenceRequired(let fact)? = fixture.host.retries[naiveCID] else {
-            return XCTFail("the naive block's connect: \(String(describing: fixture.host.retries[naiveCID]))")
-        }
-        XCTAssertEqual(fact, link, "the link runs from the predecessor's anchor")
+        XCTAssertNil(fixture.host.retries[naiveCID], "never connected: readiness held it on its parent fact")
         XCTAssertEqual(fixture.host.node.parentFacts(for: Self.alpha)?.holds(link), false)
     }
 
@@ -614,10 +614,7 @@ final class AnchoredChildTemplateTests: XCTestCase {
         XCTAssertEqual(host.node.levels[Self.nexus]?.snapshot.bestHeaderTip, a4.cid, "A is heavier")
         XCTAssertFalse(host.nexusTree.isExecuted(blockHash: a3.cid), "A3's body is withheld")
         XCTAssertTrue(host.alpha.tree.contains(blockHash: anchored.cid))
-        guard case .crossChainEvidenceRequired(let fact)? = host.retries[anchored.cid] else {
-            return XCTFail("the block's connect: \(String(describing: host.retries[anchored.cid]))")
-        }
-        XCTAssertEqual(fact, link)
+        XCTAssertNil(host.retries[anchored.cid], "never connected: readiness holds it on its parent fact")
         XCTAssertEqual(host.alpha.bodies.awaitingParent[anchored.cid], link)
         XCTAssertFalse(host.alpha.tree.isExecuted(blockHash: anchored.cid))
 

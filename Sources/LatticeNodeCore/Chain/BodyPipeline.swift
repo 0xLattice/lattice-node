@@ -5,7 +5,9 @@ import Lattice
 /// verification and provider suppression, one attempt per ask. The core
 /// names the next `ChainCoreConfig.bodyWindow` weighed-but-unexecuted blocks
 /// on the best chain, asks again for a body not obtained after a backoff,
-/// and connects them in parent order as their bodies arrive. It also
+/// and connects them in parent order as their bodies arrive, up to
+/// `ChainCoreConfig.connectBatch` blocks per job with one commit for them
+/// all. It also
 /// names, outside that count, the blocks the act-on tip would step into once
 /// executed (`forkChildren`).
 ///
@@ -16,9 +18,10 @@ public struct BodyPipeline: Sendable, Equatable {
     public internal(set) var requested: Set<String> = []
     /// Bodies that arrived and are not executed yet.
     public internal(set) var arrived: Set<String> = []
-    /// The block whose connect job is running: one at a time, in parent
-    /// order.
-    public internal(set) var connecting: String?
+    /// The blocks whose connect job is running, in parent order: one job
+    /// at a time, a run of up to `ChainCoreConfig.connectBatch` blocks,
+    /// each the previous one's child.
+    public internal(set) var connecting: [String] = []
     /// Blocks whose body could not be obtained, or whose connect found its
     /// content unresolvable, waiting before their bodies are asked for
     /// again. Each stays wanted: its wait ends early when the content may
@@ -27,11 +30,12 @@ public struct BodyPipeline: Sendable, Equatable {
     /// Requested bodies woken while their fetch ran: one that ends
     /// unavailable is asked for again at once, as the wake would have.
     var woken: Set<String> = []
-    /// Child-level blocks whose connect lacked a parent fact (decision 21:
-    /// a parent state this node has not executed), with the fact. Never
-    /// invalid and never timed: each is connected again once its parent
-    /// level holds that fact (`ChainEvent.parentFactsPresent`). Their bodies stay
-    /// arrived.
+    /// Child-level blocks that lack a parent fact (decision 21: a parent
+    /// state this node has not executed), with the fact: found from their
+    /// headers before a connect is issued (`readiness`), or from a connect
+    /// that found it lacking. Never invalid and never timed: each is
+    /// connected once its parent level holds that fact
+    /// (`ChainEvent.parentFactsPresent`). Their bodies stay arrived.
     public internal(set) var awaitingParent: [String: CrossChainEvidenceRequirement] = [:]
     public struct Parked: Sendable, Equatable {
         public let notBefore: Int64
@@ -79,7 +83,7 @@ extension ChainCore {
         let first = prefix.hash.isEmpty ? 0 : prefix.height + 1
         return [first, first + 1].allSatisfy { height in
             guard let cid = tree.canonicalBlockHash(atHeight: height), bodies.parked[cid] == nil else { return false }
-            return bodies.connecting == cid || (bodies.arrived.contains(cid) && bodies.awaitingParent[cid] == nil)
+            return bodies.connecting.contains(cid) || (bodies.arrived.contains(cid) && bodies.awaitingParent[cid] == nil)
         }
     }
 
@@ -223,6 +227,14 @@ extension ChainCore {
         bodies.parked[cid] = BodyPipeline.Parked(notBefore: now + wait, attempts: attempts)
     }
 
+    /// Apply a connect job's verdicts, in its blocks' order. A job stops at
+    /// the first block without a valid verdict, so the blocks after it are
+    /// not reported: they stay arrived and are scheduled again.
+    mutating func connected(_ results: [ConnectResult], _ turn: inout Turn) {
+        bodies.connecting = []
+        for result in results { connected(result.verdict, transactions: result.transactions, &turn) }
+    }
+
     /// Apply a connect verdict. Execution depends only on content, so a
     /// verdict is never stale: a valid block joins the executed set, its
     /// post-state persisted with its validation; a block execution proved invalid is excluded while its
@@ -233,7 +245,6 @@ extension ChainCore {
     /// after a backoff.
     mutating func connected(_ verdict: ConnectVerdict, transactions: [String], _ turn: inout Turn) {
         let cid = verdict.blockHash
-        if bodies.connecting == cid { bodies.connecting = nil }
         switch verdict.retryFailure {
         case .crossChainEvidenceRequired(let fact)?:
             switch fact {
@@ -281,8 +292,7 @@ extension ChainCore {
 
     /// Ask the content layer for every body in the window not yet asked for
     /// (a parked one once its wait is over), cancel bodies the window
-    /// left, and start the next connect: the first window block whose body
-    /// is here and whose parent is executed.
+    /// left, and start the next connect job (`nextBatch`).
     mutating func scheduleBodies(prefix: (hash: String, height: UInt64), _ turn: inout Turn) {
         let window = bodyWindow(after: prefix).blocks
         let wanted = Set(window)
@@ -300,11 +310,80 @@ extension ChainCore {
             bodies.requested.insert(cid)
             turn.effects.append(.fetchBody(cid: cid))
         }
-        guard bodies.connecting == nil, let next = window.first(where: {
-            bodies.arrived.contains($0) && bodies.awaitingParent[$0] == nil
-                && tree.parent(of: $0).map(tree.hasExecutedAncestry(blockHash:)) ?? true
-        }), let job = tree.connectJob(for: next) else { return }
-        bodies.connecting = next
-        turn.effects.append(.connect(job))
+        readiness(parent: parentTree.map { ParentLevelFacts(tree: $0) })
+        guard bodies.connecting.isEmpty else { return }
+        let batch = nextBatch(window)
+        let jobs = batch.compactMap { tree.connectJob(for: $0) }
+        guard !jobs.isEmpty, jobs.count == batch.count else { return }
+        bodies.connecting = batch
+        turn.effects.append(.connect(jobs))
+    }
+
+    /// The next connect job's blocks, in parent order: the first window
+    /// block that is ready (its body here, its parent executed, its parent
+    /// fact held), then, while the job has room, the window block on the
+    /// previous one that is ready once that one executes. The window lists
+    /// a fork's children heaviest first, so at a fork the heaviest ready
+    /// child runs first. A block that lacks its parent fact waits in
+    /// `awaitingParent` and holds back nothing else: no connect is issued
+    /// for it until its parent level holds the fact.
+    func nextBatch(_ window: [String]) -> [String] {
+        let limit = max(config.connectBatch, 1)
+        func ready(_ cid: String) -> Bool {
+            bodies.arrived.contains(cid) && bodies.awaitingParent[cid] == nil
+        }
+        guard let first = window.first(where: {
+            ready($0) && tree.parent(of: $0).map(tree.hasExecutedAncestry(blockHash:)) ?? true
+        }) else { return [] }
+        var next: [String: String] = [:]
+        for cid in window where ready(cid) {
+            if let parent = tree.parent(of: cid), next[parent] == nil { next[parent] = cid }
+        }
+        var batch = [first]
+        while batch.count < limit, let child = next[batch[batch.count - 1]] { batch.append(child) }
+        return batch
+    }
+
+    /// Record, for each arrived child-level block, the parent fact it
+    /// lacks (`awaitingParent`), read from headers: its `parentState`, and
+    /// the parent level carrying it forward from its predecessor's (spec
+    /// §5.3 step 6, the continuity its connect checks). A level with no
+    /// `parent` facts this step (a step that was not handed its parent
+    /// level) takes every such block as lacking, and the host wakes it with
+    /// its parent's facts (`NodeCore.wakeAnswered`).
+    mutating func readiness(parent: ParentLevelFacts?) {
+        guard !isRoot else { return }
+        for cid in bodies.arrived {
+            guard let fact = parentFact(of: cid) else { continue }
+            if let parent {
+                bodies.awaitingParent[cid] = parent.holds(fact) ? nil : fact
+            } else if bodies.awaitingParent[cid] == nil {
+                bodies.awaitingParent[cid] = fact
+            }
+        }
+    }
+
+    /// The parent fact a child-level block's execution needs, from its
+    /// header and its predecessor's; nil when it needs none (it names no
+    /// parent state, which its connect judges) or its header is not held.
+    func parentFact(of cid: String) -> CrossChainEvidenceRequirement? {
+        guard let to = tree.headerSnapshot(of: cid)?.parentStateCID else { return nil }
+        let empty = LatticeState.emptyHeader.rawCID
+        guard to != empty else { return nil }
+        let from = tree.parent(of: cid).flatMap { tree.headerSnapshot(of: $0)?.parentStateCID } ?? empty
+        return .parentStateContinuity(parentPath: Array(chainPath.dropLast()), fromStateCID: from, toStateCID: to)
+    }
+}
+
+/// One block of a connect job: its verdict, and the CIDs of the
+/// transactions it carries (the job read them from the body it executed):
+/// what the act-on chain confirms when it enters the block.
+public struct ConnectResult: Sendable {
+    public let verdict: ConnectVerdict
+    public let transactions: [String]
+
+    public init(_ verdict: ConnectVerdict, transactions: [String] = []) {
+        self.verdict = verdict
+        self.transactions = transactions
     }
 }

@@ -222,7 +222,7 @@ public struct Simulator {
         /// The content layer delivers a body Volume to a core.
         case bodyArrived(String, incarnation: Int)
         /// A connect job to run, then report.
-        case runConnect(ConnectJob, incarnation: Int)
+        case runConnect([ConnectJob], incarnation: Int)
         /// Arm a crash for the core's next persist.
         case crash(CrashMode)
         /// The session ends: both ends learn it, and reconnect later.
@@ -462,12 +462,12 @@ public struct Simulator {
         case .runConnect(let job, let incarnation):
             guard let content = cores[node].flatMap({ $0.incarnation == incarnation ? $0.content : nil }) else { return }
             report.connects += 1
-            let verdict = await ChainTree.connect(
+            let (verdicts, _) = await ConnectRun.run(
                 job,
                 fetcher: ContentLayer(own: content, providers: cores.filter { $0.key != node }.sorted { $0.key < $1.key }.map(\.value.content)),
-                validationContext: ValidationContext(nowMilliseconds: now)
+                validationContext: { [now] in ValidationContext(nowMilliseconds: now) }
             )
-            try await step(node, .connected(verdict))
+            try await step(node, .connected(verdicts.map { ConnectResult($0) }))
         case .crash(let mode):
             armedCrash[node] = mode
         case .scriptTick:
