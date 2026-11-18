@@ -80,7 +80,7 @@ final class WithheldBodiesLivenessTests: XCTestCase {
                 switch queue.removeFirst() {
                 case .persist(let batch):
                     for (_, level) in batch.levels {
-                        facts[node] += level.facts
+                        facts[node] += level.facts + level.executed
                         for state in level.states { try await storeMaterialized(state, in: contents[node]) }
                     }
                 case .level(_, .fetchBody(let cid)):

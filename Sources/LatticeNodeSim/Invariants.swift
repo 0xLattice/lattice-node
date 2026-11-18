@@ -18,6 +18,9 @@ public struct SimStore: Sendable {
     public private(set) var cursors: [String: StreamCursor] = [:]
     /// Header content a torn write kept without its facts: held, not weighed.
     public private(set) var torn: Set<String> = []
+    /// What executions decided since the last flush, held in memory by the
+    /// shell and lost with the process.
+    public private(set) var unflushed: [BlockImportBatch] = []
 
     /// An empty store, for a level that starts from a bootstrap batch.
     init() {}
@@ -29,6 +32,8 @@ public struct SimStore: Sendable {
         ))
     }
 
+    /// One step's write: what it weighed is durable at once, what its
+    /// executions decided waits for the flush.
     public mutating func append(_ batch: ChainBatch) {
         for header in batch.headers {
             torn.remove(header.blockCID)
@@ -36,9 +41,46 @@ public struct SimStore: Sendable {
             ownWork[header.blockCID] = ChainTree.rootWork(of: header.block)
             childIndexes[header.block.children.rawCID] = header.children
         }
-        facts += batch.facts
+        record(batch.facts)
+        unflushed += batch.executed
         cursors.merge(batch.cursors) { $1 }
-        for fact in batch.facts.flatMap(\.facts) {
+    }
+
+    /// Every verdict held becomes durable, in the order the tree applied
+    /// them; returns them. Of each, the store keeps what the node's does
+    /// (`NodeStore.stageNodeFacts`): its validation or its exclusion, not
+    /// the block and work facts an execution states again, which the step
+    /// that weighed them wrote.
+    @discardableResult
+    public mutating func flush() -> [BlockImportBatch] {
+        let flushed = unflushed
+        record(flushed.compactMap(Self.verdict(of:)))
+        unflushed = []
+        return flushed
+    }
+
+    /// An execution's batch as the node stores it: a valid one as its
+    /// validation alone, an exclusion's as it is (Lattice builds it of the
+    /// exclusion alone), and one with neither as no row at all.
+    static func verdict(of batch: BlockImportBatch) -> BlockImportBatch? {
+        for fact in batch.facts {
+            switch fact {
+            case .validation(let validation): return .validation(blockHash: validation.blockHash)
+            case .exclusion: return batch
+            case .block, .work: continue
+            }
+        }
+        return nil
+    }
+
+    /// A crash: what was held in memory is gone.
+    public mutating func loseUnflushed() {
+        unflushed = []
+    }
+
+    private mutating func record(_ batches: [BlockImportBatch]) {
+        facts += batches
+        for fact in batches.flatMap(\.facts) {
             switch fact {
             case .block(let block): blockFacts.insert(block.blockHash)
             case .validation(let validation): validations.insert(validation.blockHash)

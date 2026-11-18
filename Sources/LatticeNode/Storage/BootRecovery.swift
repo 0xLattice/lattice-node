@@ -12,7 +12,6 @@ enum BootRecovery {
     struct Result {
         let store: NodeStore
         let broker: DiskBroker
-        let localFetcher: CoalescingFetcher
         let retentionScope: String
         let durableMempoolOwner: String
         let liveMempoolOwner: String
@@ -46,7 +45,6 @@ enum BootRecovery {
         return Result(
             store: stores.store,
             broker: stores.broker,
-            localFetcher: stores.localFetcher,
             retentionScope: stores.retentionScope,
             durableMempoolOwner: stores.durableMempoolOwner,
             liveMempoolOwner: stores.liveMempoolOwner,

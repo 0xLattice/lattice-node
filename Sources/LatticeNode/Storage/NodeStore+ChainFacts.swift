@@ -2,11 +2,15 @@ import Foundation
 import Lattice
 import LatticeNodeCore
 
-/// One level's durable part of a node step. `NodeStore` commits every item in
+/// One level's durable part of a flush. `NodeStore` commits every item in
 /// the enclosing array in one SQLite transaction.
 struct NodeFactBatch: Sendable {
     let path: ChainPath
     let facts: [BlockImportBatch]
+    /// What executions decided (`ChainBatch.executed`): each batch re-states
+    /// its block's weighed facts (`BlockImport.admissionFacts`), so only its
+    /// verdict is written, and on `recent` its block's state diff.
+    var executed: [BlockImportBatch] = []
     var headers: [StoredHeader] = []
     var proofs: [StoredProof] = []
     let cursors: [String: StreamCursor]
@@ -16,15 +20,17 @@ struct NodeFactBatch: Sendable {
 }
 
 extension NodeStore {
-    /// Commit one whole node step across all affected levels. Content is
-    /// durable before this runs; every header, proof, fact, normalized index
-    /// row, and cursor for the step becomes visible atomically.
+    /// Commit a flush across all affected levels. Content is durable before
+    /// this runs; every header, proof, fact, index row, and cursor of the
+    /// flush becomes durable atomically. Each batch that writes a fact takes
+    /// the level's next seq: the store holds the facts in the order the
+    /// tree applied them.
     func stageNodeFacts(_ levels: [NodeFactBatch], logID: String) throws {
         struct PreparedRow {
-            let facts: [(id: Data, payload: Data)]
-            let blocks: [AcceptedBlockRecord]
-            let validated: [String]
-            let diffs: [(block: String, height: UInt64, diff: Data)]
+            var facts: [Data] = []
+            var blocks: [AcceptedBlockRecord] = []
+            var validated: [String] = []
+            var diffs: [(block: String, height: UInt64, diff: Data)] = []
         }
         struct PreparedLevel {
             let path: String
@@ -46,28 +52,37 @@ extension NodeStore {
             }
             var rows: [PreparedRow] = []
             for batch in level.facts {
-                let validated = batch.facts.compactMap { fact -> String? in
-                    guard case .validation(let validation) = fact else { return nil }
-                    return validation.blockHash
-                }
-                var diffs: [(block: String, height: UInt64, diff: Data)] = []
-                let facts = try batch.facts.map { fact -> (id: Data, payload: Data) in
+                var row = PreparedRow(blocks: try Self.acceptedBlocks(in: batch))
+                for fact in batch.facts {
+                    if case .validation(let validation) = fact { row.validated.append(validation.blockHash) }
                     guard case .block(let block) = fact else {
-                        return (try Self.encode(fact.id), try Self.encode(fact))
+                        row.facts.append(try Self.encode(fact))
+                        continue
                     }
-                    // An executed block's diff is in the batch that
-                    // validates it.
-                    if level.keepsStateDiffs, validated.contains(block.blockHash) {
-                        diffs.append((block.blockHash, block.blockHeight, try Self.encode(block.stateDiff)))
-                    }
-                    return (try Self.encode(fact.id), try Self.encode(ChainFact.block(Self.withoutStateDiff(block))))
+                    row.facts.append(try Self.encode(ChainFact.block(Self.withoutStateDiff(block))))
                 }
-                rows.append(PreparedRow(
-                    facts: facts,
-                    blocks: try Self.acceptedBlocks(in: batch),
-                    validated: validated,
-                    diffs: diffs
-                ))
+                rows.append(row)
+            }
+            for batch in level.executed {
+                var row = PreparedRow()
+                for fact in batch.facts {
+                    switch fact {
+                    case .validation(let validation):
+                        row.facts.append(try Self.encode(fact))
+                        row.validated.append(validation.blockHash)
+                    case .exclusion:
+                        row.facts.append(try Self.encode(fact))
+                    case .block, .work:
+                        break
+                    }
+                }
+                // An executed block's diff is in the batch that validates it.
+                if level.keepsStateDiffs {
+                    for case .block(let block) in batch.facts where row.validated.contains(block.blockHash) {
+                        row.diffs.append((block.blockHash, block.blockHeight, try Self.encode(block.stateDiff)))
+                    }
+                }
+                rows.append(row)
             }
             return PreparedLevel(
                 path: level.path.joined(separator: "/"),
@@ -88,40 +103,16 @@ extension NodeStore {
             }
             for level in prepared {
                 try Self.writeEvidence(level.evidence, at: level.path, in: database)
-                // Each batch that adds a fact takes the level's next seq; a
-                // fact already held keeps the seq it was first staged in.
                 var seq = try Self.lastSeq(at: level.path, in: database)
                 for row in level.rows {
-                    var added = false
-                    for (ord, fact) in row.facts.enumerated() {
-                        if try database.execute(
-                            "INSERT INTO admission_facts (chain_path, seq, ord, fact_id, payload) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (chain_path, fact_id) DO NOTHING",
-                            params: [
-                                .text(level.path), .int(seq + 1), .int(Int64(ord)),
-                                .blob(fact.id), .blob(fact.payload),
-                            ]
-                        ) == 1 {
-                            added = true
-                            continue
-                        }
-                        guard let existing = try database.row(
-                            ImportFactRow.self,
-                            "SELECT payload FROM admission_facts WHERE chain_path = ?1 AND fact_id = ?2",
-                            params: [.text(level.path), .blob(fact.id)]
-                        ) else {
-                            throw NodeStoreError.corrupt("an admission fact was neither stored nor held")
-                        }
-                        guard try existing.payload == fact.payload else {
-                            throw NodeStoreError.conflictingImportFact
-                        }
+                    if !row.facts.isEmpty { seq += 1 }
+                    for (ord, payload) in row.facts.enumerated() {
+                        try database.execute(
+                            "INSERT INTO admission_facts (chain_path, seq, ord, payload) VALUES (?1, ?2, ?3, ?4)",
+                            params: [.text(level.path), .int(seq), .int(Int64(ord)), .blob(payload)]
+                        )
                     }
-                    if added { seq += 1 }
-                    try persistAcceptedBlockRows(
-                        row.blocks,
-                        at: level.path,
-                        admissionSequence: max(seq, 1),
-                        status: .header
-                    )
+                    try persistAcceptedBlockRows(row.blocks, at: level.path, status: .header)
                     for diff in row.diffs {
                         try database.execute(
                             "INSERT OR REPLACE INTO state_diffs (chain_path, block_cid, height, diff) VALUES (?1, ?2, ?3, ?4)",

@@ -68,7 +68,7 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         Damage(
             table: "admission_facts", column: "payload",
             description: "malformed JSON in one fact",
-            sql: ["UPDATE admission_facts SET payload = X'00' WHERE fact_id = (SELECT MIN(fact_id) FROM admission_facts)"]
+            sql: ["UPDATE admission_facts SET payload = X'00' WHERE seq = (SELECT MAX(seq) FROM admission_facts) AND ord = 0"]
         ),
     ]
 
@@ -80,9 +80,9 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             sql: ["UPDATE accepted_blocks SET parent_cid = '' WHERE block_cid = (SELECT MIN(block_cid) FROM accepted_blocks WHERE parent_cid IS NOT NULL)"]
         ),
         Damage(
-            table: "accepted_blocks", column: "admission_seq",
-            description: "zero admission sequence",
-            sql: ["UPDATE accepted_blocks SET admission_seq = 0 WHERE block_cid = (SELECT MIN(block_cid) FROM accepted_blocks)"]
+            table: "accepted_blocks", column: "post_state",
+            description: "empty post-state CID",
+            sql: ["UPDATE accepted_blocks SET post_state = '' WHERE block_cid = (SELECT MIN(block_cid) FROM accepted_blocks)"]
         ),
         Damage(
             table: "accepted_blocks", column: "validated",

@@ -137,14 +137,16 @@ public struct ChainReads: Sendable {
     /// An executed block's own node, for reading the state it commits to:
     /// held here even when the block's body is not. A block this node has
     /// only weighed commits to a state nobody here has checked, and is not
-    /// answered for.
+    /// answered for. Executed: on the act-on chain, every block of which
+    /// is, or marked so in the store (one off it, once flushed).
     func blockNode(cid: String) async -> Block? {
-        guard await storage.hasExecutedBlock(cid, at: chainPath),
-              let data = await storage.blockNodeBytes(cid),
-              data.count <= Self.maximumReadResponseBytes else {
+        guard let data = await storage.blockNodeBytes(cid),
+              data.count <= Self.maximumReadResponseBytes,
+              let block = _contentBoundBlock(cid: cid, data: data) else {
             return nil
         }
-        return _contentBoundBlock(cid: cid, data: data)
+        if await canonicalCID(block.height) == cid { return block }
+        return await storage.hasExecutedBlock(cid, at: chainPath) ? block : nil
     }
 
     /// Bounded public read: a decoded, content-verified transaction. Resolving

@@ -38,7 +38,10 @@ final class ChildLevelRestartTests: XCTestCase {
         )
         XCTAssertTrue(restored.levels[alpha]?.tree.contains(blockHash: genesisCID) ?? false)
         XCTAssertFalse(restored.levels[alpha]?.tree.isExecuted(blockHash: genesisCID) ?? true)
-        let fact = try await reopened.store.blockFact(genesisCID, at: alpha)
+        let fact = try await reopened.store.storedFacts(at: alpha).facts.lazy.compactMap { fact -> ChainBlockFact? in
+            guard case .block(let block) = fact, block.blockHash == genesisCID else { return nil }
+            return block
+        }.first
         let spec = try XCTUnwrap(fact?.specCID)
         let volume = await reopened.volume(spec)
         XCTAssertNotNil(volume, "the child genesis's spec \(spec) was swept")

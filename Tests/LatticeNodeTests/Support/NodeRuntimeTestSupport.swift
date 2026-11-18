@@ -44,6 +44,12 @@ extension NodeRuntime {
         let children = block.children.node?.entries.values.compactMap(\.node) ?? []
         return children.map(hardestTarget).reduce(block.target, min)
     }
+
+    /// A maintenance pass, as the timer runs one: what executions decided
+    /// is flushed, and what that made safe to let go of goes.
+    func maintain() {
+        inputs.yield(.maintenance)
+    }
 }
 
 enum NetworkTransportTestPorts {

@@ -8,29 +8,8 @@ import cashew
 struct AcceptedBlockRecord: Hashable {
     let blockCID: String
     let parentCID: String?
-}
-
-private struct PersistedAcceptedBlock: Hashable {
-    let chainPath: String
-    let blockCID: String
-    let parentCID: String?
-    let admissionSequence: Int64
-
-    init(chainPath: String, blockCID: String, parentCID: String?, admissionSequence: Int64) {
-        self.chainPath = chainPath
-        self.blockCID = blockCID
-        self.parentCID = parentCID
-        self.admissionSequence = admissionSequence
-    }
-
-    init(_ row: AcceptedBlockRow) throws {
-        self.init(
-            chainPath: try row.chainPath,
-            blockCID: try row.blockCID,
-            parentCID: try row.parentCID,
-            admissionSequence: try row.admissionSequence
-        )
-    }
+    let height: UInt64
+    let postStateCID: String
 }
 
 /// `accepted_blocks`: one accepted block's index row. `block_cid` is any
@@ -56,7 +35,8 @@ struct AcceptedBlockRow: NodeStoreRecord {
             return parent
         }
     }
-    var admissionSequence: Int64 { get throws { try row.positiveInt("admission_seq") } }
+    var height: UInt64 { get throws { try row.uint64("height") } }
+    var postStateCID: String { get throws { try row.nonEmptyText("post_state") } }
     /// The execution tier; an integer outside `BlockStatus` is malformed.
     var status: BlockStatus {
         get throws {
@@ -122,6 +102,19 @@ extension NodeStore {
         ).isEmpty
     }
 
+    /// A block as the index holds it: its parent, height and post-state.
+    func indexedBlock(_ blockCID: String, at chainPath: [String]) throws -> AcceptedBlockRecord? {
+        guard let row = try database.row(
+            AcceptedBlockRow.self,
+            "SELECT block_cid, parent_cid, height, post_state FROM accepted_blocks WHERE chain_path = ?1 AND block_cid = ?2",
+            params: [.text(chainPath.joined(separator: "/")), .text(blockCID)]
+        ) else { return nil }
+        return AcceptedBlockRecord(
+            blockCID: try row.blockCID, parentCID: try row.parentCID,
+            height: try row.height, postStateCID: try row.postStateCID
+        )
+    }
+
     static func acceptedBlocks(
         in batch: BlockImportBatch
     ) throws -> [AcceptedBlockRecord] {
@@ -130,7 +123,9 @@ extension NodeStore {
             guard case .block(let block) = fact else { continue }
             let record = AcceptedBlockRecord(
                 blockCID: block.blockHash,
-                parentCID: block.parentBlockHash
+                parentCID: block.parentBlockHash,
+                height: block.blockHeight,
+                postStateCID: block.postStateCID
             )
             if let existing = blocks[record.blockCID], existing != record {
                 throw NodeStoreError.conflictingImportFact
@@ -140,34 +135,23 @@ extension NodeStore {
         return blocks.values.sorted { $0.blockCID < $1.blockCID }
     }
 
-    /// Owner: ImportJournal.stage — caller holds the transaction.
+    /// Owner: `stageNodeFacts` — caller holds the transaction. A block's
+    /// CID fixes its parent, height and post-state, so a row held is the
+    /// same row.
     func persistAcceptedBlockRows(
         _ blocks: [AcceptedBlockRecord],
         at chainPath: String,
-        admissionSequence: Int64,
         status: BlockStatus
     ) throws {
         for block in blocks {
-            let row = try database.row(
-                AcceptedBlockRow.self,
-                "SELECT chain_path, block_cid, parent_cid, admission_seq FROM accepted_blocks WHERE chain_path = ?1 AND block_cid = ?2",
-                params: [.text(chainPath), .text(block.blockCID)]
-            )
-            if let row {
-                let persisted = try PersistedAcceptedBlock(row)
-                guard persisted.parentCID == block.parentCID,
-                      persisted.admissionSequence <= admissionSequence else {
-                    throw NodeStoreError.corrupt("conflicting accepted-block index")
-                }
-                continue
-            }
             try database.execute(
-                "INSERT INTO accepted_blocks (chain_path, block_cid, parent_cid, admission_seq, validated) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT OR IGNORE INTO accepted_blocks (chain_path, block_cid, parent_cid, height, post_state, validated) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params: [
                     .text(chainPath),
                     .text(block.blockCID),
                     block.parentCID.map(NodeSQLiteValue.text) ?? .null,
-                    .int(admissionSequence),
+                    .int(Int64(clamping: block.height)),
+                    .text(block.postStateCID),
                     status.sqlValue,
                 ]
             )

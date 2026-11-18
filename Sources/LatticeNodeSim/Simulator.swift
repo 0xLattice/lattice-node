@@ -53,8 +53,12 @@ public struct SimConfig: Sendable {
     public var outage: (core: Int, from: Int64, milliseconds: Int64)?
     /// Simulated time after the last release before the run stops.
     public var settle: Int64 = 60_000
-    /// Replay the store and compare trees every this many persists per node.
+    /// Replay the store and compare trees every this many persists per node,
+    /// after a flush.
     public var replayInterval = 32
+    /// Flush a node's held verdicts once it holds this many executions, as
+    /// the shell does at its count.
+    public var flushInterval = 3
     /// A script that relays a block whose body fails execution.
     public var invalidBody = false
     /// The operator's body window.
@@ -196,7 +200,14 @@ public struct Simulator {
         }
     }
 
-    /// DST 7: the store alone rebuilds an equal tree.
+    /// The shell's flush: what executions decided becomes durable, each
+    /// executed block with its whole post-state stored.
+    func flush(_ name: String, _ node: inout CoreNode) async throws {
+        let flushed = node.store.flush()
+        try await Invariants.checkStatesStored(node: name, flushed: flushed, store: node.store, content: node.content)
+    }
+
+    /// DST 7: the store alone, once flushed, rebuilds an equal tree.
     func checkReplay(_ name: String, _ node: CoreNode, _ digest: TreeDigest) throws {
         let restored = try ChainCore.restore(
             StoredFacts(node.store.facts),
@@ -380,7 +391,10 @@ public struct Simulator {
             try await deliver(next)
         }
         try checkQuietPoint()
-        for (name, node) in cores.sorted(by: { $0.key < $1.key }) {
+        for name in cores.keys.sorted() {
+            guard var node = cores[name] else { continue }
+            try await flush(name, &node)
+            cores[name] = node
             try checkReplay(name, node, node.digest)
             report.coreTips[name] = node.core.tree.canonicalTip
             report.coreHeld[name] = Set(node.digest.blocks.keys)
@@ -571,7 +585,8 @@ public struct Simulator {
                     batch = ChainBatch(
                         headers: batch.headers,
                         states: batch.states,
-                        facts: batch.facts.filter { $0 != dropped }
+                        facts: batch.facts.filter { $0 != dropped },
+                        executed: batch.executed
                     )
                 }
                 // Content first: the post-states are stored before the facts
@@ -580,7 +595,10 @@ public struct Simulator {
                     try await storeMaterialized(state, in: node.content)
                 }
                 node.store.append(batch)
-                try await Invariants.checkStatesStored(node: name, batch: batch, store: node.store, content: node.content)
+                let invalid = batch.executed.flatMap(\.facts).contains { if case .exclusion = $0 { true } else { false } }
+                if invalid || node.store.unflushed.count >= config.flushInterval {
+                    try await flush(name, &node)
+                }
                 persisted = true
             case .publish(let snapshot):
                 // DST 3: durability precedes visibility.
@@ -706,6 +724,7 @@ public struct Simulator {
         if persisted && revisionChanged {
             node.persists += 1
             if node.persists % config.replayInterval == 0 {
+                try await flush(name, &node)
                 try checkReplay(name, node, digest)
             }
         }

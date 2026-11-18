@@ -250,7 +250,7 @@ extension ChainCore {
         switch tree.applyConnect(verdict) {
         case .applied(let update):
             if let state = update.materializedPostState { turn.states.append(state) }
-            turn.facts += update.batches
+            turn.executed += update.batches
             weighed += update.weighed
             if !update.excluded {
                 executedTransactions[cid] = transactions

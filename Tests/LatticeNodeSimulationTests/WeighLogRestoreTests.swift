@@ -27,7 +27,7 @@ final class WeighLogRestoreTests: XCTestCase {
         for grind in world.grinds {
             try await run(&host, .mined(grind.mined), world) { batch in
                 for (path, level) in batch.levels {
-                    facts[path, default: []] += level.facts
+                    facts[path, default: []] += level.facts + level.executed
                     specs[path, default: []] += level.headers.compactMap(\.spec)
                 }
             }

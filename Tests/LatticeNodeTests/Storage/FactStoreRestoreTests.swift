@@ -31,14 +31,14 @@ final class FactStoreRestoreTests: XCTestCase {
                 for batch in try await run(&host, .mined(grind.mined), world) {
                     try await store.stageNodeFacts(batch.levels.map { level in
                         NodeFactBatch(
-                            path: level.path, facts: level.batch.facts, headers: level.batch.headers,
+                            path: level.path, facts: level.batch.facts, executed: level.batch.executed, headers: level.batch.headers,
                             proofs: level.batch.proofs, cursors: level.batch.cursors
                         )
                     }, logID: "log")
                     for level in batch.levels {
                         specs[level.path, default: []] += level.batch.headers.compactMap(\.spec)
                         proofs[level.path, default: []] += level.batch.proofs
-                        staged[level.path, default: 0] += level.batch.facts.flatMap(\.facts).count
+                        staged[level.path, default: 0] += (level.batch.facts + level.batch.executed).flatMap(\.facts).count
                     }
                 }
             }

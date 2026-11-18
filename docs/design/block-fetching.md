@@ -76,8 +76,9 @@ ready and is retried when the co-hosted parent advances.
 5. Worker tasks never mutate consensus state. Their results return as events
    to the serial runtime loop.
 6. Content and header evidence are durable before the tree-wide fact
-   transaction that names them, and state is published only after that
-   transaction commits.
+   transaction that names them, and a block is published only after that
+   transaction commits. What its execution decides is held in memory and
+   flushed in batches; after a crash it is executed again.
 
 Child work proof acquisition is a separate concern. A child header carries
 bounded inline `ChildBlockProof` values; the durable local evidence index holds

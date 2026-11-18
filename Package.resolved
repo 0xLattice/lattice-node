@@ -1,5 +1,5 @@
 {
-  "originHash" : "45696e51e10965da77f789cb85a45814a7ecf8c4dd2cf99a3335857d920b275a",
+  "originHash" : "453a00df5c5cc8f3c2a393f8000ac57480fec9f43dee100d2fea695eb64b9d8f",
   "pins" : [
     {
       "identity" : "arraytrie",
@@ -375,8 +375,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/0xLattice/VolumeBroker.git",
       "state" : {
-        "revision" : "1a275ffd3e156e9e394ee3ab1f0c8bc4debef129",
-        "version" : "10.1.3"
+        "revision" : "5da8b32864d4562e0bc79e03203b2728a684424c",
+        "version" : "10.3.1"
       }
     },
     {

@@ -91,9 +91,9 @@ final class NodeStoreBootTests: XCTestCase {
     }
 
     /// Boot and a hot-hosted start read one level's facts in the order it
-    /// took them, as one primary-key range with no sort: each batch's new
-    /// facts in place, a fact staged again keeping its first seq, and a
-    /// block fact staged again with a new fact read at its first place.
+    /// took them, as one primary-key range with no sort: each batch's facts
+    /// in place, and of an execution's batch only its verdict, at its own
+    /// seq.
     func testALevelsFactsAreReadInStagedOrderByTheKey() async throws {
         let path = temporaryDirectory(create: true).appendingPathComponent("state.db")
         let store = try store(path)
@@ -104,14 +104,16 @@ final class NodeStoreBootTests: XCTestCase {
             try await store.stageChainFacts([blockBatch("block-\(index)")], logID: "log", at: level)
             if level == alpha { expected += blockBatch("block-\(index)").facts }
         }
-        // Staged again with a new fact: only the new fact takes a new seq.
+        // An execution re-states the block's facts: only its validation is
+        // written, at a new seq.
         let validation = ChainFact.validation(ChainValidationFact(blockHash: "block-1"))
-        try await store.stageChainFacts(
-            [BlockImportBatch(facts: blockBatch("block-1").facts + [validation])], logID: "log", at: alpha
-        )
+        try await store.stageNodeFacts([
+            NodeFactBatch(
+                path: alpha, facts: [],
+                executed: [BlockImportBatch(facts: blockBatch("block-1").facts + [validation])], cursors: [:]
+            ),
+        ], logID: "log")
         expected.append(validation)
-        // Staged again whole: no new seq.
-        try await store.stageChainFacts([blockBatch("block-3")], logID: "log", at: alpha)
 
         let database = try NodeSQLite(path: path.path)
         _ = try database.execute("ANALYZE")

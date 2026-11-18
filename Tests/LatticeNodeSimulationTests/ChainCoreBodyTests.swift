@@ -70,7 +70,7 @@ final class ChainCoreBodyTests: XCTestCase {
 
     private func persisted(_ effects: [ChainEffect]) -> [BlockImportBatch] {
         effects.flatMap { effect -> [BlockImportBatch] in
-            if case .persist(let batch) = effect { return batch.facts }
+            if case .persist(let batch) = effect { return batch.facts + batch.executed }
             return []
         }
     }
@@ -91,7 +91,7 @@ final class ChainCoreBodyTests: XCTestCase {
 
     private func facts(_ effects: [ChainEffect]) -> [ChainFact] {
         effects.flatMap { effect -> [ChainFact] in
-            if case .persist(let batch) = effect { return batch.facts.flatMap(\.facts) }
+            if case .persist(let batch) = effect { return (batch.facts + batch.executed).flatMap(\.facts) }
             return []
         }
     }

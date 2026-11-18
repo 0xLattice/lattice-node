@@ -430,4 +430,79 @@ final class ChainCoreMiningTests: XCTestCase {
             if case .level(_, .workSubmitted(4, .duplicate)) = $0 { true } else { false }
         })
     }
+
+    private func restored(nonce: UInt64) throws -> ChainEvent {
+        .mining(.transactionReceived(
+            try signed(key, [AccountAction(owner: address(key), delta: -2)], nonce: nonce),
+            origin: .restored(addedAt: 1)
+        ))
+    }
+
+    private func preflights(_ effects: [ChainEffect]) -> [PreflightJob] {
+        mining(effects).compactMap { if case .preflight(let job) = $0 { job } else { nil } }
+    }
+
+    /// A start holds the journal's rows while a block it executes again from
+    /// its own bodies is in the window: they are judged on the tip those
+    /// reach, not on the one the crash left (Bitcoin's `LoadMempool` after
+    /// `ActivateBestChain`).
+    func testTheJournalWaitsForWhatTheStartExecutesAgain() async throws {
+        var core = weighed(Array(chain.prefix(3)))
+        _ = core.step(.replay([chain[0].cid, chain[1].cid]), now: Self.now)
+        XCTAssertTrue(core.step(try restored(nonce: 0), now: Self.now).isEmpty)
+        let first = try await execute([chain[0]], world: world, content: content, on: &core)
+        XCTAssertTrue(preflights(first).isEmpty)
+        XCTAssertEqual(core.mining.pendingAdmissions, 0, "held while its second block is in the window")
+        let second = try await execute([chain[1]], world: world, content: content, on: &core)
+        XCTAssertEqual(preflights(second).map(\.tipCID), [chain[1].cid])
+        // Held no longer: a row now is judged at once.
+        XCTAssertEqual(preflights(core.step(try restored(nonce: 1), now: Self.now)).count, 1)
+    }
+
+    /// A block the start would execute again but cannot from what the node
+    /// holds (its body was not to be had) does not hold the journal: the
+    /// rows are judged on the tip the start reached, and the block's
+    /// transactions go back to the pool (Bitcoin's `ActivateBestChain`
+    /// stops at a block whose data it lacks, then `LoadMempool` runs).
+    func testABlockTheStartCannotExecuteDoesNotHoldTheJournal() async throws {
+        var core = weighed(Array(chain.prefix(2)))
+        _ = core.step(.replay([chain[0].cid]), now: Self.now)
+        XCTAssertTrue(core.step(try restored(nonce: 0), now: Self.now).isEmpty)
+        let effects = core.step(.bodyUnavailable(cid: chain[0].cid), now: Self.now)
+        XCTAssertEqual(preflights(effects).map(\.tipCID), [world.genesis.cid])
+        XCTAssertTrue(mining(effects).contains {
+            if case .returnTransactions(let left, _) = $0 { left == [chain[0].cid] } else { false }
+        }, "\(mining(effects))")
+    }
+
+    /// A block the start held but the window left (the crash took it off
+    /// the chain) gives its transactions back once the rows are judged, as
+    /// a reorg's do (Bitcoin's `MaybeUpdateMempoolForReorg`, geth's
+    /// `reinject`).
+    func testABlockTheStartLeftGivesItsTransactionsBack() async throws {
+        let time = World.genesisTime + World.blockInterval
+        let side = try await World.extend(world.genesis, timestamp: time + 1, nonce: 0, in: content)
+        let heavy = try await World.extend(world.genesis, timestamp: time, nonce: 0, in: content)
+        let heavier = try await World.extend(heavy, timestamp: time + World.blockInterval, nonce: 0, in: content)
+        XCTAssertNotEqual(side.cid, heavy.cid)
+        var core = weighed([side, heavy, heavier])
+        _ = core.step(.replay([side.cid, heavy.cid]), now: Self.now)
+        XCTAssertTrue(core.step(try restored(nonce: 0), now: Self.now).isEmpty)
+        for block in [side, heavy] { content.put(block.body) }
+        let arrived = core.step(.bodyFetched(cid: heavy.cid), now: Self.now)
+        _ = core.step(.bodyFetched(cid: side.cid), now: Self.now)
+        let job = try XCTUnwrap(arrived.compactMap { effect -> ConnectJob? in
+            if case .connect(let job) = effect { return job }
+            return nil
+        }.first)
+        XCTAssertEqual(job.blockHash, heavy.cid)
+        let verdict = await ChainTree.connect(
+            job, fetcher: content, validationContext: ValidationContext(nowMilliseconds: Self.now)
+        )
+        let effects = core.step(.connected(verdict), now: Self.now)
+        XCTAssertEqual(preflights(effects).map(\.tipCID), [heavy.cid])
+        XCTAssertTrue(mining(effects).contains {
+            if case .returnTransactions(let left, let carried) = $0 { left == [side.cid] && carried.isEmpty } else { false }
+        }, "\(mining(effects))")
+    }
 }

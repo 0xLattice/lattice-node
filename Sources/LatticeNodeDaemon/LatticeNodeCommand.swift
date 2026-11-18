@@ -98,6 +98,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Bytes of fetched content this node's fetches hold in memory at once, every hosted chain together: each fetch reserves its worst case (its chain's maxBlockSize, at most 67108864) when it starts and releases it when it ends. Past it, fetches wait in line (the node's own work and the blocks each chain can connect next first); nothing asked for is declined for it. It bounds what fetches reserve, not every copy: a fetch's walk makes transient copies it does not count (about 1 to 1.5 times the body), so it is not a hard limit on the process's memory. A quarter of it more keeps verified content for later reads, the fetched bodies furthest from their chain's next block to connect evicted first. At least 67108864, the bytes one block's fetch may hold.")
     var maxAcquisitionBytes = NodeResourcePolicy.defaultMaximumAcquisitionBytes
 
+    @Option(help: "Bytes of post-state the node's executions hold in memory before a flush writes them, every hosted chain together (like Bitcoin's -dbcache): a flush runs once they reach it, or once there is one execution per MiB of it, and at each maintenance pass and at a stop. Blocks are durable as they are stored; what executing them decided is a cache over them, so after a crash the node executes again, from the bodies it stores, what the last flush did not hold: at most this much. At least 1.")
+    var maxUnflushedBytes = NodeResourcePolicy.defaultMaximumUnflushedBytes
+
     @Option(help: "Which block bodies (a block's own Volume and its transactions') this node keeps beyond the ones it needs to operate: all, or none. It always holds the bodies waiting to execute, each chain's tip, and each genesis block. With none, a body is let go of once another block is the tip, and is no longer served; headers, facts and state stay, so what the node weighs and selects does not change. A node that syncs from genesis needs peers that keep all.")
     var blockBodies = "all"
 
@@ -262,7 +265,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                 announceLifetime: announceLifetime,
                 announcePins: announcePins,
                 providerWalkSessions: providerWalkSessions,
-                resourcePolicy: NodeResourcePolicy(maximumAcquisitionBytes: maxAcquisitionBytes),
+                resourcePolicy: NodeResourcePolicy(
+                    maximumAcquisitionBytes: maxAcquisitionBytes, maximumUnflushedBytes: maxUnflushedBytes
+                ),
                 blockBodies: blockBodies,
                 state: state,
                 hostedChildren: hosted.children,
@@ -357,6 +362,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         let sessionBytes = NodeResourcePolicy.default.maximumAcquisitionStorageBytes
         guard maxAcquisitionBytes >= sessionBytes else {
             throw ValidationError("--max-acquisition-bytes must be at least \(sessionBytes), the bytes one block's fetch may hold")
+        }
+        guard maxUnflushedBytes > 0 else {
+            throw ValidationError("--max-unflushed-bytes must be at least 1")
         }
         guard let blockBodies = BlockBodies(rawValue: blockBodies) else {
             throw ValidationError("--block-bodies is all or none")

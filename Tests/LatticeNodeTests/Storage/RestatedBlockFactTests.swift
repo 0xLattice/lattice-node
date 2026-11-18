@@ -6,10 +6,10 @@ import XCTest
 @testable import LatticeNode
 
 /// Execution re-states a weighed block fact with its state diff, and only
-/// that. The store keeps the fact without the diff, so the executed copy is
-/// the weighed one; the diff is kept apart for the state window. Every
-/// header field, the child block's `parentState` included, must be carried
-/// over unchanged.
+/// that. The store writes an execution's verdict, not the re-statement: the
+/// fact held is the weighed one, and the diff is kept apart for the state
+/// window. A re-statement that changes a header field is refused by the
+/// tree before anything reaches the store (`Chain.applyStaged`).
 final class RestatedBlockFactTests: XCTestCase {
     private let alpha: ChainPath = ["Nexus", "Alpha"]
 
@@ -31,10 +31,14 @@ final class RestatedBlockFactTests: XCTestCase {
         }
     }
 
-    private func stage(_ facts: [ChainFact], in store: NodeStore, keepsStateDiffs: Bool = true) async throws {
+    private func stage(
+        _ facts: [ChainFact], executed: Bool = false, in store: NodeStore, keepsStateDiffs: Bool = true
+    ) async throws {
+        let batch = BlockImportBatch(facts: facts)
         try await store.stageNodeFacts([
             NodeFactBatch(
-                path: alpha, facts: [BlockImportBatch(facts: facts)], cursors: [:], keepsStateDiffs: keepsStateDiffs
+                path: alpha, facts: executed ? [] : [batch], executed: executed ? [batch] : [], cursors: [:],
+                keepsStateDiffs: keepsStateDiffs
             ),
         ], logID: "log")
     }
@@ -50,22 +54,14 @@ final class RestatedBlockFactTests: XCTestCase {
         try await stage([fact(parentState: "anchor", diff: .empty)], in: store)
         try await stage(
             [fact(parentState: "anchor", diff: try executedDiff), .validation(ChainValidationFact(blockHash: "block"))],
-            in: store
+            executed: true, in: store
         )
         let stored = try await store.storedFacts(at: alpha).facts
-        XCTAssertEqual(stored.first, fact(parentState: "anchor", diff: .empty), "the fact keeps no diff")
-        XCTAssertEqual(stored.count, 2)
+        XCTAssertEqual(stored, [
+            fact(parentState: "anchor", diff: .empty), .validation(ChainValidationFact(blockHash: "block")),
+        ], "the weighed fact, then the verdict")
         let kept = try await store.stateDiff("block", at: alpha)
         XCTAssertEqual(kept, try executedDiff)
-    }
-
-    func testRestatementCannotChangeParentState() async throws {
-        let store = try store()
-        try await stage([fact(parentState: "anchor", diff: .empty)], in: store)
-        do {
-            try await stage([fact(parentState: "elsewhere", diff: try executedDiff)], in: store)
-            XCTFail("a re-statement changed the block's parent state")
-        } catch NodeStoreError.conflictingImportFact {}
     }
 
     /// The diff is kept only for an executed block, and only when asked:
@@ -77,9 +73,10 @@ final class RestatedBlockFactTests: XCTestCase {
         XCTAssertNil(none)
 
         let notAsked = try store()
+        try await stage([fact(parentState: nil, diff: .empty)], in: notAsked)
         try await stage(
             [fact(parentState: nil, diff: try executedDiff), .validation(ChainValidationFact(blockHash: "block"))],
-            in: notAsked, keepsStateDiffs: false
+            executed: true, in: notAsked, keepsStateDiffs: false
         )
         let unkept = try await notAsked.stateDiff("block", at: alpha)
         XCTAssertNil(unkept)

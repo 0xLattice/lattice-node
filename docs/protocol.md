@@ -121,15 +121,19 @@ acquire
   -> verify
   -> produce one path-keyed NodeBatch
   -> retain complete selected volumes
-  -> atomically commit every affected level and cursor
+  -> atomically commit what every affected level weighed, and its cursors
   -> publish the resulting level snapshots
 ```
 
-The transaction is the durability boundary. Success means the complete tree
-batch is durable; failure publishes none of it and stops the runtime. Live
-execution and recovery consume the same immutable facts. Path-keyed facts,
-indexes, cursors, incomplete header boundaries, and child proofs share
-`state.db`; content lives in `volumes.db`.
+The transaction is the durability boundary for blocks. Success means every
+block the batch weighed is durable; failure publishes none of it and stops
+the runtime. What executions decided is derived from those blocks: it is
+held in memory and flushed in batches, post-states first, then the
+verdicts in one transaction across every level, and after a crash the node
+executes again what its last flush did not hold. Live execution and
+recovery consume the same immutable facts. Path-keyed facts, indexes,
+cursors, incomplete header boundaries, and child proofs share `state.db`;
+content lives in `volumes.db`.
 
 ## Network plane
 

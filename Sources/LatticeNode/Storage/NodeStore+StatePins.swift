@@ -2,22 +2,13 @@ import Foundation
 import Lattice
 
 /// What the counts of a chain's current state, on `recent`, are moved by:
-/// the facts of its executed blocks, each naming its parent and its height,
+/// its executed blocks as the block index holds them, each naming its parent
+/// and its height,
 /// and how each one's execution changed the places of the state's nodes
 /// (its state diff, kept for the state window). Also
 /// the counts earlier versions kept (rows of `core_meta`), which a start
 /// forgets.
 extension NodeStore {
-    /// The executed block's fact, which names the state it produced.
-    func blockFact(_ blockCID: String, at chainPath: [String]) throws -> ChainBlockFact? {
-        guard let row = try database.row(
-            ImportFactRow.self,
-            "SELECT payload FROM admission_facts WHERE chain_path = ?1 AND fact_id = ?2",
-            params: [.text(chainPath.joined(separator: "/")), .blob(try Self.encode(ChainFactID.block(blockCID)))]
-        ), case .block(let fact) = try Self.decode(ChainFact.self, from: try row.payload) else { return nil }
-        return fact
-    }
-
     /// The state diff of an executed block, while the state window keeps
     /// it: nil once it is let go of, or never kept.
     func stateDiff(_ blockCID: String, at chainPath: [String]) throws -> StateDiff? {
@@ -61,30 +52,30 @@ extension NodeStore {
             chain = walked
         }
         // The tip's chain down to where it meets the counts' chain.
-        var entering: [ChainBlockFact] = []
-        guard var fact = try blockFact(tip, at: chainPath) else { return nil }
+        var entering: [AcceptedBlockRecord] = []
+        guard var block = try indexedBlock(tip, at: chainPath) else { return nil }
         while true {
-            let height = fact.blockHeight
-            if height >= base, height - base < UInt64(chain.count), chain[Int(height - base)] == fact.blockHash { break }
-            guard height > base, let parent = fact.parentBlockHash, let next = try blockFact(parent, at: chainPath) else {
+            let height = block.height
+            if height >= base, height - base < UInt64(chain.count), chain[Int(height - base)] == block.blockCID { break }
+            guard height > base, let parent = block.parentCID, let next = try indexedBlock(parent, at: chainPath) else {
                 return nil
             }
-            entering.append(fact)
-            fact = next
+            entering.append(block)
+            block = next
         }
-        let meet = Int(fact.blockHeight - base)
+        let meet = Int(block.height - base)
         var deltas: [String: Int] = [:]
         for cid in chain[(meet + 1)...] {
             guard let left = try stateDiff(cid, at: chainPath) else { return nil }
             for (cid, count) in Self.net(left).created { deltas[cid, default: 0] -= count }
         }
         var diffs: [String: StateDiff] = [:]
-        for fact in entering {
-            guard let diff = try stateDiff(fact.blockHash, at: chainPath) else { return nil }
-            diffs[fact.blockHash] = diff
+        for block in entering {
+            guard let diff = try stateDiff(block.blockCID, at: chainPath) else { return nil }
+            diffs[block.blockCID] = diff
             for (cid, count) in Self.net(diff).created { deltas[cid, default: 0] += count }
         }
-        chain = Array(chain[...meet]) + entering.reversed().map(\.blockHash)
+        chain = Array(chain[...meet]) + entering.reversed().map(\.blockCID)
         let top = base + UInt64(chain.count - 1)
         let passed = Int(max(base, top >= window ? top - window : 0) - base)
         for cid in chain[1..<(passed + 1)] {
@@ -107,7 +98,7 @@ extension NodeStore {
         guard top.height >= bottom.height else { return nil }
         var chain = [top.cid]
         while UInt64(chain.count) <= top.height - bottom.height {
-            guard let fact = try blockFact(chain[chain.count - 1], at: chainPath), let parent = fact.parentBlockHash else {
+            guard let block = try indexedBlock(chain[chain.count - 1], at: chainPath), let parent = block.parentCID else {
                 return nil
             }
             chain.append(parent)
@@ -128,12 +119,12 @@ extension NodeStore {
     /// The block `depth` blocks below `tip` on its chain, or the lowest one
     /// reached when a fact is missing first.
     func ancestor(of tip: String, depth: UInt64, at chainPath: [String]) throws -> CountedMarker.Block? {
-        guard var fact = try blockFact(tip, at: chainPath) else { return nil }
+        guard var block = try indexedBlock(tip, at: chainPath) else { return nil }
         for _ in 0..<depth {
-            guard let parent = fact.parentBlockHash, let next = try blockFact(parent, at: chainPath) else { break }
-            fact = next
+            guard let parent = block.parentCID, let next = try indexedBlock(parent, at: chainPath) else { break }
+            block = next
         }
-        return CountedMarker.Block(height: fact.blockHeight, cid: fact.blockHash)
+        return CountedMarker.Block(height: block.height, cid: block.blockCID)
     }
 
     /// Drops the counts of a tip's state earlier versions kept, and the

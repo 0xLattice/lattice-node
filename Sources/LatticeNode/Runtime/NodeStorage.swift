@@ -54,9 +54,24 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     let store: NodeStore
     nonisolated let bundles: VolumeBundleCache
     let broker: DiskBroker
+    /// The post-states executions created since the last flush, in
+    /// VolumeBroker's memory tier: every local read below finds them before
+    /// the store, as geth's reads find its dirty trie nodes
+    /// (`persistNodeBatch`, `flush`).
+    nonisolated let unflushed: MemoryBroker
+    /// What the next flush writes of them: their Volumes, the scope each
+    /// root is kept under, and their bytes.
+    var held = HeldStates()
+    struct HeldStates {
+        var volumes: [ValidatedVolume] = []
+        var roots = Set<String>()
+        var retaining: [String: [String]] = [:]
+        var bytes = 0
+    }
     let localFetcher: CoalescingFetcher
-    /// Local content, and behind it the header records: a block's own node
-    /// is read from them when its body is not held. Execution and mining
+    /// Local content (the held post-states first), and behind it the header
+    /// records: a block's own node is read from them when its body is not
+    /// held. Execution and mining
     /// build on blocks through this.
     nonisolated let workFetcher: CoalescingFetcher
     nonisolated let workSource: CompositeContentSource
@@ -83,7 +98,6 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         store: NodeStore,
         bundles: VolumeBundleCache,
         broker: DiskBroker,
-        localFetcher: CoalescingFetcher,
         retentionScope: String,
         durableMempoolOwner: String,
         liveMempoolOwner: String,
@@ -93,8 +107,10 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         self.store = store
         self.bundles = bundles
         self.broker = broker
-        self.localFetcher = localFetcher
-        self.workSource = CompositeContentSource([broker, HeaderRecords(store: store)])
+        let unflushed = MemoryBroker()
+        self.unflushed = unflushed
+        self.localFetcher = CoalescingFetcher(CompositeContentSource([unflushed, broker]))
+        self.workSource = CompositeContentSource([unflushed, broker, HeaderRecords(store: store)])
         self.workFetcher = CoalescingFetcher(workSource)
         self.readCache = ReadCache(maximumBytes: configuration.resourcePolicy.maximumCachedContentBytes)
         self.retentionScope = retentionScope
@@ -114,7 +130,6 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
             store: recovered.store,
             bundles: VolumeBundleCache(directory: configuration.storagePath),
             broker: recovered.broker,
-            localFetcher: recovered.localFetcher,
             retentionScope: recovered.retentionScope,
             durableMempoolOwner: recovered.durableMempoolOwner,
             liveMempoolOwner: recovered.liveMempoolOwner,
@@ -141,7 +156,10 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     }
 
     public func fetch(_ cids: Set<String>) async -> [String: Data] {
-        await broker.fetchDataLocal(cids: cids)
+        var found = await unflushed.fetchDataLocal(cids: cids)
+        guard found.count < cids.count else { return found }
+        found.merge(await broker.fetchDataLocal(cids: cids.filter { found[$0] == nil })) { held, _ in held }
+        return found
     }
 
     /// A block's own node: from its Volume, or from its header record when
@@ -158,8 +176,12 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// against its CIDs first: bytes damaged in the store read as absent,
     /// never handed on. This node's own reads (`fetch`) take them unhashed.
     func volume(_ rootCID: String) async -> SerializedVolume? {
-        guard let volume = await broker.fetchVolumeLocal(root: rootCID),
-              (try? volume.validate()) != nil else { return nil }
+        let held: SerializedVolume? = if let unflushed = await unflushed.fetchVolumeLocal(root: rootCID) {
+            unflushed
+        } else {
+            await broker.fetchVolumeLocal(root: rootCID)
+        }
+        guard let volume = held, (try? volume.validate()) != nil else { return nil }
         return volume
     }
 
@@ -194,9 +216,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
             )
         }
         let volume = try VolumeImpl<Transaction>(node: transaction)
-        if try await store.localMempoolTransactions().contains(where: {
-            $0.transactionCID == volume.rawCID
-        }) {
+        if try await store.holdsLocalMempoolTransaction(transactionCID: volume.rawCID) {
             return volume.rawCID
         }
         try await storeHashed(volume)

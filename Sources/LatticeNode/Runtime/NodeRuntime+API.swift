@@ -882,8 +882,9 @@ extension NodeRuntime {
 
     /// A level's connect job: `ChainTree.connect`, and for a valid block the
     /// IDs of the transactions it carries, read from the body it executed
-    /// (the index storing it walked, or when storing failed or the index
-    /// names a transaction by a non-standard CID, the body).
+    /// (the index storing it walked, or when the body could not be read
+    /// again or the index names a transaction by a non-standard CID, the
+    /// body). A body the store cannot write stops the node (`failStop`).
     /// Execution is the node's own work: what this store lacks is read from
     /// peers. A child level's parent fact is read from the live parent level
     /// (`ParentContinuity`).
@@ -892,7 +893,8 @@ extension NodeRuntime {
         at path: ChainPath,
         levels: LiveLevels,
         storage: NodeStorage,
-        remote: IvyRootContentSource? = nil
+        remote: IvyRootContentSource? = nil,
+        failStop: @escaping @Sendable (any Error) -> Void = { fatalError("node runtime: body not stored: \($0)") }
     ) -> RuntimeJob {
         RuntimeJob(path: path, tipCID: nil, kind: .connect) {
             await reading(job.blockHash, at: path, storage: storage, remote: remote) { fetcher in
@@ -913,7 +915,19 @@ extension NodeRuntime {
                         // index entry may name it by another form of the same bytes.
                         transactions = carried.allSatisfy(CIDIdentity.isStandard)
                             ? carried : await transactionIDs(ofBlock: job.blockHash, fetcher: fetcher)
+                    } catch let failure as BodyWriteFailure {
+                        // A stop cancelled the job: nothing waits for it.
+                        guard !Task.isCancelled else { return [] }
+                        // The body is what a restart executes again: one the
+                        // store cannot write stops the node, its verdict
+                        // never applied (Bitcoin's `AbortNode` on a failed
+                        // block write, geth's `log.Crit`).
+                        failStop(failure.error)
+                        return []
                     } catch {
+                        // Not read again (memory let it go and no peer
+                        // answered): the verdict stands, and the body is
+                        // fetched again if a restart executes it again.
                         storage.syncTrace("body of \(job.blockHash) not stored: \(error)")
                         transactions = await transactionIDs(ofBlock: job.blockHash, fetcher: fetcher)
                     }
@@ -933,8 +947,9 @@ extension NodeRuntime {
         }
     }
 
-    /// The operator's own work reads content the one way: what this store
-    /// holds, then a block's header record, then what is in memory (a body
+    /// The operator's own work reads content the one way: the post-states
+    /// executions hold until the next flush and what this store holds, then
+    /// a block's header record, then what is in memory (a body
     /// fetched for its connect, what earlier reads asked of peers), then
     /// peers, each answer checked against its CID by the reader. What the
     /// read asked of peers is kept in memory, never written to the store:

@@ -145,6 +145,7 @@ extension ChainEvent {
         case .derived: "derived"
         case .submitted: "submitted"
         case .mining(let event): "mining.\(traceCase(event))"
+        case .replay: "replay"
         }
     }
 }
@@ -211,6 +212,7 @@ public struct NodeBatch: Sendable {
             headers: held.headers + batch.headers,
             states: held.states + batch.states,
             facts: held.facts + batch.facts,
+            executed: held.executed + batch.executed,
             proofs: held.proofs + batch.proofs,
             cursors: held.cursors.merging(batch.cursors) { $1 }
         )
@@ -499,7 +501,9 @@ public struct NodeCore: Sendable {
 
     /// Step one level. A level that executed a block wakes each child
     /// block awaiting a fact it now holds; a level's own verdict is checked
-    /// the same way, since its parent may have executed while it ran.
+    /// the same way, since its parent may have executed while it ran. A
+    /// level whose start finished executing again what it holds steps each
+    /// child level whose journal still waits (`ChainCore.stalled`).
     ///
     /// A level is stepped by its one owner: taken out of `levels`, mutated,
     /// and moved back. Stepping a copy read from `levels` would leave two
@@ -509,14 +513,19 @@ public struct NodeCore: Sendable {
     mutating func run(_ path: ChainPath, _ event: ChainEvent, _ turn: inout Turn) {
         guard var core = levels.removeValue(forKey: path) else { return }
         turn.touched.insert(path)
-        let effects = core.step(event, now: turn.now, parent: path.count > 1 ? levels[Array(path.dropLast())]?.tree : nil)
+        let replaying = core.replaying != nil
+        let parent = Array(path.dropLast())
+        let effects = core.step(
+            event, now: turn.now, parent: path.count > 1 ? levels[parent]?.tree : nil,
+            parentReplaying: path.count > 1 && levels[parent]?.replaying != nil
+        )
         turn.weighed[path, default: []].formUnion(core.weighed)
         turn.arrived[path, default: []].formUnion(core.arrived)
         levels[path] = consume core
         absorb(effects, at: path, &turn)
         let executed = effects.contains {
             guard case .persist(let batch) = $0 else { return false }
-            return batch.facts.flatMap(\.facts).contains {
+            return batch.executed.flatMap(\.facts).contains {
                 if case .validation = $0 { return true }
                 return false
             }
@@ -527,6 +536,11 @@ public struct NodeCore: Sendable {
             }
         }
         if case .connected = event { wakeAnswered(path, &turn) }
+        if replaying, levels[path]?.replaying == nil {
+            for child in ordered where child.dropLast().elementsEqual(path) && levels[child]?.replaying != nil {
+                run(child, .tick, &turn)
+            }
+        }
     }
 
     /// Connect again the blocks of a child level whose awaited parent fact

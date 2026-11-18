@@ -44,6 +44,10 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
                 let effects = host.step(pending.removeFirst(), now: NodeRuntime.now())
                 for case .persist(let batch) in effects {
                     try await storage.persistNodeBatch(batch, logID: host.logID)
+                    try await storage.flush(
+                        Dictionary(batch.levels.map { ($0.path, $0.batch.executed) }, uniquingKeysWith: +),
+                        logID: host.logID
+                    )
                 }
                 for effect in effects {
                     switch effect {

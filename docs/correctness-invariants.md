@@ -39,14 +39,21 @@ set, GHOST, continuity) are the architecture doc's and are checked by
 
 ## NODE-STORAGE-002 — content is stored before the facts that name it, and a fact never depends on it being held
 
-- **NODE-STORAGE-002.a** — A step's content (headers, post-states, specs)
-  is stored and retained before the facts that name it. Enforced by
-  `SimBodies.checkStatesStored` and `Invariants.checkTree` ("weighed block
-  … has no durable content").
-- **NODE-STORAGE-002.b** — Nothing is published, served, relayed or
-  streamed before it is durable. Enforced by `Simulator` and
-  `LevelSimulator` ("published tip … is not durable", "served … before it
-  was durable", "relayed … before it was durable").
+- **NODE-STORAGE-002.a** — A step's content (headers, specs) is stored and
+  retained before the facts that name it, and a flush's post-states before
+  the verdicts that name them. Enforced by `SimBodies.checkStatesStored` (at
+  each of `Simulator`'s flushes, every verdict names a whole stored state;
+  it stores a state when its execution runs, so the order of the flush's
+  two writes is kept by `NodeStorage.flush`, not checked) and
+  `Invariants.checkTree` ("weighed block … has no durable content").
+  `DerivedCacheRestartTests.testACrashAtEachPointRestartsToTheSameTipAndState`
+  restarts from what the first write alone leaves.
+- **NODE-STORAGE-002.b** — No block is published, served, relayed or
+  streamed before it is durable. What its execution decided is a cache over
+  it, published from memory and durable at the next flush: after a crash
+  the act-on tip may be the last flush's, below the one published. Enforced
+  by `Simulator` and `LevelSimulator` ("published tip … is not durable",
+  "served … before it was durable", "relayed … before it was durable").
 - **NODE-STORAGE-002.c** — Content stays because a scope names it, and a
   start leaves pins as it finds them: nothing is rebuilt from the facts.
   A block's body is named by that block on its chain, what executions read
@@ -57,8 +64,9 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   and `NodeRuntimeTests.testJoinerSyncsHeadersAndExecutesBodiesOverLoopbackIvy`.
 - **NODE-STORAGE-002.f** — Content a fact names and the store lacks is no
   fault. The node starts on its facts, with the Nexus genesis block stored
-  again; executing a block and building on one read this store, a block's
-  header record, then peers, checked against the CID; what peers served
+  again; executing a block and building on one read the post-states held
+  for the next flush, this store, a block's header record, then peers,
+  checked against the CID; what peers served
   reaches the Volume store only as the Volumes this node derives when it
   stores a block, and only once the block's execution found it valid (a
   fetched body is read into memory until then, and read again whole from
@@ -68,19 +76,23 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   fails rather than falling through to peers. What the node sends, to a
   peer or a public reader, is checked first, and damaged content is
   answered as not held. The checks anyone
-  can cause (a submitted transaction, a public read) read this store alone.
+  can cause (a submitted transaction, a public read) read what this node
+  holds alone: the post-states held for the next flush, then this store.
   Pinned by `AbsentContentTests` and
   `SafetyNetCorruptStoreTests.testBootOpensAStoreWhoseVolumesAreGone`.
 - **NODE-STORAGE-002.g** — With `blockBodies: none` the node lets go of a
-  body it executed once another block is its chain's tip, and never of a
+  body it executed once another block is its chain's tip as of the last
+  flush, and never of a
   genesis block. A tip the chain moves back onto after its body went is
   not fetched again. Transactions of the blocks a move leaves are returned
   to the pool from this store, and from peers for a body it let go of; one
   no peer serves is not returned. State and facts are untouched, and the node builds
-  on a block whose body is gone. Pinned by `BlockBodiesTests`.
-- **NODE-STORAGE-002.h** — With `state: recent` what a step's executions
-  stored is named by its chain and the height of the step's newest block,
-  and is let go of once the chain's tip is a state window or more above it
+  on a block whose body is gone. Pinned by `BlockBodiesTests`
+  (`testAMinerOnNoneHoldsOnlyItsTipsBody` holds each body until a flush).
+- **NODE-STORAGE-002.h** — With `state: recent` what a flush stored of an
+  execution is named by its chain and its block's height, and is let go of
+  once the chain's tip as of the last flush is a state window or more above
+  it
   (`--state-window`, 64 blocks unless the operator sets one, per chain or
   for every chain); `none` is a window of one block, and on `recent` a
   window is let go of only once the chain's counts reached the tip. A start
@@ -89,7 +101,8 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   and state reads alike. Pinned by `StateWindowTests`.
 - **NODE-STORAGE-002.k** — With `state: recent`, once a chain's counts are
   in place, its counted scope counts each node for every place it holds in
-  the act-on tip's state plus every place a block above the cursor
+  the state of the act-on tip as of the last flush, plus every place a
+  block above the cursor
   replaced, the cursor on the tip's chain a window below the tip or higher;
   a move of the tip never lowers the cursor (a state sync may set it lower);
   every node it counts is held. The counts move with the tip in one
@@ -101,17 +114,25 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   `StateWindowTests.testTheCountsFollowEveryMoveOfTheTip` and the other
   `StateWindowTests` that check the counts.
 - **NODE-STORAGE-002.i** — With `state: recent` or `none` what a stored
-  block reads is named by that block until it executes or is found invalid
-  (a start lets go of what an executed block's scope still names). Pinned
+  block reads is named by that block until a flush writes its execution or
+  its exclusion (a start lets go of what the scope of a block executed as
+  of the last flush still names). Pinned
   by `StateWindowTests.testANodeOnNoneSyncsAndKeepsValidatingHoldingNoState`.
 - **NODE-STORAGE-002.j** — A Volume the operator pins is named by the
   operator scope until it is unpinned, whatever the other rules keep. Pinned
   by `OperatorPinTests` and `DaemonHTTPTests.testOperatorPinRoutes`.
-- **NODE-STORAGE-002.d** — Levels write parent before child; a crash
-  between them restores with the child behind, never ahead. Pinned by
-  `ChildLevelRestartTests.testACrashBetweenLevelWritesRestoresTheParentAhead`.
-- **NODE-STORAGE-002.e** — Replaying the store reproduces the trees.
-  Enforced by `Simulator.checkReplay` and `LevelSimulator.checkReplay`.
+- **NODE-STORAGE-002.d** — What a step weighed commits across every level
+  in one transaction, and a flush's verdicts likewise: a crash never leaves
+  a child's execution durable without the parent's it read. Enforced by
+  `LevelSimulator.checkReplay`; pinned by
+  `DerivedCacheRestartTests.testAChildChainOnlyThisNodeHostsExecutesAgainFromItsOwnStore`.
+- **NODE-STORAGE-002.e** — Replaying the store as of a flush reproduces the
+  trees; replaying it after a crash gives every block weighed, executed as
+  of the last flush, and the node executes the rest again from what it
+  stores. Enforced by
+  `Simulator.checkReplay` and `LevelSimulator.checkReplay` at flush points,
+  on stores that keep of an execution only its verdict, as the node's does
+  (`SimStore.flush`); pinned by `DerivedCacheRestartTests`.
 
 ## NODE-MEMPOOL-001 — the mempool is tip-relative, not consensus
 
@@ -124,9 +145,26 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   on the executed chain").
 - **NODE-MEMPOOL-001.c** — The pool holds one transaction per first signer's nonce
   and stays within its limits. Enforced by `TxWorkload.checkInvariants`.
-- **NODE-MEMPOOL-001.d** — The local journal is the pool's local set, and a
-  pool change is durable before any later effect. Enforced by
+- **NODE-MEMPOOL-001.d** — The local journal holds the pool's local set: a
+  row is durable before any later effect of its admission, and the row of a
+  transaction that left the pool goes with the next flush unless the
+  transaction is pooled again first (geth's journal holds the pool's
+  locals at `rotate`), so between flushes the journal may also hold rows
+  the pool let go of, never fewer. A start judges each chain's rows once
+  that chain has executed again the blocks it holds, or found it cannot
+  from what the node holds, and its parent chain's replay is over
+  (Bitcoin's `LoadMempool` after `ActivateBestChain`), on the tip they
+  reach rather than the last flush's; the transactions of a block it did
+  not execute again go back to the pool, as a reorganization's do. Enforced by
   `TxWorkload.checkOrder` and `TxWorkload.checkInvariants` ("journal …
-  diverged").
+  diverged", on the pool's deltas). Pinned by
+  `ChainCoreMiningTests.testTheJournalWaitsForWhatTheStartExecutesAgain`,
+  `ChainCoreMiningTests.testABlockTheStartLeftGivesItsTransactionsBack`,
+  `ChainCoreMiningTests.testABlockTheStartCannotExecuteDoesNotHoldTheJournal`,
+  `DerivedCacheRestartTests.testAJournaledTransactionIsJudgedOnceTheStartHasExecutedAgain`,
+  `DerivedCacheRestartTests.testAChildsJournalWaitsForItsParentsReplay`,
+  `DerivedCacheRestartTests.testAChildsJournalIsJudgedOnceItsParentsReplayLeftTheCarrier`,
+  `DerivedCacheRestartTests.testAConfirmedTransactionsJournalRowGoesWithTheFlush`
+  and `DerivedCacheRestartTests.testARowStaysWhenItsTransactionIsPooledAgainBeforeTheFlush`.
 - **NODE-MEMPOOL-001.e** — A transaction goes to the pool of the chain it
   names. Pinned by `MergedMiningTests.testOneGrindAdvancesNexusAndItsHostedChild`.

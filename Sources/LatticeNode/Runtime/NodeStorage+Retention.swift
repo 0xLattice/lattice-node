@@ -209,13 +209,15 @@ extension NodeStorage {
         (try? await broker.retainedRoots(scope: scopes.operatorPins)) ?? []
     }
 
-    /// Pins the Volume `root` names, already stored or as the operator
-    /// provides it in `entries`, each checked against its CID. The node does
-    /// not look inside it or follow what it names.
+    /// Pins the Volume `root` names, already stored, held in memory until
+    /// the flush, or as the operator provides it in `entries`, each checked
+    /// against its CID. The node does not look inside it or follow what it
+    /// names.
     nonisolated func pin(_ root: String, entries: [String: Data]?) async throws {
         if await !broker.hasVolume(root: root) {
-            guard let entries else { throw NodeStorageError.missingMaterializedVolume(root) }
-            let volume = SerializedVolume(root: root, entries: entries)
+            var held = entries.map { SerializedVolume(root: root, entries: $0) }
+            if held == nil { held = await unflushed.fetchVolumeLocal(root: root) }
+            guard let volume = held else { throw NodeStorageError.missingMaterializedVolume(root) }
             guard let validated = try? ValidatedVolume(validating: volume) else { throw NodeStorageError.invalidVolume(root) }
             try await broker.storeVolumesLocal([validated])
         }
@@ -363,7 +365,7 @@ extension NodeStorage {
     nonisolated func auditCounted(at path: ChainPath, marker: String) async -> [String]? {
         do {
             guard let counted = CountedMarker(marker),
-                  let tip = try await store.blockFact(counted.tip.cid, at: path),
+                  let tip = try await store.indexedBlock(counted.tip.cid, at: path),
                   let chain = try await store.chain(from: counted.tip, down: counted.cursor, at: path) else { return nil }
             var expected: [String: Int] = [:]
             try await walkState(tip.postStateCID, into: &expected) { batch in
@@ -415,10 +417,10 @@ extension NodeStorage {
     nonisolated func syncCountedState(
         at path: ChainPath, block: CountedMarker.Block, remote: IvyRootContentSource
     ) async throws -> [String: Int] {
-        guard let fact = try await store.blockFact(block.cid, at: path) else {
+        guard let indexed = try await store.indexedBlock(block.cid, at: path) else {
             throw NodeStorageError.missingBlockFact(block.cid)
         }
-        let root = fact.postStateCID
+        let root = indexed.postStateCID
         let hosts = ChainHosts.of(path, nexusGenesisCID: configuration.nexusGenesisCID)
         var places: [String: Int] = [:]
         do {

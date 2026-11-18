@@ -484,18 +484,43 @@ holds content and retained roots. Those two are the recovery unit.
 block: it may be lost or deleted while the node is stopped, and is rebuilt
 from local content.
 
+Blocks are what a node keeps durable; what executing them decides is a
+cache over them, as Bitcoin's coins cache and geth's dirty trie nodes are.
 Persistence order is:
 
-1. store the content in one `volumes.db` transaction (a block's Volumes
-   together, once its execution found it valid or it was mined here; a
-   step's post-states together), then retain it. A body fetched from peers
-   is read into memory until then (and read again from peers if memory
-   let it go), and a node does not serve it before;
-2. commit the complete multi-level `NodeBatch` (headers, child proofs, facts,
-   and cursors) in one `state.db` transaction;
+1. store a block's content in one `volumes.db` transaction, then retain it:
+   once its execution found it valid, or when it was mined or built here. A
+   body fetched from peers is read into memory until then (and read again
+   from peers if memory let it go), and a node does not serve it before;
+2. commit what a step weighed (headers, child proofs, block and work facts,
+   and cursors), across every level, in one `state.db` transaction;
 3. publish the new snapshots.
 
-Every commit is synchronous (`synchronous=FULL`): nothing is announced,
+What executions decide (validations, the exclusions an execution proves,
+state diffs) and the post-states they create are held in memory, read
+there before the store, and flushed together: the post-states in one
+`volumes.db` transaction, then the verdicts in one `state.db` transaction,
+then the journal rows of the local transactions that left the pool and did
+not come back to it.
+A flush runs once the post-states held reach `maxUnflushedBytes` in
+`lattice.json` (`--max-unflushed-bytes`, 64 MiB unless set) or the
+executions held reach one per MiB of it (64), once an execution finds a
+block invalid, at each maintenance pass, before a chain is hosted, and at
+a stop; so a crash loses at most that much (Bitcoin's `-dbcache`, geth's
+`--cache`). After a crash a node starts on its last flush:
+its tip may be lower than it was, and it executes again, from the bodies it
+stores, what came after. Each chain judges its journal's rows once it has
+executed those blocks again, not on the lower tip, or found that it cannot
+from what it holds (a body or state it does not hold, a carrier its parent
+chain's own replay left); a child chain also waits for its parent's replay.
+A transaction of a block it held but did not execute again goes back to its
+pool, as a reorganization's do. What follows a flush (the state window and its
+counts, letting go of bodies) follows each chain's tip as of the last
+flush. A body or a flush the store cannot write stops the node (Bitcoin's
+`AbortNode`, geth's `log.Crit`): going on would leave a block a restart
+could not execute again.
+
+Every commit is synchronous (`synchronous=FULL`): no block is announced,
 served, or built on before the write that makes it durable returns.
 
 ### What a node keeps

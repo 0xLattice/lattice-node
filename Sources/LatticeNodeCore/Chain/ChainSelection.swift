@@ -113,8 +113,43 @@ extension ChainCore {
         let prefix = executedPrefix(actOn: tip)
         scheduleBodies(prefix: prefix, &turn)
         moveMiningTip(to: tip, &turn)
+        admitRestored(prefix: prefix, tip: tip.hash, &turn)
         answerSideMined(prefix: prefix.hash, &turn)
         return tip
+    }
+
+    /// The journal's rows, once a start has executed again what it holds:
+    /// each of those blocks still in the body window after `prefix` executed
+    /// or cannot execute from what the node holds (`stalled`), and the pool
+    /// is on the act-on tip `tip`. A block not executed is one the crash
+    /// took off the chain: its transactions go back to the pool, as a
+    /// reorg's do (Bitcoin's `MaybeUpdateMempoolForReorg`, geth's
+    /// `reinject`).
+    mutating func admitRestored(prefix: (hash: String, height: UInt64), tip: String, _ turn: inout Turn) {
+        guard let replaying, mining.tipCID == tip else { return }
+        let left = replaying.blocks.filter { !tree.isExecuted(blockHash: $0) }
+        guard !bodyWindow(after: prefix).blocks.contains(where: {
+            left.contains($0) && !stalled($0, among: left)
+        }) else { return }
+        self.replaying = nil
+        for event in replaying.rows { turn.mining += mining.step(event, now: turn.now) }
+        guard !left.isEmpty else { return }
+        let ordered = left.sorted { (tree.height(of: $0) ?? 0, $0) < (tree.height(of: $1) ?? 0, $1) }
+        turn.mining.append(.returnTransactions(left: ordered, carried: []))
+    }
+
+    /// A block of `left` this node cannot execute from what it holds, where
+    /// Bitcoin's `ActivateBestChain` stops at a block whose data it lacks:
+    /// its body, or what its execution read, was not to be had (`parked`);
+    /// it awaits a fact its parent level neither holds nor executes again
+    /// from its own store; or its parent is such a block.
+    func stalled(_ cid: String, among left: Set<String>) -> Bool {
+        if bodies.parked[cid] != nil { return true }
+        if let fact = bodies.awaitingParent[cid] {
+            return !parentReplaying && !(parentTree.map { ParentLevelFacts(tree: $0).holds(fact) } ?? false)
+        }
+        guard let parent = tree.parent(of: cid), left.contains(parent) else { return false }
+        return stalled(parent, among: left)
     }
 
     /// When the act-on tip moved, tell the mempool in the same step: the

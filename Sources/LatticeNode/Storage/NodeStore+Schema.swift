@@ -17,6 +17,15 @@ struct NodeMetadataRow: NodeStoreRecord {
 }
 
 extension NodeStore {
+    /// Epoch 49: executions are a cache over the blocks. What they decide
+    /// and the post-states they create are flushed in batches, and a start
+    /// executes again what came after the last flush. A fact row has no id:
+    /// restore and the weigh log take each fact once, so one stored twice is
+    /// harmless.
+    /// `accepted_blocks` is the block index: each block's parent, height and
+    /// post-state, read by CID. volumes.db is VolumeBroker schema v3, which
+    /// refuses v2; state.db and volumes.db are one recovery unit, so both
+    /// are rebuilt.
     /// Epoch 48: each fact is kept once, by id, with the staged batch that
     /// first held it; the batch journal is gone and boot restores from the
     /// facts. A block fact no longer carries its state diff: `state_diffs`
@@ -28,7 +37,7 @@ extension NodeStore {
     /// Epoch 46: weighed header material and credited child proofs live in
     /// this store, written with their facts. Older stores must be wiped; Nexus
     /// deterministically recreates the configured exact genesis.
-    static let currentSchemaEpoch: Int64 = 48
+    static let currentSchemaEpoch: Int64 = 49
 
     static func validateMetadata(
         in database: NodeSQLite,
@@ -104,10 +113,11 @@ extension NodeStore {
     }
 
     private static func createDataTables(in database: NodeSQLite) throws {
-        // Every fact once, by id (`UNIQUE`), kept forever. `seq` is the
-        // level's staged batch that first held it and `ord` its place in
-        // that batch: a level reads back as one key range in its weigh
-        // order, and appends at its end. A row is stored whole in its
+        // Every fact, kept forever. `seq` is the level's staged batch that
+        // held it and `ord` its place in that batch: a level reads back as
+        // one key range in its weigh order, and appends at its end. Nothing
+        // looks a fact up by id: restore and the weigh log take each fact
+        // once, so one stored twice is harmless. A row is stored whole in its
         // b-tree page up to about 1,000 bytes: a block fact, without its
         // state diff, is about 750. The exception is a parent block that
         // commits many children: each adds about 85 bytes, so a Nexus/testnet
@@ -118,18 +128,19 @@ extension NodeStore {
                 chain_path TEXT NOT NULL,
                 seq INTEGER NOT NULL,
                 ord INTEGER NOT NULL,
-                fact_id BLOB NOT NULL,
                 payload BLOB NOT NULL,
-                PRIMARY KEY (chain_path, seq, ord),
-                UNIQUE (chain_path, fact_id)
+                PRIMARY KEY (chain_path, seq, ord)
             ) WITHOUT ROWID
             """)
+        // The block index (Bitcoin's `CBlockIndex`): what the counts walk
+        // and the read gates ask of a block by CID, without decoding facts.
         try database.execute("""
             CREATE TABLE IF NOT EXISTS accepted_blocks (
                 chain_path TEXT NOT NULL,
                 block_cid TEXT NOT NULL,
                 parent_cid TEXT,
-                admission_seq INTEGER NOT NULL,
+                height INTEGER NOT NULL,
+                post_state TEXT NOT NULL,
                 validated INTEGER NOT NULL DEFAULT \(BlockStatus.executed.rawValue),
                 PRIMARY KEY (chain_path, block_cid)
             ) WITHOUT ROWID
@@ -166,8 +177,10 @@ extension NodeStore {
         // child indexes `headers` and `child_indexes` hold are read from
         // there, and only the rest (a carrier's node and child index when
         // no level weighed it) is kept in `proof_entries`, once per CID.
+        // Read and deleted by its key only: one b-tree, its rows (CIDs) in
+        // its leaves.
         try database.execute(
-            "CREATE TABLE IF NOT EXISTS child_proofs (chain TEXT NOT NULL, child TEXT NOT NULL, root TEXT NOT NULL, entries TEXT NOT NULL, PRIMARY KEY (chain, child, root))"
+            "CREATE TABLE IF NOT EXISTS child_proofs (chain TEXT NOT NULL, child TEXT NOT NULL, root TEXT NOT NULL, entries TEXT NOT NULL, PRIMARY KEY (chain, child, root)) WITHOUT ROWID"
         )
         try database.execute(
             "CREATE TABLE IF NOT EXISTS proof_entries (cid TEXT PRIMARY KEY, bytes BLOB NOT NULL)"

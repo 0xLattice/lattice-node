@@ -666,8 +666,10 @@ public struct MiningState: Sendable {
                     replyID: replyID, cid: item.cid, count: mempool.count, bytes: mempool.byteCount
                 ))
             case .restored:
-                // Its journal row is already durable.
-                journaled.insert(item.cid)
+                // Its row is durable, unless the pool let go of a copy since
+                // (its row then goes with the next flush): written again,
+                // a write that changes nothing when the row is there.
+                journal(item, &turn)
             case .returned:
                 announce = true
             case .peer:

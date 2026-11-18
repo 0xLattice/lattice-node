@@ -40,7 +40,7 @@ final class ChainCreationTests: XCTestCase {
         try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
         let store = try NodeStore(databasePath: NodeStore.databasePath(storage: storage), nexusGenesisCID: "genesis")
         try await store.persistAcceptedBlockRows(
-            [AcceptedBlockRecord(blockCID: "block-a", parentCID: nil)], at: "Nexus/A", admissionSequence: 1, status: .header
+            [AcceptedBlockRecord(blockCID: "block-a", parentCID: nil, height: 0, postStateCID: "state-a")], at: "Nexus/A", status: .header
         )
         XCTAssertTrue(try NodeStore.holdsBlocks(of: "Nexus/A", storage: storage))
         XCTAssertFalse(try NodeStore.holdsBlocks(of: "Nexus/B", storage: storage))
@@ -71,7 +71,7 @@ final class ChainCreationTests: XCTestCase {
     private func writeOneBlock(at chain: String, storage: URL) async throws {
         let store = try NodeStore(databasePath: NodeStore.databasePath(storage: storage), nexusGenesisCID: "genesis")
         try await store.persistAcceptedBlockRows(
-            [AcceptedBlockRecord(blockCID: "block-a", parentCID: nil)], at: chain, admissionSequence: 1, status: .header
+            [AcceptedBlockRecord(blockCID: "block-a", parentCID: nil, height: 0, postStateCID: "state-a")], at: chain, status: .header
         )
     }
 

@@ -174,7 +174,7 @@ final class ConsensusEdgeSimulationTests: XCTestCase {
 
     private func persisted(_ effects: [ChainEffect]) -> [BlockImportBatch] {
         effects.flatMap { effect -> [BlockImportBatch] in
-            if case .persist(let batch) = effect { return batch.facts }
+            if case .persist(let batch) = effect { return batch.facts + batch.executed }
             return []
         }
     }

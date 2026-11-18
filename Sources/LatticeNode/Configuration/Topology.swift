@@ -41,7 +41,7 @@ public struct Topology: Codable, Sendable {
         case listen, rpc, webSocket, peers, publicRead, externalAddress
         case publicReadRate, publicReadExpensiveRate, publicReadMaxRate, publicReadFetches
         case publicReadURL, publicSubmit, publicSubmitRate, minRelayFee
-        case servingMaxConcurrent, servingMaxInFlightVolumeBytes, maxAcquisitionBytes, blockBodies, state, stateWindow, stateWindows, finalityWindow, finalityWindows, announceLifetime
+        case servingMaxConcurrent, servingMaxInFlightVolumeBytes, maxAcquisitionBytes, maxUnflushedBytes, blockBodies, state, stateWindow, stateWindows, finalityWindow, finalityWindows, announceLifetime
         case hostedChains, rpcAllowedOrigins, operatorListen, operatorTokens, operatorAllowedOrigins
     }
     public var listen: UInt16
@@ -94,6 +94,9 @@ public struct Topology: Codable, Sendable {
     /// every hosted chain together (`--max-acquisition-bytes`). Absent =
     /// the node's default.
     public var maxAcquisitionBytes: Int?
+    /// Bytes of post-state executions hold in memory before a flush
+    /// (`--max-unflushed-bytes`). Absent = the node's default.
+    public var maxUnflushedBytes: Int?
     /// The block bodies kept beyond what the node needs to operate
     /// (`--block-bodies`): `all` or `none`. Absent = `all`.
     public var blockBodies: String?
@@ -307,6 +310,9 @@ public struct Topology: Codable, Sendable {
         if let maxAcquisitionBytes, maxAcquisitionBytes < sessionBytes {
             throw CtlError("maxAcquisitionBytes must be at least \(sessionBytes), the bytes one block's fetch may hold")
         }
+        if let maxUnflushedBytes, maxUnflushedBytes < 1 {
+            throw CtlError("maxUnflushedBytes must be at least 1")
+        }
         if let publicReadFetches, publicReadFetches < 0 {
             throw CtlError("publicReadFetches must be nonnegative")
         }
@@ -325,6 +331,7 @@ public struct Topology: Codable, Sendable {
             arguments += ["--serving-max-in-flight-volume-bytes", String(value)]
         }
         if let value = maxAcquisitionBytes { arguments += ["--max-acquisition-bytes", String(value)] }
+        if let value = maxUnflushedBytes { arguments += ["--max-unflushed-bytes", String(value)] }
         if let value = blockBodies { arguments += ["--block-bodies", value] }
         if let value = state { arguments += ["--state", value] }
         if let value = stateWindow { arguments += ["--state-window", String(value)] }

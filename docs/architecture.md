@@ -78,14 +78,18 @@ plain inputs.
 
 For each turn the runtime preserves the core's effect order:
 
-1. Persist the `NodeBatch` and referenced content.
+1. Persist what the `NodeBatch` weighed, and hold what its executions
+   decided for the next flush.
 2. Publish the new per-level snapshots and read views.
 3. Execute sends, fetches, jobs, timers, disconnects, and RPC replies.
 
 Network ingress is bounded before it reaches the loop. Worker tasks never
 mutate core state; they post their results back as events. A persistence
-failure is fail-stop because publishing state that was not durably recorded
-would make restart behavior disagree with the live process.
+failure is fail-stop because publishing a block that was not durably
+recorded would make restart behavior disagree with the live process. What
+executions decide is derived from the blocks, so it is a cache: flushed in
+batches, and executed again after a crash (Bitcoin's `FlushStateToDisk` and
+`ReplayBlocks`).
 
 The production source is grouped by adapter boundary:
 
@@ -125,13 +129,16 @@ bundle serving reads it, a node runs without it, and it may be deleted while
 the node is stopped.
 
 Persistence is content-first: referenced Volumes become durable before the
-fact transaction that names them. One admission's Volumes (a block's once
-its execution found it valid or it was mined here, or the post-states of
-one step) are one `volumes.db` transaction,
-then retained. The complete `NodeBatch` then commits in one SQLite transaction
-across every affected chain path, including each path's headers, child
-proofs, and sync cursors. A crash cannot leave part of a block's content or a
-parent-level half of a multi-level grind.
+fact transaction that names them. A block's Volumes (once its execution
+found it valid, or when it was mined or built here) are one `volumes.db`
+transaction, then retained. What a step weighed then commits in one SQLite
+transaction across every affected chain path, including each path's headers,
+child proofs, and sync cursors. What executions decided is held in memory
+and flushed in batches: every post-state held in one `volumes.db`
+transaction, then every verdict, across every level, in one `state.db`
+transaction. A crash cannot leave part of a block's content, a
+parent-level half of a multi-level grind, or a verdict without the state it
+names.
 
 Content stays in `volumes.db` because a retention scope names it, and each
 scope says why. A block's body (its own Volume and its transactions') is
@@ -142,8 +149,8 @@ is let go of when its block is found invalid, and, when the operator keeps
 no bodies beyond the ones the node operates on (`blockBodies: none`), when
 another block becomes its chain's tip. When the operator keeps recent
 state (`state: recent`, or `none`, which is a window of one block), what a
-step's executions stored is named by its chain and the height of the
-step's newest block, retained in the transaction that stores it, and is let
+flush stored of each execution is named by its chain and the height of its
+block, retained in the transaction that stores it, and is let
 go of, every such height in one transaction, once that height is a state
 window or more below the chain's tip and, on `recent`, the counts (below)
 have moved there. On `recent` each chain also has a counted
@@ -208,16 +215,25 @@ Boot reads no content to restore: it stores the Nexus genesis block again
 when the store lacks it, since nothing else can supply that block's own
 node.
 
-`state.db` keeps each fact once, by id, with the level's staged batch that
-first held it and its place in that batch: the block index Bitcoin keeps
-for good. Facts are never deleted. A block fact carries no state diff; on
+`state.db` keeps each fact with the level's staged batch that held it and
+its place in that batch, and `accepted_blocks` keeps each block's parent,
+height and post-state by CID: the block index Bitcoin keeps for good.
+Facts are never deleted. A block fact carries no state diff; on
 `recent` each executed block's diff is undo data, kept in `state_diffs` for
 the state window only. `BootRecovery` validates the databases before
 networking starts. `NodeRuntime.boot` then rebuilds each hosted level's
 `ChainCore`, parent before child, from that level's facts read in the order
 it first took them (`ChainTree.restore(facts:)`): one key range per level,
 and the weigh log rebuilt from it keeps every position a peer's stream
-cursor names. A saved child proof names its entries by CID: block nodes and
+cursor names. The restored tree holds every block the node weighed,
+executed as of the last flush; the body window executes the rest again
+from the bodies the node stores.
+A level's local journal rows wait until it has executed those blocks again,
+or cannot from what the node holds, and until its parent level's own replay
+is over (Bitcoin loads its mempool once `ActivateBestChain` has connected
+what it can of the blocks on disk); the transactions of one it did not
+execute again go back to its pool. A saved child proof names its entries by CID: block
+nodes and
 child indexes are read from `headers` and `child_indexes`, and the rest
 from `proof_entries`, so it is served byte for byte as credited. Each
 commits in the transaction of the work fact it produced.

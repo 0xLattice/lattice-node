@@ -106,6 +106,11 @@ final class BlockBodiesTests: XCTestCase {
             let (runtime, storage) = try await start(miner)
             for _ in 0..<4 { blocks.append(try await mine(runtime)) }
             let tip = try XCTUnwrap(blocks.last)
+            // Until a flush writes their executions, their bodies stay: a
+            // crash executes them again from these.
+            let unflushed = await bodiesHeld(storage, of: blocks)
+            XCTAssertEqual(unflushed, blocks, "no flush yet")
+            runtime.maintain()
             try await eventually("every body below the tip is let go of") {
                 await self.bodiesHeld(storage, of: blocks) == [tip]
             }
@@ -120,6 +125,7 @@ final class BlockBodiesTests: XCTestCase {
         XCTAssertEqual(runtime.published.value?.actOnTip, blocks.last)
         let next = try await mine(runtime)
         XCTAssertEqual(runtime.published.value?.actOnHeight, UInt64(blocks.count + 1))
+        runtime.maintain()
         try await eventually("the old tip's body goes once another block is the tip") {
             await self.bodiesHeld(storage, of: blocks + [next]) == [next]
         }
@@ -142,6 +148,7 @@ final class BlockBodiesTests: XCTestCase {
             try await eventually("the joiner executes the producer's tip") {
                 runtime.published.value?.actOnTip == tip
             }
+            runtime.maintain()
             try await eventually("the joiner holds only its tip's body") {
                 await self.bodiesHeld(storage, of: blocks) == [tip]
             }
@@ -217,12 +224,14 @@ final class BlockBodiesTests: XCTestCase {
         try await eventually("the left block's transaction is returned") {
             again.published.value?.mempoolCount == 1
         }
+        again.maintain()
         try await eventually("the left tip's body is let go of") { await storage.volume(a2) == nil }
 
         let tip = try await mine(again)
         let now = await NodeRuntime.transactionIDs(ofBlock: tip, fetcher: storage)
         XCTAssertEqual(now, [carried], "the tip carries the transaction, and holds it")
         _ = try await mine(again)
+        again.maintain()
         try await eventually("the transaction goes with the body that carried it") {
             await storage.volume(carried) == nil
         }
@@ -262,6 +271,7 @@ final class BlockBodiesTests: XCTestCase {
             }
             childGenesis = try XCTUnwrap(children.first)
             let (rootTip, childTip) = (try XCTUnwrap(roots.last), try XCTUnwrap(children.last))
+            runtime.maintain()
             try await eventually("each level holds its tip's body, and the child its genesis block") {
                 let heldRoots = await self.bodiesHeld(storage, of: roots)
                 let heldChildren = await self.bodiesHeld(storage, of: children)

@@ -48,6 +48,14 @@ extension NodeStore {
         )
     }
 
+    func holdsLocalMempoolTransaction(transactionCID: String) throws -> Bool {
+        try database.row(
+            LocalMempoolTransactionRecord.self,
+            "SELECT transaction_cid, added_at FROM local_mempool_transactions WHERE transaction_cid = ?1",
+            params: [.text(transactionCID)]
+        ) != nil
+    }
+
     func localMempoolTransactions() throws -> [LocalMempoolTransactionRecord] {
         try database.rows(
             LocalMempoolTransactionRecord.self,

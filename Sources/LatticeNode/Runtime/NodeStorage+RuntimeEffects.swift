@@ -5,6 +5,12 @@ import LatticeNodeAPI
 import VolumeBroker
 import cashew
 
+/// The store refused a valid block's body (`storeValidBlock`): its write
+/// failed, not a read of its content.
+struct BodyWriteFailure: Error {
+    let error: any Error
+}
+
 /// The store side of the node runtime: the existing NodeStore (state.db) and
 /// Volume broker of an opened `NodeStorage`, used as the effect executor's
 /// persistence and content layer. Nothing here decides anything.
@@ -35,74 +41,90 @@ extension NodeStorage {
         try await store.chainCursors(at: path)
     }
 
-    /// `NodeEffect.persist`: content first — every affected level's Volumes
-    /// in one volumes.db transaction, retained in the same one — then the
-    /// complete node step's headers, proofs, facts and cursors in one
-    /// state.db transaction.
-    nonisolated func persistNodeBatch(_ batch: NodeBatch, logID: String) async throws {
-        var durable: [NodeFactBatch] = []
-        // What this step's executions created. An executed block's body was
-        // pinned under its block's name by the job that executed it.
-        var stored: [String] = []
-        // With recent state kept, or none: the state each level's
-        // executions stored, under the height of its newest block.
-        var states: [ChainPath: (height: UInt64?, roots: [String])] = [:]
+    /// `NodeEffect.persist`. What the step weighed is written now: the specs
+    /// its child genesis headers carry, retained, in one volumes.db
+    /// transaction, then its headers, credited proofs, weighed facts and
+    /// cursors in one state.db transaction. What its executions created is
+    /// held in memory until the flush (`unflushed`, `flush`): each
+    /// post-state's Volumes, read at once by whatever executes or builds
+    /// next, under the scope the flush keeps it by (the chain's when the
+    /// operator keeps all state, else the window of its block's height).
+    /// Returns the bytes held.
+    @discardableResult
+    nonisolated func persistNodeBatch(_ batch: NodeBatch, logID: String) async throws -> Int {
+        var weighed: [NodeFactBatch] = []
         let storage = NodeImportStorage(storage: broker)
-        for (path, level) in batch.levels.sorted(by: {
-            $0.path.count != $1.path.count
-                ? $0.path.count < $1.path.count
-                : $0.path.joined(separator: "/") < $1.path.joined(separator: "/")
-        }) {
-            for state in level.states {
-                try await Self.storeExecutedState(state, in: storage)
-            }
-            let executed = await storage.takeStoredVolumeRoots()
+        for (path, level) in batch.levels {
             // A child genesis's spec: what restore holds as its root's.
             for spec in level.headers.compactMap(\.spec) {
                 try await VolumeImpl<ChainSpec>(node: spec).store(storer: storage)
             }
-            let specs = await storage.takeStoredVolumeRoots()
-            let created = executed + specs
-            switch configuration.state {
-            case .all:
-                stored.append(contentsOf: created)
-            case .recent, .none:
-                // The height of the newest block whose state this step
-                // executed; one no block fact of the step names (none does
-                // today) joins the chain's newest window below.
-                let roots = Set(level.states.compactMap { try? LatticeStateHeader(node: $0).rawCID })
-                let height = level.facts.flatMap(\.facts).compactMap { fact -> UInt64? in
-                    guard case .block(let block) = fact, roots.contains(block.postStateCID) else { return nil }
-                    return block.blockHeight
-                }.max()
-                states[path] = (height, executed)
-                stored.append(contentsOf: specs)
+            if !level.facts.isEmpty || !level.headers.isEmpty || !level.proofs.isEmpty || !level.cursors.isEmpty {
+                weighed.append(NodeFactBatch(
+                    path: path, facts: level.facts, headers: level.headers, proofs: level.proofs, cursors: level.cursors
+                ))
             }
-            durable.append(NodeFactBatch(
-                path: path,
-                facts: level.facts,
-                headers: level.headers,
-                proofs: level.proofs,
-                cursors: level.cursors,
+        }
+        let specs = await storage.takeStoredVolumeRoots()
+        if !specs.isEmpty {
+            try await broker.storeVolumesLocal(await storage.takeVolumes(), retaining: [retentionScope: specs])
+        }
+        if !weighed.isEmpty { try await store.stageNodeFacts(weighed, logID: logID) }
+        return try await hold(batch)
+    }
+
+    /// The flush: every post-state held, retained as it was held, in one
+    /// volumes.db transaction, then `executed`, each level's verdict
+    /// batches in the order it applied them, in one state.db transaction.
+    /// Memory lets go of the Volumes only once both committed, so a read
+    /// that misses it finds the store.
+    func flush(_ executed: [ChainPath: [BlockImportBatch]], logID: String) async throws {
+        if !held.volumes.isEmpty {
+            try await broker.storeVolumesLocal(held.volumes, retaining: held.retaining)
+        }
+        let levels = executed.filter { !$0.value.isEmpty }.map {
+            NodeFactBatch(
+                path: $0.key, facts: [], executed: $0.value, cursors: [:],
                 keepsStateDiffs: configuration.state == .recent
-            ))
+            )
         }
-        // Every root retained is one this batch stores.
-        var retaining: [String: [String]] = [:]
-        if !stored.isEmpty { retaining[retentionScope] = stored }
-        for (path, state) in states where !state.roots.isEmpty {
-            // A state of no known height goes with the newest the chain
-            // keeps: kept as long as that, never let go of before it.
-            let scope = if let height = state.height {
-                scopes.window(at: path, height: height)
-            } else {
-                try await broker.retainedScopes(prefix: scopes.windowPrefix(at: path)).max()
-                    ?? scopes.window(at: path, height: 0)
+        if !levels.isEmpty { try await store.stageNodeFacts(levels, logID: logID) }
+        held = HeldStates()
+        try await unflushed.sweep()
+    }
+
+    private func hold(_ batch: NodeBatch) async throws -> Int {
+        for (path, level) in batch.levels where !level.states.isEmpty {
+            var heights: [String: UInt64] = [:]
+            for case .block(let block) in level.executed.flatMap(\.facts) {
+                heights[block.postStateCID] = max(heights[block.postStateCID] ?? 0, block.blockHeight)
             }
-            retaining[scope, default: []] += state.roots
+            for state in level.states {
+                let walk = NodeImportStorage(storage: nil, keepsVolumes: true)
+                try await Self.storeExecutedState(state, in: walk)
+                let volumes = await walk.takeVolumes()
+                guard !volumes.isEmpty else { continue }
+                // A state of no known height goes with the newest the chain
+                // keeps: kept as long as that, never let go of before it.
+                let scope = if configuration.state == .all {
+                    retentionScope
+                } else if let height = heights[try LatticeStateHeader(node: state).rawCID] {
+                    scopes.window(at: path, height: height)
+                } else {
+                    try await broker.retainedScopes(prefix: scopes.windowPrefix(at: path)).max()
+                        ?? scopes.window(at: path, height: 0)
+                }
+                // Each state keeps what it created under its own scope; a
+                // Volume another held state created is held once.
+                held.retaining[scope, default: []] += volumes.map(\.volume.root)
+                let fresh = volumes.filter { held.roots.insert($0.volume.root).inserted }
+                guard !fresh.isEmpty else { continue }
+                try await unflushed.storeVolumesLocal(fresh)
+                held.volumes += fresh
+                held.bytes += fresh.reduce(0) { $0 + $1.volume.entries.values.reduce(0) { $0 + $1.count } }
+            }
         }
-        try await broker.storeVolumesLocal(await storage.takeVolumes(), retaining: retaining)
-        try await store.stageNodeFacts(durable, logID: logID)
+        return held.bytes
     }
 
     /// Retains the roots this store holds, and returns the ones it lacks.
@@ -130,9 +152,10 @@ extension NodeStorage {
         return lacked
     }
 
-    /// How the operator's own work reads: this store, a block's header
-    /// record, what is in memory (`readCache`), then peers, whose answers
-    /// are kept there for the next read. Every read of materialized state
+    /// How the operator's own work reads: the post-states executions hold
+    /// until the next flush, this store, a block's header record, what is
+    /// in memory (`readCache`), then peers, whose answers are kept there
+    /// for the next read. Every read of materialized state
     /// the node's work makes (a block's pre-state when it executes, a
     /// template's, a mined block's) goes through here, so a peer is asked
     /// only for what neither this store nor memory holds: a state this node
@@ -142,9 +165,9 @@ extension NodeStorage {
         CoalescingFetcher(CompositeContentSource([workSource, readCache, readCache.remembering(peers)]))
     }
 
-    /// How a reader's state read reads: this store, a block's header
-    /// record, what is in memory, then peers, whose answers are not kept
-    /// for later reads.
+    /// How a reader's state read reads: the held post-states, this store, a
+    /// block's header record, what is in memory, then peers, whose answers
+    /// are not kept for later reads.
     nonisolated func readersReads(through peers: any ContentSource) -> CoalescingFetcher {
         CoalescingFetcher(CompositeContentSource([workSource, readCache, peers]))
     }
@@ -204,9 +227,17 @@ extension NodeStorage {
         for volume in volumes where body.contains(volume.root) || rest.contains(volume.root) {
             try await storage.store(volume: volume)
         }
-        try await storage.commit()
-        try await broker.mergeRetainedRoots(scope: scopes.body(cid, at: path), roots: body.sorted())
-        try await retainHeld(rest.sorted(), scope: configuration.state == .all ? nil : scopes.rules(at: path))
+        // One transaction: the body and its pins, so a body is durable
+        // before any flush names its execution.
+        var retaining = [scopes.body(cid, at: path): body.sorted()]
+        if !rest.isEmpty {
+            retaining[configuration.state == .all ? retentionScope : scopes.rules(at: path), default: []] += rest.sorted()
+        }
+        do {
+            try await broker.storeVolumesLocal(await storage.takeVolumes(), retaining: retaining)
+        } catch {
+            throw BodyWriteFailure(error: error)
+        }
         bundles.record(root: cid, roots: roots.sorted())
         return transactions
     }
@@ -412,7 +443,8 @@ extension NodeStorage {
     /// `MiningEffect.poolChanged`, before any later effect of its step: each
     /// added transaction's Volume stored and pinned for this storage, each
     /// journaled one written to the local journal, and every removed one
-    /// unpinned and dropped from the journal. The journal keeps seconds.
+    /// unpinned. Its journal row goes with the next flush
+    /// (`dropLocalTransactions`). The journal keeps seconds.
     nonisolated func persistPoolDelta(_ delta: PoolDelta) async throws {
         for item in delta.added {
             _ = try await persistPeerTransaction(item.transaction)
@@ -422,8 +454,17 @@ extension NodeStorage {
         }
         guard !delta.removed.isEmpty else { return }
         try await updateLiveMempoolRoots(adding: [], removing: Set(delta.removed))
+    }
+
+    /// The flush's part of the journal: the rows of `cids` go, once the
+    /// executions that took them from the pool are written (Bitcoin's
+    /// wallet writes its best block with the chainstate's flush; geth
+    /// rewrites its journal from the pool at `rotate`). A crash before
+    /// then keeps them, to be judged again on the tip the start reaches.
+    nonisolated func dropLocalTransactions(_ cids: Set<String>) async throws {
+        guard !cids.isEmpty else { return }
         let journal = try await localTransactionTimestamps()
-        for cid in delta.removed where journal[cid] != nil {
+        for cid in cids.sorted() where journal[cid] != nil {
             try await removeLocalTransaction(cid)
         }
     }

@@ -24,9 +24,11 @@ public enum NodeRuntimeError: Error, Equatable, Sendable {
 /// effects in order — persist, then publish, then everything else. Every
 /// decision remains in the core.
 ///
-/// - `persist` (one `NodeBatch`) → the opened `NodeStorage`'s Volume store and state.db
-///   (content fsynced first, then the facts in one transaction). A failure
-///   stops the storage: restart replays the journal.
+/// - `persist` (one `NodeBatch`) → what it weighed, to the opened
+///   `NodeStorage`'s state.db in one transaction; what its executions
+///   decided, held in memory until a flush (`Loop.flush`). A failure stops
+///   the storage: restart replays the facts and executes again what the
+///   last flush did not hold.
 /// - `publish` → `published`, read by RPC without touching the loop.
 /// - `send` / `serveHeaders` / `disconnect` → the Ivy overlay.
 /// - `fetchBody` / `cancelBody` / `fetchByCID` → the content layer
@@ -220,6 +222,10 @@ public final class NodeRuntime: Sendable {
         // What the journal replay below reads of the core, which the runtime
         // takes over.
         let (rootPath, levels) = (core.rootPath, Set(core.levels.keys))
+        var replays: [ChainPath: Set<String>] = [:]
+        for (path, level) in core.levels {
+            replays[path] = await replay(of: level, storage: storage)
+        }
         // Standings restored before the overlay serves anyone.
         let ivy = Ivy(config: overlay)
         let servingLedger = try ServingLedger(directory: configuration.storagePath, tally: await ivy.tally)
@@ -243,6 +249,13 @@ public final class NodeRuntime: Sendable {
                 storage.store.childIndexBytes(root).map { SerializedVolume(root: root, entries: [root: $0]) }
             }
         )
+        // What the last flush did not hold executes again from the bodies
+        // this node stores, before any peer is heard (Bitcoin activates its
+        // best chain at startup), and the journal's rows wait for it. A
+        // parent level first: its child's rows wait on its replay too.
+        for (path, blocks) in replays.sorted(by: { $0.key.count < $1.key.count }) where !blocks.isEmpty {
+            runtime.inputs.yield(.event(.level(path, .replay(blocks))))
+        }
         // Boot replay of the local journal, each row with its arrival time,
         // into the pool of the chain it names.
         for item in try await storage.localTransactions() {
@@ -252,6 +265,7 @@ public final class NodeRuntime: Sendable {
                 item.transaction, origin: .restored(addedAt: item.addedAt * 1_000)
             )))))
         }
+        runtime.inputs.yield(.event(.tick))
         do {
             try await runtime.ivy.start()
             switch configuration.webSocket {
@@ -276,6 +290,20 @@ public final class NodeRuntime: Sendable {
         runtime.inputs.yield(.maintenance)
         logLine("lattice-node: runtime started in \(seconds(started.duration(to: .now)))")
         return runtime
+    }
+
+    /// The blocks `level` executes again from the bodies this node holds:
+    /// from each block it can connect next, every descendant whose body is
+    /// held (Bitcoin's `ActivateBestChain` over the blocks it has on disk).
+    static func replay(of level: ChainCore, storage: NodeStorage) async -> Set<String> {
+        var blocks: Set<String> = []
+        var next = level.connectOrder.next
+        while let cid = next.popLast() {
+            guard !blocks.contains(cid), await storage.broker.hasVolume(root: cid) else { continue }
+            blocks.insert(cid)
+            next += level.tree.children(of: cid)
+        }
+        return blocks
     }
 
     /// Rebuild the core from the durable facts, rooted at the configured
@@ -463,6 +491,7 @@ public final class NodeRuntime: Sendable {
             // With no bodies kept beyond the working set, a start lets go
             // of the ones a run that kept them left, before any step.
             for (path, level) in state.core.levels { state.bodyTips[path] = level.snapshot.actOnTip }
+            state.markFlushed()
             await storage.letGoOfBodies(except: state.bodyTips)
             await storage.letGoOfReads()
             await storage.moveLegacyState(tips: state.core.levels.mapValues(\.snapshot.actOnHeight))
@@ -695,9 +724,10 @@ extension NodeRuntime {
         /// block leaves the body window.
         var connectWaits: [BodyKey: BodyWait] = [:]
 
-        /// Blocks whose execution this step journaled, and each level's
-        /// tip as of the last step: what the working set compares to let
-        /// go of a body when the operator keeps none beyond it.
+        /// Blocks whose execution a flush made durable since the last
+        /// settle, and each level's tip as of the last settle: what the
+        /// working set compares to let go of a body when the operator keeps
+        /// none beyond it.
         var executedThisStep: [BodyKey] = []
         var bodyTips: [ChainPath: String] = [:]
         /// The window blocks' distances from their chains' next blocks to
@@ -708,10 +738,47 @@ extension NodeRuntime {
         /// ran has the same tree, so the same window.
         var windows: [ChainPath: (next: [String], distances: [String: Int])] = [:]
         /// Each level's tip the kept state was last moved to, or held back
-        /// at (none: move it at the next settle), and the blocks executed or
-        /// found invalid this step, whose reads go after it.
+        /// at (none: move it at the next settle), and the blocks a flush
+        /// wrote executed or found invalid since, whose reads go after it.
         var stateTips: [ChainPath: String] = [:]
         var readsDone: [BodyKey] = []
+        /// What executions decided since the last flush, and what follows
+        /// it once durable (`flush`).
+        var unflushed = Unflushed()
+        /// Each level's act-on tip when no execution was last held: the
+        /// tips a restart acts on, and what bodies and state are let go of
+        /// against, so nothing goes that a restart would execute again.
+        var flushedTips: [ChainPath: (hash: String, height: UInt64)] = [:]
+
+        /// Each level's verdict batches, in the order it applied them; the
+        /// bodies they executed or found invalid; the post-state bytes held.
+        /// Written at a count of executions or a size of state, as Bitcoin
+        /// flushes at its `dbcache` and geth commits at its dirty-trie limit,
+        /// at once for a block found invalid (its body is never stored, so
+        /// its exclusion is written before the body goes), and at each
+        /// maintenance pass, a host change and a stop.
+        struct Unflushed {
+            var executed: [ChainPath: [BlockImportBatch]] = [:]
+            var bodies: [BodyKey] = []
+            var excluded: [BodyKey] = []
+            var bytes = 0
+            /// Journal rows of transactions that left the pool.
+            var journal: Set<String> = []
+            /// Due once the post-states held reach `limit` bytes, or the
+            /// executions one per MiB of it (`--max-unflushed-bytes`).
+            func due(limit: Int) -> Bool {
+                !excluded.isEmpty || bytes >= limit || bodies.count >= max(1, limit >> 20)
+            }
+            /// A row goes with the flush once its transaction left the pool,
+            /// and stays when the transaction is pooled again first (a reorg
+            /// returned it, or the journal restored it): what the flush
+            /// drops is what the pool no longer holds, as geth's journal at
+            /// `rotate`.
+            mutating func poolChanged(_ delta: PoolDelta) {
+                journal.formUnion(delta.removed)
+                journal.subtract((delta.added + delta.journaled).map(\.cid))
+            }
+        }
         /// On `recent`: each chain's counts as this loop last wrote or read
         /// them, and the repair running for them.
         var counted: [ChainPath: CountedChain] = [:]
@@ -778,6 +845,7 @@ extension NodeRuntime {
         mutating func handle(_ input: Input) async -> Bool {
             switch input {
             case .stop:
+                _ = await flush()
                 return false
             case .event(let event):
                 if case .tick = event { wake = nil }
@@ -859,6 +927,7 @@ extension NodeRuntime {
                 guard let event else { return true }
                 return await step(event)
             case .maintenance:
+                guard await flush() else { return false }
                 // Read here, on the loop: the pass runs off it and must not
                 // hold the store open past a stop. Pins not announced are
                 // not read.
@@ -868,14 +937,16 @@ extension NodeRuntime {
                 // them, a store failure on a chain with no block since, or a
                 // repair that failed) are settled again.
                 if configuration.state == .recent {
-                    for (path, level) in core.levels {
+                    for path in core.levels.keys {
                         let chain = counted[path]
                         guard chain?.waiting == true
-                            || chain?.marker.flatMap(CountedMarker.init)?.tip.cid != level.snapshot.actOnTip else { continue }
+                            || chain?.marker.flatMap(CountedMarker.init)?.tip.cid != flushedTips[path]?.hash else { continue }
                         counted[path]?.waiting = false
                         stateTips[path] = nil
                     }
-                    await settleState()
+                }
+                await settle()
+                if configuration.state == .recent {
                     // Counts that moved since they were last checked are
                     // checked against the store again.
                     for (path, chain) in counted
@@ -947,6 +1018,8 @@ extension NodeRuntime {
         /// journaled stays, so listing it again resumes it. A level that
         /// cannot start is left out, and the error says why.
         mutating func host(_ next: NodeConfiguration) async throws {
+            // A level stops, or starts, over what it made durable.
+            guard await flush() else { throw NodeRuntimeError.stopped }
             try await storage.storePolicyModules(next.policyModules)
             let listed = Set(next.hostedChildren)
             for path in core.ordered where path != core.rootPath && !listed.contains(path) {
@@ -1044,6 +1117,9 @@ extension NodeRuntime {
             guard core.levels[path] != nil else { throw NodeRuntimeError.unknownChain }
             outputs[path] = LevelOutput(published: PublishedValue(core.levels[path]?.snapshot), view: PublishedValue())
             await peerMemory?.track(path, now: NodeRuntime.now())
+            var blocks: Set<String> = []
+            if let level = core.levels[path] { blocks = await NodeRuntime.replay(of: level, storage: storage) }
+            if !blocks.isEmpty, await !step(.level(path, .replay(blocks))) { throw NodeRuntimeError.stopped }
             for item in try await storage.localTransactions()
             where item.transaction.body.node?.chainPath == path {
                 guard await step(.level(path, .mining(.transactionReceived(
@@ -1639,8 +1715,11 @@ extension NodeRuntime {
             for effect in ordered {
                 guard await execute(effect) else { return false }
             }
-            await settleBodies()
-            await settleState()
+            if unflushed.due(limit: configuration.resourcePolicy.maximumUnflushedBytes) {
+                guard await flush() else { return false }
+            }
+            if unflushed.executed.isEmpty { markFlushed() }
+            await settle()
             // The blocks each chain can connect next wait for the content
             // budget ahead of bodies fetched ahead of them. Refreshed only
             // while someone waits: a waiter that arrives between steps is
@@ -1656,11 +1735,6 @@ extension NodeRuntime {
                     leaving: reordered.filter { cachedBodyOrder[$0] == nil }
                 )
             }
-            // What an executed block read goes once the kept state holds
-            // what of it the tip's state holds: its execution's window
-            // until the counts reach it.
-            for key in readsDone { await storage.releaseReads(key.cid, at: key.path) }
-            readsDone.removeAll()
             refreshView(core.touched)
             return true
         }
@@ -1668,28 +1742,29 @@ extension NodeRuntime {
         private mutating func execute(_ effect: NodeEffect) async -> Bool {
             switch effect {
             case .persist(let batch):
-                var persistedBodyKeys: [BodyKey] = []
-                for (path, levelBatch) in batch.levels.sorted(by: { $0.path.count < $1.path.count }) {
-                    persistedBodyKeys += levelBatch.facts.flatMap(\.facts).compactMap { fact -> BodyKey? in
-                        guard case .validation(let validation) = fact else { return nil }
-                        return BodyKey(path: path, cid: validation.blockHash)
-                    }
-                }
                 do {
-                    try await storage.persistNodeBatch(batch, logID: core.logID)
-                    if configuration.blockBodies == .none { executedThisStep.append(contentsOf: persistedBodyKeys) }
-                    readsDone.append(contentsOf: persistedBodyKeys)
-                    // A block found invalid is no block: its body goes.
-                    for (path, levelBatch) in batch.levels {
-                        for case .exclusion(let excluded) in levelBatch.facts.flatMap(\.facts) {
-                            await storage.releaseBody(excluded.blockHash, at: path)
-                            readsDone.append(BodyKey(path: path, cid: excluded.blockHash))
-                        }
-                    }
+                    unflushed.bytes = try await storage.persistNodeBatch(batch, logID: core.logID)
                 } catch {
                     // Fail-stop: no later effect of this step may run.
                     failStop(error)
                     return false
+                }
+                for (path, levelBatch) in batch.levels {
+                    // A block whose header proved it invalid is no block:
+                    // its body goes.
+                    for case .exclusion(let excluded) in levelBatch.facts.flatMap(\.facts) {
+                        await storage.releaseBody(excluded.blockHash, at: path)
+                        readsDone.append(BodyKey(path: path, cid: excluded.blockHash))
+                    }
+                    guard !levelBatch.executed.isEmpty else { continue }
+                    unflushed.executed[path, default: []] += levelBatch.executed
+                    for fact in levelBatch.executed.flatMap(\.facts) {
+                        switch fact {
+                        case .validation(let validation): unflushed.bodies.append(BodyKey(path: path, cid: validation.blockHash))
+                        case .exclusion(let excluded): unflushed.excluded.append(BodyKey(path: path, cid: excluded.blockHash))
+                        case .block, .work: break
+                        }
+                    }
                 }
             case .level(let path, let effect):
                 return await execute(effect, at: path)
@@ -1707,7 +1782,8 @@ extension NodeRuntime {
                 }
             case .connect(let path, let job):
                 enqueue(NodeRuntime.connectJob(
-                    job, at: path, levels: LiveLevels(inputs: inputs), storage: storage, remote: remote
+                    job, at: path, levels: LiveLevels(inputs: inputs), storage: storage, remote: remote,
+                    failStop: failStop
                 ))
                 startJobs()
             case .wakeAt(let time):
@@ -1884,6 +1960,7 @@ extension NodeRuntime {
                     failStop(error)
                     return false
                 }
+                unflushed.poolChanged(delta)
             case .transactionAdmitted(let replyID, let cid, let count, let bytes):
                 answer(replyID, .success(.admitted(cid: cid, count: count, bytes: bytes)))
             case .transactionRefused(let replyID, let error):
@@ -2011,6 +2088,49 @@ extension NodeRuntime {
             })
         }
 
+        /// Write what executions decided since the last flush, then drop the
+        /// journal rows of the transactions that left the pool, then let go
+        /// of what that made safe to (Bitcoin's `FlushStateToDisk`): the
+        /// reads of the blocks executed or found invalid, the bodies of the
+        /// invalid ones, and, keeping none beyond the working set, those of
+        /// the executed ones that are not their chain's tip. A failure stops
+        /// the node.
+        mutating func flush() async -> Bool {
+            guard !unflushed.executed.isEmpty || !unflushed.journal.isEmpty else { return true }
+            do {
+                try await storage.flush(unflushed.executed, logID: core.logID)
+                try await storage.dropLocalTransactions(unflushed.journal)
+            } catch {
+                failStop(error)
+                return false
+            }
+            if configuration.blockBodies == .none { executedThisStep += unflushed.bodies }
+            readsDone += unflushed.bodies + unflushed.excluded
+            for key in unflushed.excluded { await storage.releaseBody(key.cid, at: key.path) }
+            unflushed = Unflushed()
+            markFlushed()
+            return true
+        }
+
+        /// Nothing executed is held: every level's act-on tip is the one a
+        /// restart acts on.
+        mutating func markFlushed() {
+            for (path, level) in core.levels {
+                flushedTips[path] = (level.snapshot.actOnTip, level.snapshot.actOnHeight)
+            }
+        }
+
+        /// What the flushes so far made safe to let go of: bodies kept
+        /// beyond none, the kept state, then what each block they wrote
+        /// read, once the kept state holds what of it the tip's state holds
+        /// (its execution's window until the counts reach it).
+        mutating func settle() async {
+            await settleBodies()
+            await settleState()
+            for key in readsDone { await storage.releaseReads(key.cid, at: key.path) }
+            readsDone.removeAll()
+        }
+
         /// The working set, when the operator keeps no bodies beyond it:
         /// a body stays while it is its chain's tip. One that executed this
         /// step and is not, and the tip another block replaced, are let go.
@@ -2018,8 +2138,8 @@ extension NodeRuntime {
             guard configuration.blockBodies == .none else { return }
             let executed = Dictionary(grouping: executedThisStep, by: \.path)
             executedThisStep.removeAll()
-            for (path, level) in core.levels {
-                let tip = level.snapshot.actOnTip
+            for path in core.levels.keys {
+                guard let tip = flushedTips[path]?.hash else { continue }
                 var past = (executed[path] ?? []).map(\.cid)
                 if let last = bodyTips[path], last != tip { past.append(last) }
                 bodyTips[path] = tip
@@ -2040,25 +2160,27 @@ extension NodeRuntime {
         /// counts follow the tip.
         mutating func settleState() async {
             guard configuration.state != .all else { return }
-            for (path, level) in core.levels where stateTips[path] != level.snapshot.actOnTip {
+            for (path, level) in core.levels {
+                guard let tip = flushedTips[path], stateTips[path] != tip.hash else { continue }
                 let asked = stateTips[path] == nil
-                stateTips[path] = level.snapshot.actOnTip
-                if !asked, climbedLessThanAWindow(level, at: path) { continue }
-                guard !level.snapshot.actOnTip.isEmpty,
-                      await settleCounted(at: path, tip: level.snapshot.actOnTip) else { continue }
-                await storage.letGoOfState(at: path, below: level.snapshot.actOnHeight)
+                stateTips[path] = tip.hash
+                if !asked, climbedLessThanAWindow(level, tip, at: path) { continue }
+                guard !tip.hash.isEmpty, await settleCounted(at: path, tip: tip.hash) else { continue }
+                await storage.letGoOfState(at: path, below: tip.height)
             }
         }
 
-        /// Whether the act-on tip of the chain at `path` descends from its
-        /// counts' tip, by less than a window: a tip on another branch, or
-        /// counts not kept, never holds a settle back.
-        private func climbedLessThanAWindow(_ level: ChainCore, at path: ChainPath) -> Bool {
+        /// Whether `tip`, the flushed act-on tip of the chain at `path`,
+        /// descends from its counts' tip, by less than a window: a tip on
+        /// another branch, or counts not kept, never holds a settle back.
+        private func climbedLessThanAWindow(
+            _ level: ChainCore, _ tip: (hash: String, height: UInt64), at path: ChainPath
+        ) -> Bool {
             guard let window = configuration.stateWindow(for: path),
                   let counts = counted[path]?.marker.flatMap(CountedMarker.init)?.tip else { return false }
-            let height = level.snapshot.actOnHeight
+            let height = tip.height
             guard height > counts.height, height - counts.height < window else { return false }
-            var cid = level.snapshot.actOnTip
+            var cid = tip.hash
             for _ in 0..<(height - counts.height) {
                 guard let parent = level.parent(of: cid) else { return false }
                 cid = parent

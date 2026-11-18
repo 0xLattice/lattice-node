@@ -34,6 +34,9 @@ public struct LevelSimConfig: Sendable {
     public var reconnectDelay: Int64 = 3_000
     public var settle: Int64 = 60_000
     public var replayInterval = 48
+    /// Flush a node's held verdicts once it holds this many executions
+    /// across its levels, as the shell does at its count.
+    public var flushInterval = 3
     /// The world's honest miners build child blocks as the node's template
     /// does, anchors moving only forward (`LevelWorld.Builder.forwardAnchors`).
     /// Off, they build on the head whatever their carrier, and under parent
@@ -113,6 +116,14 @@ public struct HostStore: Sendable {
         }
     }
 
+    /// The executions held across levels since the last flush.
+    var unflushed: Int { levels.values.reduce(0) { $0 + $1.unflushed.count } }
+
+    /// The shell's flush: one write across every level.
+    public mutating func flush() {
+        for path in levels.keys { levels[path]?.flush() }
+    }
+
     func proofs(_ path: ChainPath, _ cid: String) -> [ChildBlockProof] {
         (proofs[path]?[cid] ?? [:]).sorted { $0.key < $1.key }.map(\.value)
     }
@@ -176,7 +187,12 @@ public struct LevelSimulator {
     public private(set) var report = LevelSimReport()
 
     /// A core's durable store, by name (`report.digests` keys).
-    public func durable(_ core: String) -> HostStore? { cores[core]?.store }
+    /// A node's stores as a stop leaves them: flushed.
+    public func durable(_ core: String) -> HostStore? {
+        guard var store = cores[core]?.store else { return nil }
+        store.flush()
+        return store
+    }
 
     public static func make(_ config: LevelSimConfig) async throws -> LevelSimulator {
         var rng = SplitMix64(state: config.seed)
@@ -250,7 +266,10 @@ public struct LevelSimulator {
             report.trace = (report.trace ^ next.sequence ^ UInt64(bitPattern: next.time)) &* 0x100_0000_01B3
             try await deliver(next)
         }
-        for (name, node) in cores.sorted(by: { $0.key < $1.key }) {
+        for name in cores.keys.sorted() {
+            guard var node = cores[name] else { continue }
+            node.store.flush()
+            cores[name] = node
             try checkReplay(name, node)
             report.digests[name] = node.digests
         }
@@ -397,6 +416,10 @@ public struct LevelSimulator {
             switch effect {
             case .persist(let batch):
                 node.store.append(batch)
+                let invalid = batch.levels.flatMap(\.batch.executed).flatMap(\.facts).contains {
+                    if case .exclusion = $0 { true } else { false }
+                }
+                if invalid || node.store.unflushed >= config.flushInterval { node.store.flush() }
                 persisted = true
                 persists += 1
                 minedLevels = batch.levels.count
@@ -446,7 +469,10 @@ public struct LevelSimulator {
         node.digests = digests
         if persisted {
             node.persists += 1
-            if node.persists % config.replayInterval == 0 { try checkReplay(name, node) }
+            if node.persists % config.replayInterval == 0 {
+                node.store.flush()
+                try checkReplay(name, node)
+            }
         }
         cores[name] = node
     }
@@ -528,7 +554,8 @@ public struct LevelSimulator {
         }
     }
 
-    /// DST 7 across levels: the store alone rebuilds equal trees and facts.
+    /// DST 7 across levels: the store alone, once flushed, rebuilds equal
+    /// trees and facts.
     func checkReplay(_ name: String, _ node: HostNode) throws {
         let restored = try NodeCore.restore(
             root: node.store.records[LevelWorld.nexus]!,

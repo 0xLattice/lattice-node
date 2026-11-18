@@ -70,6 +70,11 @@ public enum ChainEvent: Sendable {
     /// The level's mempool and miner work: transactions, preflight and
     /// template results, template requests and submitted work.
     case mining(MiningEvent)
+    /// A start: the blocks this level executes again from the bodies this
+    /// node holds. The local journal's rows wait until none of them is
+    /// left in the body window (Bitcoin loads its mempool once
+    /// `ActivateBestChain` has connected the blocks it has on disk).
+    case replay(Set<String>)
 }
 
 public enum DisconnectReason: Sendable, Equatable {
@@ -82,19 +87,24 @@ public enum DisconnectReason: Sendable, Equatable {
     case stalled
 }
 
-/// The durable form of one step: content first — the post-states its
-/// executions produced, stored, pinned and fsynced — then the facts that
-/// reference it, committed with their headers and credited proofs. The shell writes it before executing any
-/// later effect of the same step. Facts durable without their content is an
-/// ordering violation the shell must prevent: a crash may lose the facts of
-/// durable content, never the reverse.
+/// What one step adds to the store: the post-states its executions
+/// produced, the facts the tree applied, with their headers and credited
+/// proofs, and the cursors it moved. The shell holds it before executing any
+/// later effect of the same step, and writes what it holds in order: a
+/// post-state with or before the facts that name it.
 public struct ChainBatch: Sendable {
     public let headers: [StoredHeader]
     /// Each executed block's materialized post-state: the state content a
     /// later execution resolves, written before the validation that
     /// references it.
     public let states: [LatticeState]
+    /// The facts the step weighed: blocks, work, and the exclusions a
+    /// header's linkage proves.
     public let facts: [BlockImportBatch]
+    /// What the step's executions decided, each batch as `applyConnect`
+    /// applied it: it re-states its block's weighed facts, so only its
+    /// verdict (a validation, or an exclusion) is new.
+    public let executed: [BlockImportBatch]
     /// A child level: the proofs this step credited, written with the work
     /// facts they produced, so this node serves them.
     public let proofs: [StoredProof]
@@ -106,12 +116,14 @@ public struct ChainBatch: Sendable {
         headers: [StoredHeader],
         states: [LatticeState] = [],
         facts: [BlockImportBatch],
+        executed: [BlockImportBatch] = [],
         proofs: [StoredProof] = [],
         cursors: [String: StreamCursor] = [:]
     ) {
         self.headers = headers
         self.states = states
         self.facts = facts
+        self.executed = executed
         self.proofs = proofs
         self.cursors = cursors
     }
@@ -334,6 +346,12 @@ public struct ChainCore: Sendable {
     /// committers make a header with no proofs worth taking (`awaitProof`).
     /// Never held past the step.
     var parentTree: ChainTree?
+    /// A child level, within one step only: whether its parent level is
+    /// still executing again what it holds (its `replaying`).
+    var parentReplaying = false
+    /// While a start executes again what it holds (`ChainEvent.replay`):
+    /// those blocks, and the journal's rows waiting for them.
+    var replaying: (blocks: Set<String>, rows: [MiningEvent])?
     /// The child directories this level's executed blocks commit: built from
     /// the held tree, then grown by every block that executes valid.
     public let executedChildren = ExecutedChildren()
@@ -398,7 +416,8 @@ public struct ChainCore: Sendable {
     ///
     /// The revision floor is the number of staged batches that added a
     /// fact. On a root level each batch that took a revision added at least
-    /// one new fact, so no revision exposed before the restart exceeds it.
+    /// one new fact, so no revision of the stored facts exceeds it (the
+    /// executions a crash lost took revisions a start takes again).
     /// Replay alone can count fewer: its sort can apply a batch that
     /// re-states a grind's final quantity before the work batches that
     /// raised it, which then replay as duplicates (§12.5.11). A child level
@@ -437,16 +456,20 @@ public struct ChainCore: Sendable {
         )
     }
 
-    /// One event. A child level is handed its parent level's tree for the
-    /// step alone (`parentTree`).
-    public mutating func step(_ event: ChainEvent, now: Int64, parent: ChainTree? = nil) -> [ChainEffect] {
+    /// One event. A child level is handed its parent level's tree, and
+    /// whether that level is still executing again what it holds, for the
+    /// step alone (`parentTree`, `parentReplaying`).
+    public mutating func step(
+        _ event: ChainEvent, now: Int64, parent: ChainTree? = nil, parentReplaying: Bool = false
+    ) -> [ChainEffect] {
         // A peer's transaction is ignored until the level has caught up
         // (`synced`), as Bitcoin Core ignores `tx` during initial block
         // download: its verdict would be read on a tip about to move. Never
         // blamed.
         if case .mining(.transactionReceived(_, origin: .peer)) = event, !synced { return [] }
         parentTree = parent
-        defer { parentTree = nil }
+        self.parentReplaying = parentReplaying
+        defer { parentTree = nil; self.parentReplaying = false }
         var turn = Turn(now: now)
         weighed = []
         arrived = []
@@ -502,7 +525,13 @@ public struct ChainCore: Sendable {
             guard !isRoot else { break }
             _ = accept(entry, from: nil, &turn)
         case .mining(let event):
-            turn.mining += mining.step(event, now: turn.now)
+            if case .transactionReceived(_, origin: .restored) = event, replaying != nil {
+                replaying?.rows.append(event)
+            } else {
+                turn.mining += mining.step(event, now: turn.now)
+            }
+        case .replay(let blocks):
+            replaying = (blocks, replaying?.rows ?? [])
         }
         drain(&turn)
         if !isRoot { proofWork(&turn) }
@@ -525,6 +554,7 @@ public struct ChainCore: Sendable {
         var headers: [StoredHeader] = []
         var states: [LatticeState] = []
         var facts: [BlockImportBatch] = []
+        var executed: [BlockImportBatch] = []
         var effects: [ChainEffect] = []
         /// Child proofs this step credited, to index.
         var indexed: [StoredProof] = []
@@ -557,10 +587,10 @@ public struct ChainCore: Sendable {
         for entry in Self.logEntries(of: turn.facts.flatMap(\.facts), isRoot: isRoot) { sync.log.append(entry, in: tree) }
         // At most a page is pushed; `hasMore` has the peer pull the rest.
         let appended = sync.log.page(after: start, limit: config.maxHeadersPerPage, bytes: config.maxPageBytes)
-        if !turn.facts.isEmpty || !turn.indexed.isEmpty || !turn.cursors.isEmpty {
+        if !turn.facts.isEmpty || !turn.executed.isEmpty || !turn.indexed.isEmpty || !turn.cursors.isEmpty {
             effects.append(.persist(ChainBatch(
                 headers: turn.headers, states: turn.states, facts: turn.facts,
-                proofs: turn.indexed, cursors: turn.cursors
+                executed: turn.executed, proofs: turn.indexed, cursors: turn.cursors
             )))
         }
         let wasSynced = synced

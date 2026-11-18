@@ -115,6 +115,7 @@ final class DerivedChildGrindTests: XCTestCase {
                     switch effect {
                     case .persist(let batch):
                         store.append(batch)
+                        store.flush()
                     case .level(let path, .fetchBody(let cid)):
                         if !withheldBodies.contains(cid) { queue.append(.level(path, .bodyFetched(cid: cid))) }
                     case .level(let path, .send(_, let message)):

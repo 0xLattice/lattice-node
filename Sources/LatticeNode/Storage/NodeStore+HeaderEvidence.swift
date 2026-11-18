@@ -89,7 +89,7 @@ extension NodeStore {
     nonisolated func savedProofs(at path: ChainPath, for children: [String]) throws -> [String: [ChildBlockProof]] {
         var proofs: [String: [ChildBlockProof]] = [:]
         guard path.count > 1, ChainAddress(path) != nil else { return proofs }
-        var bad: [Int64] = []
+        var bad: [(child: String, root: String)] = []
         var start = children.startIndex
         while start < children.endIndex {
             let chunk = children[start..<min(start + 500, children.endIndex)]
@@ -97,13 +97,13 @@ extension NodeStore {
             let marks = (2...(chunk.count + 1)).map { "?\($0)" }.joined(separator: ", ")
             for row in try reads.rows(
                 from: "child_proofs",
-                "SELECT rowid, child, root, entries FROM child_proofs WHERE chain = ?1 AND child IN (\(marks)) ORDER BY child, root",
+                "SELECT child, root, entries FROM child_proofs WHERE chain = ?1 AND child IN (\(marks)) ORDER BY child, root",
                 params: [.text(path.joined(separator: "/"))] + chunk.map { .text($0) }
             ) {
                 if let saved = try savedProof(row, at: path) {
                     proofs[saved.child, default: []].append(saved.proof)
-                } else if let rowid = try? row.int("rowid") {
-                    bad.append(rowid)
+                } else if let child = try? row.text("child"), let root = try? row.text("root") {
+                    bad.append((child, root))
                     SyncTrace.log(
                         chain: path,
                         "saved proof unreadable, left out: block=\((try? row.text("child")) ?? "?") root=\((try? row.text("root")) ?? "?")"
@@ -136,19 +136,19 @@ extension NodeStore {
     }
 
     /// Best effort: delete each row of `path` that still does not read back
-    /// as its proof (a good copy may have replaced its bytes since, and a
-    /// deleted rowid can be reused by another chain's row).
-    private func dropBadProofs(_ rowids: [Int64], at path: ChainPath) {
+    /// as its proof (a good copy may have replaced its bytes since).
+    private func dropBadProofs(_ keys: [(child: String, root: String)], at path: ChainPath) {
         let chain = path.joined(separator: "/")
-        for rowid in rowids {
+        for key in keys {
+            let params: [NodeSQLiteValue] = [.text(chain), .text(key.child), .text(key.root)]
             guard let row = try? database.row(
                 from: "child_proofs",
-                "SELECT rowid, child, root, entries FROM child_proofs WHERE rowid = ?1 AND chain = ?2",
-                params: [.int(rowid), .text(chain)]
+                "SELECT child, root, entries FROM child_proofs WHERE chain = ?1 AND child = ?2 AND root = ?3",
+                params: params
             ), let unread = try? savedProof(row, at: path) == nil, unread else { continue }
             _ = try? database.execute(
-                "DELETE FROM child_proofs WHERE rowid = ?1 AND chain = ?2",
-                params: [.int(rowid), .text(chain)]
+                "DELETE FROM child_proofs WHERE chain = ?1 AND child = ?2 AND root = ?3",
+                params: params
             )
         }
     }

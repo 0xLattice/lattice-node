@@ -29,7 +29,8 @@ struct ContentLayer: Fetcher {
 /// fsyncs a batch's content before it commits the facts (`ChainBatch`), so
 /// a crash can lose facts whose content is durable, or content no durable
 /// fact references, but never content a durable fact references: facts kept
-/// with their states lost is an ordering violation, not a crash mode.
+/// with their states lost is an ordering violation, not a crash mode. Every
+/// mode loses what executions decided since the last flush.
 public enum CrashMode: CaseIterable, Sendable {
     /// The whole batch is lost.
     case loseBatch
@@ -136,11 +137,13 @@ extension Invariants {
         }
     }
 
-    /// Content before facts: every block a persist records as executed has
+    /// Content before facts: every block a flush records as executed has
     /// its whole post-state — every node of it, not only the root — in the
     /// node's own store.
-    static func checkStatesStored(node: String, batch: ChainBatch, store: SimStore, content: SimCAS) async throws {
-        for fact in batch.facts.flatMap(\.facts) {
+    static func checkStatesStored(
+        node: String, flushed: [BlockImportBatch], store: SimStore, content: SimCAS
+    ) async throws {
+        for fact in flushed.flatMap(\.facts) {
             guard case .validation(let validation) = fact else { continue }
             guard let postState = store.headers[validation.blockHash]?.block.postState else {
                 throw fail(node, "executed \(validation.blockHash) has no durable header")
@@ -170,6 +173,7 @@ extension Simulator {
     /// started never reports.
     mutating func crash(_ name: String, tearing batch: ChainBatch, _ mode: CrashMode) async throws {
         guard var node = cores[name] else { return }
+        node.store.loseUnflushed()
         switch mode {
         case .loseBatch:
             break
@@ -183,6 +187,7 @@ extension Simulator {
                 try await storeMaterialized(state, in: node.content)
             }
             node.store.append(batch)
+            node.store.loseUnflushed()
             for cid in node.bodies.subtracting(node.store.validations) {
                 node.content.removeAll(world.blocks[cid]?.body.keys.map { $0 } ?? [])
                 node.bodies.remove(cid)

@@ -24,13 +24,25 @@ public struct NodeResourcePolicy: Sendable, Equatable {
     /// top of it. What goes first is in `ReadCache`.
     public var maximumCachedContentBytes: Int { maximumAcquisitionBytes / 4 }
 
+    /// The bytes of post-state executions hold in memory before a flush
+    /// writes them (`--max-unflushed-bytes`, Bitcoin's `-dbcache`, geth's
+    /// `--cache`); executions are flushed at one per MiB of it too, since
+    /// an empty block's leaves the state as it was. It bounds what a crash
+    /// executes again.
+    public let maximumUnflushedBytes: Int
+
+    public static let defaultMaximumUnflushedBytes = 64 * 1_024 * 1_024
+
     public init(
         maximumAcquisitionStorageBytes: Int = 64 * 1_024 * 1_024,
-        maximumAcquisitionBytes: Int = Self.defaultMaximumAcquisitionBytes
+        maximumAcquisitionBytes: Int = Self.defaultMaximumAcquisitionBytes,
+        maximumUnflushedBytes: Int = Self.defaultMaximumUnflushedBytes
     ) {
         precondition(maximumAcquisitionStorageBytes > 0)
         precondition(maximumAcquisitionBytes >= maximumAcquisitionStorageBytes)
+        precondition(maximumUnflushedBytes > 0)
         self.maximumAcquisitionStorageBytes = maximumAcquisitionStorageBytes
         self.maximumAcquisitionBytes = maximumAcquisitionBytes
+        self.maximumUnflushedBytes = maximumUnflushedBytes
     }
 }

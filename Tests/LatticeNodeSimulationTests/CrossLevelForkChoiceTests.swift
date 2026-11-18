@@ -31,7 +31,7 @@ final class CrossLevelForkChoiceTests: XCTestCase {
 
         mutating func feed(_ grinds: [MinedGrind]) async throws {
             for grind in grinds {
-                try await Self.step(&both, .mined(grind), world: world) { store.append($0) }
+                try await Self.step(&both, .mined(grind), world: world) { store.append($0); store.flush() }
                 try await Self.step(&nexusOnly, .mined(grind), world: world) { _ in }
             }
         }

@@ -2,15 +2,12 @@ import Foundation
 import Lattice
 import LatticeNodeCore
 
-/// `admission_facts`: one fact, kept once by id, with the staged batch that
-/// first held it.
+/// `admission_facts`: one fact, with the staged batch that held it.
 struct ImportFactRow: NodeStoreRecord {
     static let table = "admission_facts"
     private let row: Row
 
     init(_ row: Row) { self.row = row }
-
-    var payload: Data { get throws { try row.blob("payload") } }
 }
 
 extension NodeStore {
@@ -19,7 +16,7 @@ extension NodeStore {
         try !database.query("SELECT 1 FROM admission_facts LIMIT 1").isEmpty
     }
 
-    /// One level's facts in the order it first took them: by seq, then by
+    /// One level's facts in the order it took them: by seq, then by
     /// place in the batch, one primary-key range read with no sort. Each is
     /// decoded as its row is read: no other level's rows are read, and the
     /// rows are never held.

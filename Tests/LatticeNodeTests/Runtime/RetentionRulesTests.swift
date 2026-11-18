@@ -273,6 +273,10 @@ final class RetentionRulesTests: XCTestCase {
         try await eventually("the body is pinned under the block's own name") {
             try await storage.broker.retainedRoots(scope: storage.scopes.body(mined)).count == 2
         }
+        // The journal row of the transaction it confirmed, which holds the
+        // transaction too, goes with the flush that writes the execution.
+        runtime.maintain()
+        try await eventually("the flush drops the row") { (try? await storage.localTransactions().isEmpty) ?? false }
         let chainBefore = try await storage.broker.retainedRoots(scope: storage.scopes.chain)
 
         await storage.releaseBody(mined)
