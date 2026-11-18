@@ -48,6 +48,9 @@ final class HeldLevelTemplateTests: XCTestCase {
         hosting alpha: Bool = false,
         creator: Bool = true,
         coreConfig: ChainCoreConfig = ChainCoreConfig(),
+        // One block per connect job: these tests hold a connect at a
+        // gate and step it a block at a time, which batching would merge.
+        connectBatch: Int = 1,
         observe: NodeRuntime.JobObserver? = nil
     ) async throws -> (runtime: NodeRuntime, endpoint: PeerEndpoint, storage: NodeStorage) {
         let port = NetworkTransportTestPorts.allocate()
@@ -56,7 +59,8 @@ final class HeldLevelTemplateTests: XCTestCase {
             privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
             listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
             hostedChildren: alpha ? [Self.alpha] : [],
-            childSpecs: alpha && creator ? [Self.alpha: MergedMiningTests.alphaSpec] : [:]
+            childSpecs: alpha && creator ? [Self.alpha: MergedMiningTests.alphaSpec] : [:],
+            connectBatch: connectBatch
         )
         let storage = try await NodeStorage.open(configuration: configuration)
         let runtime = try await NodeRuntime.start(

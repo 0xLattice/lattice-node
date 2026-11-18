@@ -49,7 +49,10 @@ final class AdmissionWhileSyncingTests: XCTestCase {
             storagePath: temporaryDirectory(),
             privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
             listenPort: port,
-            rpcPort: NetworkTransportTestPorts.allocate()
+            rpcPort: NetworkTransportTestPorts.allocate(),
+            // One block per connect job: these tests hold and count
+            // connects block by block, which batching would merge.
+            connectBatch: 1
         )
         let runtime = try await NodeRuntime.start(
             storage: try await NodeStorage.open(configuration: configuration),
