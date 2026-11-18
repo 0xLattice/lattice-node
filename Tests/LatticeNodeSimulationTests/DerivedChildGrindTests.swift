@@ -64,6 +64,9 @@ final class DerivedChildGrindTests: XCTestCase {
         var position: [ChainPath: [PeerID: UInt64]] = [:]
         /// Blocks whose bodies the content layer never serves.
         var withheldBodies: Set<String> = []
+        /// Blocks whose bodies no provider has: the content layer answers
+        /// every ask for them `bodyUnavailable`.
+        var unavailableBodies: Set<String> = []
         /// Carriers whose derivations credit nothing (their content could
         /// not be read when they ran).
         var lostDerivations: Set<String> = []
@@ -133,7 +136,11 @@ final class DerivedChildGrindTests: XCTestCase {
                     case .persist(let batch):
                         store.append(batch)
                     case .level(let path, .fetchBody(let cid)):
-                        if !withheldBodies.contains(cid) { queue.append(.level(path, .bodyFetched(cid: cid))) }
+                        if unavailableBodies.contains(cid) {
+                            queue.append(.level(path, .bodyUnavailable(cid: cid)))
+                        } else if !withheldBodies.contains(cid) {
+                            queue.append(.level(path, .bodyFetched(cid: cid)))
+                        }
                     case .level(let path, .send(let peer, let message)):
                         sent.append((path, message))
                         if case .getStream(let id, _, let after, _) = message, let log = logs[path]?[peer] {
@@ -1944,6 +1951,61 @@ final class DerivedChildGrindTests: XCTestCase {
         // never read, from its start).
         XCTAssertTrue(asked.contains { $0.0 == "peer" && $0.1 == 2 }, "read after the restored cursor: \(asked)")
         XCTAssertFalse(asked.contains { $0.0 == "peer" && $0.1 != 2 })
+    }
+
+    /// A host whose Nexus peer logs N0 and N1, Nexus's heaviest header,
+    /// read to its end, with N1's body `unavailable` (no provider has it)
+    /// or only `slow` (asked, not answered yet).
+    private func withheldParentHost(_ fixture: Gate, unavailable: Bool) async throws -> Host {
+        var host = try await gatedHost(fixture)
+        if unavailable { host.unavailableBodies = [fixture.nexus[1].cid] } else { host.withheldBodies = [fixture.nexus[1].cid] }
+        for (path, message) in host.take() where path == Self.nexus {
+            guard case .getStream(let id, _, _, _) = message else { continue }
+            let entries = fixture.nexus.enumerated().map { StreamEntry(position: UInt64($0.offset + 1), entry: .header($0.element.cid)) }
+            await host.step(.received(Self.miner, Self.nexus, .stream(StreamPage(requestID: id, logID: "peer", entries: entries, hasMore: false))))
+        }
+        let nexus = try XCTUnwrap(host.core.levels[Self.nexus])
+        XCTAssertEqual(nexus.snapshot.bestHeaderTip, fixture.nexus[1].cid)
+        XCTAssertEqual(nexus.snapshot.actOnTip, fixture.nexus[0].cid, "N1 is weighed, not executed")
+        return host
+    }
+
+    /// Nexus's heaviest header's body is withheld by every provider: once
+    /// it is found unavailable, Nexus has caught up with what it can have
+    /// and latches `synced` (Bitcoin's `IsInitialBlockDownload` reads the
+    /// active chain, never the best header), so Alpha opens and syncs.
+    func testAParentWhoseHeaviestBodyIsUnavailableLatchesAndOpensItsChild() async throws {
+        let fixture = try await gateWorld()
+        let host = try await withheldParentHost(fixture, unavailable: true)
+        XCTAssertEqual(host.core.levels[Self.nexus]?.synced, true)
+        let alpha = try host.digest(Self.alpha)
+        for entry in fixture.alpha { XCTAssertNotNil(alpha.blocks[try XCTUnwrap(entry.cid)], "Alpha opened and weighed") }
+        XCTAssertEqual(alpha.canonicalTip, fixture.alpha.last?.cid)
+        XCTAssertTrue(host.disconnects.isEmpty)
+    }
+
+    /// Same: with the heaviest body unavailable, Nexus takes peers'
+    /// transactions (it is no longer in initial download).
+    func testAParentWhoseHeaviestBodyIsUnavailableAdmitsPeerTransactions() async throws {
+        let fixture = try await gateWorld()
+        var host = try await withheldParentHost(fixture, unavailable: true)
+        let key = CryptoUtils.generateKeyPair()
+        let tx = try signed(key, [AccountAction(owner: address(key), delta: -2)], nonce: 0)
+        let effects = host.core.step(.level(Self.nexus, .mining(.transactionReceived(tx, origin: .peer(Self.miner)))), now: Self.now)
+        XCTAssertTrue(effects.contains {
+            if case .level(Self.nexus, .mining(.preflight)) = $0 { return true }
+            return false
+        }, "a peer's transaction is checked, not ignored: \(effects)")
+    }
+
+    /// A body merely slow (asked, no answer yet) is not unavailable: Nexus
+    /// does not latch on it, and Alpha stays gated.
+    func testASlowParentBodyDoesNotLatch() async throws {
+        let fixture = try await gateWorld()
+        var host = try await withheldParentHost(fixture, unavailable: false)
+        XCTAssertEqual(host.core.levels[Self.nexus]?.synced, false)
+        XCTAssertFalse(host.take().contains { $0.path == Self.alpha }, "Alpha stays gated")
+        XCTAssertTrue(try host.digest(Self.alpha).blocks.isEmpty)
     }
 
     /// A grandchild whose carrier the parent level weighed is credited by
