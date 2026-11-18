@@ -224,6 +224,11 @@ public struct ChainCoreConfig: Sendable {
     /// fails again waits as long as it would have.
     public var bodyRetryBase: Int64
     public var bodyRetryCap: Int64
+
+    /// The wait after a body's `attempts`-th failed attempt.
+    func bodyRetryWait(afterAttempts attempts: Int) -> Int64 {
+        min(bodyRetryCap, bodyRetryBase << Int64(min(attempts - 1, 20)))
+    }
     /// The level's mempool and template bounds.
     public var mining = MiningConfig()
     /// Node-local finality (docs/operations.md, "Node-local finality"), per chain, in blocks: a header more
