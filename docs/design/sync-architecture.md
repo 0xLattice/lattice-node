@@ -40,7 +40,8 @@ outputs, and things it must not know.
 
 Three services belong to the node, not to any chain:
 
-- **Lanes**: a queue per chain and per kind of work. Work in one lane never
+- **Lanes**: a queue per kind of work, and per chain for execution and
+  header work. Work in one lane never
   queues behind work in another, and shared resources have limits, not
   ordering policies.
 - **Store**: a verified cache of what the network holds. Writes are atomic
@@ -74,9 +75,11 @@ established clients are built. The node has no scheduler of its own.
 | Storage writes | One writer per store, off the loop | The loop never waits on disk |
 
 The loop only decides. It does not wait on disk, read content, or do
-bookkeeping that is not a decision. Ready lane jobs take free workers first
-in, first out, and the operating system shares the CPU among lanes; there is
-no priority and no time accounting. A loop per chain would parallelise only the share the core
+bookkeeping that is not a decision. Each lane offers only its next job, and
+free workers take those lane heads in the order they became ready, so no
+lane's backlog stands in front of another lane's next job. The operating
+system shares the CPU among lanes; there is no priority and no time
+accounting. A loop per chain would parallelise only the share the core
 takes and would cost the single deterministic step order the simulator
 depends on. Because only two facts cross between chains, a chain's decisions
 can still move to a loop of their own later.
@@ -132,8 +135,8 @@ rule here first.
    consistent earlier state and re-syncs the rest.
 10. **Content is verified once, where it enters.** Modules pass verified,
     decoded values, never raw bytes.
-11. **Every module's cost is measured by the sync benchmark.** A change that
-    makes one worse states why.
+11. **Weigh, Fetch and Execute costs are measured by the sync benchmark**
+    (W, B, E, P). A change that makes one worse states why.
 12. **Consensus bytes are fixed; representation is the node's.**
     Identifiers, wire format and storage layout are private to the node and
     convert only where bytes are hashed.
@@ -156,7 +159,7 @@ a macOS host, so fsync goes to the VM's disk.
 | Rule | Today | Measured |
 |---|---|---|
 | 8, 9 | The runtime loop awaits an fsynced commit on every step that has facts | The loop was busy 46% of wall time with one worker and 67% with three |
-| 8 | A submitted block's content is stored and retained before it is weighed (`storeMinedBlock`), and its reply waits for its connect | |
+| 8 | A submitted block's content is stored and retained before it is weighed (`storeMinedBlock`) | |
 | 13 | State is content-addressed trie nodes in the content store, pruned by reference counts | 2.9 GB written for 82 MB kept |
 | 4 | Every job shares one worker pool behind three strict queues | Derivations of 0.7 ms waited 3.5 to 3.9 s for a worker |
 | 1, 2 | A child reads its peers only once its parent's executed tip has caught up | The grandchildren were idle for the first 6.7 s of a 25.8 s sync |
