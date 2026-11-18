@@ -217,7 +217,14 @@ extension NodeStore {
     /// sync level: if it were lost with a tail the run journaled after it, the
     /// next start would keep the id over a shortened log.
     func openWeighLog(fresh: String) throws -> (id: String, replaced: Bool) {
-        let opened = try database.transaction {
+        // FULL fsyncs this commit's WAL frames whether or not a reader holds
+        // the WAL, unlike a checkpoint, which a reader can leave undone.
+        let level = try database.query("PRAGMA synchronous").first?["synchronous"]
+        try database.execute("PRAGMA synchronous=FULL")
+        defer {
+            if case .int(let previous)? = level { _ = try? database.execute("PRAGMA synchronous=\(previous)") }
+        }
+        return try database.transaction {
             let stored = try chainLogID()
             let clean = try markedClean()
             try database.execute("INSERT OR REPLACE INTO core_meta (key, value) VALUES ('clean_stop', '0')")
@@ -225,8 +232,6 @@ extension NodeStore {
             try database.execute("UPDATE core_meta SET value = ?1 WHERE key = 'log_id'", params: [.text(fresh)])
             return (fresh, true)
         }
-        try database.execute("PRAGMA wal_checkpoint(FULL)")
-        return opened
     }
 
     /// Whether the last run marked a clean stop.
