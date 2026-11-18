@@ -317,7 +317,8 @@ public struct ChainCore: Sendable {
     public private(set) var published: ChainSnapshot?
     /// Whether this level has caught up since it started: set the first time
     /// a peer's log has been read to its end and applied here, and the act-on
-    /// tip is the best header tip. Never unset while the process runs, never
+    /// tip is the heaviest tip whose bodies may be had (`latchSynced`). Never
+    /// unset while the process runs, never
     /// persisted (geth's `handler.synced`, set when its downloader completes
     /// a sync cycle). Until then a peer's transaction is ignored.
     public internal(set) var synced = false

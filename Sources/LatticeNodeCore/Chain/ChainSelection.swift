@@ -79,16 +79,54 @@ extension ChainCore {
     }
 
     /// Set `synced` once a peer's log has been read to its end and applied,
-    /// and the act-on tip is the best header tip. Only a log of a peer
-    /// running this level counts: one that does not answers with an empty
-    /// log of no id (`NodeCore.answerUnhosted`), which says nothing about
-    /// the chain.
+    /// and the act-on tip is the heaviest tip whose bodies may be had
+    /// (`heaviestObtainableTip`). Only a log of a peer running this level
+    /// counts: one that does not answers with an empty log of no id
+    /// (`NodeCore.answerUnhosted`), which says nothing about the chain. As
+    /// Bitcoin Core's `IsInitialBlockDownload` reads only the active chain,
+    /// never the best header, whose data may never come
+    /// (`setBlockIndexCandidates` holds only tips with data), a body no
+    /// provider had does not hold the latch: it stays one-way, and a body
+    /// that arrives later moves only fork choice.
     mutating func latchSynced() {
         guard !synced, sync.peers.contains(where: { peer, state in
             state.readToEnd && !state.more && state.holes.isEmpty && sync.cursors[peer.key]?.logID.isEmpty == false
         }) else { return }
         let snapshot = snapshot
-        if snapshot.actOnTip == snapshot.bestHeaderTip { synced = true }
+        guard !snapshot.actOnTip.isEmpty else { return }
+        if snapshot.actOnTip == snapshot.bestHeaderTip || snapshot.actOnTip == heaviestObtainableTip() { synced = true }
+    }
+
+    /// Whether `cid`'s body could not be obtained: its last attempt found
+    /// no provider of it (or its content could not be read), and it waits
+    /// out its backoff (`bodies.parked`), not asked again, arrived or
+    /// executed since. A body in flight, a first ask or one asked again,
+    /// is not.
+    func unobtainable(_ cid: String) -> Bool {
+        bodies.parked[cid] != nil && !bodies.requested.contains(cid) && !bodies.arrived.contains(cid)
+            && !tree.isExecuted(blockHash: cid)
+    }
+
+    /// Fork choice's tip with every block whose body could not be obtained,
+    /// and all it leads to, left out, as are blocks proven invalid (fork
+    /// choice's own exclusion). Up to the first such block on the
+    /// best chain it is the best chain itself, so only the heaviest
+    /// branches below that block are walked.
+    func heaviestObtainableTip() -> String {
+        let best = tree.canonicalTip
+        let lowest = bodies.parked.keys.filter(unobtainable)
+            .compactMap { cid in tree.height(of: cid).flatMap { tree.canonicalBlockHash(atHeight: $0) == cid ? $0 : nil } }
+            .min()
+        guard let lowest else { return best }
+        func preferred(_ blocks: [String]) -> String? {
+            Self.byWeight(blocks.filter {
+                !unobtainable($0) && (tree.isExecuted(blockHash: $0) || !tree.isExcludedRoot($0))
+            }, in: tree).first
+        }
+        let start = lowest == 0 ? nil : tree.canonicalBlockHash(atHeight: lowest - 1)
+        guard var tip = start ?? preferred(tree.genesisRoots) else { return "" }
+        while let next = preferred(tree.getConsensusBlock(hash: tip)?.childHashes ?? []) { tip = next }
+        return tip
     }
 
     public var snapshot: ChainSnapshot { snapshot(actOn: actOnTip) }

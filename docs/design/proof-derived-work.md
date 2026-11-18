@@ -188,11 +188,13 @@ its carrier (§9.10). So a child level is synced whole-chain top-down: it
 reads its peers' streams, and so weighs any header from them, only once its
 parent level has caught up. That is the parent's `synced` latch: the log of
 a peer running that level read to its end and applied, with the act-on tip
-the best header tip (an unavailable heaviest header holds it back, as it
-holds back acting on the chain). The latch is one-way, like Bitcoin Core's
-`IsInitialBlockDownload`: once it is set, the child follows live, and a new
-parent block never pauses it. A grandchild waits for its child level's latch
-in turn. Nexus is not gated.
+the heaviest tip whose bodies may be had: a body no provider had (its last
+ask of every host and announcing peer failed, and it waits out its backoff)
+does not hold it back, as Bitcoin Core's `IsInitialBlockDownload` reads the
+active chain and never the best header. A body in flight does. The latch is
+one-way, like Bitcoin Core's `IsInitialBlockDownload`: once it is set, the
+child follows live, and a new parent block never pauses it. A grandchild
+waits for its child level's latch in turn. Nexus is not gated.
 
 While its parent catches up, a child level asks its peers for nothing: no
 stream page and no header, and a page pushed to it is not taken. Its stream
