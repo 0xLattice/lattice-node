@@ -32,6 +32,9 @@ SIM_SEEDS=5 swift test --filter LatticeNodeSimulationTests
   processes, mine real blocks, create and resume a child chain, submit signed
   transactions, and verify state after restart.
 
+  `TwoVersionE2ETests`, also opt-in, peers a node of an older release with a
+  node of this build and has each follow the blocks the other mines.
+
 Support utilities live under `Tests/LatticeNodeTests/Support`; they are test
 infrastructure, not alternate runtime implementations.
 
@@ -53,6 +56,23 @@ swift test --skip-build --filter LatticeCtlE2ETests
 
 The E2E suite retains its temporary roots on failure and prints their paths.
 Set `LATTICE_SYNC_TRACE=1` when diagnosing a sync failure.
+
+## Two-version E2E
+
+A change must leave this build working with the older releases still on the
+network. Point `E2E_OLD_BIN_DIR` at the `bin` directory of an older release's
+archive, with its checksum verified, and run:
+
+```sh
+swift build --build-tests -Xswiftc -warnings-as-errors
+E2E_OLD_BIN_DIR=/path/to/lattice-node-4.0.0-macos-arm64/bin \
+swift test --skip-build --filter TwoVersionE2ETests
+```
+
+Each release is driven through its own `lattice` CLI on loopback and read over
+`/health`; neither host can reach the public peers. One host mines Nexus, the
+other follows it to the same tip, in both directions. It covers Nexus blocks
+only: not child chains, transactions or state reads between the two.
 
 ## Invariants pinned here
 
@@ -82,8 +102,8 @@ transport primitive suites; this repository tests the node-facing integration.
 
 Pull requests run strict-concurrency builds on Linux and macOS, unit/integration
 tests, the simulator, wire fuzzing, SwiftLint, deployment configuration checks,
-Docker builds, reproducible Linux builds, and
-the dedicated operator E2E lane. Sanitizers run on main and merge-queue pushes.
+Docker builds, reproducible Linux builds, the dedicated operator E2E lane, and
+the two-version E2E against the older releases listed in the workflow, each pinned by sha256. Sanitizers run on main and merge-queue pushes.
 
 Release jobs run on every pull request as well as release events. They package
 all four operator binaries, run the genesis/mining/restart smoke, extract the

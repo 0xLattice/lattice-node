@@ -220,6 +220,78 @@ jobs:
           path: e2e-failure-artifacts
           if-no-files-found: ignore
 
+  # This build and the older releases still on the network stay one
+  # network. Each older release's own published binaries, pinned by sha256,
+  # against this build's.
+  two-version-e2e:
+    runs-on: ubuntu-latest
+    container: swift:6.1-jammy
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - older: "3.2.0"
+            sha256: 12a6584ea3fbf92427b06d73ee1105b8a052c11f00cde9c6cfc0c9b943e8fb2c
+          - older: "4.0.0"
+            sha256: 802820d1c29606674582398345f17141affd8f9d528424a6acea96594bf62631
+    env:
+      E2E_TIME_SCALE: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies for Linux
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev procps curl ca-certificates
+
+      - name: Restore SPM build
+        uses: actions/cache/restore@v4
+        with:
+          path: .build
+          key: spm-linux-${{ hashFiles('Package.resolved') }}
+
+      - name: Build
+        run: swift build --build-tests -Xswiftc -warnings-as-errors
+
+      - name: Fetch the older release
+        env:
+          OLDER: ${{ matrix.older }}
+          SHA256: ${{ matrix.sha256 }}
+        run: |
+          set -eu
+          archive="lattice-node-${OLDER}-linux-amd64.tar.gz"
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${OLDER}"
+          mkdir -p "$RUNNER_TEMP/older" && cd "$RUNNER_TEMP/older"
+          curl -fsSL --retry 3 -O "$base/$archive"
+          echo "$SHA256  $archive" | sha256sum -c
+          tar -xzf "$archive"
+          echo "E2E_OLD_BIN_DIR=$PWD/${archive%.tar.gz}/bin" >> "$GITHUB_ENV"
+
+      - name: Run the two-version E2Es
+        run: |
+          "$E2E_OLD_BIN_DIR/lattice-node" --help > /dev/null
+          swift test --skip-build --filter TwoVersionE2ETests
+
+      - name: Collect retained E2E artifacts
+        if: failure()
+        run: |
+          mkdir -p e2e-failure-artifacts
+          for d in /tmp/lattice-node-e2e-* "${TMPDIR:-/tmp}"/lattice-node-e2e-*; do
+            [ -d "$d" ] && cp -R "$d" e2e-failure-artifacts/ || true
+          done
+
+      - name: Upload retained E2E artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-failure-artifacts-${{ github.job }}-${{ matrix.older }}
+          path: e2e-failure-artifacts
+          if-no-files-found: ignore
+
   thread-sanitizer:
     # macOS runners are scarce: run on main and merge-queue pushes, not on every PR push.
     if: github.event_name != 'pull_request'
