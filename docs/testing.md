@@ -60,9 +60,8 @@ Set `LATTICE_SYNC_TRACE=1` when diagnosing a sync failure.
 ## Two-version E2E
 
 A change must leave this build working with the older releases still on the
-network ([sync architecture](design/sync-architecture.md), rule 15). Point
-`E2E_OLD_BIN_DIR` at the `bin` directory of an older release's archive, with
-its checksum verified, and run:
+network. Point `E2E_OLD_BIN_DIR` at the `bin` directory of an older release's
+archive, with its checksum verified, and run:
 
 ```sh
 swift build --build-tests -Xswiftc -warnings-as-errors
@@ -104,7 +103,7 @@ transport primitive suites; this repository tests the node-facing integration.
 Pull requests run strict-concurrency builds on Linux and macOS, unit/integration
 tests, the simulator, wire fuzzing, SwiftLint, deployment configuration checks,
 Docker builds, reproducible Linux builds, the dedicated operator E2E lane, and
-the two-version E2E against each older release that publishes an archive. Sanitizers run on main and merge-queue pushes.
+the two-version E2E against the older releases listed in the workflow, each pinned by sha256. Sanitizers run on main and merge-queue pushes.
 
 Release jobs run on every pull request as well as release events. They package
 all four operator binaries, run the genesis/mining/restart smoke, extract the

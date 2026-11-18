@@ -4,7 +4,7 @@ import FoundationNetworking
 #endif
 import XCTest
 
-/// Two releases on one network (rule 15 of docs/design/sync-architecture.md):
+/// Two releases on one network:
 /// a node of an older release and a node of this build, peered on loopback,
 /// each following the blocks the other mines to the same tip.
 ///
