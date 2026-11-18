@@ -26,15 +26,13 @@ final class NodeEffectTraceLabelTests: XCTestCase {
                     switch effect {
                     case .level(let path, .fetchBody(let cid)):
                         queue.append(.level(path, .bodyFetched(cid: cid)))
-                    case .connect(let path, let job):
+                    case .connect(let path, let jobs):
                         if path.count > 1 {
                             childConnects.append(effect.traceLabel.count)
                         }
-                        let verdict = await ChainTree.connect(
-                            job, fetcher: world.cas, parentFacts: host.parentFacts(for: path),
-                            validationContext: ValidationContext(nowMilliseconds: now)
-                        )
-                        queue.append(.level(path, .connected(verdict)))
+                        queue.append(.level(path, await ConnectRun.connected(
+                            jobs, fetcher: world.cas, parentFacts: host.parentFacts(for: path), now: now
+                        )))
                     default:
                         break
                     }

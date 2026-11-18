@@ -126,12 +126,17 @@ extension Invariants {
         for cid in window where digest.executed.contains(cid) {
             throw fail(node, "window block \(cid) is already executed")
         }
-        if let connecting = bodies.connecting {
+        for (index, connecting) in bodies.connecting.enumerated() {
             guard let entry = digest.blocks[connecting] else {
                 throw fail(node, "connecting \(connecting), which is not weighed")
             }
-            if let parent = entry.parent, !digest.executed.contains(parent) {
+            // A job's first block's parent is executed; each later one's is
+            // the block before it in the job.
+            if index == 0, let parent = entry.parent, !digest.executed.contains(parent) {
                 throw fail(node, "connecting \(connecting) before its parent executed")
+            }
+            if index > 0, entry.parent != bodies.connecting[index - 1] {
+                throw fail(node, "connecting \(connecting) after a block that is not its parent")
             }
         }
     }
@@ -240,4 +245,18 @@ private func storeLoaded(_ header: any Header, in storer: any VolumeStorer) asyn
 
 private func loadedNode<H: Header>(of header: H) -> (any Node)? {
     header.node
+}
+
+extension ConnectRun {
+    /// A connect job run as the shell runs it, its verdicts as the event
+    /// that reports them (no transaction IDs).
+    public static func connected(
+        _ jobs: [ConnectJob], fetcher: any Fetcher, parentFacts: (any ParentChainFacts)? = nil, now: Int64
+    ) async -> ChainEvent {
+        let (verdicts, _) = await run(
+            jobs, fetcher: fetcher, parentFacts: parentFacts,
+            validationContext: { ValidationContext(nowMilliseconds: now) }
+        )
+        return .connected(verdicts.map { ConnectResult($0) })
+    }
 }

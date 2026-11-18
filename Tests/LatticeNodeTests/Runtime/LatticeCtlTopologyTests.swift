@@ -289,6 +289,33 @@ final class LatticeCtlTopologyTests: XCTestCase {
         XCTAssertEqual(try Topology.load(root: root).contentServingArguments, [])
     }
 
+    /// The connect batch: a fragment sets it, a later layer wins, it is
+    /// validated at least 1, and it reaches the node as `--connect-batch`.
+    func testConnectBatchLoadsFromAFragmentIsValidatedAndProducesTheNodeFlag() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ctl-connect-batch-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data(#"{"listen":4001,"rpc":4003,"connectBatch":8}"#.utf8)
+            .write(to: root.appendingPathComponent(Topology.fileName))
+        XCTAssertEqual(try Topology.load(root: root).validated().connectBatch, 8)
+        let fragment = ConfigFragments.file(root: root, name: "50-sync")
+        try FileManager.default.createDirectory(at: ConfigFragments.directory(root: root), withIntermediateDirectories: true)
+        try Data(#"{"connectBatch":64}"#.utf8).write(to: fragment)
+        let loaded = try Topology.load(root: root).validated()
+        XCTAssertEqual(loaded.connectBatch, 64)
+        XCTAssertTrue(loaded.contentServingArguments.contains(["--connect-batch", "64"]))
+
+        try Data(#"{"connectBatch":0}"#.utf8).write(to: fragment)
+        XCTAssertThrowsError(try Topology.load(root: root).validated())
+        XCTAssertThrowsError(try NodeConfiguration(
+            chainPath: ["Nexus"], storagePath: root, privateKeyHex: String(repeating: "11", count: 32), connectBatch: 0
+        )) { XCTAssertEqual($0 as? NodeConfigurationError, .invalidConnectBatch) }
+        XCTAssertEqual(try NodeConfiguration(
+            chainPath: ["Nexus"], storagePath: root, privateKeyHex: String(repeating: "11", count: 32)
+        ).connectBatch, 32)
+    }
+
     func testPublicSubmitPolicyLoadsFromConfigAndProducesNodeFlags() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ctl-submit-policy-\(UUID().uuidString)")

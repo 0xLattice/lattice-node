@@ -41,7 +41,7 @@ public struct Topology: Codable, Sendable {
         case listen, rpc, webSocket, peers, publicRead, externalAddress
         case publicReadRate, publicReadExpensiveRate, publicReadMaxRate, publicReadFetches
         case publicReadURL, publicSubmit, publicSubmitRate, minRelayFee
-        case servingMaxConcurrent, servingMaxInFlightVolumeBytes, maxAcquisitionBytes, blockBodies, state, stateWindow, stateWindows, finalityWindow, finalityWindows, announceLifetime
+        case servingMaxConcurrent, servingMaxInFlightVolumeBytes, maxAcquisitionBytes, blockBodies, state, stateWindow, stateWindows, finalityWindow, finalityWindows, announceLifetime, connectBatch
         case hostedChains, rpcAllowedOrigins, operatorListen, operatorTokens, operatorAllowedOrigins
     }
     public var listen: UInt16
@@ -117,6 +117,9 @@ public struct Topology: Codable, Sendable {
     /// Seconds each provider announcement lasts (`--announce-lifetime`).
     /// Absent = the node's default.
     public var announceLifetime: UInt64?
+    /// Ready blocks of one chain executed per connect job, with one commit
+    /// for them all (`--connect-batch`). Absent = 32; at least 1.
+    public var connectBatch: Int?
     /// Child chains this process hosts as levels, parent before child.
     public var hostedChains: [String]?
     /// Browser origins allowed on the loopback RPC port (the node's
@@ -267,6 +270,9 @@ public struct Topology: Codable, Sendable {
         if let announceLifetime, !(1...NodeConfiguration.maximumAnnounceLifetime).contains(announceLifetime) {
             throw CtlError(NodeConfigurationError.invalidAnnounceLifetime.description)
         }
+        if let connectBatch, connectBatch < 1 {
+            throw CtlError(NodeConfigurationError.invalidConnectBatch.description)
+        }
         var ports: Set<UInt16> = []
         for port in [listen, rpc] + (publicRead.map { [$0] } ?? []) {
             guard port != 0, ports.insert(port).inserted else {
@@ -336,6 +342,7 @@ public struct Topology: Codable, Sendable {
             arguments += ["--finality-window", "\(path)=\(value)"]
         }
         if let value = announceLifetime { arguments += ["--announce-lifetime", String(value)] }
+        if let value = connectBatch { arguments += ["--connect-batch", String(value)] }
         return arguments
     }
 

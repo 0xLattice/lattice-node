@@ -110,6 +110,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Seconds each provider announcement lasts: each hosted chain's and each pinned Volume's. The node renews them at least every 10 minutes (every --peer-search-interval when shorter), so a lifetime shorter than that leaves gaps in which peers cannot find this node as a provider. At most 86400: peers drop announcements that last longer.")
     var announceLifetime: UInt64 = 1_200
 
+    @Option(help: "Ready blocks of one chain the node executes per job, each the previous one's child, with one commit for them all, as Bitcoin Core connects up to 32 per step. A larger batch commits less often during a sync and holds more executed state in memory until its commit; a crash loses at most the batch being executed, which runs again. At least 1.")
+    var connectBatch = NodeConfiguration.defaultConnectBatch
+
     @Flag(inversion: .prefixedNo, help: "Announce each pinned Volume as a provider record, on pinning and on every renewal. With --no-announce-pins pins are held and served but never announced: for a holder of many Volumes whose readers do not need a record per Volume.")
     var announcePins = true
 
@@ -274,7 +277,8 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                 publicSubmit: publicSubmit,
                 minRelayFee: minRelayFee,
                 finality: plan.finality,
-                stateWindows: plan.stateWindows
+                stateWindows: plan.stateWindows,
+                connectBatch: connectBatch
             )
         } catch {
             throw fault("\(error)")
@@ -357,6 +361,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         let sessionBytes = NodeResourcePolicy.default.maximumAcquisitionStorageBytes
         guard maxAcquisitionBytes >= sessionBytes else {
             throw ValidationError("--max-acquisition-bytes must be at least \(sessionBytes), the bytes one block's fetch may hold")
+        }
+        guard connectBatch >= 1 else {
+            throw ValidationError("--connect-batch must be at least 1")
         }
         guard let blockBodies = BlockBodies(rawValue: blockBodies) else {
             throw ValidationError("--block-bodies is all or none")

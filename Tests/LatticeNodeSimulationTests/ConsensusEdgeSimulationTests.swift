@@ -181,9 +181,9 @@ final class ConsensusEdgeSimulationTests: XCTestCase {
 
     private func jobs(_ effects: [ChainEffect]) -> [ConnectJob] {
         effects.compactMap {
-            if case .connect(let job) = $0 { return job }
+            if case .connect(let jobs) = $0 { return jobs }
             return nil
-        }
+        }.flatMap { $0 }
     }
 
     /// Deliver `cid`'s body, run every connect it starts, persisting as the
@@ -196,7 +196,7 @@ final class ConsensusEdgeSimulationTests: XCTestCase {
             let verdict = await ChainTree.connect(
                 job, fetcher: content, validationContext: ValidationContext(nowMilliseconds: Self.now)
             )
-            effects = core.step(.connected(verdict), now: Self.now)
+            effects = core.step(connected(verdict), now: Self.now)
             for case .persist(let batch) in effects {
                 for state in batch.states { try await storeMaterialized(state, in: content) }
             }
@@ -253,4 +253,9 @@ final class ConsensusEdgeSimulationTests: XCTestCase {
         XCTAssertFalse(after.canonicalPath.contains(invalid.cid))
         for block in extendedBranch { XCTAssertNotNil(after.blocks[block.cid]) }
     }
+}
+
+/// A one-block connect job's verdict as the event that reports it.
+private func connected(_ verdict: ConnectVerdict) -> ChainEvent {
+    .connected([ConnectResult(verdict)])
 }

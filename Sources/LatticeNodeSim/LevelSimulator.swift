@@ -408,15 +408,15 @@ public struct LevelSimulator {
                     throw Invariants.fail(name, "disconnected honest peer \(peer) as \(reason)")
                 }
                 schedule(at: now, to: name, .linkDown(name, peer.key, peer.session))
-            case .connect(let path, let job):
-                report.executions += 1
-                let verdict = await ChainTree.connect(
-                    job,
+            case .connect(let path, let jobs):
+                let (verdicts, _) = await ConnectRun.run(
+                    jobs,
                     fetcher: world.cas,
                     parentFacts: node.core.parentFacts(for: path),
-                    validationContext: ValidationContext(nowMilliseconds: now)
+                    validationContext: { [now] in ValidationContext(nowMilliseconds: now) }
                 )
-                schedule(at: delay(), to: name, .host(.level(path, .connected(verdict))))
+                report.executions += verdicts.count
+                schedule(at: delay(), to: name, .host(.level(path, .connected(verdicts.map { ConnectResult($0) }))))
             case .wakeAt(let time):
                 if time > now, !ticks.contains(Tick(node: name, time: time)) {
                     schedule(at: time, to: name, .host(.tick))

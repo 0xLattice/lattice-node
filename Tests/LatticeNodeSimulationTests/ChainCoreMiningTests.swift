@@ -51,14 +51,14 @@ final class ChainCoreMiningTests: XCTestCase {
     private func executeFirst(_ core: inout ChainCore, transactions: [String] = []) async throws -> [ChainEffect] {
         content.put(world.blocks[chain[0].cid]!.body)
         let arrived = core.step(.bodyFetched(cid: chain[0].cid), now: Self.now)
-        let job = try XCTUnwrap(arrived.compactMap { effect -> ConnectJob? in
-            if case .connect(let job) = effect { return job }
+        let jobs = try XCTUnwrap(arrived.compactMap { effect -> [ConnectJob]? in
+            if case .connect(let jobs) = effect { return jobs }
             return nil
         }.first)
-        let verdict = await ChainTree.connect(
-            job, fetcher: content, validationContext: ValidationContext(nowMilliseconds: Self.now)
+        let (verdicts, _) = await ConnectRun.run(
+            jobs, fetcher: content, validationContext: { ValidationContext(nowMilliseconds: Self.now) }
         )
-        return core.step(.connected(verdict, transactions: transactions), now: Self.now)
+        return core.step(.connected(verdicts.map { ConnectResult($0, transactions: transactions) }), now: Self.now)
     }
 
     private func mining(_ effects: [ChainEffect]) -> [MiningEffect] {
@@ -131,14 +131,11 @@ final class ChainCoreMiningTests: XCTestCase {
             content.put(world.blocks[block.cid]!.body)
             var effects = core.step(.bodyFetched(cid: block.cid), now: Self.now)
             all += effects
-            while let job = effects.lazy.compactMap({ effect -> ConnectJob? in
-                if case .connect(let job) = effect { return job }
+            while let jobs = effects.lazy.compactMap({ effect -> [ConnectJob]? in
+                if case .connect(let jobs) = effect { return jobs }
                 return nil
             }).first {
-                let verdict = await ChainTree.connect(
-                    job, fetcher: content, validationContext: ValidationContext(nowMilliseconds: Self.now)
-                )
-                effects = core.step(.connected(verdict), now: Self.now)
+                effects = core.step(await ConnectRun.connected(jobs, fetcher: content, now: Self.now), now: Self.now)
                 all += effects
                 for case .persist(let batch) in effects {
                     for state in batch.states { try await storeMaterialized(state, in: content) }
@@ -325,12 +322,10 @@ final class ChainCoreMiningTests: XCTestCase {
                     switch effect {
                     case .level(let path, .fetchBody(let cid)):
                         queue.append(.level(path, .bodyFetched(cid: cid)))
-                    case .connect(let path, let job):
-                        let verdict = await ChainTree.connect(
-                            job, fetcher: sim.world.cas, parentFacts: alone.parentFacts(for: path),
-                            validationContext: ValidationContext(nowMilliseconds: Self.now)
-                        )
-                        queue.append(.level(path, .connected(verdict)))
+                    case .connect(let path, let jobs):
+                        queue.append(.level(path, await ConnectRun.connected(
+                            jobs, fetcher: sim.world.cas, parentFacts: alone.parentFacts(for: path), now: Self.now
+                        )))
                     default:
                         break
                     }
@@ -411,14 +406,11 @@ final class ChainCoreMiningTests: XCTestCase {
 
         content.put(world.blocks[chain[0].cid]!.body)
         let arrived = host.step(.level(path, .bodyFetched(cid: chain[0].cid)), now: Self.now)
-        let job = try XCTUnwrap(arrived.compactMap { effect -> ConnectJob? in
-            if case .connect(_, let job) = effect { return job }
+        let jobs = try XCTUnwrap(arrived.compactMap { effect -> [ConnectJob]? in
+            if case .connect(_, let jobs) = effect { return jobs }
             return nil
         }.first)
-        let verdict = await ChainTree.connect(
-            job, fetcher: content, validationContext: ValidationContext(nowMilliseconds: Self.now)
-        )
-        let executed = host.step(.level(path, .connected(verdict)), now: Self.now)
+        let executed = host.step(.level(path, await ConnectRun.connected(jobs, fetcher: content, now: Self.now)), now: Self.now)
         let persisted = executed.firstIndex { if case .persist = $0 { true } else { false } }
         let answered = executed.firstIndex {
             if case .level(_, .workSubmitted(3, .executed(chain[0].cid))) = $0 { true } else { false }

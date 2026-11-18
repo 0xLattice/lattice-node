@@ -289,6 +289,8 @@ public final class NodeRuntime: Sendable {
         coreConfig: ChainCoreConfig
     ) async throws -> NodeCore {
         guard configuration.address.isNexus else { throw NodeRuntimeError.notNexus }
+        var coreConfig = coreConfig
+        coreConfig.connectBatch = configuration.connectBatch
         let logID = try await storage.chainLogID() ?? UUID().uuidString.lowercased()
         var cursors: [ChainPath: [String: StreamCursor]] = [:]
         for path in [configuration.chainPath] + configuration.hostedChildren {
@@ -811,12 +813,14 @@ extension NodeRuntime {
                 startJobs()
                 for event in events {
                     // A connect without a verdict is a wait with its reason.
-                    if case .level(let path, .connected(let verdict, _)) = event,
-                       let failure = verdict.retryFailure {
-                        wait(
-                            BodyKey(path: path, cid: verdict.blockHash), .notConnected(failure),
-                            detail: "\(failure)", in: \.connectWaits
-                        )
+                    if case .level(let path, .connected(let results)) = event {
+                        for verdict in results.map(\.verdict) {
+                            guard let failure = verdict.retryFailure else { continue }
+                            wait(
+                                BodyKey(path: path, cid: verdict.blockHash), .notConnected(failure),
+                                detail: "\(failure)", in: \.connectWaits
+                            )
+                        }
                     }
                     guard await step(event) else { return false }
                 }
@@ -1713,9 +1717,9 @@ extension NodeRuntime {
                 case .close:
                     _ = await ivy.disconnectSession(ifCurrent: session.peer)
                 }
-            case .connect(let path, let job):
+            case .connect(let path, let jobs):
                 enqueue(NodeRuntime.connectJob(
-                    job, at: path, levels: LiveLevels(inputs: inputs), storage: storage, remote: remote
+                    jobs, at: path, levels: LiveLevels(inputs: inputs), storage: storage, remote: remote
                 ))
                 startJobs()
             case .wakeAt(let time):

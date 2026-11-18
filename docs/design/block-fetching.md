@@ -15,9 +15,12 @@ state:
 
 - bodies requested from the content layer;
 - bodies that arrived and are ready to connect;
-- the single connect job currently running;
+- the single connect job currently running: up to `connectBatch` ready
+  blocks, each the previous one's child;
 - retry backoff for temporarily unavailable content; and
-- child blocks waiting for a co-hosted parent-state fact.
+- child blocks waiting for a co-hosted parent-state fact: a child block is
+  ready only once the parent state it names is in its parent level's
+  executed set, checked before any connect is issued.
 
 Provider discovery, fetching, CID verification, and provider suppression live
 in the shared content layer. `NodeRuntime` executes those effects and returns
@@ -29,8 +32,12 @@ valid and records the resulting consensus facts.
 ```text
 verified header -> fork choice -> bounded body window
                                  -> fetch Volume by block CID
-                                 -> connect next block in parent order
-                                 -> persist facts and referenced content
+                                 -> connect the next ready blocks in parent order
+                                    (one job, up to connectBatch, heaviest first
+                                    at a fork, each reading the state the one
+                                    before it produced from memory)
+                                 -> store their bodies in one volumes.db transaction,
+                                    then their states and facts in one step's persist
                                  -> publish the new read snapshot
 ```
 

@@ -19,7 +19,7 @@ final class MinedLevelsTests: XCTestCase {
         var node: NodeCore
         let cas: SimCAS
         var holding = false
-        var held: [(path: ChainPath, job: ConnectJob)] = []
+        var held: [(path: ChainPath, jobs: [ConnectJob])] = []
 
         mutating func drive(_ event: NodeEvent) async {
             var queue = [event]
@@ -28,10 +28,10 @@ final class MinedLevelsTests: XCTestCase {
                     switch effect {
                     case .level(let path, .fetchBody(let cid)):
                         queue.append(.level(path, .bodyFetched(cid: cid)))
-                    case .connect(let path, let job) where holding:
-                        held.append((path, job))
-                    case .connect(let path, let job):
-                        queue.append(.level(path, .connected(await connect(path, job))))
+                    case .connect(let path, let jobs) where holding:
+                        held.append((path, jobs))
+                    case .connect(let path, let jobs):
+                        queue.append(.level(path, await connect(path, jobs)))
                     default:
                         break
                     }
@@ -39,17 +39,16 @@ final class MinedLevelsTests: XCTestCase {
             }
         }
 
-        func connect(_ path: ChainPath, _ job: ConnectJob) async -> ConnectVerdict {
-            await ChainTree.connect(
-                job, fetcher: cas, parentFacts: node.parentFacts(for: path),
-                validationContext: ValidationContext(nowMilliseconds: MinedLevelsTests.now)
+        func connect(_ path: ChainPath, _ jobs: [ConnectJob]) async -> ChainEvent {
+            await ConnectRun.connected(
+                jobs, fetcher: cas, parentFacts: node.parentFacts(for: path), now: MinedLevelsTests.now
             )
         }
 
         /// Run the first held connect, holding whatever it starts.
         mutating func runHeld() async {
-            let (path, job) = held.removeFirst()
-            await drive(.level(path, .connected(await connect(path, job))))
+            let (path, jobs) = held.removeFirst()
+            await drive(.level(path, await connect(path, jobs)))
         }
 
         func mined(_ path: ChainPath) -> Bool {

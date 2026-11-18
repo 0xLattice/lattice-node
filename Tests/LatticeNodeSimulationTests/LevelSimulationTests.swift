@@ -590,7 +590,7 @@ final class LevelSimulationTests: XCTestCase {
         var host: NodeCore
         /// When true, root connect jobs are held here, not run.
         var holdRoot = false
-        var heldRoot: [ConnectJob] = []
+        var heldRoot: [[ConnectJob]] = []
         /// Connect jobs emitted, per block.
         var connects: [String: Int] = [:]
 
@@ -610,16 +610,14 @@ final class LevelSimulationTests: XCTestCase {
                     switch effect {
                     case .level(let path, .fetchBody(let cid)):
                         queue.append(.level(path, .bodyFetched(cid: cid)))
-                    case .connect(let path, let job) where holdRoot && path == LevelWorld.nexus:
-                        connects[job.blockHash, default: 0] += 1
-                        heldRoot.append(job)
-                    case .connect(let path, let job):
-                        connects[job.blockHash, default: 0] += 1
-                        let verdict = await ChainTree.connect(
-                            job, fetcher: world.cas, parentFacts: host.parentFacts(for: path),
-                            validationContext: ValidationContext(nowMilliseconds: now)
-                        )
-                        queue.append(.level(path, .connected(verdict)))
+                    case .connect(let path, let jobs) where holdRoot && path == LevelWorld.nexus:
+                        for job in jobs { connects[job.blockHash, default: 0] += 1 }
+                        heldRoot.append(jobs)
+                    case .connect(let path, let jobs):
+                        for job in jobs { connects[job.blockHash, default: 0] += 1 }
+                        queue.append(.level(path, await ConnectRun.connected(
+                            jobs, fetcher: world.cas, parentFacts: host.parentFacts(for: path), now: now
+                        )))
                     default:
                         break
                     }
@@ -642,25 +640,27 @@ final class LevelSimulationTests: XCTestCase {
         let first = try XCTUnwrap(grinds[2].mined.carried.first).block
         let firstCID = try BlockHeader(node: first).rawCID
         var alpha = try XCTUnwrap(harness.host.levels[LevelWorld.alpha]?.held)
-        XCTAssertEqual(Array(alpha.bodies.awaitingParent.keys), [firstCID])
+        XCTAssertNotNil(alpha.bodies.awaitingParent[firstCID])
+        for cid in alpha.bodies.awaitingParent.keys {
+            XCTAssertNil(harness.connects[cid], "no connect is issued for a block whose parent state is not executed")
+        }
         try LevelInvariants.checkExecutionStop("harness", path: LevelWorld.alpha, host: harness.host, digest: TreeDigest(alpha.tree))
         XCTAssertEqual(alpha.snapshot.actOnHeight, 0)
         XCTAssertTrue(TreeDigest(alpha.tree).excluded.isEmpty, "a missing parent fact is never invalidity")
 
         harness.holdRoot = false
         while !harness.heldRoot.isEmpty {
-            let job = harness.heldRoot.removeFirst()
-            let verdict = await ChainTree.connect(
-                job, fetcher: harness.world.cas, validationContext: ValidationContext(nowMilliseconds: harness.now)
-            )
-            try await harness.step(.level(LevelWorld.nexus, .connected(verdict)))
+            let jobs = harness.heldRoot.removeFirst()
+            try await harness.step(.level(LevelWorld.nexus, await ConnectRun.connected(
+                jobs, fetcher: harness.world.cas, now: harness.now
+            )))
         }
         let nexus = try XCTUnwrap(harness.host.levels[LevelWorld.nexus]).snapshot
         XCTAssertEqual(nexus.actOnTip, nexus.bestHeaderTip)
         alpha = try XCTUnwrap(harness.host.levels[LevelWorld.alpha]?.held)
         try LevelInvariants.checkExecutionStop("harness", path: LevelWorld.alpha, host: harness.host, digest: TreeDigest(alpha.tree))
         XCTAssertTrue(alpha.bodies.awaitingParent.isEmpty)
-        XCTAssertEqual(harness.connects[firstCID], 2, "parked once, connected again once when its fact arrived")
+        XCTAssertEqual(harness.connects[firstCID], 1, "never connected while it lacked its fact: connected once it arrived")
         XCTAssertEqual(alpha.snapshot.actOnTip, alpha.snapshot.bestHeaderTip, "the woken child level executed its whole chain")
         XCTAssertGreaterThan(alpha.snapshot.actOnHeight, 1)
     }

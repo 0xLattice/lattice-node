@@ -27,7 +27,9 @@ final class ParentContinuityTests: XCTestCase {
                     switch effect {
                     case .level(let path, .fetchBody(let cid)):
                         queue.append(.level(path, .bodyFetched(cid: cid)))
-                    case .connect(let path, let job):
+                    case .connect(let path, let jobs):
+                      var results: [ConnectResult] = []
+                      for job in jobs {
                         let levels = host.levels
                         let verdict = await ChainTree.connect(
                             job, fetcher: world.cas, parentFacts: ParentContinuity(levels: LiveLevels { $0(levels) }),
@@ -52,7 +54,10 @@ final class ParentContinuityTests: XCTestCase {
                                 if block?.parent == nil { checked.genesis += 1 } else { checked.later += 1 }
                             }
                         }
-                        queue.append(.level(path, .connected(verdict)))
+                        results.append(ConnectResult(verdict))
+                        guard verdict.isValid else { break }
+                      }
+                        queue.append(.level(path, .connected(results)))
                     default:
                         break
                     }
