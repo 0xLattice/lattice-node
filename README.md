@@ -187,6 +187,17 @@ Benchmarks/sync/run.sh /tmp/bench/main /tmp/dataset 1 /tmp/runs/main-1cpu
 Benchmarks/sync/report.py /tmp/runs/main-1cpu
 ```
 
+Without Docker, `native.sh` runs the same benchmark on the host itself (macOS
+or Linux): it builds a ref, records the chain once and syncs it with a given
+number of workers, as many times as asked. Nothing is pinned, and on macOS an
+fsync is not forced to the device, so disk timings understate Linux; the
+counts and the per-level split hold.
+
+```bash
+Benchmarks/sync/native.sh /tmp/bench 1 3                 # 1 worker, 3 runs
+Benchmarks/sync/report.py /tmp/bench/runs/w1-*
+```
+
 Record the dataset once and sync every build from it, so every build syncs the
 same blocks. Record it again only after a storage flag day. A PR that changes
 sync reports `report.py` for its base and its head, at 1 and 2 CPUs.

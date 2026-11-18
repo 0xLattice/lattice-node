@@ -269,8 +269,13 @@ final class ChildSyncBench: XCTestCase {
         if let out = env["CHILD_BENCH_VFS"] { bench_vfs_dump(out) }
         await follower.stop()
         let blocks = targets.reduce(0) { $0 + $1.1 }
-        // Peak resident memory (KiB on Linux) and what the follower keeps on disk.
+        // Peak resident memory (KiB on Linux, bytes on Darwin) and what the
+        // follower keeps on disk.
+        #if canImport(Darwin)
+        let rss = Self.usage().ru_maxrss / 1024
+        #else
         let rss = Self.usage().ru_maxrss
+        #endif
         let kept = (FileManager.default.enumerator(at: dir, includingPropertiesForKeys: [.fileSizeKey])?.allObjects as? [URL] ?? [])
             .reduce(0) { $0 + ((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
         say("CHILD_BENCH follow blocks \(blocks) wall \(String(format: "%.3f", wall)) cpu \(String(format: "%.3f", cpu)) written \(written / 1024) KiB rss \(rss / 1024) MiB disk \(kept >> 20) MiB")

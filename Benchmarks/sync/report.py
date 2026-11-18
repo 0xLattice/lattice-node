@@ -48,7 +48,7 @@ def run(d):
         if m: steps[0] += 1; steps[1] += float(m[1]); steps[2] += float(m[2]); steps[3] += float(m[3])
     if inside is None: fail(d, 'no follower start marker in the trace')
     if not steps[0]: fail(d, 'no step lines with persist time in the trace')
-    for label in ('proofVerified', 'connected'):
+    for label in ('proofsVerified', 'connected'):
         if not any(k[0] == label for k in jobs): fail(d, 'no %s jobs in the trace' % label)
     r['jobs'], r['bodies'], r['steps'] = jobs, bodies, steps
     return r
@@ -72,7 +72,7 @@ print('|---|---|---|---|---|---|---|---|---|---|---|')
 for r in traced:
     for path, l in r['levels'].items():
         h = max(l['height'], 1); j = r['jobs']
-        check, derive, conn = j.get(('proofVerified', path), [0, 0]), j.get(('derived', path), [0, 0]), j.get(('connected', path), [0, 0])
+        check, derive, conn = j.get(('proofsVerified', path), [0, 0]), j.get(('derived', path), [0, 0]), j.get(('connected', path), [0, 0])
         b = r['bodies'].get(path, [0, 0])
         print('| %s | %s | %d | %.1f | %d | %d | %.2f | %d | %.2f | %d | %.2f |' % (
             r['name'], path, l['height'], l['wall'], check[0], derive[0], (check[1] + derive[1]) / h,
