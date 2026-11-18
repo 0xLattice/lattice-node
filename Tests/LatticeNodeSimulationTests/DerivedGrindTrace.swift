@@ -266,13 +266,15 @@ final class GrindTracer: @unchecked Sendable {
         if let main { sub.append(main) }
         if !clears {
             // Peer proofs gone without their check answering: a purge when a
-            // peer left this step, else each dropped unchecked (block gone or
-            // already credited), which the model checks to no effect.
+            // peer left this step (logging what is held after it: those in a
+            // check and other peers' queued proofs), else
+            // each dropped unchecked (block gone or already credited), which
+            // the model checks to no effect.
             let gone = s0.peerKeys.subtracting(s1.peerKeys).subtracting(checkedKey.map { [$0] } ?? [])
             let left = effects.contains { if case .disconnect = $0 { return true }; return false }
                 || { if case .peerGone = event { return true }; return false }()
             if !gone.isEmpty, left {
-                sub.append(["kind": "purge"])
+                sub.append(["kind": "purge", "kept": s1.peerQ])
             } else {
                 for key in gone.sorted() {
                     guard let child = childLabel[key.childCID] else { continue }
