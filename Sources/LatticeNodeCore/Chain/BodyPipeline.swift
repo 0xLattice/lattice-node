@@ -228,11 +228,21 @@ extension ChainCore {
     }
 
     /// Apply a connect job's verdicts, in its blocks' order. A job stops at
-    /// the first block without a valid verdict, so the blocks after it are
-    /// not reported: they stay arrived and are scheduled again.
+    /// the first block without a valid verdict, or whose body was not
+    /// stored, so the blocks after it are not reported: they stay arrived
+    /// and are scheduled again. One not stored is not connected (Bitcoin's
+    /// `ConnectTip` failing leaves the block out of the active chain): its
+    /// body is asked for again after a backoff, as for one not had.
     mutating func connected(_ results: [ConnectResult], _ turn: inout Turn) {
         bodies.connecting = []
-        for result in results { connected(result.verdict, transactions: result.transactions, &turn) }
+        for result in results {
+            guard result.stored else {
+                bodies.arrived.remove(result.verdict.blockHash)
+                park(result.verdict.blockHash, now: turn.now)
+                break
+            }
+            connected(result.verdict, transactions: result.transactions, &turn)
+        }
     }
 
     /// Apply a connect verdict. Execution depends only on content, so a
@@ -390,9 +400,13 @@ extension ChainCore {
 public struct ConnectResult: Sendable {
     public let verdict: ConnectVerdict
     public let transactions: [String]
+    /// False when the block executed valid but its body was not stored: it
+    /// is not connected, and waits as a body not had does.
+    public let stored: Bool
 
-    public init(_ verdict: ConnectVerdict, transactions: [String] = []) {
+    public init(_ verdict: ConnectVerdict, transactions: [String] = [], stored: Bool = true) {
         self.verdict = verdict
         self.transactions = transactions
+        self.stored = stored
     }
 }
