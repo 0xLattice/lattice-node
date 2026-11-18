@@ -252,10 +252,10 @@ extension NodeStorage {
                     volumes = fetched
                 } else {
                     let walked = NodeImportStorage(storage: nil, keepsVolumes: true)
-                    try await BlockHeader(rawCID: cid).storeBlockContent(fetcher: fetcher, storer: walked)
                     // A fetch's Volumes carry its witness; this walk reads it
                     // too, or the block is not stored, as for its content.
-                    try await BlockHeader(rawCID: cid).storeParentReceiptWitness(fetcher: fetcher, storer: walked)
+                    try await BlockHeader(rawCID: cid)
+                        .storeBlockContent(fetcher: fetcher, storer: walked, parentReceiptWitness: true)
                     volumes = await walked.takeVolumes().map(\.volume)
                 }
                 let resolved: Block?
@@ -363,13 +363,14 @@ extension NodeStorage {
                 let fetcher = CoalescingFetcher(CompositeContentSource([broker, session]))
                 let walked = NodeImportStorage(storage: nil, keepsVolumes: true)
                 do {
-                    try await BlockHeader(rawCID: cid).storeBlockContent(fetcher: fetcher, storer: walked)
-                    // With its receipt witness, which the bundle carries: a
-                    // witness not obtained fails the fetch as content not
-                    // obtained does (its execution could not read it either),
-                    // and one past the reservation is retried under the
-                    // whole allowance.
-                    try await BlockHeader(rawCID: cid).storeParentReceiptWitness(fetcher: fetcher, storer: walked)
+                    // With its receipt witness, which the bundle carries,
+                    // read from the content this walk resolved: a witness
+                    // not obtained fails the fetch as content not obtained
+                    // does (its execution could not read it either), and one
+                    // past the reservation is retried under the whole
+                    // allowance.
+                    try await BlockHeader(rawCID: cid)
+                        .storeBlockContent(fetcher: fetcher, storer: walked, parentReceiptWitness: true)
                     // The walk reached the end: the Volumes it derived are the
                     // ones storing the block would, and serve its connect.
                     await readCache.put(walked.takeVolumes().map(\.volume), block: cid)

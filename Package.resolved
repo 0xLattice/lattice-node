@@ -1,5 +1,5 @@
 {
-  "originHash" : "45696e51e10965da77f789cb85a45814a7ecf8c4dd2cf99a3335857d920b275a",
+  "originHash" : "8b4486fc055f1378ee248dcf93e532cf75b0e9e34ae95ff8386180c6e69144a6",
   "pins" : [
     {
       "identity" : "arraytrie",
@@ -69,8 +69,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/0xLattice/Lattice.git",
       "state" : {
-        "revision" : "aca3a24d528e09aaa677b1bb68fa40055b8c2dc5",
-        "version" : "57.4.0"
+        "revision" : "dff514f53738d2cbcde4ef25fdddfb570848bd79",
+        "version" : "57.5.0"
       }
     },
     {
