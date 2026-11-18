@@ -288,9 +288,10 @@ public struct HeaderSync: Sendable {
     public internal(set) var declined = DeclinedSet()
     /// A child level: the headers dropped for anchoring past what the parent
     /// level has weighed, by CID, with the parent state each anchors at.
-    /// Each is a hole of some peer's stream, not asked again until the
-    /// parent weighs a block declaring that state (`ChainCore.parentAdvanced`):
-    /// at most the holes, which are at most a page per peer.
+    /// Each is a hole of some peer's stream or the parent of a pending
+    /// header, not asked again until the parent weighs a block declaring
+    /// that state (`ChainCore.parentAdvanced`): at most the holes and the
+    /// pending queue.
     public internal(set) var beyondParent: [String: String] = [:]
     var nextRequestID: UInt64 = 1
     var nextToken: UInt64 = 1
@@ -305,11 +306,11 @@ public struct HeaderSync: Sendable {
     public init() {}
 
     /// Forget the headers dropped past the parent that no peer's stream holds
-    /// any more.
+    /// and no pending header names as parent any more.
     mutating func forgetBeyondParent() {
         guard !beyondParent.isEmpty else { return }
         let holes = Set(peers.values.flatMap { $0.holes.map(\.entry.block) })
-        beyondParent = beyondParent.filter { holes.contains($0.key) }
+        beyondParent = beyondParent.filter { holes.contains($0.key) || pending.childrenOf[$0.key] != nil }
     }
 
     /// Remove a pending header and every reference to it.

@@ -344,6 +344,10 @@ public struct ChainCore: Sendable {
     /// step.
     var parentTree: ChainTree?
     var parentStates: Set<String>?
+    /// Whether the parent level has caught up (its `synced` latch): a
+    /// header still past it after a timeout anchors on a parent branch this
+    /// node does not have, and is let go (`tick`).
+    var parentSynced = false
     /// A level a hosted child level reads: the post-state each of its
     /// weighed blocks declares, canonical, and nil on a level no child
     /// reads (`trackWeighedStates`). A child header anchored at a state not
@@ -458,7 +462,8 @@ public struct ChainCore: Sendable {
     /// One event. A child level is handed its parent level's tree and
     /// weighed states for the step alone (`parentTree`, `parentStates`).
     public mutating func step(
-        _ event: ChainEvent, now: Int64, parent: ChainTree? = nil, parentStates: Set<String>? = nil
+        _ event: ChainEvent, now: Int64, parent: ChainTree? = nil, parentStates: Set<String>? = nil,
+        parentSynced: Bool = false
     ) -> [ChainEffect] {
         // A peer's transaction is ignored until the level has caught up
         // (`synced`), as Bitcoin Core ignores `tx` during initial block
@@ -467,9 +472,11 @@ public struct ChainCore: Sendable {
         if case .mining(.transactionReceived(_, origin: .peer)) = event, !synced { return [] }
         parentTree = parent
         self.parentStates = parentStates
+        self.parentSynced = parentSynced
         defer {
             parentTree = nil
             self.parentStates = nil
+            self.parentSynced = false
         }
         var turn = Turn(now: now)
         weighed = []
@@ -864,7 +871,7 @@ public struct ChainCore: Sendable {
                 && sync.beyondParent[entry.block] == nil
         case .proof:
             return !applied(entry) && sync.pending.entries[entry.block]?.evidence[entry.cid] == nil
-                && !sync.proofs.verifying.values.contains { $0.cid == entry.block && $0.proof.rootCID == entry.cid }
+                && !sync.proofs.checking(entry.block, root: entry.cid)
                 && sync.beyondParent[entry.block] == nil
         }
     }
@@ -1326,7 +1333,19 @@ public struct ChainCore: Sendable {
         }
         for (peer, state) in sync.peers.sorted(by: { $0.key < $1.key }) {
             let (due, overflow) = state.askedAt.addingReportingOverflow(config.headersTimeout)
-            pump(peer, &turn, again: overflow || now >= due)
+            let again = overflow || now >= due
+            // The parent has caught up and a header is still past it a
+            // timeout after it was asked: it anchors on a parent branch this
+            // node does not have. It is let go, as Bitcoin lets go of headers
+            // that do not connect, so the stream moves on; it comes back with
+            // a descendant (asked as an ancestor) or a stream reset.
+            if again, parentSynced, !sync.beyondParent.isEmpty,
+               state.holes.contains(where: { sync.beyondParent[$0.entry.block] != nil }) {
+                sync.peers[peer]?.holes.removeAll { sync.beyondParent[$0.entry.block] != nil }
+                advanceCursor(of: peer, &turn)
+                sync.forgetBeyondParent()
+            }
+            pump(peer, &turn, again: again)
         }
         while let first = sync.held.first, first.time <= now {
             _ = sync.held.pop()

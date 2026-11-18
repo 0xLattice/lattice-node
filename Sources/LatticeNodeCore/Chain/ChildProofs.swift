@@ -186,7 +186,12 @@ public struct ChildProofSync: Sendable {
     public internal(set) var awaiting: [String: AwaitingChildProof] = [:]
     /// Peers' proofs in a verify job: a check in flight still answers when
     /// its peer is gone (a check is the proof's verdict, not its sender's).
-    public internal(set) var verifying: [ChildProofKey: QueuedChildProof] = [:]
+    public private(set) var verifying: [ChildProofKey: QueuedChildProof] = [:]
+    /// What `verifying` holds, kept with it: its bytes, its checks per
+    /// block, and its (block, root) pairs.
+    public private(set) var verifyingBytes = 0
+    private var checksOf: [String: Int] = [:]
+    private var checkedRoots: [[String]: Int] = [:]
     var sequence: UInt64 = 0
     /// Derivations in flight, counted by the block derived (a waiting
     /// header with one is never evicted). Soft: in memory only, gone on
@@ -196,7 +201,29 @@ public struct ChildProofSync: Sendable {
     public init() {}
 
     func holds(_ cid: String) -> Bool {
-        verifying.keys.contains { $0.childCID == cid } || deriving[cid] != nil
+        checksOf[cid] != nil || deriving[cid] != nil
+    }
+
+    /// Whether a peer's proof of `root` at `cid` is in a check.
+    func checking(_ cid: String, root: String) -> Bool {
+        checkedRoots[[cid, root]] != nil
+    }
+
+    mutating func startCheck(_ proof: QueuedChildProof) {
+        verifying[proof.key] = proof
+        verifyingBytes += proof.bytes
+        checksOf[proof.cid, default: 0] += 1
+        checkedRoots[[proof.cid, proof.proof.rootCID], default: 0] += 1
+    }
+
+    mutating func endCheck(_ key: ChildProofKey) -> QueuedChildProof? {
+        guard let proof = verifying.removeValue(forKey: key) else { return nil }
+        verifyingBytes -= proof.bytes
+        let count = checksOf[proof.cid] ?? 1
+        checksOf[proof.cid] = count == 1 ? nil : count - 1
+        let pair = [proof.cid, proof.proof.rootCID], roots = checkedRoots[pair] ?? 1
+        checkedRoots[pair] = roots == 1 ? nil : roots - 1
+        return proof
     }
 
     mutating func startDeriving(_ child: String) {
@@ -289,7 +316,7 @@ extension ChainCore {
         for proof in proofs where !credits(proof.rootCID, at: cid) && !derives(proof.rootCID, at: cid) {
             fresh.append(proof)
         }
-        var held = sync.proofs.verifying.values.reduce(0) { $0 + $1.bytes }
+        var held = sync.proofs.verifyingBytes
         for proof in fresh.prefix(proofConfig.maxPerHeader) {
             guard let bytes = try? proof.serialize(), bytes.count <= proofConfig.maxProofBytes else { continue }
             let id = "\(UInt256.hash(bytes))"
@@ -297,7 +324,7 @@ extension ChainCore {
             guard sync.proofs.verifying[queued.key] == nil else { continue }
             guard held + queued.bytes <= proofConfig.maxQueuedBytes else { continue }
             held += queued.bytes
-            sync.proofs.verifying[queued.key] = queued
+            sync.proofs.startCheck(queued)
             turn.checks.append(ChildProofJob(
                 childCID: cid,
                 block: sync.proofs.awaiting[cid]?.block ?? sync.pending.entries[cid]?.block,
@@ -345,7 +372,7 @@ extension ChainCore {
     mutating func proofsVerified(_ answers: [ChildProofAnswer], _ turn: inout Turn) {
         for answer in answers {
             guard let result = answer.result else {
-                sync.proofs.verifying[answer.job.key] = nil
+                _ = sync.proofs.endCheck(answer.job.key)
                 continue
             }
             proofVerified(answer.job, result, &turn)
@@ -365,7 +392,7 @@ extension ChainCore {
     ) {
         var source: PeerID?
         if !job.derived {
-            guard let checked = sync.proofs.verifying.removeValue(forKey: job.key) else { return }
+            guard let checked = sync.proofs.endCheck(job.key) else { return }
             source = checked.source
         }
         let cid = job.childCID
@@ -462,7 +489,7 @@ extension ChainCore {
     /// Whether `block` anchors within what its parent level has weighed: at
     /// a state a weighed parent block declares, or at none (the empty state,
     /// a block that commits no parent state).
-    static func anchored(_ block: Block, within states: Set<String>) -> Bool {
+    public static func anchored(_ block: Block, within states: Set<String>) -> Bool {
         let anchor = canonical(block.parentState.rawCID)
         return anchor == canonical(LatticeState.emptyHeader.rawCID) || states.contains(anchor)
     }
@@ -484,18 +511,28 @@ extension ChainCore {
 
     /// The parent level weighed more: each header dropped for anchoring past
     /// it whose state `states` now holds is asked for again, of the peers
-    /// whose streams hold it, as Bitcoin asks again for headers that did
-    /// not connect once it has their parent.
+    /// whose streams hold it, or as the parent of the pending headers naming
+    /// it, as Bitcoin asks again for headers that did not connect once it
+    /// has their parent.
     mutating func parentAdvanced(_ states: Set<String>, now: Int64) -> [ChainEffect] {
         let released = Set(sync.beyondParent.filter { states.contains($0.value) }.keys)
         guard !released.isEmpty else { return [] }
         for cid in released { sync.beyondParent[cid] = nil }
         var turn = Turn(now: now)
+        weighed = []
+        arrived = []
         for peer in sync.peers.keys.sorted()
         where sync.peers[peer]?.holes.contains(where: { released.contains($0.entry.block) }) == true {
             sync.peers[peer]?.reask = true
             pump(peer, &turn)
         }
+        for cid in released.sorted() {
+            for child in (sync.pending.childrenOf[cid] ?? []).sorted() {
+                sync.pending.entries[child]?.askedParent = false
+                dirty(child, &turn)
+            }
+        }
+        drain(&turn)
         return finish(turn)
     }
 

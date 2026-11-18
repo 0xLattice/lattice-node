@@ -89,8 +89,15 @@ final class ChildGenesisSpecTests: XCTestCase {
             return nil
         }
         XCTAssertEqual(batches.count, 1)
-        let dropped = host.step(.level(alpha, .proofsVerified(try XCTUnwrap(batches.first).run { _ in nil })), now: now)
+        let jobs = try XCTUnwrap(batches.first).jobs
+        XCTAssertFalse(jobs.isEmpty)
+        XCTAssertGreaterThan(host.levels[alpha]?.sync.proofs.verifying.count ?? 0, 0)
+        // The shell found no block for any check: each answers nil.
+        let gone = jobs.map { ChildProofAnswer(job: $0, result: nil) }
+        let dropped = host.step(.level(alpha, .proofsVerified(gone)), now: now)
         XCTAssertEqual(host.levels[alpha]?.sync.proofs.verifying.count, 0)
+        XCTAssertEqual(host.levels[alpha]?.sync.proofs.verifyingBytes, 0)
+        XCTAssertFalse(host.levels[alpha]?.tree.contains(blockHash: world.geneses[alpha]!.cid) ?? true, "nothing credited")
         XCTAssertFalse(dropped.contains { if case .disconnect = $0 { true } else { false } })
     }
 }

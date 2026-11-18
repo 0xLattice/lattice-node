@@ -195,19 +195,25 @@ continuity rule ([Parent-state continuity](#parent-state-continuity)).
 
 A child header past that frontier is dropped, as Bitcoin drops headers that
 do not connect: it can be neither priced nor derived yet, and holding
-unchecked headers would let anyone fill memory for free. Nothing is lost:
-its stream hole stays, so the peer's cursor does not pass it and the stream
-pulls no further than a page of such holes, and it is not asked again while
-the parent stays behind. When the parent weighs a block declaring the
-anchor, the hole is asked again of the peers whose streams hold it. A
-submit past the frontier is dropped like a gossip; its author pushes it
-again. A node's own mined grind weighs every level it reaches in one step,
+unchecked headers would let anyone fill memory for free. Its stream hole
+stays, so the peer's cursor does not pass it and the stream pulls no
+further while half a page of holes is outstanding, and it is not asked
+again while the parent stays behind. When the parent weighs a block
+declaring the anchor, the hole is asked again of the peers whose streams
+hold it; an ancestor dropped this way is asked again for the pending
+headers naming it. Once the parent level has caught up, a hole still past
+it a timeout after it was asked anchors on a parent branch this node does
+not have: it is let go, so the stream moves on, and the header comes back
+as a descendant's ancestor or on a stream reset. A submit past the frontier
+is dropped like a gossip; its author pushes it again. A node's own mined grind weighs every level it reaches in one step,
 as before: its child blocks anchor at the state the template's parent tip
 declares.
 
 The parent level keeps the post-states its weighed blocks declare while a
 hosted child reads them, built from its tree once and grown by each step:
-in memory, never persisted.
+in memory, never persisted (one canonical CID string per weighed parent
+block). Like the runs a parent serves, it is kept after the child is
+unhosted, until a restart.
 
 ## Push-only derived grinds
 
@@ -271,7 +277,7 @@ past it is dropped without blame and nothing is evicted; the block is looked
 up again, so its hole is asked again once the checks drain. There is no
 bound on the number of checks: a page's proofs are one job. Headers awaiting
 a proof share the global `maxAwaiting`, which evicts the oldest with no proof
-queued or in flight. There are no per-peer or per-source caps: peers are
+in a check and no derivation in flight. There are no per-peer or per-source caps: peers are
 cheap to make, so such a cap protects nothing. Security comes from
 proof-of-work and verification: a proofless header is taken only when
 wanted, and a peer-sent proof that fails is a proof-of-work failure that
