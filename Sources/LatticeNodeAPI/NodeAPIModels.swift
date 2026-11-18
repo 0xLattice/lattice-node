@@ -461,6 +461,22 @@ public struct NodeSyncStatus: Codable, Sendable, Equatable {
     public var awaitingParentFacts = 0
 
     public init() {}
+
+    /// A count a node does not send reads as zero: counts come and go
+    /// without breaking a client.
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        func count(_ key: CodingKeys) throws -> Int { try values.decodeIfPresent(Int.self, forKey: key) ?? 0 }
+        pendingHeaders = try count(.pendingHeaders)
+        headersAwaitingProof = try count(.headersAwaitingProof)
+        proofChecksQueued = try count(.proofChecksQueued)
+        proofChecksRunning = try count(.proofChecksRunning)
+        bodyWindow = try count(.bodyWindow)
+        bodiesRequested = try count(.bodiesRequested)
+        bodiesUnavailable = try count(.bodiesUnavailable)
+        bodiesParked = try count(.bodiesParked)
+        awaitingParentFacts = try count(.awaitingParentFacts)
+    }
 }
 
 public enum NodeAPIError: Error, Equatable, Sendable {

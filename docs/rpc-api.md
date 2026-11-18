@@ -355,7 +355,8 @@ fork child on the act-on path and the best chain's look-ahead),
 blocks whose last fetch failed), `bodiesParked` (waiting before they are asked
 for again) and `awaitingParentFacts` (a connect needs a parent-chain fact not
 executed yet). `/status?chainPath=` answers for a hosted level, 404 for one
-not hosted.
+not hosted; a hosted child's answer carries no `templateDigest` (the digest is
+the root's).
 
 `/health` reads an immutable published view and never enters the core loop. It
 has no `templateDigest`. `/status` uses the root runtime's current template

@@ -102,10 +102,12 @@ struct Status: AsyncParsableCommand {
             HostedChainsResponse.self, from: try await send(rpc: rpc, "GET", "hosted-chains")
         )
         for path in [ChainAddress.nexus] + hosted.chains {
-            // Operator status where the credential reads it; health
-            // otherwise (a scoped token without `/status`).
+            // Operator status where the credential reads it and the node
+            // answers it for this chain; health otherwise (a scoped token
+            // without `/status`, or a node whose `/status` is the root's).
             let status = await health(rpc: rpc, chain: path, route: "status")
-            guard let health = status?["phase"] != nil ? status : await health(rpc: rpc, chain: path) else {
+            let answered = (status?["chainPath"] as? [String])?.joined(separator: "/") == path
+            guard let health = answered ? status : await health(rpc: rpc, chain: path) else {
                 print("\(path): running, rpc unreachable")
                 continue
             }
@@ -116,8 +118,10 @@ struct Status: AsyncParsableCommand {
             let mempool = health["mempoolCount"] as? Int ?? 0
             print("\(path): \(phase) height=\(height) best=\(best) tip=\(tip)… mempool=\(mempool)")
             if let waiting = health["waiting"] as? String { print("  waiting: \(waiting)") }
-            if let sync = health["sync"] as? [String: Int] {
-                print("  sync: " + sync.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " "))
+            // Only what is held: a chain holding nothing says nothing.
+            let held = (health["sync"] as? [String: Int] ?? [:]).filter { $0.value != 0 }
+            if !held.isEmpty {
+                print("  sync: " + held.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " "))
             }
         }
         for path in (hosted.configured ?? []) where !hosted.chains.contains(path) {
