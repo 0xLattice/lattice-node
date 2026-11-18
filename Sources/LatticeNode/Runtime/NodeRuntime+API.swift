@@ -656,8 +656,6 @@ extension NodeRuntime {
         enum Kind: Sendable {
             /// What an RPC waits on: an awaited admission, a template build.
             case answered
-            /// A child header's proof check (`proofJob`).
-            case check
             /// A level's next block to execute (`connectJob`).
             case connect
             case other
@@ -675,109 +673,38 @@ extension NodeRuntime {
         }
     }
 
-    /// The worker's queues, each first in, first out. What an RPC waits
-    /// on, a submit's admission and a template build, runs first. The
-    /// worker is then shared by time among three lanes: child headers'
-    /// proof checks, each level's next block (its connect), and everything
-    /// else (derivations, reads, rechecks, and a peer's or a returned
-    /// transaction's admission). The next job comes from the waiting lane
-    /// that has used the least worker time, as a fair scheduler shares a
-    /// CPU (CFS's virtual runtime): while lanes wait, each gets an equal
-    /// share, so none can hold another back however much work it queues,
-    /// and a lane's cheap jobs run many to another's one; a job runs to its
-    /// end, so a connect waits at most about its own length of the other
-    /// lanes' work. A lane that comes back from idle starts at the least
-    /// time a busy lane has used, kept even while every lane is idle (CFS's
-    /// min_vruntime): idle time earns no credit to take the worker with.
-    /// Ties go to checks, then connects. A recheck whose tip is not the
-    /// current one is dropped at dequeue: it runs nothing, posts nothing.
+    /// The worker's queues, each first in, first out, served in a fixed
+    /// order: (A) what an RPC waits on, a submit's admission and a template
+    /// build; then (B) each level's next block, so a level's connect never
+    /// waits behind the child proof checks queued before it, thousands
+    /// while a node syncs a tree of chains, and no level goes ahead of
+    /// another; then (C) everything else in arrival order: proof checks,
+    /// derivations, reads, rechecks, and a peer's or a returned
+    /// transaction's admission. A recheck whose tip is not the current one
+    /// is dropped at dequeue: it runs nothing, posts nothing.
     struct JobQueues {
         var answered: [RuntimeJob] = []
-        var checks: [RuntimeJob] = []
         var connects: [RuntimeJob] = []
         var rest: [RuntimeJob] = []
-        /// Each shared lane's worker time, in milliseconds.
-        private(set) var used: [RuntimeJob.Kind: Double] = [:]
-        /// Each shared lane's jobs on a worker.
-        private var running: [RuntimeJob.Kind: Int] = [:]
-        /// The least time a busy lane has used, never lowered: where a lane
-        /// coming back from idle starts.
-        private var floor = 0.0
 
-        private static let lanes: [RuntimeJob.Kind] = [.check, .connect, .other]
-
-        var isEmpty: Bool { answered.isEmpty && checks.isEmpty && connects.isEmpty && rest.isEmpty }
-
-        private func waiting(_ kind: RuntimeJob.Kind) -> [RuntimeJob] {
-            switch kind {
-            case .answered: answered
-            case .check: checks
-            case .connect: connects
-            case .other: rest
-            }
-        }
-
-        private func isBusy(_ kind: RuntimeJob.Kind) -> Bool {
-            !waiting(kind).isEmpty || running[kind, default: 0] > 0
-        }
+        var isEmpty: Bool { answered.isEmpty && connects.isEmpty && rest.isEmpty }
 
         mutating func append(_ job: RuntimeJob) {
-            if job.kind != .answered, !isBusy(job.kind) {
-                raiseFloor()
-                used[job.kind] = max(used[job.kind, default: 0], floor)
-            }
             switch job.kind {
             case .answered: answered.append(job)
-            case .check: checks.append(job)
             case .connect: connects.append(job)
             case .other: rest.append(job)
             }
         }
 
-        /// The next job a free worker runs; `finished` once it has run.
+        /// The next job a free worker runs.
         mutating func next(in core: NodeCore) -> RuntimeJob? {
-            while true {
-                let job: RuntimeJob
-                if !answered.isEmpty {
-                    job = answered.removeFirst()
-                } else if let lane = Self.lanes.filter({ !waiting($0).isEmpty })
-                    .min(by: { used[$0, default: 0] < used[$1, default: 0] }) {
-                    switch lane {
-                    case .check: job = checks.removeFirst()
-                    case .connect: job = connects.removeFirst()
-                    default: job = rest.removeFirst()
-                    }
-                } else {
-                    return nil
-                }
-                guard job.isCurrent(in: core) else { continue }
-                if job.kind != .answered { running[job.kind, default: 0] += 1 }
-                return job
+            while !isEmpty {
+                let job = !answered.isEmpty ? answered.removeFirst()
+                    : !connects.isEmpty ? connects.removeFirst() : rest.removeFirst()
+                if job.isCurrent(in: core) { return job }
             }
-        }
-
-        /// A job `next` handed out has run for `milliseconds`: its lane is
-        /// charged.
-        mutating func finished(_ kind: RuntimeJob.Kind, ran milliseconds: Double) {
-            guard kind != .answered else { return }
-            running[kind, default: 0] -= 1
-            used[kind, default: 0] += milliseconds
-            raiseFloor(including: kind)
-        }
-
-        /// The floor up to the least time a busy lane (and `kind`, which
-        /// just ran) has used.
-        private mutating func raiseFloor(including kind: RuntimeJob.Kind? = nil) {
-            let lanes = Self.lanes.filter { isBusy($0) || $0 == kind }
-            if let least = lanes.map({ used[$0, default: 0] }).min() { floor = max(floor, least) }
-        }
-    }
-
-    /// A level's proof check of a child header: `ChildProofJob.run` on its
-    /// block.
-    static func proofJob(_ job: ChildProofJob, block: Block, at path: ChainPath) -> RuntimeJob {
-        RuntimeJob(path: path, tipCID: nil, kind: .check) {
-            [.level(path, .proofVerified(job, job.run(block)))]
+            return nil
         }
     }
 

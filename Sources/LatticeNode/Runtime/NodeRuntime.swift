@@ -123,7 +123,7 @@ public final class NodeRuntime: Sendable {
         case helloDeadline(peerKey: String, session: UInt64)
         /// A worker finished: its slot frees, then its results step. When it
         /// was queued, started and done, while tracing.
-        case jobDone(UInt64, RuntimeJob.Kind, ran: Double, [NodeEvent], TraceTimes?)
+        case jobDone(UInt64, [NodeEvent], TraceTimes?)
         /// An RPC: its mining event under a fresh reply ID.
         case request(ChainPath, @Sendable (UInt64) -> MiningEvent, CheckedContinuation<NodeRuntimeReply, any Error>)
         /// An RPC answered outside a step (the shell could not run its part).
@@ -801,13 +801,12 @@ extension NodeRuntime {
                 sessions[key] = nil
                 _ = await ivy.disconnectSession(ifCurrent: session.peer)
                 return true
-            case .jobDone(let id, let kind, let ran, let events, let times):
+            case .jobDone(let id, let events, let times):
                 if let times {
                     let label = events.first?.traceLabel ?? "empty"
                     SyncTrace.log(chain: core.rootPath, "job \(label) \(times.line(taken: SyncTrace.now()))")
                 }
                 runningJobs -= 1
-                queued.finished(kind, ran: ran)
                 jobs[id] = nil
                 startJobs()
                 for event in events {
@@ -1861,7 +1860,9 @@ extension NodeRuntime {
                     inputs.yield(.event(.level(path, .proofDropped(job))))
                     break
                 }
-                enqueue(NodeRuntime.proofJob(job, block: block, at: path))
+                enqueue(RuntimeJob(path: path, tipCID: nil) {
+                    [.level(path, .proofVerified(job, job.run(block)))]
+                })
                 startJobs()
             case .readTransactions(let blocks):
                 enqueue(NodeRuntime.readJob(blocks, at: path, storage: storage))
@@ -1990,12 +1991,9 @@ extension NodeRuntime {
                 nextJob += 1
                 let (inputs, id, started) = (inputs, nextJob, SyncTrace.now())
                 jobs[id] = Task {
-                    let clock = ContinuousClock()
-                    let start = clock.now
                     let events = await job.run()
-                    let ran = Double((clock.now - start) / .microseconds(1)) / 1_000
                     let times = SyncTrace.enabled ? TraceTimes(queued: job.queued, started: started, done: SyncTrace.now()) : nil
-                    inputs.yield(.jobDone(id, job.kind, ran: ran, events, times))
+                    inputs.yield(.jobDone(id, events, times))
                 }
             }
         }
