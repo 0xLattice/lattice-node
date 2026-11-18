@@ -215,8 +215,15 @@ final class ReceiptWitnessTests: XCTestCase {
         }
         // It stored the witness as part of the body it fetched, and on
         // `none` let go of both once the block was no longer its tip.
-        let recorded = Set(followerStorage.bundles.bundle(root: withdrawalBlock) ?? [])
-        XCTAssertTrue(Set(witness).isSubset(of: recorded), "the follower stored the witness with the body")
+        let row = followerStorage.bundles.bundle(root: withdrawalBlock)
+        let missing = Set(witness).subtracting(row ?? [])
+        var held: [String: Bool] = [:]
+        for root in missing { held[root] = await followerStorage.broker.hasVolume(root: root) }
+        XCTAssertTrue(
+            missing.isEmpty,
+            "the follower stored the witness with the body: bundle row \(row.map { "of \($0.count) roots" } ?? "absent"), "
+                + "missing \(missing.count) of \(witness.count) witness roots, held here \(held)"
+        )
         try await eventually("the follower lets go of the old body and its witness") {
             try await followerStorage.broker.retainedRoots(
                 scope: followerStorage.scopes.body(withdrawalBlock, at: Self.alpha)
