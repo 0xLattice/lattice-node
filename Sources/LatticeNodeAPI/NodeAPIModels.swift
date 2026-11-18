@@ -454,7 +454,7 @@ public struct NodeSyncStatus: Codable, Sendable, Equatable {
     /// Window blocks whose last fetch failed: no peer served the body, or
     /// this node's byte budget or store declined it.
     public var bodiesUnavailable = 0
-    /// Blocks waiting before their bodies are asked for again.
+    /// Window blocks whose body fetch failed at least once.
     public var bodiesParked = 0
     /// Blocks whose connect needs a fact of the parent chain this node has
     /// not executed yet.
