@@ -1915,6 +1915,37 @@ final class DerivedChildGrindTests: XCTestCase {
         for entry in fixture.alpha { XCTAssertNotNil(alpha.blocks[try XCTUnwrap(entry.cid)], "Alpha read its peer") }
     }
 
+    /// A level restored with a cursor in its peer's log keeps it while
+    /// gated (a push is not taken) and, once the parent latches, reads the
+    /// log after it, not from the start.
+    func testARestoredCursorIsKeptWhileGatedAndReadFromOnceOpen() async throws {
+        let fixture = try await gateWorld()
+        var host = Host(fixture.world, hosted: [])
+        let restored = StreamCursor(logID: "peer", position: 2)
+        await host.step(.host(Self.alpha, facts: .empty, specs: [], cursors: [Self.alphaHost.key: restored]))
+        await host.step(.peerReady(Self.alphaHost))
+        XCTAssertFalse(host.take().contains { $0.path == Self.alpha }, "gated: Alpha asks its peer for nothing")
+        host.position[Self.alpha] = [Self.alphaHost: 2]
+        await host.relayPage([fixture.c4], at: Self.alpha, from: Self.alphaHost)
+        XCTAssertEqual(host.core.levels[Self.alpha]?.sync.cursors[Self.alphaHost.key], restored, "kept while gated")
+        XCTAssertEqual(host.core.levels[Self.alpha]?.sync.peers[Self.alphaHost]?.taken, 2, "the push was not taken")
+
+        for block in fixture.nexus {
+            host.serving[Self.nexus, default: [:]][Self.miner, default: [:]][block.cid] = HeaderEntry(block: block.block, children: block.children)
+        }
+        host.logs[Self.nexus] = [Self.miner: fixture.nexus.map(\.cid)]
+        await host.step(.peerReady(Self.miner))
+        XCTAssertEqual(host.core.levels[Self.nexus]?.synced, true)
+        let asked = host.take().compactMap { sent -> (String?, UInt64)? in
+            guard sent.path == Self.alpha, case .getStream(_, let logID, let after, _) = sent.message else { return nil }
+            return (logID, after)
+        }
+        // Its peer's log is asked after the restored cursor (the miner's,
+        // never read, from its start).
+        XCTAssertTrue(asked.contains { $0.0 == "peer" && $0.1 == 2 }, "read after the restored cursor: \(asked)")
+        XCTAssertFalse(asked.contains { $0.0 == "peer" && $0.1 != 2 })
+    }
+
     /// A grandchild whose carrier the parent level weighed is credited by
     /// derivation alone: a peer's proofs of A (committed by the weighed
     /// Nexus block B) and of D (committed by A) are never checked.
