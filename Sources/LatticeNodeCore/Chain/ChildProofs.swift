@@ -186,11 +186,12 @@ public struct ChildProofSync: Sendable {
         deriving[child] = count == 1 ? nil : count - 1
     }
 
-    /// Forget everything `peer` sent, queued or in flight. A check still
-    /// running in the shell answers into nothing.
+    /// Forget the proofs `peer` sent that are not yet checked. One in flight
+    /// keeps its slot and its answer counts: a check is the proof's verdict,
+    /// not its sender's, and the shell runs it anyway, so `maxChecks` bounds
+    /// the checks running however often peers come and go.
     mutating func purge(_ peer: PeerID) {
         queued.removeAll { $0.source == peer }
-        for (key, proof) in verifying where proof.source == peer { verifying[key] = nil }
     }
 }
 
@@ -291,7 +292,7 @@ extension ChainCore {
     }
 
     /// A peer is gone (for any reason): its announcements end, and its
-    /// proofs, queued or in flight, are forgotten.
+    /// proofs not yet checked are forgotten (`ChildProofSync.purge`).
     mutating func dropProofSource(_ peer: PeerID) {
         for cid in sync.proofs.awaiting.keys.sorted() {
             sync.proofs.awaiting[cid]?.announcers.removeAll { $0 == peer }
