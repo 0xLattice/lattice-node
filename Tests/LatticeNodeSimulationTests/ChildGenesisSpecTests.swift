@@ -18,6 +18,17 @@ final class ChildGenesisSpecTests: XCTestCase {
         )
     }
 
+    /// A host that weighed Nexus up to the block Alpha's genesis anchors on
+    /// (the one before its carrier): top-down, a child header is taken only
+    /// within what its parent level has weighed.
+    private func anchoredHost(_ world: LevelWorld) -> NodeCore {
+        var host = NodeCore(root: world.rootBootstrap.tree.detached(), hosted: world.hosted)
+        for grind in world.grinds.prefix(while: { $0.mined.carried.isEmpty }) {
+            _ = host.step(.mined(grind.mined), now: now)
+        }
+        return host
+    }
+
     /// `peer` streams the genesis and answers its `getData` with `spec`;
     /// proof checks run to completion. Returns the effects seen.
     private func announce(
@@ -39,9 +50,8 @@ final class ChildGenesisSpecTests: XCTestCase {
                     queue.append(.received(peer, alpha, .headers(HeadersResponse(requestID: id, entries: [
                         HeaderEntry(block: genesis.block, children: genesis.children, proofs: proofs, spec: spec),
                     ], hasMore: false))))
-                case .level(let path, .verifyProof(let job)) where verify:
-                    let block = job.block ?? genesis.block
-                    queue.append(.level(path, .proofVerified(job, job.run(block))))
+                case .level(let path, .verifyProofs(let batch)) where verify:
+                    queue.append(.level(path, .proofsVerified(batch.run { _ in genesis.block })))
                 default:
                     break
                 }
@@ -52,7 +62,7 @@ final class ChildGenesisSpecTests: XCTestCase {
 
     func testABadSpecNeverBlocksTheGenesis() async throws {
         let world = try await world()
-        var host = NodeCore(root: world.rootBootstrap.tree.detached(), hosted: world.hosted)
+        var host = anchoredHost(world)
         let liar = PeerID(key: "liar", session: 1)
         let honest = PeerID(key: "honest", session: 1)
         _ = host.step(.peerReady(liar), now: now)
@@ -66,21 +76,20 @@ final class ChildGenesisSpecTests: XCTestCase {
         XCTAssertTrue(host.levels[alpha]?.tree.contains(blockHash: genesis) ?? false, "the honest spec admits the genesis")
     }
 
-    func testADroppedProofCheckFreesItsSlotWithoutBlame() async throws {
+    func testAProofCheckWhoseBlockIsGoneFreesItsPlaceWithoutBlame() async throws {
         let world = try await world()
-        var host = NodeCore(root: world.rootBootstrap.tree.detached(), hosted: world.hosted)
+        var host = anchoredHost(world)
         let peer = PeerID(key: "peer", session: 1)
         _ = host.step(.peerReady(peer), now: now)
         let effects = try await announce(
             world, to: &host, from: peer, spec: try XCTUnwrap(world.specs[alpha]), verify: false
         )
-        let jobs = effects.compactMap { effect -> ChildProofJob? in
-            if case .level(_, .verifyProof(let job)) = effect { return job }
+        let batches = effects.compactMap { effect -> ChildProofBatch? in
+            if case .level(_, .verifyProofs(let batch)) = effect { return batch }
             return nil
         }
-        XCTAssertFalse(jobs.isEmpty)
-        var dropped: [NodeEffect] = []
-        for job in jobs { dropped += host.step(.level(alpha, .proofDropped(job)), now: now) }
+        XCTAssertEqual(batches.count, 1)
+        let dropped = host.step(.level(alpha, .proofsVerified(try XCTUnwrap(batches.first).run { _ in nil })), now: now)
         XCTAssertEqual(host.levels[alpha]?.sync.proofs.verifying.count, 0)
         XCTAssertFalse(dropped.contains { if case .disconnect = $0 { true } else { false } })
     }

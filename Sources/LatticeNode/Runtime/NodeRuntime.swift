@@ -31,7 +31,7 @@ public enum NodeRuntimeError: Error, Equatable, Sendable {
 /// - `send` / `serveHeaders` / `disconnect` → the Ivy overlay.
 /// - `fetchBody` / `cancelBody` / `fetchByCID` → the content layer
 ///   (VolumeBroker, then overlay providers by CID).
-/// - `connect` / `verifyProof` → a bounded worker pool; the result comes
+/// - `connect` / `verifyProofs` → a bounded worker pool; the result comes
 ///   back as an event.
 /// - `wakeAt` → one timer that posts `tick`.
 /// - `mining` → the pool delta persisted like `persist` (fail-stop), RPC
@@ -1371,7 +1371,6 @@ extension NodeRuntime {
             var sync = NodeSyncStatus()
             sync.pendingHeaders = level.sync.pending.entries.count
             sync.headersAwaitingProof = level.sync.proofs.awaiting.count
-            sync.proofChecksQueued = level.sync.proofs.queued.count
             sync.proofChecksRunning = level.sync.proofs.verifying.count
             sync.bodyWindow = windows[path]?.distances.count ?? 0
             sync.bodiesRequested = level.bodies.requested.count
@@ -1865,16 +1864,11 @@ extension NodeRuntime {
                     return [.level(path, .derived(await job.run(held: held, upstream: upstream, fetcher: storage.workFetcher)))]
                 })
                 startJobs()
-            case .verifyProof(let job):
-                // A job without its block reads it from the header store.
-                guard let block = job.block ?? storage.store.header(job.childCID)?.block else {
-                    // Its block is gone: the check frees its slot, blaming no one.
-                    inputs.yield(.event(.level(path, .proofDropped(job))))
-                    break
-                }
-                enqueue(RuntimeJob(path: path, tipCID: nil) {
-                    [.level(path, .proofVerified(job, job.run(block)))]
-                })
+            case .verifyProofs(let batch):
+                // Off the loop: a check without its block reads it from the
+                // header store there; one whose block is gone answers nil,
+                // blaming no one.
+                enqueue(NodeRuntime.proofJob(batch, at: path, storage: storage))
                 startJobs()
             case .readTransactions(let blocks):
                 enqueue(NodeRuntime.readJob(blocks, at: path, storage: storage))

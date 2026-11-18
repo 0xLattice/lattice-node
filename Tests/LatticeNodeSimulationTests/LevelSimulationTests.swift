@@ -211,12 +211,12 @@ final class LevelSimulationTests: XCTestCase {
     /// proof-of-work: it alone is blamed, and every honest proof is still
     /// credited everywhere (checked at the quiet point) with identical
     /// weights.
-    func testEveryHonestProofIsCreditedThroughScarceSlotsAndAFlood() async throws {
+    func testEveryHonestProofIsCreditedUnderATightBudgetAndAFlood() async throws {
         let (_, report) = try await simulate(config(0xF100D) {
             $0.flooders = 1
             $0.doubleProbability = 0.5
             $0.pageSize = 12
-            $0.proofs = ChildProofConfig(maxChecks: 4, maxAwaiting: 64)
+            $0.proofs = ChildProofConfig(maxQueuedBytes: Self.tightProofBudget, maxAwaiting: 64)
             $0.withholder = false
             $0.zeroWork = false
             $0.scheduleLiar = false
@@ -226,15 +226,20 @@ final class LevelSimulationTests: XCTestCase {
                       "\(report.disconnects)")
     }
 
-    /// Sybils: more flooders than there are check slots, each relaying every
-    /// child block with free junk proofs and coming back on every
-    /// reconnection. A flooder is disconnected at its first failed check
-    /// (its other unchecked proofs forgotten), so with only plain caps every honest
-    /// proof is credited everywhere within a bounded latency, no honest peer
-    /// is blamed, and state stays within the caps (checked every step).
+    /// The operator's byte budget for proofs in a check, a few proofs' worth.
+    private static let tightProofBudget = 16 * 1_024
+
+    /// Sybils: several flooders, each relaying every child block with free
+    /// junk proofs and coming back on every reconnection, against a tight
+    /// operator budget for proofs in a check. A flooder is disconnected at
+    /// its first failed check, so with only plain caps every honest proof is
+    /// credited everywhere within a bounded latency, no honest peer is
+    /// blamed, and state stays within the caps (checked every step). A page
+    /// of junk costs its check, never a verdict: nothing bounds a flood but
+    /// the network.
     func testSybilFloodersAreDisconnectedAndCannotStarveHonestProofs() async throws {
-        let proofs = ChildProofConfig(maxChecks: 4, maxAwaiting: 64)
-        let flooders = proofs.maxChecks + 1
+        let proofs = ChildProofConfig(maxQueuedBytes: Self.tightProofBudget, maxAwaiting: 64)
+        let flooders = 5
         let (_, report) = try await simulate(config(0x5B11) {
             $0.flooders = flooders
             $0.doubleProbability = 0.5
@@ -300,9 +305,11 @@ final class LevelSimulationTests: XCTestCase {
                     ) {
                         queue.append(.received(peer, path, reply))
                     }
-                case .level(let path, .verifyProof(let job)):
-                    let block = try XCTUnwrap(job.block ?? world.blocks[path]?[job.childCID]?.block)
-                    queue.append(.level(path, .proofVerified(job, job.run(block))))
+                case .level(let path, .verifyProofs(let batch)):
+                    queue.append(.level(path, .proofsVerified(batch.run { world.blocks[path]?[$0]?.block })))
+                case .level(let path, .deriveProof(let job)):
+                    let held = job.block ?? world.blocks[path]?[job.childCID]?.block
+                    queue.append(.level(path, .derived(await job.run(held: held, upstream: [], fetcher: world.cas))))
                 case .level(let path, .fetchByCID(_, let cid)):
                     queue.append(.level(path, .childIndexFetched(
                         peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
@@ -362,9 +369,11 @@ final class LevelSimulationTests: XCTestCase {
                     ) {
                         queue.append(.received(peer, path, reply))
                     }
-                case .level(let path, .verifyProof(let job)):
-                    let block = try XCTUnwrap(job.block ?? world.blocks[path]?[job.childCID]?.block)
-                    queue.append(.level(path, .proofVerified(job, job.run(block))))
+                case .level(let path, .verifyProofs(let batch)):
+                    queue.append(.level(path, .proofsVerified(batch.run { world.blocks[path]?[$0]?.block })))
+                case .level(let path, .deriveProof(let job)):
+                    let held = job.block ?? world.blocks[path]?[job.childCID]?.block
+                    queue.append(.level(path, .derived(await job.run(held: held, upstream: [], fetcher: world.cas))))
                 case .level(let path, .fetchByCID(_, let cid)):
                     queue.append(.level(path, .childIndexFetched(
                         peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
@@ -422,10 +431,14 @@ final class LevelSimulationTests: XCTestCase {
                         }
                         queue.append(.received(peer, path, reply))
                     }
-                case .level(let path, .verifyProof(let job)):
-                    XCTAssertTrue(asked.contains(job.childCID), "a check spent on a header not asked for")
-                    let block = try XCTUnwrap(job.block ?? world.blocks[path]?[job.childCID]?.block)
-                    queue.append(.level(path, .proofVerified(job, job.run(block))))
+                case .level(let path, .verifyProofs(let batch)):
+                    for job in batch.jobs {
+                        XCTAssertTrue(asked.contains(job.childCID), "a check spent on a header not asked for")
+                    }
+                    queue.append(.level(path, .proofsVerified(batch.run { world.blocks[path]?[$0]?.block })))
+                case .level(let path, .deriveProof(let job)):
+                    let held = job.block ?? world.blocks[path]?[job.childCID]?.block
+                    queue.append(.level(path, .derived(await job.run(held: held, upstream: [], fetcher: world.cas))))
                 case .level(let path, .fetchByCID(_, let cid)):
                     queue.append(.level(path, .childIndexFetched(
                         peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
@@ -438,7 +451,7 @@ final class LevelSimulationTests: XCTestCase {
             }
             let level = try XCTUnwrap(host.levels[alpha])
             XCTAssertTrue(asked.isSuperset(of: level.sync.proofs.awaiting.keys), "a header not asked for awaits a proof")
-            XCTAssertTrue(asked.isSuperset(of: level.sync.proofs.queued.map(\.cid)))
+            XCTAssertTrue(asked.isSuperset(of: level.sync.proofs.verifying.values.map(\.cid)))
         }
         XCTAssertGreaterThan(answers, 1)
         let weighed = TreeDigest(try XCTUnwrap(host.levels[alpha]).tree).blocks
@@ -487,9 +500,11 @@ final class LevelSimulationTests: XCTestCase {
                         ) {
                             queue.append(.received(peer, path, reply))
                         }
-                    case .level(let path, .verifyProof(let job)):
-                        let block = try XCTUnwrap(job.block ?? world.blocks[path]?[job.childCID]?.block)
-                        queue.append(.level(path, .proofVerified(job, job.run(block))))
+                    case .level(let path, .verifyProofs(let batch)):
+                        queue.append(.level(path, .proofsVerified(batch.run { world.blocks[path]?[$0]?.block })))
+                    case .level(let path, .deriveProof(let job)):
+                        let held = job.block ?? world.blocks[path]?[job.childCID]?.block
+                        queue.append(.level(path, .derived(await job.run(held: held, upstream: [], fetcher: world.cas))))
                     case .level(let path, .fetchByCID(_, let cid)):
                         queue.append(.level(path, .childIndexFetched(
                             peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
@@ -543,9 +558,11 @@ final class LevelSimulationTests: XCTestCase {
                         ) {
                             queue.append(.received(peer, path, reply))
                         }
-                    case .level(let path, .verifyProof(let job)):
-                        let block = try XCTUnwrap(job.block ?? world.blocks[path]?[job.childCID]?.block)
-                        queue.append(.level(path, .proofVerified(job, job.run(block))))
+                    case .level(let path, .verifyProofs(let batch)):
+                        queue.append(.level(path, .proofsVerified(batch.run { world.blocks[path]?[$0]?.block })))
+                    case .level(let path, .deriveProof(let job)):
+                        let held = job.block ?? world.blocks[path]?[job.childCID]?.block
+                        queue.append(.level(path, .derived(await job.run(held: held, upstream: [], fetcher: world.cas))))
                     case .level(let path, .fetchByCID(_, let cid)):
                         queue.append(.level(path, .childIndexFetched(
                             peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)

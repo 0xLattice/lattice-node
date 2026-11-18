@@ -348,8 +348,8 @@ executes, is excluded, or leaves the best chain.
 `GET /status` (operator only) also carries `sync`, counts of what the level's
 sync holds as its last step left them: `pendingHeaders` (received, not yet
 weighed, most waiting for their parent header), `headersAwaitingProof` (child
-headers waiting for a proof that weighs them), `proofChecksQueued` and
-`proofChecksRunning`, `bodyWindow` (the blocks it asks to execute next: every
+headers waiting for a proof that weighs them), `proofChecksRunning` (peers'
+proofs in a check, one job per page of headers), `bodyWindow` (the blocks it asks to execute next: every
 fork child on the act-on path and the best chain's look-ahead),
 `bodiesRequested` (asked of peers, not arrived), `bodiesUnavailable` (window
 blocks whose last fetch failed), `bodiesParked` (failed at least once, still in

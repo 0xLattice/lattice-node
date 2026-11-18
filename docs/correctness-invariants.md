@@ -22,6 +22,13 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   level has not executed waits, unvalidated, and wakes when it is.
   Enforced by `LevelInvariants.checkExecutionStop` (a stop is only at a
   block awaiting a fact its parent lacks; a held fact is a lost wake).
+- **NODE-SEMANTICS-003.e** — A child header anchored at a parent state its
+  parent level has not weighed is dropped without blame, and its stream
+  hole is asked again once the parent weighs it (top-down weighing). What
+  is kept of such headers is bounded by the holes: enforced by
+  `LevelInvariants.checkLevel` ("dropped past the parent, is no peer's
+  hole"); pinned by
+  `DerivedChildGrindTests.testAChildHeaderPastTheParentsWeighedFrontierWeighsOnlyOnceTheParentAdvances`.
 - **NODE-SEMANTICS-003.d** — A node-local failure while executing is
   retriable, never an exclusion. Pinned by
   `ChainCoreBodyTests.testALocalFailureIsNeverAnExclusion`.

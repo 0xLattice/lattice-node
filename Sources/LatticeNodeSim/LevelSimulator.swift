@@ -78,7 +78,9 @@ public struct LevelSimReport: Sendable {
     /// Per mined handoff: the persists its step emitted and the levels the
     /// one batch covered.
     public var minedBatches: [(persists: Int, levels: Int)] = []
+    /// Peer proofs checked, and the verify jobs that checked them.
     public var verifications = 0
+    public var verifyJobs = 0
     public var executions = 0
     /// The longest any core took to credit a public honest proof of a
     /// child block it holds, from the proof's release.
@@ -130,7 +132,7 @@ public struct LevelSimulator {
         var store: HostStore
         var digests: [ChainPath: TreeDigest]
         var persists = 0
-        /// Each level's peer proof checks asked of the shell (`verifyProof`)
+        /// Each level's peer proof checks asked of the shell (`verifyProofs`)
         /// and not yet answered, by key: what the shell runs, which the
         /// core's own `verifying` must match.
         var checks: [ChainPath: [ChildProofKey: Int]] = [:]
@@ -381,9 +383,11 @@ public struct LevelSimulator {
         // The step mutates the one copy: the node is taken out and put back.
         guard var node = cores.removeValue(forKey: name) else { return }
         let synced = Set(node.core.levels.filter(\.value.synced).keys)
-        if case .level(let path, .proofVerified(let job, _)) = event, !job.derived {
-            node.checks[path]?[job.key]? -= 1
-            if node.checks[path]?[job.key] == 0 { node.checks[path]?[job.key] = nil }
+        if case .level(let path, .proofsVerified(let answers)) = event {
+            for answer in answers {
+                node.checks[path]?[answer.job.key]? -= 1
+                if node.checks[path]?[answer.job.key] == 0 { node.checks[path]?[answer.job.key] = nil }
+            }
         }
         let effects = node.core.step(event, now: now)
         // The sync latch is never unset while the node runs.
@@ -493,14 +497,18 @@ public struct LevelSimulator {
             where !tip.isEmpty && node.store.levels[path]?.blockFacts.contains(tip) != true {
                 throw Invariants.fail(name, "published tip \(tip) at \(path) is not durable")
             }
-        case .verifyProof(let job):
-            report.verifications += 1
-            node.checks[path, default: [:]][job.key, default: 0] += 1
-            guard let block = job.block ?? node.store.levels[path]?.headers[job.childCID]?.block else {
-                throw Invariants.fail(name, "asked to verify a proof of \(job.childCID), which it does not hold")
+        case .verifyProofs(let batch):
+            report.verifications += batch.jobs.count
+            report.verifyJobs += 1
+            for job in batch.jobs {
+                node.checks[path, default: [:]][job.key, default: 0] += 1
+                guard job.block ?? node.store.levels[path]?.headers[job.childCID]?.block != nil else {
+                    throw Invariants.fail(name, "asked to verify a proof of \(job.childCID), which it does not hold")
+                }
             }
-            let result = job.run(block)
-            schedule(at: delay(), to: name, .host(.level(path, .proofVerified(job, result))))
+            let headers = node.store.levels[path]?.headers ?? [:]
+            let answers = batch.run { headers[$0]?.block }
+            schedule(at: delay(), to: name, .host(.level(path, .proofsVerified(answers))))
         case .readTransactions(let blocks):
             // The simulated chains carry no transactions.
             schedule(at: delay(), to: name, .host(.level(path, .transactionsRead(

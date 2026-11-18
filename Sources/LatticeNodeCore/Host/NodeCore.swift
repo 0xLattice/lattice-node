@@ -141,8 +141,7 @@ extension ChainEvent {
         case .transactionsRead: "transactionsRead"
         case .parentFactsPresent: "parentFactsPresent"
         case .tick: "tick"
-        case .proofDropped: "proofDropped"
-        case .proofVerified: "proofVerified"
+        case .proofsVerified: "proofsVerified"
         case .derived: "derived"
         case .submitted: "submitted"
         case .mining(let event): "mining.\(traceCase(event))"
@@ -164,7 +163,7 @@ extension ChainEffect {
         case .persist: "persist"
         case .publish: "publish"
         case .wakeAt: "wakeAt"
-        case .verifyProof: "verifyProof"
+        case .verifyProofs: "verifyProofs"
         case .deriveProof: "deriveProof"
         case .workSubmitted: "workSubmitted"
         case .readTransactions: "readTransactions"
@@ -516,7 +515,12 @@ public struct NodeCore: Sendable {
     mutating func run(_ path: ChainPath, _ event: ChainEvent, _ turn: inout Turn) {
         guard var core = levels.removeValue(forKey: path) else { return }
         turn.touched.insert(path)
-        let effects = core.step(event, now: turn.now, parent: path.count > 1 ? levels[Array(path.dropLast())]?.tree : nil)
+        let parent = Array(path.dropLast())
+        let effects = core.step(
+            event, now: turn.now,
+            parent: path.count > 1 ? levels[parent]?.tree : nil,
+            parentStates: path.count > 1 ? levels[parent]?.weighedStates : nil
+        )
         turn.weighed[path, default: []].formUnion(core.weighed)
         turn.arrived[path, default: []].formUnion(core.arrived)
         levels[path] = consume core
@@ -676,13 +680,15 @@ public struct NodeCore: Sendable {
 
     // MARK: - Run attribution (hierarchical GHOST)
 
-    /// Start a child level's runs: its parent serves runs for its directory.
-    /// False when this host does not run the parent level.
+    /// Start a child level's runs: its parent serves runs for its directory,
+    /// and keeps its weighed post-states, which bound what the child takes
+    /// (top-down). False when this host does not run the parent level.
     @discardableResult
     mutating func serve(_ path: ChainPath) -> Bool {
         let parent = Array(path.dropLast())
         guard path.count > 1, var core = levels.removeValue(forKey: parent) else { return false }
         core.tree.serveRuns(for: path[path.count - 1])
+        core.trackWeighedStates()
         levels[parent] = core
         return true
     }
@@ -693,7 +699,9 @@ public struct NodeCore: Sendable {
     /// forwarded unchanged. What a level raises flows on down. Beside them,
     /// by the same index, the grinds of the parent's weighed blocks and of
     /// the committers of what this level took in are derived (a level just
-    /// restored takes in every block it holds).
+    /// restored takes in every block it holds), and the headers the level
+    /// dropped past its parent are asked for again once the parent weighs
+    /// their anchors.
     mutating func attributeRuns(_ turn: inout Turn) {
         var raised: [ChainPath: Set<String>] = [:]
         for path in ordered where path.count > 1 {
@@ -707,10 +715,12 @@ public struct NodeCore: Sendable {
                 from: parentCore.tree, parentBlocks: parentBlocks, held: held, now: turn.now
             )
             let derived = core.deriveGrinds(from: parentCore.tree, carriers: turn.weighed[parent] ?? [], arrived: arrived)
+            let released = parentBlocks.isEmpty || core.sync.beyondParent.isEmpty
+                ? [] : core.parentAdvanced(parentCore.weighedStates ?? [], now: turn.now)
             levels[path] = consume core
             turn.touched.insert(path)
             raised[path] = Set(result.raised)
-            absorb(result.effects + derived, at: path, &turn)
+            absorb(result.effects + derived + released, at: path, &turn)
         }
     }
 }

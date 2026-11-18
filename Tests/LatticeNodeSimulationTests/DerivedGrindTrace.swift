@@ -140,7 +140,7 @@ final class GrindTracer: @unchecked Sendable {
         for carrier in fixture.carriers where snap.cgr[carrier.label] == nil { snap.cgr[carrier.label] = [] }
         guard let level = core.levels[path] else { return snap }
         let proofs = level.sync.proofs
-        let held = proofs.queued.map { ($0.key, $0.proof) } + proofs.verifying.map { ($0.key, $0.value.proof) }
+        let held = proofs.verifying.map { ($0.key, $0.value.proof) }
         for child in fixture.children {
             let cid = child.cid
             var credited: [String] = []
@@ -185,7 +185,8 @@ final class GrindTracer: @unchecked Sendable {
         }
 
         var main: [String: Any]?
-        var checkedKey: ChildProofKey?
+        var checked: [[String: Any]] = []
+        var checkedKeys: Set<ChildProofKey> = []
         var clears = false
         var gossiped: String?
         if booting {
@@ -205,10 +206,13 @@ final class GrindTracer: @unchecked Sendable {
                     anomalies.append("\(name): answer of a job not in flight")
                 }
             }
-        case .level(let at, .proofVerified(let job, _)) where at == path && !job.derived:
-            if s0.peerKeys.contains(job.key), let child = childLabel[job.childCID] {
-                main = ["kind": "check", "child": child, "proof": label(of: job.proof)]
-                checkedKey = job.key
+        case .level(let at, .proofsVerified(let answers)) where at == path:
+            // One verify job: each of its checks a model check, in order.
+            for answer in answers {
+                let job = answer.job
+                guard s0.peerKeys.contains(job.key), let child = childLabel[job.childCID] else { continue }
+                checked.append(["kind": "check", "child": child, "proof": label(of: job.proof)])
+                checkedKeys.insert(job.key)
             }
         case .level(let at, .submitted(let entry)) where at == path:
             if let cid = try? BlockHeader(node: entry.block).rawCID, let child = childLabel[cid] {
@@ -264,13 +268,14 @@ final class GrindTracer: @unchecked Sendable {
             }
         }
         if let main { sub.append(main) }
+        sub += checked
         if !clears {
             // Peer proofs gone without their check answering: a purge when a
             // peer left this step (logging what is held after it: those in a
             // check and other peers' queued proofs), else
             // each dropped unchecked (block gone or already credited), which
             // the model checks to no effect.
-            let gone = s0.peerKeys.subtracting(s1.peerKeys).subtracting(checkedKey.map { [$0] } ?? [])
+            let gone = s0.peerKeys.subtracting(s1.peerKeys).subtracting(checkedKeys)
             let left = effects.contains { if case .disconnect = $0 { return true }; return false }
                 || { if case .peerGone = event { return true }; return false }()
             if !gone.isEmpty, left {

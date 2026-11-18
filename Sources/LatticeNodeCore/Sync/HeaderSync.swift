@@ -36,6 +36,9 @@ public struct PeerSync: Sendable, Equatable {
     /// Requests that arrived while `serving` was being sent, in order (at
     /// most one of each kind: an honest peer has no more in flight).
     public internal(set) var queued: [SyncMessage] = []
+    /// A hole dropped for anchoring past the parent level may now be taken:
+    /// the next `getData` asks every hole still lacking.
+    public internal(set) var reask = false
 
     public init() {}
 
@@ -46,7 +49,7 @@ public struct PeerSync: Sendable, Equatable {
             && lhs.readToEnd == rhs.readToEnd
             && lhs.parentRequest == rhs.parentRequest
             && lhs.childIndex == rhs.childIndex && lhs.serving == rhs.serving
-            && lhs.queued.count == rhs.queued.count
+            && lhs.queued.count == rhs.queued.count && lhs.reask == rhs.reask
     }
 
     var deadlines: [Int64] {
@@ -283,6 +286,12 @@ public struct HeaderSync: Sendable {
     /// Headers declined as beyond the finality window, so a peer's stream
     /// treats them as done instead of asking for them again.
     public internal(set) var declined = DeclinedSet()
+    /// A child level: the headers dropped for anchoring past what the parent
+    /// level has weighed, by CID, with the parent state each anchors at.
+    /// Each is a hole of some peer's stream, not asked again until the
+    /// parent weighs a block declaring that state (`ChainCore.parentAdvanced`):
+    /// at most the holes, which are at most a page per peer.
+    public internal(set) var beyondParent: [String: String] = [:]
     var nextRequestID: UInt64 = 1
     var nextToken: UInt64 = 1
     /// This node's weigh log, which peers stream.
@@ -294,6 +303,14 @@ public struct HeaderSync: Sendable {
     var knownCursors: Set<String> = []
 
     public init() {}
+
+    /// Forget the headers dropped past the parent that no peer's stream holds
+    /// any more.
+    mutating func forgetBeyondParent() {
+        guard !beyondParent.isEmpty else { return }
+        let holes = Set(peers.values.flatMap { $0.holes.map(\.entry.block) })
+        beyondParent = beyondParent.filter { holes.contains($0.key) }
+    }
 
     /// Remove a pending header and every reference to it.
     mutating func removePending(_ cid: String) {
