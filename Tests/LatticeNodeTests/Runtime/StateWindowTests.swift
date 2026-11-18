@@ -1025,8 +1025,15 @@ final class StateWindowTests: XCTestCase {
             try await eventually("the node executes Alpha's tip") {
                 await runtime.levelReads[Self.alpha]?.readSnapshot().tipCID == alphaTip
             }
-            try await eventually("Alpha's window is its last 2 blocks") {
-                try await self.windowHeights(storage, at: Self.alpha) == [alphaHeight - 1, alphaHeight]
+            var heights: [UInt64] = []
+            do {
+                try await eventually("Alpha's window is its last 2 blocks") {
+                    heights = try await self.windowHeights(storage, at: Self.alpha)
+                    return heights == [alphaHeight - 1, alphaHeight]
+                }
+            } catch {
+                XCTFail("Alpha's windows \(heights), tip height \(alphaHeight)")
+                throw error
             }
             try await eventually("Alpha's counts reach its tip") { try await self.settled(storage, at: alphaTip, path: Self.alpha) }
             await runtime.stop()
