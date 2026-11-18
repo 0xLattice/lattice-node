@@ -386,9 +386,9 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
 /// is needed, what goes first: bodies of blocks in no chain's body window
 /// (connected, or off the best chain), then the entries reads asked for,
 /// then bodies furthest ahead of their chain's next block to connect
-/// (`order(bodies:)`), the least recently read first among equals. What
-/// would go before everything it would have to evict is not kept. What is
-/// evicted is fetched again when it is read: this decides only what is
+/// (`order(bodies:leaving:)`), the least recently read first among equals.
+/// What would go before everything it would have to evict is not kept. What
+/// is evicted is fetched again when it is read: this decides only what is
 /// asked of peers twice. What is put again replaces what is held.
 actor ReadCache: ContentSource {
     private enum Key: Hashable {
@@ -452,11 +452,16 @@ actor ReadCache: ContentSource {
     /// How many times room was made by looking through the held bodies.
     private(set) var bodyScans = 0
 
-    /// The window blocks, each by its distance from its chain's next block
-    /// to connect (0 for that block): the order their bodies are needed in.
-    func order(bodies distances: [String: Int]) {
-        self.distances = distances
-        outsideWindow = bodies.keys.reduce(0) { $0 + (distances[$1] == nil ? 1 : 0) }
+    /// The window blocks whose distance from their chain's next block to
+    /// connect (0 for that block) changed, each by its distance, and the
+    /// blocks that left every window: the order their bodies are needed in.
+    func order(bodies distances: [String: Int], leaving left: Set<String>) {
+        for (block, distance) in distances where self.distances.updateValue(distance, forKey: block) == nil {
+            if bodies[block] != nil { outsideWindow -= 1 }
+        }
+        for block in left where self.distances.removeValue(forKey: block) != nil {
+            if bodies[block] != nil { outsideWindow += 1 }
+        }
     }
 
     /// The whole Volume under `root`, when this node derived it and it is held.

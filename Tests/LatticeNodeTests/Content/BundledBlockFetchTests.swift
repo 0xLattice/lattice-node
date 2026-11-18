@@ -835,7 +835,7 @@ final class BundledBlockFetchTests: XCTestCase {
         let joiner = try await storage(keyByte: 0x70, resourcePolicy: NodeResourcePolicy(
             maximumAcquisitionStorageBytes: 4 * cacheBytes, maximumAcquisitionBytes: 4 * cacheBytes
         ))
-        await joiner.readCache.order(bodies: Dictionary(uniqueKeysWithValues: window.enumerated().map { ($1, $0) }))
+        await joiner.readCache.order(bodies: Dictionary(uniqueKeysWithValues: window.enumerated().map { ($1, $0) }), leaving: [])
         let requests = Requests()
         let remote = remote(producer, requests: requests)
         for cid in window {

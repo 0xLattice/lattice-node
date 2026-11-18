@@ -534,6 +534,41 @@ public final class NodeRuntime: Sendable {
     static let rememberedPeerDials = 4
 }
 
+extension NodeRuntime.Loop {
+    /// Moves the body order (each window block's nearest distance in any
+    /// window) with the windows that moved, each from `old` to `new`, and
+    /// returns the blocks whose order changed. `windows` are every window
+    /// after the moves. A block is looked up across windows only where its
+    /// nearest distance may have grown or left; elsewhere the work is the
+    /// moved windows' entries.
+    static func reorder(
+        _ order: inout [String: Int], moved: [(old: [String: Int], new: [String: Int])], windows: [[String: Int]]
+    ) -> Set<String> {
+        var reordered: Set<String> = []
+        var lookUp: Set<String> = []
+        for (old, new) in moved {
+            for (cid, distance) in new where old[cid] != distance {
+                if order[cid].map({ distance < $0 }) ?? true {
+                    order[cid] = distance
+                    reordered.insert(cid)
+                } else if order[cid] == old[cid] {
+                    lookUp.insert(cid)
+                }
+            }
+            for (cid, distance) in old where new[cid] == nil && order[cid] == distance {
+                lookUp.insert(cid)
+            }
+        }
+        for cid in lookUp {
+            let nearest = windows.compactMap { $0[cid] }.min()
+            guard order[cid] != nearest else { continue }
+            order[cid] = nearest
+            reordered.insert(cid)
+        }
+        return reordered
+    }
+}
+
 extension NodeRuntime {
     /// Everything the loop task owns. Only the loop touches it.
     struct Loop: Sendable {
@@ -663,7 +698,7 @@ extension NodeRuntime {
         var executedThisStep: [BodyKey] = []
         var bodyTips: [ChainPath: String] = [:]
         /// The window blocks' distances from their chains' next blocks to
-        /// connect, as last given to the read cache.
+        /// connect, each its nearest in any window: the read cache's order.
         var cachedBodyOrder: [String: Int] = [:]
         /// Each level's next blocks to connect and window distances, as of
         /// the last step that ran it (`NodeCore.touched`): a level no step
@@ -1530,10 +1565,17 @@ extension NodeRuntime {
             let stepped = SyncTrace.now()
             // Only the step moves a level: its window is read once, here,
             // before any effect refreshes a view.
-            for path in windows.keys where core.levels[path] == nil { windows[path] = nil }
-            for (path, level) in core.levels where core.touched.contains(path) || windows[path] == nil {
-                windows[path] = level.connectOrder
+            var moved: [(old: [String: Int], new: [String: Int])] = []
+            for path in windows.keys where core.levels[path] == nil {
+                moved.append((windows.removeValue(forKey: path)?.distances ?? [:], [:]))
             }
+            for (path, level) in core.levels where core.touched.contains(path) || windows[path] == nil {
+                let window = level.connectOrder
+                moved.append((windows.updateValue(window, forKey: path)?.distances ?? [:], window.distances))
+            }
+            let reordered = moved.isEmpty
+                ? []
+                : Self.reorder(&cachedBodyOrder, moved: moved, windows: windows.values.map(\.distances))
             defer {
                 if SyncTrace.enabled {
                     SyncTrace.log(
@@ -1568,14 +1610,11 @@ extension NodeRuntime {
             }
             // Fetched bodies stay in memory in the order their connects
             // need them: the furthest ahead go first when room is needed.
-            if !bodies.isEmpty || !cachedBodyOrder.isEmpty {
-                let order = windows.values.reduce(into: [String: Int]()) { order, window in
-                    order.merge(window.distances) { min($0, $1) }
-                }
-                if order != cachedBodyOrder {
-                    cachedBodyOrder = order
-                    await storage.readCache.order(bodies: order)
-                }
+            if !reordered.isEmpty {
+                await storage.readCache.order(
+                    bodies: reordered.reduce(into: [:]) { $0[$1] = cachedBodyOrder[$1] },
+                    leaving: reordered.filter { cachedBodyOrder[$0] == nil }
+                )
             }
             // What an executed block read goes once the kept state holds
             // what of it the tip's state holds: its execution's window

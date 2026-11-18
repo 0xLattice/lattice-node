@@ -401,18 +401,18 @@ final class AbsentContentTests: XCTestCase {
         // Bodies go furthest from their chain's next block to connect
         // first, whatever was read last; a block in no window before any.
         let ordered = ReadCache(maximumBytes: 2 * charge("a"))
-        await ordered.order(bodies: ["a": 0, "b": 1, "c": 2])
+        await ordered.order(bodies: ["a": 0, "b": 1, "c": 2], leaving: [])
         await ordered.put([volume("a", 7)], block: "a")
         await ordered.put([volume("b", 7)], block: "b")
         _ = await ordered.fetch(["a"])
         await ordered.put([volume("c", 7)], block: "c")
         let furthestNotKept = await ordered.fetch(["a", "b", "c"])
         XCTAssertEqual(Set(furthestNotKept.keys), ["a", "b"], "the furthest ahead is not kept over nearer ones")
-        await ordered.order(bodies: ["b": 0, "c": 1])
+        await ordered.order(bodies: ["b": 0, "c": 1], leaving: ["a"])
         await ordered.put([volume("c", 7)], block: "c")
         let connectedFirst = await ordered.fetch(["a", "b", "c"])
         XCTAssertEqual(Set(connectedFirst.keys), ["b", "c"], "a block in no window goes first")
-        await ordered.order(bodies: ["d": 0, "b": 1, "c": 2])
+        await ordered.order(bodies: ["d": 0, "b": 1, "c": 2], leaving: [])
         await ordered.put([volume("d", 7)], block: "d")
         let nextKept = await ordered.fetch(["b", "c", "d"])
         XCTAssertEqual(Set(nextKept.keys), ["b", "d"], "the next to connect evicts the furthest ahead")
@@ -489,7 +489,7 @@ final class AbsentContentTests: XCTestCase {
                 case 0:
                     var distances: [String: Int] = [:]
                     for block in blocks where Bool.random(using: &rng) { distances[block] = Int.random(in: 0..<4, using: &rng) }
-                    await cache.order(bodies: distances)
+                    await cache.order(bodies: distances, leaving: Set(scan.distances.keys).subtracting(distances.keys))
                     scan.distances = distances
                 case 1:
                     let block = blocks.randomElement(using: &rng)!
@@ -543,7 +543,7 @@ final class AbsentContentTests: XCTestCase {
         // Full of bodies in a window: an entry that cannot fit is refused
         // without looking at them.
         let full = ReadCache(maximumBytes: 3 * charge(["b0": Data(count: 100)]))
-        await full.order(bodies: ["b0": 0, "b1": 1, "b2": 2])
+        await full.order(bodies: ["b0": 0, "b1": 1, "b2": 2], leaving: [])
         for block in ["b0", "b1", "b2"] {
             await full.put([SerializedVolume(root: block, entries: [block: Data(count: 100)])], block: block)
         }
