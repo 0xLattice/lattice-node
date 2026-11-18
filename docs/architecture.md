@@ -227,6 +227,10 @@ unit and must be wiped together on a schema cutover.
 
 ## Networking and synchronization
 
+The modules, node roles and rules that a change to sync, storage or the wire
+is reviewed against are in [sync architecture](design/sync-architecture.md);
+this section describes the code as it stands.
+
 The Ivy adapter has three distinct wire responsibilities:
 
 - `ChainHandshake` establishes the Nexus identity and chain-root context;
