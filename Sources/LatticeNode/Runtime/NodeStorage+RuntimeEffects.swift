@@ -31,6 +31,17 @@ extension NodeStorage {
         try await store.chainLogID()
     }
 
+    /// The weigh log id of the run that is starting (`NodeStore.openWeighLog`).
+    nonisolated func openWeighLog() async throws -> (id: String, replaced: Bool) {
+        try await store.openWeighLog(fresh: UUID().uuidString.lowercased())
+    }
+
+    /// Marks this run as stopped cleanly. Failing to costs peers a re-read of
+    /// this node's log after the next start, nothing else.
+    nonisolated func markCleanStop() async {
+        do { try await store.markCleanStop() } catch { syncTrace("clean stop not marked: \(error)") }
+    }
+
     nonisolated func chainCursors(at path: ChainPath) async throws -> [String: StreamCursor] {
         try await store.chainCursors(at: path)
     }
