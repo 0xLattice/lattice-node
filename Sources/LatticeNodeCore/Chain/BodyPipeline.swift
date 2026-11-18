@@ -21,28 +21,21 @@ public struct BodyPipeline: Sendable, Equatable {
     public internal(set) var connecting: String?
     /// Blocks whose body could not be obtained, or whose connect found its
     /// content unresolvable, waiting before their bodies are asked for
-    /// again.
+    /// again. Each stays wanted: its wait ends early when the content may
+    /// now be had (`wake`).
     public internal(set) var parked: [String: Parked] = [:]
+    /// Requested bodies woken while their fetch ran: one that ends
+    /// unavailable is asked for again at once, as the wake would have.
+    var woken: Set<String> = []
     /// Child-level blocks whose connect lacked a parent fact (decision 21:
     /// a parent state this node has not executed), with the fact. Never
     /// invalid and never timed: each is connected again once its parent
     /// level holds that fact (`ChainEvent.parentFactsPresent`). Their bodies stay
     /// arrived.
     public internal(set) var awaitingParent: [String: CrossChainEvidenceRequirement] = [:]
-    /// The act-on tip and window when `parked` was last kept: a change to
-    /// either (an execution, or a best chain that moved) starts every
-    /// backoff over. A header weighed off the best chain changes neither:
-    /// `window` is the best chain's.
-    var seen: TreeMark?
-
     public struct Parked: Sendable, Equatable {
         public let notBefore: Int64
         public let attempts: Int
-    }
-
-    struct TreeMark: Sendable, Equatable {
-        let actOn: String
-        let window: [String]
     }
 
     public init() {}
@@ -78,10 +71,9 @@ extension ChainCore {
     /// extends a chain it is about to leave. One block arriving at the tip
     /// leaves it mined. A body not held (withheld or missing), one whose
     /// content could not be read (it holds the level no more, arrived again
-    /// or not, until its backoff starts over when the act-on tip or best
-    /// window moves), or one waiting on its parent level leaves the level
-    /// mined, and an invalid one is excluded when it executes and is no
-    /// longer next.
+    /// or not, until its wait ends), or one waiting on its parent level
+    /// leaves the level mined, and an invalid one is excluded when it
+    /// executes and is no longer next.
     public var holdsBacklog: Bool {
         let prefix = executedPrefix(actOn: actOnTip)
         let first = prefix.hash.isEmpty ? 0 : prefix.height + 1
@@ -176,17 +168,50 @@ extension ChainCore {
 
     /// The content layer has the body of `cid` locally. Only a body the
     /// window still wants is kept; any other arrival is simply unused.
+    /// Its parent's body was held by whoever built on it: a parent waiting
+    /// is asked for again at once.
     mutating func bodyFetched(_ cid: String) {
+        bodies.woken.remove(cid)
         guard bodies.requested.remove(cid) != nil else { return }
         bodies.arrived.insert(cid)
+        wake(parentOf: cid)
+    }
+
+    /// A block's body may now be had: its parent's, when the block was
+    /// weighed or its body arrived (its author executed the parent, so
+    /// held that body), as Bitcoin asks for a block once a peer announces
+    /// it. A hint, never a verdict: a wake costs one more attempt (a block
+    /// weighed again, as when more work credits it, wakes its parent
+    /// again; that work is paid for). A wait that ends here is asked for in
+    /// this step.
+    mutating func wake(parentOf cid: String) {
+        guard let parent = tree.parent(of: cid) else { return }
+        end(parent)
+    }
+
+    /// A peer that may hold this level's content connected (`ChainEvent
+    /// .providerJoined`): every waiting body is asked for again at once.
+    mutating func providerJoined() {
+        for cid in Set(bodies.parked.keys).union(bodies.requested) { end(cid) }
+    }
+
+    /// `cid`'s wait is over: it is asked for in this step. It keeps its
+    /// attempts, so a body that fails again waits as long as it would have,
+    /// and a wake costs one attempt.
+    private mutating func end(_ cid: String) {
+        if bodies.requested.contains(cid) { bodies.woken.insert(cid) }
+        guard let parked = bodies.parked[cid] else { return }
+        bodies.parked[cid] = BodyPipeline.Parked(notBefore: 0, attempts: parked.attempts)
     }
 
     /// The content layer could not obtain the body of `cid`: it waits out
-    /// the backoff, and is asked for again then, or at once when an
-    /// execution or the best chain moves the window.
+    /// the backoff, and is asked for again then, or at once when it may
+    /// now be had (`wake`, `providerJoined`). Nothing else ends the wait:
+    /// an execution or a moved window says nothing of who holds a body.
     mutating func bodyUnavailable(_ cid: String, _ turn: inout Turn) {
         guard bodies.requested.remove(cid) != nil else { return }
         park(cid, now: turn.now)
+        if bodies.woken.remove(cid) != nil { end(cid) }
     }
 
     /// `cid` waits before its body is asked for again, doubling per attempt
@@ -258,18 +283,15 @@ extension ChainCore {
     /// (a parked one once its wait is over), cancel bodies the window
     /// left, and start the next connect: the first window block whose body
     /// is here and whose parent is executed.
-    mutating func scheduleBodies(actOn: String, prefix: (hash: String, height: UInt64), _ turn: inout Turn) {
-        let (window, best) = bodyWindow(after: prefix)
+    mutating func scheduleBodies(prefix: (hash: String, height: UInt64), _ turn: inout Turn) {
+        let window = bodyWindow(after: prefix).blocks
         let wanted = Set(window)
-        let mark = BodyPipeline.TreeMark(actOn: actOn, window: best)
-        if bodies.seen != mark {
-            bodies.seen = mark
-            bodies.parked.removeAll()
-        }
+        for cid in weighed { wake(parentOf: cid) }
         for cid in bodies.requested.subtracting(wanted).sorted() {
             turn.effects.append(.cancelBody(cid: cid))
         }
         bodies.requested.formIntersection(wanted)
+        bodies.woken.formIntersection(bodies.requested)
         bodies.arrived.formIntersection(wanted)
         bodies.parked = bodies.parked.filter { wanted.contains($0.key) }
         bodies.awaitingParent = bodies.awaitingParent.filter { wanted.contains($0.key) }

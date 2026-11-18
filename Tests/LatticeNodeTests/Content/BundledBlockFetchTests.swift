@@ -428,7 +428,8 @@ final class BundledBlockFetchTests: XCTestCase {
         _ host: NodeStorage, _ bystander: NodeStorage, rendezvous: String,
         recordsPerPeer: Int = IvyConfig.defaultMaxProviderRecordsPerPeer,
         requestTimeout: Duration = .seconds(5),
-        bothHost: Bool = false
+        bothHost: Bool = false,
+        bystanderProvides: String? = nil
     ) async throws -> (remote: IvyRootContentSource, host: CountingSource, bystander: CountingSource) {
         func ivy() -> (Ivy, PeerEndpoint) {
             let (key, port) = (Curve25519.Signing.PrivateKey(), NetworkTransportTestPorts.allocate())
@@ -465,7 +466,12 @@ final class BundledBlockFetchTests: XCTestCase {
                 rootCID: rendezvous, expiresAt: UInt64(Date().timeIntervalSince1970) + 600
             )
             let named = await client.providers(for: rendezvous)
-            if connections.all.count == 2, named == [hostID] { break }
+            var provided = true
+            if let root = bystanderProvides {
+                await servers[1].announceProvider(rootCID: root, expiresAt: UInt64(Date().timeIntervalSince1970) + 600)
+                provided = await client.providers(for: root).contains(await servers[1].localID)
+            }
+            if connections.all.count == 2, named == [hostID], provided { break }
             try await Task.sleep(for: .milliseconds(20))
         }
         overlayClient = try connections.all.first { $0.id == hostID }.map { (client, $0) }
@@ -506,22 +512,58 @@ final class BundledBlockFetchTests: XCTestCase {
         XCTAssertEqual(bystander.bundleRequestCount, 0)
     }
 
-    /// The record is a hint: a named session with no bundle for the block is
-    /// asked first, each block, and the bundle then comes from a capable
-    /// session that is not named.
-    func testABlockStillArrivesWhenThePeerItsRendezvousNamesHasNoBundle() async throws {
+    /// A child's body is asked of its hosts alone, as Bitcoin asks for a
+    /// block only the peers that announced it: a peer that is not one of
+    /// them is asked neither for its bundle nor for its Volumes, whatever
+    /// it holds, and the body waits.
+    func testAChildsBodyIsAskedOnlyOfItsHosts() async throws {
         let producer = try await storage(keyByte: 0x77)
         let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
-        let recorded = await producer.volumeBundle(cid)
         let (remote, host, bystander) = try await hostAndBystander(
             try await storage(keyByte: 0x78), producer, rendezvous: Self.alpha.key
         )
-        for (count, keyByte) in [(1, UInt8(0x79)), (2, 0x7A)] {
-            let stored = try await storage(keyByte: keyByte).fetchChainBody(cid, remote: remote, hosts: Self.alpha)
-            XCTAssertEqual(Set(stored), Set(recorded))
-            XCTAssertEqual(host.bundleRequestCount, count)
-            XCTAssertEqual(bystander.bundleRequestCount, count)
+        for (bundle, keyByte) in [(true, UInt8(0x79)), (false, 0x7A)] {
+            do {
+                _ = try await storage(keyByte: keyByte).fetchChainBody(
+                    cid, remote: remote, bundle: bundle, hosts: Self.alpha
+                )
+                XCTFail("a body only a bystander holds is not fetched")
+            } catch {}
         }
+        XCTAssertEqual(host.bundleRequestCount, 1)
+        XCTAssertGreaterThan(host.volumeRequestCount, 0)
+        XCTAssertEqual(bystander.bundleRequestCount, 0)
+        XCTAssertEqual(bystander.volumeRequestCount, 0)
+    }
+
+    /// A peer that is not the chain's host but announced the block's Volume
+    /// (an operator's pin) is asked after the hosts: a body it alone holds
+    /// arrives.
+    func testAChildsBodyIsAskedOfAPeerThatAnnouncedItAfterTheHosts() async throws {
+        let producer = try await storage(keyByte: 0x9C)
+        let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
+        let (remote, host, bystander) = try await hostAndBystander(
+            try await storage(keyByte: 0x9D), producer, rendezvous: Self.alpha.key, bystanderProvides: cid
+        )
+        _ = try await storage(keyByte: 0x9E).fetchChainBody(cid, remote: remote, bundle: false, hosts: Self.alpha)
+        XCTAssertGreaterThan(host.volumeRequestCount, 0, "the host first")
+        XCTAssertGreaterThan(bystander.volumeRequestCount, 0)
+    }
+
+    /// With none of a child's hosts connected, a body fetch asks no peer and
+    /// reserves nothing from the budget: it waits for a host.
+    func testAChildsBodyWithNoHostConnectedAsksNoOneAndReservesNothing() async throws {
+        let producer = try await storage(keyByte: 0x9A)
+        let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
+        let (remote, host, bystander) = try await hostAndBystander(producer, producer, rendezvous: Self.alpha.key)
+        let unhosted = ChainHosts(nexusGenesisCID: "nexus", chainPath: ["Nexus", "Beta"])
+        do {
+            _ = try await storage(keyByte: 0x9B).fetchChainBody(cid, remote: remote, hosts: unhosted)
+            XCTFail("no host, no body")
+        } catch {}
+        XCTAssertEqual(host.bundleRequestCount + host.volumeRequestCount, 0)
+        XCTAssertEqual(bystander.bundleRequestCount + bystander.volumeRequestCount, 0)
+        XCTAssertEqual(remote.budget.peakReserved, 0, "nothing was reserved")
     }
 
     /// A child's Volumes fetched one at a time (a retry asks no bundle) are
@@ -540,23 +582,6 @@ final class BundledBlockFetchTests: XCTestCase {
         }
         XCTAssertGreaterThan(host.volumeRequestCount, 0)
         XCTAssertEqual(bystander.volumeRequestCount, 0)
-    }
-
-    /// The record is a hint: a Volume the named peer does not hold is then
-    /// asked of anyone, and the block still arrives.
-    func testAChildsVolumeTheNamedPeerLacksIsAskedOfAnyone() async throws {
-        let producer = try await storage(keyByte: 0x94)
-        let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
-        let recorded = await producer.volumeBundle(cid)
-        let (remote, host, bystander) = try await hostAndBystander(
-            try await storage(keyByte: 0x95), producer, rendezvous: Self.alpha.key
-        )
-        let stored = try await storage(keyByte: 0x96).fetchChainBody(
-            cid, remote: remote, bundle: false, hosts: Self.alpha
-        )
-        XCTAssertEqual(Set(stored), Set(recorded))
-        XCTAssertGreaterThan(host.volumeRequestCount, 0)
-        XCTAssertGreaterThan(bystander.volumeRequestCount, 0)
     }
 
     /// Two peers name themselves the chain's hosts and one never answers a
@@ -587,8 +612,9 @@ final class BundledBlockFetchTests: XCTestCase {
     }
 
     /// A named session is held to its bundles like any other: one that never
-    /// ends a bundle is asked once, and the next block's bundle is asked of
-    /// the others.
+    /// ends a bundle is asked once, and the next block is fetched from it
+    /// one Volume at a time. A peer that is not the chain's host is asked
+    /// for neither.
     func testANamedPeerThatNeverEndsABundleIsNotAskedForTheNextBlock() async throws {
         let producer = try await storage(keyByte: 0x7F)
         let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
@@ -598,12 +624,12 @@ final class BundledBlockFetchTests: XCTestCase {
         )
         host.neverEnds = true
         // The first block keeps what the bundle sent before it stalled and
-        // fetches the rest per Volume; the second asks the other session.
-        for (others, keyByte) in [(0, UInt8(0x80)), (1, 0x81)] {
+        // fetches the rest per Volume; the second is fetched per Volume.
+        for keyByte in [UInt8(0x80), 0x81] {
             let stored = try await storage(keyByte: keyByte).fetchChainBody(cid, remote: remote, hosts: Self.alpha)
             XCTAssertEqual(Set(stored), Set(recorded))
             XCTAssertEqual(host.bundleRequestCount, 1)
-            XCTAssertEqual(bystander.bundleRequestCount, others)
+            XCTAssertEqual(bystander.bundleRequestCount + bystander.volumeRequestCount, 0)
         }
     }
 

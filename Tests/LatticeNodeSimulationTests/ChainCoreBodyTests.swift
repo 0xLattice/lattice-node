@@ -399,9 +399,10 @@ final class ChainCoreBodyTests: XCTestCase {
 
     /// A body the content layer could not obtain waits out the same paced
     /// backoff as a connect without a verdict, blaming no one, and is asked
-    /// for again when it is due, or at once when an execution moves the
-    /// window.
-    func testABodyNotObtainedIsAskedForAgainAfterItsBackoffOrAtTheNextExecution() async throws {
+    /// for again when it is due. An execution says nothing of who holds it:
+    /// the wait stands. A body built on it arriving does: whoever built on
+    /// it held it, so it is asked for at once.
+    func testABodyNotObtainedWaitsOutItsBackoffUntilABlockOnItArrives() async throws {
         var (core, _) = weighed(Array(chain.prefix(3)))
         let base = core.config.bodyRetryBase
         let first = core.step(.bodyUnavailable(cid: chain[1].cid), now: Self.now)
@@ -412,10 +413,60 @@ final class ChainCoreBodyTests: XCTestCase {
         XCTAssertEqual(bodyFetches(core.step(.tick, now: Self.now + base)), [chain[1].cid])
         let second = core.step(.bodyUnavailable(cid: chain[1].cid), now: Self.now + base)
         XCTAssertEqual(wakes(second).min(), Self.now + 3 * base, "twice as long")
-        // Its parent executes: the window moved, so it is asked for at once.
+        // Its parent executes: the window moved, and the wait stands.
         let executed = try await deliver(chain[0].cid, to: &core)
-        XCTAssertTrue(bodyFetches(executed).contains(chain[1].cid))
-        XCTAssertTrue(core.bodies.parked.isEmpty)
+        XCTAssertFalse(bodyFetches(executed).contains(chain[1].cid))
+        XCTAssertNotNil(core.bodies.parked[chain[1].cid])
+        // Its child's body arrives: it is asked for at once.
+        let arrived = core.step(.bodyFetched(cid: chain[2].cid), now: Self.now + base)
+        XCTAssertEqual(bodyFetches(arrived), [chain[1].cid])
+        // It keeps its attempts: failing again, it waits as long as it would have.
+        let again = core.step(.bodyUnavailable(cid: chain[1].cid), now: Self.now + base)
+        XCTAssertEqual(wakes(again).min(), Self.now + 5 * base, "four times the base, its third attempt")
+    }
+
+    /// The backoff doubles past a minute, up to `bodyRetryCap`: a body no
+    /// peer holds is not asked for every minute.
+    func testABodyNoPeerHoldsIsAskedForLessAndLessOften() async throws {
+        var (core, _) = weighed(Array(chain.prefix(2)))
+        let (base, cap) = (core.config.bodyRetryBase, core.config.bodyRetryCap)
+        XCTAssertGreaterThan(cap, 60_000)
+        var now = Self.now
+        var wait: Int64 = 0
+        for attempt in 0..<16 {
+            let effects = core.step(.bodyUnavailable(cid: chain[0].cid), now: now)
+            wait = try XCTUnwrap(wakes(effects).min()) - now
+            XCTAssertEqual(wait, min(cap, base << Int64(attempt)))
+            now += wait
+            XCTAssertEqual(bodyFetches(core.step(.tick, now: now)), [chain[0].cid])
+        }
+        XCTAssertEqual(wait, cap)
+    }
+
+    /// A peer hosting the level connects: every waiting body is asked for
+    /// again at once, keeping its attempts, so a host that keeps
+    /// reconnecting costs one attempt per body each time and no more.
+    func testAProviderJoiningAsksForEveryWaitingBodyAgain() async throws {
+        var (core, _) = weighed(Array(chain.prefix(3)))
+        let base = core.config.bodyRetryBase
+        for block in chain.prefix(3) { _ = core.step(.bodyUnavailable(cid: block.cid), now: Self.now) }
+        XCTAssertEqual(core.bodies.parked.count, 3)
+        let effects = core.step(.providerJoined, now: Self.now + 1)
+        XCTAssertEqual(Set(bodyFetches(effects)), Set(chain.prefix(3).map(\.cid)))
+        let again = core.step(.bodyUnavailable(cid: chain[0].cid), now: Self.now + 1)
+        XCTAssertEqual(wakes(again).min(), Self.now + 1 + 2 * base, "its second attempt's wait")
+    }
+
+    /// A wake that comes while a body's fetch runs is not lost: the fetch
+    /// ending unavailable asks again at once, keeping its attempts.
+    func testAWakeDuringAFetchAsksAgainWhenItEnds() async throws {
+        var (core, _) = weighed(Array(chain.prefix(2)))
+        XCTAssertTrue(core.bodies.requested.contains(chain[0].cid))
+        _ = core.step(.providerJoined, now: Self.now)
+        let ended = core.step(.bodyUnavailable(cid: chain[0].cid), now: Self.now + 1)
+        XCTAssertEqual(bodyFetches(ended), [chain[0].cid], "asked again at once")
+        let again = core.step(.bodyUnavailable(cid: chain[0].cid), now: Self.now + 2)
+        XCTAssertEqual(wakes(again).min(), Self.now + 2 + 2 * core.config.bodyRetryBase, "its attempts kept")
     }
 
     func testARestartReplaysTheExecutedSetAndAsksOnlyForWhatIsLeft() async throws {
@@ -432,24 +483,27 @@ final class ChainCoreBodyTests: XCTestCase {
         XCTAssertEqual(bodyFetches(effects), [chain[2].cid, chain[3].cid])
     }
 
-    func testAWindowChangeStartsTheBackoffOver() async throws {
+    /// A header built on a waiting block is its author's announcement
+    /// that it held the block's body: the wait ends. A header elsewhere,
+    /// on the best chain or off it, leaves it.
+    func testAHeaderBuiltOnAWaitingBlockEndsItsWait() async throws {
         var (core, _) = weighed(Array(chain.prefix(3)))
         let job = try XCTUnwrap(jobs(arrive(chain[0].cid, &core)).first)
         let verdict = await ChainTree.connect(job, fetcher: SimCAS(), validationContext: ValidationContext(nowMilliseconds: Self.now))
         _ = core.step(.connected(verdict), now: Self.now)
         let parked = try XCTUnwrap(core.bodies.parked[chain[0].cid])
-        // A header weighed off the best chain moves neither the act-on tip
-        // nor the window: the wait stands.
+        _ = core.step(.bodyUnavailable(cid: chain[2].cid), now: Self.now)
+        XCTAssertNotNil(core.bodies.parked[chain[2].cid])
         let side = try XCTUnwrap(world.blocks[world.spam[0]])
         let off = show(&core, [HeaderEntry(block: side.block, children: side.children)], at: Self.now + 1)
         XCTAssertTrue(core.tree.contains(blockHash: side.cid))
-        XCTAssertFalse(bodyFetches(off).contains(chain[0].cid))
-        XCTAssertEqual(core.bodies.parked[chain[0].cid], parked)
-        // A new header extends the best chain: the window changed, so the
-        // wait is over.
+        XCTAssertTrue(Set(bodyFetches(off)).isDisjoint(with: [chain[0].cid, chain[2].cid]))
+        // A new header extends the best chain on block 3: block 3 is asked
+        // for at once; block 1, which it is not built on directly, waits on.
         let effects = show(&core, [HeaderEntry(block: chain[3].block, children: chain[3].children)], at: Self.now + 1)
-        XCTAssertTrue(bodyFetches(effects).contains(chain[0].cid))
-        XCTAssertTrue(core.bodies.parked.isEmpty)
+        XCTAssertTrue(bodyFetches(effects).contains(chain[2].cid))
+        XCTAssertFalse(bodyFetches(effects).contains(chain[0].cid))
+        XCTAssertEqual(core.bodies.parked[chain[0].cid], parked)
     }
 
     func testABodyThatLeavesTheWindowUnarrivedIsCancelled() async throws {

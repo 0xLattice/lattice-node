@@ -111,7 +111,7 @@ extension ChainCore {
     mutating func followActOnChain(_ turn: inout Turn) -> (hash: String, height: UInt64) {
         let tip = actOnTip
         let prefix = executedPrefix(actOn: tip)
-        scheduleBodies(actOn: tip.hash, prefix: prefix, &turn)
+        scheduleBodies(prefix: prefix, &turn)
         moveMiningTip(to: tip, &turn)
         answerSideMined(prefix: prefix.hash, &turn)
         return tip

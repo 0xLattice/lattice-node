@@ -74,4 +74,17 @@ final class PeerSearchTests: XCTestCase {
         XCTAssertNotEqual(key, ChainPeersKey.key(nexusGenesisCID: "bafyOther", chainPath: testnet))
         XCTAssertNotEqual(key, ReadEndpointKey.key(nexusGenesisCID: "bafyNexus", chainPath: testnet))
     }
+
+    /// A host entering a chain's connected set is news, a reconnect
+    /// included; one already connected, or one leaving, is not.
+    func testAHostConnectingOrReconnectingEntersAChainsHosts() {
+        var hosts = ConnectedHosts()
+        let path = ["Nexus", "Alpha"]
+        XCTAssertTrue(hosts.update(path, ["a"]), "first connect")
+        XCTAssertFalse(hosts.update(path, ["a"]), "still connected")
+        XCTAssertFalse(hosts.update(path, []), "gone")
+        XCTAssertTrue(hosts.update(path, ["a"]), "reconnect")
+        XCTAssertTrue(hosts.update(path, ["a", "b"]), "another")
+        XCTAssertFalse(hosts.update(["Nexus"], []), "another chain's are its own")
+    }
 }

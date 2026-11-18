@@ -658,6 +658,8 @@ extension NodeRuntime {
         /// counted them: for a child, what its rendezvous adds to the
         /// sessions whose hello named it.
         var currentPeers: [ChainPath: Set<String>] = [:]
+        /// The keys of the peers connected now hosting each chain.
+        var connectedHosts = ConnectedHosts()
         /// A maintenance pass asked for while one was running: run it next.
         var maintenancePending = false
 
@@ -884,8 +886,9 @@ extension NodeRuntime {
                 return true
             case .currentPeers(let current):
                 currentPeers = current
+                let running = await meetHosts()
                 refreshView()
-                return true
+                return running
             case .reproject(let path):
                 reprojections.remove(path)
                 refreshView(path)
@@ -972,6 +975,7 @@ extension NodeRuntime {
                 views[path] = nil
                 digests[path] = nil
                 currentPeers[path] = nil
+                connectedHosts.keys[path] = nil
             }
             // A stopped level's body fetches would run on though nobody
             // wants them: no `cancelBody` comes from a level that is gone. Its RPCs would
@@ -1269,6 +1273,29 @@ extension NodeRuntime {
             for path in core.levels.keys { refreshView(path) }
         }
 
+        /// The chain's own current peers: every session for Nexus; for a
+        /// child, those whose hello named it or its rendezvous names.
+        func hosts(of path: ChainPath) -> [Session] {
+            let hosting = ChainHandshake.hosting(path)
+            return sessions.values.filter {
+                $0.ready && (path == core.rootPath || $0.capabilities.contains(hosting)
+                    || currentPeers[path]?.contains($0.peer.id.publicKey) == true)
+            }
+        }
+
+        /// A level with bodies waiting or in flight asks for them again when a host
+        /// connects, a reconnect included: Bitswap sends its wants on every
+        /// new connection. False when a step fail-stopped.
+        mutating func meetHosts() async -> Bool {
+            for path in core.ordered {
+                let entered = connectedHosts.update(path, Set(hosts(of: path).map(\.peer.id.publicKey)))
+                guard entered, let bodies = core.levels[path]?.bodies,
+                      !bodies.parked.isEmpty || !bodies.requested.isEmpty else { continue }
+                guard await step(.level(path, .providerJoined)) else { return false }
+            }
+            return true
+        }
+
         /// The views of `paths` and of the root, whose template digest
         /// names every level's tip and pool.
         mutating func refreshView(_ paths: Set<ChainPath>) {
@@ -1284,13 +1311,7 @@ extension NodeRuntime {
             view.children = level.executedChildren
             let snapshot = level.snapshot
             let tip = (hash: snapshot.actOnTip, height: snapshot.actOnHeight)
-            // The chain's own current peers: every session for Nexus; for
-            // a child, those whose hello named it or its rendezvous names.
-            let hosting = ChainHandshake.hosting(path)
-            let peers = sessions.values.filter {
-                $0.ready && (path == core.rootPath || $0.capabilities.contains(hosting)
-                    || currentPeers[path]?.contains($0.peer.id.publicKey) == true)
-            }.count
+            let peers = hosts(of: path).count
             let pool = level.mining.mempool
             // The digest names what a template would carry: a level with a
             // backlog to execute names nothing, and it and every level below
@@ -1447,7 +1468,9 @@ extension NodeRuntime {
                     Task { _ = await punch.upgrade(peer) }
                 }
                 if let replaced, replaced.ready {
-                    return await step(.peerGone(replaced.coreID))
+                    guard await step(.peerGone(replaced.coreID)) else { return false }
+                    // Forget the host it was, so the new session's hello wakes.
+                    return await meetHosts()
                 }
             case .disconnected(let key):
                 guard let session = sessions[key],
@@ -1465,7 +1488,11 @@ extension NodeRuntime {
                     lastUrgentMaintenanceAt = now
                     inputs.yield(.maintenance)
                 }
-                if session.ready { return await step(.peerGone(session.coreID)) }
+                if session.ready {
+                    guard await step(.peerGone(session.coreID)) else { return false }
+                    // Forget the host it was, so its reconnect wakes.
+                    return await meetHosts()
+                }
             case .hello(let peer, let payload):
                 // A ready session's later hello replaces its claims, if its
                 // first hello said it sends them; otherwise it is ignored.
@@ -1512,9 +1539,10 @@ extension NodeRuntime {
                         claims.filter { $0.hasPrefix(ChainHandshake.hosting([])) }
                     }
                     if hosting(before) != hosting(session.capabilities) { startNetworkMaintenance() }
-                    return true
+                    return await meetHosts()
                 }
-                return await step(.peerReady(session.coreID))
+                guard await step(.peerReady(session.coreID)) else { return false }
+                return await meetHosts()
             case .sync(let peer, let chainPath, let message):
                 guard let session = sessions[peer.key.hex], session.peer.sessionID == peer.sessionID,
                       session.ready else {
@@ -1668,6 +1696,9 @@ extension NodeRuntime {
             case .disconnect(let peer, let reason):
                 guard let session = session(peer) else { break }
                 sessions[peer.key] = nil
+                // No `.disconnected` follows for a session already gone: it
+                // is no longer a connected host, so its reconnect wakes.
+                for path in connectedHosts.keys.keys { connectedHosts.keys[path]?.remove(peer.key) }
                 switch SessionClose(reason) {
                 case .recycle:
                     _ = await ivy.recycleSession(ifCurrent: session.peer)
@@ -1775,8 +1806,9 @@ extension NodeRuntime {
                 let key = BodyKey(path: path, cid: cid)
                 guard bodies[key] == nil else { break }
                 let (storage, remote, inputs) = (storage, remote, inputs)
-                // Every peer hosts Nexus; a child's hosts are its current
-                // peers: a hint for whom to ask for the bundle.
+                // Every peer hosts Nexus; a child's body is asked of its
+                // hosts (its current peers), then of the root's known
+                // providers.
                 let rendezvous = ChainHosts.of(path, nexusGenesisCID: configuration.nexusGenesisCID)
                 let maxBlockSize = core.levels[path]?.maxBlockSize(of: cid)
                 // A bundle is an optimisation: a block whose fetch failed is
@@ -1784,8 +1816,8 @@ extension NodeRuntime {
                 // bundles, so a bad bundle cannot withhold it.
                 let bundle = fetchWaits[key] == nil
                 let asked = SyncTrace.now()
-                // One attempt: the core asks again after its backoff, which
-                // starts over at each execution.
+                // One attempt: the core asks again after its backoff, or
+                // at once when the body may now be had.
                 bodies[key] = Task {
                     do {
                         _ = try await storage.fetchChainBody(

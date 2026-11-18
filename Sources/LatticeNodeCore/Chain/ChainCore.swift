@@ -42,6 +42,10 @@ public enum ChainEvent: Sendable {
     /// availability wait, never a verdict. It is asked for again after the
     /// level's backoff (`ChainCoreConfig.bodyRetryBase`).
     case bodyUnavailable(cid: String)
+    /// A peer hosting this level connected (a reconnect included): what
+    /// no peer held may be held now, so every waiting body is asked for
+    /// again.
+    case providerJoined
     /// A connect job's verdict, with the CIDs of the transactions the block
     /// carries (the job read them from the body it executed): what the act-on
     /// chain confirms when it enters the block.
@@ -206,8 +210,10 @@ public struct ChainCoreConfig: Sendable {
     /// A body the content layer could not obtain, or a connect with no
     /// verdict (its content was not resolvable), waits this long before its
     /// body is asked for again, doubling per attempt up to
-    /// `bodyRetryCap`, and starting over whenever the act-on tip or the
-    /// window changes.
+    /// `bodyRetryCap`. It ends early when the body may now be had: a block
+    /// built on it is weighed or its body arrives, or a peer hosting the
+    /// level connects. Ending early keeps the attempt count: a body that
+    /// fails again waits as long as it would have.
     public var bodyRetryBase: Int64
     public var bodyRetryCap: Int64
     /// The level's mempool and template bounds.
@@ -230,7 +236,7 @@ public struct ChainCoreConfig: Sendable {
         maxFutureDrift: Int64 = 2 * 60 * 60 * 1_000,
         bodyWindow: Int = 64,
         bodyRetryBase: Int64 = 1_000,
-        bodyRetryCap: Int64 = 60_000
+        bodyRetryCap: Int64 = 300_000
     ) {
         self.maxFutureDrift = maxFutureDrift
         self.maxHeadersPerPage = maxHeadersPerPage
@@ -469,6 +475,8 @@ public struct ChainCore: Sendable {
             bodyFetched(cid)
         case .bodyUnavailable(let cid):
             bodyUnavailable(cid, &turn)
+        case .providerJoined:
+            providerJoined()
         case .connected(let verdict, let transactions):
             connected(verdict, transactions: transactions, &turn)
         case .transactionsRead(let blocks):

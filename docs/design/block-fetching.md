@@ -47,9 +47,19 @@ one that arrives later is executed and followed then. A block whose body is
 not held keeps its weight and gets no verdict. Losing headers retain their
 verified work
 and can become selected later without having consumed state-execution work in
-advance. A missing body is an availability wait, never peer blame. If a
-connect attempt lacks content, the block is retried with bounded exponential
-backoff. If a child block lacks a parent-state continuity fact, it remains
+advance. A missing body is an availability wait, never peer blame. A body is
+asked of the peers that announced it, as Bitcoin asks for a block: a
+child's of that chain's hosts (the peers whose hello names it, or its
+rendezvous), the peers that store a chain's bodies, then of the connected
+peers this node knows a provider record of for the block or the Volume (an
+operator's pin announces its root); never of anyone else or through a DHT walk. With none of
+them connected no peer is asked. A body not obtained, or whose connect
+lacks content, waits a backoff that doubles per attempt up to five minutes,
+and stays wanted: the wait ends at once when the body may now be had,
+because a block built on it is weighed or its body arrives (its author held
+it), or a host of the chain connects (Bitswap's resend on each new
+connection). An execution or a moved window does not end it: neither says
+who holds a body. If a child block lacks a parent-state continuity fact, it remains
 ready and is retried when the co-hosted parent advances.
 
 ## Invariants
