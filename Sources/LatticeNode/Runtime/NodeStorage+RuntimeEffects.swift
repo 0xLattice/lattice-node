@@ -54,10 +54,17 @@ extension NodeStorage {
                 ? $0.path.count < $1.path.count
                 : $0.path.joined(separator: "/") < $1.path.joined(separator: "/")
         }) {
-            // The blocks whose states these are, in execution order: two
-            // blocks can produce the same state, each in its own window.
-            var heights = level.facts.flatMap(\.facts).compactMap { fact -> (cid: String, height: UInt64)? in
-                guard case .block(let block) = fact else { return nil }
+            // The blocks whose states these are: the ones this step
+            // executed (a header only weighed names a state it did not
+            // produce), in order. Two blocks can produce the same state,
+            // each in its own window.
+            let facts = level.facts.flatMap(\.facts)
+            let validated = Set(facts.compactMap { fact -> String? in
+                guard case .validation(let validation) = fact else { return nil }
+                return validation.blockHash
+            })
+            var heights = facts.compactMap { fact -> (cid: String, height: UInt64)? in
+                guard case .block(let block) = fact, validated.contains(block.blockHash) else { return nil }
                 return (block.postStateCID, block.blockHeight)
             }
             var executed: [String] = []
