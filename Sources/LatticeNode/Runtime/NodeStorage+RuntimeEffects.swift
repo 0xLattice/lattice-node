@@ -288,7 +288,7 @@ extension NodeStorage {
         }
         let volumes = try stored.keys.sorted().compactMap { try stored[$0].map(ValidatedVolume.init(trusting:)) }
         try await broker.storeVolumesLocal(volumes, retaining: retaining.filter { !$0.value.isEmpty })
-        for (root, roots) in bundled { bundles.record(root: root, roots: roots) }
+        bundles.record(bundled)
         return carried
     }
 
