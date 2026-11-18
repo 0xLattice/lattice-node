@@ -168,16 +168,41 @@ extension NodeStorage {
     /// Stores a block and pins what was stored: its body is what `fetcher`,
     /// the content it was stored from, says it carries.
     nonisolated func storingAndRetaining(
-        _ blockCID: String, at path: ChainPath, from fetcher: any Fetcher,
+        _ header: BlockHeader, at path: ChainPath, from fetcher: any Fetcher,
         _ store: (NodeImportStorage) async throws -> Void
     ) async throws -> [String] {
+        let blockCID = header.rawCID
         let storage = NodeImportStorage(storage: broker)
         try await store(storage)
         try await storage.commit()
+        // Read once the block's content is stored: the witness is read
+        // through the block's transactions.
+        let witness = await receiptWitness(of: header, fetcher: fetcher)
+        for volume in witness { try await storage.store(volume: volume) }
+        try await storage.commit()
         let roots = await storage.takeStoredVolumeRoots()
         let body = [blockCID] + (try await NodeRuntime.carriedTransactionIDs(ofBlock: blockCID, fetcher: fetcher))
+            + witness.map(\.root)
         try await retainStored(roots, body: body, ofBlock: blockCID, at: path)
         return roots
+    }
+
+    /// A block's parent-receipt witness (`storeParentReceiptWitness`): the
+    /// Volumes under its parent state on the path to each of its
+    /// withdrawals' receipts, which its execution reads. They are its body's
+    /// as much as its transactions are: fetched, stored, pinned under its
+    /// name, and served with it, so the block executes where its parent's
+    /// state is gone. None for a block without withdrawals, or when
+    /// `fetcher` cannot read them (the execution then reads them itself).
+    nonisolated func receiptWitness(of block: BlockHeader, fetcher: any Fetcher) async -> [SerializedVolume] {
+        let walked = NodeImportStorage(storage: nil, keepsVolumes: true)
+        do {
+            try await block.storeParentReceiptWitness(fetcher: fetcher, storer: walked)
+        } catch {
+            syncTrace("receipt witness of \(block.rawCID) not read: \(error)")
+            return []
+        }
+        return await walked.takeVolumes().map(\.volume)
     }
 
     /// Stores a block execution found valid, and pins it
@@ -194,10 +219,11 @@ extension NodeStorage {
     /// them, in one volumes.db transaction. A body fetched from peers is
     /// held in memory until then. Each block's Volumes are the ones its
     /// body's fetch derived and kept, or else derived again as `fetcher`
-    /// reads them: its content, never the state it read
-    /// (`storeBlockContent`). What is stored is its body (its own Volume and
-    /// its transactions'), pinned under its name, and, with the chain, its
-    /// spec and policy modules. The state it read is its parent's, which
+    /// reads them: its content (`storeBlockContent`) and its receipt witness
+    /// (`receiptWitness`), never the rest of the state it read. What is
+    /// stored is its body (its own Volume, its transactions' and its
+    /// witness's), pinned under its name, and, with the chain, its spec and
+    /// policy modules. The state it read is its parent's, which
     /// this node stored executing the parent, and the counts and windows
     /// keep or peers serve. Returns, by block, the CIDs of the transactions
     /// it carries, read once from its transaction index. `decoded` is the
@@ -221,7 +247,9 @@ extension NodeStorage {
                 } else {
                     let walked = NodeImportStorage(storage: nil, keepsVolumes: true)
                     try await BlockHeader(rawCID: cid).storeBlockContent(fetcher: fetcher, storer: walked)
+                    // A fetch's Volumes carry its witness; this walk reads it too.
                     volumes = await walked.takeVolumes().map(\.volume)
+                        + (await receiptWitness(of: BlockHeader(rawCID: cid), fetcher: fetcher))
                 }
                 let resolved: Block?
                 if let decoded {
@@ -231,10 +259,14 @@ extension NodeStorage {
                 }
                 guard let block = resolved else { throw NodeAPIError.unresolvedTransactionContent }
                 let transactions = try await NodeRuntime.carriedTransactionIDs(of: block, fetcher: fetcher)
-                let body = Set([cid] + transactions)
+                // What is neither the block's, its transactions' nor its
+                // rules (spec and policy modules) is its receipt witness (for
+                // a genesis, the empty state it starts from): body too.
                 let roots = Set(volumes.map(\.root))
+                let rules = await rules(of: block, fetcher: fetcher)
+                let body = roots.subtracting(rules).union([cid] + transactions)
                 var rest = roots.subtracting(body)
-                if configuration.state != .all { rest.formIntersection(await rules(of: block, fetcher: fetcher)) }
+                if configuration.state != .all { rest.formIntersection(rules) }
                 for volume in volumes where body.contains(volume.root) || rest.contains(volume.root) {
                     stored[volume.root] = volume
                 }
@@ -324,6 +356,12 @@ extension NodeStorage {
                 let walked = NodeImportStorage(storage: nil, keepsVolumes: true)
                 do {
                     try await BlockHeader(rawCID: cid).storeBlockContent(fetcher: fetcher, storer: walked)
+                    // With its receipt witness, which the bundle carries: a
+                    // witness not obtained fails the fetch as content not
+                    // obtained does (its execution could not read it either),
+                    // and one past the reservation is retried under the
+                    // whole allowance.
+                    try await BlockHeader(rawCID: cid).storeParentReceiptWitness(fetcher: fetcher, storer: walked)
                     // The walk reached the end: the Volumes it derived are the
                     // ones storing the block would, and serve its connect.
                     await readCache.put(walked.takeVolumes().map(\.volume), block: cid)
@@ -360,7 +398,8 @@ extension NodeStorage {
             syncTrace("volume bundle of \(rootCID) not walked: \(error)")
             return [rootCID]
         }
-        let roots = await walked.takeStoredVolumeRoots()
+        let witness = await receiptWitness(of: BlockHeader(rawCID: rootCID), fetcher: localFetcher).map(\.root)
+        let roots = Set(await walked.takeStoredVolumeRoots() + witness).sorted()
         bundles.record(root: rootCID, roots: roots)
         return [rootCID] + roots.filter { $0 != rootCID }
     }
@@ -388,7 +427,7 @@ extension NodeStorage {
     private nonisolated func storeMinedBlock(
         _ header: BlockHeader, _ block: Block, at path: ChainPath, fetcher: any Fetcher
     ) async throws -> FlatDictionary<BlockHeader> {
-        let roots = try await storingAndRetaining(header.rawCID, at: path, from: fetcher) { storage in
+        let roots = try await storingAndRetaining(header, at: path, from: fetcher) { storage in
             try await header.storeBlockContent(fetcher: fetcher, storer: storage)
         }
         bundles.record(root: header.rawCID, roots: roots)
@@ -437,7 +476,7 @@ extension NodeStorage {
                 // contribution) is stored and carried.
                 frontier.append((block, childPath, proof))
                 guard evidence.contribution != nil else { continue }
-                let roots = try await storingAndRetaining(child.rawCID, at: childPath, from: localFetcher) { storage in
+                let roots = try await storingAndRetaining(child, at: childPath, from: localFetcher) { storage in
                     try await child.storeBlockContent(fetcher: localFetcher, storer: storage)
                 }
                 bundles.record(root: child.rawCID, roots: roots)
