@@ -171,6 +171,19 @@ final class ReceiptWitnessTests: XCTestCase {
         XCTAssertTrue(Set(witness).isSubset(of: Set(pinned)), "the witness is pinned with the body")
         let bundle = await storage.volumeBundle(withdrawalBlock)
         XCTAssertTrue(Set(witness).isSubset(of: Set(bundle)), "and served with it")
+        // A witness that cannot be read when the block is stored fails it,
+        // as its content would: the block is not stored, so its connect
+        // job does not connect it (`connectJob`).
+        let content = NodeImportStorage(storage: nil, keepsVolumes: true)
+        try await BlockHeader(rawCID: withdrawalBlock).storeBlockContent(fetcher: local, storer: content)
+        let unreadable = Set(witness).subtracting(await content.takeVolumes().map(\.volume.root))
+        XCTAssertFalse(unreadable.isEmpty)
+        // Stored by a node holding nothing of it, so storing reads it.
+        let empty = try await NodeStorage.open(configuration: try host(keyByte: 0xd3, blockBodies: .all).configuration)
+        let stored = try await empty.storeValidBlocks(
+            [(withdrawalBlock, nil)], at: Self.alpha, from: Unreadable(local, cids: unreadable)
+        )
+        XCTAssertNil(stored[withdrawalBlock], "a block whose witness cannot be read is not stored")
         let producerAlpha = await alphaReads.readSnapshot()
         // Its height, not its tip: the producer's last carried Alpha block
         // can connect after this read, and the follower then follows it.
@@ -211,5 +224,22 @@ final class ReceiptWitnessTests: XCTestCase {
         }
         await followerRuntime.stop()
         await runtime.stop()
+    }
+
+    /// Reads through `fetcher` except `cids`, which fail.
+    private struct Unreadable: Fetcher {
+        struct Failure: Error {}
+        let fetcher: any Fetcher
+        let cids: Set<String>
+
+        init(_ fetcher: any Fetcher, cids: Set<String>) {
+            self.fetcher = fetcher
+            self.cids = cids
+        }
+
+        func fetch(rawCid: String) async throws -> Data {
+            guard !cids.contains(rawCid) else { throw Failure() }
+            return try await fetcher.fetch(rawCid: rawCid)
+        }
     }
 }

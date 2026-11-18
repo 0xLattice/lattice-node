@@ -306,6 +306,31 @@ final class ChainCoreBodyTests: XCTestCase {
         XCTAssertFalse(core.tree.isExcludedRoot(chain[2].cid))
     }
 
+    /// A valid block reported not stored (its body could not be read to
+    /// store it) is not connected: the blocks before it commit, it parks as
+    /// a body not had, the block after it waits for a later job, and no
+    /// fact or state of it is persisted.
+    func testAValidBlockNotStoredIsNotConnectedAndParks() async throws {
+        var (core, _) = weighed(Array(chain.prefix(3)), window: 8, connectBatch: 3)
+        for block in chain.prefix(3).dropFirst() { _ = arrive(block.cid, &core) }
+        let batch = jobs(arrive(chain[0].cid, &core))
+        let (verdicts, _) = await ConnectRun.run(
+            batch, fetcher: content, validationContext: { ValidationContext(nowMilliseconds: Self.now) }
+        )
+        XCTAssertEqual(verdicts.map(\.isValid), [true, true, true])
+        let applied = core.step(
+            .connected([ConnectResult(verdicts[0]), ConnectResult(verdicts[1], stored: false), ConnectResult(verdicts[2])]),
+            now: Self.now
+        )
+        XCTAssertEqual(core.snapshot.actOnTip, chain[0].cid)
+        XCTAssertEqual(batches(applied).first?.states.count, 1, "only the stored block's state")
+        XCTAssertNotNil(core.bodies.parked[chain[1].cid], "parked as a body not had")
+        XCTAssertFalse(core.bodies.arrived.contains(chain[1].cid))
+        XCTAssertTrue(core.bodies.arrived.contains(chain[2].cid), "the block after it waits for a later job")
+        XCTAssertTrue(jobs(applied).isEmpty, "no job runs the parked block at once")
+        XCTAssertFalse(core.tree.isExcludedRoot(chain[1].cid), "not stored is not invalid")
+    }
+
     /// At a fork the heavier branch's ready block connects first; the
     /// lighter sibling is not held behind the heavier one's missing body.
     func testAtAForkTheHeavierReadyBranchConnectsFirstAndNoSiblingWaitsOnAnother() async throws {

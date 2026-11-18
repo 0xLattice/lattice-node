@@ -207,12 +207,15 @@ extension NodeStorage {
 
     /// Stores a block execution found valid, and pins it
     /// (`storeValidBlocks` of the one block). Returns the CIDs of the
-    /// transactions the block carries.
+    /// transactions the block carries; throws when it was not stored.
     @discardableResult
     nonisolated func storeValidBlock(
         _ cid: String, decoded: Block? = nil, at path: ChainPath, from fetcher: any Fetcher
     ) async throws -> [String] {
-        try await storeValidBlocks([(cid, decoded)], at: path, from: fetcher)[cid] ?? []
+        guard let transactions = try await storeValidBlocks([(cid, decoded)], at: path, from: fetcher)[cid] else {
+            throw NodeAPIError.unresolvedTransactionContent
+        }
+        return transactions
     }
 
     /// Stores the blocks of one connect job execution found valid, and pins
@@ -225,8 +228,13 @@ extension NodeStorage {
     /// witness's), pinned under its name, and, with the chain, its spec and
     /// policy modules. The state it read is its parent's, which
     /// this node stored executing the parent, and the counts and windows
-    /// keep or peers serve. Returns, by block, the CIDs of the transactions
-    /// it carries, read once from its transaction index. `decoded` is the
+    /// keep or peers serve. Returns, by block stored, the CIDs of the
+    /// transactions it carries, read once from its transaction index. A
+    /// block whose body or witness cannot be read ends the run: it and the
+    /// blocks after it are not stored, and not in the result, so the job
+    /// does not connect them (geth's `insertChain` stops at the first block
+    /// it cannot import). Throws only when the store's write fails.
+    /// `decoded` is the
     /// block's node as its connect decoded it (`ConnectVerdict.connectedBlock`),
     /// or nil to resolve it through `fetcher`.
     nonisolated func storeValidBlocks(
@@ -237,8 +245,6 @@ extension NodeStorage {
         var carried: [String: [String]] = [:]
         var bundled: [(root: String, roots: [String])] = []
         let rulesScope = configuration.state == .all ? retentionScope : scopes.rules(at: path)
-        // A block whose body cannot be read is left out, logged, as one
-        // stored alone was: the batch's others are stored.
         for (cid, decoded) in blocks {
             do {
                 let volumes: [SerializedVolume]
@@ -247,9 +253,10 @@ extension NodeStorage {
                 } else {
                     let walked = NodeImportStorage(storage: nil, keepsVolumes: true)
                     try await BlockHeader(rawCID: cid).storeBlockContent(fetcher: fetcher, storer: walked)
-                    // A fetch's Volumes carry its witness; this walk reads it too.
+                    // A fetch's Volumes carry its witness; this walk reads it
+                    // too, or the block is not stored, as for its content.
+                    try await BlockHeader(rawCID: cid).storeParentReceiptWitness(fetcher: fetcher, storer: walked)
                     volumes = await walked.takeVolumes().map(\.volume)
-                        + (await receiptWitness(of: BlockHeader(rawCID: cid), fetcher: fetcher))
                 }
                 let resolved: Block?
                 if let decoded {
@@ -276,6 +283,7 @@ extension NodeStorage {
                 bundled.append((cid, roots.sorted()))
             } catch {
                 syncTrace("body of \(cid) not stored: \(error)")
+                break
             }
         }
         let volumes = try stored.keys.sorted().compactMap { try stored[$0].map(ValidatedVolume.init(trusting:)) }

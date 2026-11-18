@@ -1718,7 +1718,8 @@ extension NodeRuntime {
                 }
             case .connect(let path, let jobs):
                 enqueue(NodeRuntime.connectJob(
-                    jobs, at: path, levels: LiveLevels(inputs: inputs), storage: storage, remote: remote
+                    jobs, at: path, levels: LiveLevels(inputs: inputs), storage: storage, remote: remote,
+                    failStop: failStop
                 ))
                 startJobs()
             case .wakeAt(let time):
