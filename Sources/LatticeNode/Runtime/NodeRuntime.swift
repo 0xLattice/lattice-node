@@ -2,6 +2,7 @@ import Foundation
 import Ivy
 import IvyWebSocket
 import Lattice
+import LatticeNodeAPI
 import LatticeNodeCore
 import Synchronization
 import cashew
@@ -1342,6 +1343,16 @@ extension NodeRuntime {
                     return (fetchWaits[key] ?? connectWaits[key]).map { NodeReadView.Waiting(cid: cid, reason: $0) }
                 }
             }
+            var sync = NodeSyncStatus()
+            sync.pendingHeaders = level.sync.pending.entries.count
+            sync.headersAwaitingProof = level.sync.proofs.awaiting.count
+            sync.proofChecksQueued = level.sync.proofs.queued.count
+            sync.proofChecksRunning = level.sync.proofs.verifying.count
+            sync.bodyWindow = windows[path]?.distances.count ?? 0
+            sync.bodiesRequested = level.bodies.requested.count
+            sync.bodiesUnavailable = fetchWaits.keys.count(where: { $0.path == path })
+            sync.bodiesParked = level.bodies.parked.count
+            sync.awaitingParentFacts = level.bodies.awaitingParent.count
             // The fee projection walks the pool, so a busy pool is projected
             // at most once a `projectionInterval`, and at once on a new tip.
             // A change inside the interval is projected when it ends, input
@@ -1360,7 +1371,7 @@ extension NodeRuntime {
             }
             guard view.actOnTip != tip.hash || view.poolVersion != pool.version
                     || view.templateDigest != digest || view.peers != peers
-                    || view.waiting != waiting || reproject else { return }
+                    || view.waiting != waiting || view.sync != sync || reproject else { return }
             if view.actOnTip != tip.hash {
                 view.actOnTip = tip.hash
                 // The act-on chain is the tip's ancestry, on the best header
@@ -1398,6 +1409,7 @@ extension NodeRuntime {
             view.templateDigest = digest
             view.peers = peers
             view.waiting = waiting
+            view.sync = sync
             views[path] = view
             output.view.publish(view)
             // After the view: a client told of a digest finds it in status.

@@ -64,7 +64,7 @@ extension LatticeNodeCommand {
                 reads: runtime.reads,
                 levelReads: { Array(runtime.levelReads.values) },
                 writes: runtime,
-                status: { await runtime.status() },
+                status: { await runtime.status(chainPath: $0) },
                 metrics: { runtime.metricsExposition(peers: $0, processStartTime: $1) },
                 host: host,
                 port: port,

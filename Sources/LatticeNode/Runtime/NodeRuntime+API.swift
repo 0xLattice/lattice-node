@@ -24,6 +24,8 @@ struct NodeReadView: Sendable {
     var peers = 0
     /// The first block of the body window, when it waits, and why.
     var waiting: Waiting?
+    /// What the level's sync holds, for operator status.
+    var sync = NodeSyncStatus()
     /// The level core's directories of committed children (shared, grow-only).
     var children: ExecutedChildren?
 
@@ -531,7 +533,8 @@ extension NodeRuntime {
                     height: snapshot?.actOnTip.isEmpty == false ? snapshot?.actOnHeight : nil,
                     revision: nil,
                     bestHeaderHeight: snapshot?.bestHeaderTip.isEmpty == false ? snapshot?.bestHeaderHeight : nil,
-                    waiting: view.value?.waiting.map { "body of \($0.cid): \($0.reason)" }
+                    waiting: view.value?.waiting.map { "body of \($0.cid): \($0.reason)" },
+                    sync: view.value?.sync
                 )
             },
             canonicalCID: { height in
@@ -594,10 +597,23 @@ extension NodeRuntime {
         )
     }
 
-    /// `/status`: the read snapshot with the template digest.
+    /// `/status` of the root: the read snapshot with the template digest,
+    /// and what its sync holds.
     public func status() async -> NodeStatusResponse {
+        await status(of: reads, root: true)
+    }
+
+    /// `/status?chainPath=`: a hosted chain's status (nil: the root); nil
+    /// when this node does not host it. The template digest is the root's.
+    public func status(chainPath: [String]?) async -> NodeStatusResponse? {
+        guard let chainPath, chainPath != configuration.chainPath else { return await status() }
+        guard let reads = levelReads[chainPath] else { return nil }
+        return await status(of: reads, root: false)
+    }
+
+    private func status(of reads: ChainReads, root: Bool) async -> NodeStatusResponse {
         let read = await reads.readSnapshot()
-        return NodeStatusResponse(
+        var status = NodeStatusResponse(
             phase: read.phase,
             chainPath: read.chainPath,
             nexusGenesisCID: read.nexusGenesisCID,
@@ -606,11 +622,13 @@ extension NodeRuntime {
             revision: read.revision,
             mempoolCount: read.mempoolCount,
             mempoolBytes: read.mempoolBytes,
-            templateDigest: read.tipCID == nil ? nil : readView.value?.templateDigest,
+            templateDigest: !root || read.tipCID == nil ? nil : readView.value?.templateDigest,
             bestHeaderHeight: read.bestHeaderHeight,
             waiting: read.waiting,
             version: LatticeNodeVersion.current
         )
+        status.sync = await reads.tip().sync
+        return status
     }
 
     /// Ready overlay sessions: Nexus's current peers.

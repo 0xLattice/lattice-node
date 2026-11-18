@@ -2,6 +2,7 @@ import Foundation
 import Lattice
 import VolumeBroker
 import cashew
+import LatticeNodeAPI
 
 public enum NodeStorageError: Error, Equatable, Sendable {
     case invalidStoragePath
@@ -33,6 +34,8 @@ public struct ChainStatus: Sendable, Equatable {
     public var bestHeaderHeight: UInt64? = nil
     /// The next block this chain cannot execute yet, and why (nil when none).
     public var waiting: String? = nil
+    /// What the chain's sync holds (operator status only).
+    public var sync: NodeSyncStatus? = nil
 }
 
 

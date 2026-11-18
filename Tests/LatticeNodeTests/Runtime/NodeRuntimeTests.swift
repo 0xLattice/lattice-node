@@ -136,6 +136,52 @@ final class NodeRuntimeTests: XCTestCase {
         await producerRuntime.stop()
     }
 
+    /// Operator status counts what a chain's sync holds: a block whose body
+    /// this node's budget declines is in the window, unavailable and parked,
+    /// and none of it once the block executes. A chain this node does not
+    /// host has no status.
+    func testOperatorStatusCountsWhatTheChainsSyncHolds() async throws {
+        let producer = try host(keyByte: 0x3A)
+        let producerStorage = try await NodeStorage.open(configuration: producer.configuration)
+        let producerRuntime = try await NodeRuntime.start(
+            storage: producerStorage, configuration: producer.configuration, overlay: producer.overlay
+        )
+        let blockCID = try BlockHeader(node: try await producerRuntime.mineBlock()).rawCID
+
+        let joiner = try host(
+            keyByte: 0x3B, peers: [producer.endpoint],
+            resourcePolicy: NodeResourcePolicy(maximumAcquisitionStorageBytes: 1)
+        )
+        let joinerStorage = try await NodeStorage.open(configuration: joiner.configuration)
+        let joinerRuntime = try await NodeRuntime.start(
+            storage: joinerStorage, configuration: joiner.configuration, overlay: joiner.overlay
+        )
+        try await eventually("the joiner's status counts the declined body") {
+            let sync = await joinerRuntime.status().sync
+            return sync?.bodyWindow == 1 && sync?.bodiesUnavailable == 1 && sync?.bodiesParked == 1
+        }
+        let root = await joinerRuntime.status(chainPath: ["Nexus"])
+        XCTAssertEqual(root?.sync?.bodyWindow, 1, "the root's path names the root")
+        XCTAssertEqual(root?.bestHeaderHeight, 1)
+        XCTAssertEqual(root?.height, 0)
+        let unhosted = await joinerRuntime.status(chainPath: ["Nexus", "unhosted"])
+        XCTAssertNil(unhosted)
+        let health = String(decoding: try JSONEncoder().encode(await joinerRuntime.reads.readSnapshot()), as: UTF8.self)
+        XCTAssertFalse(health.contains("\"sync\""), "public health shows no sync counts: \(health)")
+
+        try await BlockHeader(rawCID: blockCID).storeBlock(
+            fetcher: producerStorage.localFetcher, storer: joinerStorage
+        )
+        try await eventually("the joiner executes the block") {
+            joinerRuntime.published.value?.actOnTip == blockCID
+        }
+        try await eventually("nothing is held once it executes") {
+            await joinerRuntime.status().sync == NodeSyncStatus()
+        }
+        await joinerRuntime.stop()
+        await producerRuntime.stop()
+    }
+
     /// Status is public. Whatever error is behind a wait, it shows one of a
     /// fixed set of reasons: none of the error's text, and no setting's value.
     func testStatusShowsAFixedReasonAndNeverAnErrorsText() async throws {
