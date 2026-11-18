@@ -1283,13 +1283,14 @@ extension NodeRuntime {
             }
         }
 
-        /// A level with bodies waiting asks for them again when a host
+        /// A level with bodies waiting or in flight asks for them again when a host
         /// connects, a reconnect included: Bitswap sends its wants on every
         /// new connection. False when a step fail-stopped.
         mutating func meetHosts() async -> Bool {
             for path in core.ordered {
                 let entered = connectedHosts.update(path, Set(hosts(of: path).map(\.peer.id.publicKey)))
-                guard entered, core.levels[path]?.bodies.parked.isEmpty == false else { continue }
+                guard entered, let bodies = core.levels[path]?.bodies,
+                      !bodies.parked.isEmpty || !bodies.requested.isEmpty else { continue }
                 guard await step(.level(path, .providerJoined)) else { return false }
             }
             return true
