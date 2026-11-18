@@ -129,7 +129,7 @@ set, GHOST, continuity) are the architecture doc's and are checked by
 - **NODE-STORAGE-002.e** — Replaying the store as of a flush reproduces the
   trees; replaying it after a crash gives every block weighed, executed as
   of the last flush, and the node executes the rest again from what it
-  stores. Enforced by
+  stores, reading no clock but for a genesis. Enforced by
   `Simulator.checkReplay` and `LevelSimulator.checkReplay` at flush points,
   on stores that keep of an execution only its verdict, as the node's does
   (`SimStore.flush`); pinned by `DerivedCacheRestartTests`.

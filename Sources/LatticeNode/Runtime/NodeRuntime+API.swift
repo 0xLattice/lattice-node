@@ -887,10 +887,11 @@ extension NodeRuntime {
     /// body). A body the store cannot write stops the node (`failStop`).
     /// Execution is the node's own work: what this store lacks is read from
     /// peers. A child level's parent fact is read from the live parent level
-    /// (`ParentContinuity`).
+    /// (`ParentContinuity`). Only a `genesis` is judged against the clock.
     static func connectJob(
         _ job: ConnectJob,
         at path: ChainPath,
+        genesis: Bool,
         levels: LiveLevels,
         storage: NodeStorage,
         remote: IvyRootContentSource? = nil,
@@ -898,11 +899,15 @@ extension NodeRuntime {
     ) -> RuntimeJob {
         RuntimeJob(path: path, tipCID: nil, kind: .connect) {
             await reading(job.blockHash, at: path, storage: storage, remote: remote) { fetcher in
+                // A genesis meets the clock when it executes (spec §5.1 rule
+                // 3); every other block met it when it was weighed (§5.2
+                // rule 5), so executing one, live or again after a restart,
+                // reads no clock (Bitcoin's `ConnectBlock`).
                 let verdict = await ChainTree.connect(
                     job,
                     fetcher: fetcher,
                     parentFacts: ParentContinuity(levels: levels),
-                    validationContext: ValidationContext(nowMilliseconds: now())
+                    validationContext: ValidationContext(nowMilliseconds: genesis ? now() : .max)
                 )
                 let valid = verdict.retryFailure == nil && !verdict.provesInvalid
                 var transactions: [String] = []

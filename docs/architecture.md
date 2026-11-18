@@ -227,7 +227,8 @@ it first took them (`ChainTree.restore(facts:)`): one key range per level,
 and the weigh log rebuilt from it keeps every position a peer's stream
 cursor names. The restored tree holds every block the node weighed,
 executed as of the last flush; the body window executes the rest again
-from the bodies the node stores.
+from the bodies the node stores, reading no clock but for a genesis, whose
+clock check is at its execution.
 A level's local journal rows wait until it has executed those blocks again,
 or cannot from what the node holds, and until its parent level's own replay
 is over (Bitcoin loads its mempool once `ActivateBestChain` has connected

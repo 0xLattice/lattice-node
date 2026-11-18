@@ -476,10 +476,12 @@ public struct Simulator {
         case .runConnect(let job, let incarnation):
             guard let content = cores[node].flatMap({ $0.incarnation == incarnation ? $0.content : nil }) else { return }
             report.connects += 1
+            // As the shell does: only a genesis meets the clock.
+            let genesis = cores[node]?.core.parent(of: job.blockHash) == nil
             let verdict = await ChainTree.connect(
                 job,
                 fetcher: ContentLayer(own: content, providers: cores.filter { $0.key != node }.sorted { $0.key < $1.key }.map(\.value.content)),
-                validationContext: ValidationContext(nowMilliseconds: now)
+                validationContext: ValidationContext(nowMilliseconds: genesis ? now : .max)
             )
             try await step(node, .connected(verdict))
         case .crash(let mode):

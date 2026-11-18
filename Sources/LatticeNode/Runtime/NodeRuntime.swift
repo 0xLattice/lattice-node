@@ -1782,7 +1782,8 @@ extension NodeRuntime {
                 }
             case .connect(let path, let job):
                 enqueue(NodeRuntime.connectJob(
-                    job, at: path, levels: LiveLevels(inputs: inputs), storage: storage, remote: remote,
+                    job, at: path, genesis: core.levels[path]?.parent(of: job.blockHash) == nil,
+                    levels: LiveLevels(inputs: inputs), storage: storage, remote: remote,
                     failStop: failStop
                 ))
                 startJobs()

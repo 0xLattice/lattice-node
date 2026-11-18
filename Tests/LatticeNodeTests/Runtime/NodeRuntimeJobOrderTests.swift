@@ -55,7 +55,8 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
                         // The job reads the levels as this step left them.
                         let levels = host.levels
                         pending += await NodeRuntime.connectJob(
-                            job, at: path, levels: LiveLevels { $0(levels) }, storage: storage
+                            job, at: path, genesis: levels[path]?.parent(of: job.blockHash) == nil,
+                            levels: LiveLevels { $0(levels) }, storage: storage
                         ).run()
                     case .level(let path, .readTransactions(let blocks)):
                         reads.append(blocks)

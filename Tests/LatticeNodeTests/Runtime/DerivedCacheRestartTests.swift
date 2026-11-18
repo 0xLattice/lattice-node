@@ -47,7 +47,8 @@ final class DerivedCacheRestartTests: XCTestCase {
                     case .connect(let path, let job):
                         let levels = host.levels
                         pending += await NodeRuntime.connectJob(
-                            job, at: path, levels: LiveLevels { $0(levels) }, storage: storage, failStop: failStop
+                            job, at: path, genesis: levels[path]?.parent(of: job.blockHash) == nil,
+                            levels: LiveLevels { $0(levels) }, storage: storage, failStop: failStop
                         ).run()
                     case .level(let path, .fetchBody(let cid)):
                         pending.append(.level(path, .bodyFetched(cid: cid)))
@@ -79,10 +80,10 @@ final class DerivedCacheRestartTests: XCTestCase {
         }
 
         /// Mine a block on `previous` carrying `transactions`, store it and
-        /// weigh it as this node's grind; its execution runs at once, after
-        /// `stored`.
+        /// weigh it as this node's grind, under the clock `now`; its
+        /// execution runs at once, after `stored`.
         mutating func mine(
-            on previous: Block, timestamp: Int64, transactions: [Transaction] = [],
+            on previous: Block, timestamp: Int64, transactions: [Transaction] = [], now: Int64? = nil,
             stored: () throws -> Void = {}
         ) async throws -> Block {
             var nonce: UInt64 = 0
@@ -95,7 +96,7 @@ final class DerivedCacheRestartTests: XCTestCase {
             } while block.proofOfWorkHash() > block.target
             let children = try await storage.storeMinedBlock(block)
             try stored()
-            try await step(.mined(MinedGrind(root: block, rootChildren: children, carried: [])))
+            try await step(.mined(MinedGrind(root: block, rootChildren: children, carried: [])), now: now ?? NodeRuntime.now())
             return block
         }
     }
@@ -200,6 +201,26 @@ final class DerivedCacheRestartTests: XCTestCase {
         XCTAssertEqual(node.host.levels[["Nexus"]]?.snapshot.bestHeaderTip, heavier, "the heavier branch is weighed")
         try await node.step(.tick)
         XCTAssertEqual(node.tip(), heavier)
+    }
+
+    /// Only a genesis meets the clock when it executes: a block weighed while
+    /// the clock read its time executes again after a restart under a clock
+    /// an hour behind it.
+    func testABlockWeighedUnderALaterClockExecutesAgainUnderAnEarlierOne() async throws {
+        let configuration = try configuration()
+        let ahead = NodeRuntime.now() + 3_600_000
+        let cid: String
+        do {
+            var node = try await open(configuration)
+            let genesis = try await node.block(node.tip())
+            let block = try await node.mine(on: genesis, timestamp: ahead, now: ahead + 1)
+            cid = try BlockHeader(node: block).rawCID
+            XCTAssertEqual(node.tip(), cid)
+        }
+        var node = try await open(configuration)
+        XCTAssertNotEqual(node.tip(), cid)
+        try await node.step(.tick)
+        XCTAssertEqual(node.tip(), cid, "executed again with the clock behind its time")
     }
 
     /// A child chain no other node hosts: its genesis, carried by a Nexus

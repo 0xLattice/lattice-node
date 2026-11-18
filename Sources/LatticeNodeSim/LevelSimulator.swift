@@ -433,11 +433,13 @@ public struct LevelSimulator {
                 schedule(at: now, to: name, .linkDown(name, peer.key, peer.session))
             case .connect(let path, let job):
                 report.executions += 1
+                // As the shell does: only a genesis meets the clock.
+                let genesis = node.core.levels[path]?.parent(of: job.blockHash) == nil
                 let verdict = await ChainTree.connect(
                     job,
                     fetcher: world.cas,
                     parentFacts: node.core.parentFacts(for: path),
-                    validationContext: ValidationContext(nowMilliseconds: now)
+                    validationContext: ValidationContext(nowMilliseconds: genesis ? now : .max)
                 )
                 schedule(at: delay(), to: name, .host(.level(path, .connected(verdict))))
             case .wakeAt(let time):
