@@ -181,13 +181,21 @@ extension ChainCore {
     /// nothing that waits. A wait that ends here is asked for in this step.
     mutating func wake(parentOf cid: String) {
         guard let parent = tree.parent(of: cid) else { return }
-        bodies.parked[parent] = nil
+        end(parent)
     }
 
-    /// A peer that may hold this level's content joined (`ChainEvent
+    /// A peer that may hold this level's content connected (`ChainEvent
     /// .providerJoined`): every waiting body is asked for again at once.
     mutating func providerJoined() {
-        bodies.parked.removeAll()
+        for cid in bodies.parked.keys { end(cid) }
+    }
+
+    /// `cid`'s wait is over: it is asked for in this step. It keeps its
+    /// attempts, so a body that fails again waits as long as it would have,
+    /// and a wake costs one attempt.
+    private mutating func end(_ cid: String) {
+        guard let parked = bodies.parked[cid] else { return }
+        bodies.parked[cid] = BodyPipeline.Parked(notBefore: 0, attempts: parked.attempts)
     }
 
     /// The content layer could not obtain the body of `cid`: it waits out

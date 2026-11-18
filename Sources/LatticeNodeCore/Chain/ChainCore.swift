@@ -42,7 +42,7 @@ public enum ChainEvent: Sendable {
     /// availability wait, never a verdict. It is asked for again after the
     /// level's backoff (`ChainCoreConfig.bodyRetryBase`).
     case bodyUnavailable(cid: String)
-    /// A peer hosting this level that this node had not met joined: what
+    /// A peer hosting this level connected (a reconnect included): what
     /// no peer held may be held now, so every waiting body is asked for
     /// again.
     case providerJoined
@@ -212,7 +212,8 @@ public struct ChainCoreConfig: Sendable {
     /// body is asked for again, doubling per attempt up to
     /// `bodyRetryCap`. It ends early when the body may now be had: a block
     /// built on it is weighed or its body arrives, or a peer hosting the
-    /// level that this node had not met joins.
+    /// level connects. Ending early keeps the attempt count: a body that
+    /// fails again waits as long as it would have.
     public var bodyRetryBase: Int64
     public var bodyRetryCap: Int64
     /// The level's mempool and template bounds.

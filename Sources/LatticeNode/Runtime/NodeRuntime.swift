@@ -1467,7 +1467,9 @@ extension NodeRuntime {
                     Task { _ = await punch.upgrade(peer) }
                 }
                 if let replaced, replaced.ready {
-                    return await step(.peerGone(replaced.coreID))
+                    guard await step(.peerGone(replaced.coreID)) else { return false }
+                    // Forget the host it was, so the new session's hello wakes.
+                    return await meetHosts()
                 }
             case .disconnected(let key):
                 guard let session = sessions[key],

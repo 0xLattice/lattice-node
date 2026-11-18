@@ -304,7 +304,8 @@ public struct IvyRootContentSource: Sendable {
 
     /// One Volume under a root. A child's is asked first of its chain's
     /// current peers (`hosts`) other than `excluding` (those reported for
-    /// it), then of anyone unless `onlyHosts`.
+    /// it), then of anyone, or with `onlyHosts` only of the connected peers
+    /// known to provide the block or the Volume.
     fileprivate typealias VolumeFetch =
         @Sendable (_ rootCID: String, _ excluding: Set<PeerID>) async -> AttributedVolumeResponse
     private let fetch: @Sendable (
@@ -595,8 +596,11 @@ public struct IvyRootContentSource: Sendable {
     /// again: a bundle is held within the same reservation. A session
     /// whose task is cancelled while it waits leaves the line at once,
     /// reserves nothing and asks no peer, whichever task its reads run in.
-    /// With `onlyHosts`, a child's content is asked of its hosts alone, and
-    /// a session with no host connected reserves nothing and asks no one.
+    /// With `onlyHosts`, a child's content is asked of its hosts, then of the
+    /// connected peers known to provide the block or the Volume; a session
+    /// with no host and no known provider of the block connected reserves
+    /// nothing and asks no one (a pin of the block's root is found, one of
+    /// an inner Volume only once a session asks a peer).
     public func withRootTracing<T: Sendable>(
         _ rootCID: String,
         bundle: Bool = true,

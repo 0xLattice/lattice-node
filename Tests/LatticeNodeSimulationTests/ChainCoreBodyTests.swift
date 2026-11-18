@@ -420,7 +420,9 @@ final class ChainCoreBodyTests: XCTestCase {
         // Its child's body arrives: it is asked for at once.
         let arrived = core.step(.bodyFetched(cid: chain[2].cid), now: Self.now + base)
         XCTAssertEqual(bodyFetches(arrived), [chain[1].cid])
-        XCTAssertTrue(core.bodies.parked.isEmpty)
+        // It keeps its attempts: failing again, it waits as long as it would have.
+        let again = core.step(.bodyUnavailable(cid: chain[1].cid), now: Self.now + base)
+        XCTAssertEqual(wakes(again).min(), Self.now + 5 * base, "four times the base, its third attempt")
     }
 
     /// The backoff doubles past a minute, up to `bodyRetryCap`: a body no
@@ -441,15 +443,18 @@ final class ChainCoreBodyTests: XCTestCase {
         XCTAssertEqual(wait, cap)
     }
 
-    /// A peer hosting the level that this node had not met joins: every
-    /// waiting body is asked for again at once.
+    /// A peer hosting the level connects: every waiting body is asked for
+    /// again at once, keeping its attempts, so a host that keeps
+    /// reconnecting costs one attempt per body each time and no more.
     func testAProviderJoiningAsksForEveryWaitingBodyAgain() async throws {
         var (core, _) = weighed(Array(chain.prefix(3)))
+        let base = core.config.bodyRetryBase
         for block in chain.prefix(3) { _ = core.step(.bodyUnavailable(cid: block.cid), now: Self.now) }
         XCTAssertEqual(core.bodies.parked.count, 3)
         let effects = core.step(.providerJoined, now: Self.now + 1)
         XCTAssertEqual(Set(bodyFetches(effects)), Set(chain.prefix(3).map(\.cid)))
-        XCTAssertTrue(core.bodies.parked.isEmpty)
+        let again = core.step(.bodyUnavailable(cid: chain[0].cid), now: Self.now + 1)
+        XCTAssertEqual(wakes(again).min(), Self.now + 1 + 2 * base, "its second attempt's wait")
     }
 
     func testARestartReplaysTheExecutedSetAndAsksOnlyForWhatIsLeft() async throws {
