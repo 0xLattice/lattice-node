@@ -29,9 +29,8 @@ public enum ConnectRun {
             )
             verdicts.append(verdict)
             guard verdict.isValid else { break }
-            if let state = verdict.materializedPostState {
-                guard (try? await reads.add(state)) != nil else { break }
-            }
+            // A child reads this state from memory, or the job ends here.
+            guard let state = verdict.materializedPostState, (try? await reads.add(state)) != nil else { break }
         }
         return (verdicts, reads)
     }

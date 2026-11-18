@@ -36,7 +36,8 @@ verified header -> fork choice -> bounded body window
                                     (one job, up to connectBatch, heaviest first
                                     at a fork, each reading the state the one
                                     before it produced from memory)
-                                 -> persist their facts and content in one commit
+                                 -> store their bodies in one volumes.db transaction,
+                                    then their states and facts in one step's persist
                                  -> publish the new read snapshot
 ```
 

@@ -514,7 +514,8 @@ and geth's `insertChain` writes a batch at once.
 
 `connectBatch` in `lattice.json` or a `config.d` fragment
 (`--connect-batch`; default 32, at least 1) is the most blocks one batch
-executes. A larger batch commits less often while a node catches up and
+executes; the body window (64 blocks ahead) bounds it too. A larger batch
+commits less often while a node catches up and
 holds more executed state in memory until its commit. A crash loses at most
 the batch being executed: the node restarts at the last batch committed and
 runs it again. A change takes effect on restart.

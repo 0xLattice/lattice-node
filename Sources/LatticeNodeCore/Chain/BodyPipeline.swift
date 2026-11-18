@@ -356,7 +356,9 @@ extension ChainCore {
         for cid in bodies.arrived {
             guard let fact = parentFact(of: cid) else { continue }
             if let parent {
-                bodies.awaitingParent[cid] = parent.holds(fact) ? nil : fact
+                // A fact a verdict named is Lattice's: it decides.
+                let needed = bodies.awaitingParent[cid] ?? fact
+                bodies.awaitingParent[cid] = parent.holds(needed) ? nil : needed
             } else if bodies.awaitingParent[cid] == nil {
                 bodies.awaitingParent[cid] = fact
             }
@@ -365,12 +367,19 @@ extension ChainCore {
 
     /// The parent fact a child-level block's execution needs, from its
     /// header and its predecessor's; nil when it needs none (it names no
-    /// parent state, which its connect judges) or its header is not held.
+    /// parent state, which its connect judges) or its or its predecessor's
+    /// header is not held (its connect judges then too).
     func parentFact(of cid: String) -> CrossChainEvidenceRequirement? {
         guard let to = tree.headerSnapshot(of: cid)?.parentStateCID else { return nil }
         let empty = LatticeState.emptyHeader.rawCID
         guard to != empty else { return nil }
-        let from = tree.parent(of: cid).flatMap { tree.headerSnapshot(of: $0)?.parentStateCID } ?? empty
+        let from: String
+        if let predecessor = tree.parent(of: cid) {
+            guard let anchor = tree.headerSnapshot(of: predecessor)?.parentStateCID else { return nil }
+            from = anchor
+        } else {
+            from = empty
+        }
         return .parentStateContinuity(parentPath: Array(chainPath.dropLast()), fromStateCID: from, toStateCID: to)
     }
 }

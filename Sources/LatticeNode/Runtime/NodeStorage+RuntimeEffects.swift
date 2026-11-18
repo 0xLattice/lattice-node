@@ -195,34 +195,40 @@ extension NodeStorage {
         var carried: [String: [String]] = [:]
         var bundled: [(root: String, roots: [String])] = []
         let rulesScope = configuration.state == .all ? retentionScope : scopes.rules(at: path)
+        // A block whose body cannot be read is left out, logged, as one
+        // stored alone was: the batch's others are stored.
         for (cid, decoded) in blocks {
-            let volumes: [SerializedVolume]
-            if let fetched = await readCache.body(cid) {
-                volumes = fetched
-            } else {
-                let walked = NodeImportStorage(storage: nil, keepsVolumes: true)
-                try await BlockHeader(rawCID: cid).storeBlockContent(fetcher: fetcher, storer: walked)
-                volumes = await walked.takeVolumes().map(\.volume)
+            do {
+                let volumes: [SerializedVolume]
+                if let fetched = await readCache.body(cid) {
+                    volumes = fetched
+                } else {
+                    let walked = NodeImportStorage(storage: nil, keepsVolumes: true)
+                    try await BlockHeader(rawCID: cid).storeBlockContent(fetcher: fetcher, storer: walked)
+                    volumes = await walked.takeVolumes().map(\.volume)
+                }
+                let resolved: Block?
+                if let decoded {
+                    resolved = decoded
+                } else {
+                    resolved = try await BlockHeader(rawCID: cid).resolve(fetcher: fetcher).node
+                }
+                guard let block = resolved else { throw NodeAPIError.unresolvedTransactionContent }
+                let transactions = try await NodeRuntime.carriedTransactionIDs(of: block, fetcher: fetcher)
+                let body = Set([cid] + transactions)
+                let roots = Set(volumes.map(\.root))
+                var rest = roots.subtracting(body)
+                if configuration.state != .all { rest.formIntersection(await rules(of: block, fetcher: fetcher)) }
+                for volume in volumes where body.contains(volume.root) || rest.contains(volume.root) {
+                    stored[volume.root] = volume
+                }
+                retaining[scopes.body(cid, at: path), default: []] += body.sorted()
+                retaining[rulesScope, default: []] += rest.sorted()
+                carried[cid] = transactions
+                bundled.append((cid, roots.sorted()))
+            } catch {
+                syncTrace("body of \(cid) not stored: \(error)")
             }
-            let resolved: Block?
-            if let decoded {
-                resolved = decoded
-            } else {
-                resolved = try await BlockHeader(rawCID: cid).resolve(fetcher: fetcher).node
-            }
-            guard let block = resolved else { throw NodeAPIError.unresolvedTransactionContent }
-            let transactions = try await NodeRuntime.carriedTransactionIDs(of: block, fetcher: fetcher)
-            let body = Set([cid] + transactions)
-            let roots = Set(volumes.map(\.root))
-            var rest = roots.subtracting(body)
-            if configuration.state != .all { rest.formIntersection(await rules(of: block, fetcher: fetcher)) }
-            for volume in volumes where body.contains(volume.root) || rest.contains(volume.root) {
-                stored[volume.root] = volume
-            }
-            retaining[scopes.body(cid, at: path), default: []] += body.sorted()
-            retaining[rulesScope, default: []] += rest.sorted()
-            carried[cid] = transactions
-            bundled.append((cid, roots.sorted()))
         }
         let volumes = try stored.keys.sorted().compactMap { try stored[$0].map(ValidatedVolume.init(trusting:)) }
         try await broker.storeVolumesLocal(volumes, retaining: retaining.filter { !$0.value.isEmpty })
