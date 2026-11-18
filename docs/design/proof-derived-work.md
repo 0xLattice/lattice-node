@@ -158,6 +158,13 @@ this design forbids.
 - Proofs learned from peers or produced by local merged mining are verified
   before credit. A node can later serve the exact saved proof with the child
   header.
+- The proofs one step takes from peers (a page of headers) are checked
+  together in one job off the step, as geth's `VerifyHeaders` checks a
+  batch of headers off its import loop, and the job's answers are applied
+  in one step: one persist and one commit for the page. The job reads from
+  the store a weighed block it needs; the core reads nothing. A proof that
+  fails disconnects its sender; the page's other proofs that verify still
+  credit, since each verdict is its proof's own, not its sender's.
 - Gossip, sync, acquisition, and persistence may run asynchronously.
   Chain insertion and fork choice consume only complete, durable import
   batches.
@@ -166,11 +173,45 @@ this design forbids.
 - Candidate content is retained with issued mining work; a submitted grind
   transfers the roots only for levels whose targets it actually meets.
 
-Queued child proofs share one operator byte budget across all sources, with
-no per-peer bound ([Push-only derived grinds](#push-only-derived-grinds)).
-Triggered sync is rate- and concurrency-limited. A valid proof for a child
-that has not yet arrived is not punishable; lying about advertised
-availability or returning malformed bytes is.
+Child proofs in a check share one operator byte budget across all sources,
+with no per-peer bound ([Push-only derived grinds](#push-only-derived-grinds)).
+A flood of valid but cheap pages is bounded only by network ingress: it
+costs the checks, never a verdict. A valid proof for a child that has not
+yet arrived is not punishable; lying about advertised availability or
+returning malformed bytes is.
+
+## Top-down weighing
+
+A child block's work comes from its parent level: its grinds' carriers are
+parent blocks or shares on them (§9.5), and its runs are parent blocks after
+its carrier (§9.10). So a child level is synced whole-chain top-down: it
+reads its peers' streams, and so weighs any header from them, only once its
+parent level has caught up. That is the parent's `synced` latch: the log of
+a peer running that level read to its end and applied, with the act-on tip
+the best header tip (an unavailable heaviest header holds it back, as it
+holds back acting on the chain). The latch is one-way, like Bitcoin Core's
+`IsInitialBlockDownload`: once it is set, the child follows live, and a new
+parent block never pauses it. A grandchild waits for its child level's latch
+in turn. Nexus is not gated.
+
+While its parent catches up, a child level asks its peers for nothing: no
+stream page and no header, and a page pushed to it is not taken. Its stream
+cursors stay where they were. After any step in which the parent is latched,
+however it latched, a level that held its peers back reads every peer's
+stream from its cursor. Its own mined grinds and
+the blocks submitted on this node still weigh, as before: a mined grind
+weighs every level it reaches in one step.
+
+The nearest prior art is Polkadot's parachains: a parachain node follows
+its relay chain, taking as best and final the parachain blocks relay blocks
+include, and a collator does not author while its relay chain node is
+still syncing.
+Here the gate is coarser, one latch per level instead of a check per block,
+since a child block's weight is read from its parent level (its grinds'
+carriers and its runs), which a level still catching up does not yet have.
+Execution keeps its own rule: a child block executes once its parent state
+is held and continuous
+([Parent-state continuity](#parent-state-continuity)).
 
 ## Push-only derived grinds
 
@@ -202,9 +243,25 @@ Two triggers derive:
    derived.
 
 A derivation is pure over this node's own content and its answer is always
-applied; credit is idempotent. It does not wait on peer proofs that are
-queued or in a check, so neither a bogus front-run proof nor a peer that
-leaves can keep `C` from being credited. A derived proof that fails blames no
+applied; credit is idempotent. It does not wait on peer proofs that are in
+a check, so neither a bogus front-run proof nor a peer that leaves can keep
+`C` from being credited.
+
+A peer's proof of a grind a derivation credits is not checked: one whose
+root is a grind of a weighed parent block committing `C`, while `C`'s
+derivation is in flight or is issued in the same step (`C` just arrived).
+Both are the same path from the same root, so they verify alike, and
+checking both was double work: every derivable block paid a peer check
+beside its derivation. The rule is the same at every level with a parent,
+whatever its depth, and is decided per block: a block a weighed parent
+block commits has its work derived, with no peer check at all; any other
+block's work is its peers' proofs, checked. How many blocks are derivable
+is a property of the chains, not of depth: a parent that commits its child
+every block makes the child all derived, one that rarely does leaves it to
+peer proofs. A peer's proof is checked when no derivation
+will answer for it: the parent committed `C` by no weighed block, or `C`'s
+derivation already ran and credited nothing for content it could not read
+(the proof is then checked when it is sent again). A derived proof that fails blames no
 one. A header with a derivation in flight is never evicted. Nothing about a
 derivation is persisted: a restored child level treats every block it
 restores as arrived, so its committers are derived again.
@@ -216,12 +273,13 @@ carrier is weighed, or lost to a restart, an unhost or an eviction, is pushed
 again; `lattice child commit` does this until the submit answers `tree`
 ([operator CLI](../operator-cli.md#committing-a-child-block-on-its-parent)).
 
-**Budgets.** Proofs queued or in a check share one operator budget,
+**Budgets.** Proofs in a check share one operator budget,
 `ChildProofConfig.maxQueuedBytes` (default 16 MiB), over all sources. A proof
 past it is dropped without blame and nothing is evicted; the block is looked
-up again, so its hole is asked again once the queue drains. Headers awaiting
+up again, so its hole is asked again once the checks drain. There is no
+bound on the number of checks: a page's proofs are one job. Headers awaiting
 a proof share the global `maxAwaiting`, which evicts the oldest with no proof
-queued or in flight. There are no per-peer or per-source caps: peers are
+in a check and no derivation in flight. There are no per-peer or per-source caps: peers are
 cheap to make, so such a cap protects nothing. Security comes from
 proof-of-work and verification: a proofless header is taken only when
 wanted, and a peer-sent proof that fails is a proof-of-work failure that

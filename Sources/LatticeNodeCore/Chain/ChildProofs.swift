@@ -5,25 +5,21 @@ import UInt256
 /// A child level's proof bounds: plain caps. A peer whose proof fails
 /// proof-of-work is disconnected, so no fairness machinery is needed.
 public struct ChildProofConfig: Sendable {
-    /// Peers' proof checks in flight at once.
-    public var maxChecks: Int
     /// Proofs taken from one header, and the largest proof taken at all.
     public var maxPerHeader: Int
     public var maxProofBytes: Int
-    /// The operator's memory budget for proofs queued or in flight, all
-    /// sources together; over it, a proof is dropped without blame.
+    /// The operator's memory budget for proofs in a check, all sources
+    /// together; over it, a proof is dropped without blame.
     public var maxQueuedBytes: Int
     /// Headers awaiting their first proof that weighs, at once.
     public var maxAwaiting: Int
 
     public init(
-        maxChecks: Int = 256,
         maxPerHeader: Int = 8,
         maxProofBytes: Int = 64 * 1_024,
         maxQueuedBytes: Int = 16 * 1_024 * 1_024,
         maxAwaiting: Int = 1_024
     ) {
-        self.maxChecks = maxChecks
         self.maxPerHeader = maxPerHeader
         self.maxProofBytes = maxProofBytes
         self.maxQueuedBytes = maxQueuedBytes
@@ -47,8 +43,8 @@ public struct ChildProofKey: Hashable, Comparable, Sendable {
     }
 }
 
-/// A proof not yet checked or in flight: for a block, from the peer that
-/// sent it, with its serialized size.
+/// A peer's proof in a check: for a block, from the peer that sent it, with
+/// its serialized size.
 public struct QueuedChildProof: Sendable {
     public let cid: String
     public let proof: ChildBlockProof
@@ -59,11 +55,11 @@ public struct QueuedChildProof: Sendable {
     public var key: ChildProofKey { ChildProofKey(childCID: cid, proofID: id) }
 }
 
-/// One proof check the shell runs off the step: `verifySecuringWork` of
-/// `proof` for the block on the level's chain. Pure over its inputs, so its
-/// answer is never stale. `block` is nil for a weighed block: the shell
-/// reads it from its store, as it does to serve it. A `derived` proof was
-/// built by this node (`ChildDeriveJob`): in no slot, blaming no one.
+/// One proof check: `verifySecuringWork` of `proof` for the block on the
+/// level's chain. Pure over its inputs, so its answer is never stale.
+/// `block` is nil for a weighed block: the shell reads it from its store,
+/// as it does to serve it. A `derived` proof was built by this node
+/// (`ChildDeriveJob`), blaming no one.
 public struct ChildProofJob: Sendable {
     public let childCID: String
     public let block: Block?
@@ -84,6 +80,32 @@ public struct ChildProofJob: Sendable {
     public static func id(of proof: ChildBlockProof) -> String? {
         guard let bytes = try? proof.serialize() else { return nil }
         return "\(UInt256.hash(bytes))"
+    }
+}
+
+/// The proofs one step took from peers, checked together in one job off
+/// the step (geth's `VerifyHeaders` checks a batch of headers off its import
+/// loop), whose answers apply in one step: one persist for the page.
+public struct ChildProofBatch: Sendable {
+    public let jobs: [ChildProofJob]
+
+    /// Each check, its block read through `stored` when the job carries
+    /// none; nil when that block is not held (no verdict, no blame).
+    public func run(stored: (String) -> Block?) -> [ChildProofAnswer] {
+        jobs.map { job in
+            ChildProofAnswer(job: job, result: (job.block ?? stored(job.childCID)).map(job.run))
+        }
+    }
+}
+
+/// One check's answer: its result, or nil when its block was not held.
+public struct ChildProofAnswer: Sendable {
+    public let job: ChildProofJob
+    public let result: Result<VerifiedChildEvidence, ChildProofVerificationFailure>?
+
+    public init(job: ChildProofJob, result: Result<VerifiedChildEvidence, ChildProofVerificationFailure>?) {
+        self.job = job
+        self.result = result
     }
 }
 
@@ -158,12 +180,18 @@ public struct AwaitingChildProof: Sendable {
     var source: PeerID? { announcers.first }
 }
 
-/// A child level's proof work: one FIFO of unchecked proofs and the checks
-/// in flight.
+/// A child level's proof work: the headers awaiting a proof, the peers'
+/// proofs in a check, and the derivations in flight.
 public struct ChildProofSync: Sendable {
     public internal(set) var awaiting: [String: AwaitingChildProof] = [:]
-    public internal(set) var queued: [QueuedChildProof] = []
-    public internal(set) var verifying: [ChildProofKey: QueuedChildProof] = [:]
+    /// Peers' proofs in a verify job: a check in flight still answers when
+    /// its peer is gone (a check is the proof's verdict, not its sender's).
+    public private(set) var verifying: [ChildProofKey: QueuedChildProof] = [:]
+    /// What `verifying` holds, kept with it: its bytes, its checks per
+    /// block, and its (block, root) pairs.
+    public private(set) var verifyingBytes = 0
+    private var checksOf: [String: Int] = [:]
+    private var checkedRoots: [[String]: Int] = [:]
     var sequence: UInt64 = 0
     /// Derivations in flight, counted by the block derived (a waiting
     /// header with one is never evicted). Soft: in memory only, gone on
@@ -173,8 +201,29 @@ public struct ChildProofSync: Sendable {
     public init() {}
 
     func holds(_ cid: String) -> Bool {
-        queued.contains { $0.cid == cid } || verifying.keys.contains { $0.childCID == cid }
-            || deriving[cid] != nil
+        checksOf[cid] != nil || deriving[cid] != nil
+    }
+
+    /// Whether a peer's proof of `root` at `cid` is in a check.
+    func checking(_ cid: String, root: String) -> Bool {
+        checkedRoots[[cid, root]] != nil
+    }
+
+    mutating func startCheck(_ proof: QueuedChildProof) {
+        verifying[proof.key] = proof
+        verifyingBytes += proof.bytes
+        checksOf[proof.cid, default: 0] += 1
+        checkedRoots[[proof.cid, proof.proof.rootCID], default: 0] += 1
+    }
+
+    mutating func endCheck(_ key: ChildProofKey) -> QueuedChildProof? {
+        guard let proof = verifying.removeValue(forKey: key) else { return nil }
+        verifyingBytes -= proof.bytes
+        let count = checksOf[proof.cid] ?? 1
+        checksOf[proof.cid] = count == 1 ? nil : count - 1
+        let pair = [proof.cid, proof.proof.rootCID], roots = checkedRoots[pair] ?? 1
+        checkedRoots[pair] = roots == 1 ? nil : roots - 1
+        return proof
     }
 
     mutating func startDeriving(_ child: String) {
@@ -184,14 +233,6 @@ public struct ChildProofSync: Sendable {
     mutating func finishDeriving(_ child: String) {
         guard let count = deriving[child] else { return }
         deriving[child] = count == 1 ? nil : count - 1
-    }
-
-    /// Forget the proofs `peer` sent that are not yet checked. One in flight
-    /// keeps its slot and its answer counts: a check is the proof's verdict,
-    /// not its sender's, and the shell runs it anyway, so `maxChecks` bounds
-    /// the checks running however often peers come and go.
-    mutating func purge(_ peer: PeerID) {
-        queued.removeAll { $0.source == peer }
     }
 }
 
@@ -232,7 +273,7 @@ extension ChainCore {
             if held.children == nil, let children = entry.children { held.children = children }
             if held.spec == nil { held.spec = Self.bound(entry.spec, by: entry.block) }
             sync.proofs.awaiting[cid] = held
-            if let peer { offer(entry.proofs, cid: cid, from: peer) }
+            if let peer { offer(entry.proofs, cid: cid, from: peer, &turn) }
             return
         }
         let wanted = sync.pending.childrenOf[cid] != nil
@@ -246,11 +287,11 @@ extension ChainCore {
             announcers: peer.map { [$0] } ?? [], sequence: sync.proofs.sequence
         )
         arrived.append(cid)
-        if let peer { offer(entry.proofs, cid: cid, from: peer) }
+        if let peer { offer(entry.proofs, cid: cid, from: peer, &turn) }
     }
 
-    /// Room for one more waiting header: evict the oldest with no proof
-    /// queued or in flight, or refuse.
+    /// Room for one more waiting header: evict the oldest with no proof in a
+    /// check and no derivation in flight, or refuse.
     mutating func makeRoomToAwait() -> Bool {
         guard sync.proofs.awaiting.count >= proofConfig.maxAwaiting else { return true }
         guard let victim = sync.proofs.awaiting.values
@@ -260,29 +301,52 @@ extension ChainCore {
         return true
     }
 
-    /// Queue each new proof (by content) of a waiting, pending or weighed
-    /// header, up to `maxPerHeader` from one header, within the queue's byte
-    /// budget; over it, a proof is dropped without blame, taken again only
-    /// if a peer sends it again. Checks start in `proofWork`.
-    mutating func offer(_ proofs: [ChildBlockProof], cid: String, from source: PeerID) {
+    /// Check each new proof (by content) of a waiting, pending or weighed
+    /// header, up to `maxPerHeader` from one header, within the operator's
+    /// byte budget for proofs in a check; over it, a proof is dropped without
+    /// blame, taken again only if a peer sends it again. A proof whose grind
+    /// a derivation credits instead (`derives`) is not checked. The step's
+    /// checks run as one job (`finish`).
+    mutating func offer(_ proofs: [ChildBlockProof], cid: String, from source: PeerID, _ turn: inout Turn) {
         // Work crediting a block beyond the finality window is declined.
         if pastFinality(cid) { return }
         // Grinds not yet credited first, so a header served again with the
         // same proofs offers the ones a cap left out.
         var fresh: [ChildBlockProof] = []
-        for proof in proofs where !credits(proof.rootCID, at: cid) { fresh.append(proof) }
-        var held = sync.proofs.queued.reduce(0) { $0 + $1.bytes }
-            + sync.proofs.verifying.values.reduce(0) { $0 + $1.bytes }
+        for proof in proofs where !credits(proof.rootCID, at: cid) && !derives(proof.rootCID, at: cid) {
+            fresh.append(proof)
+        }
+        var held = sync.proofs.verifyingBytes
         for proof in fresh.prefix(proofConfig.maxPerHeader) {
             guard let bytes = try? proof.serialize(), bytes.count <= proofConfig.maxProofBytes else { continue }
             let id = "\(UInt256.hash(bytes))"
             let queued = QueuedChildProof(cid: cid, proof: proof, id: id, source: source, bytes: bytes.count)
-            guard sync.proofs.verifying[queued.key] == nil,
-                  !sync.proofs.queued.contains(where: { $0.key == queued.key }),
-                  !credits(proof.rootCID, at: cid) else { continue }
+            guard sync.proofs.verifying[queued.key] == nil else { continue }
             guard held + queued.bytes <= proofConfig.maxQueuedBytes else { continue }
             held += queued.bytes
-            sync.proofs.queued.append(queued)
+            sync.proofs.startCheck(queued)
+            turn.checks.append(ChildProofJob(
+                childCID: cid,
+                block: sync.proofs.awaiting[cid]?.block ?? sync.pending.entries[cid]?.block,
+                proof: proof, proofID: id, chainPath: chainPath
+            ))
+        }
+    }
+
+    /// Whether a derivation credits `grind` at `cid` (§4.2 of the sync
+    /// design: work comes from the parent once it has weighed the carrier):
+    /// a parent-level block committing `cid` holds that grind, and `cid`'s
+    /// derivation is in flight or is issued at the end of this step (it
+    /// arrived in it). A derived proof and a peer's proof of one grind at
+    /// one block are the same path from the same root, so they verify
+    /// alike; a peer's is checked only when no derivation will answer (one
+    /// that ran and credited nothing, for content it could not read, leaves
+    /// the peer's to be checked when it is sent again).
+    func derives(_ grind: String, at cid: String) -> Bool {
+        guard let parentTree, sync.proofs.deriving[cid] != nil || arrived.contains(cid) else { return false }
+        return parentTree.committers(of: cid, directory: chainPath[chainPath.count - 1]).contains { carrier in
+            guard let meta = parentTree.getConsensusBlock(hash: carrier) else { return false }
+            return meta.workContributions[grind] != nil && !meta.attributedRuns.contains(grind)
         }
     }
 
@@ -291,16 +355,29 @@ extension ChainCore {
             || (tree.contains(blockHash: cid) && tree.workContribution(id: grind, at: cid) != nil)
     }
 
-    /// A peer is gone (for any reason): its announcements end, and its
-    /// proofs not yet checked are forgotten (`ChildProofSync.purge`).
+    /// A peer is gone (for any reason): its announcements end. Its proofs in
+    /// a check still answer.
     mutating func dropProofSource(_ peer: PeerID) {
         for cid in sync.proofs.awaiting.keys.sorted() {
             sync.proofs.awaiting[cid]?.announcers.removeAll { $0 == peer }
         }
-        sync.proofs.purge(peer)
     }
 
     // MARK: - Results
+
+    /// A verify job's answers, applied in one step: each as `proofVerified`,
+    /// one whose block was not held freeing its place, blaming no one. A
+    /// failing proof disconnects its sender; the page's other proofs that
+    /// verify still credit, since each verdict is its proof's own.
+    mutating func proofsVerified(_ answers: [ChildProofAnswer], _ turn: inout Turn) {
+        for answer in answers {
+            guard let result = answer.result else {
+                _ = sync.proofs.endCheck(answer.job.key)
+                continue
+            }
+            proofVerified(answer.job, result, &turn)
+        }
+    }
 
     /// A proof that weighs credits its grind: at a weighed block at once
     /// (persisted, indexed, relayed), on a pending header when it is weighed,
@@ -315,7 +392,7 @@ extension ChainCore {
     ) {
         var source: PeerID?
         if !job.derived {
-            guard let checked = sync.proofs.verifying.removeValue(forKey: job.key) else { return }
+            guard let checked = sync.proofs.endCheck(job.key) else { return }
             source = checked.source
         }
         let cid = job.childCID
@@ -362,32 +439,6 @@ extension ChainCore {
         dirty(cid, &turn)
     }
 
-    // MARK: - Each step
-
-    /// Start queued checks in arrival order while slots are free, dropping
-    /// proofs whose block is gone or already credited by that root as they
-    /// come up: a step looks at no more of the queue than it starts. The
-    /// evidence index is never asked: it holds only proofs this level
-    /// credited, written with the facts that credit them, so a proof comes
-    /// from a peer or a derivation.
-    mutating func proofWork(_ turn: inout Turn) {
-        var taken = 0
-        while taken < sync.proofs.queued.count, sync.proofs.verifying.count < proofConfig.maxChecks {
-            let proof = sync.proofs.queued[taken]
-            taken += 1
-            let known = sync.proofs.awaiting[proof.cid] != nil || sync.pending.entries[proof.cid] != nil
-                || tree.contains(blockHash: proof.cid)
-            guard known, !credits(proof.proof.rootCID, at: proof.cid) else { continue }
-            sync.proofs.verifying[proof.key] = proof
-            turn.effects.append(.verifyProof(ChildProofJob(
-                childCID: proof.cid,
-                block: sync.proofs.awaiting[proof.cid]?.block ?? sync.pending.entries[proof.cid]?.block,
-                proof: proof.proof, proofID: proof.id, chainPath: chainPath
-            )))
-        }
-        sync.proofs.queued.removeFirst(taken)
-    }
-
     // MARK: - Weighing
 
     /// Weigh a pending child header with its smallest-hash grind: a genesis
@@ -410,8 +461,8 @@ extension ChainCore {
     }
 
     /// Credit a newly weighed child header's other grinds, one per root, and
-    /// return every proof it now weighs by, to index and log. Its queued
-    /// proofs are checked later against the weighed block.
+    /// return every proof it now weighs by, to index and log. Its proofs in a
+    /// check answer against the weighed block.
     @discardableResult
     mutating func creditRemainingProofs(of header: PendingHeader, _ turn: inout Turn) -> [ChildBlockProof] {
         guard !isRoot else { return [] }
@@ -478,7 +529,6 @@ extension ChainCore {
         turn.facts += update.batches
         if let proof { turn.indexed.append(StoredProof(childCID: cid, proof: proof.proof)) }
         drain(&turn)
-        if !isRoot { proofWork(&turn) }
         turn.own = true
         return finish(turn)
     }

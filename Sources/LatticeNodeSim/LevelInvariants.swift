@@ -47,19 +47,17 @@ public enum LevelInvariants {
     }
 
     /// The checks the shell runs are the core's: at each level the peer
-    /// proof checks asked of the shell and not yet answered are exactly the
-    /// core's `verifying`, so `maxChecks` bounds what the shell runs. A
-    /// check the core forgot while the shell still ran it would be work
-    /// past the bound, its answer landing on nothing.
+    /// proof checks in verify jobs the shell has not answered are exactly
+    /// the core's `verifying`, each once, so the operator's byte budget
+    /// bounds what the shell runs. A check the core forgot while the shell
+    /// still ran it would be work past the budget, its answer landing on
+    /// nothing.
     public static func checkProofChecks(
         node: String, host: NodeCore, running: [ChainPath: [ChildProofKey: Int]]
     ) throws {
         for (path, core) in host.levels {
             let checks = running[path] ?? [:]
             let name = "\(node)\(path.dropFirst().map { "/" + $0 }.joined())"
-            if checks.values.reduce(0, +) > core.config.proofs.maxChecks {
-                throw Invariants.fail(name, "\(checks.values.reduce(0, +)) proof checks run, over maxChecks")
-            }
             if checks.values.contains(where: { $0 > 1 }) {
                 throw Invariants.fail(name, "a proof check runs twice")
             }
@@ -221,10 +219,7 @@ public enum LevelInvariants {
         }
         // The plain proof caps.
         let proofs = core.sync.proofs, bounds = core.config.proofs
-        let held = proofs.queued + Array(proofs.verifying.values)
-        if proofs.verifying.count > bounds.maxChecks {
-            throw fail("proof checks in flight exceed their bounds")
-        }
+        let held = Array(proofs.verifying.values)
         if proofs.awaiting.count > bounds.maxAwaiting {
             throw fail("\(proofs.awaiting.count) headers await a proof, over the bound")
         }
@@ -232,11 +227,15 @@ public enum LevelInvariants {
             throw fail("a proof larger than the per-proof bound is held")
         }
         if held.reduce(0, { $0 + $1.bytes }) > bounds.maxQueuedBytes {
-            throw fail("proofs queued or in flight exceed their byte budget")
+            throw fail("proofs in a check exceed their byte budget")
         }
-        // A gone peer's checks in flight still answer; its others are gone.
-        for peer in Set(proofs.queued.compactMap(\.source)) where core.sync.peers[peer] == nil {
-            throw fail("proofs of the gone peer \(peer) are still queued")
+        // Whole-chain top-down: a child level asks its peers for nothing
+        // while its parent level has not caught up.
+        if path.count > 1, host.levels[Array(path.dropLast())]?.synced == false,
+           core.sync.peers.values.contains(where: {
+               $0.stream != nil || $0.data != nil || $0.parentRequest != nil || !$0.holes.isEmpty
+           }) {
+            throw fail("a child level reads its peers before its parent caught up")
         }
         if core.sync.pending.entries.values.contains(where: { path.count > 1 && $0.evidence.isEmpty }) {
             throw fail("a child header with no verified work is in the pending queue")

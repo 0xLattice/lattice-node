@@ -708,6 +708,14 @@ extension NodeRuntime {
         }
     }
 
+    /// A level's proof checks of one step, in one job: each check on its
+    /// block, read from the header store when the batch carries none.
+    static func proofJob(_ batch: ChildProofBatch, at path: ChainPath, storage: NodeStorage) -> RuntimeJob {
+        RuntimeJob(path: path, tipCID: nil) {
+            [.level(path, .proofsVerified(batch.run { storage.store.header($0)?.block }))]
+        }
+    }
+
     /// The basis of a preflight or template job on `tree`, the live level's,
     /// taken when the job is spawned; nil for any other effect, or a tree
     /// made without a context.

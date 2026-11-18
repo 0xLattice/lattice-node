@@ -25,6 +25,13 @@ set, GHOST, continuity) are the architecture doc's and are checked by
 - **NODE-SEMANTICS-003.d** — A node-local failure while executing is
   retriable, never an exclusion. Pinned by
   `ChainCoreBodyTests.testALocalFailureIsNeverAnExclusion`.
+- **NODE-SEMANTICS-003.e** — A child level asks its peers for nothing (no
+  stream page, no header) while its parent level has not latched `synced`
+  (whole-chain top-down weighing); the latch is one-way. Enforced by
+  `LevelInvariants.checkLevel` ("a child level reads its peers before its
+  parent caught up"); pinned by
+  `DerivedChildGrindTests.testAChildLevelAsksItsPeersNothingWhileItsParentCatchesUpThenSyncsFully`
+  and `DerivedChildGrindTests.testAfterTheLatchANewParentBlockDoesNotPauseTheChild`.
 
 ## NODE-SEMANTICS-005 — only obtained invalid evidence is punishable
 

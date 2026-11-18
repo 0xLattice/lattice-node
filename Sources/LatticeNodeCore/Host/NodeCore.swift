@@ -141,8 +141,8 @@ extension ChainEvent {
         case .transactionsRead: "transactionsRead"
         case .parentFactsPresent: "parentFactsPresent"
         case .tick: "tick"
-        case .proofDropped: "proofDropped"
-        case .proofVerified: "proofVerified"
+        case .parentSynced: "parentSynced"
+        case .proofsVerified: "proofsVerified"
         case .derived: "derived"
         case .submitted: "submitted"
         case .mining(let event): "mining.\(traceCase(event))"
@@ -164,7 +164,7 @@ extension ChainEffect {
         case .persist: "persist"
         case .publish: "publish"
         case .wakeAt: "wakeAt"
-        case .verifyProof: "verifyProof"
+        case .verifyProofs: "verifyProofs"
         case .deriveProof: "deriveProof"
         case .workSubmitted: "workSubmitted"
         case .readTransactions: "readTransactions"
@@ -491,6 +491,7 @@ public struct NodeCore: Sendable {
         for path in ordered where path.count > 1 && turn.touched.contains(path) {
             wakeAnswered(path, &turn)
         }
+        openGates(&turn)
         touched = turn.touched
         return emit(turn)
     }
@@ -502,6 +503,19 @@ public struct NodeCore: Sendable {
         effects += turn.disconnects.sorted { $0.key < $1.key }.map { .disconnect($0.key, $0.value) }
         if let wake = turn.wake { effects.append(.wakeAt(wake)) }
         return effects
+    }
+
+    /// Whole-chain top-down: a child level reads its peers' streams only once
+    /// its parent level has caught up, a one-way latch (Bitcoin Core's
+    /// initial block download). After every step, however the parent
+    /// latched (a peer's page, a run, a connect), a child level that held
+    /// back its peers while gated reads them now. It follows live from then
+    /// on; its own children open in turn.
+    mutating func openGates(_ turn: inout Turn) {
+        for path in ordered where path.count > 1 && levels[path]?.heldBack == true
+            && levels[Array(path.dropLast())]?.synced != false {
+            run(path, .parentSynced, &turn)
+        }
     }
 
     /// Step one level. A level that executed a block wakes each child
@@ -516,7 +530,11 @@ public struct NodeCore: Sendable {
     mutating func run(_ path: ChainPath, _ event: ChainEvent, _ turn: inout Turn) {
         guard var core = levels.removeValue(forKey: path) else { return }
         turn.touched.insert(path)
-        let effects = core.step(event, now: turn.now, parent: path.count > 1 ? levels[Array(path.dropLast())]?.tree : nil)
+        let parent = path.count > 1 ? Array(path.dropLast()) : nil
+        let effects = core.step(
+            event, now: turn.now,
+            parent: parent.flatMap { levels[$0]?.tree }, parentSynced: parent.flatMap { levels[$0]?.synced } ?? true
+        )
         turn.weighed[path, default: []].formUnion(core.weighed)
         turn.arrived[path, default: []].formUnion(core.arrived)
         levels[path] = consume core

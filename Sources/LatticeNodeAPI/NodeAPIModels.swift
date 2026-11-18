@@ -443,8 +443,7 @@ public struct NodeSyncStatus: Codable, Sendable, Equatable {
     public var pendingHeaders = 0
     /// Child-chain headers waiting for a proof that weighs them.
     public var headersAwaitingProof = 0
-    /// Proof checks waiting for a worker, and running.
-    public var proofChecksQueued = 0
+    /// Peers' proofs in a check (one job per page of headers).
     public var proofChecksRunning = 0
     /// The blocks the body window asks to execute next: every fork child on
     /// the act-on path and the best chain's look-ahead.
@@ -469,7 +468,6 @@ public struct NodeSyncStatus: Codable, Sendable, Equatable {
         func count(_ key: CodingKeys) throws -> Int { try values.decodeIfPresent(Int.self, forKey: key) ?? 0 }
         pendingHeaders = try count(.pendingHeaders)
         headersAwaitingProof = try count(.headersAwaitingProof)
-        proofChecksQueued = try count(.proofChecksQueued)
         proofChecksRunning = try count(.proofChecksRunning)
         bodyWindow = try count(.bodyWindow)
         bodiesRequested = try count(.bodiesRequested)

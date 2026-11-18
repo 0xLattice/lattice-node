@@ -56,11 +56,12 @@ public enum ChainEvent: Sendable {
     /// connects lacked.
     case parentFactsPresent([String])
     case tick
-    /// A child level: a `verifyProof` job the shell could not run (its block
-    /// is not held): its slot frees, blaming no one.
-    case proofDropped(ChildProofJob)
-    /// A child level: a `verifyProof` job finished.
-    case proofVerified(ChildProofJob, Result<VerifiedChildEvidence, ChildProofVerificationFailure>)
+    /// A child level: its parent level latched `synced`, so this level's
+    /// gate opens for good and every peer's stream is read.
+    case parentSynced
+    /// A child level: a `verifyProofs` job finished, every check answered
+    /// (nil for one whose block was not held: no verdict, no blame).
+    case proofsVerified([ChildProofAnswer])
     /// A child level: a `deriveProof` job finished, every time it ran.
     case derived(ChildDerivation)
     /// A child level: a header submitted on this node (its author's push),
@@ -138,9 +139,10 @@ public enum ChainEffect: Sendable {
     case persist(ChainBatch)
     case publish(ChainSnapshot)
     case wakeAt(Int64)
-    /// A child level: run `ChildBlockProof.verifySecuringWork`, a pure job,
-    /// and answer `proofVerified`.
-    case verifyProof(ChildProofJob)
+    /// A child level: run every check of the batch (`verifySecuringWork`,
+    /// pure) in one job off the step, reading from the store a block the
+    /// batch does not carry, and answer `proofsVerified` once.
+    case verifyProofs(ChildProofBatch)
     /// A child level: derive a held block's proofs from a parent-level
     /// block that commits it, from this node's own content only, and answer
     /// `derived` (`ChildDeriveJob`).
@@ -342,6 +344,15 @@ public struct ChainCore: Sendable {
     /// committers make a header with no proofs worth taking (`awaitProof`).
     /// Never held past the step.
     var parentTree: ChainTree?
+    /// A child level, within one step only: its parent level has not caught
+    /// up (`synced`). Whole-chain top-down: a gated level reads none of its
+    /// peers' streams, so it weighs, fetches and executes nothing from them;
+    /// its cursors stay where they were. The parent's latch opens it for
+    /// good (`parentSynced`). Never held past the step.
+    var gated = false
+    /// A child level stepped while gated: its peers were held back, and are
+    /// read once the parent has latched (`parentSynced`).
+    public internal(set) var heldBack = false
     /// The child directories this level's executed blocks commit: built from
     /// the held tree, then grown by every block that executes valid.
     public let executedChildren = ExecutedChildren()
@@ -445,16 +456,24 @@ public struct ChainCore: Sendable {
         )
     }
 
-    /// One event. A child level is handed its parent level's tree for the
-    /// step alone (`parentTree`).
-    public mutating func step(_ event: ChainEvent, now: Int64, parent: ChainTree? = nil) -> [ChainEffect] {
+    /// One event. A child level is handed its parent level's tree, and
+    /// whether that level has caught up, for the step alone (`parentTree`,
+    /// `gated`).
+    public mutating func step(
+        _ event: ChainEvent, now: Int64, parent: ChainTree? = nil, parentSynced: Bool = true
+    ) -> [ChainEffect] {
         // A peer's transaction is ignored until the level has caught up
         // (`synced`), as Bitcoin Core ignores `tx` during initial block
         // download: its verdict would be read on a tip about to move. Never
         // blamed.
         if case .mining(.transactionReceived(_, origin: .peer)) = event, !synced { return [] }
         parentTree = parent
-        defer { parentTree = nil }
+        gated = !parentSynced
+        if gated { heldBack = true }
+        defer {
+            parentTree = nil
+            gated = false
+        }
         var turn = Turn(now: now)
         weighed = []
         arrived = []
@@ -496,10 +515,11 @@ public struct ChainCore: Sendable {
             parentFactsPresent(blocks)
         case .tick:
             tick(&turn)
-        case .proofDropped(let job):
-            sync.proofs.verifying.removeValue(forKey: job.key)
-        case .proofVerified(let job, let result):
-            proofVerified(job, result, &turn)
+        case .parentSynced:
+            heldBack = false
+            for peer in sync.peers.keys.sorted() { requestStream(from: peer, &turn) }
+        case .proofsVerified(let answers):
+            proofsVerified(answers, &turn)
         case .derived(let derivation):
             // Applied even when it outlived its count (an unhost between):
             // the job is pure and credit idempotent.
@@ -513,7 +533,6 @@ public struct ChainCore: Sendable {
             turn.mining += mining.step(event, now: turn.now)
         }
         drain(&turn)
-        if !isRoot { proofWork(&turn) }
         // Evict once the step's headers are processed, so a header weighed
         // this step (a promoted one whose parent is weighed) has already left
         // the queue: only what still waits is evicted, largest hash first.
@@ -536,6 +555,8 @@ public struct ChainCore: Sendable {
         var effects: [ChainEffect] = []
         /// Child proofs this step credited, to index.
         var indexed: [StoredProof] = []
+        /// Peers' proofs this step took, checked as one job (`finish`).
+        var checks: [ChildProofJob] = []
         /// Stream cursors this step moved.
         var cursors: [String: StreamCursor] = [:]
         var mining: [MiningEffect] = []
@@ -606,6 +627,7 @@ public struct ChainCore: Sendable {
             }
         }
         effects += turn.effects
+        if !turn.checks.isEmpty { effects.append(.verifyProofs(ChildProofBatch(jobs: turn.checks))) }
         effects += turn.mining.map { .mining($0) }
         sync.compact()
         // Holes left unasked are asked again on a tick.
@@ -744,9 +766,10 @@ public struct ChainCore: Sendable {
     // MARK: - Streams
 
     /// Ask `peer` for its log after what we took of it (on a new session,
-    /// after our cursor in it; a fresh peer: 0).
+    /// after our cursor in it; a fresh peer: 0). Never while gated: the
+    /// parent's latch asks every peer (`parentSynced`).
     private mutating func requestStream(from peer: PeerID, _ turn: inout Turn) {
-        guard let state = sync.peers[peer], state.stream == nil else { return }
+        guard !gated, let state = sync.peers[peer], state.stream == nil else { return }
         let requestID = nextRequestID()
         sync.peers[peer]?.stream = InFlightStream(requestID: requestID, deadline: turn.now + config.headersTimeout)
         sync.peers[peer]?.more = false
@@ -762,8 +785,10 @@ public struct ChainCore: Sendable {
     /// taken in order from the next position while the peer's holes (taken,
     /// not yet applied) fit in a page; a gap, a full page or `hasMore` has
     /// the next pull continue it.
+    /// Nothing is taken while gated: no page was asked, and a push is read
+    /// again from the cursor once the gate opens.
     private mutating func receive(_ page: StreamPage, from peer: PeerID, _ turn: inout Turn) {
-        guard let state = sync.peers[peer] else { return }
+        guard !gated, let state = sync.peers[peer] else { return }
         let reset = sync.cursors[peer.key]?.logID != page.logID
         if page.requestID != 0 {
             guard state.stream?.requestID == page.requestID else { return }
@@ -834,8 +859,7 @@ public struct ChainCore: Sendable {
                 && sync.proofs.awaiting[entry.block] == nil && !sync.declined.contains(entry.block)
         case .proof:
             return !applied(entry) && sync.pending.entries[entry.block]?.evidence[entry.cid] == nil
-                && !sync.proofs.verifying.values.contains { $0.cid == entry.block && $0.proof.rootCID == entry.cid }
-                && !sync.proofs.queued.contains { $0.cid == entry.block && $0.proof.rootCID == entry.cid }
+                && !sync.proofs.checking(entry.block, root: entry.cid)
         }
     }
 
@@ -846,9 +870,9 @@ public struct ChainCore: Sendable {
     /// page is pulled, once the holes leave room for half a page: a page is
     /// served whole, and a pull with room for a few entries would take those
     /// few and drop the rest (TCP's silly-window avoidance). Holes still
-    /// lacking are asked again on a tick.
+    /// lacking are asked again on a tick. Nothing while gated.
     mutating func pump(_ peer: PeerID, _ turn: inout Turn, again: Bool = false) {
-        guard let state = sync.peers[peer], state.data == nil, sync.cursors[peer.key] != nil else { return }
+        guard !gated, let state = sync.peers[peer], state.data == nil, sync.cursors[peer.key] != nil else { return }
         let inFlight = Set(sync.peers.values.flatMap { $0.data?.cids ?? [] })
         let requested = state.holes.last.map { Swift.max(state.requested, $0.position) } ?? state.requested
         var seen = Set<String>()
@@ -960,7 +984,7 @@ public struct ChainCore: Sendable {
             return nil
         }
         if tree.contains(blockHash: cid) {
-            if !isRoot, let peer { offer(entry.proofs, cid: cid, from: peer) }
+            if !isRoot, let peer { offer(entry.proofs, cid: cid, from: peer, &turn) }
             return cid
         }
         if sync.declined.contains(cid) { return cid }
@@ -994,7 +1018,7 @@ public struct ChainCore: Sendable {
             if held.spec == nil, let spec = Self.bound(entry.spec, by: entry.block) {
                 sync.pending.entries[cid]?.spec = spec
             }
-            if !isRoot, let peer { offer(entry.proofs, cid: cid, from: peer) }
+            if !isRoot, let peer { offer(entry.proofs, cid: cid, from: peer, &turn) }
             dirty(cid, &turn)
             return cid
         }

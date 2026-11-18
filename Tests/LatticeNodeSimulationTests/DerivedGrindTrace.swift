@@ -40,8 +40,7 @@ struct GrindTraceFixture {
 /// `trace-<name>.json` under `DERIVED_TRACE_DIR` (none written without it).
 ///
 /// One host step is atomic in the code and may be several model actions
-/// (a peer proof's check, then a purge as its peer is disconnected; a
-/// pending eviction beside a promotion): it becomes those events in an
+/// (a page's peer proof checks; a pending eviction beside a promotion): it becomes those events in an
 /// order the model can take, and only the last carries the state after.
 final class GrindTracer: @unchecked Sendable {
     nonisolated(unsafe) static var open: [GrindTracer] = []
@@ -140,7 +139,7 @@ final class GrindTracer: @unchecked Sendable {
         for carrier in fixture.carriers where snap.cgr[carrier.label] == nil { snap.cgr[carrier.label] = [] }
         guard let level = core.levels[path] else { return snap }
         let proofs = level.sync.proofs
-        let held = proofs.queued.map { ($0.key, $0.proof) } + proofs.verifying.map { ($0.key, $0.value.proof) }
+        let held = proofs.verifying.map { ($0.key, $0.value.proof) }
         for child in fixture.children {
             let cid = child.cid
             var credited: [String] = []
@@ -185,7 +184,8 @@ final class GrindTracer: @unchecked Sendable {
         }
 
         var main: [String: Any]?
-        var checkedKey: ChildProofKey?
+        var checked: [[String: Any]] = []
+        var checkedKeys: Set<ChildProofKey> = []
         var clears = false
         var gossiped: String?
         if booting {
@@ -205,10 +205,13 @@ final class GrindTracer: @unchecked Sendable {
                     anomalies.append("\(name): answer of a job not in flight")
                 }
             }
-        case .level(let at, .proofVerified(let job, _)) where at == path && !job.derived:
-            if s0.peerKeys.contains(job.key), let child = childLabel[job.childCID] {
-                main = ["kind": "check", "child": child, "proof": label(of: job.proof)]
-                checkedKey = job.key
+        case .level(let at, .proofsVerified(let answers)) where at == path:
+            // One verify job: each of its checks a model check, in order.
+            for answer in answers {
+                let job = answer.job
+                guard s0.peerKeys.contains(job.key), let child = childLabel[job.childCID] else { continue }
+                checked.append(["kind": "check", "child": child, "proof": label(of: job.proof)])
+                checkedKeys.insert(job.key)
             }
         case .level(let at, .submitted(let entry)) where at == path:
             if let cid = try? BlockHeader(node: entry.block).rawCID, let child = childLabel[cid] {
@@ -264,22 +267,15 @@ final class GrindTracer: @unchecked Sendable {
             }
         }
         if let main { sub.append(main) }
+        sub += checked
         if !clears {
-            // Peer proofs gone without their check answering: a purge when a
-            // peer left this step (logging what is held after it: those in a
-            // check and other peers' queued proofs), else
-            // each dropped unchecked (block gone or already credited), which
-            // the model checks to no effect.
-            let gone = s0.peerKeys.subtracting(s1.peerKeys).subtracting(checkedKey.map { [$0] } ?? [])
-            let left = effects.contains { if case .disconnect = $0 { return true }; return false }
-                || { if case .peerGone = event { return true }; return false }()
-            if !gone.isEmpty, left {
-                sub.append(["kind": "purge", "kept": s1.peerQ])
-            } else {
-                for key in gone.sorted() {
-                    guard let child = childLabel[key.childCID] else { continue }
-                    sub.append(["kind": "check", "child": child, "proof": s0.peerLabels[key] ?? "bogus"])
-                }
+            // Peer proofs gone without a verdict (their block not held, or
+            // already credited): each a check the model takes to no effect.
+            // A gone peer's checks still answer, so nothing is purged.
+            let gone = s0.peerKeys.subtracting(s1.peerKeys).subtracting(checkedKeys)
+            for key in gone.sorted() {
+                guard let child = childLabel[key.childCID] else { continue }
+                sub.append(["kind": "check", "child": child, "proof": s0.peerLabels[key] ?? "bogus"])
             }
             // A block promoted and evicted in one step.
             if gossiped == nil {
