@@ -352,8 +352,8 @@ headers waiting for a proof that weighs them), `proofChecksQueued` and
 `proofChecksRunning`, `bodyWindow` (the blocks it asks to execute next: every
 fork child on the act-on path and the best chain's look-ahead),
 `bodiesRequested` (asked of peers, not arrived), `bodiesUnavailable` (window
-blocks whose last fetch failed), `bodiesParked` (waiting before they are asked
-for again) and `awaitingParentFacts` (a connect needs a parent-chain fact not
+blocks whose last fetch failed), `bodiesParked` (failed at least once, still in
+the window) and `awaitingParentFacts` (a connect needs a parent-chain fact not
 executed yet). `/status?chainPath=` answers for a hosted level, 404 for one
 not hosted; a hosted child's answer carries no `templateDigest` (the digest is
 the root's).
