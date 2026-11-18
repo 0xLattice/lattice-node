@@ -48,7 +48,9 @@ final class HeldLevelTemplateTests: XCTestCase {
         hosting alpha: Bool = false,
         creator: Bool = true,
         coreConfig: ChainCoreConfig = ChainCoreConfig(),
-        connectBatch: Int = NodeConfiguration.defaultConnectBatch,
+        // One block per connect job: these tests hold a connect at a
+        // gate and step it a block at a time, which batching would merge.
+        connectBatch: Int = 1,
         observe: NodeRuntime.JobObserver? = nil
     ) async throws -> (runtime: NodeRuntime, endpoint: PeerEndpoint, storage: NodeStorage) {
         let port = NetworkTransportTestPorts.allocate()
@@ -164,11 +166,7 @@ final class HeldLevelTemplateTests: XCTestCase {
         let miner = try await node(keyByte: 0x87)
         for _ in 0..<2 { _ = try await miner.runtime.mineBlock() }
         let gate = Gate()
-        // One block per connect job, so each step executes one block of the
-        // backlog: batched, blocks 4-6 would connect in one step.
-        let follower = try await node(
-            keyByte: 0x88, peers: [miner.endpoint], connectBatch: 1, observe: Self.holding(Self.nexus, at: gate)
-        )
+        let follower = try await node(keyByte: 0x88, peers: [miner.endpoint], observe: Self.holding(Self.nexus, at: gate))
         try await eventually("the follower is synced") { follower.runtime.published.value?.actOnHeight == 2 }
         let synced = await follower.runtime.status().templateDigest
 
