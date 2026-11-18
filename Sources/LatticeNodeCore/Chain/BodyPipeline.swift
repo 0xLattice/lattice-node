@@ -367,8 +367,8 @@ extension ChainCore {
 
     /// The parent fact a child-level block's execution needs, from its
     /// header and its predecessor's; nil when it needs none (it names no
-    /// parent state, which its connect judges) or its or its predecessor's
-    /// header is not held (its connect judges then too).
+    /// parent state, which its connect judges) or the header of the block
+    /// or of its predecessor is not held (its connect judges then too).
     func parentFact(of cid: String) -> CrossChainEvidenceRequirement? {
         guard let to = tree.headerSnapshot(of: cid)?.parentStateCID else { return nil }
         let empty = LatticeState.emptyHeader.rawCID
