@@ -900,10 +900,12 @@ extension NodeRuntime {
     /// transaction (`storeValidBlocks`), and for each valid block the IDs of
     /// the transactions it carries, read from the body it executed (the
     /// index storing it walked, or when the index names a transaction by a
-    /// non-standard CID, the body). A valid block whose body was not stored
-    /// is reported not stored and ends the job: it is not connected
-    /// (durable before visible). The verdicts come back as one event: the
-    /// step that applies them commits them once.
+    /// non-standard CID, the body). A valid block whose body could not be
+    /// read to store it is reported not stored and ends the job: it is not
+    /// connected (durable before visible). The store's write failing is a
+    /// local fault, not a body unavailable: `failStop` (Bitcoin's
+    /// `AbortNode`), and nothing of the job is reported. The verdicts come
+    /// back as one event: the step that applies them commits them once.
     /// Execution is the node's own work: what this store lacks is read from
     /// peers. A child level's parent fact is read from the live parent level
     /// (`ParentContinuity`).
@@ -913,6 +915,7 @@ extension NodeRuntime {
         levels: LiveLevels,
         storage: NodeStorage,
         remote: IvyRootContentSource? = nil,
+        failStop: @escaping @Sendable (any Error) -> Void,
         store: @escaping StoreValidBlocks = { try await $0.storeValidBlocks($1, at: $2, from: $3) }
     ) -> RuntimeJob {
         RuntimeJob(path: path, tipCID: nil, kind: .connect) {
@@ -930,7 +933,8 @@ extension NodeRuntime {
                     do {
                         carried = try await store(storage, valid, path, reads)
                     } catch {
-                        storage.syncTrace("bodies of \(valid.map(\.cid)) not stored: \(error)")
+                        failStop(error)
+                        return []
                     }
                 }
                 var results: [ConnectResult] = []

@@ -233,7 +233,8 @@ extension NodeStorage {
     /// block whose body or witness cannot be read ends the run: it and the
     /// blocks after it are not stored, and not in the result, so the job
     /// does not connect them (geth's `insertChain` stops at the first block
-    /// it cannot write). `decoded` is the
+    /// it cannot import). Throws only when the store's write fails.
+    /// `decoded` is the
     /// block's node as its connect decoded it (`ConnectVerdict.connectedBlock`),
     /// or nil to resolve it through `fetcher`.
     nonisolated func storeValidBlocks(

@@ -3,6 +3,7 @@ import Lattice
 @testable import LatticeNodeCore
 import XCTest
 @testable import LatticeNode
+import Synchronization
 import cashew
 
 /// Batched execution through the runtime, over a real `NodeStorage`: a
@@ -69,6 +70,7 @@ final class BatchedConnectRuntimeTests: XCTestCase {
         /// Run the first held job as the worker does, storing its valid
         /// blocks through `store`; its events, unapplied.
         mutating func runHeld(
+            failStop: @escaping @Sendable (any Error) -> Void = { XCTFail("fail-stop: \($0)") },
             store: @escaping NodeRuntime.StoreValidBlocks = { try await $0.storeValidBlocks($1, at: $2, from: $3) }
         ) async -> [NodeEvent] {
             guard !held.isEmpty else {
@@ -78,7 +80,8 @@ final class BatchedConnectRuntimeTests: XCTestCase {
             let jobs = held.removeFirst()
             let levels = host.levels
             return await NodeRuntime.connectJob(
-                jobs, at: host.rootPath, levels: LiveLevels { $0(levels) }, storage: storage, store: store
+                jobs, at: host.rootPath, levels: LiveLevels { $0(levels) }, storage: storage,
+                failStop: failStop, store: store
             ).run()
         }
     }
@@ -168,17 +171,38 @@ final class BatchedConnectRuntimeTests: XCTestCase {
         XCTAssertEqual(fourth.actOnTip, cids[5])
     }
 
-    /// A connect job whose storing fails: the store failing whole, or one
-    /// block's body unreadable when it is stored. The blocks before the
-    /// failed one connect; it and the job's later blocks do not, the tip
-    /// stays below it, and once its wait is over its body is asked for
-    /// again and it connects.
-    func testAStoreFailingWholeConnectsNoneOfTheJob() async throws {
-        try await assertStoreFailure { blocks, storage, path, reads in
-            throw StoreFailure()
-        } connects: { _ in nil }
+    /// The store's write failing is a local fault: the node fail-stops
+    /// (Bitcoin's `AbortNode`) with nothing of the job reported, so no
+    /// block of it connects; restarted, it runs the job again.
+    func testAStoreWriteFailingFailStopsWithNothingOfTheJobConnected() async throws {
+        let (genesisCID, cids): (String, [String])
+        do {
+            var first = try await boot()
+            genesisCID = first.actOnTip
+            cids = try await mine(3, on: try await genesis(first), &first).map { try BlockHeader(node: $0).rawCID }
+        }
+        do {
+            var process = try await boot()
+            try await process.deliver()
+            let stopped = Stopped()
+            let events = await process.runHeld(failStop: { stopped.record($0) }) { _, _, _, _ in throw StoreFailure() }
+            XCTAssertTrue(events.isEmpty, "nothing of the job is reported")
+            XCTAssertTrue(stopped.called, "the write failing fail-stops the node")
+            XCTAssertEqual(process.actOnTip, genesisCID)
+            let executed = try await process.storage.store.hasExecutedBlock(cids[0], at: ["Nexus"])
+            XCTAssertFalse(executed)
+        }
+        var restarted = try await boot()
+        XCTAssertEqual(restarted.actOnTip, genesisCID)
+        try await restarted.deliver()
+        for event in await restarted.runHeld() { try await restarted.step(event) }
+        XCTAssertEqual(restarted.actOnTip, cids[2])
     }
 
+    /// A block whose body cannot be read when it is stored ends its job at
+    /// it: the blocks before it connect; it and the job's later blocks do
+    /// not, the tip stays below it, and once its wait is over its body is
+    /// asked for again and it connects.
     func testABlockWhoseBodyCannotBeStoredEndsTheJobAtIt() async throws {
         try await assertStoreFailure { cids in
             { storage, blocks, path, reads in
@@ -188,6 +212,12 @@ final class BatchedConnectRuntimeTests: XCTestCase {
     }
 
     private struct StoreFailure: Error {}
+
+    private final class Stopped: Sendable {
+        private let stopped = Mutex(false)
+        func record(_: any Error) { stopped.withLock { $0 = true } }
+        var called: Bool { stopped.withLock { $0 } }
+    }
 
     /// Reads through `fetcher` except `cid`, which fails.
     private struct Failing: Fetcher {
@@ -203,13 +233,6 @@ final class BatchedConnectRuntimeTests: XCTestCase {
             guard rawCid != cid else { throw StoreFailure() }
             return try await fetcher.fetch(rawCid: rawCid)
         }
-    }
-
-    private func assertStoreFailure(
-        _ store: @escaping NodeRuntime.StoreValidBlocks,
-        connects: ([String]) -> String?
-    ) async throws {
-        try await assertStoreFailure({ _ in store }, connects: connects)
     }
 
     /// Mines three blocks, runs their one job storing through `store`
