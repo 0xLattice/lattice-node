@@ -515,7 +515,7 @@ extension ChainCore {
     /// it, as Bitcoin asks again for headers that did not connect once it
     /// has their parent.
     mutating func parentAdvanced(_ states: Set<String>, now: Int64) -> [ChainEffect] {
-        let released = Set(sync.beyondParent.filter { states.contains($0.value) }.keys)
+        let released = Set(sync.beyondParent.filter { states.contains($0.value.anchor) }.keys)
         guard !released.isEmpty else { return [] }
         for cid in released { sync.beyondParent[cid] = nil }
         var turn = Turn(now: now)

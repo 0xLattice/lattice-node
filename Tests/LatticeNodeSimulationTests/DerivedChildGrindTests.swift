@@ -47,6 +47,7 @@ final class DerivedChildGrindTests: XCTestCase {
         /// Peer proofs the host asked the shell to check, and the size of
         /// each verify job it asked for.
         var peerChecks = 0
+        var peerChecksAt: [ChainPath: Int] = [:]
         var verifyJobs: [Int] = []
         /// The persists of each step that applied verify answers.
         var answerPersists: [Int] = []
@@ -138,11 +139,21 @@ final class DerivedChildGrindTests: XCTestCase {
                                 queue.append(.received(peer, path, .headers(HeadersResponse(requestID: id, entries: entries, hasMore: false))))
                             }
                         }
+                        if case .getAncestors(let id, let cid, let max) = message, let served = serving[path]?[peer] {
+                            var entries: [HeaderEntry] = []
+                            var next: String? = cid
+                            while let at = next, let entry = served[at], entries.count < max {
+                                entries.append(entry)
+                                next = entry.block.parent?.rawCID
+                            }
+                            queue.append(.received(peer, path, .headers(HeadersResponse(requestID: id, entries: entries, hasMore: false))))
+                        }
                     case .level(_, .fetchByCID(let peer, let cid)):
                         fetches.append((peer, cid))
                     case .level(let path, .verifyProofs(let batch)):
                         for job in batch.jobs { checks.append(Check(path: path, cid: job.childCID, root: job.proof.rootCID)) }
                         peerChecks += batch.jobs.count
+                        peerChecksAt[path, default: 0] += batch.jobs.count
                         verifyJobs.append(batch.jobs.count)
                         let headers = store.levels[path]?.headers ?? [:]
                         let answer = NodeEvent.level(path, .proofsVerified(batch.run { headers[$0]?.block }))
@@ -1753,6 +1764,65 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertTrue(host.disconnects.isEmpty)
     }
 
+    /// Once the parent level has caught up, a header still past it a
+    /// timeout after it was dropped anchors on a parent branch this node
+    /// does not have: it is let go, so the peer's stream moves on. Before
+    /// the timeout it is kept.
+    func testAHeaderPastACaughtUpParentIsLetGoAfterATimeout() async throws {
+        let fixture = try await sharesWorld(1, anchoredAtN2: true)
+        var host = Host(fixture.world)
+        for grind in fixture.setup { await host.step(.mined(grind)) }
+        // The parent level has caught up (its latch, as when its best
+        // header executes).
+        host.core.levels[Self.nexus]?.synced = true
+        host.tamper("Nexus latched synced")
+        await host.meet(Self.alphaHost)
+        let c = try XCTUnwrap(fixture.blocks.first)
+        await host.relayPage([c], at: Self.alpha, from: Self.alphaHost)
+        XCTAssertNotNil(host.core.levels[Self.alpha]?.sync.beyondParent[c.block.cid], "dropped past the parent")
+        func holes() -> Int { host.core.levels[Self.alpha]?.sync.peers[Self.alphaHost]?.holes.count ?? -1 }
+        XCTAssertEqual(holes(), 1)
+        _ = host.core.step(.tick, now: Self.now + host.config.headersTimeout - 1)
+        XCTAssertEqual(holes(), 1, "kept before the timeout")
+        _ = host.core.step(.tick, now: Self.now + host.config.headersTimeout)
+        XCTAssertEqual(holes(), 0, "let go: the stream moves on")
+        XCTAssertNil(host.core.levels[Self.alpha]?.sync.beyondParent[c.block.cid])
+        XCTAssertTrue(host.disconnects.isEmpty)
+    }
+
+    /// A pending header's parent X, asked for as an ancestor, anchors past
+    /// the parent level: X is dropped and remembered for the header naming
+    /// it, and asked for again once the parent weighs X's anchor; then both
+    /// weigh by their proofs.
+    func testAnAncestorPastTheParentIsAskedAgainWhenTheParentAdvances() async throws {
+        var builder = try await LevelWorld.Builder(levels: 2)
+        let n0 = try await builder.grind(on: try XCTUnwrap(builder.geneses[Self.nexus]), carrying: [], at: Self.t + Self.interval / 2, outcome: .block)
+        let g = try await builder.childGenesis(Self.alpha, parentState: n0.root.block.postState.rawCID, at: Self.t + Self.interval)
+        let n1 = try await builder.grind(on: n0.root, carrying: [(Self.alpha, g)], at: Self.t + Self.interval, outcome: .block)
+        let n2 = try await builder.grind(on: n1.root, carrying: [], at: Self.t + 2 * Self.interval, outcome: .block)
+        // X anchors at N2's post-state (past the parent until N2 weighs).
+        let x = try await builder.build(on: g, carrierPrevState: n2.root.block.postState.rawCID, timestamp: Self.t + 3 * Self.interval, nonce: 1)
+        let xShare = try await builder.grind(on: n2.root, carrying: [(Self.alpha, x)], at: Self.t + 3 * Self.interval, outcome: .share)
+        // C, on X, anchors at N1's post-state: within the parent from the start.
+        let c = try await builder.build(on: x, carrierPrevState: n1.root.block.postState.rawCID, timestamp: Self.t + 4 * Self.interval, nonce: 2)
+        let cShare = try await builder.grind(on: n1.root, carrying: [(Self.alpha, c)], at: Self.t + 4 * Self.interval, outcome: .share)
+        var host = Host(builder.world())
+        for grind in [n0.grind, n1.grind] { await host.step(.mined(grind)) }
+        await host.meet(Self.miner)
+        await host.meet(Self.alphaHost)
+        let xProof = try XCTUnwrap(xShare.grind.carried.first).proof
+        host.serving[Self.alpha] = [Self.alphaHost: [x.cid: HeaderEntry(block: x.block, children: x.children, proofs: [xProof])]]
+        await host.relay(c, at: Self.alpha, from: Self.alphaHost, proofs: [try XCTUnwrap(cShare.grind.carried.first).proof])
+        XCTAssertNotNil(host.core.levels[Self.alpha]?.sync.pending.entries[c.cid], "C waits for its parent")
+        XCTAssertNotNil(host.core.levels[Self.alpha]?.sync.beyondParent[x.cid], "X, asked as its ancestor, dropped past the parent")
+        XCTAssertNil(try host.digest(Self.alpha).blocks[x.cid])
+        await host.relay(n2.root, at: Self.nexus, from: Self.miner)
+        let alpha = try host.digest(Self.alpha)
+        XCTAssertNotNil(alpha.blocks[x.cid], "the parent advanced: X asked again and weighed")
+        XCTAssertNotNil(alpha.blocks[c.cid], "and C on it")
+        XCTAssertTrue(host.disconnects.isEmpty)
+    }
+
     /// A grandchild whose carrier the parent level weighed is credited by
     /// derivation alone: a peer's proofs of A (committed by the weighed
     /// Nexus block B) and of D (committed by A) are never checked.
@@ -1777,6 +1847,117 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertEqual(host.peerChecks, 0, "no peer proof is checked")
         XCTAssertEqual(Set(host.derived.map(\.carrier)), [fixture.b.cid, fixture.a.cid])
         XCTAssertTrue(host.disconnects.isEmpty)
+    }
+
+    /// One rule at every level with a parent, whatever its depth: a block a
+    /// weighed parent-level block commits is credited by derivation, with
+    /// no peer proof checked; one no weighed parent block commits is
+    /// credited by its peer proof. Run at depth one (Alpha, under Nexus)
+    /// and depth two (Beta, under Alpha), each with every block committed
+    /// and with none.
+    func testDeriveOrCheckIsDecidedPerBlockByAWeighedCommitterAtEveryDepth() async throws {
+        for path in [Self.alpha, Self.beta] {
+            for committed in [true, false] {
+                let name = "\(path.last!) \(committed ? "committed" : "uncommitted")"
+                let (host, blocks) = try await perBlockScenario(at: path, committed: committed, count: 3)
+                let level = try host.digest(path)
+                for block in blocks { XCTAssertNotNil(level.blocks[block.cid], "\(name): every block weighs") }
+                XCTAssertEqual(host.peerChecksAt[path] ?? 0, committed ? 0 : blocks.count,
+                               "\(name): peer proofs checked only for blocks no weighed parent block commits")
+                let derived = Set(host.derived.filter { $0.path == path }.map(\.cid))
+                XCTAssertEqual(derived, committed ? Set(blocks.map(\.cid)) : [], "\(name): derived exactly the committed blocks")
+                XCTAssertTrue(host.disconnects.isEmpty, name)
+            }
+        }
+    }
+
+    /// The setup of `deepWorld` (Nexus B commits Alpha block A, which
+    /// commits Beta's genesis D), weighed by the host. Then `count` blocks
+    /// at `path`, each carried by a grind on the Nexus tip and relayed by a
+    /// peer with that grind's proof. When `committed`, the parent-level
+    /// block carrying each one is weighed first (a Nexus block, or an Alpha
+    /// block meeting its target, relayed with its proof); otherwise no
+    /// parent-level block carrying it is weighed (a Nexus share, or an
+    /// Alpha block missing its target).
+    private func perBlockScenario(at path: ChainPath, committed: Bool, count: Int) async throws -> (Host, [SimBlock]) {
+        var builder = try await LevelWorld.Builder(levels: 3)
+        let n0 = try await builder.grind(on: try XCTUnwrap(builder.geneses[Self.nexus]), carrying: [], at: Self.t + Self.interval / 2, outcome: .block)
+        let g = try await builder.childGenesis(Self.alpha, parentState: n0.root.block.postState.rawCID, at: Self.t + Self.interval)
+        let n1 = try await builder.grind(on: n0.root, carrying: [(Self.alpha, g)], at: Self.t + Self.interval, outcome: .block)
+        let a1 = try await builder.build(on: g, carrierPrevState: n1.root.block.postState.rawCID, timestamp: Self.t + 2 * Self.interval, nonce: 5)
+        let r1 = try await builder.grind(on: n1.root, carrying: [(Self.alpha, a1)], at: Self.t + 2 * Self.interval, outcome: .block)
+        let entering = r1.root.block.postState.rawCID
+        let underA = a1.block.postState.rawCID
+        let d = try await builder.childGenesis(Self.beta, parentState: underA, at: Self.t + 3 * Self.interval)
+        let a = try await builder.build(
+            on: a1, carrierPrevState: entering,
+            transactions: [try Self.commit(d, parentState: underA, under: Self.beta[2], on: Self.alpha, key: 1)],
+            timestamp: Self.t + 3 * Self.interval, nonce: 1
+        )
+        let unmined = try await builder.build(
+            on: r1.root, carrierPrevState: nil,
+            transactions: [try Self.commit(a, parentState: entering, under: Self.alpha[1], on: Self.nexus, key: 0)],
+            timestamp: Self.t + 3 * Self.interval, nonce: 0
+        )
+        let (rootTarget, aTarget, dTarget) = (unmined.block.target, a.block.target, d.block.target)
+        let b = try await builder.store(
+            builder.mine(unmined.block) { rootTarget >= $0 && aTarget >= $0 && dTarget >= $0 },
+            releaseAt: Self.t + 3 * Self.interval, anchor: unmined.anchor
+        )
+        var (nexusTip, alphaTip, betaTip) = (b, a, d)
+        // Per block: the parent-level block to relay first (if any), the
+        // block and its proof.
+        var steps: [(carrier: (path: ChainPath, block: SimBlock, proof: ChildBlockProof?)?, block: SimBlock, proof: ChildBlockProof)] = []
+        for index in 0..<count {
+            let time = Self.t + Int64(4 + index) * Self.interval
+            if path == Self.alpha {
+                let c = try await builder.build(on: alphaTip, carrierPrevState: nexusTip.block.postState.rawCID, timestamp: time, nonce: UInt64(10 + index))
+                let r = try await builder.grind(on: nexusTip, carrying: [(Self.alpha, c)], at: time, outcome: committed ? .block : .share)
+                steps.append((committed ? (Self.nexus, r.root, nil) : nil, c, try XCTUnwrap(r.grind.carried.first).proof))
+                if committed { nexusTip = r.root }
+                alphaTip = c
+            } else {
+                let d = try await builder.build(on: betaTip, carrierPrevState: alphaTip.block.postState.rawCID, timestamp: time, nonce: UInt64(10 + index))
+                let a = try await builder.build(
+                    on: alphaTip, carrierPrevState: nexusTip.block.postState.rawCID, children: [Self.beta[2]: d.block],
+                    timestamp: time, nonce: UInt64(20 + index)
+                )
+                // A Nexus share (no Nexus block); A meets its target only when committed.
+                let unmined = try await builder.build(
+                    on: nexusTip, carrierPrevState: nil, children: [Self.alpha[1]: a.block], timestamp: time, nonce: 0
+                )
+                let (rootTarget, aTarget, dTarget) = (unmined.block.target, a.block.target, d.block.target)
+                let root = builder.mine(unmined.block) { hash in
+                    hash > rootTarget && dTarget >= hash && (committed ? aTarget >= hash : hash > aTarget)
+                }
+                let hop = try await ChildBlockProof.generate(rootHeader: BlockHeader(node: root), childDirectory: Self.alpha[1], fetcher: builder.cas)
+                let down = try await ChildBlockProof.generate(rootHeader: BlockHeader(node: a.block), childDirectory: Self.beta[2], fetcher: builder.cas)
+                steps.append((committed ? (Self.alpha, a, hop) : nil, d, hop.composing(hop: down)))
+                if committed { alphaTip = a }
+                betaTip = d
+            }
+        }
+        let world = builder.world()
+        var host = Host(world)
+        for grind in [n0.grind, n1.grind, r1.grind] { await host.step(.mined(grind)) }
+        await host.meet(Self.miner)
+        await host.relay(b, at: Self.nexus, from: Self.miner)
+        await host.submit(a, at: Self.alpha)
+        await host.submit(d, at: Self.beta, spec: world.specs[Self.beta])
+        XCTAssertNotNil(try host.digest(Self.beta).blocks[d.cid], "the setup weighs")
+        host.derived = []
+        await host.meet(Self.alphaHost)
+        for step in steps {
+            if let carrier = step.carrier {
+                if let proof = carrier.proof {
+                    await host.relay(carrier.block, at: carrier.path, from: Self.alphaHost, proofs: [proof])
+                } else {
+                    await host.relay(carrier.block, at: carrier.path, from: Self.miner)
+                }
+            }
+            await host.relay(step.block, at: path, from: Self.alphaHost, proofs: [step.proof])
+        }
+        return (host, steps.map(\.block))
     }
 
     /// A page of n headers, each with a proof, is checked by one verify

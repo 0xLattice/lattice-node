@@ -287,12 +287,13 @@ public struct HeaderSync: Sendable {
     /// treats them as done instead of asking for them again.
     public internal(set) var declined = DeclinedSet()
     /// A child level: the headers dropped for anchoring past what the parent
-    /// level has weighed, by CID, with the parent state each anchors at.
+    /// level has weighed, by CID, with the parent state each anchors at and
+    /// when it was first dropped.
     /// Each is a hole of some peer's stream or the parent of a pending
     /// header, not asked again until the parent weighs a block declaring
     /// that state (`ChainCore.parentAdvanced`): at most the holes and the
     /// pending queue.
-    public internal(set) var beyondParent: [String: String] = [:]
+    public internal(set) var beyondParent: [String: BeyondParent] = [:]
     var nextRequestID: UInt64 = 1
     var nextToken: UInt64 = 1
     /// This node's weigh log, which peers stream.
@@ -304,6 +305,11 @@ public struct HeaderSync: Sendable {
     var knownCursors: Set<String> = []
 
     public init() {}
+
+    public struct BeyondParent: Sendable, Equatable {
+        public let anchor: String
+        public let droppedAt: Int64
+    }
 
     /// Forget the headers dropped past the parent that no peer's stream holds
     /// and no pending header names as parent any more.

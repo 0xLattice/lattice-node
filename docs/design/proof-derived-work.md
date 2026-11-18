@@ -202,8 +202,10 @@ again while the parent stays behind. When the parent weighs a block
 declaring the anchor, the hole is asked again of the peers whose streams
 hold it; an ancestor dropped this way is asked again for the pending
 headers naming it. Once the parent level has caught up, a hole still past
-it a timeout after it was asked anchors on a parent branch this node does
-not have: it is let go, so the stream moves on, and the header comes back
+it a timeout after it was dropped anchors on a parent branch this node does
+not have: it is let go, so the stream moves on (a parent that never
+catches up, its best header never executed, keeps such a peer's stream
+waiting), and the header comes back
 as a descendant's ancestor or on a stream reset. A submit past the frontier
 is dropped like a gossip; its author pushes it again. A node's own mined grind weighs every level it reaches in one step,
 as before: its child blocks anchor at the state the template's parent tip
@@ -254,9 +256,13 @@ root is a grind of a weighed parent block committing `C`, while `C`'s
 derivation is in flight or is issued in the same step (`C` just arrived).
 Both are the same path from the same root, so they verify alike, and
 checking both was double work: every derivable block paid a peer check
-beside its derivation. At depth two and below nearly every block is
-committed by a parent block, so under top-down weighing its work is derived
-with no peer check at all. A peer's proof is checked when no derivation
+beside its derivation. The rule is the same at every level with a parent,
+whatever its depth, and is decided per block: a block a weighed parent
+block commits has its work derived, with no peer check at all; any other
+block's work is its peers' proofs, checked. How many blocks are derivable
+is a property of the chains, not of depth: a parent that commits its child
+every block makes the child all derived, one that rarely does leaves it to
+peer proofs. A peer's proof is checked when no derivation
 will answer for it: the parent committed `C` by no weighed block, or `C`'s
 derivation already ran and credited nothing for content it could not read
 (the proof is then checked when it is sent again). A derived proof that fails blames no

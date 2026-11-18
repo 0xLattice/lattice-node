@@ -579,6 +579,9 @@ public struct ChainCore: Sendable {
     /// in the same step.
     mutating func finish(_ turn: Turn) -> [ChainEffect] {
         var turn = turn
+        // Pending headers leave by many ways (weighed, evicted, rejected):
+        // what was dropped past the parent and is no longer named goes too.
+        sync.forgetBeyondParent()
         if weighedStates != nil {
             for hash in weighed {
                 guard let state = tree.headerSnapshot(of: hash)?.postStateCID else { continue }
@@ -660,10 +663,7 @@ public struct ChainCore: Sendable {
         if !sync.knownCursors.contains(peer.key), !sync.peers.keys.contains(where: { $0.key == peer.key }) {
             sync.cursors[peer.key] = nil
         }
-        if !isRoot {
-            dropProofSource(peer)
-            sync.forgetBeyondParent()
-        }
+        if !isRoot { dropProofSource(peer) }
         for parent in [true, false] {
             sync.wants[WantSlot(peer: peer, parent: parent)] = nil
             sync.wanting[WantSlot(peer: peer, parent: parent)] = nil
@@ -814,7 +814,6 @@ public struct ChainCore: Sendable {
             sync.peers[peer]?.holes = []
             sync.peers[peer]?.requested = 0
             sync.peers[peer]?.data = nil
-            sync.forgetBeyondParent()
         }
         for item in page.entries {
             guard let state = sync.peers[peer], item.position > state.taken else { continue }
@@ -1032,7 +1031,9 @@ public struct ChainCore: Sendable {
         // Its stream hole stays, and is asked again once the parent weighs
         // a block declaring that state (`parentAdvanced`).
         if !isRoot, let parentStates, !Self.anchored(entry.block, within: parentStates) {
-            if peer != nil { sync.beyondParent[cid] = Self.canonical(entry.block.parentState.rawCID) }
+            if peer != nil, sync.beyondParent[cid] == nil {
+                sync.beyondParent[cid] = .init(anchor: Self.canonical(entry.block.parentState.rawCID), droppedAt: turn.now)
+            }
             return cid
         }
         if let held = sync.pending.entries[cid] {
@@ -1335,15 +1336,18 @@ public struct ChainCore: Sendable {
             let (due, overflow) = state.askedAt.addingReportingOverflow(config.headersTimeout)
             let again = overflow || now >= due
             // The parent has caught up and a header is still past it a
-            // timeout after it was asked: it anchors on a parent branch this
-            // node does not have. It is let go, as Bitcoin lets go of headers
-            // that do not connect, so the stream moves on; it comes back with
-            // a descendant (asked as an ancestor) or a stream reset.
-            if again, parentSynced, !sync.beyondParent.isEmpty,
-               state.holes.contains(where: { sync.beyondParent[$0.entry.block] != nil }) {
-                sync.peers[peer]?.holes.removeAll { sync.beyondParent[$0.entry.block] != nil }
+            // timeout after it was dropped: it anchors on a parent branch
+            // this node does not have. It is let go, as Bitcoin lets go of
+            // headers that do not connect, so the stream moves on; it comes
+            // back with a descendant (asked as an ancestor) or a stream reset.
+            func stale(_ hole: StreamEntry) -> Bool {
+                guard let dropped = sync.beyondParent[hole.entry.block] else { return false }
+                let (until, overflow) = dropped.droppedAt.addingReportingOverflow(config.headersTimeout)
+                return !overflow && now >= until
+            }
+            if parentSynced, !sync.beyondParent.isEmpty, state.holes.contains(where: stale) {
+                sync.peers[peer]?.holes.removeAll(where: stale)
                 advanceCursor(of: peer, &turn)
-                sync.forgetBeyondParent()
             }
             pump(peer, &turn, again: again)
         }
