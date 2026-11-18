@@ -21,7 +21,7 @@ only says which node it mines through.
 
 | Command | Effect |
 |---|---|
-| `lattice status` | Each hosted chain's phase and tip, the chains hosted only for a chain listed under them, configured chains not running, keys waiting for a restart. |
+| `lattice status` | Each hosted chain's phase, height, best header height and tip, what it waits on and its sync counts (`GET /status`), the chains hosted only for a chain listed under them, configured chains not running, keys waiting for a restart. |
 | `lattice config get [a.b.c]` | The configuration, or one key of it. |
 | `lattice config set a.b.c=value ...` | Change keys (a value that parses as JSON is JSON, else a string), or `--patch '<merge patch>'`. |
 | `lattice config unset a.b.c ...` | Remove keys. |
