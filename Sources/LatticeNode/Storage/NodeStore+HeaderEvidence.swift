@@ -95,7 +95,7 @@ extension NodeStore {
             let chunk = children[start..<min(start + 500, children.endIndex)]
             start = chunk.endIndex
             let marks = (2...(chunk.count + 1)).map { "?\($0)" }.joined(separator: ", ")
-            for row in try database.rows(
+            for row in try reads.rows(
                 from: "child_proofs",
                 "SELECT rowid, child, root, entries FROM child_proofs WHERE chain = ?1 AND child IN (\(marks)) ORDER BY child, root",
                 params: [.text(path.joined(separator: "/"))] + chunk.map { .text($0) }
@@ -125,7 +125,7 @@ extension NodeStore {
               cids.allSatisfy(CIDIdentity.isCanonical) else { return nil }
         var entries: [(cid: String, data: Data)] = []
         for cid in cids {
-            guard let bytes = try database.row(
+            guard let bytes = try reads.row(
                 from: "proof_entries",
                 "SELECT bytes FROM proof_entries WHERE cid = ?1 UNION ALL SELECT block FROM headers WHERE cid = ?1 UNION ALL SELECT bytes FROM child_indexes WHERE cid = ?1 LIMIT 1",
                 params: [.text(cid)]
@@ -154,7 +154,7 @@ extension NodeStore {
     }
 
     nonisolated func header(_ cid: String) -> (block: Block, children: FlatDictionary<BlockHeader>)? {
-        guard let row = try? database.row(
+        guard let row = try? reads.row(
             HeaderEvidenceRow.self,
             "SELECT h.block AS block, c.bytes AS children FROM headers h JOIN child_indexes c ON c.cid = h.children_cid WHERE h.cid = ?1",
             params: [.text(cid)]
@@ -167,13 +167,13 @@ extension NodeStore {
 
     /// A weighed block's own node, as it was weighed.
     nonisolated func headerBlockBytes(_ cid: String) -> Data? {
-        try? database.row(
+        try? reads.row(
             HeaderBlockRow.self, "SELECT block FROM headers WHERE cid = ?1", params: [.text(cid)]
         )?.block
     }
 
     nonisolated func childIndexBytes(_ cid: String) -> Data? {
-        try? database.row(
+        try? reads.row(
             ChildIndexEvidenceRow.self, "SELECT bytes FROM child_indexes WHERE cid = ?1", params: [.text(cid)]
         )?.bytes
     }

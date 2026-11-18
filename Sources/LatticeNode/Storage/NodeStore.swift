@@ -33,10 +33,44 @@ enum NodeStoreError: Error, Equatable, LocalizedError {
     }
 }
 
+/// Runs an actor's jobs, one at a time, on a dispatch queue of its own
+/// (`DispatchSerialQueue` is this, but not on Linux). The queue names no
+/// QoS: on Darwin each job runs at the QoS of the thread that enqueued it,
+/// and a task's later priority escalation does not reach the queue.
+final class SerialQueueExecutor: SerialExecutor {
+    private let queue: DispatchQueue
+
+    init(label: String) {
+        queue = DispatchQueue(label: label)
+    }
+
+    func enqueue(_ job: consuming ExecutorJob) {
+        let job = UnownedJob(job)
+        queue.async { job.runSynchronously(on: self.asUnownedSerialExecutor()) }
+    }
+}
+
 /// Node-owned immutable facts and availability indexes for one hosted tree.
+///
+/// Its SQLite calls are synchronous, and a commit waits for its fsync
+/// (`synchronous=FULL`), so the actor runs on a serial queue of its own, not
+/// the Swift cooperative pool, and the reads made outside it (`reads`) have
+/// a connection of their own: a commit blocks that queue's thread, never a
+/// pool thread the node's other tasks need. VolumeBroker keeps its writes on
+/// a queue, and its reads on another connection one at a time, for the same
+/// reason.
 actor NodeStore {
     let database: NodeSQLite
+    /// The connection the `nonisolated` reads use: in WAL mode, each read
+    /// (one at a time, `NodeSQLite`) sees what was committed when it began,
+    /// and never waits on a commit.
+    let reads: NodeSQLite
     let nexusGenesisCID: String
+    private let executor = SerialQueueExecutor(label: "LatticeNode.NodeStore")
+
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        executor.asUnownedSerialExecutor()
+    }
 
     init(
         databasePath: URL,
@@ -71,6 +105,7 @@ actor NodeStore {
         try database.configureDurability()
 
         self.database = database
+        reads = try NodeSQLite(path: databasePath.path, create: false)
         self.nexusGenesisCID = nexusGenesisCID
     }
 
