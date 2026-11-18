@@ -45,18 +45,31 @@ extension NodeStorage {
         // pinned under its block's name by the job that executed it.
         var stored: [String] = []
         // With recent state kept, or none: the state each level's
-        // executions stored, under the height of its newest block.
-        var states: [ChainPath: (height: UInt64?, roots: [String])] = [:]
+        // executions stored, each under the height of the block that
+        // produced it (a batch's blocks keep their own windows).
+        var states: [ChainPath: [(height: UInt64?, roots: [String])]] = [:]
         let storage = NodeImportStorage(storage: broker)
         for (path, level) in batch.levels.sorted(by: {
             $0.path.count != $1.path.count
                 ? $0.path.count < $1.path.count
                 : $0.path.joined(separator: "/") < $1.path.joined(separator: "/")
         }) {
+            // The blocks whose states these are, in execution order: two
+            // blocks can produce the same state, each in its own window.
+            var heights = level.facts.flatMap(\.facts).compactMap { fact -> (cid: String, height: UInt64)? in
+                guard case .block(let block) = fact else { return nil }
+                return (block.postStateCID, block.blockHeight)
+            }
+            var executed: [String] = []
+            var produced: [(height: UInt64?, roots: [String])] = []
             for state in level.states {
                 try await Self.storeExecutedState(state, in: storage)
+                let roots = await storage.takeStoredVolumeRoots()
+                executed += roots
+                let cid = try? LatticeStateHeader(node: state).rawCID
+                let height = heights.firstIndex { $0.cid == cid }.map { heights.remove(at: $0).height }
+                produced.append((height, roots))
             }
-            let executed = await storage.takeStoredVolumeRoots()
             // A child genesis's spec: what restore holds as its root's.
             for spec in level.headers.compactMap(\.spec) {
                 try await VolumeImpl<ChainSpec>(node: spec).store(storer: storage)
@@ -67,15 +80,9 @@ extension NodeStorage {
             case .all:
                 stored.append(contentsOf: created)
             case .recent, .none:
-                // The height of the newest block whose state this step
-                // executed; one no block fact of the step names (none does
-                // today) joins the chain's newest window below.
-                let roots = Set(level.states.compactMap { try? LatticeStateHeader(node: $0).rawCID })
-                let height = level.facts.flatMap(\.facts).compactMap { fact -> UInt64? in
-                    guard case .block(let block) = fact, roots.contains(block.postStateCID) else { return nil }
-                    return block.blockHeight
-                }.max()
-                states[path] = (height, executed)
+                // A state no block fact of the step names (none does today)
+                // joins the chain's newest window below.
+                states[path] = produced
                 stored.append(contentsOf: specs)
             }
             durable.append(NodeFactBatch(
@@ -90,16 +97,18 @@ extension NodeStorage {
         // Every root retained is one this batch stores.
         var retaining: [String: [String]] = [:]
         if !stored.isEmpty { retaining[retentionScope] = stored }
-        for (path, state) in states where !state.roots.isEmpty {
-            // A state of no known height goes with the newest the chain
-            // keeps: kept as long as that, never let go of before it.
-            let scope = if let height = state.height {
-                scopes.window(at: path, height: height)
-            } else {
-                try await broker.retainedScopes(prefix: scopes.windowPrefix(at: path)).max()
-                    ?? scopes.window(at: path, height: 0)
+        for (path, produced) in states {
+            for state in produced where !state.roots.isEmpty {
+                // A state of no known height goes with the newest the chain
+                // keeps: kept as long as that, never let go of before it.
+                let scope = if let height = state.height {
+                    scopes.window(at: path, height: height)
+                } else {
+                    try await broker.retainedScopes(prefix: scopes.windowPrefix(at: path)).max()
+                        ?? scopes.window(at: path, height: 0)
+                }
+                retaining[scope, default: []] += state.roots
             }
-            retaining[scope, default: []] += state.roots
         }
         try await broker.storeVolumesLocal(await storage.takeVolumes(), retaining: retaining)
         try await store.stageNodeFacts(durable, logID: logID)
