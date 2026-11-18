@@ -18,6 +18,8 @@ final class VolumeBundleCache: @unchecked Sendable {
 
     private let database: NodeSQLite?
     private let lock = NSLock()
+    /// One writer at a time: a batch is a transaction on the one connection.
+    private let writes = NSLock()
     private var reported = false
 
     init(directory: URL) {
@@ -39,11 +41,24 @@ final class VolumeBundleCache: @unchecked Sendable {
 
     /// `roots` are served in order after `root`'s own Volume.
     func record(root: String, roots: [String]) {
+        record([(root: root, roots: roots)])
+    }
+
+    /// Several blocks' bundles (one connect job's) in one transaction: a
+    /// commit per block is a WAL frame and a page write per block.
+    func record(_ bundles: [(root: String, roots: [String])]) {
+        guard let database, !bundles.isEmpty else { return }
         do {
-            try database?.execute(
-                "INSERT OR REPLACE INTO volume_bundles (root, roots) VALUES (?1, ?2)",
-                params: [.text(root), .blob(try NodeStore.encode([root] + roots.filter { $0 != root }))]
-            )
+            try writes.withLock {
+                try database.transaction {
+                    for (root, roots) in bundles {
+                        try database.execute(
+                            "INSERT OR REPLACE INTO volume_bundles (root, roots) VALUES (?1, ?2)",
+                            params: [.text(root), .blob(try NodeStore.encode([root] + roots.filter { $0 != root }))]
+                        )
+                    }
+                }
+            }
         } catch {
             report("a Volume bundle was not recorded: \(error)")
         }
