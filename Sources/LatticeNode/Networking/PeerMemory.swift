@@ -117,12 +117,19 @@ struct PeerBook: Equatable, Sendable {
         excluding connected: Set<String>, count: Int,
         using generator: inout some RandomNumberGenerator
     ) -> [PeerEndpoint] {
-        entries.values
-            .filter { !connected.contains($0.publicKey) }
-            .sorted { $0.publicKey < $1.publicKey }
-            .shuffled(using: &generator)
-            .prefix(max(0, count))
-            .map(\.endpoint)
+        eligible(excluding: connected).shuffled(using: &generator).prefix(max(0, count)).map(\.endpoint)
+    }
+
+    /// `candidates` drawn with the system generator. The draw is the
+    /// standard library's own: the system generator is an empty value, and
+    /// passed inout here every caller's access would share one placeholder
+    /// address, which ThreadSanitizer reports as a race between actors.
+    func candidates(excluding connected: Set<String>, count: Int) -> [PeerEndpoint] {
+        eligible(excluding: connected).shuffled().prefix(max(0, count)).map(\.endpoint)
+    }
+
+    private func eligible(excluding connected: Set<String>) -> [Entry] {
+        entries.values.filter { !connected.contains($0.publicKey) }.sorted { $0.publicKey < $1.publicKey }
     }
 
     /// The network group of a host: an IPv4 address's /16, as the overlay's
@@ -209,10 +216,7 @@ actor PeerMemory {
     /// Peers remembered for `chain` to dial, none of them `connected` or
     /// excluded.
     func candidates(for chain: ChainPath, excluding connected: Set<String>, count: Int) -> [PeerEndpoint] {
-        var generator = SystemRandomNumberGenerator()
-        return books[chain]?.candidates(
-            excluding: connected.union(excluded), count: count, using: &generator
-        ) ?? []
+        books[chain]?.candidates(excluding: connected.union(excluded), count: count) ?? []
     }
 
     /// A dial to `publicKey` failed: counted in every book that holds it.

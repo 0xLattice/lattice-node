@@ -827,7 +827,11 @@ final class NodeRuntimeTests: XCTestCase {
         }
         let listing = await runtime.reads.explorerMempool()
         XCTAssertEqual(listing.transactions, [admitted.transactionCID])
-        // The fee projection is published with the pool: one block with room.
+        // The fee projection follows the pool: one block with room. A pool
+        // change on no new tip is projected within `projectionInterval`.
+        try await eventually("the fee projection holds the returned transaction") {
+            await runtime.reads.explorerFees().blocks.map(\.transactionCount) == [1]
+        }
         let fees = await runtime.reads.explorerFees()
         XCTAssertEqual(fees.blocks.map(\.transactionCount), [1])
         XCTAssertEqual(fees.blocks.map(\.full), [false])
