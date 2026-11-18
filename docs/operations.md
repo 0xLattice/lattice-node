@@ -532,7 +532,12 @@ Two rules are built in: a node always holds each hosted chain's genesis
 block, and the body of each chain's tip, so that a new block can be passed
 on. A body fetched for a block waiting to execute is read into memory, not
 stored: it is stored once the block's execution finds it valid. A body
-is a block's own Volume and its transactions'.
+is a block's own Volume and its transactions', and, for a child block with
+withdrawals, its receipt witness: the nodes of the parent chain's state on
+the path to each withdrawal's receipt, which its execution reads. The
+witness is kept, served and let go of with the body, so a node that fetches
+an old withdrawal's body executes it though every node let go of that
+parent state.
 
 `blockBodies` in `lattice.json` (`--block-bodies`) says which bodies it keeps
 beyond those:
