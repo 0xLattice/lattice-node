@@ -13,10 +13,11 @@
 For a change to sync, storage or the wire, against
 [sync architecture](design/sync-architecture.md):
 
+- [ ] It satisfies rules 1–15 there, or changes the rule there first.
 - [ ] No hashed byte and no consensus decision changes.
 - [ ] Weight does not wait on execution, and availability gates no other chain.
 - [ ] Nothing crosses between chains except work facts and continuity facts.
-- [ ] Work of a new kind runs in its own lane; nothing reorders another lane's work.
+- [ ] Work of a new kind runs in its own lane, and chains do not share an execution queue; nothing reorders another lane's work.
 - [ ] A new wait has a typed reason and a wake, not only a timer.
 - [ ] A decision is made in the core; the shell only executes effects.
 - [ ] A liveness rule has a simulator scenario; a performance claim has a benchmark number.

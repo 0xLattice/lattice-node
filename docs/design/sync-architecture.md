@@ -1,15 +1,14 @@
 # Sync architecture: modules, roles and rules
 
 > **Status: agreed target design.** The code does not follow all of it yet.
-> [Where the code departs](#where-the-code-departs) lists the gaps and the
-> order they close in. A change to sync, storage or the wire is reviewed
+> [Where the code departs](#where-the-code-departs) lists the gaps. A change to sync, storage or the wire is reviewed
 > against the rules here ([PR checklist](../pr-checklist.md)).
 
 Sync was rebuilt several times, each time after a node stopped making
 progress, and each fix was a sound local decision. This document is the
 global design those decisions are checked against. Nothing in it changes a
 hashed byte or a consensus decision; the [protocol
-specification](https://github.com/0xLattice/Lattice/blob/57.4.0/docs/spec.md)
+specification](https://github.com/0xLattice/Lattice/blob/57.5.0/docs/spec.md)
 stays normative.
 
 ## What sync produces
@@ -42,11 +41,11 @@ outputs, and things it must not know.
 Three services belong to the node, not to any chain:
 
 - **Lanes**: a queue per chain and per kind of work. Work in one lane never
-  waits behind work in another, and shared resources have limits, not
+  queues behind work in another, and shared resources have limits, not
   ordering policies.
 - **Store**: a verified cache of what the network holds. Writes are atomic
-  and ordered, and nothing waits for them to reach disk except a promise to
-  the operator.
+  and ordered, reads see every write handed to the writer, and nothing waits
+  for writes to reach disk except a promise to the operator.
 - **Progress**: every module reports what it is waiting on, as a typed
   reason.
 
@@ -69,15 +68,15 @@ established clients are built. The node has no scheduler of its own.
 | What | Runs on | Why |
 |---|---|---|
 | Decisions: every step of the core | One serial loop | It stays deterministic and simulated. The core took 9% to 16% of wall time in the first baseline |
-| Execution of a chain's blocks | One lane per chain, one job at a time | A chain executes in order anyway; chains run side by side |
-| Header work: proof checks and derivations | Its own lane | It never queues behind execution. Batched per page |
+| Execution of a chain's blocks | One lane per chain, one job at a time: a batch of up to `connectBatch` ready blocks, one commit | A chain executes in order anyway; chains run side by side |
+| Header work: proof checks and derivations | Its own lane per chain | It never queues behind execution. Batched per page |
 | What an RPC waits on | Its own lane | Latency |
 | Storage writes | One writer per store, off the loop | The loop never waits on disk |
 
 The loop only decides. It does not wait on disk, read content, or do
-bookkeeping that is not a decision. Chain lanes take turns for the shared
-workers and the operating system shares the CPU among lanes; there is no
-time accounting. A loop per chain would parallelise only the share the core
+bookkeeping that is not a decision. Ready lane jobs take free workers first
+in, first out, and the operating system shares the CPU among lanes; there is
+no priority and no time accounting. A loop per chain would parallelise only the share the core
 takes and would cost the single deterministic step order the simulator
 depends on. Because only two facts cross between chains, a chain's decisions
 can still move to a loop of their own later.
@@ -105,8 +104,9 @@ commitment; storage does not mirror it.
 | "State reflects block X" marker | Per chain, in the same transaction as state and facts |
 
 Durable writes are kept for promises to the operator: an acknowledged local
-transaction, pins and configuration. The miner persists a block it mined;
-the node has no notion of a block mined here.
+transaction, pins and configuration. The node makes no durability promise
+for a submitted block: the miner keeps what it mined until it sees it on
+chain.
 
 ## Rules
 
@@ -118,7 +118,7 @@ rule here first.
 3. **Exactly two facts cross between chains**: work facts and continuity
    facts.
 4. **One loop decides; lanes execute.** Work of different kinds never shares
-   a queue, and chains never share one. Shared resources have limits, not
+   a queue, and neither does execution of different chains. Shared resources have limits, not
    ordering policies. There is no scheduler to tune.
 5. **Every wait is typed and visible.** A timer may end a wait on something
    outside the node; it is never the reason work inside the node proceeds.
@@ -132,15 +132,15 @@ rule here first.
    consistent earlier state and re-syncs the rest.
 10. **Content is verified once, where it enters.** Modules pass verified,
     decoded values, never raw bytes.
-11. **Every module has a performance budget.** A change that exceeds it
-    states why.
+11. **Every module's cost is measured by the sync benchmark.** A change that
+    makes one worse states why.
 12. **Consensus bytes are fixed; representation is the node's.**
     Identifiers, wire format and storage layout are private to the node and
     convert only where bytes are hashed.
 13. **The trie commits; a flat table serves reads.** Storage does not have
     to mirror the commitment.
-14. **A full node never waits on the network to execute.** A light node
-    may.
+14. **A full node's execution never reads from the network**: its inputs
+    are in its store before the job starts. A light node's may.
 15. **New and old versions stay on one network.** A wire change is an
     addition that older peers ignore, the node keeps serving what older
     peers ask for, and nothing changes what is valid. Storage may change
@@ -148,13 +148,15 @@ rule here first.
 
 ## Where the code departs
 
-In the order the gaps close. The measurements are the first
+The measurements are the first
 [sync benchmark](../../README.md) baseline at `0ff1e87a`: 9,086 blocks over
-four chains, one run per setting, on macOS.
+four chains, one run per setting, on Linux (swift:6.1-jammy) under Docker on
+a macOS host, so fsync goes to the VM's disk.
 
 | Rule | Today | Measured |
 |---|---|---|
 | 8, 9 | The runtime loop awaits an fsynced commit on every step that has facts | The loop was busy 46% of wall time with one worker and 67% with three |
+| 8 | A submitted block's content is stored and retained before it is weighed (`storeMinedBlock`), and its reply waits for its connect | |
 | 13 | State is content-addressed trie nodes in the content store, pruned by reference counts | 2.9 GB written for 82 MB kept |
 | 4 | Every job shares one worker pool behind three strict queues | Derivations of 0.7 ms waited 3.5 to 3.9 s for a worker |
 | 1, 2 | A child reads its peers only once its parent's executed tip has caught up | The grandchildren were idle for the first 6.7 s of a 25.8 s sync |
