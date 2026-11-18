@@ -318,6 +318,17 @@ public struct ChainCore: Sendable {
     /// persisted (geth's `handler.synced`, set when its downloader completes
     /// a sync cycle). Until then a peer's transaction is ignored.
     public internal(set) var synced = false
+
+    /// Synced, with no header work outstanding: no pending or waiting
+    /// header, and every peer's stream read to its end and applied, with
+    /// nothing asked of it. What this level has weighed is then all its
+    /// peers have served.
+    public var caughtUp: Bool {
+        synced && sync.pending.entries.isEmpty && sync.proofs.awaiting.isEmpty
+            && sync.peers.values.allSatisfy {
+                $0.holes.isEmpty && !$0.more && $0.stream == nil && $0.data == nil && $0.parentRequest == nil
+            }
+    }
     public let config: ChainCoreConfig
     /// The level's mempool and template book, on the act-on tip.
     public internal(set) var mining: MiningState
@@ -344,10 +355,6 @@ public struct ChainCore: Sendable {
     /// step.
     var parentTree: ChainTree?
     var parentStates: Set<String>?
-    /// Whether the parent level has caught up (its `synced` latch): a
-    /// header still past it after a timeout anchors on a parent branch this
-    /// node does not have, and is let go (`tick`).
-    var parentSynced = false
     /// A level a hosted child level reads: the post-state each of its
     /// weighed blocks declares, canonical, and nil on a level no child
     /// reads (`trackWeighedStates`). A child header anchored at a state not
@@ -462,8 +469,7 @@ public struct ChainCore: Sendable {
     /// One event. A child level is handed its parent level's tree and
     /// weighed states for the step alone (`parentTree`, `parentStates`).
     public mutating func step(
-        _ event: ChainEvent, now: Int64, parent: ChainTree? = nil, parentStates: Set<String>? = nil,
-        parentSynced: Bool = false
+        _ event: ChainEvent, now: Int64, parent: ChainTree? = nil, parentStates: Set<String>? = nil
     ) -> [ChainEffect] {
         // A peer's transaction is ignored until the level has caught up
         // (`synced`), as Bitcoin Core ignores `tx` during initial block
@@ -472,11 +478,9 @@ public struct ChainCore: Sendable {
         if case .mining(.transactionReceived(_, origin: .peer)) = event, !synced { return [] }
         parentTree = parent
         self.parentStates = parentStates
-        self.parentSynced = parentSynced
         defer {
             parentTree = nil
             self.parentStates = nil
-            self.parentSynced = false
         }
         var turn = Turn(now: now)
         weighed = []
@@ -1032,7 +1036,7 @@ public struct ChainCore: Sendable {
         // a block declaring that state (`parentAdvanced`).
         if !isRoot, let parentStates, !Self.anchored(entry.block, within: parentStates) {
             if peer != nil, sync.beyondParent[cid] == nil {
-                sync.beyondParent[cid] = .init(anchor: Self.canonical(entry.block.parentState.rawCID), droppedAt: turn.now)
+                sync.beyondParent[cid] = .init(anchor: Self.canonical(entry.block.parentState.rawCID), parentWeighed: parentStates.count)
             }
             return cid
         }
@@ -1334,22 +1338,7 @@ public struct ChainCore: Sendable {
         }
         for (peer, state) in sync.peers.sorted(by: { $0.key < $1.key }) {
             let (due, overflow) = state.askedAt.addingReportingOverflow(config.headersTimeout)
-            let again = overflow || now >= due
-            // The parent has caught up and a header is still past it a
-            // timeout after it was dropped: it anchors on a parent branch
-            // this node does not have. It is let go, as Bitcoin lets go of
-            // headers that do not connect, so the stream moves on; it comes
-            // back with a descendant (asked as an ancestor) or a stream reset.
-            func stale(_ hole: StreamEntry) -> Bool {
-                guard let dropped = sync.beyondParent[hole.entry.block] else { return false }
-                let (until, overflow) = dropped.droppedAt.addingReportingOverflow(config.headersTimeout)
-                return !overflow && now >= until
-            }
-            if parentSynced, !sync.beyondParent.isEmpty, state.holes.contains(where: stale) {
-                sync.peers[peer]?.holes.removeAll(where: stale)
-                advanceCursor(of: peer, &turn)
-            }
-            pump(peer, &turn, again: again)
+            pump(peer, &turn, again: overflow || now >= due)
         }
         while let first = sync.held.first, first.time <= now {
             _ = sync.held.pop()

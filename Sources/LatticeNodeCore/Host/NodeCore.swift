@@ -519,8 +519,7 @@ public struct NodeCore: Sendable {
         let effects = core.step(
             event, now: turn.now,
             parent: path.count > 1 ? levels[parent]?.tree : nil,
-            parentStates: path.count > 1 ? levels[parent]?.weighedStates : nil,
-            parentSynced: path.count > 1 && levels[parent]?.synced == true
+            parentStates: path.count > 1 ? levels[parent]?.weighedStates : nil
         )
         turn.weighed[path, default: []].formUnion(core.weighed)
         turn.arrived[path, default: []].formUnion(core.arrived)
@@ -717,7 +716,7 @@ public struct NodeCore: Sendable {
             )
             let derived = core.deriveGrinds(from: parentCore.tree, carriers: turn.weighed[parent] ?? [], arrived: arrived)
             let released = parentBlocks.isEmpty || core.sync.beyondParent.isEmpty
-                ? [] : core.parentAdvanced(parentCore.weighedStates ?? [], now: turn.now)
+                ? [] : core.parentAdvanced(parentCore.weighedStates ?? [], caughtUp: parentCore.caughtUp, now: turn.now)
             levels[path] = consume core
             turn.touched.insert(path)
             raised[path] = Set(result.raised)

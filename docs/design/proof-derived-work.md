@@ -201,12 +201,16 @@ further while half a page of holes is outstanding, and it is not asked
 again while the parent stays behind. When the parent weighs a block
 declaring the anchor, the hole is asked again of the peers whose streams
 hold it; an ancestor dropped this way is asked again for the pending
-headers naming it. Once the parent level has caught up, a hole still past
-it a timeout after it was dropped anchors on a parent branch this node does
-not have: it is let go, so the stream moves on (a parent that never
-catches up, its best header never executed, keeps such a peer's stream
-waiting), and the header comes back
-as a descendant's ancestor or on a stream reset. A submit past the frontier
+headers naming it. When the parent has caught up (synced, every peer's
+stream read to its end and applied, nothing pending) and weighs another
+block without the anchor, the anchor is on no branch the parent's peers
+serve: the header's holes are let go so the streams move on, as Bitcoin
+keeps no header that does not connect. It comes back as a descendant's
+ancestor or on a stream reset. This is driven by the parent's progress,
+never a clock: a parent that never catches up or never advances keeps
+such a peer's stream waiting, and one that weighs an unrelated block an
+instant before the anchor's arrives lets the header go early, to return
+with its next descendant. A submit past the frontier
 is dropped like a gossip; its author pushes it again. A node's own mined grind weighs every level it reaches in one step,
 as before: its child blocks anchor at the state the template's parent tip
 declares.

@@ -1764,29 +1764,40 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertTrue(host.disconnects.isEmpty)
     }
 
-    /// Once the parent level has caught up, a header still past it a
-    /// timeout after it was dropped anchors on a parent branch this node
-    /// does not have: it is let go, so the peer's stream moves on. Before
-    /// the timeout it is kept.
-    func testAHeaderPastACaughtUpParentIsLetGoAfterATimeout() async throws {
-        let fixture = try await sharesWorld(1, anchoredAtN2: true)
-        var host = Host(fixture.world)
-        for grind in fixture.setup { await host.step(.mined(grind)) }
+    /// A header anchored past the parent is kept while the parent has not
+    /// caught up, or has caught up without weighing more. Once the caught-up
+    /// parent weighs another block (a sibling of the anchor's) and still
+    /// lacks the anchor, the anchor is on no branch its peers serve: the
+    /// header is let go so the peer's stream moves on. No clock is read:
+    /// time passing changes nothing.
+    func testAHeaderPastACaughtUpParentIsLetGoWhenTheParentAdvancesWithoutIt() async throws {
+        var builder = try await LevelWorld.Builder(levels: 2)
+        let n0 = try await builder.grind(on: try XCTUnwrap(builder.geneses[Self.nexus]), carrying: [], at: Self.t + Self.interval / 2, outcome: .block)
+        let g = try await builder.childGenesis(Self.alpha, parentState: n0.root.block.postState.rawCID, at: Self.t + Self.interval)
+        let n1 = try await builder.grind(on: n0.root, carrying: [(Self.alpha, g)], at: Self.t + Self.interval, outcome: .block)
+        let n2 = try await builder.grind(on: n1.root, carrying: [], at: Self.t + 2 * Self.interval, outcome: .block)
+        let sibling = try await builder.grind(on: n1.root, carrying: [], at: Self.t + 2 * Self.interval + 1, outcome: .block)
+        let c = try await builder.build(on: g, carrierPrevState: n2.root.block.postState.rawCID, timestamp: Self.t + 3 * Self.interval, nonce: 1)
+        let share = try await builder.grind(on: n2.root, carrying: [(Self.alpha, c)], at: Self.t + 3 * Self.interval, outcome: .share)
+        var host = Host(builder.world())
+        for grind in [n0.grind, n1.grind] { await host.step(.mined(grind)) }
         // The parent level has caught up (its latch, as when its best
         // header executes).
         host.core.levels[Self.nexus]?.synced = true
         host.tamper("Nexus latched synced")
+        await host.meet(Self.miner)
         await host.meet(Self.alphaHost)
-        let c = try XCTUnwrap(fixture.blocks.first)
-        await host.relayPage([c], at: Self.alpha, from: Self.alphaHost)
-        XCTAssertNotNil(host.core.levels[Self.alpha]?.sync.beyondParent[c.block.cid], "dropped past the parent")
+        await host.relayPage([(c, [try XCTUnwrap(share.grind.carried.first).proof])], at: Self.alpha, from: Self.alphaHost)
+        XCTAssertNotNil(host.core.levels[Self.alpha]?.sync.beyondParent[c.cid], "dropped past the parent")
         func holes() -> Int { host.core.levels[Self.alpha]?.sync.peers[Self.alphaHost]?.holes.count ?? -1 }
         XCTAssertEqual(holes(), 1)
-        _ = host.core.step(.tick, now: Self.now + host.config.headersTimeout - 1)
-        XCTAssertEqual(holes(), 1, "kept before the timeout")
-        _ = host.core.step(.tick, now: Self.now + host.config.headersTimeout)
-        XCTAssertEqual(holes(), 0, "let go: the stream moves on")
-        XCTAssertNil(host.core.levels[Self.alpha]?.sync.beyondParent[c.block.cid])
+        _ = host.core.step(.tick, now: Self.now + 100 * host.config.headersTimeout)
+        XCTAssertEqual(holes(), 1, "time passing lets nothing go")
+        await host.relay(sibling.root, at: Self.nexus, from: Self.miner)
+        XCTAssertNotNil(try host.digest(Self.nexus).blocks[sibling.root.cid])
+        XCTAssertEqual(host.core.levels[Self.nexus]?.caughtUp, true)
+        XCTAssertEqual(holes(), 0, "the caught-up parent advanced without the anchor: let go, the stream moves on")
+        XCTAssertNil(host.core.levels[Self.alpha]?.sync.beyondParent[c.cid])
         XCTAssertTrue(host.disconnects.isEmpty)
     }
 

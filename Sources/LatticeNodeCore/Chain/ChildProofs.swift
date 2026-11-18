@@ -513,14 +513,28 @@ extension ChainCore {
     /// it whose state `states` now holds is asked for again, of the peers
     /// whose streams hold it, or as the parent of the pending headers naming
     /// it, as Bitcoin asks again for headers that did not connect once it
-    /// has their parent.
-    mutating func parentAdvanced(_ states: Set<String>, now: Int64) -> [ChainEffect] {
+    /// has their parent. When the parent has `caughtUp` and has weighed
+    /// more since a header was dropped, without its anchor, the anchor is
+    /// on no branch the parent's peers serve: that header's stream holes
+    /// are let go, so the streams move on, as Bitcoin keeps no header that
+    /// does not connect. It comes back with a descendant (asked as an
+    /// ancestor) or a stream reset. Driven by the parent's progress, never
+    /// by a clock.
+    mutating func parentAdvanced(_ states: Set<String>, caughtUp: Bool, now: Int64) -> [ChainEffect] {
         let released = Set(sync.beyondParent.filter { states.contains($0.value.anchor) }.keys)
-        guard !released.isEmpty else { return [] }
+        let stale = caughtUp
+            ? Set(sync.beyondParent.filter { !released.contains($0.key) && states.count > $0.value.parentWeighed }.keys)
+            : []
+        guard !released.isEmpty || !stale.isEmpty else { return [] }
         for cid in released { sync.beyondParent[cid] = nil }
         var turn = Turn(now: now)
         weighed = []
         arrived = []
+        for peer in sync.peers.keys.sorted()
+        where sync.peers[peer]?.holes.contains(where: { stale.contains($0.entry.block) }) == true {
+            sync.peers[peer]?.holes.removeAll { stale.contains($0.entry.block) }
+            advanceCursor(of: peer, &turn)
+        }
         for peer in sync.peers.keys.sorted()
         where sync.peers[peer]?.holes.contains(where: { released.contains($0.entry.block) }) == true {
             sync.peers[peer]?.reask = true
