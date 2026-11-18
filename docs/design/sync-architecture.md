@@ -41,8 +41,9 @@ outputs, and things it must not know.
 
 Three services belong to the node, not to any chain:
 
-- **Scheduler**: the only place that divides worker time, fetch slots and
-  byte budgets among modules and chains.
+- **Lanes**: a queue per chain and per kind of work. Work in one lane never
+  waits behind work in another, and shared resources have limits, not
+  ordering policies.
 - **Store**: a verified cache of what the network holds. Writes are atomic
   and ordered, and nothing waits for them to reach disk except a promise to
   the operator.
@@ -56,9 +57,30 @@ Between chains exactly two facts cross, both from parent to child:
 2. **Continuity facts**: the parent's executed set feeds the child's Execute.
 
 At any moment each piece of work is in one of four states: running; ready,
-so the Scheduler owes it a turn; waiting on another module's output; or
+in a lane that will run it; waiting on another module's output; or
 waiting on something outside the node, with a wake registered. A stall is
 work in none of the four.
+
+## Concurrency: one loop decides, lanes execute
+
+Decisions are made in one place and each kind of work has its own queue, as
+established clients are built. The node has no scheduler of its own.
+
+| What | Runs on | Why |
+|---|---|---|
+| Decisions: every step of the core | One serial loop | It stays deterministic and simulated. The core took 9% to 16% of wall time in the first baseline |
+| Execution of a chain's blocks | One lane per chain, one job at a time | A chain executes in order anyway; chains run side by side |
+| Header work: proof checks and derivations | Its own lane | It never queues behind execution. Batched per page |
+| What an RPC waits on | Its own lane | Latency |
+| Storage writes | One writer per store, off the loop | The loop never waits on disk |
+
+The loop only decides. It does not wait on disk, read content, or do
+bookkeeping that is not a decision. Chain lanes take turns for the shared
+workers and the operating system shares the CPU among lanes; there is no
+time accounting. A loop per chain would parallelise only the share the core
+takes and would cost the single deterministic step order the simulator
+depends on. Because only two facts cross between chains, a chain's decisions
+can still move to a loop of their own later.
 
 ## Node roles
 
@@ -95,8 +117,9 @@ rule here first.
 2. **Availability never judges**, and never gates another chain's weight.
 3. **Exactly two facts cross between chains**: work facts and continuity
    facts.
-4. **Only the Scheduler arbitrates scarce resources.** No module orders its
-   own work against another's.
+4. **One loop decides; lanes execute.** Work of different kinds never shares
+   a queue, and chains never share one. Shared resources have limits, not
+   ordering policies. There is no scheduler to tune.
 5. **Every wait is typed and visible.** A timer may end a wait on something
    outside the node; it is never the reason work inside the node proceeds.
 6. **Decisions live in the core.** The shell executes effects and reports
@@ -133,7 +156,7 @@ four chains, one run per setting, on macOS.
 |---|---|---|
 | 8, 9 | The runtime loop awaits an fsynced commit on every step that has facts | The loop was busy 46% of wall time with one worker and 67% with three |
 | 13 | State is content-addressed trie nodes in the content store, pruned by reference counts | 2.9 GB written for 82 MB kept |
-| 4, 6 | Job order is decided in the runtime shell | Derivations of 0.7 ms waited 3.5 to 3.9 s for a worker |
+| 4 | Every job shares one worker pool behind three strict queues | Derivations of 0.7 ms waited 3.5 to 3.9 s for a worker |
 | 1, 2 | A child reads its peers only once its parent's executed tip has caught up | The grandchildren were idle for the first 6.7 s of a 25.8 s sync |
 | 3 | A child's step receives its parent's whole tree and a `parentSynced` flag | |
 | 5 | Backoff, wake and let-go logic is separate per subsystem | |
