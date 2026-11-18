@@ -304,11 +304,12 @@ public struct IvyRootContentSource: Sendable {
 
     /// One Volume under a root. A child's is asked first of its chain's
     /// current peers (`hosts`) other than `excluding` (those reported for
-    /// it), then of anyone.
+    /// it), then of anyone unless `onlyHosts`.
     fileprivate typealias VolumeFetch =
         @Sendable (_ rootCID: String, _ excluding: Set<PeerID>) async -> AttributedVolumeResponse
-    private let fetch: @Sendable (_ rootCID: String, _ hosts: ChainHosts?, _ excluding: Set<PeerID>) async
-        -> AttributedVolumeResponse
+    private let fetch: @Sendable (
+        _ rootCID: String, _ hosts: ChainHosts?, _ onlyHosts: Bool, _ excluding: Set<PeerID>
+    ) async -> AttributedVolumeResponse
     /// The Volumes a peer that speaks bundles holds under a root (what it
     /// stored with that block), or none, and the session that sent them.
     /// Whatever a bundle lacks is fetched with `fetch`. The capable sessions
@@ -316,8 +317,11 @@ public struct IvyRootContentSource: Sendable {
     /// others; the record is a hint for whom to ask, never for what to accept.
     fileprivate typealias BundleFetch =
         @Sendable (String) async -> (volumes: [AttributedVolumeResponse], session: AuthenticatedPeer?)
-    private let fetchBundle: @Sendable (_ rootCID: String, _ hosts: ChainHosts?) async
+    private let fetchBundle: @Sendable (_ rootCID: String, _ hosts: ChainHosts?, _ onlyHosts: Bool) async
         -> (volumes: [AttributedVolumeResponse], session: AuthenticatedPeer?)
+    /// Whether a session for `hosts` has anyone to ask: false only when
+    /// it asks only a child's hosts and none is connected.
+    private let canAsk: @Sendable (_ hosts: ChainHosts?, _ onlyHosts: Bool) async -> Bool
     /// Credits the peer that served a requested Volume once it verifies, so
     /// the overlay favours peers that serve this node when it is contended.
     private let credit: @Sendable (PeerID, Int) async -> Void
@@ -333,6 +337,7 @@ public struct IvyRootContentSource: Sendable {
     let budget: AcquisitionBudget
 
     public final class Session: ContentSource {
+        private let canAsk: @Sendable () async -> Bool
         private let fetchVolume: VolumeFetch
         private let fetchBundle: BundleFetch
         private let credit: @Sendable (PeerID, Int) async -> Void
@@ -345,12 +350,14 @@ public struct IvyRootContentSource: Sendable {
             budget: AcquisitionBudget,
             reserving bytes: Int,
             priority: AcquisitionBudget.Priority,
+            canAsk: @escaping @Sendable () async -> Bool,
             fetch: @escaping VolumeFetch,
             fetchBundle: @escaping BundleFetch,
             credit: @escaping @Sendable (PeerID, Int) async -> Void,
             report: @escaping @Sendable (String, PeerID) async -> Void,
             peerCapabilities: PeerCapabilities
         ) {
+            self.canAsk = canAsk
             self.fetchVolume = fetch
             self.fetchBundle = fetchBundle
             self.credit = credit
@@ -383,8 +390,10 @@ public struct IvyRootContentSource: Sendable {
             }
             let cached = await context.cached(cids)
             let missing = cids.subtracting(cached.keys)
-            // Cancelled before its reservation: nothing is asked of peers.
-            let reserved = missing.isEmpty ? false : await context.reserveBudget()
+            // Cancelled before its reservation, or no one to ask: nothing
+            // is reserved or asked of peers.
+            var reserved = false
+            if !missing.isEmpty, await canAsk() { reserved = await context.reserveBudget() }
             for rootCID in missing.sorted() where reserved {
                 guard context.reserve(rootCID: rootCID) else { continue }
                 // A Volume that does not verify, bundled or requested, reports
@@ -473,7 +482,10 @@ public struct IvyRootContentSource: Sendable {
         // the hosts one at a time in its own order (those timing out last,
         // then the least loaded). Every peer hosts Nexus, so its Volumes go
         // to anyone. A peer reported for this root is not asked first again.
-        fetch = { rootCID, hosts, excluding in
+        // Content only a child's hosts hold (`onlyHosts`: its block bodies;
+        // no other peer stores them) is asked of them alone, as Bitcoin
+        // asks for a block only the peers that announced it.
+        fetch = { rootCID, hosts, onlyHosts, excluding in
             if let hosts {
                 let named = await capabilities.sessions(hosting: hosts, ivy: ivy)
                     .filter { !excluding.contains($0.id) }
@@ -483,8 +495,13 @@ public struct IvyRootContentSource: Sendable {
                     // sent nothing do not.
                     if !answer.entries.isEmpty || answer.failure == .localCapacityUnavailable { return answer }
                 }
+                if onlyHosts { return .empty }
             }
             return await ivy.fetchVolume(rootCID: rootCID)
+        }
+        canAsk = { hosts, onlyHosts in
+            guard onlyHosts, let hosts else { return true }
+            return !(await capabilities.sessions(hosting: hosts, ivy: ivy)).isEmpty
         }
         // Asked only of the sessions whose hello said they answer it, one at
         // a time, each read as still capable when its turn comes. A session
@@ -495,16 +512,18 @@ public struct IvyRootContentSource: Sendable {
         // own capacity or boundary, a request not sent, its cancellation)
         // reports a failure and is not the peer's. The current peers of the
         // block's chain are asked before the others.
-        fetchBundle = { rootCID, hosts in
+        fetchBundle = { rootCID, hosts, onlyHosts in
             var named = Set<Data>()
             if let hosts {
                 named = Set(await capabilities.sessions(hosting: hosts, ivy: ivy).map(\.sessionID))
             }
+            let hostsOnly = onlyHosts && hosts != nil
             var asked = Set<Data>()
             while let peer = ({
                 let left = capabilities.sessions(speaking: ChainHandshake.volumeBundle)
                     .filter { !asked.contains($0.sessionID) }
-                return left.filter { named.contains($0.sessionID) }.randomElement() ?? left.randomElement()
+                let hosting = left.filter { named.contains($0.sessionID) }.randomElement()
+                return hostsOnly ? hosting : hosting ?? left.randomElement()
             })() {
                 asked.insert(peer.sessionID)
                 let answer = await ivy.fetchVolumeBundle(rootCID: rootCID, from: [peer])
@@ -542,8 +561,9 @@ public struct IvyRootContentSource: Sendable {
         self.budget = budget ?? AcquisitionBudget(
             capacity: max(maximumStorageBytes, Self.defaultPolicy.maximumAcquisitionBytes)
         )
-        self.fetch = { rootCID, _, _ in await fetch(rootCID) }
-        self.fetchBundle = { rootCID, _ in (await fetchBundle(rootCID), nil) }
+        self.fetch = { rootCID, _, _, _ in await fetch(rootCID) }
+        self.fetchBundle = { rootCID, _, _ in (await fetchBundle(rootCID), nil) }
+        canAsk = { _, _ in true }
     }
 
     public func withRoot<T: Sendable>(
@@ -563,26 +583,30 @@ public struct IvyRootContentSource: Sendable {
     /// again: a bundle is held within the same reservation. A session
     /// whose task is cancelled while it waits leaves the line at once,
     /// reserves nothing and asks no peer, whichever task its reads run in.
+    /// With `onlyHosts`, a child's content is asked of its hosts alone, and
+    /// a session with no host connected reserves nothing and asks no one.
     public func withRootTracing<T: Sendable>(
         _ rootCID: String,
         bundle: Bool = true,
         hosts: ChainHosts? = nil,
+        onlyHosts: Bool = false,
         initialResponse: AttributedVolumeResponse? = nil,
         capture: AttributionCapture? = nil,
         reserving bytes: Int? = nil,
         priority: AcquisitionBudget.Priority = .ownWork,
         operation: @Sendable (Session) async throws -> T
     ) async rethrows -> (value: T, attribution: Attribution) {
-        let (fetch, fetchBundle) = (fetch, fetchBundle)
-        let fetched: VolumeFetch = { rootCID, excluding in await fetch(rootCID, hosts, excluding) }
+        let (fetch, fetchBundle, canAsk) = (fetch, fetchBundle, canAsk)
+        let fetched: VolumeFetch = { rootCID, excluding in await fetch(rootCID, hosts, onlyHosts, excluding) }
         let bundled: BundleFetch = { rootCID in
-            bundle ? await fetchBundle(rootCID, hosts) : ([], nil)
+            bundle ? await fetchBundle(rootCID, hosts, onlyHosts) : ([], nil)
         }
         let session = Session(
             rootCID: rootCID,
             budget: budget,
             reserving: min(max(bytes ?? maximumStorageBytes, 1), maximumStorageBytes),
             priority: priority,
+            canAsk: { await canAsk(hosts, onlyHosts) },
             fetch: fetched,
             fetchBundle: bundled,
             credit: credit,

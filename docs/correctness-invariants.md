@@ -9,8 +9,9 @@ set, GHOST, continuity) are the architecture doc's and are checked by
 ## NODE-SEMANTICS-003 — availability is retriable, not punishable
 
 - **NODE-SEMANTICS-003.a** — Content that cannot be resolved is no verdict:
-  the block parks and its body is asked for again after a backoff; it is
-  never excluded. Enforced by `Invariants.checkTree` ("excludes …, ground
+  the block parks and its body is asked for again after a backoff, or at
+  once when it may now be had (a block on it, or a new host); it is never
+  excluded. Enforced by `Invariants.checkTree` ("excludes …, ground
   truth …": only invalid bodies are excluded) and `SimBodies.checkBodies`
   (every window block is asked for or parked, a parked body has a wake).
 - **NODE-SEMANTICS-003.b** — A missing body, header or proof blames no peer;

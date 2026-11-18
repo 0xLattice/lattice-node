@@ -225,7 +225,9 @@ extension NodeStorage {
     /// `bundle` is false once a fetch of the block failed: a bundle is an
     /// optimisation, so such a block is fetched one Volume at a time, as it
     /// would be from peers that speak no bundles. `hosts` names the
-    /// block's child chain: the bundle is asked first of its current peers.
+    /// block's child chain: its body is asked of that chain's current peers
+    /// alone, the only peers that store it, and with none connected no
+    /// peer is asked.
     ///
     /// The session reserves from the node's budget when it first asks a
     /// peer, an estimate of its worst case (`bodyReservation`): the chain's
@@ -270,7 +272,7 @@ extension NodeStorage {
         let capture = IvyRootContentSource.AttributionCapture()
         do {
             return try await remote.withRootTracing(
-                cid, bundle: bundle, hosts: hosts, capture: capture, reserving: bytes, priority: .body(
+                cid, bundle: bundle, hosts: hosts, onlyHosts: true, capture: capture, reserving: bytes, priority: .body(
                     cid, depth: hosts.map { $0.path.count - 1 } ?? 0
                 )
             ) { session in
