@@ -92,12 +92,12 @@ extension NodeStorage {
     nonisolated var scopes: RetentionScopes { RetentionScopes(chain: retentionScope) }
 
     /// Pins what storing a block wrote: its `body`, the block's own Volume
-    /// and its transactions', under the block's name, and the rest, the
-    /// state its execution reads, its spec and its policy modules, with
-    /// the chain. When the operator does not keep all state, the spec and
-    /// policy modules are kept with the chain at `path` while it is hosted,
-    /// and the state with the block until it executes. A body root this
-    /// store lacks refuses the pin whole.
+    /// and its transactions', under the block's name, and the rest, its
+    /// spec and its policy modules (and for a genesis the empty state it
+    /// starts from), with the chain. When the operator does not keep all
+    /// state, the spec and policy modules are kept with the chain at `path`
+    /// while it is hosted, and any state with the block until it executes.
+    /// A body root this store lacks refuses the pin whole.
     nonisolated func retainStored(
         _ roots: [String], body: [String], ofBlock blockCID: String, at path: ChainPath = ["Nexus"]
     ) async throws {

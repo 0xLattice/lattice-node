@@ -171,8 +171,9 @@ extension NodeStorage {
     /// What is stored is its body (its own Volume and its transactions'),
     /// pinned under its name, and, with the chain, its spec and policy
     /// modules. The state it read is its parent's, which this node stored
-    /// executing the parent, and the counts and windows keep or peers serve. Returns the CIDs of the transactions the
-    /// block carries, read once from its transaction index. `decoded` is the
+    /// executing the parent, and the counts and windows keep or peers
+    /// serve. Returns the CIDs of the transactions the block carries, read
+    /// once from its transaction index. `decoded` is the
     /// block's node as its connect decoded it (`ConnectVerdict.connectedBlock`),
     /// or nil to resolve it through `fetcher`.
     @discardableResult
@@ -221,16 +222,17 @@ extension NodeStorage {
     /// The execution reads that state through `ownReads`, which asks a
     /// peer only for what this node does not hold.
     ///
-    /// `bundle` is false on a retry: a bundle is an optimisation, so a block
-    /// whose first attempt failed is fetched one Volume at a time, as it
+    /// `bundle` is false once a fetch of the block failed: a bundle is an
+    /// optimisation, so such a block is fetched one Volume at a time, as it
     /// would be from peers that speak no bundles. `hosts` names the
     /// block's child chain: the bundle is asked first of its current peers.
     ///
     /// The session reserves from the node's budget when it first asks a
     /// peer, an estimate of its worst case (`bodyReservation`): the chain's
     /// `maxBlockSize` (when its spec is held) bounds a body's bytes, not
-    /// what holding them costs this node. A body past the estimate is fetched once more under the whole
-    /// allowance, after the first reservation is released. The Volumes the
+    /// what holding them costs this node. A body past the estimate is
+    /// fetched once more under the whole allowance, after the first
+    /// reservation is released. The Volumes the
     /// walk derives, once it reaches the end of the body, are kept in memory
     /// for the block's connect.
     nonisolated func fetchChainBody(
@@ -297,8 +299,8 @@ extension NodeStorage {
     }
 
     /// The Volume roots served together for `rootCID`, its own first: the
-    /// content `storeBlockContent` defines for that block. Recorded when the block
-    /// was stored; for a block stored before bundles were recorded, the same
+    /// content `storeBlockContent` defines for that block. Recorded when the
+    /// block was stored; for a block stored before bundles were recorded, the same
     /// walk over local content only, recorded once it completes. A root that
     /// is no block this node holds whole bundles only itself.
     nonisolated func volumeBundle(_ rootCID: String) async -> [String] {

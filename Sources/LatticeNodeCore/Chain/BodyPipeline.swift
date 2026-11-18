@@ -2,9 +2,10 @@ import Lattice
 
 /// Body download and execution for one level. Block bodies are Volumes fetched by
 /// CID through the content layer, which owns provider discovery, CID
-/// verification, retries and provider suppression. The core only names the
-/// next `ChainCoreConfig.bodyWindow` weighed-but-unexecuted blocks on the best
-/// chain and connects them in parent order as their bodies arrive. It also
+/// verification and provider suppression, one attempt per ask. The core
+/// names the next `ChainCoreConfig.bodyWindow` weighed-but-unexecuted blocks
+/// on the best chain, asks again for a body not obtained after a backoff,
+/// and connects them in parent order as their bodies arrive. It also
 /// names, outside that count, the blocks the act-on tip would step into once
 /// executed (`forkChildren`).
 ///

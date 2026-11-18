@@ -937,7 +937,7 @@ extension NodeRuntime {
                 digests[path] = nil
                 currentPeers[path] = nil
             }
-            // A stopped level's body fetches would retry for good: no
+            // A stopped level's body fetches would run on unwanted: no
             // `cancelBody` comes from a level that is gone. Its RPCs would
             // wait for good: no answer comes from it either.
             for key in bodies.keys where core.levels[key.path] == nil {
