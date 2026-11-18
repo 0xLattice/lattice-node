@@ -1984,6 +1984,45 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertTrue(host.disconnects.isEmpty)
     }
 
+    /// The body arriving after the latch moves only fork choice: Nexus acts
+    /// on N1 once it executes, and stays `synced`.
+    func testAnUnavailableBodyArrivingAfterTheLatchMovesOnlyForkChoice() async throws {
+        let fixture = try await gateWorld()
+        var host = try await withheldParentHost(fixture, unavailable: true)
+        XCTAssertEqual(host.core.levels[Self.nexus]?.synced, true)
+        host.unavailableBodies = []
+        await host.step(.level(Self.nexus, .providerJoined))
+        XCTAssertEqual(host.core.levels[Self.nexus]?.snapshot.actOnTip, fixture.nexus[1].cid)
+        XCTAssertEqual(host.core.levels[Self.nexus]?.synced, true)
+    }
+
+    /// A body found unavailable and then asked again (a provider joined) is
+    /// in flight, not unavailable: Nexus's log read to its end does not
+    /// latch while it is asked.
+    func testAnUnavailableBodyAskedAgainDoesNotLatch() async throws {
+        let fixture = try await gateWorld()
+        var host = try await gatedHost(fixture)
+        host.unavailableBodies = [fixture.nexus[1].cid]
+        let id = try XCTUnwrap(host.take().compactMap { sent -> UInt64? in
+            guard sent.path == Self.nexus, case .getStream(let id, _, 0, _) = sent.message else { return nil }
+            return id
+        }.first)
+        let entries = fixture.nexus.enumerated().map { StreamEntry(position: UInt64($0.offset + 1), entry: .header($0.element.cid)) }
+        await host.step(.received(Self.miner, Self.nexus, .stream(StreamPage(requestID: id, logID: "peer", entries: entries, hasMore: true))))
+        XCTAssertNotNil(host.core.levels[Self.nexus]?.bodies.parked[fixture.nexus[1].cid], "N1's body was found unavailable")
+        host.unavailableBodies = []
+        host.withheldBodies = [fixture.nexus[1].cid]
+        await host.step(.level(Self.nexus, .providerJoined))
+        XCTAssertEqual(host.core.levels[Self.nexus]?.bodies.requested.contains(fixture.nexus[1].cid), true, "asked again")
+        let next = try XCTUnwrap(host.take().compactMap { sent -> UInt64? in
+            guard sent.path == Self.nexus, case .getStream(let id, _, 2, _) = sent.message else { return nil }
+            return id
+        }.first)
+        await host.step(.received(Self.miner, Self.nexus, .stream(StreamPage(requestID: next, logID: "peer", entries: [], hasMore: false))))
+        XCTAssertEqual(host.core.levels[Self.nexus]?.synced, false, "a body asked again holds the latch")
+        XCTAssertFalse(host.take().contains { $0.path == Self.alpha }, "Alpha stays gated")
+    }
+
     /// Same: with the heaviest body unavailable, Nexus takes peers'
     /// transactions (it is no longer in initial download).
     func testAParentWhoseHeaviestBodyIsUnavailableAdmitsPeerTransactions() async throws {

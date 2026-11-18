@@ -93,19 +93,23 @@ extension ChainCore {
             state.readToEnd && !state.more && state.holes.isEmpty && sync.cursors[peer.key]?.logID.isEmpty == false
         }) else { return }
         let snapshot = snapshot
+        guard !snapshot.actOnTip.isEmpty else { return }
         if snapshot.actOnTip == snapshot.bestHeaderTip || snapshot.actOnTip == heaviestObtainableTip() { synced = true }
     }
 
-    /// Whether `cid`'s body could not be obtained: the content layer found
-    /// no provider of it (or its content could not be read), it waits out
-    /// its backoff (`bodies.parked`), and it has neither arrived nor
-    /// executed since. A body merely in flight is not.
+    /// Whether `cid`'s body could not be obtained: its last attempt found
+    /// no provider of it (or its content could not be read), and it waits
+    /// out its backoff (`bodies.parked`), not asked again, arrived or
+    /// executed since. A body in flight, a first ask or one asked again,
+    /// is not.
     func unobtainable(_ cid: String) -> Bool {
-        bodies.parked[cid] != nil && !bodies.arrived.contains(cid) && !tree.isExecuted(blockHash: cid)
+        bodies.parked[cid] != nil && !bodies.requested.contains(cid) && !bodies.arrived.contains(cid)
+            && !tree.isExecuted(blockHash: cid)
     }
 
     /// Fork choice's tip with every block whose body could not be obtained,
-    /// and all it leads to, left out. Up to the first such block on the
+    /// and all it leads to, left out, as are blocks proven invalid (fork
+    /// choice's own exclusion). Up to the first such block on the
     /// best chain it is the best chain itself, so only the heaviest
     /// branches below that block are walked.
     func heaviestObtainableTip() -> String {
@@ -115,7 +119,9 @@ extension ChainCore {
             .min()
         guard let lowest else { return best }
         func preferred(_ blocks: [String]) -> String? {
-            Self.byWeight(blocks.filter { !unobtainable($0) }, in: tree).first
+            Self.byWeight(blocks.filter {
+                !unobtainable($0) && (tree.isExecuted(blockHash: $0) || !tree.isExcludedRoot($0))
+            }, in: tree).first
         }
         let start = lowest == 0 ? nil : tree.canonicalBlockHash(atHeight: lowest - 1)
         guard var tip = start ?? preferred(tree.genesisRoots) else { return "" }
