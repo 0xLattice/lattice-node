@@ -30,8 +30,10 @@ fi
 # SwiftPM names the bundle per target on macOS and per package on Linux.
 B=$(ls -d "$W"/src/.build/release/LatticeNodeTests.xctest "$W"/src/.build/release/LatticeNodePackageTests.xctest 2>/dev/null | head -1)
 [ -n "$B" ] || { echo "no test bundle under $W/src/.build/release"; exit 1; }
+# Found once: xcrun's lookup can fail while another xcrun is running.
+[ "$(uname)" = Darwin ] && XCTEST=$(xcrun --find xctest)
 bench() {
-  if [ "$(uname)" = Darwin ]; then xcrun xctest -XCTest "LatticeNodeTests.ChildSyncBench/$1" "$B"
+  if [ "$(uname)" = Darwin ]; then "$XCTEST" -XCTest "LatticeNodeTests.ChildSyncBench/$1" "$B"
   else "$B" "LatticeNodeTests.ChildSyncBench/$1"; fi
 }
 
