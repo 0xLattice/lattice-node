@@ -46,6 +46,29 @@ public enum LevelInvariants {
         }
     }
 
+    /// The checks the shell runs are the core's: at each level the peer
+    /// proof checks asked of the shell and not yet answered are exactly the
+    /// core's `verifying`, so `maxChecks` bounds what the shell runs. A
+    /// check the core forgot while the shell still ran it would be work
+    /// past the bound, its answer landing on nothing.
+    public static func checkProofChecks(
+        node: String, host: NodeCore, running: [ChainPath: [ChildProofKey: Int]]
+    ) throws {
+        for (path, core) in host.levels {
+            let checks = running[path] ?? [:]
+            let name = "\(node)\(path.dropFirst().map { "/" + $0 }.joined())"
+            if checks.values.reduce(0, +) > core.config.proofs.maxChecks {
+                throw Invariants.fail(name, "\(checks.values.reduce(0, +)) proof checks run, over maxChecks")
+            }
+            if checks.values.contains(where: { $0 > 1 }) {
+                throw Invariants.fail(name, "a proof check runs twice")
+            }
+            if Set(checks.keys) != Set(core.sync.proofs.verifying.keys) {
+                throw Invariants.fail(name, "the proof checks running are not the ones the core holds in flight")
+            }
+        }
+    }
+
     static func checkLevel(
         _ node: String,
         path: ChainPath,

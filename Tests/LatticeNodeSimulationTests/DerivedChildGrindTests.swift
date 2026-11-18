@@ -607,6 +607,27 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertTrue(host.disconnects.isEmpty)
     }
 
+    /// A peer sends C with a bogus proof and is gone before its check
+    /// answers: the check keeps its slot and fails, nobody is blamed (the
+    /// sender is not held), and C is credited with B's grind by derivation.
+    func testAGonePeersFailingCheckBlamesNobodyAndDerivationCredits() async throws {
+        let fixture = try await committedWorld()
+        var host = await host(fixture)
+        await host.relay(fixture.b, at: Self.nexus, from: Self.miner)
+        await host.meet(Self.alphaHost)
+        let bogus = ChildBlockProof(rootCID: fixture.b.cid, directoryPath: [Self.alpha[1]], entries: [])
+        for tracer in host.tracers { tracer.label(bogus, as: "bogus") }
+        host.deferChecks = true
+        await host.relay(fixture.c, at: Self.alpha, from: Self.alphaHost, proofs: [bogus])
+        XCTAssertEqual(host.deferred.count, 1, "the peer's check has not answered")
+        await host.step(.peerGone(Self.alphaHost))
+        XCTAssertEqual(host.core.levels[Self.alpha]?.sync.proofs.verifying.count, 1, "the check keeps its slot")
+        for answer in host.deferred { await host.step(answer) }
+        XCTAssertTrue(host.disconnects.isEmpty, "a gone sender is blamed for nothing")
+        XCTAssertEqual(host.core.levels[Self.alpha]?.sync.proofs.verifying.isEmpty, true)
+        XCTAssertNotNil(try host.digest(Self.alpha).blocks[fixture.c.cid]?.grinds[fixture.b.cid], "C is credited by derivation")
+    }
+
     /// C waits for a proof (its derivation lost), and a peer then logs B's
     /// proof of C: the host asks for it, takes the header it already holds
     /// with that proof, and C is credited with B's grind.

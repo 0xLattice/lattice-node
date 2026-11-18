@@ -130,6 +130,10 @@ public struct LevelSimulator {
         var store: HostStore
         var digests: [ChainPath: TreeDigest]
         var persists = 0
+        /// Each level's peer proof checks asked of the shell (`verifyProof`)
+        /// and not yet answered, by key: what the shell runs, which the
+        /// core's own `verifying` must match.
+        var checks: [ChainPath: [ChildProofKey: Int]] = [:]
     }
 
     enum Delivery {
@@ -377,6 +381,10 @@ public struct LevelSimulator {
         // The step mutates the one copy: the node is taken out and put back.
         guard var node = cores.removeValue(forKey: name) else { return }
         let synced = Set(node.core.levels.filter(\.value.synced).keys)
+        if case .level(let path, .proofVerified(let job, _)) = event, !job.derived {
+            node.checks[path]?[job.key]? -= 1
+            if node.checks[path]?[job.key] == 0 { node.checks[path]?[job.key] = nil }
+        }
         let effects = node.core.step(event, now: now)
         // The sync latch is never unset while the node runs.
         if let lost = synced.first(where: { node.core.levels[$0]?.synced == false }) {
@@ -424,6 +432,7 @@ public struct LevelSimulator {
             node: name, host: node.core, digests: digests, previous: node.digests,
             store: node.store, world: world
         )
+        try LevelInvariants.checkProofChecks(node: name, host: node.core, running: node.checks)
         for (path, digest) in digests where path.count > 1 {
             let before = node.digests[path]
             for (cid, entry) in digest.blocks {
@@ -486,6 +495,7 @@ public struct LevelSimulator {
             }
         case .verifyProof(let job):
             report.verifications += 1
+            node.checks[path, default: [:]][job.key, default: 0] += 1
             guard let block = job.block ?? node.store.levels[path]?.headers[job.childCID]?.block else {
                 throw Invariants.fail(name, "asked to verify a proof of \(job.childCID), which it does not hold")
             }
