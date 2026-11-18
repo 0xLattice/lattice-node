@@ -45,8 +45,9 @@ Three services belong to the node, not to any chain:
   queues behind work in another, and shared resources have limits, not
   ordering policies.
 - **Store**: a verified cache of what the network holds. Writes are atomic
-  and ordered, reads see every write handed to the writer, and nothing waits
-  for writes to reach disk except a promise to the operator.
+  and ordered. Changes are buffered in memory, read from the buffer, and
+  flushed to disk in batches; nothing waits for each write to reach disk
+  except a promise to the operator.
 - **Progress**: every module reports what it is waiting on, as a typed
   reason.
 
@@ -72,9 +73,9 @@ established clients are built. The node has no scheduler of its own.
 | Execution of a chain's blocks | One lane per chain, one job at a time: a batch of up to `connectBatch` ready blocks, one commit | A chain executes in order anyway; chains run side by side |
 | Header work: proof checks and derivations | Its own lane per chain | It never queues behind execution. Batched per page |
 | What an RPC waits on | Its own lane | Latency |
-| Storage writes | One writer per store, off the loop | The loop never waits on disk |
+| Storage writes | Buffered in memory, flushed in batches, as Bitcoin Core's coins cache and geth's trie database do | The loop waits on a flush, not on every write |
 
-The loop only decides. It does not wait on disk, read content, or do
+The loop only decides. It does not wait on each write, read content, or do
 bookkeeping that is not a decision. Each lane offers only its next job, and
 free workers take those lane heads in the order they became ready, so no
 lane's backlog stands in front of another lane's next job. The operating
