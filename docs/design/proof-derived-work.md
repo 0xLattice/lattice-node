@@ -184,42 +184,31 @@ returning malformed bytes is.
 
 A child block's work comes from its parent level: its grinds' carriers are
 parent blocks or shares on them (§9.5), and its runs are parent blocks after
-its carrier (§9.10). Both are parent blocks at or after the one whose
-post-state the child block anchors on (`parentState`, which the terminal
-carrier binds to its own pre-state). So a level weighs a child header only
-when its parent level has weighed a block declaring that post-state, or when
-the header anchors at no parent state (the empty state). Nexus is
-unconstrained. The bound is the parent's **weighed** headers, not its
-executed ones: weighing reads no execution, and execution keeps its own
-continuity rule ([Parent-state continuity](#parent-state-continuity)).
+its carrier (§9.10). So a child level is synced whole-chain top-down: it
+reads its peers' streams, and so weighs, fetches and executes anything from
+them, only once its parent level has caught up. That is the parent's
+`synced` latch: a peer's log read to its end and applied, with the act-on
+tip the best header tip. The latch is one-way, like Bitcoin Core's
+`IsInitialBlockDownload`: once it is set, the child follows live, and a new
+parent block never pauses it. A grandchild waits for its child level's latch
+in turn. Nexus is not gated.
 
-A child header past that frontier is dropped, as Bitcoin drops headers that
-do not connect: it can be neither priced nor derived yet, and holding
-unchecked headers would let anyone fill memory for free. Its stream hole
-stays, so the peer's cursor does not pass it and the stream pulls no
-further while half a page of holes is outstanding, and it is not asked
-again while the parent stays behind. When the parent weighs a block
-declaring the anchor, the hole is asked again of the peers whose streams
-hold it; an ancestor dropped this way is asked again for the pending
-headers naming it. When the parent has caught up (synced, every peer's
-stream read to its end and applied, nothing pending) and weighs another
-block without the anchor, the anchor is on no branch the parent's peers
-serve: the header's holes are let go so the streams move on, as Bitcoin
-keeps no header that does not connect. It comes back as a descendant's
-ancestor or on a stream reset. This is driven by the parent's progress,
-never a clock: a parent that never catches up or never advances keeps
-such a peer's stream waiting, and one that weighs an unrelated block an
-instant before the anchor's arrives lets the header go early, to return
-with its next descendant. A submit past the frontier
-is dropped like a gossip; its author pushes it again. A node's own mined grind weighs every level it reaches in one step,
-as before: its child blocks anchor at the state the template's parent tip
-declares.
+While its parent catches up, a child level asks its peers for nothing: no
+stream page and no header. Its stream cursors stay where they were, and the
+latch has it read every peer's stream from there. Its own mined grinds and
+the blocks submitted on this node still weigh, as before: a mined grind
+weighs every level it reaches in one step.
 
-The parent level keeps the post-states its weighed blocks declare while a
-hosted child reads them, built from its tree once and grown by each step:
-in memory, never persisted (one canonical CID string per weighed parent
-block). Like the runs a parent serves, it is kept after the child is
-unhosted, until a restart.
+The nearest prior art is Polkadot's parachains: a parachain node follows
+its relay chain, taking as best and final the parachain blocks relay blocks
+include, and a collator does not author while its relay chain node is
+still syncing.
+Here the gate is coarser, one latch per level instead of a check per block,
+since a child block's weight is read from its parent level (its grinds'
+carriers and its runs), which a level still catching up does not yet have.
+Execution keeps its own rule: a child block executes once its parent state
+is held and continuous
+([Parent-state continuity](#parent-state-continuity)).
 
 ## Push-only derived grinds
 

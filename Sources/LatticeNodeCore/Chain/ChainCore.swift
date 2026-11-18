@@ -56,6 +56,9 @@ public enum ChainEvent: Sendable {
     /// connects lacked.
     case parentFactsPresent([String])
     case tick
+    /// A child level: its parent level latched `synced`, so this level's
+    /// gate opens for good and every peer's stream is read.
+    case parentSynced
     /// A child level: a `verifyProofs` job finished, every check answered
     /// (nil for one whose block was not held: no verdict, no blame).
     case proofsVerified([ChildProofAnswer])
@@ -318,17 +321,6 @@ public struct ChainCore: Sendable {
     /// persisted (geth's `handler.synced`, set when its downloader completes
     /// a sync cycle). Until then a peer's transaction is ignored.
     public internal(set) var synced = false
-
-    /// Synced, with no header work outstanding: no pending or waiting
-    /// header, and every peer's stream read to its end and applied, with
-    /// nothing asked of it. What this level has weighed is then all its
-    /// peers have served.
-    public var caughtUp: Bool {
-        synced && sync.pending.entries.isEmpty && sync.proofs.awaiting.isEmpty
-            && sync.peers.values.allSatisfy {
-                $0.holes.isEmpty && !$0.more && $0.stream == nil && $0.data == nil && $0.parentRequest == nil
-            }
-    }
     public let config: ChainCoreConfig
     /// The level's mempool and template book, on the act-on tip.
     public internal(set) var mining: MiningState
@@ -349,20 +341,15 @@ public struct ChainCore: Sendable {
     /// grinds are derived (`deriveGrinds`). Reset by every step.
     public internal(set) var arrived: [String] = []
     /// A child level, within one step only: its parent level's tree, whose
-    /// committers make a header with no proofs worth taking (`awaitProof`),
-    /// and the post-states its weighed blocks declare (`weighedStates`),
-    /// which bound what this level takes (`accept`). Never held past the
-    /// step.
+    /// committers make a header with no proofs worth taking (`awaitProof`).
+    /// Never held past the step.
     var parentTree: ChainTree?
-    var parentStates: Set<String>?
-    /// A level a hosted child level reads: the post-state each of its
-    /// weighed blocks declares, canonical, and nil on a level no child
-    /// reads (`trackWeighedStates`). A child header anchored at a state not
-    /// in it is past what this level has weighed. Declared, not executed:
-    /// a child block's work (its grinds, spec §9.5) and its runs (§9.10)
-    /// come from parent blocks at and after the one it anchors on, whatever
-    /// their execution. In memory only, rebuilt from the tree.
-    public internal(set) var weighedStates: Set<String>?
+    /// A child level, within one step only: its parent level has not caught
+    /// up (`synced`). Whole-chain top-down: a gated level reads none of its
+    /// peers' streams, so it weighs, fetches and executes nothing from them;
+    /// its cursors stay where they were. The parent's latch opens it for
+    /// good (`parentSynced`). Never held past the step.
+    var gated = false
     /// The child directories this level's executed blocks commit: built from
     /// the held tree, then grown by every block that executes valid.
     public let executedChildren = ExecutedChildren()
@@ -466,10 +453,11 @@ public struct ChainCore: Sendable {
         )
     }
 
-    /// One event. A child level is handed its parent level's tree and
-    /// weighed states for the step alone (`parentTree`, `parentStates`).
+    /// One event. A child level is handed its parent level's tree, and
+    /// whether that level has caught up, for the step alone (`parentTree`,
+    /// `gated`).
     public mutating func step(
-        _ event: ChainEvent, now: Int64, parent: ChainTree? = nil, parentStates: Set<String>? = nil
+        _ event: ChainEvent, now: Int64, parent: ChainTree? = nil, parentSynced: Bool = true
     ) -> [ChainEffect] {
         // A peer's transaction is ignored until the level has caught up
         // (`synced`), as Bitcoin Core ignores `tx` during initial block
@@ -477,10 +465,10 @@ public struct ChainCore: Sendable {
         // blamed.
         if case .mining(.transactionReceived(_, origin: .peer)) = event, !synced { return [] }
         parentTree = parent
-        self.parentStates = parentStates
+        gated = !parentSynced
         defer {
             parentTree = nil
-            self.parentStates = nil
+            gated = false
         }
         var turn = Turn(now: now)
         weighed = []
@@ -523,6 +511,8 @@ public struct ChainCore: Sendable {
             parentFactsPresent(blocks)
         case .tick:
             tick(&turn)
+        case .parentSynced:
+            for peer in sync.peers.keys.sorted() { requestStream(from: peer, &turn) }
         case .proofsVerified(let answers):
             proofsVerified(answers, &turn)
         case .derived(let derivation):
@@ -583,15 +573,6 @@ public struct ChainCore: Sendable {
     /// in the same step.
     mutating func finish(_ turn: Turn) -> [ChainEffect] {
         var turn = turn
-        // Pending headers leave by many ways (weighed, evicted, rejected):
-        // what was dropped past the parent and is no longer named goes too.
-        sync.forgetBeyondParent()
-        if weighedStates != nil {
-            for hash in weighed {
-                guard let state = tree.headerSnapshot(of: hash)?.postStateCID else { continue }
-                weighedStates?.insert(Self.canonical(state))
-            }
-        }
         let actOn = followActOnChain(&turn)
         var effects: [ChainEffect] = []
         // The weigh log follows the fact log: a header precedes its proofs,
@@ -780,9 +761,10 @@ public struct ChainCore: Sendable {
     // MARK: - Streams
 
     /// Ask `peer` for its log after what we took of it (on a new session,
-    /// after our cursor in it; a fresh peer: 0).
+    /// after our cursor in it; a fresh peer: 0). Never while gated: the
+    /// parent's latch asks every peer (`parentSynced`).
     private mutating func requestStream(from peer: PeerID, _ turn: inout Turn) {
-        guard let state = sync.peers[peer], state.stream == nil else { return }
+        guard !gated, let state = sync.peers[peer], state.stream == nil else { return }
         let requestID = nextRequestID()
         sync.peers[peer]?.stream = InFlightStream(requestID: requestID, deadline: turn.now + config.headersTimeout)
         sync.peers[peer]?.more = false
@@ -849,10 +831,7 @@ public struct ChainCore: Sendable {
     /// (only that one is looked at), else through what was taken.
     mutating func advanceCursor(of peer: PeerID, _ turn: inout Turn) {
         guard var state = sync.peers[peer], let cursor = sync.cursors[peer.key] else { return }
-        while let hole = state.holes.first, applied(hole.entry) {
-            state.holes.removeFirst()
-            sync.beyondParent[hole.entry.block] = nil
-        }
+        while let hole = state.holes.first, applied(hole.entry) { state.holes.removeFirst() }
         sync.peers[peer] = state
         let position = state.holes.first.map { $0.position - 1 } ?? state.taken
         guard position != cursor.position else { return }
@@ -871,11 +850,9 @@ public struct ChainCore: Sendable {
             let waiting = sync.pending.entries[entry.block].map { $0.children == nil && $0.announcers.isEmpty }
             return !tree.contains(blockHash: entry.block) && waiting != false
                 && sync.proofs.awaiting[entry.block] == nil && !sync.declined.contains(entry.block)
-                && sync.beyondParent[entry.block] == nil
         case .proof:
             return !applied(entry) && sync.pending.entries[entry.block]?.evidence[entry.cid] == nil
                 && !sync.proofs.checking(entry.block, root: entry.cid)
-                && sync.beyondParent[entry.block] == nil
         }
     }
 
@@ -886,11 +863,9 @@ public struct ChainCore: Sendable {
     /// page is pulled, once the holes leave room for half a page: a page is
     /// served whole, and a pull with room for a few entries would take those
     /// few and drop the rest (TCP's silly-window avoidance). Holes still
-    /// lacking are asked again on a tick.
+    /// lacking are asked again on a tick. Nothing while gated.
     mutating func pump(_ peer: PeerID, _ turn: inout Turn, again: Bool = false) {
-        guard let state = sync.peers[peer], state.data == nil, sync.cursors[peer.key] != nil else { return }
-        let again = again || state.reask
-        sync.peers[peer]?.reask = false
+        guard !gated, let state = sync.peers[peer], state.data == nil, sync.cursors[peer.key] != nil else { return }
         let inFlight = Set(sync.peers.values.flatMap { $0.data?.cids ?? [] })
         let requested = state.holes.last.map { Swift.max(state.requested, $0.position) } ?? state.requested
         var seen = Set<String>()
@@ -1026,18 +1001,6 @@ public struct ChainCore: Sendable {
         if pastFinality(height: entry.block.height)
             || entry.block.parent.map({ sync.declined.contains($0.rawCID) }) == true {
             decline(cid)
-            return cid
-        }
-        // Top-down: a child header anchored at a parent state the parent
-        // level has not weighed is past it, and is dropped as Bitcoin drops
-        // headers that do not connect: its work and runs come from parent
-        // blocks not weighed yet, so it can be neither priced nor derived.
-        // Its stream hole stays, and is asked again once the parent weighs
-        // a block declaring that state (`parentAdvanced`).
-        if !isRoot, let parentStates, !Self.anchored(entry.block, within: parentStates) {
-            if peer != nil, sync.beyondParent[cid] == nil {
-                sync.beyondParent[cid] = .init(anchor: Self.canonical(entry.block.parentState.rawCID), parentWeighed: parentStates.count)
-            }
             return cid
         }
         if let held = sync.pending.entries[cid] {

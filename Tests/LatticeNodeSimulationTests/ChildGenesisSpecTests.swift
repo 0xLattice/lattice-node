@@ -18,14 +18,16 @@ final class ChildGenesisSpecTests: XCTestCase {
         )
     }
 
-    /// A host that weighed Nexus up to the block Alpha's genesis anchors on
-    /// (the one before its carrier): top-down, a child header is taken only
-    /// within what its parent level has weighed.
-    private func anchoredHost(_ world: LevelWorld) -> NodeCore {
+    /// A host whose Nexus level has caught up (a peer's Nexus log read to
+    /// its end): top-down, Alpha reads its peers only then.
+    private func syncedHost(_ world: LevelWorld) -> NodeCore {
         var host = NodeCore(root: world.rootBootstrap.tree.detached(), hosted: world.hosted)
-        for grind in world.grinds.prefix(while: { $0.mined.carried.isEmpty }) {
-            _ = host.step(.mined(grind.mined), now: now)
+        let peer = PeerID(key: "nexus", session: 1)
+        for effect in host.step(.peerReady(peer), now: now) {
+            guard case .level(let path, .send(_, .getStream(let id, _, _, _))) = effect, path == LevelWorld.nexus else { continue }
+            _ = host.step(.received(peer, path, .stream(StreamPage(requestID: id, logID: "nexus", entries: [], hasMore: false))), now: now)
         }
+        XCTAssertEqual(host.levels[LevelWorld.nexus]?.synced, true)
         return host
     }
 
@@ -62,7 +64,7 @@ final class ChildGenesisSpecTests: XCTestCase {
 
     func testABadSpecNeverBlocksTheGenesis() async throws {
         let world = try await world()
-        var host = anchoredHost(world)
+        var host = syncedHost(world)
         let liar = PeerID(key: "liar", session: 1)
         let honest = PeerID(key: "honest", session: 1)
         _ = host.step(.peerReady(liar), now: now)
@@ -78,7 +80,7 @@ final class ChildGenesisSpecTests: XCTestCase {
 
     func testAProofCheckWhoseBlockIsGoneFreesItsPlaceWithoutBlame() async throws {
         let world = try await world()
-        var host = anchoredHost(world)
+        var host = syncedHost(world)
         let peer = PeerID(key: "peer", session: 1)
         _ = host.step(.peerReady(peer), now: now)
         let effects = try await announce(

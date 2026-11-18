@@ -246,9 +246,9 @@ ancestor grind contributed work to it. That is why the former
 `ChildHeaders.swift` is now `ChildProofs.swift`: the file owns proof admission
 and verification, while ordinary header synchronization stays in `Sync/`.
 
-Child levels weigh top-down: a child header is taken only once its parent
-level has weighed the block whose post-state it anchors on, since its work
-and runs come from parent blocks. A page's peer proofs are checked in one
+Child levels sync whole-chain top-down: a child level reads its peers only
+once its parent level has caught up (the parent's one-way `synced` latch),
+since its work and runs come from parent blocks. A page's peer proofs are checked in one
 job off the loop and applied in one step; a grind the parent's committing
 block lets this node derive is derived, not checked
 ([proof-derived work](design/proof-derived-work.md#top-down-weighing)).

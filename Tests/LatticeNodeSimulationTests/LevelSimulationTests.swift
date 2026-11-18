@@ -314,6 +314,13 @@ final class LevelSimulationTests: XCTestCase {
                     queue.append(.level(path, .childIndexFetched(
                         peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
                     )))
+                // Nexus executes, so it latches `synced` and Alpha's gate opens.
+                case .level(let path, .fetchBody(let cid)):
+                    queue.append(.level(path, .bodyFetched(cid: cid)))
+                case .connect(let path, let jobs):
+                    queue.append(.level(path, await ConnectRun.connected(
+                        jobs, fetcher: world.cas, parentFacts: host.parentFacts(for: path), now: now
+                    )))
                 case .disconnect(let gone, let reason):
                     XCTFail("disconnected \(gone) as \(reason)")
                 default:
@@ -377,6 +384,13 @@ final class LevelSimulationTests: XCTestCase {
                 case .level(let path, .fetchByCID(_, let cid)):
                     queue.append(.level(path, .childIndexFetched(
                         peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
+                    )))
+                // Nexus executes, so it latches `synced` and Alpha's gate opens.
+                case .level(let path, .fetchBody(let cid)):
+                    queue.append(.level(path, .bodyFetched(cid: cid)))
+                case .connect(let path, let jobs):
+                    queue.append(.level(path, await ConnectRun.connected(
+                        jobs, fetcher: world.cas, parentFacts: host.parentFacts(for: path), now: now
                     )))
                 default:
                     break
@@ -442,6 +456,13 @@ final class LevelSimulationTests: XCTestCase {
                 case .level(let path, .fetchByCID(_, let cid)):
                     queue.append(.level(path, .childIndexFetched(
                         peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
+                    )))
+                // Nexus executes, so it latches `synced` and Alpha's gate opens.
+                case .level(let path, .fetchBody(let cid)):
+                    queue.append(.level(path, .bodyFetched(cid: cid)))
+                case .connect(let path, let jobs):
+                    queue.append(.level(path, await ConnectRun.connected(
+                        jobs, fetcher: world.cas, parentFacts: host.parentFacts(for: path), now: now
                     )))
                 case .disconnect(let gone, let reason):
                     XCTFail("disconnected \(gone) as \(reason)")
@@ -509,6 +530,13 @@ final class LevelSimulationTests: XCTestCase {
                         queue.append(.level(path, .childIndexFetched(
                             peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
                         )))
+                    // Nexus executes, so it latches `synced` and Alpha's gate opens.
+                    case .level(let path, .fetchBody(let cid)):
+                        queue.append(.level(path, .bodyFetched(cid: cid)))
+                    case .connect(let path, let jobs):
+                        queue.append(.level(path, await ConnectRun.connected(
+                            jobs, fetcher: world.cas, parentFacts: host.parentFacts(for: path), now: now
+                        )))
                     case .disconnect(let gone, let reason):
                         XCTFail("disconnected \(gone) as \(reason)")
                     default:
@@ -566,6 +594,13 @@ final class LevelSimulationTests: XCTestCase {
                     case .level(let path, .fetchByCID(_, let cid)):
                         queue.append(.level(path, .childIndexFetched(
                             peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
+                        )))
+                    // Nexus executes, so it latches `synced` and Alpha's gate opens.
+                    case .level(let path, .fetchBody(let cid)):
+                        queue.append(.level(path, .bodyFetched(cid: cid)))
+                    case .connect(let path, let jobs):
+                        queue.append(.level(path, await ConnectRun.connected(
+                            jobs, fetcher: world.cas, parentFacts: host.parentFacts(for: path), now: now
                         )))
                     case .disconnect(let gone, let reason):
                         XCTFail("disconnected \(gone) as \(reason)")

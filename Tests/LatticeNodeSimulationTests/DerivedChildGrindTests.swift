@@ -54,6 +54,9 @@ final class DerivedChildGrindTests: XCTestCase {
         /// What each peer serves when asked (`getData`), answered as the
         /// request is sent, by level.
         var serving: [ChainPath: [PeerID: [String: HeaderEntry]]] = [:]
+        /// Each peer's whole log, by level, which answers every stream
+        /// request as it is sent.
+        var logs: [ChainPath: [PeerID: [String]]] = [:]
         var disconnects: [PeerID] = []
         /// Child indexes asked for by CID, and of whom.
         var fetches: [(peer: PeerID, cid: String)] = []
@@ -133,6 +136,12 @@ final class DerivedChildGrindTests: XCTestCase {
                         if !withheldBodies.contains(cid) { queue.append(.level(path, .bodyFetched(cid: cid))) }
                     case .level(let path, .send(let peer, let message)):
                         sent.append((path, message))
+                        if case .getStream(let id, _, let after, _) = message, let log = logs[path]?[peer] {
+                            let entries = log.enumerated().dropFirst(Int(after)).map {
+                                StreamEntry(position: UInt64($0.offset + 1), entry: .header($0.element))
+                            }
+                            queue.append(.received(peer, path, .stream(StreamPage(requestID: id, logID: "peer", entries: entries, hasMore: false))))
+                        }
                         if case .getData(let id, let cids) = message, let served = serving[path]?[peer] {
                             let entries = cids.compactMap { served[$0] }
                             if !entries.isEmpty {
@@ -196,12 +205,17 @@ final class DerivedChildGrindTests: XCTestCase {
             for (path, job) in held { await step(await derive(job, at: path)) }
         }
 
-        /// A peer whose logs this host reads from their start.
+        /// A peer whose logs this host reads from their start (a child
+        /// level's once its parent level caught up).
         mutating func meet(_ peer: PeerID) async {
             await step(.peerReady(peer))
-            for (path, message) in take() {
-                guard case .getStream(let id, _, _, _) = message else { continue }
-                await step(.received(peer, path, .stream(StreamPage(requestID: id, logID: "peer", entries: [], hasMore: false))))
+            var asked = take()
+            while !asked.isEmpty {
+                for (path, message) in asked {
+                    guard case .getStream(let id, _, _, _) = message else { continue }
+                    await step(.received(peer, path, .stream(StreamPage(requestID: id, logID: "peer", entries: [], hasMore: false))))
+                }
+                asked = take()
             }
         }
 
@@ -1173,10 +1187,6 @@ final class DerivedChildGrindTests: XCTestCase {
             if parentFirst {
                 await host.relay(n1.root, at: Self.nexus, from: Self.miner)
                 await host.relay(n2.root, at: Self.nexus, from: Self.miner)
-            } else {
-                // C anchors at N1's post-state: past the parent's frontier
-                // it is dropped, and asked again once N1 is weighed.
-                host.serving[Self.alpha] = [Self.alphaHost: [c.cid: HeaderEntry(block: c.block, children: c.children, proofs: [cProof])]]
             }
             await host.relay(g, at: Self.alpha, from: Self.alphaHost, proofs: [gProof], spec: world.specs[Self.alpha])
             await host.relay(c, at: Self.alpha, from: Self.alphaHost, proofs: [cProof])
@@ -1704,24 +1714,21 @@ final class DerivedChildGrindTests: XCTestCase {
 
     // MARK: - Top-down weighing and page-batched checks
 
-    /// N0, N1 (carrying Alpha's genesis G) and N2 on N1; Alpha blocks
-    /// C1...Cn on G, each anchored at `anchor`'s post-state and carried by a
-    /// share on it (a grind that is no Nexus block), with that share's
-    /// proof.
+    /// N0 and N1 (carrying Alpha's genesis G); Alpha blocks C1...Cn on G,
+    /// each anchored at N1's post-state and carried by a share on it (a
+    /// grind that is no Nexus block), with that share's proof.
     private struct Shares {
         let world: LevelWorld
         let setup: [MinedGrind]
-        let n2: SimBlock
         let blocks: [(block: SimBlock, proofs: [ChildBlockProof])]
     }
 
-    private func sharesWorld(_ count: Int, anchoredAtN2: Bool) async throws -> Shares {
+    private func sharesWorld(_ count: Int) async throws -> Shares {
         var builder = try await LevelWorld.Builder(levels: 2)
         let n0 = try await builder.grind(on: try XCTUnwrap(builder.geneses[Self.nexus]), carrying: [], at: Self.t + Self.interval / 2, outcome: .block)
         let g = try await builder.childGenesis(Self.alpha, parentState: n0.root.block.postState.rawCID, at: Self.t + Self.interval)
         let n1 = try await builder.grind(on: n0.root, carrying: [(Self.alpha, g)], at: Self.t + Self.interval, outcome: .block)
-        let n2 = try await builder.grind(on: n1.root, carrying: [], at: Self.t + 2 * Self.interval, outcome: .block)
-        let carrier = anchoredAtN2 ? n2.root : n1.root
+        let carrier = n1.root
         var blocks: [(block: SimBlock, proofs: [ChildBlockProof])] = []
         var previous = g
         for index in 0..<count {
@@ -1733,104 +1740,143 @@ final class DerivedChildGrindTests: XCTestCase {
             blocks.append((block, [try XCTUnwrap(share.grind.carried.first).proof]))
             previous = block
         }
-        return Shares(world: builder.world(), setup: [n0.grind, n1.grind], n2: n2.root, blocks: blocks)
+        return Shares(world: builder.world(), setup: [n0.grind, n1.grind], blocks: blocks)
     }
 
-    /// Top-down: a child header anchored at a parent state its parent
-    /// level has not weighed is neither checked nor weighed, and its hole
-    /// is not asked again while the parent stays behind. Once the parent
-    /// weighs the block that declares that state, the hole is asked again
-    /// and the header weighs by its proof.
-    func testAChildHeaderPastTheParentsWeighedFrontierWeighsOnlyOnceTheParentAdvances() async throws {
-        let fixture = try await sharesWorld(1, anchoredAtN2: true)
+    /// N0, N1 (carrying Alpha's genesis G, with its proof) and N2 on N1;
+    /// Alpha blocks C1...C4 on G, each anchored at N1's post-state but C4
+    /// at N2's, and carried by a share on its anchor, with that share's
+    /// proof.
+    private struct Gate {
+        let world: LevelWorld
+        let nexus: [SimBlock]
+        let n2: SimBlock
+        let alpha: [HeaderEntry]
+        let c4: (block: SimBlock, proofs: [ChildBlockProof])
+    }
+
+    private func gateWorld() async throws -> Gate {
+        var builder = try await LevelWorld.Builder(levels: 2)
+        let n0 = try await builder.grind(on: try XCTUnwrap(builder.geneses[Self.nexus]), carrying: [], at: Self.t + Self.interval / 2, outcome: .block)
+        let g = try await builder.childGenesis(Self.alpha, parentState: n0.root.block.postState.rawCID, at: Self.t + Self.interval)
+        let n1 = try await builder.grind(on: n0.root, carrying: [(Self.alpha, g)], at: Self.t + Self.interval, outcome: .block)
+        let n2 = try await builder.grind(on: n1.root, carrying: [], at: Self.t + 2 * Self.interval, outcome: .block)
+        var alpha = [HeaderEntry(
+            block: g.block, children: g.children, proofs: [try XCTUnwrap(n1.grind.carried.first).proof], spec: builder.world().specs[Self.alpha]
+        )]
+        var previous = g
+        var c4: (block: SimBlock, proofs: [ChildBlockProof])?
+        for index in 0..<4 {
+            let carrier = index < 3 ? n1.root : n2.root
+            let time = Self.t + Int64(3 + index) * Self.interval
+            let block = try await builder.build(
+                on: previous, carrierPrevState: carrier.block.postState.rawCID, timestamp: time, nonce: UInt64(index + 1)
+            )
+            let share = try await builder.grind(on: carrier, carrying: [(Self.alpha, block)], at: time, outcome: .share)
+            let proofs = [try XCTUnwrap(share.grind.carried.first).proof]
+            if index < 3 {
+                alpha.append(HeaderEntry(block: block.block, children: block.children, proofs: proofs))
+            } else {
+                c4 = (block, proofs)
+            }
+            previous = block
+        }
+        return Gate(world: builder.world(), nexus: [n0.root, n1.root], n2: n2.root, alpha: alpha, c4: try XCTUnwrap(c4))
+    }
+
+    /// A host that hears Alpha's peer before Nexus has caught up.
+    private func gatedHost(_ fixture: Gate) async throws -> Host {
         var host = Host(fixture.world)
-        for grind in fixture.setup { await host.step(.mined(grind)) }
-        await host.meet(Self.miner)
-        await host.meet(Self.alphaHost)
-        let c = try XCTUnwrap(fixture.blocks.first)
-        await host.relayPage([c], at: Self.alpha, from: Self.alphaHost)
-        XCTAssertNil(try host.digest(Self.alpha).blocks[c.block.cid], "past the parent's frontier: not weighed")
-        XCTAssertEqual(host.peerChecks, 0, "nor checked")
-        XCTAssertNil(host.core.levels[Self.alpha]?.sync.proofs.awaiting[c.block.cid], "nor held")
-        let asked = host.take().filter { if case .getData = $0.message { return true }; return false }.count
-        await host.step(.tick)
-        XCTAssertEqual(host.take().filter { if case .getData = $0.message { return true }; return false }.count, 0,
-                       "not asked again while the parent stays behind (asked \(asked) before)")
-
-        await host.relay(fixture.n2, at: Self.nexus, from: Self.miner)
-        XCTAssertNotNil(try host.digest(Self.nexus).blocks[fixture.n2.cid])
-        XCTAssertNotNil(try host.digest(Self.alpha).blocks[c.block.cid], "the parent advanced: weighed")
-        XCTAssertEqual(host.peerChecks, 1)
-        XCTAssertTrue(host.disconnects.isEmpty)
+        for block in fixture.nexus + [fixture.n2] {
+            host.serving[Self.nexus, default: [:]][Self.miner, default: [:]][block.cid] = HeaderEntry(block: block.block, children: block.children)
+        }
+        for entry in fixture.alpha {
+            host.serving[Self.alpha, default: [:]][Self.alphaHost, default: [:]][try XCTUnwrap(entry.cid)] = entry
+        }
+        host.logs[Self.alpha] = [Self.alphaHost: try fixture.alpha.map { try XCTUnwrap($0.cid) }]
+        // Alpha's peer, hosting Nexus too, never answers for Nexus.
+        await host.step(.peerReady(Self.alphaHost))
+        XCTAssertFalse(host.take().contains { $0.path == Self.alpha }, "gated: Alpha asks its peer for nothing")
+        await host.step(.peerReady(Self.miner))
+        return host
     }
 
-    /// A header anchored past the parent is kept while the parent has not
-    /// caught up, or has caught up without weighing more. Once the caught-up
-    /// parent weighs another block (a sibling of the anchor's) and still
-    /// lacks the anchor, the anchor is on no branch its peers serve: the
-    /// header is let go so the peer's stream moves on. No clock is read:
-    /// time passing changes nothing.
-    func testAHeaderPastACaughtUpParentIsLetGoWhenTheParentAdvancesWithoutIt() async throws {
-        var builder = try await LevelWorld.Builder(levels: 2)
-        let n0 = try await builder.grind(on: try XCTUnwrap(builder.geneses[Self.nexus]), carrying: [], at: Self.t + Self.interval / 2, outcome: .block)
-        let g = try await builder.childGenesis(Self.alpha, parentState: n0.root.block.postState.rawCID, at: Self.t + Self.interval)
-        let n1 = try await builder.grind(on: n0.root, carrying: [(Self.alpha, g)], at: Self.t + Self.interval, outcome: .block)
-        let n2 = try await builder.grind(on: n1.root, carrying: [], at: Self.t + 2 * Self.interval, outcome: .block)
-        let sibling = try await builder.grind(on: n1.root, carrying: [], at: Self.t + 2 * Self.interval + 1, outcome: .block)
-        let c = try await builder.build(on: g, carrierPrevState: n2.root.block.postState.rawCID, timestamp: Self.t + 3 * Self.interval, nonce: 1)
-        let share = try await builder.grind(on: n2.root, carrying: [(Self.alpha, c)], at: Self.t + 3 * Self.interval, outcome: .share)
-        var host = Host(builder.world())
-        for grind in [n0.grind, n1.grind] { await host.step(.mined(grind)) }
-        // The parent level has caught up (its latch, as when its best
-        // header executes).
-        host.core.levels[Self.nexus]?.synced = true
-        host.tamper("Nexus latched synced")
-        await host.meet(Self.miner)
-        await host.meet(Self.alphaHost)
-        await host.relayPage([(c, [try XCTUnwrap(share.grind.carried.first).proof])], at: Self.alpha, from: Self.alphaHost)
-        XCTAssertNotNil(host.core.levels[Self.alpha]?.sync.beyondParent[c.cid], "dropped past the parent")
-        func holes() -> Int { host.core.levels[Self.alpha]?.sync.peers[Self.alphaHost]?.holes.count ?? -1 }
-        XCTAssertEqual(holes(), 1)
-        _ = host.core.step(.tick, now: Self.now + 100 * host.config.headersTimeout)
-        XCTAssertEqual(holes(), 1, "time passing lets nothing go")
-        await host.relay(sibling.root, at: Self.nexus, from: Self.miner)
-        XCTAssertNotNil(try host.digest(Self.nexus).blocks[sibling.root.cid])
-        XCTAssertEqual(host.core.levels[Self.nexus]?.caughtUp, true)
-        XCTAssertEqual(holes(), 0, "the caught-up parent advanced without the anchor: let go, the stream moves on")
-        XCTAssertNil(host.core.levels[Self.alpha]?.sync.beyondParent[c.cid])
-        XCTAssertTrue(host.disconnects.isEmpty)
-    }
+    /// Whole-chain top-down: while Nexus catches up, Alpha asks its peer
+    /// for nothing (no stream page, no header) and weighs nothing; its
+    /// cursor stays where it was. Once Nexus latches `synced`, Alpha reads
+    /// its peer's log and weighs every block in it.
+    func testAChildLevelAsksItsPeersNothingWhileItsParentCatchesUpThenSyncsFully() async throws {
+        let fixture = try await gateWorld()
+        var host = try await gatedHost(fixture)
+        func asks(_ sent: [(path: ChainPath, message: SyncMessage)], at path: ChainPath) -> [SyncMessage] {
+            sent.filter { $0.path == path }.map(\.message).filter {
+                switch $0 {
+                case .getStream, .getData, .getAncestors: true
+                default: false
+                }
+            }
+        }
+        var sent = host.take()
+        let nexusStream = try XCTUnwrap(sent.compactMap { sent -> UInt64? in
+            guard sent.path == Self.nexus, case .getStream(let id, _, 0, _) = sent.message else { return nil }
+            return id
+        }.first)
+        XCTAssertTrue(asks(sent, at: Self.alpha).isEmpty, "gated: Alpha asks for no stream")
 
-    /// A pending header's parent X, asked for as an ancestor, anchors past
-    /// the parent level: X is dropped and remembered for the header naming
-    /// it, and asked for again once the parent weighs X's anchor; then both
-    /// weigh by their proofs.
-    func testAnAncestorPastTheParentIsAskedAgainWhenTheParentAdvances() async throws {
-        var builder = try await LevelWorld.Builder(levels: 2)
-        let n0 = try await builder.grind(on: try XCTUnwrap(builder.geneses[Self.nexus]), carrying: [], at: Self.t + Self.interval / 2, outcome: .block)
-        let g = try await builder.childGenesis(Self.alpha, parentState: n0.root.block.postState.rawCID, at: Self.t + Self.interval)
-        let n1 = try await builder.grind(on: n0.root, carrying: [(Self.alpha, g)], at: Self.t + Self.interval, outcome: .block)
-        let n2 = try await builder.grind(on: n1.root, carrying: [], at: Self.t + 2 * Self.interval, outcome: .block)
-        // X anchors at N2's post-state (past the parent until N2 weighs).
-        let x = try await builder.build(on: g, carrierPrevState: n2.root.block.postState.rawCID, timestamp: Self.t + 3 * Self.interval, nonce: 1)
-        let xShare = try await builder.grind(on: n2.root, carrying: [(Self.alpha, x)], at: Self.t + 3 * Self.interval, outcome: .share)
-        // C, on X, anchors at N1's post-state: within the parent from the start.
-        let c = try await builder.build(on: x, carrierPrevState: n1.root.block.postState.rawCID, timestamp: Self.t + 4 * Self.interval, nonce: 2)
-        let cShare = try await builder.grind(on: n1.root, carrying: [(Self.alpha, c)], at: Self.t + 4 * Self.interval, outcome: .share)
-        var host = Host(builder.world())
-        for grind in [n0.grind, n1.grind] { await host.step(.mined(grind)) }
-        await host.meet(Self.miner)
-        await host.meet(Self.alphaHost)
-        let xProof = try XCTUnwrap(xShare.grind.carried.first).proof
-        host.serving[Self.alpha] = [Self.alphaHost: [x.cid: HeaderEntry(block: x.block, children: x.children, proofs: [xProof])]]
-        await host.relay(c, at: Self.alpha, from: Self.alphaHost, proofs: [try XCTUnwrap(cShare.grind.carried.first).proof])
-        XCTAssertNotNil(host.core.levels[Self.alpha]?.sync.pending.entries[c.cid], "C waits for its parent")
-        XCTAssertNotNil(host.core.levels[Self.alpha]?.sync.beyondParent[x.cid], "X, asked as its ancestor, dropped past the parent")
-        XCTAssertNil(try host.digest(Self.alpha).blocks[x.cid])
-        await host.relay(n2.root, at: Self.nexus, from: Self.miner)
+        // Nexus catches up page by page: N0, then N1.
+        let n0 = fixture.nexus[0].cid, n1 = fixture.nexus[1].cid
+        await host.step(.received(Self.miner, Self.nexus, .stream(StreamPage(
+            requestID: nexusStream, logID: "peer", entries: [StreamEntry(position: 1, entry: .header(n0))], hasMore: true
+        ))))
+        XCTAssertNotNil(try host.digest(Self.nexus).blocks[n0])
+        XCTAssertEqual(host.core.levels[Self.nexus]?.synced, false)
+        sent = host.take()
+        XCTAssertTrue(asks(sent, at: Self.alpha).isEmpty, "still gated while Nexus catches up")
+        XCTAssertEqual(host.core.levels[Self.alpha]?.sync.peers[Self.alphaHost]?.holes.isEmpty, true)
+        XCTAssertNil(host.core.levels[Self.alpha]?.sync.cursors[Self.alphaHost.key], "Alpha's cursor stays")
+        XCTAssertEqual(try host.digest(Self.alpha).blocks.count, 0, "Alpha weighs nothing")
+        let next = try XCTUnwrap(sent.compactMap { sent -> UInt64? in
+            guard sent.path == Self.nexus, case .getStream(let id, _, 1, _) = sent.message else { return nil }
+            return id
+        }.first)
+        await host.step(.received(Self.miner, Self.nexus, .stream(StreamPage(
+            requestID: next, logID: "peer", entries: [StreamEntry(position: 2, entry: .header(n1))], hasMore: false
+        ))))
+
+        XCTAssertEqual(host.core.levels[Self.nexus]?.synced, true, "Nexus caught up")
+        XCTAssertFalse(asks(host.take(), at: Self.alpha).isEmpty, "the gate opened: Alpha reads its peer")
         let alpha = try host.digest(Self.alpha)
-        XCTAssertNotNil(alpha.blocks[x.cid], "the parent advanced: X asked again and weighed")
-        XCTAssertNotNil(alpha.blocks[c.cid], "and C on it")
+        for entry in fixture.alpha { XCTAssertNotNil(alpha.blocks[try XCTUnwrap(entry.cid)], "every Alpha block weighs") }
+        XCTAssertEqual(alpha.canonicalTip, fixture.alpha.last?.cid)
+        XCTAssertTrue(host.disconnects.isEmpty)
+    }
+
+    /// The latch is one-way: once Nexus has caught up, a new Nexus block,
+    /// not yet executed (its body withheld, so its best header tip is past
+    /// its act-on tip), does not pause Alpha. An Alpha block anchored at
+    /// that new block's state weighs as soon as Alpha's peer relays it.
+    func testAfterTheLatchANewParentBlockDoesNotPauseTheChild() async throws {
+        let fixture = try await gateWorld()
+        var host = try await gatedHost(fixture)
+        for (path, message) in host.take() where path == Self.nexus {
+            guard case .getStream(let id, _, _, _) = message else { continue }
+            let entries = fixture.nexus.enumerated().map { StreamEntry(position: UInt64($0.offset + 1), entry: .header($0.element.cid)) }
+            await host.step(.received(Self.miner, Self.nexus, .stream(StreamPage(requestID: id, logID: "peer", entries: entries, hasMore: false))))
+        }
+        XCTAssertEqual(host.core.levels[Self.nexus]?.synced, true)
+        XCTAssertEqual(try host.digest(Self.alpha).canonicalTip, fixture.alpha.last?.cid)
+
+        host.withheldBodies.insert(fixture.n2.cid)
+        host.position[Self.nexus] = [Self.miner: UInt64(fixture.nexus.count)]
+        await host.relay(fixture.n2, at: Self.nexus, from: Self.miner)
+        let nexus = try XCTUnwrap(host.core.levels[Self.nexus]?.snapshot)
+        XCTAssertEqual(nexus.bestHeaderTip, fixture.n2.cid)
+        XCTAssertNotEqual(nexus.actOnTip, fixture.n2.cid, "N2 is weighed, not executed")
+        let c4 = fixture.c4.block.cid
+        host.position[Self.alpha] = [Self.alphaHost: UInt64(fixture.alpha.count)]
+        await host.relayPage([fixture.c4], at: Self.alpha, from: Self.alphaHost)
+        XCTAssertNotNil(try host.digest(Self.alpha).blocks[c4], "Alpha follows live")
+        XCTAssertEqual(try host.digest(Self.alpha).canonicalTip, c4)
         XCTAssertTrue(host.disconnects.isEmpty)
     }
 
@@ -1975,7 +2021,7 @@ final class DerivedChildGrindTests: XCTestCase {
     /// job, and its answers apply in one step with one persist.
     func testAPageOfProofsIsOneVerifyJobAndOneCommit() async throws {
         let count = 8
-        let fixture = try await sharesWorld(count, anchoredAtN2: false)
+        let fixture = try await sharesWorld(count)
         var host = Host(fixture.world)
         for grind in fixture.setup { await host.step(.mined(grind)) }
         await host.meet(Self.alphaHost)
@@ -1992,7 +2038,7 @@ final class DerivedChildGrindTests: XCTestCase {
     /// proof that verifies is credited (the verdict is the proof's).
     func testABadProofInAPageDisconnectsItsSenderAndTheValidOnesCredit() async throws {
         let count = 6
-        let fixture = try await sharesWorld(count, anchoredAtN2: false)
+        let fixture = try await sharesWorld(count)
         var blocks = fixture.blocks
         blocks[count - 1].proofs = blocks[0].proofs
         var host = Host(fixture.world)

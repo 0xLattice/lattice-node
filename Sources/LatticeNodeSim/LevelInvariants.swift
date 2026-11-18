@@ -229,34 +229,13 @@ public enum LevelInvariants {
         if held.reduce(0, { $0 + $1.bytes }) > bounds.maxQueuedBytes {
             throw fail("proofs in a check exceed their byte budget")
         }
-        // Top-down: a header dropped past the parent is a peer's stream hole
-        // or a pending header's parent, so what is kept of them is bounded
-        // by the holes and the pending queue.
-        let holes = Set(core.sync.peers.values.flatMap { $0.holes.map(\.entry.block) })
-        let parents = Set(core.sync.pending.entries.values.compactMap { $0.block.parent?.rawCID })
-        if let stray = core.sync.beyondParent.keys.first(where: { !holes.contains($0) && !parents.contains($0) }) {
-            throw fail("\(stray), dropped past the parent, is no peer's hole and no pending header's parent")
-        }
-        if path.count > 1, let parent = host.levels[Array(path.dropLast())], let states = parent.weighedStates {
-            // The parent's weighed states are exactly those its tree declares.
-            var rebuilt = Set<String>()
-            var stack = parent.tree.genesisRoots
-            while let hash = stack.popLast() {
-                guard let meta = parent.tree.getConsensusBlock(hash: hash) else { continue }
-                if let state = parent.tree.headerSnapshot(of: hash)?.postStateCID {
-                    rebuilt.insert(CIDIdentity.canonicalString(state) ?? state)
-                }
-                stack += meta.childHashes
-            }
-            if rebuilt != states {
-                throw fail("the parent's weighed states differ from its tree's by \(rebuilt.symmetricDifference(states).count)")
-            }
-            // What waits for a proof came in past the top-down gate: it
-            // anchors within what the parent weighed. (A node's own mined
-            // child blocks are not gated: they anchor at its template's tip.)
-            for waiting in core.sync.proofs.awaiting.values where !ChainCore.anchored(waiting.block, within: states) {
-                throw fail("\(waiting.blockCID) awaits a proof past its parent level")
-            }
+        // Whole-chain top-down: a child level asks its peers for nothing
+        // while its parent level has not caught up.
+        if path.count > 1, host.levels[Array(path.dropLast())]?.synced == false,
+           core.sync.peers.values.contains(where: {
+               $0.stream != nil || $0.data != nil || $0.parentRequest != nil || !$0.holes.isEmpty
+           }) {
+            throw fail("a child level reads its peers before its parent caught up")
         }
         if core.sync.pending.entries.values.contains(where: { path.count > 1 && $0.evidence.isEmpty }) {
             throw fail("a child header with no verified work is in the pending queue")

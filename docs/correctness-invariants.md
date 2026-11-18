@@ -25,15 +25,13 @@ set, GHOST, continuity) are the architecture doc's and are checked by
 - **NODE-SEMANTICS-003.d** — A node-local failure while executing is
   retriable, never an exclusion. Pinned by
   `ChainCoreBodyTests.testALocalFailureIsNeverAnExclusion`.
-- **NODE-SEMANTICS-003.e** — A child header anchored at a parent state its
-  parent level has not weighed is dropped without blame, and its stream
-  hole is asked again once the parent weighs it (top-down weighing). What
-  is kept of such headers is bounded by the holes and the pending queue:
-  enforced by
-  `LevelInvariants.checkLevel` ("dropped past the parent, is no peer's
-  hole and no pending header's parent"; "awaits a proof past its parent level";
-  the parent's weighed states match its tree); pinned by
-  `DerivedChildGrindTests.testAChildHeaderPastTheParentsWeighedFrontierWeighsOnlyOnceTheParentAdvances`.
+- **NODE-SEMANTICS-003.e** — A child level asks its peers for nothing (no
+  stream page, no header) while its parent level has not latched `synced`
+  (whole-chain top-down weighing); the latch is one-way. Enforced by
+  `LevelInvariants.checkLevel` ("a child level reads its peers before its
+  parent caught up"); pinned by
+  `DerivedChildGrindTests.testAChildLevelAsksItsPeersNothingWhileItsParentCatchesUpThenSyncsFully`
+  and `DerivedChildGrindTests.testAfterTheLatchANewParentBlockDoesNotPauseTheChild`.
 
 ## NODE-SEMANTICS-005 — only obtained invalid evidence is punishable
 
