@@ -266,7 +266,7 @@ final class ChainCoreBodyTests: XCTestCase {
         for later in stride(from: Self.now, through: Self.now + 3_600_000, by: 600_000) {
             let effects = core.step(.tick, now: later)
             XCTAssertFalse(hasDisconnect(effects))
-            XCTAssertTrue(bodyFetches(effects).isEmpty, "the content layer retries, not the core")
+            XCTAssertTrue(bodyFetches(effects).isEmpty, "a body is asked for again only once it was not obtained")
             XCTAssertTrue(cancels(effects).isEmpty)
         }
         XCTAssertEqual(core.snapshot.actOnTip, world.genesis.cid)
@@ -395,6 +395,27 @@ final class ChainCoreBodyTests: XCTestCase {
             job = try XCTUnwrap(jobs(core.step(.bodyFetched(cid: chain[0].cid), now: now)).first)
         }
         XCTAssertEqual(core.bodies.parked[chain[0].cid]?.attempts, 4)
+    }
+
+    /// A body the content layer could not obtain waits out the same paced
+    /// backoff as a connect without a verdict, blaming no one, and is asked
+    /// for again when it is due, or at once when an execution moves the
+    /// window.
+    func testABodyNotObtainedIsAskedForAgainAfterItsBackoffOrAtTheNextExecution() async throws {
+        var (core, _) = weighed(Array(chain.prefix(3)))
+        let base = core.config.bodyRetryBase
+        let first = core.step(.bodyUnavailable(cid: chain[1].cid), now: Self.now)
+        XCTAssertFalse(hasDisconnect(first))
+        XCTAssertFalse(core.bodies.requested.contains(chain[1].cid))
+        XCTAssertEqual(wakes(first).min(), Self.now + base)
+        XCTAssertTrue(bodyFetches(core.step(.tick, now: Self.now + base - 1)).isEmpty)
+        XCTAssertEqual(bodyFetches(core.step(.tick, now: Self.now + base)), [chain[1].cid])
+        let second = core.step(.bodyUnavailable(cid: chain[1].cid), now: Self.now + base)
+        XCTAssertEqual(wakes(second).min(), Self.now + 3 * base, "twice as long")
+        // Its parent executes: the window moved, so it is asked for at once.
+        let executed = try await deliver(chain[0].cid, to: &core)
+        XCTAssertTrue(bodyFetches(executed).contains(chain[1].cid))
+        XCTAssertTrue(core.bodies.parked.isEmpty)
     }
 
     func testARestartReplaysTheExecutedSetAndAsksOnlyForWhatIsLeft() async throws {

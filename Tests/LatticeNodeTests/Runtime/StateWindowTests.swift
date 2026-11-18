@@ -202,6 +202,40 @@ final class StateWindowTests: XCTestCase {
         await producerRuntime.stop()
     }
 
+    /// A fresh node syncs from a peer on `recent` that let go of its older
+    /// blocks' states. It fetches each block's content only and derives
+    /// each pre-state by executing the parent, as Bitcoin's initial block
+    /// download does: no body waits on a state no peer holds any more.
+    func testAFreshNodeSyncsFromAPeerThatLetGoOfOldStatesWithoutWaiting() async throws {
+        let (payer, payee): (Key, Key) = (CryptoUtils.generateKeyPair(), CryptoUtils.generateKeyPair())
+        let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(payer))])
+        let producer = try host(keyByte: 0xe4, state: .recent, stateWindow: 2)
+        let (producerRuntime, producerStorage) = try await start(producer)
+        _ = try await producerRuntime.mineBlock(paid)
+        var blocks: [String] = []
+        for nonce in 0..<UInt64(24) {
+            // Each block reads and writes the payer's account.
+            _ = try await producerRuntime.submitTransaction(SubmitTransactionRequest(
+                transaction: try transaction(payer, nonce: nonce, moves: [(address(payer), -2), (address(payee), 1)])
+            ))
+            blocks.append(try BlockHeader(node: try await producerRuntime.mineBlock(paid)).rawCID)
+        }
+        let tip = try XCTUnwrap(blocks.last)
+        let early = try await stateNodes(of: blocks[2], in: producerStorage)
+        XCTAssertNil(early, "the producer let go of an early block's state")
+
+        let node = try host(keyByte: 0xe5, peers: [producer.endpoint], state: .recent)
+        let (runtime, _) = try await start(node)
+        var waits: Set<String> = []
+        try await eventually("the fresh node executes every block", within: .seconds(20)) {
+            if let waiting = await runtime.status().waiting { waits.insert(waiting) }
+            return runtime.published.value?.actOnTip == tip
+        }
+        XCTAssertEqual(waits, [], "no body waited")
+        await runtime.stop()
+        await producerRuntime.stop()
+    }
+
     /// State is a cache: a node of the tip's state this store lost (the
     /// account tree's root, which every account read goes through, with the
     /// counts that kept it) is read from a peer when a submitted

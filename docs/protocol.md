@@ -227,11 +227,14 @@ may request a Volume, including a same-key replacement connection. Entry CIDs,
 bounded framing, and atomic publication are transport/storage details; node
 protocol messages never request arbitrary CID selections.
 
-A block's bundle is the content the protocol's `storeBlock` defines for it:
-the block's own Volume, its transactions', its spec and policy modules, and
-the materialized pre-state its validation reads (the `prevState` root and
-every trie node on the paths its actions touch), never its post-state, its
-parent or its child blocks. Storing a block records those Volume roots in
+A block's bundle is the content the protocol's `storeBlockContent` defines
+for it: the block's own Volume, its transactions', its spec and policy
+modules, never the state it reads or writes, its parent or its child blocks.
+A node derives a block's pre-state by executing its parent, as Bitcoin's
+initial block download and geth's full sync do, and its execution reads that
+state from this node's store first, then what is in memory, and asks peers
+only for what neither holds (a state it let go of, as a reorganization past
+its kept windows needs). Storing a block records those Volume roots in
 `volume-bundles.db`, a cache beside the stores that nothing else reads and
 whose failure costs only speed; for a block with no record the server walks
 the same paths over its local content and records what it finds. A content

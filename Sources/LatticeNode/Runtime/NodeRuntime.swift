@@ -115,8 +115,8 @@ public final class NodeRuntime: Sendable {
         /// A body is held locally; when it was asked for and held, while
         /// tracing.
         case bodyStored(ChainPath, cid: String, asked: Double, held: Double)
-        /// A body's fetch failed and is being retried: why, and the error
-        /// for the log.
+        /// A body's fetch failed: why, and the error for the log. The core
+        /// asks for it again after its backoff.
         case bodyWaiting(ChainPath, cid: String, BodyWait, detail: String)
         /// A session's hello deadline passed.
         case helloDeadline(peerKey: String, session: UInt64)
@@ -516,28 +516,6 @@ public final class NodeRuntime: Sendable {
         templateDigest.finish()
     }
 
-    /// The content layer retries until the body is held or the core no longer
-    /// wants it (nil), and says why each attempt failed. A bundle is asked
-    /// for on the first attempt only.
-    static func retryingBody<T>(
-        _ attempt: (_ bundle: Bool) async throws -> T,
-        waiting: (Error) -> Void
-    ) async -> T? {
-        var backoff: UInt64 = 250
-        var bundle = true
-        while !Task.isCancelled {
-            do {
-                return try await attempt(bundle)
-            } catch {
-                if !Task.isCancelled { waiting(error) }
-            }
-            bundle = false
-            _ = await Timers.sleep(nanoseconds: backoff * 1_000_000)
-            backoff = min(backoff * 2, 30_000)
-        }
-        return nil
-    }
-
     /// How often, at most, a changing pool is projected for `/api/fees`
     /// (milliseconds): fee estimates a second old are as good, and a burst of
     /// submits does not walk the pool once each.
@@ -671,7 +649,9 @@ extension NodeRuntime {
         /// Levels with a `reproject` timer pending.
         var reprojections: Set<ChainPath> = []
         var bodies: [BodyKey: Task<Void, Never>] = [:]
-        /// Why each body being fetched has not arrived, while its fetch runs.
+        /// Why each body the window asks for has not arrived: its last
+        /// fetch's failure, until it arrives or the window leaves it. A body
+        /// with one is fetched again without a bundle.
         var fetchWaits: [BodyKey: BodyWait] = [:]
         /// Why each held block's connect ended without a verdict, until the
         /// block leaves the body window.
@@ -775,10 +755,9 @@ extension NodeRuntime {
                 return await step(.level(path, .bodyFetched(cid: cid)))
             case .bodyWaiting(let path, let cid, let reason, let detail):
                 let key = BodyKey(path: path, cid: cid)
-                guard bodies[key] != nil else { return true }
+                guard bodies.removeValue(forKey: key) != nil else { return true }
                 wait(key, reason, detail: detail, in: \.fetchWaits)
-                refreshView(path)
-                return true
+                return await step(.level(path, .bodyUnavailable(cid: cid)))
             case .helloDeadline(let key, let id):
                 guard let session = sessions[key], session.id == id, !session.ready else { return true }
                 sessions[key] = nil
@@ -1322,6 +1301,7 @@ extension NodeRuntime {
                 // tip is among those to connect next.
                 let window = windows[path] ?? level.connectOrder
                 connectWaits = connectWaits.filter { $0.key.path != path || window.distances[$0.key.cid] != nil }
+                fetchWaits = fetchWaits.filter { $0.key.path != path || window.distances[$0.key.cid] != nil }
                 waiting = window.next.first { (level.parent(of: $0) ?? "") == tip.hash }.flatMap { cid in
                     let key = BodyKey(path: path, cid: cid)
                     return (fetchWaits[key] ?? connectWaits[key]).map { NodeReadView.Waiting(cid: cid, reason: $0) }
@@ -1413,12 +1393,11 @@ extension NodeRuntime {
                 }
                 if peer.route != .direct {
                     // A peer met through another is worth a connection of
-                    // its own, and only that: one that cannot be made is
-                    // let go, so no peer is left carrying the two of them.
-                    let (ivy, punch) = (ivy, punch)
-                    Task {
-                        if await !punch.upgrade(peer) { _ = await ivy.disconnectSession(ifCurrent: peer) }
-                    }
+                    // its own. One that cannot be made leaves the relayed
+                    // session as it is, as libp2p's DCUtR does: the relay
+                    // bounds the routes it carries.
+                    let punch = punch
+                    Task { _ = await punch.upgrade(peer) }
                 }
                 if let replaced, replaced.ready {
                     return await step(.peerGone(replaced.coreID))
@@ -1749,18 +1728,23 @@ extension NodeRuntime {
                 // peers: a hint for whom to ask for the bundle.
                 let rendezvous = ChainHosts.of(path, nexusGenesisCID: configuration.nexusGenesisCID)
                 let maxBlockSize = core.levels[path]?.maxBlockSize(of: cid)
+                // A bundle is an optimisation: a block whose fetch failed is
+                // fetched one Volume at a time, as from peers that speak no
+                // bundles, so a bad bundle cannot withhold it.
+                let bundle = fetchWaits[key] == nil
                 let asked = SyncTrace.now()
+                // One attempt: the core asks again after its backoff, which
+                // starts over at each execution.
                 bodies[key] = Task {
-                    let roots = await NodeRuntime.retryingBody { bundle in
-                        try await storage.fetchChainBody(
+                    do {
+                        _ = try await storage.fetchChainBody(
                             cid, remote: remote, bundle: bundle, hosts: rendezvous, maxBlockSize: maxBlockSize
                         )
-                    } waiting: { error in
-                        inputs.yield(.bodyWaiting(
-                            path, cid: cid, BodyWait(fetchFailure: error), detail: "\(error)"
-                        ))
+                        inputs.yield(.bodyStored(path, cid: cid, asked: asked, held: SyncTrace.now()))
+                    } catch {
+                        guard !Task.isCancelled else { return }
+                        inputs.yield(.bodyWaiting(path, cid: cid, BodyWait(fetchFailure: error), detail: "\(error)"))
                     }
-                    if roots != nil { inputs.yield(.bodyStored(path, cid: cid, asked: asked, held: SyncTrace.now())) }
                 }
             case .cancelBody(let cid):
                 bodies.removeValue(forKey: BodyKey(path: path, cid: cid))?.cancel()

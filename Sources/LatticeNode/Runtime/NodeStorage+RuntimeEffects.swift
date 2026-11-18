@@ -132,7 +132,12 @@ extension NodeStorage {
 
     /// How the operator's own work reads: this store, a block's header
     /// record, what is in memory (`readCache`), then peers, whose answers
-    /// are kept there for the next read.
+    /// are kept there for the next read. Every read of materialized state
+    /// the node's work makes (a block's pre-state when it executes, a
+    /// template's, a mined block's) goes through here, so a peer is asked
+    /// only for what neither this store nor memory holds: a state this node
+    /// let go of, as a reorganization past its kept windows needs. A
+    /// block's body is fetched without its state (`fetchChainBody`).
     nonisolated func ownReads(through peers: any ContentSource) -> CoalescingFetcher {
         CoalescingFetcher(CompositeContentSource([workSource, readCache, readCache.remembering(peers)]))
     }
@@ -162,11 +167,11 @@ extension NodeStorage {
     /// Stores a block execution found valid, and pins it. A body fetched
     /// from peers is held in memory until then. Its Volumes are the ones its
     /// body's fetch derived and kept, or else derived again as `fetcher`
-    /// reads them. What is stored is its body (its own Volume and its
-    /// transactions'), pinned under its name, and, with the chain, the rest
-    /// when the operator keeps all state, or else only its spec and policy
-    /// modules: the state it read is its parent's, which the counts and
-    /// windows keep or peers serve. Returns the CIDs of the transactions the
+    /// reads them: its content, never the state it read (`storeBlockContent`).
+    /// What is stored is its body (its own Volume and its transactions'),
+    /// pinned under its name, and, with the chain, its spec and policy
+    /// modules. The state it read is its parent's, which this node stored
+    /// executing the parent, and the counts and windows keep or peers serve. Returns the CIDs of the transactions the
     /// block carries, read once from its transaction index. `decoded` is the
     /// block's node as its connect decoded it (`ConnectVerdict.connectedBlock`),
     /// or nil to resolve it through `fetcher`.
@@ -179,7 +184,7 @@ extension NodeStorage {
             volumes = fetched
         } else {
             let walked = NodeImportStorage(storage: nil, keepsVolumes: true)
-            try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: walked)
+            try await BlockHeader(rawCID: cid).storeBlockContent(fetcher: fetcher, storer: walked)
             volumes = await walked.takeVolumes().map(\.volume)
         }
         let resolved: Block?
@@ -205,11 +210,16 @@ extension NodeStorage {
         return transactions
     }
 
-    /// `ChainEffect.fetchBody`: the block's Volume and the nested Volumes its
-    /// execution reads, through the content layer (local store first, then
-    /// any overlay provider of the root), read into memory and not stored:
-    /// the block is stored once its execution finds it valid. Returns the
-    /// roots it read.
+    /// `ChainEffect.fetchBody`: the block's content (`storeBlockContent`: its
+    /// Volume, its transactions', its spec and policy modules) through the
+    /// content layer (local store first, then any overlay provider of the
+    /// root), read into memory and not stored: the block is stored once its
+    /// execution finds it valid. Returns the roots it read. Never the state
+    /// its execution reads: this node derives a block's pre-state by
+    /// executing its parent, as Bitcoin's initial block download and geth's
+    /// full sync do, and a peer keeping recent state only holds no old one.
+    /// The execution reads that state through `ownReads`, which asks a
+    /// peer only for what this node does not hold.
     ///
     /// `bundle` is false on a retry: a bundle is an optimisation, so a block
     /// whose first attempt failed is fetched one Volume at a time, as it
@@ -219,8 +229,7 @@ extension NodeStorage {
     /// The session reserves from the node's budget when it first asks a
     /// peer, an estimate of its worst case (`bodyReservation`): the chain's
     /// `maxBlockSize` (when its spec is held) bounds a body's bytes, not
-    /// what holding them costs this node nor the state its validation
-    /// reads. A body past the estimate is fetched once more under the whole
+    /// what holding them costs this node. A body past the estimate is fetched once more under the whole
     /// allowance, after the first reservation is released. The Volumes the
     /// walk derives, once it reaches the end of the body, are kept in memory
     /// for the block's connect.
@@ -237,25 +246,20 @@ extension NodeStorage {
         }
     }
 
-    /// What a body session reserves: six times `maxBlockSize`, at most
+    /// What a body session reserves: four times `maxBlockSize`, at most
     /// `allowance` (the whole allowance when the spec is not held).
     /// `maxBlockSize` counts the data of the block's own Volume and its
-    /// transactions. Holding an entry costs its CID and
-    /// `retainedEntryOverhead` beside its data, and the walk also reads the
-    /// pre-state its transactions touch: the nodes on each touched path,
-    /// from peers when this node has not executed the parent (a look-ahead
-    /// body). A body of 0.97 MB of minimal transactions costs 3.5 MB to
-    /// hold on state this node holds, and 4.9 MB (about 5 times its size)
-    /// on a parent state of about 1,500 accounts it does not hold, hence
-    /// six. A larger state has deeper paths, so a near-full look-ahead body
-    /// on it can cost more; that body, like one of unusually small entries
-    /// or one whose spec or policy modules are not held yet, is fetched
-    /// once more under the whole allowance. The spec and modules
-    /// cost the session nothing once held (stored with the chain's genesis,
-    /// then with each block): the walk reads the store first.
+    /// transactions, which is all the walk reads from peers. Holding an
+    /// entry costs its CID and `retainedEntryOverhead` beside its data: a
+    /// body of 0.97 MB of minimal transactions costs 3.5 MB to hold, hence
+    /// four. A body past that (one of unusually small entries, or one whose
+    /// spec or policy modules are not held yet) is fetched once more under
+    /// the whole allowance. The spec and modules cost the session nothing
+    /// once held (stored with the chain's genesis, then with each block):
+    /// the walk reads the store first.
     static func bodyReservation(maxBlockSize: Int?, allowance: Int) -> Int {
-        guard let maxBlockSize, maxBlockSize < allowance / 6 else { return allowance }
-        return 6 * max(maxBlockSize, 0)
+        guard let maxBlockSize, maxBlockSize < allowance / 4 else { return allowance }
+        return 4 * max(maxBlockSize, 0)
     }
 
     private nonisolated func fetchChainBody(
@@ -273,7 +277,7 @@ extension NodeStorage {
                 let fetcher = CoalescingFetcher(CompositeContentSource([broker, session]))
                 let walked = NodeImportStorage(storage: nil, keepsVolumes: true)
                 do {
-                    try await BlockHeader(rawCID: cid).storeBlock(fetcher: fetcher, storer: walked)
+                    try await BlockHeader(rawCID: cid).storeBlockContent(fetcher: fetcher, storer: walked)
                     // The walk reached the end: the Volumes it derived are the
                     // ones storing the block would, and serve its connect.
                     await readCache.put(walked.takeVolumes().map(\.volume), block: cid)
@@ -293,7 +297,7 @@ extension NodeStorage {
     }
 
     /// The Volume roots served together for `rootCID`, its own first: the
-    /// content `storeBlock` defines for that block. Recorded when the block
+    /// content `storeBlockContent` defines for that block. Recorded when the block
     /// was stored; for a block stored before bundles were recorded, the same
     /// walk over local content only, recorded once it completes. A root that
     /// is no block this node holds whole bundles only itself.
@@ -305,7 +309,7 @@ extension NodeStorage {
         }
         let walked = NodeImportStorage(storage: nil)
         do {
-            try await BlockHeader(rawCID: rootCID).storeBlock(fetcher: localFetcher, storer: walked)
+            try await BlockHeader(rawCID: rootCID).storeBlockContent(fetcher: localFetcher, storer: walked)
         } catch {
             syncTrace("volume bundle of \(rootCID) not walked: \(error)")
             return [rootCID]
@@ -339,7 +343,7 @@ extension NodeStorage {
         _ header: BlockHeader, _ block: Block, at path: ChainPath, fetcher: any Fetcher
     ) async throws -> FlatDictionary<BlockHeader> {
         let roots = try await storingAndRetaining(header.rawCID, at: path, from: fetcher) { storage in
-            try await header.storeBlock(fetcher: fetcher, storer: storage)
+            try await header.storeBlockContent(fetcher: fetcher, storer: storage)
         }
         bundles.record(root: header.rawCID, roots: roots)
         guard let children = try await block.children.resolve(fetcher: fetcher).node else {
@@ -388,7 +392,7 @@ extension NodeStorage {
                 frontier.append((block, childPath, proof))
                 guard evidence.contribution != nil else { continue }
                 let roots = try await storingAndRetaining(child.rawCID, at: childPath, from: localFetcher) { storage in
-                    try await child.storeBlock(fetcher: localFetcher, storer: storage)
+                    try await child.storeBlockContent(fetcher: localFetcher, storer: storage)
                 }
                 bundles.record(root: child.rawCID, roots: roots)
                 guard let grandchildren = try await block.children.resolve(fetcher: localFetcher).node else { continue }

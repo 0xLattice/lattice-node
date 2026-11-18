@@ -2,10 +2,10 @@ import Foundation
 
 /// For a block root, the Volume roots that make up its bundle.
 ///
-/// A block's bundle is the content the protocol's `storeBlock` defines for it:
-/// the block's own Volume, its transactions', its spec and policy modules,
-/// and the materialized pre-state its validation reads. Never its post-state,
-/// its parent or its child blocks. This is a cache of those roots, so a peer
+/// A block's bundle is the content the protocol's `storeBlockContent`
+/// defines for it: the block's own Volume, its transactions', its spec and
+/// policy modules. Never the state it reads or writes, its parent or its
+/// child blocks. This is a cache of those roots, so a peer
 /// can be sent them together: recorded when a block is stored, recomputed
 /// from local content when a block has no row. It lives in its own file, read
 /// by nothing else, and may be deleted while the node is stopped.
