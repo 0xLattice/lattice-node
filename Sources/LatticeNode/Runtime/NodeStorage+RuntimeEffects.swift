@@ -39,7 +39,7 @@ extension NodeStorage {
     /// Marks this run as stopped cleanly. Failing to costs peers a re-read of
     /// this node's log after the next start, nothing else.
     nonisolated func markCleanStop() async {
-        do { try await store.markCleanStop() } catch { syncTrace("clean stop not marked: \(error)") }
+        do { try await store.markCleanStop() } catch { logLine("clean stop not marked, so peers read this log again after the next start: \(error)") }
     }
 
     nonisolated func chainCursors(at path: ChainPath) async throws -> [String: StreamCursor] {

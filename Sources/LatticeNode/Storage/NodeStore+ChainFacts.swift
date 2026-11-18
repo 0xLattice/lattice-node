@@ -212,22 +212,34 @@ extension NodeStore {
     /// costs one id). A store that has journaled nothing has no id to
     /// replace: `fresh` is recorded with its first fact. A store written
     /// before this mark existed counts as not stopped cleanly, once.
+    ///
+    /// Clearing the mark is durable before this returns, whatever the store's
+    /// sync level: if it were lost with a tail the run journaled after it, the
+    /// next start would keep the id over a shortened log.
     func openWeighLog(fresh: String) throws -> (id: String, replaced: Bool) {
-        try database.transaction {
+        let opened = try database.transaction {
             let stored = try chainLogID()
-            let clean = try database.row(
-                ChainFactMetadataRow.self,
-                "SELECT value FROM core_meta WHERE key = 'clean_stop'"
-            )?.value == "1"
+            let clean = try markedClean()
             try database.execute("INSERT OR REPLACE INTO core_meta (key, value) VALUES ('clean_stop', '0')")
             guard stored != nil, !clean else { return (stored ?? fresh, false) }
             try database.execute("UPDATE core_meta SET value = ?1 WHERE key = 'log_id'", params: [.text(fresh)])
             return (fresh, true)
         }
+        try database.execute("PRAGMA wal_checkpoint(FULL)")
+        return opened
+    }
+
+    /// Whether the last run marked a clean stop.
+    func markedClean() throws -> Bool {
+        try database.row(
+            ChainFactMetadataRow.self,
+            "SELECT value FROM core_meta WHERE key = 'clean_stop'"
+        )?.value == "1"
     }
 
     /// The run stopped with everything it journaled written: the next start
-    /// keeps the log's id (`openWeighLog`).
+    /// keeps the log's id (`openWeighLog`). Called after the last write is
+    /// durable, and written directly, never through a buffer.
     func markCleanStop() throws {
         try database.execute("INSERT OR REPLACE INTO core_meta (key, value) VALUES ('clean_stop', '1')")
     }

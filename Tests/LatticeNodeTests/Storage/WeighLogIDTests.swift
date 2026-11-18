@@ -165,10 +165,11 @@ final class WeighLogIDTests: XCTestCase {
             let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration, overlay: overlay)
             let second = try await storage.chainLogID()
             XCTAssertEqual(second, first, "a clean stop keeps the id")
-            // Running, so not marked clean: a start now would replace the id.
-            let whileRunning = try await storage.store.openWeighLog(fresh: "probe")
-            XCTAssertTrue(whileRunning.replaced)
+            let whileRunning = try await storage.store.markedClean()
+            XCTAssertFalse(whileRunning, "a running node is not marked clean")
             await runtime.stop()
+            let afterStop = try await storage.store.markedClean()
+            XCTAssertTrue(afterStop, "a clean stop marks the store")
         }
     }
 }
