@@ -1617,11 +1617,13 @@ extension NodeRuntime {
             let reordered = moved.isEmpty
                 ? []
                 : Self.reorder(&cachedBodyOrder, moved: moved, windows: windows.values.map(\.distances))
+            // Time in the step's facts transaction, for the trace.
+            var persisting = 0.0
             defer {
                 if SyncTrace.enabled {
                     SyncTrace.log(
                         chain: core.rootPath,
-                        "node-runtime step \(event.traceLabel) core \(SyncTrace.ms(started, stepped)) ms total \(SyncTrace.ms(started, SyncTrace.now())) ms depth \(inputs.depth) -> \(effects.map(\.traceLabel))"
+                        "node-runtime step \(event.traceLabel) core \(SyncTrace.ms(started, stepped)) ms total \(SyncTrace.ms(started, SyncTrace.now())) ms persist \(SyncTrace.ms(0, persisting)) ms depth \(inputs.depth) -> \(effects.map(\.traceLabel))"
                     )
                 }
             }
@@ -1638,7 +1640,13 @@ extension NodeRuntime {
                 .sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }
                 .map(\.element)
             for effect in ordered {
+                guard SyncTrace.enabled, case .persist = effect else {
+                    guard await execute(effect) else { return false }
+                    continue
+                }
+                let before = SyncTrace.now()
                 guard await execute(effect) else { return false }
+                persisting += SyncTrace.now() - before
             }
             await settleBodies()
             await settleState()
