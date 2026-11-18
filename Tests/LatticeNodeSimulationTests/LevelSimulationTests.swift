@@ -229,7 +229,7 @@ final class LevelSimulationTests: XCTestCase {
     /// Sybils: more flooders than there are check slots, each relaying every
     /// child block with free junk proofs and coming back on every
     /// reconnection. A flooder is disconnected at its first failed check
-    /// (its other proofs forgotten), so with only plain caps every honest
+    /// (its other unchecked proofs forgotten), so with only plain caps every honest
     /// proof is credited everywhere within a bounded latency, no honest peer
     /// is blamed, and state stays within the caps (checked every step).
     func testSybilFloodersAreDisconnectedAndCannotStarveHonestProofs() async throws {

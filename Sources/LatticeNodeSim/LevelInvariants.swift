@@ -211,8 +211,9 @@ public enum LevelInvariants {
         if held.reduce(0, { $0 + $1.bytes }) > bounds.maxQueuedBytes {
             throw fail("proofs queued or in flight exceed their byte budget")
         }
-        for peer in Set(held.compactMap(\.source)) where core.sync.peers[peer] == nil {
-            throw fail("proofs of the gone peer \(peer) are still held")
+        // A gone peer's checks in flight still answer; its others are gone.
+        for peer in Set(proofs.queued.compactMap(\.source)) where core.sync.peers[peer] == nil {
+            throw fail("proofs of the gone peer \(peer) are still queued")
         }
         if core.sync.pending.entries.values.contains(where: { path.count > 1 && $0.evidence.isEmpty }) {
             throw fail("a child header with no verified work is in the pending queue")

@@ -580,25 +580,30 @@ final class DerivedChildGrindTests: XCTestCase {
                        "the bogus check, then the derived one")
     }
 
-    /// A peer gossips C with a copy of the real proof for (C, B), then is
-    /// gone before that proof's check answers: its proof is forgotten and
-    /// its late answer lands on nothing, yet C is credited with B's grind
-    /// without a restart, by derivation.
-    func testAPeerGoneBeforeItsProofIsCheckedCannotLeaveTheBlockUncredited() async throws {
+    /// The check of a proof a peer sent is the proof's verdict, not the
+    /// peer's: one in flight when the peer is gone still credits the block
+    /// (its derivation lost, so nothing else would), and holds its slot
+    /// until it answers. Forgotten, its slot was refilled while the shell
+    /// still ran it, so under peer churn the checks in flight grew without
+    /// bound past `maxChecks`, and a one-CPU node's child chains stalled
+    /// behind hours of checks whose answers landed on nothing.
+    func testAGonePeersCheckInFlightStillCreditsTheBlock() async throws {
         let fixture = try await committedWorld()
         var host = await host(fixture)
         await host.relay(fixture.b, at: Self.nexus, from: Self.miner)
+        host.lostDerivations = [fixture.b.cid]
         await host.meet(Self.alphaHost)
         let proof = try await ChildBlockProof.generate(
             rootHeader: BlockHeader(node: fixture.b.block), childDirectory: Self.alpha[1], fetcher: fixture.world.cas
         )
         host.deferChecks = true
         await host.relay(fixture.c, at: Self.alpha, from: Self.alphaHost, proofs: [proof])
-        XCTAssertFalse(host.deferred.isEmpty, "the peer's check has not answered")
+        XCTAssertEqual(host.deferred.count, 1, "the peer's check has not answered")
         await host.step(.peerGone(Self.alphaHost))
-        XCTAssertEqual(host.core.levels[Self.alpha]?.sync.proofs.verifying.isEmpty, true, "the peer's proof is forgotten")
+        XCTAssertEqual(host.core.levels[Self.alpha]?.sync.proofs.verifying.count, 1, "the check keeps its slot")
         for answer in host.deferred { await host.step(answer) }
-        XCTAssertNotNil(try host.digest(Self.alpha).blocks[fixture.c.cid]?.grinds[fixture.b.cid], "C is credited by derivation")
+        XCTAssertNotNil(try host.digest(Self.alpha).blocks[fixture.c.cid]?.grinds[fixture.b.cid], "C is credited by the gone peer's proof")
+        XCTAssertEqual(host.core.levels[Self.alpha]?.sync.proofs.verifying.isEmpty, true)
         XCTAssertTrue(host.disconnects.isEmpty)
     }
 
