@@ -333,8 +333,9 @@ extension ChainCore {
         }
     }
 
-    /// Whether a derivation credits `grind` at `cid` (§4.2 of the sync
-    /// design: work comes from the parent once it has weighed the carrier):
+    /// Whether a derivation credits `grind` at `cid` (the work facts of
+    /// docs/design/sync-architecture.md: work comes from the parent once it
+    /// has weighed the carrier):
     /// a parent-level block committing `cid` holds that grind, and `cid`'s
     /// derivation is in flight or is issued at the end of this step (it
     /// arrived in it). A derived proof and a peer's proof of one grind at
