@@ -212,9 +212,15 @@ public final class NodeRuntime: Sendable {
         var coreConfig = coreConfig
         coreConfig.mining.mempool.minRelayFee = configuration.minRelayFee
         coreConfig.finality = configuration.finality
+        // Before anything is journaled or served: a run that did not stop
+        // cleanly may have lost its log's tail, so the log gets a new id.
+        let (logID, replaced) = try await storage.openWeighLog()
+        if replaced {
+            logLine("lattice-node: the last run did not stop cleanly; peers read this node's weigh log again from its start")
+        }
         let core = try await boot(
             storage: storage, configuration: configuration,
-            coreConfig: coreConfig
+            coreConfig: coreConfig, logID: logID
         )
         let overlay = try overlay ?? OverlayConfiguration(configuration).overlay
         // What the journal replay below reads of the core, which the runtime
@@ -280,18 +286,21 @@ public final class NodeRuntime: Sendable {
 
     /// Rebuild the core from the durable facts, rooted at the configured
     /// Nexus genesis and nothing else.
-    /// The weigh log is derived from the fact log; its id is the one state.db
-    /// recorded with its first fact (a fresh store: a new one, recorded with
-    /// the first fact it journals).
+    /// The weigh log is derived from the fact log; its id is `logID`, the one
+    /// a starting run opened (`NodeStorage.openWeighLog`), or else the one
+    /// state.db recorded with its first fact (a fresh store: a new one,
+    /// recorded with the first fact it journals). Reads only.
     static func boot(
         storage: NodeStorage,
         configuration: NodeConfiguration,
-        coreConfig: ChainCoreConfig
+        coreConfig: ChainCoreConfig,
+        logID opened: String? = nil
     ) async throws -> NodeCore {
         guard configuration.address.isNexus else { throw NodeRuntimeError.notNexus }
         var coreConfig = coreConfig
         coreConfig.connectBatch = configuration.connectBatch
-        let logID = try await storage.chainLogID() ?? UUID().uuidString.lowercased()
+        let stored = try await storage.chainLogID()
+        let logID = opened ?? stored ?? UUID().uuidString.lowercased()
         var cursors: [ChainPath: [String: StreamCursor]] = [:]
         for path in [configuration.chainPath] + configuration.hostedChildren {
             cursors[path] = try await storage.chainCursors(at: path)
@@ -516,6 +525,8 @@ public final class NodeRuntime: Sendable {
         inputs.yield(.stop)
         inputs.finish()
         await loop.value
+        // Everything the loop journaled is written: the log keeps its id.
+        await storage.markCleanStop()
         templateDigest.finish()
     }
 

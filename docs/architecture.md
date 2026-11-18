@@ -217,7 +217,10 @@ networking starts. `NodeRuntime.boot` then rebuilds each hosted level's
 `ChainCore`, parent before child, from that level's facts read in the order
 it first took them (`ChainTree.restore(facts:)`): one key range per level,
 and the weigh log rebuilt from it keeps every position a peer's stream
-cursor names. A saved child proof names its entries by CID: block nodes and
+cursor names. The log keeps its id across a clean stop. A run that did not
+stop cleanly may have lost the log's tail, so the next start gives the log a
+new id (`NodeStore.openWeighLog`) and every peer reads it again from its
+start. A saved child proof names its entries by CID: block nodes and
 child indexes are read from `headers` and `child_indexes`, and the rest
 from `proof_entries`, so it is served byte for byte as credited. Each
 commits in the transaction of the work fact it produced.

@@ -85,6 +85,11 @@ extension NodeStore {
                     "INSERT OR IGNORE INTO core_meta (key, value) VALUES ('log_id', ?1)",
                     params: [.text(logID)]
                 )
+                // A log recorded whole in this transaction has lost nothing:
+                // a store seeded before its first run starts clean.
+                try database.execute(
+                    "INSERT OR IGNORE INTO core_meta (key, value) VALUES ('clean_stop', '1')"
+                )
             }
             for level in prepared {
                 try Self.writeEvidence(level.evidence, at: level.path, in: database)
@@ -193,6 +198,55 @@ extension NodeStore {
             ChainFactMetadataRow.self,
             "SELECT value FROM core_meta WHERE key = 'log_id'"
         )?.value
+    }
+
+    /// The weigh log id of the run that is starting, and whether it replaces
+    /// the stored one. Called once, at boot, before anything is journaled.
+    ///
+    /// A peer keeps a cursor into this node's log as (id, position). A run
+    /// that did not stop cleanly may have lost the log's tail, and entries
+    /// appended since would sit at positions a peer has already passed: it
+    /// would skip them, or ask past the log's end for good. So unless the
+    /// last run marked a clean stop, the log continues under a new id, which
+    /// every peer answers by reading it again from its start (a duplicate
+    /// costs one id). A store that has journaled nothing has no id to
+    /// replace: `fresh` is recorded with its first fact. A store written
+    /// before this mark existed counts as not stopped cleanly, once.
+    ///
+    /// Clearing the mark is durable before this returns, whatever the store's
+    /// sync level: if it were lost with a tail the run journaled after it, the
+    /// next start would keep the id over a shortened log.
+    func openWeighLog(fresh: String) throws -> (id: String, replaced: Bool) {
+        // FULL fsyncs this commit's WAL frames whether or not a reader holds
+        // the WAL, unlike a checkpoint, which a reader can leave undone.
+        let level = try database.query("PRAGMA synchronous").first?["synchronous"]
+        try database.execute("PRAGMA synchronous=FULL")
+        defer {
+            if case .int(let previous)? = level { _ = try? database.execute("PRAGMA synchronous=\(previous)") }
+        }
+        return try database.transaction {
+            let stored = try chainLogID()
+            let clean = try markedClean()
+            try database.execute("INSERT OR REPLACE INTO core_meta (key, value) VALUES ('clean_stop', '0')")
+            guard stored != nil, !clean else { return (stored ?? fresh, false) }
+            try database.execute("UPDATE core_meta SET value = ?1 WHERE key = 'log_id'", params: [.text(fresh)])
+            return (fresh, true)
+        }
+    }
+
+    /// Whether the last run marked a clean stop.
+    func markedClean() throws -> Bool {
+        try database.row(
+            ChainFactMetadataRow.self,
+            "SELECT value FROM core_meta WHERE key = 'clean_stop'"
+        )?.value == "1"
+    }
+
+    /// The run stopped with everything it journaled written: the next start
+    /// keeps the log's id (`openWeighLog`). Called after the last write is
+    /// durable, and written directly, never through a buffer.
+    func markCleanStop() throws {
+        try database.execute("INSERT OR REPLACE INTO core_meta (key, value) VALUES ('clean_stop', '1')")
     }
 
     func chainCursors(at path: ChainPath = ["Nexus"]) throws -> [String: StreamCursor] {
