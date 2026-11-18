@@ -246,11 +246,14 @@ carries nothing more for the pair.
 - Nothing is configured, and nothing is opened on the router.
 - It works where the router keeps a connection's port, which most home
   routers do. Behind one that gives each connection another port, or with
-  no public address known, the pair cannot connect: the relayed session is
-  let go, and each keeps the peers it can reach.
+  no public address known, the pair cannot connect directly: they keep the
+  relayed session, as libp2p's DCUtR does. A direct connection is tried
+  when a relayed session is made, by each end at most once.
 - A node learns its own public address as before: from `--external-address`
   or from the STUN servers its overlay asks at start.
-- A relaying node carries a pair only while they try, some seconds.
+- A relaying node carries a pair while they try, and after, when they
+  cannot connect directly. It carries at most 64 routes, 8 asked by any
+  one peer, and lets a route go once it is idle.
 
 The public-read listener serves the bounded GET routes and never registers
 operator status, metrics, or mining handlers; it registers

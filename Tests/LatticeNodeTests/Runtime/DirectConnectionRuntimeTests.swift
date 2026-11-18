@@ -50,21 +50,20 @@ final class DirectConnectionRuntimeTests: XCTestCase {
         try await a.runtime.ivy.connect(to: unreachable)
 
         // Neither node knows an address the other could reach it at, so the
-        // session cannot be made direct, and a peer is not kept through
-        // another: both let it go, and keep the relay.
+        // session cannot be made direct (the attempt ends at once: neither
+        // has an address to offer). It stays relayed, as libp2p's DCUtR
+        // leaves a relayed connection it could not upgrade: both keep it,
+        // and the relay.
         let known = await relay.runtime.ivy.connectedPeers
         let bID = try XCTUnwrap(known.first { $0.publicKey == b.endpoint.publicKey })
-        try await eventually("the relayed session is let go") {
-            await a.runtime.ivy.session(with: bID) == nil
+        try await eventually("both are peers through the relay") {
+            a.runtime.peerCount == 2 && b.runtime.peerCount == 2
         }
-        // Peer counts follow the session teardown asynchronously, so they
-        // are waited for rather than read the moment the session is gone.
-        try await eventually("both keep only the relay") {
-            a.runtime.peerCount == 1 && b.runtime.peerCount == 1
+        try await alwaysDuring("the relayed session is kept", .seconds(2)) {
+            await a.runtime.ivy.session(with: bID) != nil && a.runtime.peerCount == 2 && b.runtime.peerCount == 2
         }
-        try await eventually("the relay keeps both") {
-            await relay.runtime.ivy.connectedPeers.count == 2
-        }
+        let relayed = await relay.runtime.ivy.connectedPeers.count
+        XCTAssertEqual(relayed, 2, "the relay keeps both")
     }
 
     func testAPeerThatDidNotSayItRelaysIsNotAsked() async throws {

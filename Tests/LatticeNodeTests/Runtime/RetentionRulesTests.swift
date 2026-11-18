@@ -171,7 +171,8 @@ final class RetentionRulesTests: XCTestCase {
 
     /// On recent a block found valid is stored without the state it read:
     /// its body under its name, its spec and policy modules with the chain,
-    /// and nothing else it read is written or pinned.
+    /// and nothing else is written or pinned. Its body's fetch read no
+    /// state.
     func testOnRecentAValidBlockIsStoredWithoutTheStateItRead() async throws {
         let producerHost = try host(keyByte: 0x8a)
         let producer = try await NodeStorage.open(configuration: producerHost.configuration)
@@ -217,7 +218,7 @@ final class RetentionRulesTests: XCTestCase {
         let reads = try await joiner.broker.retainedRoots(scope: joiner.scopes.reads(mined, at: ["Nexus"]))
         XCTAssertEqual(reads, [])
         let read = fetched.filter { !body.contains($0) && !rules.contains($0) }
-        XCTAssertFalse(read.isEmpty, "the block read state")
+        XCTAssertEqual(read, [], "its body's fetch read no state")
         for root in fetched where !heldBefore.contains(root) {
             let held = await joiner.volume(root) != nil
             XCTAssertEqual(held, body.contains(root) || rules.contains(root), root)

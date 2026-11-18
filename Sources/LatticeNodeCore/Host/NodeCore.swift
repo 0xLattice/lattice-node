@@ -134,6 +134,7 @@ extension ChainEvent {
         case .childIndexFetched: "childIndexFetched"
         case .headersServed: "headersServed"
         case .bodyFetched: "bodyFetched"
+        case .bodyUnavailable: "bodyUnavailable"
         case .connected: "connected"
         case .transactionsRead: "transactionsRead"
         case .parentFactsPresent: "parentFactsPresent"

@@ -2,9 +2,10 @@ import Lattice
 
 /// Body download and execution for one level. Block bodies are Volumes fetched by
 /// CID through the content layer, which owns provider discovery, CID
-/// verification, retries and provider suppression. The core only names the
-/// next `ChainCoreConfig.bodyWindow` weighed-but-unexecuted blocks on the best
-/// chain and connects them in parent order as their bodies arrive. It also
+/// verification and provider suppression, one attempt per ask. The core
+/// names the next `ChainCoreConfig.bodyWindow` weighed-but-unexecuted blocks
+/// on the best chain, asks again for a body not obtained after a backoff,
+/// and connects them in parent order as their bodies arrive. It also
 /// names, outside that count, the blocks the act-on tip would step into once
 /// executed (`forkChildren`).
 ///
@@ -18,8 +19,9 @@ public struct BodyPipeline: Sendable, Equatable {
     /// The block whose connect job is running: one at a time, in parent
     /// order.
     public internal(set) var connecting: String?
-    /// Blocks whose connect found its content unresolvable, waiting before
-    /// their bodies are asked for again.
+    /// Blocks whose body could not be obtained, or whose connect found its
+    /// content unresolvable, waiting before their bodies are asked for
+    /// again.
     public internal(set) var parked: [String: Parked] = [:]
     /// Child-level blocks whose connect lacked a parent fact (decision 21:
     /// a parent state this node has not executed), with the fact. Never
@@ -179,6 +181,23 @@ extension ChainCore {
         bodies.arrived.insert(cid)
     }
 
+    /// The content layer could not obtain the body of `cid`: it waits out
+    /// the backoff, and is asked for again then, or at once when an
+    /// execution or the best chain moves the window.
+    mutating func bodyUnavailable(_ cid: String, _ turn: inout Turn) {
+        guard bodies.requested.remove(cid) != nil else { return }
+        park(cid, now: turn.now)
+    }
+
+    /// `cid` waits before its body is asked for again, doubling per attempt
+    /// up to `bodyRetryCap`.
+    private mutating func park(_ cid: String, now: Int64) {
+        let attempts = (bodies.parked[cid]?.attempts ?? 0) + 1
+        let shift = min(attempts - 1, 20)
+        let wait = min(config.bodyRetryCap, config.bodyRetryBase << Int64(shift))
+        bodies.parked[cid] = BodyPipeline.Parked(notBefore: now + wait, attempts: attempts)
+    }
+
     /// Apply a connect verdict. Execution depends only on content, so a
     /// verdict is never stale: a valid block joins the executed set, its
     /// post-state persisted with its validation; a block execution proved invalid is excluded while its
@@ -225,10 +244,7 @@ extension ChainCore {
         case .rejected:
             // No verdict: nothing was emitted and the tree is unchanged.
             guard verdict.retryFailure != nil else { break }
-            let attempts = (bodies.parked[cid]?.attempts ?? 0) + 1
-            let shift = min(attempts - 1, 20)
-            let wait = min(config.bodyRetryCap, config.bodyRetryBase << Int64(shift))
-            bodies.parked[cid] = BodyPipeline.Parked(notBefore: turn.now + wait, attempts: attempts)
+            park(cid, now: turn.now)
         }
     }
 

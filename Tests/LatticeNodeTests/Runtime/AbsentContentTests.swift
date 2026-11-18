@@ -83,8 +83,8 @@ final class AbsentContentTests: XCTestCase {
     }
 
     /// A node whose Volume store was emptied starts on its facts, builds on
-    /// its tip with what a peer serves, keeps what it read, and goes on
-    /// following the chain.
+    /// its tip with what a peer serves, keeps what it read in memory, and
+    /// goes on following the chain.
     func testANodeWithAnEmptiedVolumeStoreMinesAndFollowsTheChain() async throws {
         let first = address()
         let second = address()
@@ -141,8 +141,10 @@ final class AbsentContentTests: XCTestCase {
         await producerRuntime.stop()
         let mined = try await mine(runtime, paying(second))
         XCTAssertEqual(runtime.published.value?.actOnTip, mined)
-        let stored = await storage.volume(state)
-        XCTAssertNotNil(stored, "storing the mined block stores what it names")
+        // Storing it stores its content, never the state it read: that is
+        // the state layer's, which a peer serves to whoever lacks it.
+        let stored = await storage.volume(mined)
+        XCTAssertNotNil(stored, "storing the mined block stores its body")
         let paid = await runtime.reads.account(owner: second, blockCID: mined)
         XCTAssertNotNil(paid)
         await runtime.stop()

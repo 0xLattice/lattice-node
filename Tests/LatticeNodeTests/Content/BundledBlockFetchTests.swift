@@ -152,15 +152,17 @@ final class BundledBlockFetchTests: XCTestCase {
     }
 
     /// The joiner holds genesis only: not block 1, nor the state it wrote.
-    /// Everything block 2 needs to be validated arrives in its bundle.
-    func testABlockSpendingExistingStateIsFetchedWithOneRequestAndValidatesFromItsBundle() async throws {
+    /// Block 2's bundle is its content, in one request, and none of the
+    /// state its validation reads: the joiner derives that by executing
+    /// block 1.
+    func testABlockSpendingExistingStateIsFetchedWithOneRequestAndWithoutItsPreState() async throws {
         let producer = try await storage(keyByte: 0x51)
         let joiner = try await storage(keyByte: 0x52)
         let chain = try await transferChain(by: producer)
         let cid = try BlockHeader(node: chain.transfer).rawCID
         let recorded = await producer.volumeBundle(cid)
         XCTAssertEqual(recorded.first, cid)
-        XCTAssertTrue(recorded.contains(chain.transfer.prevState.rawCID))
+        XCTAssertFalse(recorded.contains(chain.transfer.prevState.rawCID))
         // A block stored with no record (genesis, as every block stored
         // before bundles were) has its bundle walked from local content, once.
         let genesis = NexusGenesis.expectedBlockHash
@@ -189,13 +191,8 @@ final class BundledBlockFetchTests: XCTestCase {
         XCTAssertEqual(bundles, [cid])
         XCTAssertEqual(volumes, [])
         XCTAssertEqual(Set(stored), Set(recorded))
-        // The joiner re-executes the block from what it now holds, and
-        // reaches the post-state the block commits to.
-        let replayed = try await BlockBuilder.buildBlock(
-            previous: chain.funding, transactions: chain.transactions,
-            timestamp: chain.transfer.timestamp, nonce: chain.transfer.nonce, fetcher: joiner
-        )
-        XCTAssertEqual(replayed.postState.rawCID, chain.transfer.postState.rawCID)
+        let fetchedPreState = await joiner.readCache.volume(chain.transfer.prevState.rawCID)
+        XCTAssertNil(fetchedPreState, "the fetch read none of the block's pre-state")
         // Nothing a peer sent is stored before the block is found valid.
         let unrecorded = await joiner.volumeBundle(cid)
         XCTAssertEqual(unrecorded, [cid])
@@ -709,8 +706,9 @@ final class BundledBlockFetchTests: XCTestCase {
 
     /// A capable peer answers every bundle with a Volume that verifies and
     /// lacks part of the block; an honest peer holds the block and speaks no
-    /// bundles. The runtime's retry asks for no bundle, and the block completes.
-    func testARetryAsksForNoBundleSoABadBundleCannotWithholdABlock() async throws {
+    /// bundles. The runtime fetches a block whose fetch failed without a
+    /// bundle, and the block completes.
+    func testAFetchWithoutABundleCompletesABlockABadBundleWithheld() async throws {
         let producer = try await storage(keyByte: 0x5D)
         let joiner = try await storage(keyByte: 0x5E)
         let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
@@ -736,20 +734,12 @@ final class BundledBlockFetchTests: XCTestCase {
                 return [partial]
             }
         )
-        // The loop the runtime fetches a body with: the first attempt fails
-        // on the partial bundle, the second is made without one.
-        var attempts: [Bool] = []
-        var failures = 0
-        let stored = await NodeRuntime.retryingBody { bundle in
-            // A third attempt is a failure, not a wait.
-            if attempts.count == 2 { withUnsafeCurrentTask { $0?.cancel() } }
-            try Task.checkCancellation()
-            attempts.append(bundle)
-            return try await joiner.fetchChainBody(cid, remote: poisoned, bundle: bundle)
-        } waiting: { _ in failures += 1 }
-        XCTAssertEqual(Set(try XCTUnwrap(stored)), Set(recorded))
-        XCTAssertEqual(attempts, [true, false])
-        XCTAssertEqual(failures, 1)
+        do {
+            _ = try await joiner.fetchChainBody(cid, remote: poisoned, bundle: true)
+            XCTFail("the partial bundle completed the block")
+        } catch {}
+        let stored = try await joiner.fetchChainBody(cid, remote: poisoned, bundle: false)
+        XCTAssertEqual(Set(stored), Set(recorded))
         let bundles = await requests.bundles
         XCTAssertEqual(bundles, [cid])
     }
@@ -919,10 +909,9 @@ final class BundledBlockFetchTests: XCTestCase {
     }
 
     /// A near-full look-ahead body whose parent this node has not executed:
-    /// the walk reads the pre-state its transactions touch from peers, which
-    /// costs more than the body itself (about 4.9 MB beside its 0.97 MB),
-    /// and the session's reservation still holds it: one fetch, nothing left
-    /// reserved.
+    /// the walk reads none of the pre-state its transactions touch, so it
+    /// costs what the body does on any state, and the session's first
+    /// reservation holds it: one fetch, nothing left reserved.
     func testANearFullLookAheadBodyOnUnheldStateIsFetchedOnce() async throws {
         let producer = try await storage(keyByte: 0xA2)
         let joiner = try await storage(keyByte: 0xA3)
@@ -955,16 +944,87 @@ final class BundledBlockFetchTests: XCTestCase {
         XCTAssertLessThanOrEqual(size, maxBlockSize)
         let parentState = await joiner.volume(block.prevState.rawCID)
         XCTAssertNil(parentState, "the joiner has not executed the parent")
-        let remote = remote(producer, requests: Requests())
+        let requests = Requests()
+        let remote = remote(producer, requests: requests)
 
         let stored = try await joiner.fetchChainBody(cid, remote: remote, maxBlockSize: maxBlockSize)
 
         let recorded = await producer.volumeBundle(cid)
         XCTAssertEqual(Set(stored), Set(recorded))
+        XCTAssertFalse(stored.contains(block.prevState.rawCID))
+        let volumes = await requests.volumes
+        XCTAssertEqual(volumes, [], "nothing past the bundle was asked for")
         let held = await joiner.readCache.heldBytes
-        XCTAssertGreaterThan(held, 4 * maxBlockSize, "the touched pre-state is past four times maxBlockSize")
-        XCTAssertEqual(remote.budget.peakReserved, 6 * maxBlockSize, "the first reservation held it: no second fetch")
+        XCTAssertLessThan(held, 4 * maxBlockSize)
+        XCTAssertEqual(remote.budget.peakReserved, 4 * maxBlockSize, "the first reservation held it: no second fetch")
         XCTAssertEqual(remote.budget.reserved, 0)
+    }
+
+    /// Executing a block reads its pre-state from this store first: a node
+    /// that executed the parent asks no peer for any of it.
+    func testAPreStateThisNodeHoldsIsReadWithoutAskingAnyPeer() async throws {
+        let producer = try await storage(keyByte: 0xA4)
+        let joiner = try await storage(keyByte: 0xA5)
+        let chain = try await transferChain(by: producer)
+        let cid = try BlockHeader(node: chain.transfer).rawCID
+        // The joiner executes block 1 itself, and holds the state it wrote.
+        let genesisCID = NexusGenesis.expectedBlockHash
+        let genesisData = await joiner.content([genesisCID])[genesisCID]
+        let executed = try await BlockBuilder.buildBlockWithTransition(
+            previous: try XCTUnwrap(Block(data: try XCTUnwrap(genesisData))), transactions: [],
+            timestamp: chain.funding.timestamp, nonce: chain.funding.nonce,
+            rewardRecipient: chain.funding.rewardRecipient, fetcher: joiner
+        )
+        XCTAssertEqual(try BlockHeader(node: executed.block).rawCID, try BlockHeader(node: chain.funding).rawCID)
+        try await NodeStorage.storeExecutedState(try XCTUnwrap(executed.materializedPostState), in: joiner)
+        let requests = Requests()
+        let remote = remote(producer, requests: requests)
+        _ = try await joiner.fetchChainBody(cid, remote: remote)
+        let fetched = await requests.volumes
+
+        let postState = try await Self.replay(chain, from: producer, on: joiner, remote: remote)
+
+        XCTAssertEqual(postState, chain.transfer.postState.rawCID)
+        let volumes = await requests.volumes
+        XCTAssertEqual(volumes, fetched, "executing the block asked no peer")
+    }
+
+    /// A pre-state this node does not hold (one a reorganization past its
+    /// kept windows needs) is read from peers when the block executes.
+    func testAPreStateThisNodeLacksIsReadFromPeers() async throws {
+        let producer = try await storage(keyByte: 0xA6)
+        let joiner = try await storage(keyByte: 0xA7)
+        let chain = try await transferChain(by: producer)
+        let cid = try BlockHeader(node: chain.transfer).rawCID
+        let requests = Requests()
+        let remote = remote(producer, requests: requests)
+        _ = try await joiner.fetchChainBody(cid, remote: remote)
+
+        let postState = try await Self.replay(chain, from: producer, on: joiner, remote: remote)
+
+        XCTAssertEqual(postState, chain.transfer.postState.rawCID)
+        let volumes = await requests.volumes
+        XCTAssertTrue(volumes.contains(chain.transfer.prevState.rawCID), "the pre-state was asked of a peer")
+    }
+
+    /// The transfer block executed as a connect reads (`NodeRuntime.reading`),
+    /// on its parent as decoded from `producer`'s bytes (no state loaded):
+    /// its post-state's CID, nil when its content could not be read.
+    private static func replay(
+        _ chain: (funding: Block, transfer: Block, transactions: [Transaction]),
+        from producer: NodeStorage, on storage: NodeStorage, remote: IvyRootContentSource
+    ) async throws -> String? {
+        let cid = try BlockHeader(node: chain.transfer).rawCID
+        let fundingCID = try BlockHeader(node: chain.funding).rawCID
+        let fundingData = await producer.content([fundingCID])[fundingCID]
+        let funding = try XCTUnwrap(Block(data: try XCTUnwrap(fundingData)))
+        XCTAssertNil(funding.postState.node)
+        return await NodeRuntime.reading(cid, at: ["Nexus"], storage: storage, remote: remote) { fetcher in
+            try? await BlockBuilder.buildBlock(
+                previous: funding, transactions: chain.transactions,
+                timestamp: chain.transfer.timestamp, nonce: chain.transfer.nonce, fetcher: fetcher
+            ).postState.rawCID
+        }
     }
 
     /// A body fetch that fails leaves nothing it was sent to stand for the

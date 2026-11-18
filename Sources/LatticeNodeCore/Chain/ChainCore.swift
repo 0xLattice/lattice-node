@@ -38,6 +38,10 @@ public enum ChainEvent: Sendable {
     case headersServed(PeerID, token: UInt64)
     /// The content layer holds the body Volume of this block locally.
     case bodyFetched(cid: String)
+    /// The content layer could not obtain the body of this block: an
+    /// availability wait, never a verdict. It is asked for again after the
+    /// level's backoff (`ChainCoreConfig.bodyRetryBase`).
+    case bodyUnavailable(cid: String)
     /// A connect job's verdict, with the CIDs of the transactions the block
     /// carries (the job read them from the body it executed): what the act-on
     /// chain confirms when it enters the block.
@@ -117,7 +121,8 @@ public enum ChainEffect: Sendable {
     case serveHeaders(PeerID, token: UInt64, requestID: UInt64, blockCIDs: [String], hasMore: Bool)
     case fetchByCID(PeerID, cid: String)
     /// Fetch a block's body Volume by CID through the content layer, and
-    /// report `bodyFetched` once it has been read.
+    /// report `bodyFetched` once it has been read, or `bodyUnavailable`
+    /// when it could not be.
     case fetchBody(cid: String)
     /// The window no longer wants this body: stop fetching it.
     case cancelBody(cid: String)
@@ -198,8 +203,9 @@ public struct ChainCoreConfig: Sendable {
     /// executed prefix, have their bodies asked for at once. Fork children
     /// are asked for besides and are not counted.
     public var bodyWindow: Int
-    /// A connect with no verdict (its content was not resolvable) waits this
-    /// long before its body is asked for again, doubling per attempt up to
+    /// A body the content layer could not obtain, or a connect with no
+    /// verdict (its content was not resolvable), waits this long before its
+    /// body is asked for again, doubling per attempt up to
     /// `bodyRetryCap`, and starting over whenever the act-on tip or the
     /// window changes.
     public var bodyRetryBase: Int64
@@ -461,6 +467,8 @@ public struct ChainCore: Sendable {
             }
         case .bodyFetched(let cid):
             bodyFetched(cid)
+        case .bodyUnavailable(let cid):
+            bodyUnavailable(cid, &turn)
         case .connected(let verdict, let transactions):
             connected(verdict, transactions: transactions, &turn)
         case .transactionsRead(let blocks):
