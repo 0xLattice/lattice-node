@@ -19,8 +19,8 @@ func nodeBinary() throws -> URL {
     try siblingBinary("lattice-node")
 }
 
-func health(rpc: NodeRPC, chain: String = "Nexus") async -> [String: Any]? {
-    guard var request = try? rpc.request("health", chain: chain) else {
+func health(rpc: NodeRPC, chain: String = "Nexus", route: String = "health") async -> [String: Any]? {
+    guard var request = try? rpc.request(route, chain: chain) else {
         return nil
     }
     request.timeoutInterval = 5
@@ -102,15 +102,27 @@ struct Status: AsyncParsableCommand {
             HostedChainsResponse.self, from: try await send(rpc: rpc, "GET", "hosted-chains")
         )
         for path in [ChainAddress.nexus] + hosted.chains {
-            guard let health = await health(rpc: rpc, chain: path) else {
+            // Operator status where the credential reads it and the node
+            // answers it for this chain; health otherwise (a scoped token
+            // without `/status`, or a node whose `/status` is the root's).
+            let status = await health(rpc: rpc, chain: path, route: "status")
+            let answered = (status?["chainPath"] as? [String])?.joined(separator: "/") == path
+            guard let health = answered ? status : await health(rpc: rpc, chain: path) else {
                 print("\(path): running, rpc unreachable")
                 continue
             }
             let phase = health["phase"] as? String ?? "?"
             let height = health["height"] as? String ?? "-"
+            let best = health["bestHeaderHeight"] as? String ?? "-"
             let tip = (health["tipCID"] as? String)?.prefix(20) ?? "-"
             let mempool = health["mempoolCount"] as? Int ?? 0
-            print("\(path): \(phase) height=\(height) tip=\(tip)… mempool=\(mempool)")
+            print("\(path): \(phase) height=\(height) best=\(best) tip=\(tip)… mempool=\(mempool)")
+            if let waiting = health["waiting"] as? String { print("  waiting: \(waiting)") }
+            // Only what is held: a chain holding nothing says nothing.
+            let held = (health["sync"] as? [String: Int] ?? [:]).filter { $0.value != 0 }
+            if !held.isEmpty {
+                print("  sync: " + held.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " "))
+            }
         }
         for path in (hosted.configured ?? []) where !hosted.chains.contains(path) {
             print("\(path): configured, not running")

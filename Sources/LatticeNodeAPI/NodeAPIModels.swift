@@ -403,6 +403,8 @@ public struct NodeStatusResponse: Codable, Sendable, Equatable {
     /// When this node process started, in unix seconds; a restart in place
     /// (`POST /restart`) changes it. Operator status only.
     public var startedAt: Double? = nil
+    /// What this chain's sync holds right now. Operator status only.
+    public var sync: NodeSyncStatus? = nil
 
     public init(
         phase: NodeAPIPhase,
@@ -430,6 +432,50 @@ public struct NodeStatusResponse: Codable, Sendable, Equatable {
         self.bestHeaderHeight = bestHeaderHeight
         self.waiting = waiting
         self.version = version
+    }
+}
+
+/// Counts of what one chain's sync holds, as its last step left them: what
+/// an operator reads to see where a chain waits. Operator status only.
+public struct NodeSyncStatus: Codable, Sendable, Equatable {
+    /// Headers received and not yet weighed, most waiting for their parent
+    /// header.
+    public var pendingHeaders = 0
+    /// Child-chain headers waiting for a proof that weighs them.
+    public var headersAwaitingProof = 0
+    /// Proof checks waiting for a worker, and running.
+    public var proofChecksQueued = 0
+    public var proofChecksRunning = 0
+    /// The blocks the body window asks to execute next: every fork child on
+    /// the act-on path and the best chain's look-ahead.
+    public var bodyWindow = 0
+    /// Bodies asked of peers that have not arrived.
+    public var bodiesRequested = 0
+    /// Window blocks whose last fetch failed: no peer served the body, or
+    /// this node's byte budget or store declined it.
+    public var bodiesUnavailable = 0
+    /// Blocks waiting before their bodies are asked for again.
+    public var bodiesParked = 0
+    /// Blocks whose connect needs a fact of the parent chain this node has
+    /// not executed yet.
+    public var awaitingParentFacts = 0
+
+    public init() {}
+
+    /// A count a node does not send reads as zero: counts come and go
+    /// without breaking a client.
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        func count(_ key: CodingKeys) throws -> Int { try values.decodeIfPresent(Int.self, forKey: key) ?? 0 }
+        pendingHeaders = try count(.pendingHeaders)
+        headersAwaitingProof = try count(.headersAwaitingProof)
+        proofChecksQueued = try count(.proofChecksQueued)
+        proofChecksRunning = try count(.proofChecksRunning)
+        bodyWindow = try count(.bodyWindow)
+        bodiesRequested = try count(.bodiesRequested)
+        bodiesUnavailable = try count(.bodiesUnavailable)
+        bodiesParked = try count(.bodiesParked)
+        awaitingParentFacts = try count(.awaitingParentFacts)
     }
 }
 

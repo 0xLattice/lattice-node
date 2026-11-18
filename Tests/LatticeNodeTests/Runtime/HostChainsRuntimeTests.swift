@@ -101,6 +101,10 @@ final class HostChainsRuntimeTests: XCTestCase {
         try await eventually("the follower syncs Alpha from the peer it already has", within: .seconds(20)) {
             (await followerAlpha.readSnapshot().height ?? 0) >= 2
         }
+        let alphaStatus = await follower.runtime.status(chainPath: Self.alpha)
+        XCTAssertEqual(alphaStatus?.chainPath, Self.alpha, "operator status answers for the hosted child")
+        XCTAssertNotNil(alphaStatus?.sync)
+        XCTAssertNil(alphaStatus?.templateDigest, "the template digest is the root's")
         // A peer that connects now is told Alpha is hosted.
         let late = try await start(keyByte: 0x83, hosted: [], peers: [follower.endpoint])
         try await eventually("the follower's hello names Alpha") {
@@ -113,6 +117,8 @@ final class HostChainsRuntimeTests: XCTestCase {
             try await Self.alphaHealth(client, .notFound)
         }
         XCTAssertNil(follower.runtime.levelReads[Self.alpha])
+        let unhosted = await follower.runtime.status(chainPath: Self.alpha)
+        XCTAssertNil(unhosted)
         XCTAssertEqual(follower.runtime.hostedChildren, [])
         try await eventually("the connected peer learns the follower no longer hosts Alpha") { !hostSeesAlphaHosted() }
         let held = await followerAlpha.readSnapshot().height ?? 0

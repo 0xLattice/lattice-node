@@ -617,7 +617,7 @@ func makeApplication(
     reads: ChainReads,
     levelReads: @escaping @Sendable () -> [ChainReads] = { [] },
     writes: any OperatorWrites,
-    status: @Sendable @escaping () async -> NodeStatusResponse,
+    status: @Sendable @escaping (_ chainPath: [String]?) async -> NodeStatusResponse?,
     metrics: @Sendable @escaping (_ peers: Int, _ processStartTime: Date) async -> String,
     host: String,
     port: Int,
@@ -654,7 +654,8 @@ func makeApplication(
     // /status reads the live runtime status and template digest. It is an
     // internal endpoint; the public status surface is /health.
     router.get("status") { request, context in
-        var answer = await status()
+        let chainPath = request.uri.queryParameters["chainPath"].map { $0.split(separator: "/").map(String.init) }
+        guard var answer = await status(chainPath) else { throw HTTPError(.notFound) }
         answer.startedAt = processStartTime.timeIntervalSince1970
         return try json(answer, request: request, context: context)
     }

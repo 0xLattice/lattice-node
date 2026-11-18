@@ -345,6 +345,19 @@ setting's value is shown: the error behind a reason, and the budget, are in
 the node's log. The node keeps retrying; the field goes when the block
 executes, is excluded, or leaves the best chain.
 
+`GET /status` (operator only) also carries `sync`, counts of what the level's
+sync holds as its last step left them: `pendingHeaders` (received, not yet
+weighed, most waiting for their parent header), `headersAwaitingProof` (child
+headers waiting for a proof that weighs them), `proofChecksQueued` and
+`proofChecksRunning`, `bodyWindow` (the blocks it asks to execute next: every
+fork child on the act-on path and the best chain's look-ahead),
+`bodiesRequested` (asked of peers, not arrived), `bodiesUnavailable` (window
+blocks whose last fetch failed), `bodiesParked` (waiting before they are asked
+for again) and `awaitingParentFacts` (a connect needs a parent-chain fact not
+executed yet). `/status?chainPath=` answers for a hosted level, 404 for one
+not hosted; a hosted child's answer carries no `templateDigest` (the digest is
+the root's).
+
 `/health` reads an immutable published view and never enters the core loop. It
 has no `templateDigest`. `/status` uses the root runtime's current template
 digest so a miner can detect any hosted-tree input change.
