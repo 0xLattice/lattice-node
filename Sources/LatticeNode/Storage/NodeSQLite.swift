@@ -34,8 +34,15 @@ enum NodeSQLiteValue {
 }
 
 /// The small SQLite surface needed by the immutable node store.
+///
+/// One statement runs at a time on a connection, from prepare to finalize
+/// (`statementLock`): SQLite serializes only each call, and a statement begun
+/// while another thread's is still stepping joins that one's read snapshot,
+/// so it would not see a commit made since. A statement inside another's on
+/// the same thread (a `forEach` body) is the caller's own, and joins it.
 final class NodeSQLite: @unchecked Sendable {
     private let handle: OpaquePointer
+    private let statementLock = NSRecursiveLock()
 
     /// `create`: created when there is none (otherwise opening one that is
     /// not there fails).
@@ -67,6 +74,8 @@ final class NodeSQLite: @unchecked Sendable {
 
     @discardableResult
     func execute(_ sql: String, params: [NodeSQLiteValue] = []) throws -> Int {
+        statementLock.lock()
+        defer { statementLock.unlock() }
         let statement = try prepare(sql, params: params)
         defer { sqlite3_finalize(statement) }
         let result = sqlite3_step(statement)
@@ -80,6 +89,8 @@ final class NodeSQLite: @unchecked Sendable {
         _ sql: String,
         params: [NodeSQLiteValue] = []
     ) throws -> [[String: NodeSQLiteValue]] {
+        statementLock.lock()
+        defer { statementLock.unlock() }
         let statement = try prepare(sql, params: params)
         defer { sqlite3_finalize(statement) }
         var rows: [[String: NodeSQLiteValue]] = []
@@ -121,6 +132,8 @@ final class NodeSQLite: @unchecked Sendable {
         params: [NodeSQLiteValue] = [],
         _ body: (NodeSQLiteStep) throws -> Void
     ) throws {
+        statementLock.lock()
+        defer { statementLock.unlock() }
         let statement = try prepare(sql, params: params)
         defer { sqlite3_finalize(statement) }
         while true {
