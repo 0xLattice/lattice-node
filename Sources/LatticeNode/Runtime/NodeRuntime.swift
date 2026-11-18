@@ -1695,6 +1695,9 @@ extension NodeRuntime {
             case .disconnect(let peer, let reason):
                 guard let session = session(peer) else { break }
                 sessions[peer.key] = nil
+                // No `.disconnected` follows for a session already gone: it
+                // is no longer a connected host, so its reconnect wakes.
+                for path in connectedHosts.keys.keys { connectedHosts.keys[path]?.remove(peer.key) }
                 switch SessionClose(reason) {
                 case .recycle:
                     _ = await ivy.recycleSession(ifCurrent: session.peer)

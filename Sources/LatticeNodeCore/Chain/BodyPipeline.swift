@@ -24,6 +24,9 @@ public struct BodyPipeline: Sendable, Equatable {
     /// again. Each stays wanted: its wait ends early when the content may
     /// now be had (`wake`).
     public internal(set) var parked: [String: Parked] = [:]
+    /// Requested bodies woken while their fetch ran: one that ends
+    /// unavailable is asked for again at once, as the wake would have.
+    var woken: Set<String> = []
     /// Child-level blocks whose connect lacked a parent fact (decision 21:
     /// a parent state this node has not executed), with the fact. Never
     /// invalid and never timed: each is connected again once its parent
@@ -168,6 +171,7 @@ extension ChainCore {
     /// Its parent's body was held by whoever built on it: a parent waiting
     /// is asked for again at once.
     mutating func bodyFetched(_ cid: String) {
+        bodies.woken.remove(cid)
         guard bodies.requested.remove(cid) != nil else { return }
         bodies.arrived.insert(cid)
         wake(parentOf: cid)
@@ -176,9 +180,10 @@ extension ChainCore {
     /// A block's body may now be had: its parent's, when the block was
     /// weighed or its body arrived (its author executed the parent, so
     /// held that body), as Bitcoin asks for a block once a peer announces
-    /// it. A hint, never a verdict: a wake costs one more attempt, and a
-    /// block weighed again (or one whose parent is already executed) wakes
-    /// nothing that waits. A wait that ends here is asked for in this step.
+    /// it. A hint, never a verdict: a wake costs one more attempt (a block
+    /// weighed again, as when more work credits it, wakes its parent
+    /// again; that work is paid for). A wait that ends here is asked for in
+    /// this step.
     mutating func wake(parentOf cid: String) {
         guard let parent = tree.parent(of: cid) else { return }
         end(parent)
@@ -187,13 +192,14 @@ extension ChainCore {
     /// A peer that may hold this level's content connected (`ChainEvent
     /// .providerJoined`): every waiting body is asked for again at once.
     mutating func providerJoined() {
-        for cid in bodies.parked.keys { end(cid) }
+        for cid in Set(bodies.parked.keys).union(bodies.requested) { end(cid) }
     }
 
     /// `cid`'s wait is over: it is asked for in this step. It keeps its
     /// attempts, so a body that fails again waits as long as it would have,
     /// and a wake costs one attempt.
     private mutating func end(_ cid: String) {
+        if bodies.requested.contains(cid) { bodies.woken.insert(cid) }
         guard let parked = bodies.parked[cid] else { return }
         bodies.parked[cid] = BodyPipeline.Parked(notBefore: 0, attempts: parked.attempts)
     }
@@ -205,6 +211,7 @@ extension ChainCore {
     mutating func bodyUnavailable(_ cid: String, _ turn: inout Turn) {
         guard bodies.requested.remove(cid) != nil else { return }
         park(cid, now: turn.now)
+        if bodies.woken.remove(cid) != nil { end(cid) }
     }
 
     /// `cid` waits before its body is asked for again, doubling per attempt
@@ -284,6 +291,7 @@ extension ChainCore {
             turn.effects.append(.cancelBody(cid: cid))
         }
         bodies.requested.formIntersection(wanted)
+        bodies.woken.formIntersection(bodies.requested)
         bodies.arrived.formIntersection(wanted)
         bodies.parked = bodies.parked.filter { wanted.contains($0.key) }
         bodies.awaitingParent = bodies.awaitingParent.filter { wanted.contains($0.key) }

@@ -457,6 +457,18 @@ final class ChainCoreBodyTests: XCTestCase {
         XCTAssertEqual(wakes(again).min(), Self.now + 1 + 2 * base, "its second attempt's wait")
     }
 
+    /// A wake that comes while a body's fetch runs is not lost: the fetch
+    /// ending unavailable asks again at once, keeping its attempts.
+    func testAWakeDuringAFetchAsksAgainWhenItEnds() async throws {
+        var (core, _) = weighed(Array(chain.prefix(2)))
+        XCTAssertTrue(core.bodies.requested.contains(chain[0].cid))
+        _ = core.step(.providerJoined, now: Self.now)
+        let ended = core.step(.bodyUnavailable(cid: chain[0].cid), now: Self.now + 1)
+        XCTAssertEqual(bodyFetches(ended), [chain[0].cid], "asked again at once")
+        let again = core.step(.bodyUnavailable(cid: chain[0].cid), now: Self.now + 2)
+        XCTAssertEqual(wakes(again).min(), Self.now + 2 + 2 * core.config.bodyRetryBase, "its attempts kept")
+    }
+
     func testARestartReplaysTheExecutedSetAndAsksOnlyForWhatIsLeft() async throws {
         var (core, log) = weighed(Array(chain.prefix(4)))
         log += persisted(try await deliver(chain[0].cid, to: &core))
