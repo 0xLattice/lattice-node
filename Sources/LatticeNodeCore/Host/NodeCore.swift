@@ -457,7 +457,6 @@ public struct NodeCore: Sendable {
 
     public mutating func step(_ event: NodeEvent, now: Int64) -> [NodeEffect] {
         var turn = Turn(now: now)
-        let unsynced = Set(levels.compactMap { $0.value.synced ? nil : $0.key })
         switch event {
         case .peerReady(let peer):
             guard peers.insert(peer).inserted else { break }
@@ -485,7 +484,6 @@ public struct NodeCore: Sendable {
             turn.touched.insert(rootPath)
         }
         dropDisconnected(&turn)
-        openGates(after: unsynced, &turn)
         attributeRuns(&turn)
         // A child level stepped without its parent's facts (run
         // attribution, a mined grind) took its blocks needing one as
@@ -493,6 +491,7 @@ public struct NodeCore: Sendable {
         for path in ordered where path.count > 1 && turn.touched.contains(path) {
             wakeAnswered(path, &turn)
         }
+        openGates(&turn)
         touched = turn.touched
         return emit(turn)
     }
@@ -508,11 +507,13 @@ public struct NodeCore: Sendable {
 
     /// Whole-chain top-down: a child level reads its peers' streams only once
     /// its parent level has caught up, a one-way latch (Bitcoin Core's
-    /// initial block download), so a level that latched this step opens its
-    /// children's gates. They follow live from then on; theirs open in turn.
-    mutating func openGates(after unsynced: Set<ChainPath>, _ turn: inout Turn) {
-        for path in ordered where path.count > 1 && unsynced.contains(Array(path.dropLast()))
-            && levels[Array(path.dropLast())]?.synced == true {
+    /// initial block download). After every step, however the parent
+    /// latched (a peer's page, a run, a connect), a child level that held
+    /// back its peers while gated reads them now. It follows live from then
+    /// on; its own children open in turn.
+    mutating func openGates(_ turn: inout Turn) {
+        for path in ordered where path.count > 1 && levels[path]?.heldBack == true
+            && levels[Array(path.dropLast())]?.synced != false {
             run(path, .parentSynced, &turn)
         }
     }

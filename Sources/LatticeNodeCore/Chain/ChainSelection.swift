@@ -79,9 +79,14 @@ extension ChainCore {
     }
 
     /// Set `synced` once a peer's log has been read to its end and applied,
-    /// and the act-on tip is the best header tip.
+    /// and the act-on tip is the best header tip. Only a log of a peer
+    /// running this level counts: one that does not answers with an empty
+    /// log of no id (`NodeCore.answerUnhosted`), which says nothing about
+    /// the chain.
     mutating func latchSynced() {
-        guard !synced, sync.peers.values.contains(where: { $0.readToEnd && !$0.more && $0.holes.isEmpty }) else { return }
+        guard !synced, sync.peers.contains(where: { peer, state in
+            state.readToEnd && !state.more && state.holes.isEmpty && sync.cursors[peer.key]?.logID.isEmpty == false
+        }) else { return }
         let snapshot = snapshot
         if snapshot.actOnTip == snapshot.bestHeaderTip { synced = true }
     }

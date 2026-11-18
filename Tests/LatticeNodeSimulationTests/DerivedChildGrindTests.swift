@@ -1880,6 +1880,41 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertTrue(host.disconnects.isEmpty)
     }
 
+    /// A peer that does not run Nexus answers with an empty log of no id:
+    /// it says nothing about the chain, so Nexus does not latch on it and
+    /// Alpha stays gated.
+    func testAnUnhostedPeersEmptyLogDoesNotLatchTheParent() async throws {
+        let fixture = try await gateWorld()
+        var host = Host(fixture.world)
+        await host.step(.peerReady(Self.alphaHost))
+        let asked = try XCTUnwrap(host.take().compactMap { sent -> UInt64? in
+            guard sent.path == Self.nexus, case .getStream(let id, _, _, _) = sent.message else { return nil }
+            return id
+        }.first)
+        await host.step(.received(Self.alphaHost, Self.nexus, .stream(StreamPage(requestID: asked, logID: "", entries: [], hasMore: false))))
+        XCTAssertEqual(host.core.levels[Self.nexus]?.synced, false, "no hosted log was read")
+        XCTAssertFalse(host.take().contains { $0.path == Self.alpha }, "Alpha stays gated")
+    }
+
+    /// The gate opens on the parent's state, not on seeing it change: a
+    /// parent that latched by any path (here set outside a step) opens its
+    /// held-back child on the next step, and a page pushed while gated is
+    /// not taken.
+    func testAChildHeldBackOpensOnTheNextStepAfterItsParentLatched() async throws {
+        let fixture = try await gateWorld()
+        var host = try await gatedHost(fixture)
+        _ = host.take()
+        await host.relayPage([fixture.c4], at: Self.alpha, from: Self.alphaHost)
+        XCTAssertNil(host.core.levels[Self.alpha]?.sync.cursors[Self.alphaHost.key], "a push while gated is not taken")
+        XCTAssertEqual(host.core.levels[Self.alpha]?.heldBack, true)
+        host.core.levels[Self.nexus]?.synced = true
+        host.tamper("Nexus latched synced")
+        await host.step(.tick)
+        XCTAssertEqual(host.core.levels[Self.alpha]?.heldBack, false)
+        let alpha = try host.digest(Self.alpha)
+        for entry in fixture.alpha { XCTAssertNotNil(alpha.blocks[try XCTUnwrap(entry.cid)], "Alpha read its peer") }
+    }
+
     /// A grandchild whose carrier the parent level weighed is credited by
     /// derivation alone: a peer's proofs of A (committed by the weighed
     /// Nexus block B) and of D (committed by A) are never checked.

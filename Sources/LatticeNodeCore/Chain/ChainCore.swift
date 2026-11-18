@@ -350,6 +350,9 @@ public struct ChainCore: Sendable {
     /// its cursors stay where they were. The parent's latch opens it for
     /// good (`parentSynced`). Never held past the step.
     var gated = false
+    /// A child level stepped while gated: its peers were held back, and are
+    /// read once the parent has latched (`parentSynced`).
+    public internal(set) var heldBack = false
     /// The child directories this level's executed blocks commit: built from
     /// the held tree, then grown by every block that executes valid.
     public let executedChildren = ExecutedChildren()
@@ -466,6 +469,7 @@ public struct ChainCore: Sendable {
         if case .mining(.transactionReceived(_, origin: .peer)) = event, !synced { return [] }
         parentTree = parent
         gated = !parentSynced
+        if gated { heldBack = true }
         defer {
             parentTree = nil
             gated = false
@@ -512,6 +516,7 @@ public struct ChainCore: Sendable {
         case .tick:
             tick(&turn)
         case .parentSynced:
+            heldBack = false
             for peer in sync.peers.keys.sorted() { requestStream(from: peer, &turn) }
         case .proofsVerified(let answers):
             proofsVerified(answers, &turn)
@@ -780,8 +785,10 @@ public struct ChainCore: Sendable {
     /// taken in order from the next position while the peer's holes (taken,
     /// not yet applied) fit in a page; a gap, a full page or `hasMore` has
     /// the next pull continue it.
+    /// Nothing is taken while gated: no page was asked, and a push is read
+    /// again from the cursor once the gate opens.
     private mutating func receive(_ page: StreamPage, from peer: PeerID, _ turn: inout Turn) {
-        guard let state = sync.peers[peer] else { return }
+        guard !gated, let state = sync.peers[peer] else { return }
         let reset = sync.cursors[peer.key]?.logID != page.logID
         if page.requestID != 0 {
             guard state.stream?.requestID == page.requestID else { return }

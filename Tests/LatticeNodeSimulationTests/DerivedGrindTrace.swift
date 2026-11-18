@@ -40,8 +40,7 @@ struct GrindTraceFixture {
 /// `trace-<name>.json` under `DERIVED_TRACE_DIR` (none written without it).
 ///
 /// One host step is atomic in the code and may be several model actions
-/// (a peer proof's check, then a purge as its peer is disconnected; a
-/// pending eviction beside a promotion): it becomes those events in an
+/// (a page's peer proof checks; a pending eviction beside a promotion): it becomes those events in an
 /// order the model can take, and only the last carries the state after.
 final class GrindTracer: @unchecked Sendable {
     nonisolated(unsafe) static var open: [GrindTracer] = []
@@ -270,21 +269,13 @@ final class GrindTracer: @unchecked Sendable {
         if let main { sub.append(main) }
         sub += checked
         if !clears {
-            // Peer proofs gone without their check answering: a purge when a
-            // peer left this step (logging what is held after it: those in a
-            // check and other peers' queued proofs), else
-            // each dropped unchecked (block gone or already credited), which
-            // the model checks to no effect.
+            // Peer proofs gone without a verdict (their block not held, or
+            // already credited): each a check the model takes to no effect.
+            // A gone peer's checks still answer, so nothing is purged.
             let gone = s0.peerKeys.subtracting(s1.peerKeys).subtracting(checkedKeys)
-            let left = effects.contains { if case .disconnect = $0 { return true }; return false }
-                || { if case .peerGone = event { return true }; return false }()
-            if !gone.isEmpty, left {
-                sub.append(["kind": "purge", "kept": s1.peerQ])
-            } else {
-                for key in gone.sorted() {
-                    guard let child = childLabel[key.childCID] else { continue }
-                    sub.append(["kind": "check", "child": child, "proof": s0.peerLabels[key] ?? "bogus"])
-                }
+            for key in gone.sorted() {
+                guard let child = childLabel[key.childCID] else { continue }
+                sub.append(["kind": "check", "child": child, "proof": s0.peerLabels[key] ?? "bogus"])
             }
             // A block promoted and evicted in one step.
             if gossiped == nil {

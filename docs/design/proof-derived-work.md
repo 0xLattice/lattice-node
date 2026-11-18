@@ -185,17 +185,20 @@ returning malformed bytes is.
 A child block's work comes from its parent level: its grinds' carriers are
 parent blocks or shares on them (§9.5), and its runs are parent blocks after
 its carrier (§9.10). So a child level is synced whole-chain top-down: it
-reads its peers' streams, and so weighs, fetches and executes anything from
-them, only once its parent level has caught up. That is the parent's
-`synced` latch: a peer's log read to its end and applied, with the act-on
-tip the best header tip. The latch is one-way, like Bitcoin Core's
+reads its peers' streams, and so weighs any header from them, only once its
+parent level has caught up. That is the parent's `synced` latch: the log of
+a peer running that level read to its end and applied, with the act-on tip
+the best header tip (an unavailable heaviest header holds it back, as it
+holds back acting on the chain). The latch is one-way, like Bitcoin Core's
 `IsInitialBlockDownload`: once it is set, the child follows live, and a new
 parent block never pauses it. A grandchild waits for its child level's latch
 in turn. Nexus is not gated.
 
 While its parent catches up, a child level asks its peers for nothing: no
-stream page and no header. Its stream cursors stay where they were, and the
-latch has it read every peer's stream from there. Its own mined grinds and
+stream page and no header, and a page pushed to it is not taken. Its stream
+cursors stay where they were. After any step in which the parent is latched,
+however it latched, a level that held its peers back reads every peer's
+stream from its cursor. Its own mined grinds and
 the blocks submitted on this node still weigh, as before: a mined grind
 weighs every level it reaches in one step.
 
