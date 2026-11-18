@@ -182,6 +182,61 @@ final class NodeRuntimeTests: XCTestCase {
         await producerRuntime.stop()
     }
 
+    /// A body waiting out a long backoff is asked for again when a host
+    /// connects, and again when that host reconnects (Bitswap resends its
+    /// wants on each new connection); nothing else asks before the wait
+    /// ends.
+    func testAWaitingBodyIsAskedForAgainWhenAHostConnectsAndReconnects() async throws {
+        let waits = ChainCoreConfig(bodyRetryBase: 600_000, bodyRetryCap: 600_000)
+        let producer = try host(keyByte: 0x4A)
+        let producerStorage = try await NodeStorage.open(configuration: producer.configuration)
+        let producerRuntime = try await NodeRuntime.start(
+            storage: producerStorage, configuration: producer.configuration, overlay: producer.overlay
+        )
+        let joiner = try host(
+            keyByte: 0x4B, peers: [producer.endpoint],
+            resourcePolicy: NodeResourcePolicy(maximumAcquisitionStorageBytes: 1)
+        )
+        let joinerStorage = try await NodeStorage.open(configuration: joiner.configuration)
+        let joinerRuntime = try await NodeRuntime.start(
+            storage: joinerStorage, configuration: joiner.configuration, overlay: joiner.overlay, coreConfig: waits
+        )
+        // The body the joiner's budget declines, held locally once it waits:
+        // only an attempt finds it.
+        func waitingBody() async throws -> String {
+            let cid = try BlockHeader(node: try await producerRuntime.mineBlock()).rawCID
+            try await eventually("the joiner waits on \(cid)") {
+                await joinerRuntime.status().waiting?.hasPrefix("body of \(cid)") == true
+            }
+            try await BlockHeader(rawCID: cid).storeBlock(fetcher: producerStorage.localFetcher, storer: joinerStorage)
+            try await Task.sleep(for: .milliseconds(500 * testTimeScale))
+            XCTAssertNotEqual(joinerRuntime.published.value?.actOnTip, cid, "nothing asks before the wait ends")
+            return cid
+        }
+        func connectHost() async throws -> NodeRuntime {
+            let visitor = try host(keyByte: 0x4C, peers: [joiner.endpoint])
+            let storage = try await NodeStorage.open(configuration: visitor.configuration)
+            return try await NodeRuntime.start(storage: storage, configuration: visitor.configuration, overlay: visitor.overlay)
+        }
+
+        let first = try await waitingBody()
+        let visitor = try await connectHost()
+        try await eventually("a host connecting asks for it again") {
+            joinerRuntime.published.value?.actOnTip == first
+        }
+
+        let second = try await waitingBody()
+        await visitor.stop()
+        try await eventually("the joiner sees the host go") { joinerRuntime.peerCount == 1 }
+        let back = try await connectHost()
+        try await eventually("the host reconnecting asks for it again") {
+            joinerRuntime.published.value?.actOnTip == second
+        }
+        await back.stop()
+        await joinerRuntime.stop()
+        await producerRuntime.stop()
+    }
+
     /// Status is public. Whatever error is behind a wait, it shows one of a
     /// fixed set of reasons: none of the error's text, and no setting's value.
     func testStatusShowsAFixedReasonAndNeverAnErrorsText() async throws {

@@ -235,7 +235,7 @@ public struct ChainCoreConfig: Sendable {
         maxFutureDrift: Int64 = 2 * 60 * 60 * 1_000,
         bodyWindow: Int = 64,
         bodyRetryBase: Int64 = 1_000,
-        bodyRetryCap: Int64 = 3_600_000
+        bodyRetryCap: Int64 = 300_000
     ) {
         self.maxFutureDrift = maxFutureDrift
         self.maxHeadersPerPage = maxHeadersPerPage

@@ -176,7 +176,9 @@ extension ChainCore {
     /// A block's body may now be had: its parent's, when the block was
     /// weighed or its body arrived (its author executed the parent, so
     /// held that body), as Bitcoin asks for a block once a peer announces
-    /// it. A wait that ends here is asked for in this step.
+    /// it. A hint, never a verdict: a wake costs one more attempt, and a
+    /// block weighed again (or one whose parent is already executed) wakes
+    /// nothing that waits. A wait that ends here is asked for in this step.
     mutating func wake(parentOf cid: String) {
         guard let parent = tree.parent(of: cid) else { return }
         bodies.parked[parent] = nil

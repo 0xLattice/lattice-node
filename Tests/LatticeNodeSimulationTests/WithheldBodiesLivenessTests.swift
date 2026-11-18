@@ -31,6 +31,9 @@ final class WithheldBodiesLivenessTests: XCTestCase {
         /// While set, a withheld body's Volume arrives without the content
         /// its connect needs.
         var unresolvable = false
+        /// While set, a withheld body's fetch ends as the content layer's
+        /// does when no peer serves it: unavailable, and the block parks.
+        var answersUnavailable = false
         var now = World.genesisTime + 1_000_000
         /// Per node: the bodies asked for and the blocks connected, in order,
         /// and every act-on tip it published, in order.
@@ -83,7 +86,7 @@ final class WithheldBodiesLivenessTests: XCTestCase {
                 case .level(_, .fetchBody(let cid)):
                     fetched[node].append(cid)
                     if inFlight || (withheld.contains(cid) && !unresolvable) {
-                        break
+                        if !inFlight, answersUnavailable { next = step(node, .level(path, .bodyUnavailable(cid: cid))) }
                     } else if withheld.contains(cid) {
                         next = step(node, .level(path, .bodyFetched(cid: cid)))
                     } else {
@@ -172,6 +175,17 @@ final class WithheldBodiesLivenessTests: XCTestCase {
             }
         }
 
+        /// Time passes to `until`, each wait due on the way ending at its
+        /// due time: the parked bodies are asked for again.
+        func pass(to until: Int64, node: Int) async throws {
+            while let due = level(node).bodies.parked.values.map(\.notBefore).filter({ $0 > now && $0 <= until }).min() {
+                now = due
+                try await settle(node, step(node, .tick))
+            }
+            now = until
+            try await settle(node, step(node, .tick))
+        }
+
         /// A withheld block weighs what it weighed and has no verdict.
         func assertUnjudged(_ blocks: [SimBlock], weight: UInt256?) {
             for node in hosts.indices {
@@ -188,13 +202,15 @@ final class WithheldBodiesLivenessTests: XCTestCase {
     /// `nodes` honest nodes at an executed tip of height 3, shown `count`
     /// headers on it whose bodies are withheld.
     private func held(
-        withheld count: Int, nodes: Int, window: Int = 8, unresolvable: Bool = false
+        withheld count: Int, nodes: Int, window: Int = 8, unresolvable: Bool = false,
+        answersUnavailable: Bool = false
     ) async throws -> (net: Net, base: SimBlock, branch: [SimBlock], weight: UInt256?) {
         var rng = SplitMix64(state: 0x317)
         let world = try await World.generate(rng: &rng, honestBlocks: 4, forkProbability: 0, spamBlocks: 0)
         let chain = world.honest.compactMap { world.blocks[$0] }
         let net = Net(world: world, nodes: nodes, window: window)
         net.unresolvable = unresolvable
+        net.answersUnavailable = answersUnavailable
         for block in chain.prefix(Self.executedHeight) { _ = try await net.mine(by: 0, block) }
         let base = chain[Self.executedHeight - 1]
         let branch = try await world.branch(from: base, count: count)
@@ -257,6 +273,28 @@ final class WithheldBodiesLivenessTests: XCTestCase {
         XCTAssertEqual(net.snapshot(0).actOnHeight, UInt64(Self.executedHeight + 3))
         let next = try await net.mine(by: 0)
         XCTAssertEqual(next.block.parent, branch.last?.cid)
+    }
+
+    /// The withheld bodies' fetches end unavailable, as no peer serves
+    /// them: they park and are asked for again, less and less often, the
+    /// miner never held meanwhile. Released while parked, the branch is
+    /// fetched when the waits end, within the backoff's cap, and wins.
+    func testAWithheldBranchReleasedWhileParkedIsFetchedWhenItsWaitEnds() async throws {
+        let (net, _, branch, weight) = try await held(withheld: 3, nodes: 1, answersUnavailable: true)
+        XCTAssertNotNil(net.level(0).bodies.parked[branch[0].cid], "unavailable: parked, still wanted")
+        let (honest, _) = try await net.mine(by: 0)
+        XCTAssertEqual(net.snapshot(0).actOnTip, honest.cid)
+        let asked = net.fetched[0].filter { $0 == branch[0].cid }.count
+        try await net.pass(to: net.now + 60_000, node: 0)
+        XCTAssertGreaterThan(net.fetched[0].filter { $0 == branch[0].cid }.count, asked, "asked for again")
+        XCTAssertNotNil(net.level(0).bodies.parked[branch[0].cid])
+        net.assertUnjudged(branch, weight: weight)
+
+        net.withheld = []
+        let cap = net.level(0).config.bodyRetryCap
+        try await net.pass(to: net.now + cap, node: 0)
+        XCTAssertEqual(net.snapshot(0).actOnTip, branch.last?.cid)
+        XCTAssertEqual(net.snapshot(0).actOnHeight, UInt64(Self.executedHeight + 3))
     }
 
     /// Three honest miners: each node asks for every child of its tip, so

@@ -80,3 +80,17 @@ struct PeerSearch {
         return allowed
     }
 }
+
+/// The keys of the peers connected now hosting each chain. A key entering
+/// (a host connecting, or reconnecting) is when a chain's waiting bodies
+/// are asked for again (`ChainEvent.providerJoined`).
+struct ConnectedHosts {
+    var keys: [ChainPath: Set<String>] = [:]
+
+    /// `path`'s hosts are now `current`: true when one of them was not
+    /// connected before.
+    mutating func update(_ path: ChainPath, _ current: Set<String>) -> Bool {
+        defer { keys[path] = current }
+        return !current.isSubset(of: keys[path] ?? [])
+    }
+}

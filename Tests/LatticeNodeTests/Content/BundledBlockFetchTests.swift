@@ -428,7 +428,8 @@ final class BundledBlockFetchTests: XCTestCase {
         _ host: NodeStorage, _ bystander: NodeStorage, rendezvous: String,
         recordsPerPeer: Int = IvyConfig.defaultMaxProviderRecordsPerPeer,
         requestTimeout: Duration = .seconds(5),
-        bothHost: Bool = false
+        bothHost: Bool = false,
+        bystanderProvides: String? = nil
     ) async throws -> (remote: IvyRootContentSource, host: CountingSource, bystander: CountingSource) {
         func ivy() -> (Ivy, PeerEndpoint) {
             let (key, port) = (Curve25519.Signing.PrivateKey(), NetworkTransportTestPorts.allocate())
@@ -465,7 +466,12 @@ final class BundledBlockFetchTests: XCTestCase {
                 rootCID: rendezvous, expiresAt: UInt64(Date().timeIntervalSince1970) + 600
             )
             let named = await client.providers(for: rendezvous)
-            if connections.all.count == 2, named == [hostID] { break }
+            var provided = true
+            if let root = bystanderProvides {
+                await servers[1].announceProvider(rootCID: root, expiresAt: UInt64(Date().timeIntervalSince1970) + 600)
+                provided = await client.providers(for: root).contains(await servers[1].localID)
+            }
+            if connections.all.count == 2, named == [hostID], provided { break }
             try await Task.sleep(for: .milliseconds(20))
         }
         overlayClient = try connections.all.first { $0.id == hostID }.map { (client, $0) }
@@ -528,6 +534,20 @@ final class BundledBlockFetchTests: XCTestCase {
         XCTAssertGreaterThan(host.volumeRequestCount, 0)
         XCTAssertEqual(bystander.bundleRequestCount, 0)
         XCTAssertEqual(bystander.volumeRequestCount, 0)
+    }
+
+    /// A peer that is not the chain's host but announced the block's Volume
+    /// (an operator's pin) is asked after the hosts: a body it alone holds
+    /// arrives.
+    func testAChildsBodyIsAskedOfAPeerThatAnnouncedItAfterTheHosts() async throws {
+        let producer = try await storage(keyByte: 0x9C)
+        let cid = try BlockHeader(node: try await transferChain(by: producer).transfer).rawCID
+        let (remote, host, bystander) = try await hostAndBystander(
+            try await storage(keyByte: 0x9D), producer, rendezvous: Self.alpha.key, bystanderProvides: cid
+        )
+        _ = try await storage(keyByte: 0x9E).fetchChainBody(cid, remote: remote, bundle: false, hosts: Self.alpha)
+        XCTAssertGreaterThan(host.volumeRequestCount, 0, "the host first")
+        XCTAssertGreaterThan(bystander.volumeRequestCount, 0)
     }
 
     /// With none of a child's hosts connected, a body fetch asks no peer and

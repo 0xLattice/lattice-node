@@ -308,7 +308,7 @@ public struct IvyRootContentSource: Sendable {
     fileprivate typealias VolumeFetch =
         @Sendable (_ rootCID: String, _ excluding: Set<PeerID>) async -> AttributedVolumeResponse
     private let fetch: @Sendable (
-        _ rootCID: String, _ hosts: ChainHosts?, _ onlyHosts: Bool, _ excluding: Set<PeerID>
+        _ rootCID: String, _ session: String, _ hosts: ChainHosts?, _ onlyHosts: Bool, _ excluding: Set<PeerID>
     ) async -> AttributedVolumeResponse
     /// The Volumes a peer that speaks bundles holds under a root (what it
     /// stored with that block), or none, and the session that sent them.
@@ -319,9 +319,9 @@ public struct IvyRootContentSource: Sendable {
         @Sendable (String) async -> (volumes: [AttributedVolumeResponse], session: AuthenticatedPeer?)
     private let fetchBundle: @Sendable (_ rootCID: String, _ hosts: ChainHosts?, _ onlyHosts: Bool) async
         -> (volumes: [AttributedVolumeResponse], session: AuthenticatedPeer?)
-    /// Whether a session for `hosts` has anyone to ask: false only when
-    /// it asks only a child's hosts and none is connected.
-    private let canAsk: @Sendable (_ hosts: ChainHosts?, _ onlyHosts: Bool) async -> Bool
+    /// Whether a session for `rootCID` has anyone to ask: false only when
+    /// it asks only a child's hosts and providers and none is connected.
+    private let canAsk: @Sendable (_ rootCID: String, _ hosts: ChainHosts?, _ onlyHosts: Bool) async -> Bool
     /// Credits the peer that served a requested Volume once it verifies, so
     /// the overlay favours peers that serve this node when it is contended.
     private let credit: @Sendable (PeerID, Int) async -> Void
@@ -482,10 +482,12 @@ public struct IvyRootContentSource: Sendable {
         // the hosts one at a time in its own order (those timing out last,
         // then the least loaded). Every peer hosts Nexus, so its Volumes go
         // to anyone. A peer reported for this root is not asked first again.
-        // Content only a child's hosts hold (`onlyHosts`: its block bodies;
-        // no other peer stores them) is asked of them alone, as Bitcoin
-        // asks for a block only the peers that announced it.
-        fetch = { rootCID, hosts, onlyHosts, excluding in
+        // A child's block body (`onlyHosts`) is asked of those that announced
+        // it, as Bitcoin asks for a block: its hosts, then the connected
+        // peers this node knows a provider record of for the block or the
+        // Volume (an operator's pin announces its root), never anyone or
+        // the DHT.
+        fetch = { rootCID, session, hosts, onlyHosts, excluding in
             if let hosts {
                 let named = await capabilities.sessions(hosting: hosts, ivy: ivy)
                     .filter { !excluding.contains($0.id) }
@@ -495,13 +497,23 @@ public struct IvyRootContentSource: Sendable {
                     // sent nothing do not.
                     if !answer.entries.isEmpty || answer.failure == .localCapacityUnavailable { return answer }
                 }
-                if onlyHosts { return .empty }
+                if onlyHosts {
+                    let providers = Set(await ivy.providers(for: session) + ivy.providers(for: rootCID))
+                    let announced = await capabilities.sessions(hosting: nil, ivy: ivy).filter {
+                        providers.contains($0.id) && !excluding.contains($0.id) && !named.contains($0)
+                    }
+                    return announced.isEmpty ? .empty : await ivy.fetchVolume(rootCID: rootCID, from: announced)
+                }
             }
             return await ivy.fetchVolume(rootCID: rootCID)
         }
-        canAsk = { hosts, onlyHosts in
+        // A body with no host connected and no connected provider of its
+        // block asks no one.
+        canAsk = { rootCID, hosts, onlyHosts in
             guard onlyHosts, let hosts else { return true }
-            return !(await capabilities.sessions(hosting: hosts, ivy: ivy)).isEmpty
+            if !(await capabilities.sessions(hosting: hosts, ivy: ivy)).isEmpty { return true }
+            let providers = Set(await ivy.providers(for: rootCID))
+            return await capabilities.sessions(hosting: nil, ivy: ivy).contains { providers.contains($0.id) }
         }
         // Asked only of the sessions whose hello said they answer it, one at
         // a time, each read as still capable when its turn comes. A session
@@ -561,9 +573,9 @@ public struct IvyRootContentSource: Sendable {
         self.budget = budget ?? AcquisitionBudget(
             capacity: max(maximumStorageBytes, Self.defaultPolicy.maximumAcquisitionBytes)
         )
-        self.fetch = { rootCID, _, _, _ in await fetch(rootCID) }
+        self.fetch = { rootCID, _, _, _, _ in await fetch(rootCID) }
         self.fetchBundle = { rootCID, _, _ in (await fetchBundle(rootCID), nil) }
-        canAsk = { _, _ in true }
+        canAsk = { _, _, _ in true }
     }
 
     public func withRoot<T: Sendable>(
@@ -597,7 +609,8 @@ public struct IvyRootContentSource: Sendable {
         operation: @Sendable (Session) async throws -> T
     ) async rethrows -> (value: T, attribution: Attribution) {
         let (fetch, fetchBundle, canAsk) = (fetch, fetchBundle, canAsk)
-        let fetched: VolumeFetch = { rootCID, excluding in await fetch(rootCID, hosts, onlyHosts, excluding) }
+        let block = rootCID
+        let fetched: VolumeFetch = { rootCID, excluding in await fetch(rootCID, block, hosts, onlyHosts, excluding) }
         let bundled: BundleFetch = { rootCID in
             bundle ? await fetchBundle(rootCID, hosts, onlyHosts) : ([], nil)
         }
@@ -606,7 +619,7 @@ public struct IvyRootContentSource: Sendable {
             budget: budget,
             reserving: min(max(bytes ?? maximumStorageBytes, 1), maximumStorageBytes),
             priority: priority,
-            canAsk: { await canAsk(hosts, onlyHosts) },
+            canAsk: { await canAsk(rootCID, hosts, onlyHosts) },
             fetch: fetched,
             fetchBundle: bundled,
             credit: credit,

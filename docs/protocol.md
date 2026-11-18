@@ -156,10 +156,11 @@ verified progress stalls, and once an interval while it has fewer current peers
 than the target, the node dials a bounded random set of that chain's providers.
 A lookup answers with a sample of the key's providers that announcing more
 often does not buy a place in. A child's current peers are what is routed by:
-its transaction announcements go only to them; on a block's first attempt its
-bundle is asked of the capable ones before other capable sessions; and each of
-its Volumes is asked of them before the ordinary order. Nexus's go to every
-session. A Nexus stall retries disconnected bootstrap peers.
+its transaction announcements go only to them; a block's body is asked of
+them alone (its bundle of the capable ones, then each Volume), then of the
+connected peers known to provide the block or that Volume, never of anyone
+else. Nexus's go
+to every session. A Nexus stall retries disconnected bootstrap peers.
 
 Parent facts, run reports and merged-mining candidates never cross a network
 plane: they pass in-process between co-hosted levels.
