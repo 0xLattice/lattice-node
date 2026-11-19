@@ -40,10 +40,10 @@ outputs, and things it must not know.
 
 Three services belong to the node, not to any chain:
 
-- **Lanes**: a queue per kind of work, and per chain for execution and
-  header work. Work in one lane never
-  queues behind work in another, and shared resources have limits, not
-  ordering policies.
+- **Workers**: a pool fed by three queues served in a fixed order: what an
+  RPC waits on, then each chain's next blocks to execute, then everything
+  else. A chain's next blocks never queue behind proof checks, and shared
+  resources have limits, not further ordering policies.
 - **Store**: a verified cache of what the network holds. Writes are atomic
   and ordered. Content (a body, a mined block) is stored by the job that
   validated or built it, before anything names it; the loop then writes each
@@ -59,30 +59,31 @@ Between chains exactly two facts cross, both from parent to child:
 2. **Continuity facts**: the parent's executed set feeds the child's Execute.
 
 At any moment each piece of work is in one of four states: running; ready,
-in a lane that will run it; waiting on another module's output; or
+in a queue that will run it; waiting on another module's output; or
 waiting on something outside the node, with a wake registered. A stall is
 work in none of the four.
 
-## Concurrency: one loop decides, lanes execute
+## Concurrency: one loop decides, workers execute
 
-Decisions are made in one place and each kind of work has its own queue, as
+Decisions are made in one place and work runs on a worker pool, as
 established clients are built. The node has no scheduler of its own.
 
 | What | Runs on | Why |
 |---|---|---|
 | Decisions: every step of the core | One serial loop | It stays deterministic and simulated. The core took 9% to 16% of wall time in the first baseline |
-| Execution of a chain's blocks | One lane per chain, one job at a time: a batch of up to `connectBatch` ready blocks, one atomic change set | A chain executes in order anyway; chains run side by side |
-| Header work: proof checks and derivations | Its own lane per chain | It never queues behind execution. Batched per page |
-| What an RPC waits on | Its own lane | Latency |
+| What an RPC waits on | The first queue | Latency |
+| Execution of a chain's blocks | The second queue, one job per chain at a time: a batch of up to `connectBatch` ready blocks, one atomic change set | A chain executes in order anyway; chains run side by side; a chain's next block never waits behind thousands of child proof checks (#64, #76) |
+| Header work: proof checks and derivations, and everything else | The third queue, in arrival order | Batched per page |
 | Storage writes | Validated content by its job; then, as each step ends, the step's state and facts by the loop, facts in one transaction | One boundary, one order, one place: no caller orders writes |
 
 The loop decides, and makes each step's writes before it publishes what
 they make true: that wait is deliberate, the one the loop has. It does not
-wait on the network, read content, or do bookkeeping that is not a decision. Each lane offers only its next job, and
-free workers take those lane heads in the order they became ready, so no
-lane's backlog stands in front of another lane's next job. The operating
-system shares the CPU among lanes; there is no priority and no time
-accounting. A loop per chain would parallelise only the share the core
+wait on the network, read content, or do bookkeeping that is not a decision.
+A free worker takes the head of the first non-empty queue; a recheck whose
+tip has moved is dropped unrun. There is no time accounting and no
+scheduler to tune. A queue per chain and kind of work ("lanes") was built
+and measured slower: 10.7–10.8 s against 10.4–10.5 s for the three queues
+on the child-sync benchmark. A loop per chain would parallelise only the share the core
 takes and would cost the single deterministic step order the simulator
 depends on. Because only two facts cross between chains, a chain's decisions
 can still move to a loop of their own later.
@@ -123,9 +124,11 @@ rule here first.
 2. **Availability never judges**, and never gates another chain's weight.
 3. **Exactly two facts cross between chains**: work facts and continuity
    facts.
-4. **One loop decides; lanes execute.** Work of different kinds never shares
-   a queue, and neither does execution of different chains. Shared resources have limits, not
-   ordering policies. There is no scheduler to tune.
+4. **One loop decides; workers execute** from three queues served in order:
+   what an RPC waits on, each chain's next blocks, everything else. A new
+   kind of work goes in one of them, not in a new queue or priority, unless
+   a benchmark shows the three cannot serve it. There is no scheduler to
+   tune.
 5. **Every wait is typed and visible.** A timer may end a wait on something
    outside the node; it is never the reason work inside the node proceeds.
 6. **Decisions live in the core.** The shell executes effects and reports

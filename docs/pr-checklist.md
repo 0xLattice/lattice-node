@@ -17,7 +17,7 @@ For a change to sync, storage or the wire, against
 - [ ] No hashed byte and no consensus decision changes.
 - [ ] Weight does not wait on execution, and availability gates no other chain.
 - [ ] Nothing crosses between chains except work facts and continuity facts.
-- [ ] Work of a new kind runs in its own lane, and chains do not share an execution queue; nothing reorders another lane's work.
+- [ ] Work of a new kind goes in one of the three worker queues (what an RPC waits on, each chain's next blocks, the rest); a new queue or priority comes with a benchmark that shows the three cannot serve it.
 - [ ] A new wait has a typed reason and a wake, not only a timer.
 - [ ] A decision is made in the core; the shell only executes effects.
 - [ ] A liveness rule has a simulator scenario; a performance claim has a benchmark number.
