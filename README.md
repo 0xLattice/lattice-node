@@ -195,15 +195,9 @@ counts and the per-level split hold.
 
 What the follower keeps is set in the environment, for either script:
 `BENCH_STATE` (`all`, `recent` or `none`; default `recent`), `BENCH_BODIES`
-(`all` or `none`; default `all`) and `BENCH_STATE_BUFFER` (the state
-buffer's limit in bytes; default the node's, `0` for none). They are the
-follower's alone: the recorder and the server keep everything. A value that
-is none of these stops the run. The state buffer is written when it fills,
-and before the node lets go of anything: a follower that keeps `recent`
-state moves its counts, and so writes the buffer, at least once per state
-window; one that keeps no state or no bodies lets go of something, and
-writes the buffer, at every step, whatever its limit. The report's
-`state/bodies/buffer` column says what each run kept. Compare runs of one
+(`all` or `none`; default `all`). They are the follower's alone: the
+recorder and the server keep everything. A value that is none of these
+stops the run. The report's `state/bodies` column says what each run kept. Compare runs of one
 setting only, and give each setting its own run directory: a directory
 holds the runs of whatever was last run in it.
 

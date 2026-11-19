@@ -21,6 +21,6 @@ For a change to sync, storage or the wire, against
 - [ ] A new wait has a typed reason and a wake, not only a timer.
 - [ ] A decision is made in the core; the shell only executes effects.
 - [ ] A liveness rule has a simulator scenario; a performance claim has a benchmark number.
-- [ ] Nothing new waits on each write reaching disk except a promise to the operator; writes are buffered and flushed in batches.
+- [ ] Writes are made as each step ends, in one order from one place: the content a step's facts name, then the facts in one transaction. Nothing is written behind the loop, and no caller orders writes across stores.
 - [ ] Content is verified once, and modules pass verified values.
 - [ ] A wire change is an addition behind a capability, and older peers are still served.

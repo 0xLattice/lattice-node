@@ -45,9 +45,9 @@ Three services belong to the node, not to any chain:
   queues behind work in another, and shared resources have limits, not
   ordering policies.
 - **Store**: a verified cache of what the network holds. Writes are atomic
-  and ordered. State changes are buffered in memory, read from the buffer,
-  and flushed to disk in one atomic batch when the buffer reaches its limit; nothing waits for each write to reach disk
-  except a promise to the operator.
+  and ordered, and made as each step ends, from one place: the content the
+  step's facts name first, then its facts in one transaction. Nothing is
+  written behind the loop.
 - **Progress**: every module reports what it is waiting on, as a typed
   reason.
 
@@ -73,7 +73,7 @@ established clients are built. The node has no scheduler of its own.
 | Execution of a chain's blocks | One lane per chain, one job at a time: a batch of up to `connectBatch` ready blocks, one atomic change set | A chain executes in order anyway; chains run side by side |
 | Header work: proof checks and derivations | Its own lane per chain | It never queues behind execution. Batched per page |
 | What an RPC waits on | Its own lane | Latency |
-| Storage writes | State buffered in memory and flushed in batches on a size limit, as Bitcoin Core's coins cache (`-dbcache`) and geth's trie database do | The loop waits on a flush, not on every write |
+| Storage writes | As each step ends, from the loop: content, then the step's facts in one transaction | One boundary, one order, one place. A write-behind layer (state buffer, write lane, deferred syncs) was tried and removed: it bought speed past the target and put the ordering on every caller |
 
 The loop only decides. It does not wait on each write, read content, or do
 bookkeeping that is not a decision. Each lane offers only its next job, and
@@ -107,10 +107,10 @@ commitment; storage does not mirror it.
 | Headers, facts, proofs, cursors | The node's own tables |
 | "State reflects block X" marker | Per chain, in the same transaction as state and facts |
 
-Durable writes are kept for promises to the operator: an acknowledged local
-transaction, pins and configuration. The node makes no durability promise
-for a submitted block: the miner keeps what it mined until it sees it on
-chain.
+Every write is made before the step that decided it is published, so what
+the node promises is on disk when it says so: an acknowledged local
+transaction, pins, configuration, and a block a miner or an author was told
+is accepted.
 
 ## Rules
 
@@ -130,10 +130,11 @@ rule here first.
    results.
 7. **Every liveness rule has a simulator scenario**, and every performance
    claim has a benchmark number.
-8. **The network is the durable record.** Consistency is strict and
-   durability catches up: local storage is a verified cache.
-9. **Writes are atomic and ordered, always.** A restart resumes from a
-   consistent earlier state and re-syncs the rest.
+8. **The network is the durable record.** Local storage is a verified cache:
+   what peers can give back again needs no care beyond atomic, ordered writes.
+9. **Writes are atomic and ordered, always, from one place.** Each step's
+   content, then its facts in one transaction, as the step ends. A restart
+   resumes from a consistent earlier state and re-syncs the rest.
 10. **Content is verified once, where it enters.** Modules pass verified,
     decoded values, never raw bytes.
 11. **Weigh, Fetch and Execute costs are measured by the sync benchmark**
@@ -162,8 +163,6 @@ code no longer departs.
 
 | Rule | Today | Measured |
 |---|---|---|
-| 8, 9 | The runtime loop awaits an fsynced commit on every step that has facts | The loop was busy 46% of wall time with one worker and 67% with three |
-| 8 | A submitted block's content is stored and retained before it is weighed (`storeMinedBlock`) | |
 | 13 | State is content-addressed trie nodes in the content store, pruned by reference counts | 2.9 GB written for 82 MB kept |
 | 4 | Every job shares one worker pool behind three strict queues | Derivations of 0.7 ms waited 3.5 to 3.9 s for a worker |
 | 2 | A child reads its peers only once its parent has applied every header of one peer's log. A parent header that never applies (its child index not obtainable, say) holds its child's weight back, as does a parent with no peer running it. And the log is whichever peer's ended first: a peer that is behind opens the child on a parent that has weighed little, and the child then checks peers' proofs where it could have derived them | Not measured |
