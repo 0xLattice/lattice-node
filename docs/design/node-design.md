@@ -611,7 +611,10 @@ executed is stored only with it; a served block's bundle includes it. A new
 block is advertised by its header, in its chain's header log, and peers pull
 the block and sidecar from its hosts, as Bitcoin and Ethereum announce a
 block and send its body on request; pushing the sidecar with the header
-would send it to peers that never execute the child. One path is
+would send it to peers that never execute the child. The sidecar's nodes are
+content addressed and checked against the block's `parentState`, so they
+may be taken from any peer; the child's hosts are the ones sure to hold
+them, since they keep them with the block. One path is
 best-effort: a block this node mined or was handed is stored without
 a witness it could not read (`NodeStorage.storingAndRetaining`). That path
 fails closed under this decision.
