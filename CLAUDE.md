@@ -20,8 +20,9 @@ The question to the owner names, in a few lines:
    order, under which atomic boundary. "As Bitcoin does" counts only if the
    whole shape matches: who writes, when, in what order, inside one
    boundary. The same idea assembled differently is invention.
-2. **What it is for, measured.** The gain on the sync benchmark on Linux,
-   against the goal it serves, and whether that goal is already met.
+2. **What it is for, measured.** The objective it serves and the effect on
+   that row of the [targets](docs/design/node-objective.md#targets), on
+   Linux, and whether that target is already met.
 3. **What it costs.** Lines added and removed, and every new ordering rule
    or invariant a caller must now keep.
 
@@ -41,8 +42,8 @@ owner instead.
 - **A second review round finds a new hole of the same kind** (ordering
   between stores, a read racing a write, a release running late). Stop
   patching. Bring the design question to the owner, not a third fix.
-- **The goal is met.** Performance work stops when the stated goal is met
-  on Linux, unless the owner sets a new one.
+- **The target is met.** Work on a [target](docs/design/node-objective.md#targets)
+  stops when it is met on Linux, unless the owner raises it.
 - **A fix adds machinery to fix machinery.** If the fix for a component's
   problem is another component, stop and ask.
 
@@ -67,6 +68,8 @@ After every few merged changes, tell the owner:
 
 ## Also
 
+- [What the node is for](docs/design/node-objective.md) orders the
+  objectives: an earlier one is never traded for a later one.
 - [Sync architecture](docs/design/sync-architecture.md) and the
   [PR checklist](docs/pr-checklist.md) apply. Where they conflict with this
   file, this file wins until they are amended.
