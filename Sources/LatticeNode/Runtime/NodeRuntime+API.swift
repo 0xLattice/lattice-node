@@ -704,6 +704,12 @@ extension NodeRuntime {
 
         var isEmpty: Bool { answered.isEmpty && connects.isEmpty && rest.isEmpty }
 
+        /// The jobs waiting for a worker on `path`.
+        func count(at path: ChainPath) -> Int {
+            answered.count(where: { $0.path == path }) + connects.count(where: { $0.path == path })
+                + rest.count(where: { $0.path == path })
+        }
+
         mutating func append(_ job: RuntimeJob) {
             switch job.kind {
             case .answered: answered.append(job)
