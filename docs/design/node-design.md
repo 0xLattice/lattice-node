@@ -532,7 +532,6 @@ sweep runs at start.
 | staging | what a state sync or heal fetched | once the counts move |
 | operator | pins | on unpin |
 | durable / live mempool | journaled and pooled transactions | as they leave |
-| receipts (per chain), *proposed, §4.9a* | every version of the chain's `receiptState`, and each executed state's top node | never, while the chain is hosted |
 
 On `recent` the counts move with the tip once per window, are checked at
 start and maintenance, healed when roots are missing, and replaced by a state
@@ -565,86 +564,82 @@ to retain trie nodes on disk; geth moved away from hash-keyed state. Replace
 when an objective needs it, with geth's path scheme the nearest shape — but
 first make it replaceable (§6).
 
-### 4.9a Decision proposed: receipt state is history
+### 4.9a Decision proposed: a child block carries its receipt proofs
 
 **The failure.** Testnet nodes stopped child chains at height 3,920 (as
 reported by the owner's investigation). Block 3,921 carries a withdrawal. A
 withdrawal is checked against a receipt in its parent's state at the block's
-anchor, `parentState.receiptState`. The block's body predates #119, so it
-carries no receipt witness, and every host runs `state: recent`, so no node
-still holds that Nexus state. A node that syncs the child chain cannot execute
-the block, and nothing it can do on its own will change that.
+anchor, `parentState.receiptState`. The block's body was stored before #119,
+so it carries no receipt witness, and every host runs `state: recent`, so no
+node still holds that Nexus state. No node can execute the block.
 
-**What the protocol says.** The spec fixes three facts:
+**What the protocol says.**
 
 - A withdrawal is the only thing in a child block that reads its parent
   state's contents: a proof of the receipt in `parentState.receiptState`
   (spec §7.3, §8.1 phase 3, §8.3). A child genesis and parent continuity
   rest on what the parent executed, not on its state's contents (§5.3 step 6).
-- The anchor can be any state the parent executed, at any depth, on any
-  branch (§5.3 step 6, §9.5). A child may be hosted, or synced, long after
-  its anchors were current.
-- `receiptState` only grows. A receipt is inserted once, its key must be
-  absent, and nothing updates or removes it (§6.5, §8.1).
+- The anchor can be any state the parent executed (§5.3 step 6, §9.5), and a
+  child may be synced long after its anchors were current. A receipt being
+  immutable does not let today's trie stand in for the anchor's: a receipt
+  inserted after the anchor must fail against it, and one inserted only on a
+  parent branch that lost exists only under the old root.
+- The parent-receipt closure is "validation witness data outside
+  `maxBlockSize` … each node bounds acquisition before decoding it", and
+  receipt keys are hashed into 64-character hex paths "because a child may
+  need that proof from a remote same-chain peer" (§3.5). The protocol
+  intends a per-withdrawal witness.
 
-A receipt being immutable does not let the current trie stand in for the
-anchor's. A receipt inserted after the anchor is in today's trie but must
-fail against the anchor; one inserted only on a parent branch that lost is
-under the anchor's root and absent from today's canonical trie. The check is
-against the anchor's root, and consensus fixes it.
+**Decision proposed.** A child block's body includes the parent state trie
+nodes its withdrawals' receipt proofs read: from its `parentState` down each
+receipt's path (`Block.parentReceiptWitnessPaths`). A body with withdrawals
+is complete only with them: a node does not store, weigh, serve or connect
+one without them. Whoever produces the block can always build them, since a
+child block anchors at its carrier's entering state, the one its miner builds
+on. Old parent state is then never needed to execute a child block, on any
+retention setting, by any node, whenever it hosts the child.
 
-**The line this draws.** A chain's `accountState`, `generalState` and
-`depositState` are read by that chain alone, at its tip: they are state, and
-the state window prunes them correctly. Its `receiptState` is read by its
-child chains at any point in its past: it is history, like bodies, and
-pruning it by the window loses something other chains still need.
+**What the code already does (#119, #129).** A body fetched from a peer
+requires the witness, counted against the fetch's byte reservation; a block
+the node executed is stored only with it; a served body includes it. One
+path is best-effort: a block this node mined or was handed is stored without
+a witness it could not read (`NodeStorage.storingAndRetaining`). That path
+fails closed under this decision.
 
-**Decision proposed.** Keep every version of each hosted chain's
-`receiptState` as part of the chain, released only when the chain is no
-longer hosted, on every retention setting. Keep with it each executed
-state's top node (the map of its four sub-state links), which leads from a
-`parentState` CID to its receipt root. The rest of the state is pruned
-exactly as now.
-
-**Cost.** Because the trie only grows and versions share every node a
-receipt did not touch, all versions together cost the receipt trie's
-insertions: about one path, a few nodes, per receipt, plus one top node of
-four links per executed block. Each receipt is a paid parent transaction, so
-the cost is bounded by use, not by time. Not yet measured on testnet; the
-implementing PR measures it. No setting, window or new process is involved.
+**Size.** A receipt path is about six trie nodes at a million receipts
+(16-way branching on hashed keys), each up to about 1.2 KB: roughly 6–8 KB
+per withdrawal, with the upper levels shared among a block's withdrawals.
+Estimated from the trie format, to be measured. It is paid only where
+withdrawals happen, by the hosts of that child, for as long as they keep its
+bodies.
 
 **Alternatives.**
 
 | Approach | Works for | Cost and shape | Verdict |
 |---|---|---|---|
-| `state: all` on some nodes (archive) | any node that can reach one | every version of all state; liveness depends on operators running archives | rejected: an operator role for a protocol need |
-| A long state window for the parent | a node that sets it | all of the parent's recent state; a setting to get right per network | rejected: configuration, not design |
-| Hold a parent state until hosted children execute past it | a node syncing parent and children together | couples retention to other chains' progress; a stuck child holds state forever unless bounded | rejected: inelegant, and no help to a node that hosts a child late |
-| The receipt witness carried in the child's body (#119) | a block whose body was stored with it | best-effort: absent when whoever stored the body could not read the receipt, forever after | not enough alone |
-| **Receipt history kept with the chain** | **any node, any child, hosted whenever** | **the receipt trie's insertions; no setting** | **proposed** |
+| `state: all` on some nodes (archive) | any node that can reach one | every version of all state; liveness rests on operators running archives | rejected: an operator role for a protocol need |
+| A long state window for the parent | a node that sets it | the parent's recent state; a setting to get right per network | rejected: configuration, not design |
+| Hold a parent state until hosted children execute past it | a node syncing parent and children together | couples retention to other chains' progress; a stuck child holds state unless bounded | rejected: inelegant, no help to a node that hosts a child late |
+| Keep every version of each chain's receipt state | any node | about 7 KB per receipt ever made, forever, on every parent host (about 35 times the trie) | rejected: size, paid by every parent host for every receipt |
+| **The witness in the child's body, required** | **any node, any child, hosted whenever** | **the paths each withdrawal reads, kept with its body** | **proposed; the spec's design** |
 
-**How others do it.** Ethereum full nodes prune old state but keep
-receipts with the block history
-([geth sync modes](https://geth.ethereum.org/docs/fundamentals/sync-modes)):
-what other systems prove against outlives state pruning. Cosmos IBC proves
-packets against a counterparty's state at a past height, so its relayers
-need nodes that keep that state: the shape this decision avoids.
+**How others do it.** Bitcoin blocks carry everything validating them reads
+beyond the node's own state. Ethereum's stateless-client work carries state
+witnesses with blocks, and moved toward Verkle trees because Merkle-Patricia
+witnesses are large: the same tradeoff, at much higher volume. Cosmos IBC
+proves packets against a counterparty's state at a past height, and its
+relayers need nodes that keep that state: the shape this avoids.
 
-**What it leaves open, for the owner.** Whether to keep the receipt witness
-in child bodies (#119). With receipt history on every parent host it is no
-longer needed for availability: any peer serves the same Volumes, and
-parent content is asked of anyone. Keeping it saves fetches and serves a
-node that does not host the parent; removing it leaves one mechanism.
-
-**Testnet.** Nodes that already let go of old receipt state do not get it
-back. One node wiped and synced again on the new version (Nexus is about
-6,300 blocks) holds every receipt version, and other nodes fetch from it.
+**Legacy bodies.** Bodies stored before #119 lack the witness; as far as is
+known, only testnet's 3,921 has a withdrawal among them. One node executes
+Nexus again from genesis keeping its state (about 6,300 blocks; a wipe on a
+node that let it go), executes 3,921, and stores and serves its body with
+the witness. Other nodes fetch the complete body. Nothing is kept afterwards.
 
 **How it is tested.** A follower on `recent` with a small window syncs a
-parent and a child whose withdrawal is anchored below the parent's window,
-from a producer that kept no witness, and executes past it. A node that
-starts hosting the child after its parent has moved far past the anchor does
-the same. The implementing PR shows both fail on today's code.
+parent and a child whose withdrawal is anchored below the parent's window
+and executes past it, from the witness alone. A block mined with a
+withdrawal whose witness cannot be read is not stored or weighed.
 
 ### 4.10 Workers and scheduling
 
@@ -861,9 +856,10 @@ progress or reports exactly why it cannot.
   status per chain (§4.4).
 - Simulator scenarios for starvation, missing bodies, delayed proofs,
   parent–child stalls, and reorganisations at several depths (§4.19).
-- Keep receipt state as history (§4.9a), the cause of testnet's stall at
-  3,920; and report a block that waits on missing parent state as that, not
-  as an unavailable body (§4.4).
+- Require the receipt witness in every child body with withdrawals, and
+  repair testnet's block 3,921 once (§4.9a): the cause of the stall at
+  3,920. Report a block that waits on missing parent state as that, not as
+  an unavailable body (§4.4).
 
 *Exit:* no unexplained stalled chain in production; every known blocking
 condition is observable and recoverable.
@@ -943,8 +939,7 @@ against an agreed target says otherwise.
 2. State retention extracted behind one interface, behaviour unchanged.
 3. The binary wire format as the next performance experiment, with a
    benchmark and a compatibility gate.
-4. Receipt state kept as history (§4.9a), and whether the receipt witness
-   stays in child bodies.
+4. A child block carries its receipt proofs (§4.9a).
 
 Everything else stays conditional on measurements.
 
