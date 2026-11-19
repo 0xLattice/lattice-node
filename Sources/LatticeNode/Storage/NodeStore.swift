@@ -65,8 +65,6 @@ actor NodeStore {
     /// (one at a time, `NodeSQLite`) sees what was committed when it began,
     /// and never waits on a commit.
     let reads: NodeSQLite
-    /// Every level's newest seq, once read (`lastSeqs`).
-    var newestSeqs: [String: Int64]?
     let nexusGenesisCID: String
     private let executor = SerialQueueExecutor(label: "LatticeNode.NodeStore")
 

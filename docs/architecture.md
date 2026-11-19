@@ -124,34 +124,14 @@ though it were a complete boundary.
 bundle serving reads it, a node runs without it, and it may be deleted while
 the node is stopped.
 
-A block's body is durable before the fact transaction that names it: a
-block's Volumes, once its execution found it valid or it was mined here, are
-one `volumes.db` transaction, then retained. The complete `NodeBatch` then
-commits in one SQLite transaction across every affected chain path, including
-each path's headers, child proofs, and sync cursors. A crash cannot leave
-part of a block's content or a parent-level half of a multi-level grind.
-
-The states executions produce are buffered in memory and flushed in batches
-(`StateBuffer`), as Bitcoin Core's coins cache and geth's trie database are.
-A step's post-states go to the buffer with their retention, and every read
-of content asks the buffer before the store: execution, the API, mining, and
-what is served to peers. A flush writes the whole buffer and its retention
-in one `volumes.db` transaction. It happens when the buffer reaches its
-limit (`NodeResourcePolicy.maximumBufferedStateBytes`, 64 MiB), on a clean
-stop, and before every operation on what the store retains (the counts, the
-window releases, a pin, a state sync, letting go of bodies), so those find
-every state in the store. After the states, a flush moves each chain's
-flush marker in `state.db` to the facts it covers: the state of every
-execution up to the marker is stored. A crash loses the buffer. At the next
-start an execution above its chain's marker counts as not executed
-(`NodeStore.forgetUnflushedExecutions`): its block is a header again, and
-the node executes it as it executes any block, off the loop, from the body
-it holds and the state below it, while it weighs and answers as usual.
-Bitcoin Core and geth keep the same marker with their flushed state. The
-marker follows the states because they are in two stores; a crash between
-the two leaves it behind the state, never ahead, and the blocks between
-execute again into the same state. A child genesis's spec is stored at
-once, since a start reads it before it executes anything.
+Persistence is content-first: referenced Volumes become durable before the
+fact transaction that names them. One admission's Volumes (a block's once
+its execution found it valid or it was mined here, or the post-states of
+one step) are one `volumes.db` transaction,
+then retained. The complete `NodeBatch` then commits in one SQLite transaction
+across every affected chain path, including each path's headers, child
+proofs, and sync cursors. A crash cannot leave part of a block's content or a
+parent-level half of a multi-level grind.
 
 Content stays in `volumes.db` because a retention scope names it, and each
 scope says why. A block's body (its own Volume and its transactions') is

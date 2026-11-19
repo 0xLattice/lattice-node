@@ -98,9 +98,6 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Bytes of fetched content this node's fetches hold in memory at once, every hosted chain together: each fetch reserves its worst case (its chain's maxBlockSize, at most 67108864) when it starts and releases it when it ends. Past it, fetches wait in line (the node's own work and the blocks each chain can connect next first); nothing asked for is declined for it. It bounds what fetches reserve, not every copy: a fetch's walk makes transient copies it does not count (about 1 to 1.5 times the body), so it is not a hard limit on the process's memory. A quarter of it more keeps verified content for later reads, the fetched bodies furthest from their chain's next block to connect evicted first. At least 67108864, the bytes one block's fetch may hold.")
     var maxAcquisitionBytes = NodeResourcePolicy.defaultMaximumAcquisitionBytes
 
-    @Option(help: "Bytes of executed state the node holds in memory before it writes them to its store in one batch, as Bitcoin Core's -dbcache bounds its coins cache. Larger means fewer, larger writes during a sync and more memory. A crash loses what was not yet written: on the next start those blocks count as not executed and the node executes them again from the bodies it holds. 0 writes each step's state as it is produced.")
-    var stateBufferBytes = NodeResourcePolicy.defaultMaximumBufferedStateBytes
-
     @Option(help: "Which block bodies (a block's own Volume and its transactions') this node keeps beyond the ones it needs to operate: all, or none. It always holds the bodies waiting to execute, each chain's tip, and each genesis block. With none, a body is let go of once another block is the tip, and is no longer served; headers, facts and state stay, so what the node weighs and selects does not change. A node that syncs from genesis needs peers that keep all.")
     var blockBodies = "all"
 
@@ -113,7 +110,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Seconds each provider announcement lasts: each hosted chain's and each pinned Volume's. The node renews them at least every 10 minutes (every --peer-search-interval when shorter), so a lifetime shorter than that leaves gaps in which peers cannot find this node as a provider. At most 86400: peers drop announcements that last longer.")
     var announceLifetime: UInt64 = 1_200
 
-    @Option(help: "Ready blocks of one chain the node executes per job, each the previous one's child, with one commit for them all, as Bitcoin Core connects up to 32 per step. A larger batch commits less often during a sync and holds more executed state in memory until its commit. A crash loses the batch being executed and the executed state not yet written to the store (--state-buffer-bytes); those blocks run again on the next start. At least 1.")
+    @Option(help: "Ready blocks of one chain the node executes per job, each the previous one's child, with one commit for them all, as Bitcoin Core connects up to 32 per step. A larger batch commits less often during a sync and holds more executed state in memory until its commit; a crash loses at most the batch being executed, which runs again. At least 1.")
     var connectBatch = NodeConfiguration.defaultConnectBatch
 
     @Flag(inversion: .prefixedNo, help: "Announce each pinned Volume as a provider record, on pinning and on every renewal. With --no-announce-pins pins are held and served but never announced: for a holder of many Volumes whose readers do not need a record per Volume.")
@@ -268,9 +265,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                 announceLifetime: announceLifetime,
                 announcePins: announcePins,
                 providerWalkSessions: providerWalkSessions,
-                resourcePolicy: NodeResourcePolicy(
-                    maximumAcquisitionBytes: maxAcquisitionBytes, maximumBufferedStateBytes: stateBufferBytes
-                ),
+                resourcePolicy: NodeResourcePolicy(maximumAcquisitionBytes: maxAcquisitionBytes),
                 blockBodies: blockBodies,
                 state: state,
                 hostedChildren: hosted.children,
@@ -366,9 +361,6 @@ struct LatticeNodeCommand: AsyncParsableCommand {
         let sessionBytes = NodeResourcePolicy.default.maximumAcquisitionStorageBytes
         guard maxAcquisitionBytes >= sessionBytes else {
             throw ValidationError("--max-acquisition-bytes must be at least \(sessionBytes), the bytes one block's fetch may hold")
-        }
-        guard stateBufferBytes >= 0 else {
-            throw ValidationError("--state-buffer-bytes must be 0 or more")
         }
         guard connectBatch >= 1 else {
             throw ValidationError("--connect-batch must be at least 1")

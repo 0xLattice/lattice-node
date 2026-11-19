@@ -320,22 +320,14 @@ final class StateWindowTests: XCTestCase {
             blocks.append(try BlockHeader(node: try await runtime.mineBlock()).rawCID)
         }
         for _ in 0..<2 { try await mine() }
-        // The step that executed 2 also settled: it held the counts at
-        // genesis. Its state is in the state buffer until a flush, so the
-        // windows are read from the store after one.
-        try await eventually("2's state is stored") {
-            try await storage.flushState()
-            return try await self.windowHeights(storage).last == 2
-        }
+        // The step that stored 2's state also settled: it held them at genesis.
+        try await eventually("2's state is stored") { try await self.windowHeights(storage).last == 2 }
         var settledAt = try await counted(storage).marker?.tip
         XCTAssertEqual(settledAt?.cid, genesis, "the tip is 2, less than a window above genesis")
         try await mine()
         try await eventually("the counts reach 3, a window above genesis") { try await self.settled(storage, at: blocks[2]) }
         for _ in 0..<2 { try await mine() }
-        try await eventually("5's state is stored") {
-            try await storage.flushState()
-            return try await self.windowHeights(storage).last == 5
-        }
+        try await eventually("5's state is stored") { try await self.windowHeights(storage).last == 5 }
         settledAt = try await counted(storage).marker?.tip
         XCTAssertEqual(settledAt?.cid, blocks[2], "the tip is 5, less than a window above 3")
         let held = try await windowHeights(storage)

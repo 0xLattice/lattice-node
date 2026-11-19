@@ -46,17 +46,10 @@ extension NodeStorage {
         try await store.chainCursors(at: path)
     }
 
-    /// `NodeEffect.persist`: content first, then the complete node step's
-    /// headers, proofs, facts and cursors in one state.db transaction.
-    ///
-    /// The states the step's executions produced go to the state buffer
-    /// with their retention, where every read finds them; a flush writes
-    /// them to volumes.db in one transaction, then moves each level's flush
-    /// marker to the facts it covers (`flushState`). A child
-    /// genesis's spec is stored at once: a start reads it before anything
-    /// is executed again. With no buffer (`maximumBufferedStateBytes` 0)
-    /// every affected level's Volumes are one volumes.db transaction,
-    /// retained in the same one, before the facts.
+    /// `NodeEffect.persist`: content first — every affected level's Volumes
+    /// in one volumes.db transaction, retained in the same one — then the
+    /// complete node step's headers, proofs, facts and cursors in one
+    /// state.db transaction.
     nonisolated func persistNodeBatch(_ batch: NodeBatch, logID: String) async throws {
         var durable: [NodeFactBatch] = []
         // What this step's executions created. An executed block's body was
@@ -67,7 +60,6 @@ extension NodeStorage {
         // produced it (a batch's blocks keep their own windows).
         var states: [ChainPath: [(height: UInt64?, roots: [String])]] = [:]
         let storage = NodeImportStorage(storage: broker)
-        var specRoots = Set<String>()
         for (path, level) in batch.levels.sorted(by: {
             $0.path.count != $1.path.count
                 ? $0.path.count < $1.path.count
@@ -101,7 +93,6 @@ extension NodeStorage {
                 try await VolumeImpl<ChainSpec>(node: spec).store(storer: storage)
             }
             let specs = await storage.takeStoredVolumeRoots()
-            specRoots.formUnion(specs)
             let created = executed + specs
             switch configuration.state {
             case .all:
@@ -118,14 +109,8 @@ extension NodeStorage {
                 headers: level.headers,
                 proofs: level.proofs,
                 cursors: level.cursors,
-                keepsStateDiffs: configuration.state == .recent,
-                buffersState: buffersState
+                keepsStateDiffs: configuration.state == .recent
             ))
-        }
-        // A state of no known height joins the newest window the store
-        // lists: the buffered windows must be in it.
-        if buffersState, states.values.contains(where: { $0.contains { $0.height == nil && !$0.roots.isEmpty } }) {
-            try await flushState()
         }
         // Every root retained is one this batch stores.
         var retaining: [String: [String]] = [:]
@@ -143,21 +128,7 @@ extension NodeStorage {
                 retaining[scope, default: []] += state.roots
             }
         }
-        let volumes = await storage.takeVolumes()
-        guard buffersState else {
-            try await broker.storeVolumesLocal(volumes, retaining: retaining)
-            try await store.stageNodeFacts(durable, logID: logID)
-            return
-        }
-        let specVolumes = volumes.filter { specRoots.contains($0.volume.root) }
-        if !specVolumes.isEmpty {
-            try await broker.storeVolumesLocal(specVolumes, retaining: [retentionScope: specRoots.sorted()])
-        }
-        retaining[retentionScope]?.removeAll(where: specRoots.contains)
-        stateBuffer.add(
-            volumes.filter { !specRoots.contains($0.volume.root) },
-            retaining: retaining.filter { !$0.value.isEmpty }
-        )
+        try await broker.storeVolumesLocal(await storage.takeVolumes(), retaining: retaining)
         try await store.stageNodeFacts(durable, logID: logID)
     }
 
@@ -400,7 +371,7 @@ extension NodeStorage {
             ) { session in
                 // Read into memory, never into the store: what a peer sent is
                 // stored once the block's execution has found it valid.
-                let fetcher = CoalescingFetcher(CompositeContentSource([held, session]))
+                let fetcher = CoalescingFetcher(CompositeContentSource([broker, session]))
                 let walked = NodeImportStorage(storage: nil, keepsVolumes: true)
                 do {
                     // With its receipt witness, which the bundle carries,
