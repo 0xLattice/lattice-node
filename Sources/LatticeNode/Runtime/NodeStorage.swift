@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Lattice
 import VolumeBroker
 import cashew
@@ -88,8 +89,9 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// executing it again at a start. A flush names no block above it
     /// flushed, so rows a start has not executed again yet survive a flush.
     private var bufferedThrough: Int64 = 0
-    /// The flush asked for last, running or done: the next runs after it.
-    private var lastFlush: Task<Void, any Error>?
+    /// The lane every write of a step runs in, in order, off the loop
+    /// (`StoreLane`): its facts, then what follows them.
+    nonisolated let lane = StoreLane()
 
     private init(
         configuration: NodeConfiguration,
@@ -108,7 +110,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         let held = CompositeContentSource([stateBuffer, broker])
         self.held = held
         self.localFetcher = CoalescingFetcher(held)
-        self.workSource = CompositeContentSource([held, HeaderRecords(store: store)])
+        self.workSource = CompositeContentSource([held, HeaderRecords(store: store, lane: lane)])
         self.workFetcher = CoalescingFetcher(workSource)
         self.readCache = ReadCache(maximumBytes: configuration.resourcePolicy.maximumCachedContentBytes)
         self.retentionScope = retentionScope
@@ -146,7 +148,8 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         _ cid: String,
         at chainPath: [String] = ["Nexus"]
     ) async -> Bool {
-        (try? await store.hasAcceptedBlock(cid, at: chainPath)) ?? false
+        await written()
+        return (try? await store.hasAcceptedBlock(cid, at: chainPath)) ?? false
     }
 
     // MARK: - The state buffer
@@ -169,21 +172,49 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// retention in one volumes.db transaction, then the blocks it covers
     /// named unflushed no more. A crash between the two leaves blocks named
     /// whose state is stored: a start executes them again and stores the
-    /// same Volumes. One flush at a time; reads see the buffer until the
-    /// store holds what it held.
-    func flushState() async throws {
-        // Each flush runs after the one asked for before it: a chain, so a
-        // caller waits once and nothing is polled.
-        let previous = lastFlush
-        let flush = Task {
-            _ = try? await previous?.value
-            try await self.flushStateOnce()
-        }
-        lastFlush = flush
-        try await flush.value
+    /// same Volumes. It runs in the store's lane, after every write asked
+    /// for before it: the facts that name a buffered state are stored
+    /// before its state is. Reads see the buffer until the store holds what
+    /// it held.
+    nonisolated func flushState() async throws {
+        try await flushStateBehind().value
+    }
+
+    /// As `flushState`, not waited for: the loop asks and goes on.
+    @discardableResult
+    nonisolated func flushStateBehind() -> Task<Void, any Error> {
+        lane.run { try await self.flushStateOnce() }
+    }
+
+    /// A flush is asked of the lane and not started yet: no second is asked.
+    private nonisolated let flushAsked = Mutex(false)
+
+    /// The buffer reached its limit: a flush is asked of the lane, once
+    /// until it starts, and the loop goes on.
+    nonisolated func flushStateIfFull() {
+        guard stateBufferIsFull, flushAsked.withLock({ asked in
+            defer { asked = true }
+            return !asked
+        }) else { return }
+        flushStateBehind()
+    }
+
+    /// The loop has run further ahead of the store than it may: more
+    /// writes wait than a step asks for many times over, or the buffer
+    /// holds twice its limit. The loop waits for the lane.
+    nonisolated var laneIsBehind: Bool {
+        lane.depth > 256
+            || stateBuffer.bytes >= 2 * max(configuration.resourcePolicy.maximumBufferedStateBytes, 1)
+    }
+
+    /// Everything the loop asked the stores to write is written: a read of
+    /// what a step's facts transaction wrote waits for this first.
+    nonisolated func written() async {
+        try? await lane.settled()
     }
 
     private func flushStateOnce() async throws {
+        flushAsked.withLock { $0 = false }
         // Read before the batch is taken: a block is named unflushed after
         // its state is buffered, so the batch holds every one up to it.
         let through = bufferedThrough
@@ -210,7 +241,8 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     }
 
     func hasExecutedBlock(_ cid: String, at chainPath: [String]) async -> Bool {
-        (try? await store.hasExecutedBlock(cid, at: chainPath)) ?? false
+        await written()
+        return (try? await store.hasExecutedBlock(cid, at: chainPath)) ?? false
     }
 
     public func fetch(_ cids: Set<String>) async -> [String: Data] {
@@ -221,6 +253,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// its body is not held. Enough to reach the state it commits to.
     nonisolated func blockNodeBytes(_ cid: String) async -> Data? {
         if let held = await held.fetch([cid])[cid] { return held }
+        await written()
         return store.headerBlockBytes(cid)
     }
 

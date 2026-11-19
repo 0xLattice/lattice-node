@@ -57,7 +57,18 @@ extension NodeStorage {
     /// is executed again. With no buffer (`maximumBufferedStateBytes` 0)
     /// every affected level's Volumes are one volumes.db transaction,
     /// retained in the same one, before the facts.
+    ///
+    /// Returns when the facts are written.
     nonisolated func persistNodeBatch(_ batch: NodeBatch, logID: String) async throws {
+        try await persistNodeBatchBehind(batch, logID: logID)?.value
+    }
+
+    /// As `persistNodeBatch`, for the loop: returns once what the step
+    /// created is where reads find it and its facts transaction is asked of
+    /// the store's lane, with the task that writes it (nil when it was
+    /// written here, with no buffer). The loop does not wait for it.
+    @discardableResult
+    nonisolated func persistNodeBatchBehind(_ batch: NodeBatch, logID: String) async throws -> Task<Void, any Error>? {
         var durable: [NodeFactBatch] = []
         // What this step's executions created. An executed block's body was
         // pinned under its block's name by the job that executed it.
@@ -147,7 +158,7 @@ extension NodeStorage {
         guard buffersState else {
             try await broker.storeVolumesLocal(volumes, retaining: retaining)
             try await store.stageNodeFacts(durable, logID: logID)
-            return
+            return nil
         }
         let specVolumes = volumes.filter { specRoots.contains($0.volume.root) }
         if !specVolumes.isEmpty {
@@ -158,8 +169,14 @@ extension NodeStorage {
             volumes.filter { !specRoots.contains($0.volume.root) },
             retaining: retaining.filter { !$0.value.isEmpty }
         )
-        try await store.stageNodeFacts(durable, logID: logID)
-        await noteBuffered(through: try await store.lastUnflushedBlock())
+        // The facts are written behind the loop, in the order the steps
+        // decided them. What the step created is read from the buffer, and
+        // a reader of the facts waits for the lane (`written`).
+        let facts = durable
+        return lane.run {
+            try await self.store.stageNodeFacts(facts, logID: logID)
+            await self.noteBuffered(through: try await self.store.lastUnflushedBlock())
+        }
     }
 
     /// The post-state a start produced executing again `cid`, the block
@@ -614,6 +631,7 @@ extension NodeStorage {
     }
 
     nonisolated func chainHeader(_ cid: String) async -> (block: Block, children: FlatDictionary<BlockHeader>)? {
+        await written()
         if let stored = store.header(cid) { return stored }
         guard let blockBytes = try? await localFetcher.fetch(rawCid: cid),
               let block = Block(data: blockBytes),

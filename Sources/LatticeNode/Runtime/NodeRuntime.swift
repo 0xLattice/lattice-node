@@ -246,7 +246,8 @@ public final class NodeRuntime: Sendable {
             delegate: runtime.punch,
             contentSource: NodeStorageIvyContentSource(storage: storage) { root in
                 // A child index travels by CID as its own one-node Volume.
-                storage.store.childIndexBytes(root).map { SerializedVolume(root: root, entries: [root: $0]) }
+                await storage.written()
+                return storage.store.childIndexBytes(root).map { SerializedVolume(root: root, entries: [root: $0]) }
             }
         )
         // Boot replay of the local journal, each row with its arrival time,
@@ -469,6 +470,9 @@ public final class NodeRuntime: Sendable {
             observeJob: observeJob,
             peerMemory: peerMemory
         ))
+        // A write the lane could not make stops the node, as one the loop
+        // waited for did.
+        storage.lane.onFailure(failStop)
         loop = Task {
             var state = initial.take()
             // First: the state a crash lost is produced again, so everything
@@ -1048,6 +1052,7 @@ extension NodeRuntime {
         /// One child level started over what it journaled, as boot does,
         /// with the operator's own pooled transactions for it.
         private mutating func start(_ path: ChainPath, specs operatorSpecs: [ChainPath: ChainSpec]) async throws {
+            await storage.written()
             let facts = try await storage.nodeFacts(at: path)
             var specs: [ChainSpec] = []
             for case .block(let block) in facts.facts where block.parentBlockHash == nil {
@@ -1687,8 +1692,12 @@ extension NodeRuntime {
             // What an executed block read goes once the kept state holds
             // what of it the tip's state holds: its execution's window
             // until the counts reach it.
-            for key in readsDone { await storage.releaseReads(key.cid, at: key.path) }
-            readsDone.removeAll()
+            // After the facts of the step that executed it, in the lane.
+            if !readsDone.isEmpty {
+                let (storage, done) = (storage, readsDone)
+                storage.lane.run { for key in done { await storage.releaseReads(key.cid, at: key.path) } }
+                readsDone.removeAll()
+            }
             refreshView(core.touched)
             return true
         }
@@ -1704,18 +1713,24 @@ extension NodeRuntime {
                     }
                 }
                 do {
-                    try await storage.persistNodeBatch(batch, logID: core.logID)
-                    // The loop waits on a flush, not on each step's state.
-                    if storage.stateBufferIsFull { try await storage.flushState() }
+                    // The step's facts are asked of the store's lane, and
+                    // the loop goes on: it waits for no commit and no flush.
+                    try await storage.persistNodeBatchBehind(batch, logID: core.logID)
+                    storage.flushStateIfFull()
                     if configuration.blockBodies == .none { executedThisStep.append(contentsOf: persistedBodyKeys) }
                     readsDone.append(contentsOf: persistedBodyKeys)
-                    // A block found invalid is no block: its body goes.
+                    // A block found invalid is no block: its body goes,
+                    // after the fact that says so.
                     for (path, levelBatch) in batch.levels {
                         for case .exclusion(let excluded) in levelBatch.facts.flatMap(\.facts) {
-                            await storage.releaseBody(excluded.blockHash, at: path)
+                            let storage = storage
+                            storage.lane.run { await storage.releaseBody(excluded.blockHash, at: path) }
                             readsDone.append(BodyKey(path: path, cid: excluded.blockHash))
                         }
                     }
+                    // The lane is behind by more than the loop may run
+                    // ahead of it: the loop waits for it here, and only here.
+                    if storage.laneIsBehind { await storage.written() }
                 } catch {
                     // Fail-stop: no later effect of this step may run.
                     failStop(error)
@@ -1780,6 +1795,7 @@ extension NodeRuntime {
                     // loop, a proof whose staging transaction has not
                     // committed may show, as headers may: it was verified
                     // before persist, and the peer verifies it again.
+                    await storage.written()
                     var saved = SavedProofPage(store: storage.store, path: path, cids: blockCIDs)
                     for (offset, cid) in blockCIDs.enumerated() {
                         let proofs: [ChildBlockProof]
@@ -1824,6 +1840,7 @@ extension NodeRuntime {
                 let (storage, ivy, inputs) = (storage, ivy, inputs)
                 spawn {
                     let bytes: Data?
+                    await storage.written()
                     if let local = storage.store.childIndexBytes(cid) {
                         bytes = local
                     } else {
@@ -1867,11 +1884,13 @@ extension NodeRuntime {
                 // From this node's own content only, never peers: the block
                 // (read from this store when weighed), the carrier, its child
                 // index and its saved proofs, written by the step that
-                // weighed it, before this effect.
-                let held = job.block ?? storage.store.header(job.childCID)?.block
+                // weighed it: asked of the store's lane before this effect,
+                // and waited for by the job, off the loop.
                 let parent = Array(path.dropLast())
                 let (storage, failStop) = (storage, failStop)
                 enqueue(RuntimeJob(path: path, tipCID: nil) {
+                    await storage.written()
+                    let held = job.block ?? storage.store.header(job.childCID)?.block
                     var upstream: [ChildBlockProof] = []
                     if parent.count > 1 {
                         do {

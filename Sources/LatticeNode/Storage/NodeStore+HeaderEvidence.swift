@@ -192,8 +192,12 @@ struct HeaderBlockRow: NodeStoreRecord {
 /// mining read of a block whose body this store does not hold.
 struct HeaderRecords: ContentSource {
     let store: NodeStore
+    /// The lane the records are written in: a read waits for the writes
+    /// asked for before it.
+    let lane: StoreLane
 
     func fetch(_ cids: Set<String>) async -> [String: Data] {
+        try? await lane.settled()
         var found: [String: Data] = [:]
         for cid in cids {
             if let bytes = store.headerBlockBytes(cid) ?? store.childIndexBytes(cid) { found[cid] = bytes }

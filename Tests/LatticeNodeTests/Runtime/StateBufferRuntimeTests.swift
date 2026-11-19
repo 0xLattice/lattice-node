@@ -163,4 +163,27 @@ final class StateBufferRuntimeTests: XCTestCase {
             XCTAssertEqual(after, before)
         }
     }
+
+    /// A disk that has stopped answering: a write waits in the store's
+    /// lane and every write behind it with it. The node goes on executing
+    /// the blocks it is given; when the disk answers, it holds them all,
+    /// and a node started again is at the same tip with the same balance.
+    func testANodeWhoseDiskStoppedAnsweringGoesOnExecutingBlocks() async throws {
+        let (configuration, overlay) = try configuration(directory("stalled"))
+        let payee = payee()
+        let (answers, disk) = AsyncStream<Void>.makeStream()
+        let before = try await run(configuration, overlay) { runtime in
+            _ = try await self.mine(2, on: runtime, paying: payee)
+            let height = try XCTUnwrap(runtime.published.value?.actOnHeight)
+            runtime.storage.lane.run { for await _ in answers { break } }
+            _ = try await self.mine(4, on: runtime, paying: payee)
+            XCTAssertEqual(runtime.published.value?.actOnHeight, height + 4)
+            disk.yield()
+            return try await self.seen(by: runtime, of: payee)
+        }
+        try await run(configuration, overlay) { runtime in
+            let after = try await self.seen(by: runtime, of: payee)
+            XCTAssertEqual(after, before)
+        }
+    }
 }

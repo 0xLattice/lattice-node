@@ -148,6 +148,19 @@ and applying nothing of the verdicts (Bitcoin Core's roll forward). A child
 genesis's spec is stored at once, since a start reads it before it executes
 anything.
 
+The loop waits for none of these writes. A step's facts transaction, a
+flush, and the releases that follow a fact are asked of the store's lane
+(`StoreLane`), which runs them one at a time in the order they were asked,
+off the loop: a write that waits on the disk holds up the writes behind it
+and no decision. Whatever reads what a step wrote waits for the lane first
+(`NodeStorage.written`), off the loop: a job, an answer to a peer, an API
+read. A crash loses the writes still in the lane, so the store holds a
+prefix of what the loop decided, and a start goes on from there. The loop
+waits for the lane only when it has run too far ahead of it (more than 256
+writes, or a buffer at twice its limit), and before an operation on what
+the store retains, which still runs on the loop. A write that fails stops
+the node.
+
 Content stays in `volumes.db` because a retention scope names it, and each
 scope says why. A block's body (its own Volume and its transactions') is
 named by that block on its chain, so a transaction two blocks carry stays

@@ -722,7 +722,8 @@ extension NodeRuntime {
     /// block, read from the header store when the batch carries none.
     static func proofJob(_ batch: ChildProofBatch, at path: ChainPath, storage: NodeStorage) -> RuntimeJob {
         RuntimeJob(path: path, tipCID: nil) {
-            [.level(path, .proofsVerified(batch.run { storage.store.header($0)?.block }))]
+            await storage.written()
+            return [.level(path, .proofsVerified(batch.run { storage.store.header($0)?.block }))]
         }
     }
 
