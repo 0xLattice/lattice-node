@@ -32,8 +32,11 @@ B=$(ls -d "$W"/src/.build/release/LatticeNodeTests.xctest "$W"/src/.build/releas
 [ -n "$B" ] || { echo "no test bundle under $W/src/.build/release"; exit 1; }
 # Found once: xcrun's lookup can fail while another xcrun is running.
 [ "$(uname)" = Darwin ] && XCTEST=$(xcrun --find xctest)
+# On Linux, CPUS pins the process it runs to those CPUs (taskset): the
+# follower to FOLLOWER_CPUS, the server to SERVER_CPUS, when set.
 bench() {
   if [ "$(uname)" = Darwin ]; then "$XCTEST" -XCTest "LatticeNodeTests.ChildSyncBench/$1" "$B"
+  elif [ -n "$CPUS" ]; then taskset -c "$CPUS" "$B" "LatticeNodeTests.ChildSyncBench/$1"
   else "$B" "LatticeNodeTests.ChildSyncBench/$1"; fi
 }
 
@@ -48,7 +51,7 @@ cat "$D/manifest.txt"
 n=1
 while [ "$n" -le "$REPEATS" ]; do
   O=$W/runs/w$N-$n; rm -rf "$O" "$W/follower"; mkdir -p "$O"; cp "$W/ref" "$O/ref"
-  (export CHILD_BENCH=serve CHILD_BENCH_DIR=$D CHILD_BENCH_SERVE=7200; exec 2>&1; bench testServe) > "$O/serve.log" &
+  (export CHILD_BENCH=serve CHILD_BENCH_DIR=$D CHILD_BENCH_SERVE=7200 CPUS=$SERVER_CPUS; exec 2>&1; bench testServe) > "$O/serve.log" &
   SERVE=$!
   PEER=
   for i in $(seq 120); do
@@ -60,7 +63,7 @@ while [ "$n" -le "$REPEATS" ]; do
   [ -n "$PEER" ] || { tail -20 "$O/serve.log"; echo "server did not start"; exit 1; }
   status=0
   (
-    export CHILD_BENCH=follow CHILD_BENCH_WORKERS=$N CHILD_BENCH_DIR=$W/follower
+    export CHILD_BENCH=follow CHILD_BENCH_WORKERS=$N CHILD_BENCH_DIR=$W/follower CPUS=$FOLLOWER_CPUS
     export CHILD_BENCH_MANIFEST=$D/manifest.txt CHILD_BENCH_PEER=$PEER CHILD_BENCH_VFS=$O/vfs.txt
     # TRACE=0 skips the sync trace: no W/B/E/P split, no trace cost.
     [ "${TRACE:-1}" = 0 ] || export LATTICE_SYNC_TRACE=$O/trace LATTICE_SYNC_TRACE_MAX_BYTES=0
