@@ -22,6 +22,9 @@ def run(d):
     if re.search(r': error: |Test Case .* failed', out): fail(d, 'the follower test failed (see out)')
     r['blocks'], r['wall'], r['cpu'], r['written'], r['rss'], r['disk'] = int(m[1]), float(m[2]), float(m[3]), int(m[4]), int(m[5]), int(m[6])
     r['workers'] = re.search(r'workers (\d+)', out)[1]
+    # What the follower kept: runs of different settings are told apart.
+    kept = re.search(r'CHILD_BENCH follower .* state (\w+) bodies (\w+) buffer (\d+)', out)
+    r['keeps'] = '%s/%s/%d MiB' % (kept[1], kept[2], int(kept[3]) >> 20) if kept else 'recent/all/-' 
     r['ref'] = open(os.path.join(d, 'ref')).read()[:9]
     r['levels'] = {l[0]: dict(height=int(l[1]), wall=float(l[2])) for l in
                    re.findall(r'CHILD_BENCH level (\S+) height (\d+) wall ([\d.]+)', out)}
@@ -55,13 +58,13 @@ def run(d):
 
 runs = [run(d) for d in sys.argv[1:]]
 dash = lambda r, x: x if r['traced'] else '-'
-print('| run | ref | workers | blocks | wall s | wall ms/blk | CPU ms/blk | commits/blk | fsyncs/blk | fsync ms/blk | SQLite KB/blk | disk write KB/blk | kept MiB | peak RSS MiB | steps/blk | P ms/blk | loop ms/blk |')
-print('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|')
+print('| run | ref | workers | state/bodies/buffer | blocks | wall s | wall ms/blk | CPU ms/blk | commits/blk | fsyncs/blk | fsync ms/blk | SQLite KB/blk | disk write KB/blk | kept MiB | peak RSS MiB | steps/blk | P ms/blk | loop ms/blk |')
+print('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|')
 for r in runs:
     n, v = r['blocks'], r['vfs']
     s = r.get('steps', [0, 0, 0, 0])
-    print('| %s | %s | %s | %d | %.1f | %.2f | %.2f | %.2f | %.2f | %.2f | %.1f | %.1f | %d | %d | %s | %s | %s |' % (
-        r['name'], r['ref'], r['workers'], n, r['wall'], r['wall'] * 1e3 / n, r['cpu'] * 1e3 / n, v['commits'] / n, v['syncs'] / n,
+    print('| %s | %s | %s | %s | %d | %.1f | %.2f | %.2f | %.2f | %.2f | %.2f | %.1f | %.1f | %d | %d | %s | %s | %s |' % (
+        r['name'], r['ref'], r['workers'], r['keeps'], n, r['wall'], r['wall'] * 1e3 / n, r['cpu'] * 1e3 / n, v['commits'] / n, v['syncs'] / n,
         v['syncms'] / n, v['bytes'] / 1024 / n, r['written'] / n, r['disk'], r['rss'],
         dash(r, '%.2f' % (s[0] / n)), dash(r, '%.2f' % (s[3] / n)), dash(r, '%.2f' % (s[2] / n))))
 traced = [r for r in runs if r['traced']]

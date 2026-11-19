@@ -24,7 +24,8 @@ import XCTest
 /// - CHILD_BENCH=serve: starts a node on a recorded CHILD_BENCH_DIR and
 ///   serves it for CHILD_BENCH_SERVE seconds.
 /// - CHILD_BENCH=follow: a follower (state BENCH_STATE, default recent;
-///   bodies BENCH_BODIES, default all) in CHILD_BENCH_DIR syncs
+///   bodies BENCH_BODIES, default all; state buffer BENCH_STATE_BUFFER
+///   bytes, default the node's; the follower's alone) in CHILD_BENCH_DIR syncs
 ///   from CHILD_BENCH_PEER (key@host:port) until every level in
 ///   CHILD_BENCH_MANIFEST reaches its recorded height. With CHILD_BENCH_VFS
 ///   set it counts SQLite writes, commits and syncs and writes them there.
@@ -75,20 +76,23 @@ final class ChildSyncBench: XCTestCase {
         return nil
     }
 
+    /// A setting of the follower that is not one the benchmark has.
+    private struct BenchSetting: Error, CustomStringConvertible {
+        let (name, value): (String, String)
+        var description: String { "\(name)=\(value) is not a setting of the sync benchmark" }
+    }
+
     private func host(
         _ keyByte: UInt8, _ dir: URL, port: UInt16, levels: [[String]], specs: Bool,
-        peers: [PeerEndpoint], state: StateRetention, bodies: BlockBodies = .all
+        peers: [PeerEndpoint], state: StateRetention, bodies: BlockBodies = .all,
+        buffer: Int = NodeResourcePolicy.defaultMaximumBufferedStateBytes
     ) throws -> (NodeConfiguration, IvyConfig) {
         let configuration = try NodeConfiguration(
             chainPath: ["Nexus"], storagePath: dir,
             privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
             listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(), webSocket: .off,
             peerSearchInterval: 600,
-            // BENCH_STATE_BUFFER: the state buffer's limit in bytes (0, none).
-            resourcePolicy: NodeResourcePolicy(
-                maximumBufferedStateBytes: ProcessInfo.processInfo.environment["BENCH_STATE_BUFFER"].flatMap(Int.init)
-                    ?? NodeResourcePolicy.defaultMaximumBufferedStateBytes
-            ),
+            resourcePolicy: NodeResourcePolicy(maximumBufferedStateBytes: buffer),
             blockBodies: bodies, state: state,
             hostedChildren: levels,
             childSpecs: specs ? Dictionary(uniqueKeysWithValues: levels.map { ($0, Self.spec($0)) }) : [:]
@@ -236,22 +240,35 @@ final class ChildSyncBench: XCTestCase {
         let dir = URL(fileURLWithPath: env["CHILD_BENCH_DIR"]!)
         try? FileManager.default.removeItem(at: dir)
         if env["CHILD_BENCH_VFS"] != nil { XCTAssertEqual(bench_vfs_install(), 0) }
+        // What the follower keeps, from the environment (the recorder and
+        // the server keep everything, whatever it says): BENCH_STATE (all,
+        // recent, none; default recent), BENCH_BODIES (all, none; default
+        // all) and BENCH_STATE_BUFFER (the state buffer's limit in bytes,
+        // 0 for none; default the node's). A value that is not one of
+        // these stops the run: a run under a setting it did not use would
+        // be compared as if it had.
+        func setting<T>(_ name: String, default fallback: T, _ read: (String) -> T?) throws -> T {
+            guard let value = env[name] else { return fallback }
+            guard let read = read(value) else {
+                throw BenchSetting(name: name, value: value)
+            }
+            return read
+        }
+        let state = try setting("BENCH_STATE", default: StateRetention.recent, StateRetention.init(rawValue:))
+        let bodies = try setting("BENCH_BODIES", default: BlockBodies.all, BlockBodies.init(rawValue:))
+        let buffer = try setting("BENCH_STATE_BUFFER", default: NodeResourcePolicy.defaultMaximumBufferedStateBytes) {
+            Int($0).flatMap { $0 >= 0 ? $0 : nil }
+        }
         let (fc, fo) = try host(
             Self.followerKey, dir, port: NetworkTransportTestPorts.allocate(),
             levels: targets.map(\.0).filter { $0 != ["Nexus"] }, specs: false, peers: [peer],
-            // BENCH_STATE (all, recent, none; default recent) and
-            // BENCH_BODIES (all, none; default all): what the follower
-            // keeps. With all state the buffer's limit, not a window,
-            // decides when it flushes; with no state or no bodies it lets
-            // go of something every step.
-            state: StateRetention(rawValue: env["BENCH_STATE"] ?? "") ?? .recent,
-            bodies: BlockBodies(rawValue: env["BENCH_BODIES"] ?? "") ?? .all
+            state: state, bodies: bodies, buffer: buffer
         )
         // The node sizes its workers to the processors it sees; a container
         // limited to N CPUs still sees the host's, so run.sh passes what a
         // host with N CPUs would use.
         let workers = env["CHILD_BENCH_WORKERS"].flatMap(Int.init) ?? max(1, ProcessInfo.processInfo.activeProcessorCount - 1)
-        say("CHILD_BENCH follower workers \(workers) processors \(ProcessInfo.processInfo.activeProcessorCount)")
+        say("CHILD_BENCH follower workers \(workers) processors \(ProcessInfo.processInfo.activeProcessorCount) state \(state.rawValue) bodies \(bodies.rawValue) buffer \(buffer)")
         SyncTrace.log(chain: ["bench"], "follower start")
         let io0 = Self.bytesWritten()
         let cpu0 = Self.cpuSeconds()
