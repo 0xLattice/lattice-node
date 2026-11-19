@@ -518,8 +518,8 @@ operator submitted is journaled before it is acknowledged, a block a miner
 submitted has its facts written before its miner is answered, and a pin is
 synced before it is confirmed. A pending transaction's journal row is read
 at a start and returns to the pool once its chain has executed up to the
-heaviest block the node knows. A buffer of 0 is written after every step, the
-same way.
+heaviest block the node knows. A buffer of 0 is flushed after every step, behind
+that step's records, and the markers move with the flush.
 
 ### Batched execution
 
@@ -558,8 +558,8 @@ an author pushing a child block (`submitChildBlock`), is told the block is
 accepted or in the tree only once its records are written, so a block the
 node said it accepted is still there after a crash, on a chain this node alone hosts too. Its state
 may not be, and is produced again from the block. Until it is back at its tip, reads at the tip answer
-for the lower tip. With 0 each step's state is written as it is produced
-and a crash loses at most the batch being executed. A node that keeps
+for the lower tip. With 0 each step's state is written after the step, behind its records,
+and a crash loses what was not yet written: at most a few steps. A node that keeps
 `recent` state writes at least once per state window, and one that keeps
 no state or no bodies writes every step, whatever the limit.
 

@@ -65,8 +65,9 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   writes since the last flush (`NodeStorage.flushVolumes`): it is flushed
   before a marker moves, and before the facts of a child genesis whose
   spec it holds, which a start reads and asks no peer for. Pinned by
-  `PowerLossTests`. The simulator models a store with no
-  buffer and enforces the unbuffered form: `SimBodies.checkStatesStored`
+  `PowerLossTests`. The simulator models a store that
+  writes a step's states with its facts, a buffer the node no longer has,
+  and enforces that form: `SimBodies.checkStatesStored`
   and `Invariants.checkTree` ("weighed block … has no durable content").
 - **NODE-STORAGE-002.b** — Nothing is published, served, relayed or
   streamed before the step that decided it has ended, and so before every
