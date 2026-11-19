@@ -15,6 +15,14 @@ import cashew
 /// path (no UTF-8 text holds it), so a node's path followed by 0xFF bounds
 /// every path below it.
 ///
+/// A trie's keys are ASCII, one byte per character: consensus admits only
+/// visible ASCII in every key a transaction names (Lattice's
+/// `DirectoryGrammar`), and the node's own keys (addresses, nonces,
+/// deposits, receipts, child commitments) are built from those. A
+/// character of any other kind could make one edge's bytes begin another's,
+/// so a key holding one is refused (`Failure.unplaceableKey`), never placed
+/// wrong.
+///
 /// A block's new state, as execution leaves it, holds a node for every node
 /// the block changed or read; a node it did not touch is a hash only. What
 /// it did not touch is where it was: execution loads a node before it
@@ -34,6 +42,8 @@ enum StatePaths {
     enum Failure: Error, Equatable {
         /// A loaded node that does not encode.
         case unencodable(String)
+        /// A trie key with a character that is not one ASCII byte.
+        case unplaceableKey(String)
     }
 
     /// What follows every path below a node's.
@@ -65,11 +75,11 @@ enum StatePaths {
             let childPath: Data
             if trie {
                 guard let loaded = child.node as? any RadixNode else {
-                    let edge = path + Data(property.utf8)
+                    let edge = path + (try pathBytes(of: property))
                     kept.append((edge, edge + [end]))
                     continue
                 }
-                childPath = path + Data(loaded.prefix.utf8)
+                childPath = path + (try pathBytes(of: loaded.prefix))
             } else {
                 childPath = path + Data(property.utf8) + [separator]
             }
@@ -86,5 +96,14 @@ enum StatePaths {
             if from.lexicographicallyPrecedes(range.to) { from = range.to }
         }
         if from.lexicographicallyPrecedes(to) { changes.append(.clear(from: from, to: to)) }
+    }
+
+    /// A trie key's part as path bytes: one per character, each an ASCII
+    /// character of one scalar.
+    private static func pathBytes(of part: String) throws -> Data {
+        guard part.allSatisfy({ $0.unicodeScalars.count == 1 && $0.isASCII }) else {
+            throw Failure.unplaceableKey(part)
+        }
+        return Data(part.utf8)
     }
 }
