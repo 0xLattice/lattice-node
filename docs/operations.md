@@ -546,9 +546,10 @@ again from the bodies it holds, while it weighs headers and answers
 requests as usual. The node's own records (headers, facts, proofs) are
 written behind its decisions too, in order: a crash can also lose the last
 of those, and the node then asks its peers again for what it had weighed.
-A block a miner submitted is the exception: its miner is answered only once
-the block's records are written, so a block the node said it accepted is
-still there after a crash, on a chain this node alone hosts too. Its state
+A block submitted to this node is the exception: a miner (`submitWork`), or
+an author pushing a child block (`submitChildBlock`), is told the block is
+accepted or in the tree only once its records are written, so a block the
+node said it accepted is still there after a crash, on a chain this node alone hosts too. Its state
 may not be, and is produced again from the block. Until it is back at its tip, reads at the tip answer
 for the lower tip. With 0 each step's state is written as it is produced
 and a crash loses at most the batch being executed. A node that keeps

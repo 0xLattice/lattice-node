@@ -322,4 +322,28 @@ final class StateBufferRuntimeTests: XCTestCase {
             try await eventually("the node is back at its tip") { runtime.published.value?.actOnTip == before }
         }
     }
+
+    /// A write the store could not make stops the node, and it says why. A
+    /// miner that submits a block after it is not told the block is
+    /// accepted: nothing after the failed write is written.
+    func testAWriteTheStoreCouldNotMakeStopsTheNodeAndNoLaterBlockIsAnsweredAsAccepted() async throws {
+        let (configuration, overlay) = try configuration(directory("failed"))
+        let payee = payee()
+        let stopped = Mutex<String?>(nil)
+        let storage = try await NodeStorage.open(configuration: configuration)
+        let runtime = try await NodeRuntime.start(
+            storage: storage, configuration: configuration, overlay: overlay,
+            failStop: { error in stopped.withLock { $0 = "\(error)" } }, observeJob: nil
+        )
+        _ = try await mine(2, on: runtime, paying: payee)
+        storage.lane.run { throw CocoaError(.fileWriteOutOfSpace) }
+        try await eventually("the node stops on the failed write") { stopped.withLock { $0 != nil } }
+        do {
+            _ = try await runtime.mineBlock(MiningTemplateRequest(recipients: [
+                MiningRecipient(chainPath: nexus, address: payee),
+            ]))
+            XCTFail("a block was answered as accepted after the store's write failed")
+        } catch {}
+        await runtime.stop()
+    }
 }

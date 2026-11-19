@@ -172,9 +172,16 @@ crash loses what the lane had not written, so the store holds a prefix of
 what the loop decided, and a start goes on from there. A write that fails
 stops the node.
 
-Three things wait for the lane. An operation on what the store itself
-holds (the counts, the window releases, letting go of bodies, a chain newly
-hosted reading its facts log) waits for every write asked before it. The
+What works on the store itself runs in the lane too, in its turn among the
+writes: moving a chain's counts to its tip, letting go of the state windows
+below it, and letting go of bodies. The loop asks and goes on; a move of the
+counts posts how it ended, and the loop settles again only once the tip has
+climbed another window. So a node that keeps `recent` state, or no state or
+bodies, waits on its disk no more than one that keeps everything.
+
+Three things wait for the lane. A read of what only the store holds (a
+chain newly hosted reading its facts log, a check of the counts) waits for
+every write asked before it. The
 loop waits when it has run too far ahead of the store: the records not yet
 written hold as many bytes as the state buffer may, the state buffer holds
 twice its limit, or more than 256 writes are asked and not made. And two

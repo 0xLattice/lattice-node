@@ -347,6 +347,10 @@ extension NodeRuntime {
             if level.sync.proofs.awaiting[cid] != nil { return .awaiting }
             return .dropped
         }) else { throw NodeRuntimeError.stopped }
+        // In the tree: its author is told so, and stops pushing it, only
+        // once the facts that hold it are written, as a miner is answered
+        // for a submitted block. The wait is this request's, off the loop.
+        if status == .tree { await storage.written() }
         return SubmitChildBlockResponse(blockCID: cid, status: status)
     }
 
