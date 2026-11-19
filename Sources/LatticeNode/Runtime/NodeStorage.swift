@@ -283,6 +283,9 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
             try await broker.storeVolumesLocal(batch.volumes, retaining: batch.retaining)
         }
         // The marker outlives a power loss, so the states it covers must.
+        // Flushed even with nothing buffered: what follows a flush in
+        // state.db (a marker, dropped state diffs after the counts moved)
+        // relies on every Volume store write before it being kept.
         try await flushVolumes()
         try await store.markFlushed(seqs)
         stateBuffer.remove(batch)
@@ -431,6 +434,9 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     func removeLocalTransaction(_ transactionCID: String) async throws {
         try await acquireMutationOperation()
         defer { releaseOperation() }
+        // The row goes after the block that confirmed the transaction is
+        // kept: its body, which now carries it, outlives a power loss first.
+        try await flushVolumes()
         try await store.removeLocalMempoolTransaction(
             transactionCID: transactionCID
         )

@@ -666,6 +666,13 @@ extension NodeRuntime {
         /// The write of the last step's facts, asked of the store's lane:
         /// what an answer that promises a block is held waits for.
         var lastFacts: Task<Void, any Error>?
+        /// Journal rows a start read, by chain, not yet given to the pool:
+        /// held until the chain has executed up to the heaviest block it
+        /// knows. A start can stand below the tip the node last executed
+        /// (the executions above the flush marker are made again), and a
+        /// transaction judged there can be refused for what that tip does
+        /// not hold yet, which would delete its row.
+        var heldRestored: [ChainPath: [NodeEvent]] = [:]
         /// Announced transactions being fetched, by CID.
         var transactionFetches: Set<String> = []
         /// Transactions recently fetched, not refetched until a hosted chain's
@@ -803,11 +810,45 @@ extension NodeRuntime {
 
         /// Returns false once the loop must end.
         mutating func handle(_ input: Input) async -> Bool {
+            guard await take(input) else { return false }
+            return await releaseRestored()
+        }
+
+        /// Whether `path` has executed up to the heaviest block it knows.
+        private func hasCaughtUp(_ path: ChainPath) -> Bool {
+            guard let snapshot = core.levels[path]?.snapshot else { return false }
+            return !snapshot.actOnTip.isEmpty && snapshot.actOnTip == snapshot.bestHeaderTip
+        }
+
+        /// A journal row read at a start: to the pool now, or held
+        /// (`heldRestored`).
+        private mutating func restore(_ event: NodeEvent, at path: ChainPath) async -> Bool {
+            guard hasCaughtUp(path) else {
+                heldRestored[path, default: []].append(event)
+                return true
+            }
+            return await step(event)
+        }
+
+        private mutating func releaseRestored() async -> Bool {
+            for path in heldRestored.keys.sorted(by: { $0.joined(separator: "/") < $1.joined(separator: "/") })
+            where hasCaughtUp(path) {
+                for event in heldRestored.removeValue(forKey: path) ?? [] {
+                    guard await step(event) else { return false }
+                }
+            }
+            return true
+        }
+
+        private mutating func take(_ input: Input) async -> Bool {
             switch input {
             case .stop:
                 return false
             case .event(let event):
                 if case .tick = event { wake = nil }
+                if case .level(let path, .mining(.transactionReceived(_, origin: .restored(addedAt: _)))) = event {
+                    return await restore(event, at: path)
+                }
                 return await step(event)
             case .bodyStored(let path, let cid, let asked, let held):
                 SyncTrace.log(
@@ -1089,9 +1130,9 @@ extension NodeRuntime {
             await peerMemory?.track(path, now: NodeRuntime.now())
             for item in try await storage.localTransactions()
             where item.transaction.body.node?.chainPath == path {
-                guard await step(.level(path, .mining(.transactionReceived(
+                guard await restore(.level(path, .mining(.transactionReceived(
                     item.transaction, origin: .restored(addedAt: item.addedAt * 1_000)
-                )))) else { throw NodeRuntimeError.stopped }
+                ))), at: path) else { throw NodeRuntimeError.stopped }
             }
         }
 
@@ -1940,12 +1981,18 @@ extension NodeRuntime {
                 // is in the store, and outlives a crash. The answer waits
                 // for the write, off the loop; the loop does not.
                 guard let entry = replies.removeValue(forKey: replyID) else { break }
-                let (written, storage) = (lastFacts, storage)
+                // No facts were written behind the loop: nothing was
+                // stored, or each step's write was made and flushed in it.
+                guard let written = lastFacts else {
+                    entry.reply.resume(returning: .work(outcome))
+                    break
+                }
+                let storage = storage
                 Task {
                     do {
                         // Its facts, then its body: the Volume store does
                         // not wait for a write's fsync unless asked.
-                        try await written?.value
+                        try await written.value
                         try await storage.flushVolumes()
                         entry.reply.resume(returning: .work(outcome))
                     } catch {

@@ -166,6 +166,10 @@ extension NodeStorage {
         let specVolumes = volumes.filter { specRoots.contains($0.volume.root) }
         if !specVolumes.isEmpty {
             try await broker.storeVolumesLocal(specVolumes, retaining: [retentionScope: specRoots.sorted()])
+            // A child genesis's spec is read at every start and no peer is
+            // asked for it then: it outlives a power loss before the facts
+            // that name its genesis do.
+            try await flushVolumes()
         }
         retaining[retentionScope]?.removeAll(where: specRoots.contains)
         stateBuffer.add(

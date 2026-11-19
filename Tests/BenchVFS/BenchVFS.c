@@ -5,6 +5,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <time.h>
+#include <stdlib.h>
 
 #define MAX_SLOTS 256
 typedef struct {
@@ -17,7 +18,37 @@ static pthread_mutex_t slotLock = PTHREAD_MUTEX_INITIALIZER;
 static sqlite3_vfs *orig;
 static sqlite3_vfs shim;
 
-typedef struct { sqlite3_file base; int slot; int isWal; int pageSize; sqlite3_file *real; } ShimFile;
+typedef struct { sqlite3_file base; int slot; int isWal; int pageSize; int kept; sqlite3_file *real; } ShimFile;
+
+// Power loss: under `keptPrefix`, each file's bytes as of its last sync are
+// kept beside it as "<name>.durable" (what a power loss is sure to leave).
+static char keptPrefix[1024];
+static pthread_mutex_t keptLock = PTHREAD_MUTEX_INITIALIZER;
+
+static void keepSynced(ShimFile *p) {
+    const char *name = slots[p->slot].name;
+    char tmp[1100], out[1100];
+    snprintf(tmp, sizeof tmp, "%s.durable.tmp", name);
+    snprintf(out, sizeof out, "%s.durable", name);
+    sqlite3_int64 size = 0;
+    if (p->real->pMethods->xFileSize(p->real, &size) != SQLITE_OK) return;
+    pthread_mutex_lock(&keptLock);
+    FILE *f = fopen(tmp, "wb");
+    if (f) {
+        enum { CHUNK = 1 << 16 };
+        char *buffer = malloc(CHUNK);
+        for (sqlite3_int64 at = 0; buffer && at < size; at += CHUNK) {
+            int n = (int)(size - at < CHUNK ? size - at : CHUNK);
+            int rc = p->real->pMethods->xRead(p->real, buffer, n, at);
+            if (rc != SQLITE_OK && rc != SQLITE_IOERR_SHORT_READ) break;
+            fwrite(buffer, 1, n, f);
+        }
+        free(buffer);
+        fclose(f);
+        rename(tmp, out);
+    }
+    pthread_mutex_unlock(&keptLock);
+}
 
 static int slotFor(const char *name) {
     if (!name) name = "(temp)";
@@ -64,6 +95,7 @@ static int xSync(sqlite3_file *f, int flags) {
     int rc = R(f)->pMethods->xSync(R(f), flags);
     atomic_fetch_add(&s->syncs, 1);
     atomic_fetch_add(&s->syncNanos, nanos() - start);
+    if (rc == SQLITE_OK && ((ShimFile *)f)->kept) keepSynced((ShimFile *)f);
     return rc;
 }
 static int xFileSize(sqlite3_file *f, sqlite3_int64 *s) { return R(f)->pMethods->xFileSize(R(f), s); }
@@ -91,6 +123,9 @@ static int xOpen(sqlite3_vfs *v, const char *name, sqlite3_file *f, int flags, i
     p->slot = slotFor(name);
     p->isWal = (flags & SQLITE_OPEN_WAL) != 0;
     p->pageSize = 0;
+    pthread_mutex_lock(&keptLock);
+    p->kept = name && keptPrefix[0] && strncmp(name, keptPrefix, strlen(keptPrefix)) == 0;
+    pthread_mutex_unlock(&keptLock);
     int rc = orig->xOpen(orig, name, p->real, flags, out);
     p->base.pMethods = p->real->pMethods ? &methods : NULL;
     return rc;
@@ -117,4 +152,10 @@ void bench_vfs_dump(const char *path) {
                 (long long)s->commits);
     }
     fclose(out);
+}
+
+void bench_vfs_keep_synced(const char *prefix) {
+    pthread_mutex_lock(&keptLock);
+    strncpy(keptPrefix, prefix ? prefix : "", sizeof(keptPrefix) - 1);
+    pthread_mutex_unlock(&keptLock);
 }
