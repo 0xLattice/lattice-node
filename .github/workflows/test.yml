@@ -25,7 +25,7 @@ jobs:
 
       - name: Install dependencies for Linux
         run: |
-          apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev ripgrep
+          .github/scripts/apt-install.sh libsqlite3-dev ripgrep
 
       - name: Run strict concurrency gate
         run: .github/scripts/check-strict-concurrency.sh
@@ -120,7 +120,7 @@ jobs:
 
       - name: Install dependencies for Linux
         run: |
-          apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev
+          .github/scripts/apt-install.sh libsqlite3-dev
 
       # Dependencies only: our own modules rebuild because checkout refreshes
       # their mtimes. test-linux builds both configurations, so it alone saves.
@@ -180,7 +180,7 @@ jobs:
 
       - name: Install dependencies for Linux
         run: |
-          apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev procps
+          .github/scripts/apt-install.sh libsqlite3-dev procps
 
       - name: Restore SPM build
         uses: actions/cache/restore@v4
@@ -246,7 +246,7 @@ jobs:
 
       - name: Install dependencies for Linux
         run: |
-          apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev procps curl ca-certificates
+          .github/scripts/apt-install.sh libsqlite3-dev procps curl ca-certificates
 
       - name: Restore SPM build
         uses: actions/cache/restore@v4
@@ -358,7 +358,7 @@ jobs:
 
       - name: Install dependencies for Linux
         run: |
-          apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev
+          .github/scripts/apt-install.sh libsqlite3-dev
 
       - name: Restore SPM build
         uses: actions/cache/restore@v4
@@ -385,7 +385,7 @@ jobs:
 
       - name: Install dependencies for Linux
         run: |
-          apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev
+          .github/scripts/apt-install.sh libsqlite3-dev
 
       - name: Restore SPM build
         uses: actions/cache/restore@v4
