@@ -158,6 +158,8 @@ extension NodeStorage {
         let volumes = await storage.takeVolumes()
         guard buffersState else {
             try await broker.storeVolumesLocal(volumes, retaining: retaining)
+            // Without a buffer each level's marker moves with these facts.
+            try await flushVolumes()
             try await store.stageNodeFacts(durable, logID: logID)
             return nil
         }

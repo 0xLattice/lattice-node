@@ -535,6 +535,7 @@ public final class NodeRuntime: Sendable {
         // A clean stop leaves nothing in the state buffer: a start that
         // follows executes nothing again.
         _ = await storage.flushedState()
+        try? await storage.flushVolumes()
         // Everything the loop journaled is written: the log keeps its id.
         await storage.markCleanStop()
         templateDigest.finish()
@@ -1939,13 +1940,13 @@ extension NodeRuntime {
                 // is in the store, and outlives a crash. The answer waits
                 // for the write, off the loop; the loop does not.
                 guard let entry = replies.removeValue(forKey: replyID) else { break }
-                guard let written = lastFacts else {
-                    entry.reply.resume(returning: .work(outcome))
-                    break
-                }
+                let (written, storage) = (lastFacts, storage)
                 Task {
                     do {
-                        try await written.value
+                        // Its facts, then its body: the Volume store does
+                        // not wait for a write's fsync unless asked.
+                        try await written?.value
+                        try await storage.flushVolumes()
                         entry.reply.resume(returning: .work(outcome))
                     } catch {
                         // The write failed: the node stops, as it says.

@@ -225,12 +225,14 @@ extension NodeStorage {
             try await broker.storeVolumesLocal([validated])
         }
         try await broker.mergeRetainedRoots(scope: scopes.operatorPins, roots: [root])
+        try await flushVolumes()
     }
 
     /// Unpinning what the operator did not pin changes nothing.
     nonisolated func unpin(_ root: String) async throws {
         guard await operatorPins().contains(root) else { return }
         try await broker.releaseRetainedRoots(scope: scopes.operatorPins, roots: [root])
+        try await flushVolumes()
     }
 
     /// Lets go of everything `scope` names.

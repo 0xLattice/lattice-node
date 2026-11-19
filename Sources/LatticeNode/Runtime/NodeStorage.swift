@@ -263,6 +263,15 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         try? await lane.settled()
     }
 
+    /// Makes every write to the Volume store so far outlive a power loss.
+    /// The store is opened not to wait for each write's fsync
+    /// (`BrokerDurability.deferred`), so this comes before anything that
+    /// must not name content a power loss took: a level's flush marker, and
+    /// an answer that promises the operator or a miner something is kept.
+    nonisolated func flushVolumes() async throws {
+        try await broker.flush()
+    }
+
     private func flushStateOnce() async throws {
         flushAsked.withLock { $0 = false }
         // Read before the batch is taken: a step buffers its states before
@@ -273,6 +282,8 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         if !batch.isEmpty {
             try await broker.storeVolumesLocal(batch.volumes, retaining: batch.retaining)
         }
+        // The marker outlives a power loss, so the states it covers must.
+        try await flushVolumes()
         try await store.markFlushed(seqs)
         stateBuffer.remove(batch)
     }
@@ -364,6 +375,8 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         try Task.checkCancellation()
         try await broker.retain([volume.rawCID], owner: durableMempoolOwner)
         do {
+            // The journal row outlives a power loss, so what it names must.
+            try await flushVolumes()
             try await store.persistLocalMempoolTransaction(
                 transactionCID: volume.rawCID,
                 addedAt: addedAt

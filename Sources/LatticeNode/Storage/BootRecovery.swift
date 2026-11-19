@@ -79,8 +79,12 @@ enum BootRecovery {
     private static func openStores(
         configuration: NodeConfiguration
     ) throws -> Stores {
+        // A write to the Volume store does not wait for its fsync: its
+        // content can be had again. What must outlive a power loss is
+        // flushed where it is promised (`NodeStorage.flushVolumes`).
         let broker = try DiskBroker(
-            path: configuration.storagePath.appendingPathComponent("volumes.db").path
+            path: configuration.storagePath.appendingPathComponent("volumes.db").path,
+            durability: .deferred
         )
         let localFetcher = CoalescingFetcher(broker)
         let retentionScope = [
