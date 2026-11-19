@@ -175,12 +175,14 @@ stops the node.
 Three things wait for the lane. An operation on what the store itself
 holds (the counts, the window releases, letting go of bodies, a chain newly
 hosted reading its facts log) waits for every write asked before it. The
-loop waits when it has run too far ahead of the store: more than 256 writes
-asked and not made, or a state buffer at twice its limit. And a pool change
-that adds a transaction is waited for, so a transaction an operator
-submitted is answered only once it is journaled; one that only removes
-transactions a block confirmed is not, and runs after that block's facts, so
-a crash cannot lose both the block and the journal's row.
+loop waits when it has run too far ahead of the store: the records not yet
+written hold as many bytes as the state buffer may, the state buffer holds
+twice its limit, or more than 256 writes are asked and not made. And a
+transaction an operator submitted is answered only once it is journaled. A
+transaction a peer sent is not waited for: it is held in memory, mined and
+served from there, until the lane has stored it. A pool change that removes
+transactions a block confirmed runs after that block's facts, so a crash
+cannot lose both the block and the journal's row.
 
 Content stays in `volumes.db` because a retention scope names it, and each
 scope says why. A block's body (its own Volume and its transactions') is

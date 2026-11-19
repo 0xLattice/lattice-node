@@ -131,6 +131,9 @@ final class StateBufferRuntimeTests: XCTestCase {
             let seen = try await self.seen(by: runtime, of: payee)
             let fact = try await runtime.storage.store.blockFact(tip, at: self.nexus)
             tipState = try XCTUnwrap(fact).postStateCID
+            // No write is under way while the files are copied: the copy
+            // is the store at one moment, as a crash leaves it.
+            await runtime.storage.written()
             try FileManager.default.createDirectory(at: crashed, withIntermediateDirectories: true)
             for file in try FileManager.default.contentsOfDirectory(atPath: configuration.storagePath.path)
             where file.hasSuffix(".db") || file.hasSuffix("-wal") {
@@ -226,8 +229,14 @@ final class StateBufferRuntimeTests: XCTestCase {
             let tip = try await self.mine(2, on: runtime, paying: payee)
             let admitted = try await runtime.submitTransaction(SubmitTransactionRequest(transaction: transaction))
             XCTAssertEqual(admitted.mempoolCount, 1)
-            // The disk stops answering; a block confirms the transaction.
-            runtime.storage.lane.run { for await _ in answers { break } }
+            // The disk stops answering, once every write before is made;
+            // a block confirms the transaction.
+            let (stopped, stops) = AsyncStream<Void>.makeStream()
+            runtime.storage.lane.run {
+                stops.yield()
+                for await _ in answers { break }
+            }
+            for await _ in stopped { break }
             _ = try await self.mine(1, on: runtime, paying: payee)
             try await eventually("the block took the transaction from the pool") {
                 runtime.published.value?.mempoolCount == 0

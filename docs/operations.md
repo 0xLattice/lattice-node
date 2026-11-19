@@ -486,17 +486,27 @@ from local content.
 
 Persistence order is:
 
-1. store the content in one `volumes.db` transaction (a block's Volumes
-   together, once its execution found it valid or it was mined here; a
-   step's post-states together), then retain it. A body fetched from peers
-   is read into memory until then (and read again from peers if memory
-   let it go), and a node does not serve it before;
-2. commit the complete multi-level `NodeBatch` (headers, child proofs, facts,
+1. store a block's body in one `volumes.db` transaction (its Volumes
+   together, once its execution found it valid or it was mined here), then
+   retain it. A body fetched from peers is read into memory until then (and
+   read again from peers if memory let it go), and a node does not serve it
+   before;
+2. put the step's post-states in the state buffer, where every read finds
+   them;
+3. commit the complete multi-level `NodeBatch` (headers, child proofs, facts,
    and cursors) in one `state.db` transaction;
-3. publish the new snapshots.
+4. publish the new snapshots;
+5. later, at a flush: store the buffered post-states in one `volumes.db`
+   transaction, then move each chain's flush marker in `state.db` to the
+   facts those states belong to.
 
-Every commit is synchronous (`synchronous=FULL`): nothing is announced,
-served, or built on before the write that makes it durable returns.
+A commit is synchronous (`synchronous=FULL`), and bodies, headers and facts
+are committed before anything is announced, served or built on. Executed
+state is not: a published tip's state may be in the buffer and not yet on
+disk. A crash then costs the executions above the flush markers, which run
+again at the next start (`stateBufferBytes`, below); with a buffer of 0 the
+post-states are stored in step 2's place and nothing is published before it
+is on disk.
 
 ### Batched execution
 
@@ -508,7 +518,7 @@ it. A batch is a run of consecutive blocks on one chain, the heavier branch
 first at a fork; each block reads the state the one before it produced from
 memory. Its valid blocks are stored and committed together, by the order
 above: one `volumes.db` transaction for their bodies, then one step's
-post-states and facts. The batch ends at its first block without a valid
+post-states into the buffer and its facts. The batch ends at its first block without a valid
 verdict. Bitcoin Core connects up to 32 blocks per `ActivateBestChainStep`,
 and geth's `insertChain` writes a batch at once.
 

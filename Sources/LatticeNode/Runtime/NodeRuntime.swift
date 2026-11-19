@@ -1924,13 +1924,15 @@ extension NodeRuntime {
                 // In the store's lane, after the facts asked for before it:
                 // a transaction a block confirmed leaves the journal only
                 // once that block's facts are written, so a crash cannot
-                // lose both. What the pool gained is waited for: it is read
-                // from the store, and a transaction an operator submitted
-                // is answered only once it is journaled.
+                // lose both. What the pool gained is read from memory
+                // until it is stored. Only a transaction an operator
+                // submitted is waited for: it is answered once journaled.
                 let storage = storage
-                let written = storage.lane.run { try await storage.persistPoolDelta(delta) }
-                guard !delta.added.isEmpty || !delta.journaled.isEmpty else { break }
                 do {
+                    let written = try await storage.storingBehind(delta.added.map(\.transaction)) {
+                        try await storage.persistPoolDelta(delta)
+                    }
+                    guard !delta.journaled.isEmpty else { break }
                     try await written.value
                 } catch {
                     failStop(error)

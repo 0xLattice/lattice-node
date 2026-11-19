@@ -86,6 +86,10 @@ extension NodeStore {
             )
         }
 
+        // Each level's seq as this transaction leaves it: added to the
+        // log's newest seqs once it committed.
+        var newest = try lastSeqs()
+        var reached: [String: Int64] = [:]
         try database.transaction {
             if !prepared.isEmpty {
                 try database.execute(
@@ -153,6 +157,7 @@ extension NodeStore {
                         )
                     }
                 }
+                reached[level.path] = seq
                 // The step's states were stored before this transaction:
                 // the level's marker moves with its facts.
                 if !level.buffersState { try Self.markFlushed(seq, at: level.path, in: database) }
@@ -175,6 +180,8 @@ extension NodeStore {
                 }
             }
         }
+        newest.merge(reached) { max($0, $1) }
+        newestSeqs = newest
     }
 
     /// Convenience for seeding and focused store tests.
@@ -224,8 +231,11 @@ extension NodeStore {
         )
     }
 
-    /// Every level's newest seq.
+    /// Every level's newest seq. Held in memory once read: the one scan of
+    /// the facts log is the first call's, and each transaction that adds
+    /// facts keeps it current (`stageNodeFacts`), so a flush reads no log.
     func lastSeqs() throws -> [String: Int64] {
+        if let newestSeqs { return newestSeqs }
         var seqs: [String: Int64] = [:]
         for row in try database.query("SELECT chain_path, MAX(seq) AS seq FROM admission_facts GROUP BY chain_path") {
             guard case .text(let path)? = row["chain_path"], case .int(let seq)? = row["seq"] else {
@@ -233,6 +243,7 @@ extension NodeStore {
             }
             seqs[path] = seq
         }
+        newestSeqs = seqs
         return seqs
     }
 
@@ -259,7 +270,9 @@ extension NodeStore {
     /// every state before the facts that name it: its markers start at its
     /// newest seqs.
     func forgetUnflushedExecutions() throws -> Int {
-        try database.transaction {
+        // What goes may have been a level's newest: read again when asked.
+        defer { newestSeqs = nil }
+        return try database.transaction {
             let seqs = try lastSeqs()
             guard try !database.query("SELECT 1 AS one FROM core_meta WHERE key = 'flush_markers'").isEmpty else {
                 for (path, seq) in seqs { try Self.markFlushed(seq, at: path, in: database) }
