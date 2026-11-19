@@ -166,6 +166,7 @@ code no longer departs.
 
 | Rule | Today | Measured |
 |---|---|---|
+| 8, 9 | With a state window (`recent`, or no state or bodies kept) the loop waits for the store's lane before it moves the counts and lets go of windows and bodies | |
 | 13 | State is content-addressed trie nodes in the content store, pruned by reference counts | 2.9 GB written for 82 MB kept |
 | 4 | Every job shares one worker pool behind three strict queues | Derivations of 0.7 ms waited 3.5 to 3.9 s for a worker |
 | 2 | A child reads its peers only once its parent has applied every header of one peer's log. A parent header that never applies (its child index not obtainable, say) holds its child's weight back, as does a parent with no peer running it. And the log is whichever peer's ended first: a peer that is behind opens the child on a parent that has weighed little, and the child then checks peers' proofs where it could have derived them | Not measured |

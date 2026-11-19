@@ -61,10 +61,6 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// Transactions the pool gained whose store write waits in the lane
     /// (`storingBehind`): read as stored content is.
     nonisolated let poolBuffer = StateBuffer()
-    /// Each chain's act-on height as the loop last decided it, set before
-    /// that step's state is buffered. A window release asked at an older
-    /// tip runs behind the loop: it keeps what this height's window holds.
-    nonisolated let actOnHeights = Mutex<[[String]: UInt64]>([:])
     /// How many waiting writes hold each Volume of `poolBuffer`.
     private nonisolated let poolHolds = Mutex<[String: Int]>([:])
     /// What this node holds: the state buffer, then the store.
@@ -182,8 +178,6 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// asked for before it: the facts a marker covers are stored before it
     /// moves. Reads see the buffer until the store holds what it held.
     nonisolated func flushState() async throws {
-        // Asked by the lane's own work: flushed here, in its turn.
-        guard !lane.isCurrent else { return try await flushStateOnce() }
         try await flushStateBehind().value
     }
 
@@ -259,7 +253,6 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// works on the store itself and no read through `PendingFacts`
     /// answers: the facts log, the counts, a chain newly hosted.
     nonisolated func written() async {
-        guard !lane.isCurrent else { return }
         try? await lane.settled()
     }
 
