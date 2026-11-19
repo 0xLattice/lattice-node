@@ -45,9 +45,10 @@ Three services belong to the node, not to any chain:
   queues behind work in another, and shared resources have limits, not
   ordering policies.
 - **Store**: a verified cache of what the network holds. Writes are atomic
-  and ordered, and made as each step ends, from one place: the content the
-  step's facts name first, then its facts in one transaction. Nothing is
-  written behind the loop.
+  and ordered. Content (a body, a mined block) is stored by the job that
+  validated or built it, before anything names it; the loop then writes each
+  step's state and facts, content first and facts in one transaction, before
+  it publishes. Facts and state are written by the loop alone.
 - **Progress**: every module reports what it is waiting on, as a typed
   reason.
 
@@ -73,7 +74,7 @@ established clients are built. The node has no scheduler of its own.
 | Execution of a chain's blocks | One lane per chain, one job at a time: a batch of up to `connectBatch` ready blocks, one atomic change set | A chain executes in order anyway; chains run side by side |
 | Header work: proof checks and derivations | Its own lane per chain | It never queues behind execution. Batched per page |
 | What an RPC waits on | Its own lane | Latency |
-| Storage writes | As each step ends, from the loop: content, then the step's facts in one transaction | One boundary, one order, one place. A write-behind layer (state buffer, write lane, deferred syncs) was tried and removed: it bought speed past the target and put the ordering on every caller |
+| Storage writes | Validated content by its job; then, as each step ends, the step's state and facts by the loop, facts in one transaction | One boundary, one order, one place. A write-behind layer (state buffer, write lane, deferred syncs) was tried and removed: it bought speed past the target and put the ordering on every caller |
 
 The loop only decides. It does not wait on each write, read content, or do
 bookkeeping that is not a decision. Each lane offers only its next job, and
