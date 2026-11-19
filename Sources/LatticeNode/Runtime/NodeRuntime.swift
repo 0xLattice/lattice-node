@@ -667,11 +667,13 @@ extension NodeRuntime {
         /// what an answer that promises a block is held waits for.
         var lastFacts: Task<Void, any Error>?
         /// Journal rows a start read, by chain, not yet given to the pool:
-        /// held until the chain has executed up to the heaviest block it
-        /// knows. A start can stand below the tip the node last executed
-        /// (the executions above the flush marker are made again), and a
-        /// transaction judged there can be refused for what that tip does
-        /// not hold yet, which would delete its row.
+        /// held until the chain and every chain above it have executed all
+        /// they can (`ChainCore.hasExecutedWhatItCan`). A start can stand
+        /// below the tip the node last executed (the executions above the
+        /// flush marker are made again), and a transaction judged there, or
+        /// a child's judged against its parent's state there, can be
+        /// refused for what that tip does not hold yet, which would delete
+        /// its row.
         var heldRestored: [ChainPath: [NodeEvent]] = [:]
         /// Announced transactions being fetched, by CID.
         var transactionFetches: Set<String> = []
@@ -814,10 +816,10 @@ extension NodeRuntime {
             return await releaseRestored()
         }
 
-        /// Whether `path` has executed up to the heaviest block it knows.
+        /// Whether `path` and every chain above it have executed all they
+        /// can: a child's transaction is judged against its parent's state.
         private func hasCaughtUp(_ path: ChainPath) -> Bool {
-            guard let snapshot = core.levels[path]?.snapshot else { return false }
-            return !snapshot.actOnTip.isEmpty && snapshot.actOnTip == snapshot.bestHeaderTip
+            (1...path.count).allSatisfy { core.levels[Array(path.prefix($0))]?.hasExecutedWhatItCan == true }
         }
 
         /// A journal row read at a start: to the pool now, or held
@@ -833,7 +835,20 @@ extension NodeRuntime {
         private mutating func releaseRestored() async -> Bool {
             for path in heldRestored.keys.sorted(by: { $0.joined(separator: "/") < $1.joined(separator: "/") })
             where hasCaughtUp(path) {
+                // A row that went while it was held (the same transaction
+                // came another way and a block confirmed it) is not pooled
+                // again: the pool would count it journaled with no row.
+                let rows: Set<String>
+                do {
+                    rows = Set(try await storage.localTransactions().map(\.transactionCID))
+                } catch {
+                    failStop(error)
+                    return false
+                }
                 for event in heldRestored.removeValue(forKey: path) ?? [] {
+                    guard case .level(_, .mining(.transactionReceived(let transaction, _))) = event,
+                          let cid = try? VolumeImpl<Transaction>(node: transaction).rawCID, rows.contains(cid)
+                    else { continue }
                     guard await step(event) else { return false }
                 }
             }
@@ -1054,6 +1069,7 @@ extension NodeRuntime {
             }
             for path in outputs.keys where core.levels[path] == nil {
                 outputs[path] = nil
+                heldRestored[path] = nil
                 views[path] = nil
                 digests[path] = nil
                 currentPeers[path] = nil

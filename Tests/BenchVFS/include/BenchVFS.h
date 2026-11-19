@@ -12,3 +12,6 @@ void bench_vfs_dump(const char *path);
 /// as "<path>.durable": what a power loss at any later moment is sure to
 /// leave. An empty prefix stops it for files opened afterwards.
 void bench_vfs_keep_synced(const char *prefix);
+/// While held (1 until 0), no ".durable" file changes and no sync returns:
+/// the ones there are what one moment's power loss leaves, read together.
+void bench_vfs_hold_synced(int held);

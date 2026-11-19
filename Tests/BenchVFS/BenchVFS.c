@@ -18,7 +18,7 @@ static pthread_mutex_t slotLock = PTHREAD_MUTEX_INITIALIZER;
 static sqlite3_vfs *orig;
 static sqlite3_vfs shim;
 
-typedef struct { sqlite3_file base; int slot; int isWal; int pageSize; int kept; sqlite3_file *real; } ShimFile;
+typedef struct { sqlite3_file base; int slot; int isWal; int pageSize; int kept; const char *name; sqlite3_file *real; } ShimFile;
 
 // Power loss: under `keptPrefix`, each file's bytes as of its last sync are
 // kept beside it as "<name>.durable" (what a power loss is sure to leave).
@@ -26,7 +26,9 @@ static char keptPrefix[1024];
 static pthread_mutex_t keptLock = PTHREAD_MUTEX_INITIALIZER;
 
 static void keepSynced(ShimFile *p) {
-    const char *name = slots[p->slot].name;
+    // The file's own name, which SQLite keeps for as long as it is open:
+    // slots past the table's size share one.
+    const char *name = p->name;
     char tmp[1100], out[1100];
     snprintf(tmp, sizeof tmp, "%s.durable.tmp", name);
     snprintf(out, sizeof out, "%s.durable", name);
@@ -123,6 +125,7 @@ static int xOpen(sqlite3_vfs *v, const char *name, sqlite3_file *f, int flags, i
     p->slot = slotFor(name);
     p->isWal = (flags & SQLITE_OPEN_WAL) != 0;
     p->pageSize = 0;
+    p->name = name;
     pthread_mutex_lock(&keptLock);
     p->kept = name && keptPrefix[0] && strncmp(name, keptPrefix, strlen(keptPrefix)) == 0;
     pthread_mutex_unlock(&keptLock);
@@ -158,4 +161,8 @@ void bench_vfs_keep_synced(const char *prefix) {
     pthread_mutex_lock(&keptLock);
     strncpy(keptPrefix, prefix ? prefix : "", sizeof(keptPrefix) - 1);
     pthread_mutex_unlock(&keptLock);
+}
+
+void bench_vfs_hold_synced(int held) {
+    if (held) pthread_mutex_lock(&keptLock); else pthread_mutex_unlock(&keptLock);
 }

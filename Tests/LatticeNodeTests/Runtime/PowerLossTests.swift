@@ -58,6 +58,9 @@ final class PowerLossTests: XCTestCase {
     private func afterPowerLoss(_ directory: URL) throws -> URL {
         let left = disks.appendingPathComponent("left-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: left, withIntermediateDirectories: true)
+        // One moment's: no database's synced bytes change while they are read.
+        bench_vfs_hold_synced(1)
+        defer { bench_vfs_hold_synced(0) }
         for name in try FileManager.default.contentsOfDirectory(atPath: directory.path) {
             let source = directory.appendingPathComponent(name)
             if name.hasSuffix(".durable") {
@@ -103,7 +106,18 @@ final class PowerLossTests: XCTestCase {
     }
 
     private func start(_ host: Host) async throws -> (NodeRuntime, NodeStorage) {
-        let storage = try await NodeStorage.open(configuration: host.configuration)
+        // A directory a node of this test just stopped on is free once that
+        // node's last work has let go of its store.
+        var opened: NodeStorage?
+        try await eventually("the store directory is free") {
+            do {
+                opened = try await NodeStorage.open(configuration: host.configuration)
+                return true
+            } catch NodeStorageError.storageInUse {
+                return false
+            }
+        }
+        let storage = try XCTUnwrap(opened)
         return (try await NodeRuntime.start(
             storage: storage, configuration: host.configuration, overlay: host.overlay
         ), storage)
@@ -153,11 +167,22 @@ final class PowerLossTests: XCTestCase {
     }
 
     /// A block a miner was told is accepted is on the chain of the node
-    /// that starts after a power loss, with no peer to give it back, and
-    /// the node reads that block's state from its own store.
+    /// that starts after a power loss, with no peer to give it back: the
+    /// node holds its body, executes again what it must, and answers for
+    /// its state.
     func testABlockAMinerWasAnsweredForOutlivesAPowerLoss() async throws {
+        try await answeredBlockOutlivesAPowerLoss(stateBuffer: NodeResourcePolicy.defaultMaximumBufferedStateBytes)
+    }
+
+    /// The same with no state buffer, where each step's states are stored
+    /// before its facts.
+    func testABlockAMinerWasAnsweredForOutlivesAPowerLossWithNoStateBuffer() async throws {
+        try await answeredBlockOutlivesAPowerLoss(stateBuffer: 0)
+    }
+
+    private func answeredBlockOutlivesAPowerLoss(stateBuffer: Int) async throws {
         let miner: Key = CryptoUtils.generateKeyPair()
-        let node = try host(keyByte: 0xe2)
+        let node = try host(keyByte: 0xe2, stateBuffer: stateBuffer)
         let (runtime, _) = try await start(node)
         let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(miner))])
         var tip = ""
@@ -165,7 +190,7 @@ final class PowerLossTests: XCTestCase {
         let left = try afterPowerLoss(node.configuration.storagePath)
         await runtime.stop()
 
-        let (after, _) = try await start(try host(keyByte: 0xe2, storageDirectory: left))
+        let (after, _) = try await start(try host(keyByte: 0xe2, storageDirectory: left, stateBuffer: stateBuffer))
         try await eventually("the node is on the block it answered for") {
             after.published.value?.actOnTip == tip
         }
@@ -222,6 +247,7 @@ final class PowerLossTests: XCTestCase {
         do {
             let (alone, _) = try await start(try host(keyByte: 0xe5, storageDirectory: left, state: .recent, stateBuffer: 4_096))
             let snapshot = await alone.reads.readSnapshot()
+            XCTAssertGreaterThan(snapshot.height ?? 0, 0, "the node starts on a block it executed before the power went")
             let standing = try XCTUnwrap(snapshot.tipCID)
             let balance = await alone.reads.account(owner: address(payer), blockCID: standing)?.balance
             XCTAssertNotNil(balance, "the node holds the state of the tip it starts on")
@@ -261,6 +287,12 @@ final class PowerLossTests: XCTestCase {
         let left = try afterPowerLoss(follower.configuration.storagePath)
         await runtime.stop()
 
+        // Alone first: the start itself needs the spec, and no peer has it then.
+        do {
+            let (alone, _) = try await start(try host(keyByte: 0xe7, storageDirectory: left, hostsAlpha: true))
+            XCTAssertNotNil(alone.levelReads[Self.alpha], "the node starts, following the child chain")
+            await alone.stop()
+        }
         let (after, _) = try await start(
             try host(keyByte: 0xe7, peers: [producer.endpoint], storageDirectory: left, hostsAlpha: true)
         )
