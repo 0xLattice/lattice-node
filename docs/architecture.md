@@ -153,6 +153,35 @@ the two leaves it behind the state, never ahead, and the blocks between
 execute again into the same state. A child genesis's spec is stored at
 once, since a start reads it before it executes anything.
 
+The truth is the chain the network agrees on. A node holds its own checked
+view of it, and that view is current in memory from the moment the loop
+decided it; the store follows. What a crash takes from the store the node
+reads from its peers and checks again. What no peer holds is not restored
+that way: a transaction an operator submitted, which is why its journal
+write is waited for; a block mined here that reached no peer, which its
+miner keeps until it sees it on the chain; and the newest blocks of a chain
+this node alone hosts. A step's states are in the state buffer and its facts,
+headers and proofs in `PendingFacts` before the step ends; every read a
+running node makes of them asks there first, then the store, through the
+store's own read functions, so no reader knows or waits for when a write
+lands. The step's facts transaction, a flush, a pool change, and the
+releases that follow a fact are asked of the store's lane (`StoreLane`),
+which makes them one at a time in the order asked, off the loop: a write
+that waits on the disk holds up the writes behind it and no decision. A
+crash loses what the lane had not written, so the store holds a prefix of
+what the loop decided, and a start goes on from there. A write that fails
+stops the node.
+
+Three things wait for the lane. An operation on what the store itself
+holds (the counts, the window releases, letting go of bodies, a chain newly
+hosted reading its facts log) waits for every write asked before it. The
+loop waits when it has run too far ahead of the store: more than 256 writes
+asked and not made, or a state buffer at twice its limit. And a pool change
+that adds a transaction is waited for, so a transaction an operator
+submitted is answered only once it is journaled; one that only removes
+transactions a block confirmed is not, and runs after that block's facts, so
+a crash cannot lose both the block and the journal's row.
+
 Content stays in `volumes.db` because a retention scope names it, and each
 scope says why. A block's body (its own Volume and its transactions') is
 named by that block on its chain, so a transaction two blocks carry stays

@@ -169,4 +169,33 @@ final class StateBufferRuntimeTests: XCTestCase {
             XCTAssertEqual(after, before)
         }
     }
+
+    /// A disk that has stopped answering: a write waits in the store's
+    /// lane and every write behind it with it. The node goes on executing
+    /// the blocks it is given and answers for them, their balances and
+    /// their blocks, from what it holds in memory; when the disk answers,
+    /// a node started again is at the same tip with the same balance.
+    func testANodeWhoseDiskStoppedAnsweringGoesOnExecutingAndAnswering() async throws {
+        let (configuration, overlay) = try configuration(directory("stalled"))
+        let payee = payee()
+        let (answers, disk) = AsyncStream<Void>.makeStream()
+        let before = try await run(configuration, overlay) { runtime in
+            _ = try await self.mine(2, on: runtime, paying: payee)
+            let height = try XCTUnwrap(runtime.published.value?.actOnHeight)
+            runtime.storage.lane.run { for await _ in answers { break } }
+            let tip = try await self.mine(4, on: runtime, paying: payee)
+            XCTAssertEqual(runtime.published.value?.actOnHeight, height + 4)
+            // Asked while nothing of the four blocks is written.
+            let seen = try await self.seen(by: runtime, of: payee)
+            XCTAssertEqual(seen.tip, tip)
+            let executed = await runtime.storage.hasExecutedBlock(tip, at: self.nexus)
+            XCTAssertTrue(executed, "the tip is answered for as executed")
+            disk.yield()
+            return seen
+        }
+        try await run(configuration, overlay) { runtime in
+            let after = try await self.seen(by: runtime, of: payee)
+            XCTAssertEqual(after, before)
+        }
+    }
 }

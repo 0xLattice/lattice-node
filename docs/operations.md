@@ -527,7 +527,12 @@ cache. A clean stop writes it all. A crash loses the batch being executed
 and the state not yet written: on the next start the node logs how many
 executed blocks that was, counts them as not executed, and executes them
 again from the bodies it holds, while it weighs headers and answers
-requests as usual. Until it is back at its tip, reads at the tip answer
+requests as usual. The node's own records (headers, facts, proofs) are
+written behind its decisions too, in order: a crash can also lose the last
+of those, and the node then asks its peers again for what it had weighed.
+On a chain this node alone hosts there is no peer to ask: blocks accepted
+in the moments before a crash, and not yet written, are gone unless their
+miner submits them again. Until it is back at its tip, reads at the tip answer
 for the lower tip. With 0 each step's state is written as it is produced
 and a crash loses at most the batch being executed. A node that keeps
 `recent` state writes at least once per state window, and one that keeps
