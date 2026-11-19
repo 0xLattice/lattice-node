@@ -583,7 +583,7 @@ final class StateWindowTests: XCTestCase {
         }
         do {
             let (runtime, storage) = try await start(node)
-            try await eventually("the state sync completes and the counts reach the tip") {
+            try await eventuallyWithPasses(runtime, "the state sync completes and the counts reach the tip") {
                 try await self.settled(storage, at: tip)
             }
             await runtime.stop()
@@ -660,7 +660,7 @@ final class StateWindowTests: XCTestCase {
         do {
             let (runtime, storage) = try await start(node)
             try await eventually("the node follows the shorter chain") { runtime.published.value?.actOnTip == abandoned[3] }
-            try await eventually("the counts reach its tip") { try await self.settled(storage, at: abandoned[3]) }
+            try await eventuallyWithPasses(runtime, "the counts reach its tip") { try await self.settled(storage, at: abandoned[3]) }
             await runtime.stop()
             let fact = try await storage.store.blockFact(abandoned[3], at: ["Nexus"])
             let state = try await LatticeStateHeader(rawCID: try XCTUnwrap(fact?.postStateCID)).resolve(fetcher: storage.localFetcher)
@@ -673,7 +673,7 @@ final class StateWindowTests: XCTestCase {
         )
         let (runtime, storage) = try await start(node)
         try await eventually("the node moves to the longer chain") { runtime.published.value?.actOnTip == adopted[6] }
-        try await eventually("the counts reach its tip") { try await self.settled(storage, at: adopted[6]) }
+        try await eventuallyWithPasses(runtime, "the counts reach its tip") { try await self.settled(storage, at: adopted[6]) }
         await runtime.stop()
         await longerRuntime.stop()
         _ = try await storage.broker.sweep()
@@ -712,7 +712,7 @@ final class StateWindowTests: XCTestCase {
         await producerRuntime.stop()
         node = try host(keyByte: 0xa2, storageDirectory: node.configuration.storagePath, state: .recent, stateWindow: 4)
         let (runtime, storage) = try await start(node)
-        try await eventually("the counts reach the tip") { try await self.settled(storage, at: blocks[4]) }
+        try await eventuallyWithPasses(runtime, "the counts reach the tip") { try await self.settled(storage, at: blocks[4]) }
         await runtime.stop()
         let marker = try await counted(storage).marker
         XCTAssertEqual(marker?.cursor.cid, blocks[4], "synced at the tip")
@@ -810,7 +810,7 @@ final class StateWindowTests: XCTestCase {
         let (runtime, storage) = try await start(rejoined)
         try await eventually("the node moves to the producer's chain") { runtime.published.value?.actOnTip == main[9] }
         // A tip on another branch moves the counts at once, with no pass.
-        try await eventually("the counts leave the fork for the producer's chain") {
+        try await eventuallyWithPasses(runtime, "the counts leave the fork for the producer's chain") {
             try await self.counted(storage).marker.map { main.contains($0.tip.cid) } == true
         }
         try await eventuallyWithPasses(runtime, "the counts reach 9") { try await self.settled(storage, at: main[9]) }
@@ -953,7 +953,7 @@ final class StateWindowTests: XCTestCase {
         let (runtime, storage) = try await start(node)
         var tip = ""
         for _ in 0..<3 { tip = try BlockHeader(node: try await runtime.mineBlock(paid)).rawCID }
-        try await eventually("the counts reach the tip") { try await self.settled(storage, at: tip) }
+        try await eventuallyWithPasses(runtime, "the counts reach the tip") { try await self.settled(storage, at: tip) }
         let kept = try await storage.store.stateDiff(tip, at: ["Nexus"])
         var diff = try XCTUnwrap(kept)
         XCTAssertFalse(NodeStore.net(diff).replaced.isEmpty, "the block replaced something")
@@ -980,7 +980,7 @@ final class StateWindowTests: XCTestCase {
             let (runtime, storage) = try await start(node)
             var tip = ""
             for _ in 0..<4 { tip = try BlockHeader(node: try await runtime.mineBlock(paid)).rawCID }
-            try await eventually("the counts reach the tip") { try await self.settled(storage, at: tip) }
+            try await eventuallyWithPasses(runtime, "the counts reach the tip") { try await self.settled(storage, at: tip) }
             await runtime.stop()
             let fact = try await storage.store.blockFact(tip, at: ["Nexus"])
             let root = try XCTUnwrap(fact?.postStateCID)
@@ -1050,7 +1050,7 @@ final class StateWindowTests: XCTestCase {
                 XCTFail("Alpha's windows \(heights), tip height \(alphaHeight)")
                 throw error
             }
-            try await eventually("Alpha's counts reach its tip") { try await self.settled(storage, at: alphaTip, path: Self.alpha) }
+            try await eventuallyWithPasses(runtime, "Alpha's counts reach its tip") { try await self.settled(storage, at: alphaTip, path: Self.alpha) }
             await runtime.stop()
             _ = try await storage.broker.sweep()
             try await assertCountsHold(storage, at: Self.alpha)
