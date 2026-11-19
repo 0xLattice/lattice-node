@@ -74,10 +74,11 @@ established clients are built. The node has no scheduler of its own.
 | Execution of a chain's blocks | One lane per chain, one job at a time: a batch of up to `connectBatch` ready blocks, one atomic change set | A chain executes in order anyway; chains run side by side |
 | Header work: proof checks and derivations | Its own lane per chain | It never queues behind execution. Batched per page |
 | What an RPC waits on | Its own lane | Latency |
-| Storage writes | Validated content by its job; then, as each step ends, the step's state and facts by the loop, facts in one transaction | One boundary, one order, one place. A write-behind layer (state buffer, write lane, deferred syncs) was tried and removed: it bought speed past the target and put the ordering on every caller |
+| Storage writes | Validated content by its job; then, as each step ends, the step's state and facts by the loop, facts in one transaction | One boundary, one order, one place: no caller orders writes |
 
-The loop only decides. It does not wait on each write, read content, or do
-bookkeeping that is not a decision. Each lane offers only its next job, and
+The loop decides, and makes each step's writes before it publishes what
+they make true: that wait is deliberate, the one the loop has. It does not
+wait on the network, read content, or do bookkeeping that is not a decision. Each lane offers only its next job, and
 free workers take those lane heads in the order they became ready, so no
 lane's backlog stands in front of another lane's next job. The operating
 system shares the CPU among lanes; there is no priority and no time

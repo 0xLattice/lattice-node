@@ -782,8 +782,15 @@ enable it only for diagnosis and rotate or remove it afterwards.
 
 ### `wipe required`
 
-The store belongs to another schema epoch or Nexus genesis. Stop the complete
+The store belongs to another schema epoch or Nexus genesis, or `volumes.db`
+was written by a version with another Volume store schema. Stop the complete
 tree and use `lattice wipe`; there is no migration path.
+
+A node that ran a build of `main` with the write-behind persistence layer
+(the state buffer and `stateBufferBytes`, from #137 until #156 reverted it)
+must be wiped before it runs this version: its store may hold facts whose
+state it never wrote, and a `stateBufferBytes` key left in `lattice.json` or
+`config.d` is refused at start.
 
 ### `missingMaterializedVolume`
 

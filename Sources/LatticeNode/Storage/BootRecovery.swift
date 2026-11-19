@@ -79,9 +79,13 @@ enum BootRecovery {
     private static func openStores(
         configuration: NodeConfiguration
     ) throws -> Stores {
-        let broker = try DiskBroker(
-            path: configuration.storagePath.appendingPathComponent("volumes.db").path
-        )
+        let broker: DiskBroker
+        do {
+            broker = try DiskBroker(path: configuration.storagePath.appendingPathComponent("volumes.db").path)
+        } catch BrokerError.migrationRequired(let found, let required) {
+            // A Volume store another version wrote is not converted.
+            throw NodeStoreError.wipeRequired("volumes.db has schema \(found), this version reads \(required)")
+        }
         let localFetcher = CoalescingFetcher(broker)
         let retentionScope = [
             configuration.nexusGenesisCID,
