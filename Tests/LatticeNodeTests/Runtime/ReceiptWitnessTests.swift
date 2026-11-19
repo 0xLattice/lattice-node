@@ -202,10 +202,16 @@ final class ReceiptWitnessTests: XCTestCase {
             try await eventually("the follower executes Nexus to the producer's tip") {
                 nexusRuntime.published.value?.actOnTip == nexusTip
             }
-            await nexusRuntime.stop()
+            // On `recent` a window is let go of once the chain's counts
+            // reach the tip, which a maintenance pass may be what settles.
             let followerLocal = await nexusStorage.localFetcher
-            let held = try? await block.parentState.resolveRecursive(fetcher: followerLocal)
-            XCTAssertNil(held, "the follower let go of the state the withdrawal names")
+            var polls = 0
+            try await eventually("the follower let go of the state the withdrawal names") {
+                if polls % 50 == 0 { nexusRuntime.inputs.yield(.maintenance) }
+                polls += 1
+                return (try? await block.parentState.resolveRecursive(fetcher: followerLocal)) == nil
+            }
+            await nexusRuntime.stop()
         }
         let follower = try host(
             keyByte: 0xd2, peers: [producer.endpoint], blockBodies: .none,
