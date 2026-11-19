@@ -54,6 +54,11 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     let store: NodeStore
     nonisolated let bundles: VolumeBundleCache
     let broker: DiskBroker
+    /// Executed state not yet flushed to `broker`. Every read of content
+    /// asks it first (`held`).
+    nonisolated let stateBuffer = StateBuffer()
+    /// What this node holds: the state buffer, then the store.
+    nonisolated let held: CompositeContentSource
     let localFetcher: CoalescingFetcher
     /// Local content, and behind it the header records: a block's own node
     /// is read from them when its body is not held. Execution and mining
@@ -78,12 +83,14 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     private var operationInFlight = false
     private var operationWaiters: [OperationWaiter] = []
 
+    /// The flush asked for last, running or done: the next runs after it.
+    private var lastFlush: Task<Void, any Error>?
+
     private init(
         configuration: NodeConfiguration,
         store: NodeStore,
         bundles: VolumeBundleCache,
         broker: DiskBroker,
-        localFetcher: CoalescingFetcher,
         retentionScope: String,
         durableMempoolOwner: String,
         liveMempoolOwner: String,
@@ -93,8 +100,10 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         self.store = store
         self.bundles = bundles
         self.broker = broker
-        self.localFetcher = localFetcher
-        self.workSource = CompositeContentSource([broker, HeaderRecords(store: store)])
+        let held = CompositeContentSource([stateBuffer, broker])
+        self.held = held
+        self.localFetcher = CoalescingFetcher(held)
+        self.workSource = CompositeContentSource([held, HeaderRecords(store: store)])
         self.workFetcher = CoalescingFetcher(workSource)
         self.readCache = ReadCache(maximumBytes: configuration.resourcePolicy.maximumCachedContentBytes)
         self.retentionScope = retentionScope
@@ -109,12 +118,17 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         configuration: NodeConfiguration
     ) async throws -> NodeStorage {
         let recovered = try await BootRecovery.run(configuration: configuration)
+        // What a crash left executed in the facts and absent from the
+        // content store counts as not executed (`forgetUnflushedExecutions`).
+        let forgotten = try await recovered.store.forgetUnflushedExecutions()
+        if forgotten > 0 {
+            logLine("lattice-node: the last run left the state of \(forgotten) executed blocks unstored: they execute again")
+        }
         return NodeStorage(
             configuration: configuration,
             store: recovered.store,
             bundles: VolumeBundleCache(directory: configuration.storagePath),
             broker: recovered.broker,
-            localFetcher: recovered.localFetcher,
             retentionScope: recovered.retentionScope,
             durableMempoolOwner: recovered.durableMempoolOwner,
             liveMempoolOwner: recovered.liveMempoolOwner,
@@ -136,18 +150,74 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         (try? await store.hasAcceptedBlock(cid, at: chainPath)) ?? false
     }
 
+    // MARK: - The state buffer
+
+    /// Whether executed state is buffered at all (`maximumBufferedStateBytes`).
+    nonisolated var buffersState: Bool { configuration.resourcePolicy.maximumBufferedStateBytes > 0 }
+
+    /// Whether the state buffer has reached its limit: the loop flushes.
+    nonisolated var stateBufferIsFull: Bool {
+        stateBuffer.bytes >= configuration.resourcePolicy.maximumBufferedStateBytes && !stateBuffer.isEmpty
+    }
+
+    /// Writes the state buffer to the store: every buffered Volume and its
+    /// retention in one volumes.db transaction, then each level's flush
+    /// marker moved to the facts it covers (`NodeStore.markFlushed`). A
+    /// crash between the two leaves a marker behind the state: a start
+    /// counts those blocks as not executed, and executing them stores the
+    /// same Volumes. One flush at a time; reads see the buffer until the
+    /// store holds what it held.
+    func flushState() async throws {
+        // Each flush runs after the one asked for before it: a chain, so a
+        // caller waits once and nothing is polled.
+        let previous = lastFlush
+        let flush = Task {
+            _ = try? await previous?.value
+            try await self.flushStateOnce()
+        }
+        lastFlush = flush
+        try await flush.value
+    }
+
+    private func flushStateOnce() async throws {
+        // Read before the batch is taken: a step buffers its states before
+        // its facts are written, so the batch holds the state of every
+        // execution up to these seqs.
+        let seqs = try await store.lastSeqs()
+        let batch = stateBuffer.batch()
+        if !batch.isEmpty {
+            try await broker.storeVolumesLocal(batch.volumes, retaining: batch.retaining)
+        }
+        try await store.markFlushed(seqs)
+        stateBuffer.remove(batch)
+    }
+
+    /// The flush before an operation on what the store retains: the store
+    /// then holds every executed state, as it did before states were
+    /// buffered. False when the store's write failed, which is said: the
+    /// operation is left undone, and the loop's own flush fail-stops.
+    nonisolated func flushedState() async -> Bool {
+        do {
+            try await flushState()
+            return true
+        } catch {
+            logLine("lattice-node: state buffer not flushed: \(error)")
+            return false
+        }
+    }
+
     func hasExecutedBlock(_ cid: String, at chainPath: [String]) async -> Bool {
         (try? await store.hasExecutedBlock(cid, at: chainPath)) ?? false
     }
 
     public func fetch(_ cids: Set<String>) async -> [String: Data] {
-        await broker.fetchDataLocal(cids: cids)
+        await held.fetch(cids)
     }
 
     /// A block's own node: from its Volume, or from its header record when
     /// its body is not held. Enough to reach the state it commits to.
     nonisolated func blockNodeBytes(_ cid: String) async -> Data? {
-        if let held = await broker.fetchDataLocal(cid: cid) { return held }
+        if let held = await held.fetch([cid])[cid] { return held }
         return store.headerBlockBytes(cid)
     }
 
@@ -158,8 +228,14 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// against its CIDs first: bytes damaged in the store read as absent,
     /// never handed on. This node's own reads (`fetch`) take them unhashed.
     func volume(_ rootCID: String) async -> SerializedVolume? {
-        guard let volume = await broker.fetchVolumeLocal(root: rootCID),
-              (try? volume.validate()) != nil else { return nil }
+        // Unflushed state is served as stored state is: a peer asking for
+        // the newest blocks' state finds it here.
+        let found: SerializedVolume? = if let buffered = stateBuffer.volume(rootCID) {
+            buffered
+        } else {
+            await broker.fetchVolumeLocal(root: rootCID)
+        }
+        guard let volume = found, (try? volume.validate()) != nil else { return nil }
         return volume
     }
 

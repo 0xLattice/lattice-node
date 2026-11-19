@@ -41,7 +41,7 @@ public struct Topology: Codable, Sendable {
         case listen, rpc, webSocket, peers, publicRead, externalAddress
         case publicReadRate, publicReadExpensiveRate, publicReadMaxRate, publicReadFetches
         case publicReadURL, publicSubmit, publicSubmitRate, minRelayFee
-        case servingMaxConcurrent, servingMaxInFlightVolumeBytes, maxAcquisitionBytes, blockBodies, state, stateWindow, stateWindows, finalityWindow, finalityWindows, announceLifetime, connectBatch
+        case servingMaxConcurrent, servingMaxInFlightVolumeBytes, maxAcquisitionBytes, stateBufferBytes, blockBodies, state, stateWindow, stateWindows, finalityWindow, finalityWindows, announceLifetime, connectBatch
         case hostedChains, rpcAllowedOrigins, operatorListen, operatorTokens, operatorAllowedOrigins
     }
     public var listen: UInt16
@@ -94,6 +94,10 @@ public struct Topology: Codable, Sendable {
     /// every hosted chain together (`--max-acquisition-bytes`). Absent =
     /// the node's default.
     public var maxAcquisitionBytes: Int?
+    /// Bytes of executed state held in memory before one write stores
+    /// them (`--state-buffer-bytes`). Absent = the node's default; 0
+    /// stores each step's state as it is produced.
+    public var stateBufferBytes: Int?
     /// The block bodies kept beyond what the node needs to operate
     /// (`--block-bodies`): `all` or `none`. Absent = `all`.
     public var blockBodies: String?
@@ -313,6 +317,9 @@ public struct Topology: Codable, Sendable {
         if let maxAcquisitionBytes, maxAcquisitionBytes < sessionBytes {
             throw CtlError("maxAcquisitionBytes must be at least \(sessionBytes), the bytes one block's fetch may hold")
         }
+        if let stateBufferBytes, stateBufferBytes < 0 {
+            throw CtlError("stateBufferBytes must be 0 or more")
+        }
         if let publicReadFetches, publicReadFetches < 0 {
             throw CtlError("publicReadFetches must be nonnegative")
         }
@@ -331,6 +338,7 @@ public struct Topology: Codable, Sendable {
             arguments += ["--serving-max-in-flight-volume-bytes", String(value)]
         }
         if let value = maxAcquisitionBytes { arguments += ["--max-acquisition-bytes", String(value)] }
+        if let value = stateBufferBytes { arguments += ["--state-buffer-bytes", String(value)] }
         if let value = blockBodies { arguments += ["--block-bodies", value] }
         if let value = state { arguments += ["--state", value] }
         if let value = stateWindow { arguments += ["--state-window", String(value)] }

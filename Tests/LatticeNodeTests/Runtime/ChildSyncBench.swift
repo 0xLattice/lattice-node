@@ -82,7 +82,13 @@ final class ChildSyncBench: XCTestCase {
             chainPath: ["Nexus"], storagePath: dir,
             privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
             listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(), webSocket: .off,
-            peerSearchInterval: 600, state: state,
+            peerSearchInterval: 600,
+            // BENCH_STATE_BUFFER: the state buffer's limit in bytes (0, none).
+            resourcePolicy: NodeResourcePolicy(
+                maximumBufferedStateBytes: ProcessInfo.processInfo.environment["BENCH_STATE_BUFFER"].flatMap(Int.init)
+                    ?? NodeResourcePolicy.defaultMaximumBufferedStateBytes
+            ),
+            state: state,
             hostedChildren: levels,
             childSpecs: specs ? Dictionary(uniqueKeysWithValues: levels.map { ($0, Self.spec($0)) }) : [:]
         )
@@ -231,7 +237,10 @@ final class ChildSyncBench: XCTestCase {
         if env["CHILD_BENCH_VFS"] != nil { XCTAssertEqual(bench_vfs_install(), 0) }
         let (fc, fo) = try host(
             Self.followerKey, dir, port: NetworkTransportTestPorts.allocate(),
-            levels: targets.map(\.0).filter { $0 != ["Nexus"] }, specs: false, peers: [peer], state: .recent
+            levels: targets.map(\.0).filter { $0 != ["Nexus"] }, specs: false, peers: [peer],
+            // BENCH_STATE=all: a follower that keeps every state, where the
+            // state buffer's limit, not a window, decides when it flushes.
+            state: env["BENCH_STATE"] == "all" ? .all : .recent
         )
         // The node sizes its workers to the processors it sees; a container
         // limited to N CPUs still sees the host's, so run.sh passes what a

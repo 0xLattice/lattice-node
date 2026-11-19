@@ -44,16 +44,27 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   proof check the shell cannot run. Pinned by
   `ChildGenesisSpecTests`.
 
-## NODE-STORAGE-002 — content is stored before the facts that name it, and a fact never depends on it being held
+## NODE-STORAGE-002 — a fact names content the node can read, and after a crash only content the store holds
 
-- **NODE-STORAGE-002.a** — A step's content (headers, post-states, specs)
-  is stored and retained before the facts that name it. Enforced by
-  `SimBodies.checkStatesStored` and `Invariants.checkTree` ("weighed block
-  … has no durable content").
+- **NODE-STORAGE-002.a** — A step's headers and specs are stored before
+  the facts that name them. Its post-states are where every read finds
+  them before its facts are written: in the state buffer, then in the
+  store once a flush wrote them. A level's flush marker in `state.db` is
+  moved only after the states of every execution up to it are stored, so
+  it is never ahead of the store. At a start, an execution above its
+  level's marker is forgotten (`NodeStore.forgetUnflushedExecutions`): the
+  block is a header again and executes again. No fact a start restores
+  names a state the store lacks. The simulator models a store with no
+  buffer and enforces the unbuffered form: `SimBodies.checkStatesStored`
+  and `Invariants.checkTree` ("weighed block … has no durable content").
 - **NODE-STORAGE-002.b** — Nothing is published, served, relayed or
-  streamed before it is durable. Enforced by `Simulator` and
-  `LevelSimulator` ("published tip … is not durable", "served … before it
-  was durable", "relayed … before it was durable").
+  streamed before its facts are committed. An executed tip is published
+  while its state may still be in the state buffer: durability follows
+  consistency, it does not gate it (rule 8 of the sync architecture). A
+  crash may take a node back below a tip it published; it executes the
+  lost blocks again and reaches the same tip. Enforced for facts by
+  `Simulator` and `LevelSimulator` ("published tip … is not durable",
+  "served … before it was durable", "relayed … before it was durable").
 - **NODE-STORAGE-002.c** — Content stays because a scope names it, and a
   start leaves pins as it finds them: nothing is rebuilt from the facts.
   A block's body is named by that block on its chain, what executions read

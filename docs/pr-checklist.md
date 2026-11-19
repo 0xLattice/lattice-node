@@ -7,6 +7,7 @@
 - [ ] Local durability failures are non-punitive.
 - [ ] All ingress transports use the same mapping.
 - [ ] Dependency branch pins are replaced by released versions before merge.
+- [ ] Each new test states something an operator or a peer could observe, and would pass a rewrite that kept the behaviour ([testing](testing.md)).
 
 ## Architecture rules
 

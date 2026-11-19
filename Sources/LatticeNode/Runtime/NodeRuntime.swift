@@ -483,6 +483,10 @@ public final class NodeRuntime: Sendable {
             }
             await state.settleState()
             state.refreshView()
+            // The core takes a step before any peer or request gives it
+            // one: what it restored and has not executed (blocks weighed,
+            // and blocks whose state a crash lost) it asks for now.
+            inputs.yield(.event(.tick))
             // After the loop ends, inputs are only drained until the stream
             // finishes, so no RPC waits forever.
             var running = true
@@ -525,6 +529,9 @@ public final class NodeRuntime: Sendable {
         inputs.yield(.stop)
         inputs.finish()
         await loop.value
+        // A clean stop leaves nothing in the state buffer: a start that
+        // follows executes nothing again.
+        _ = await storage.flushedState()
         // Everything the loop journaled is written: the log keeps its id.
         await storage.markCleanStop()
         templateDigest.finish()
@@ -1699,6 +1706,8 @@ extension NodeRuntime {
                 }
                 do {
                     try await storage.persistNodeBatch(batch, logID: core.logID)
+                    // The loop waits on a flush, not on each step's state.
+                    if storage.stateBufferIsFull { try await storage.flushState() }
                     if configuration.blockBodies == .none { executedThisStep.append(contentsOf: persistedBodyKeys) }
                     readsDone.append(contentsOf: persistedBodyKeys)
                     // A block found invalid is no block: its body goes.
