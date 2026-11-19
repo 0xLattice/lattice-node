@@ -293,7 +293,8 @@ final class StateBufferRuntimeTests: XCTestCase {
         }
     }
 
-    /// A node that keeps one block of state lets go of what each tip replaced, which
+    /// A node that keeps one block of state lets go of what each tip
+    /// replaced once its counts are in place, which
     /// works on the store. With the disk stopped that waits, and the node
     /// goes on all the same: a second block submitted to it executes on the
     /// first, neither miner answered yet. When the disk answers both are,

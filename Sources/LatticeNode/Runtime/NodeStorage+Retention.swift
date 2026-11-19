@@ -190,7 +190,7 @@ extension NodeStorage {
         }
     }
 
-    /// At a start with `none`: lets go of every executed body pinned under
+    /// At a start with `blockBodies: none`: lets go of every executed body pinned under
     /// its block's name but each chain's tip.
     nonisolated func letGoOfBodies(except tips: [ChainPath: String]) async {
         guard configuration.blockBodies == .none else { return }

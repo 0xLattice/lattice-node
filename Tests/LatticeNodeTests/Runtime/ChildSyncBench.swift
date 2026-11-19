@@ -242,7 +242,7 @@ final class ChildSyncBench: XCTestCase {
         if env["CHILD_BENCH_VFS"] != nil { XCTAssertEqual(bench_vfs_install(), 0) }
         // What the follower keeps, from the environment (the recorder and
         // the server keep everything, whatever it says): BENCH_STATE (all,
-        // recent, none; default recent), BENCH_BODIES (all, none; default
+        // recent; default recent), BENCH_BODIES (all, none; default
         // all) and BENCH_STATE_BUFFER (the state buffer's limit in bytes,
         // 0 for none; default the node's). A value that is not one of
         // these stops the run: a run under a setting it did not use would

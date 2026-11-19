@@ -108,11 +108,11 @@ final class StateWindowTests: XCTestCase {
         return counts
     }
 
-    /// A node keeping one block of state follows a chain whose blocks delete
-    /// keys and empty accounts: a deletion merges a node's neighbour into
-    /// its parent, and the neighbour, which no block's read set names, is
-    /// read from the state it holds or a peer.
-    func testANodeKeepingOneBlockOfStateFollowsBlocksThatDeleteState() async throws {
+    /// A node on `recent` follows a chain whose blocks delete keys and empty
+    /// accounts: a deletion merges a node's neighbour into its parent, and
+    /// the neighbour, which no block's read set names, is in the current
+    /// state the node holds.
+    func testANodeOnRecentFollowsBlocksThatDeleteState() async throws {
         let miner: Key = CryptoUtils.generateKeyPair()
         let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(miner))])
         let producer = try host(keyByte: 0xc4)
@@ -143,7 +143,7 @@ final class StateWindowTests: XCTestCase {
 
         let node = try host(keyByte: 0xc5, peers: [producer.endpoint], state: .recent, stateWindow: 1)
         let (runtime, _) = try await start(node)
-        try await eventually("the node on a window of one executes every block") { runtime.published.value?.actOnTip == tip }
+        try await eventually("the node executes every block") { runtime.published.value?.actOnTip == tip }
         await runtime.stop()
         await producerRuntime.stop()
     }
@@ -1076,6 +1076,29 @@ final class StateWindowTests: XCTestCase {
         _ = try await storage.broker.sweep()
         let kept = await storage.broker.hasVolume(root: moduleCID)
         XCTAssertFalse(kept, "its policy module goes")
+        await runtime.stop()
+    }
+
+    /// What a block read is let go of at a start when the block executed
+    /// before the node stopped, whatever stopped it between the two.
+    func testAStartLetsGoOfWhatAnExecutedBlockRead() async throws {
+        let node = try host(keyByte: 0xd9, state: .recent, stateWindow: 2)
+        var tip = ""
+        let scope: String
+        do {
+            let (runtime, storage) = try await start(node)
+            for _ in 0..<3 { tip = try BlockHeader(node: try await runtime.mineBlock()).rawCID }
+            await runtime.stop()
+            // As a stop between the execution and the release leaves it.
+            scope = storage.scopes.reads(tip, at: ["Nexus"])
+            try await storage.broker.mergeRetainedRoots(scope: scope, roots: [tip])
+            let left = try await storage.broker.retainedScopes(prefix: storage.scopes.readsPrefix)
+            XCTAssertEqual(left, [scope], "fixture: the block's reads are named")
+        }
+        let (runtime, storage) = try await start(node)
+        try await eventually("the start lets go of them") {
+            (try? await storage.broker.retainedScopes(prefix: storage.scopes.readsPrefix))?.isEmpty == true
+        }
         await runtime.stop()
     }
 

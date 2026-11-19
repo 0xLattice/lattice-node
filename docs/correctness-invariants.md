@@ -147,7 +147,8 @@ set, GHOST, continuity) are the architecture doc's and are checked by
 - **NODE-STORAGE-002.i** — With `state: recent` what a stored
   block reads is named by that block until it executes or is found invalid
   (a start lets go of what an executed block's scope still names). Pinned
-  by `StateWindowTests.testRecentKeepsAChildsSpecAndPolicyModulesWhileItIsHosted`.
+  by `StateWindowTests.testRecentKeepsAChildsSpecAndPolicyModulesWhileItIsHosted`
+  and `StateWindowTests.testAStartLetsGoOfWhatAnExecutedBlockRead`.
 - **NODE-STORAGE-002.j** — A Volume the operator pins is named by the
   operator scope until it is unpinned, whatever the other rules keep. Pinned
   by `OperatorPinTests` and `DaemonHTTPTests.testOperatorPinRoutes`.

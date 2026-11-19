@@ -119,7 +119,7 @@ extension NodeStorage {
             case .all:
                 stored.append(contentsOf: created)
             case .recent:
-                // A state no block fact of the step names (none does today)
+                // A state no block fact of the step names (no step has one today)
                 // joins the chain's newest window below.
                 states[path] = produced
                 stored.append(contentsOf: specs)

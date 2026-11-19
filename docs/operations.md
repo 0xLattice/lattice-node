@@ -625,10 +625,13 @@ their own reason to run one. Keep `all` on a node an explorer reads.
   `stateWindow` blocks (`--state-window`, counting the tip) replaced. 64
   blocks unless set; `stateWindows` (or `--state-window Nexus/Alpha=500`)
   sets one chain. `tip`, the earlier name, means `recent`.
+
 `--state-window` applies to `recent` only; set with `all` it is refused.
 `none`, which kept only what the last executions read and created, was
 removed: a node configured with it does not start and says to use
-`recent`, where `stateWindow: 1` keeps the least.
+`recent`, where `stateWindow: 1` keeps the least. `recent` always keeps the
+whole current state of each chain, so a node moved from `none` needs much
+more disk.
 
 On `recent` a node keeps each chain's spec and the policy modules
 the spec names for as long as it hosts the chain, as `all` does: every block
