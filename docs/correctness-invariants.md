@@ -26,10 +26,16 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   retriable, never an exclusion. Pinned by
   `ChainCoreBodyTests.testALocalFailureIsNeverAnExclusion`.
 - **NODE-SEMANTICS-003.e** — A child level asks its peers for nothing (no
-  stream page, no header) while its parent level has not latched `synced`
-  (whole-chain top-down weighing); the latch is one-way. Enforced by
+  stream page, no header) while its parent level has not latched
+  `headersSynced`: weighed a peer's whole log, whatever of it is executed
+  (top-down weighing). The latch is one-way. Enforced by
   `LevelInvariants.checkLevel` ("a child level reads its peers before its
-  parent caught up"); pinned by
+  parent weighed a whole log") and `LevelSimulator` ("still holds its peers
+  back after its parent weighed a whole log"); pinned by
+  `DerivedChildGrindTests.testASlowParentBodyDoesNotLatchSyncedAndTheChildOpens`,
+  `DerivedChildGrindTests.testATransientBodyFailureDoesNotLatchSyncedAndTheChildOpens`,
+  `DerivedChildGrindTests.testAPeerWhoseLogIsReplacedHasNotBeenReadToItsEnd`,
+  `DerivedChildGrindTests.testAChildOpenedBeforeItsParentExecutesRunsOnceItDoes`,
   `DerivedChildGrindTests.testAChildLevelAsksItsPeersNothingWhileItsParentCatchesUpThenSyncsFully`
   and `DerivedChildGrindTests.testAfterTheLatchANewParentBlockDoesNotPauseTheChild`.
 

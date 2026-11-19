@@ -184,19 +184,26 @@ returning malformed bytes is.
 
 A child block's work comes from its parent level: its grinds' carriers are
 parent blocks or shares on them (§9.5), and its runs are parent blocks after
-its carrier (§9.10). So a child level is synced whole-chain top-down: it
-reads its peers' streams, and so weighs any header from them, only once its
-parent level has caught up. That is the parent's `synced` latch: the log of
-a peer running that level read to its end and applied, with the act-on tip
-the heaviest tip whose bodies may be had: a body no provider had (every host
-and announcing peer failed it repeatedly, and its backoff reached the cap)
-does not hold it back, as Bitcoin Core's `IsInitialBlockDownload` reads the
-active chain and never the best header. A body in flight does. The latch is
-one-way, like Bitcoin Core's `IsInitialBlockDownload`: once it is set, the
-child follows live, and a new parent block never pauses it. A grandchild
-waits for its child level's latch in turn. Nexus is not gated.
+its carrier (§9.10). All of that is in what the parent level has weighed;
+none of it is in what the parent has executed. So a child level is synced
+top-down by weight: it reads its peers' streams, and so weighs any header
+from them, only once its parent level has weighed a whole log. That is the
+parent's `headersSynced` latch: the log of a peer running that level read to
+its end with every header in it applied, and the level holding a weighed
+block, as headers-first sync reads headers to the end before it asks for
+what hangs from them. It is the first half of `synced`, which also asks that
+the act-on tip be the heaviest tip whose bodies may be had and gates a
+peer's transactions. A parent that has read a log to its end and is still
+fetching or executing bodies has latched `headersSynced` and not `synced`,
+and its children are open:
+weight never waits on execution, a chain's own or its parent's. What a child
+block's execution needs of its parent, the state its parent block produced,
+it waits for block by block, and the parent executing that block wakes it.
+The latch is one-way: once it is set, the child follows live, and a new
+parent block never pauses it. A grandchild waits for its child level's latch
+in turn. Nexus is not gated.
 
-While its parent catches up, a child level asks its peers for nothing: no
+Until its parent has weighed a whole log, a child level asks its peers for nothing: no
 stream page and no header, and a page pushed to it is not taken. Its stream
 cursors stay where they were. After any step in which the parent is latched,
 however it latched, a level that held its peers back reads every peer's
@@ -206,11 +213,15 @@ weighs every level it reaches in one step.
 
 The nearest prior art is Polkadot's parachains: a parachain node follows
 its relay chain, taking as best and final the parachain blocks relay blocks
-include, and a collator does not author while its relay chain node is
-still syncing.
+include.
 Here the gate is coarser, one latch per level instead of a check per block,
 since a child block's weight is read from its parent level (its grinds'
-carriers and its runs), which a level still catching up does not yet have.
+carriers and its runs), which a level that has not yet weighed a whole log
+does not hold. With the gate open while the parent still executes, the
+levels' working sets are held at once, each within its own bounds (its
+pending headers, its headers awaiting proof, its proofs in a check, and a
+body window of fetched blocks), where before a child's began once its
+parent's was done.
 Execution keeps its own rule: a child block executes once its parent state
 is held and continuous
 ([Parent-state continuity](#parent-state-continuity)).

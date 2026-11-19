@@ -1808,9 +1808,9 @@ final class DerivedChildGrindTests: XCTestCase {
         return host
     }
 
-    /// Whole-chain top-down: while Nexus catches up, Alpha asks its peer
-    /// for nothing (no stream page, no header) and weighs nothing; its
-    /// cursor stays where it was. Once Nexus latches `synced`, Alpha reads
+    /// Top-down by weight: until Nexus has weighed a peer's whole log, Alpha
+    /// asks its peer for nothing (no stream page, no header) and weighs
+    /// nothing; its cursor stays where it was. Once Nexus has, Alpha reads
     /// its peer's log and weighs every block in it.
     func testAChildLevelAsksItsPeersNothingWhileItsParentCatchesUpThenSyncsFully() async throws {
         let fixture = try await gateWorld()
@@ -1914,8 +1914,8 @@ final class DerivedChildGrindTests: XCTestCase {
         await host.relayPage([fixture.c4], at: Self.alpha, from: Self.alphaHost)
         XCTAssertNil(host.core.levels[Self.alpha]?.sync.cursors[Self.alphaHost.key], "a push while gated is not taken")
         XCTAssertEqual(host.core.levels[Self.alpha]?.heldBack, true)
-        host.core.levels[Self.nexus]?.synced = true
-        host.tamper("Nexus latched synced")
+        host.core.levels[Self.nexus]?.headersSynced = true
+        host.tamper("Nexus weighed a whole log")
         await host.step(.tick)
         XCTAssertEqual(host.core.levels[Self.alpha]?.heldBack, false)
         let alpha = try host.digest(Self.alpha)
@@ -1984,22 +1984,25 @@ final class DerivedChildGrindTests: XCTestCase {
     }
 
     /// One failed fetch (a transient failure, the body parked at its first
-    /// backoff step) is not unavailability: Nexus does not latch, and Alpha
-    /// stays gated.
-    func testATransientBodyFailureDoesNotLatch() async throws {
+    /// backoff step) is not unavailability: Nexus does not latch `synced`.
+    /// It has weighed its peer's whole log all the same, so Alpha opens
+    /// and weighs: weight does not wait on its parent's execution.
+    func testATransientBodyFailureDoesNotLatchSyncedAndTheChildOpens() async throws {
         let fixture = try await gateWorld()
-        var host = try await withheldParentHost(fixture, unavailable: true)
+        let host = try await withheldParentHost(fixture, unavailable: true)
         XCTAssertEqual(host.core.levels[Self.nexus]?.bodies.parked[fixture.nexus[1].cid]?.attempts, 1)
         XCTAssertEqual(host.core.levels[Self.nexus]?.synced, false)
-        XCTAssertFalse(host.take().contains { $0.path == Self.alpha }, "Alpha stays gated")
-        XCTAssertTrue(try host.digest(Self.alpha).blocks.isEmpty)
+        let alpha = try host.digest(Self.alpha)
+        for entry in fixture.alpha { XCTAssertNotNil(alpha.blocks[try XCTUnwrap(entry.cid)], "Alpha opened and weighed") }
+        XCTAssertTrue(host.disconnects.isEmpty)
     }
 
     /// Nexus's heaviest header's body is withheld by every provider: once
     /// its backoff reaches the cap, it is unavailable, and Nexus has caught up with what it can have
     /// and latches `synced` (Bitcoin's `IsInitialBlockDownload` reads the
-    /// active chain, never the best header), so Alpha opens and syncs.
-    func testAParentWhoseHeaviestBodyIsUnavailableLatchesAndOpensItsChild() async throws {
+    /// active chain, never the best header). Alpha, open since Nexus weighed
+    /// its log, has its whole chain weighed.
+    func testAParentWhoseHeaviestBodyIsUnavailableLatchesSynced() async throws {
         let fixture = try await gateWorld()
         var host = try await withheldParentHost(fixture, unavailable: true)
         try await failToCap(&host, fixture.nexus[1].cid)
@@ -2048,7 +2051,58 @@ final class DerivedChildGrindTests: XCTestCase {
         }.first)
         await host.step(.received(Self.miner, Self.nexus, .stream(StreamPage(requestID: next, logID: "peer", entries: [], hasMore: false))))
         XCTAssertEqual(host.core.levels[Self.nexus]?.synced, false, "a body asked again holds the latch")
-        XCTAssertFalse(host.take().contains { $0.path == Self.alpha }, "Alpha stays gated")
+        // The log is weighed to its end, which is all Alpha waits for.
+        let alpha = try host.digest(Self.alpha)
+        for entry in fixture.alpha { XCTAssertNotNil(alpha.blocks[try XCTUnwrap(entry.cid)], "Alpha opened and weighed") }
+    }
+
+    /// The state this gate makes the usual one while a node syncs: Alpha is
+    /// open and has weighed its whole chain while Nexus has not executed
+    /// N1, whose state Alpha's blocks after its genesis are anchored at.
+    /// Alpha executes its genesis and none of them until then, and all of
+    /// them once N1's body arrives and Nexus executes it.
+    func testAChildOpenedBeforeItsParentExecutesRunsOnceItDoes() async throws {
+        let fixture = try await gateWorld()
+        // N1's body fails once: asked again when a provider joins.
+        var host = try await withheldParentHost(fixture, unavailable: true)
+        let last = try XCTUnwrap(fixture.alpha.last?.cid)
+        XCTAssertEqual(try host.digest(Self.alpha).canonicalTip, last, "Alpha weighed its chain")
+        XCTAssertEqual(host.core.levels[Self.nexus]?.snapshot.actOnTip, fixture.nexus[0].cid, "N1 is not executed")
+        // Alpha's genesis is anchored at N0's state, which Nexus executed;
+        // every block after it at N1's, which it has not.
+        XCTAssertEqual(
+            host.core.levels[Self.alpha]?.snapshot.actOnTip, try XCTUnwrap(fixture.alpha.first?.cid),
+            "Alpha executed its genesis and nothing anchored at N1"
+        )
+        // N1's body arrives.
+        host.unavailableBodies = []
+        await host.step(.level(Self.nexus, .providerJoined))
+        XCTAssertEqual(host.core.levels[Self.nexus]?.snapshot.actOnTip, fixture.nexus[1].cid)
+        XCTAssertEqual(host.core.levels[Self.alpha]?.snapshot.actOnTip, last, "Alpha executed what waited on N1")
+        XCTAssertTrue(host.disconnects.isEmpty)
+    }
+
+    /// A peer whose log is replaced has not been read to its end, however
+    /// far its old log was read. Nexus read its peer's first log to the end
+    /// and waits for a header of it; the peer then pushes a new, empty log.
+    /// That is no log read to its end: Nexus does not latch on it, and
+    /// Alpha asks its peer for nothing.
+    func testAPeerWhoseLogIsReplacedHasNotBeenReadToItsEnd() async throws {
+        let fixture = try await gateWorld()
+        var host = Host(fixture.world)
+        await host.step(.peerReady(Self.alphaHost))
+        let asked = try XCTUnwrap(host.take().compactMap { sent -> UInt64? in
+            guard sent.path == Self.nexus, case .getStream(let id, _, _, _) = sent.message else { return nil }
+            return id
+        }.first)
+        // The whole first log, naming headers this peer never sends.
+        let entries = fixture.nexus.enumerated().map { StreamEntry(position: UInt64($0.offset + 1), entry: .header($0.element.cid)) }
+        await host.step(.received(Self.alphaHost, Self.nexus, .stream(StreamPage(requestID: asked, logID: "first", entries: entries, hasMore: false))))
+        XCTAssertEqual(host.core.levels[Self.nexus]?.headersSynced, false, "its headers are not applied yet")
+        _ = host.take()
+        await host.step(.received(Self.alphaHost, Self.nexus, .stream(StreamPage(requestID: 0, logID: "second", entries: [], hasMore: false))))
+        XCTAssertEqual(host.core.levels[Self.nexus]?.headersSynced, false, "a log pushed in its place was not read to its end")
+        XCTAssertFalse(host.take().contains { $0.path == Self.alpha }, "Alpha asks its peer for nothing")
     }
 
     /// Same: with the heaviest body unavailable, Nexus takes peers'
@@ -2068,13 +2122,15 @@ final class DerivedChildGrindTests: XCTestCase {
     }
 
     /// A body merely slow (asked, no answer yet) is not unavailable: Nexus
-    /// does not latch on it, and Alpha stays gated.
-    func testASlowParentBodyDoesNotLatch() async throws {
+    /// does not latch `synced` on it. Alpha opens and weighs meanwhile: a
+    /// parent slow to execute does not hold its child's weight back.
+    func testASlowParentBodyDoesNotLatchSyncedAndTheChildOpens() async throws {
         let fixture = try await gateWorld()
-        var host = try await withheldParentHost(fixture, unavailable: false)
+        let host = try await withheldParentHost(fixture, unavailable: false)
         XCTAssertEqual(host.core.levels[Self.nexus]?.synced, false)
-        XCTAssertFalse(host.take().contains { $0.path == Self.alpha }, "Alpha stays gated")
-        XCTAssertTrue(try host.digest(Self.alpha).blocks.isEmpty)
+        let alpha = try host.digest(Self.alpha)
+        for entry in fixture.alpha { XCTAssertNotNil(alpha.blocks[try XCTUnwrap(entry.cid)], "Alpha opened and weighed") }
+        XCTAssertTrue(host.disconnects.isEmpty)
     }
 
     /// A grandchild whose carrier the parent level weighed is credited by

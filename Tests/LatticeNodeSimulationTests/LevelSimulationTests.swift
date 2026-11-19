@@ -314,7 +314,7 @@ final class LevelSimulationTests: XCTestCase {
                     queue.append(.level(path, .childIndexFetched(
                         peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
                     )))
-                // Nexus executes, so it latches `synced` and Alpha's gate opens.
+                // Nexus executes what it weighed; Alpha's gate opened when Nexus had weighed its peer's log.
                 case .level(let path, .fetchBody(let cid)):
                     queue.append(.level(path, .bodyFetched(cid: cid)))
                 case .connect(let path, let jobs):
@@ -385,7 +385,7 @@ final class LevelSimulationTests: XCTestCase {
                     queue.append(.level(path, .childIndexFetched(
                         peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
                     )))
-                // Nexus executes, so it latches `synced` and Alpha's gate opens.
+                // Nexus executes what it weighed; Alpha's gate opened when Nexus had weighed its peer's log.
                 case .level(let path, .fetchBody(let cid)):
                     queue.append(.level(path, .bodyFetched(cid: cid)))
                 case .connect(let path, let jobs):
@@ -457,7 +457,7 @@ final class LevelSimulationTests: XCTestCase {
                     queue.append(.level(path, .childIndexFetched(
                         peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
                     )))
-                // Nexus executes, so it latches `synced` and Alpha's gate opens.
+                // Nexus executes what it weighed; Alpha's gate opened when Nexus had weighed its peer's log.
                 case .level(let path, .fetchBody(let cid)):
                     queue.append(.level(path, .bodyFetched(cid: cid)))
                 case .connect(let path, let jobs):
@@ -530,7 +530,7 @@ final class LevelSimulationTests: XCTestCase {
                         queue.append(.level(path, .childIndexFetched(
                             peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
                         )))
-                    // Nexus executes, so it latches `synced` and Alpha's gate opens.
+                    // Nexus executes what it weighed; Alpha's gate opened when Nexus had weighed its peer's log.
                     case .level(let path, .fetchBody(let cid)):
                         queue.append(.level(path, .bodyFetched(cid: cid)))
                     case .connect(let path, let jobs):
@@ -595,7 +595,7 @@ final class LevelSimulationTests: XCTestCase {
                         queue.append(.level(path, .childIndexFetched(
                             peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
                         )))
-                    // Nexus executes, so it latches `synced` and Alpha's gate opens.
+                    // Nexus executes what it weighed; Alpha's gate opened when Nexus had weighed its peer's log.
                     case .level(let path, .fetchBody(let cid)):
                         queue.append(.level(path, .bodyFetched(cid: cid)))
                     case .connect(let path, let jobs):

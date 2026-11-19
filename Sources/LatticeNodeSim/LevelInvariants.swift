@@ -229,13 +229,13 @@ public enum LevelInvariants {
         if held.reduce(0, { $0 + $1.bytes }) > bounds.maxQueuedBytes {
             throw fail("proofs in a check exceed their byte budget")
         }
-        // Whole-chain top-down: a child level asks its peers for nothing
-        // while its parent level has not caught up.
-        if path.count > 1, host.levels[Array(path.dropLast())]?.synced == false,
+        // Top-down by weight: a child level asks its peers for nothing
+        // while its parent level has not weighed a peer's whole log.
+        if path.count > 1, host.levels[Array(path.dropLast())]?.headersSynced == false,
            core.sync.peers.values.contains(where: {
                $0.stream != nil || $0.data != nil || $0.parentRequest != nil || !$0.holes.isEmpty
            }) {
-            throw fail("a child level reads its peers before its parent caught up")
+            throw fail("a child level reads its peers before its parent weighed a whole log")
         }
         if core.sync.pending.entries.values.contains(where: { path.count > 1 && $0.evidence.isEmpty }) {
             throw fail("a child header with no verified work is in the pending queue")
