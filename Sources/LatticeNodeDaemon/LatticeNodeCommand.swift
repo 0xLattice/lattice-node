@@ -104,7 +104,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(help: "Which block bodies (a block's own Volume and its transactions') this node keeps beyond the ones it needs to operate: all, or none. It always holds the bodies waiting to execute, each chain's tip, and each genesis block. With none, a body is let go of once another block is the tip, and is no longer served; headers, facts and state stay, so what the node weighs and selects does not change. A node that syncs from genesis needs peers that keep all.")
     var blockBodies = "all"
 
-    @Option(help: "Which state this node keeps: all, the state of every block it executed; recent, the whole current state of each chain and what its last --state-window blocks replaced; or none, what the executions of each chain's tip block read and created (a window of 1), and blocks above the tip until it passes them. Kept state is a cache: execution, a submitted transaction's check and reads all read from peers the state this node does not hold, so recent and none answer the same as all, a read of state they let go of costing a fetch. On recent a node counts the places each node of the state holds and keeps what it counts; a chain with no counts (the first start on recent, a chain newly hosted), or a reorganization deeper than the window, gets a state sync, which reads the current state the node lacks from peers. A network needs nodes on all to serve what the others let go of, and a node that syncs from genesis needs peers that keep all. tip, the earlier name, means recent.")
+    @Option(help: "Which state this node keeps: all, the state of every block it executed; or recent, the whole current state of each chain and what its last --state-window blocks replaced. Kept state is a cache: execution, a submitted transaction's check and reads all read from peers the state this node does not hold, so recent answers the same as all, a read of state it let go of costing a fetch. On recent a node counts the places each node of the state holds and keeps what it counts; a chain with no counts (the first start on recent, a chain newly hosted), or a reorganization deeper than the window, gets a state sync, which reads the current state the node lacks from peers. A network needs nodes on all to serve what the others let go of, and a node that syncs from genesis needs peers that keep all. tip, the earlier name, means recent.")
     var state = "all"
 
     @Option(help: "Seconds with no newly accepted block on a hosted chain after which the node widens that chain's peer search: Nexus re-dials configured peers without a session, a child chain looks up its providers, and either dials peers it remembers. The node also announces each hosted child chain. Staleness is measured from the verified local tip. Discovery never affects validation or fork choice. 0 disables search.")
@@ -377,7 +377,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             throw ValidationError("--block-bodies is all or none")
         }
         guard let state = StateRetention(named: state) else {
-            throw ValidationError("--state is all, recent or none")
+            throw ValidationError("--state is all or recent; none was removed: use recent (--state-window 1 keeps the least)")
         }
         guard stateWindow.isEmpty || state == .recent else {
             throw ValidationError("--state-window applies to --state recent only")

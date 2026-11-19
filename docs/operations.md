@@ -625,12 +625,12 @@ their own reason to run one. Keep `all` on a node an explorer reads.
   `stateWindow` blocks (`--state-window`, counting the tip) replaced. 64
   blocks unless set; `stateWindows` (or `--state-window Nexus/Alpha=500`)
   sets one chain. `tip`, the earlier name, means `recent`.
-- `none`: a window of 1: what the executions at each chain's tip height read
-  and created (and of side blocks above it, until the tip passes them), and
-  what a block reads, until it has executed. `--state-window` applies to
-  `recent` only; set with `all` or `none` it is refused.
+`--state-window` applies to `recent` only; set with `all` it is refused.
+`none`, which kept only what the last executions read and created, was
+removed: a node configured with it does not start and says to use
+`recent`, where `stateWindow: 1` keeps the least.
 
-On `recent` and `none` a node keeps each chain's spec and the policy modules
+On `recent` a node keeps each chain's spec and the policy modules
 the spec names for as long as it hosts the chain, as `all` does: every block
 of the chain reads them, so they are not state that a window lets go of.
 
@@ -680,13 +680,12 @@ spec and policy modules; hosting it again starts with a state sync.
 
 Kept state is a cache, not a promise: execution, a submitted transaction's
 check, and state reads all read the state this node does not hold from
-peers, so `recent` and `none` answer what `all` answers, and a read of state
-they let go of costs a fetch. A submitted transaction is first checked
+peers, so `recent` answers what `all` answers, and a read of state it let
+go of costs a fetch. A submitted transaction is first checked
 against what this node holds, and only one that passes those checks (its
 signatures, chain, fee and size) reads further state from peers. On `recent`
 blocks, transactions and reads of the current state run without fetching once
-a chain's counts are in place, as does a reorganization within the window; on
-`none` blocks that touch recent state do. Block bodies (a block's transactions and children) and
+a chain's counts are in place, as does a reorganization within the window. Block bodies (a block's transactions and children) and
 anything asked for by CID are answered from this node's store alone: which
 bodies it keeps is `blockBodies`, and a reader cannot make it fetch whatever
 it names.
@@ -695,11 +694,10 @@ A start after a version that kept exactly the tip's state (`tip`) moves that
 state into each chain's window at its tip, so it goes a window later like
 any state, and forgets its counts. What a node kept for a chain it no longer
 hosts goes at its next start, and its counts go when it stops hosting it.
-Switching from `recent` to `all` keeps what the counts held with the chain;
-switching to `none` lets it go.
+Switching from `recent` to `all` keeps what the counts held with the chain.
 
 A node that is the only holder of a state and lets it go has lost it, so a
-network needs nodes on `all`. Switching to `recent` or `none` applies to state
+network needs nodes on `all`. Switching to `recent` applies to state
 stored from then on: what a run on `all` stored stays until the node is
 synced again.
 

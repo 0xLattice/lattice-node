@@ -101,7 +101,7 @@ public struct Topology: Codable, Sendable {
     /// The block bodies kept beyond what the node needs to operate
     /// (`--block-bodies`): `all` or `none`. Absent = `all`.
     public var blockBodies: String?
-    /// The state kept (`--state`): `all`, `recent` or `none` (`tip` is the
+    /// The state kept (`--state`): `all` or `recent` (`tip` is the
     /// earlier name of `recent`). Absent = `all`.
     public var state: String?
     /// With `recent`, the blocks of each chain, counting its tip, whose
@@ -255,7 +255,9 @@ public struct Topology: Codable, Sendable {
             throw CtlError("blockBodies is all or none, not \(blockBodies)")
         }
         if let state, StateRetention(named: state) == nil {
-            throw CtlError("state is all, recent or none, not \(state)")
+            throw CtlError(state == "none"
+                ? "state none was removed: use recent (a stateWindow of 1 keeps the least)"
+                : "state is all or recent, not \(state)")
         }
         if stateWindow != nil || !(stateWindows ?? [:]).isEmpty, StateRetention(named: state ?? "all") != .recent {
             throw CtlError("a state window applies to state recent only")

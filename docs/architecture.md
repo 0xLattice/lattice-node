@@ -203,7 +203,7 @@ policy modules) and the Nexus genesis block are named by the chain. A body
 is let go of when its block is found invalid, and, when the operator keeps
 no bodies beyond the ones the node operates on (`blockBodies: none`), when
 another block becomes its chain's tip. When the operator keeps recent
-state (`state: recent`, or `none`, which is a window of one block), what a
+state (`state: recent`), what a
 step's executions stored is named by its chain and the height of the
 step's newest block, retained in the transaction that stores it, and is let
 go of, every such height in one transaction, once that height is a state
@@ -233,7 +233,7 @@ then the difference from the counts, moved on to the tip, is written in one
 adjustment. A start checks each chain's counts against the store first, and
 a maintenance pass checks again those that moved since. A node
 the counts would start counting and the store lacks is healed the same way
-first. On `recent` and on `none`, what a block mined here reads is named by
+first. On `recent`, what a block mined here reads is named by
 that block until it executes; a block found valid is stored without the
 state it read, its parent's, which the counts and windows keep or peers serve. Kept state is a cache: whatever
 reads state the store lacks (execution, a submitted transaction's check, a

@@ -235,22 +235,24 @@ final class LatticeCtlTopologyTests: XCTestCase {
         )
         XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"state":"recent","stateWindow":0}"#))
         XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"state":"recent","stateWindows":{"Alpha":5}}"#))
-        // A window says how much recent state to keep: on all or none it says
+        // A window says how much recent state to keep: on all it says
         // nothing, and is left out (inert, reported), as is one for a chain
         // not hosted.
         XCTAssertEqual(try load(#"{"listen":4001,"rpc":4003,"stateWindow":32}"#).contentServingArguments, [])
         XCTAssertEqual(
-            try load(#"{"listen":4001,"rpc":4003,"hostedChains":["Nexus/Alpha"],"state":"none","stateWindows":{"Nexus/Alpha":5}}"#)
+            try load(#"{"listen":4001,"rpc":4003,"hostedChains":["Nexus/Alpha"],"state":"all","stateWindows":{"Nexus/Alpha":5}}"#)
                 .contentServingArguments,
-            ["--state", "none"]
+            ["--state", "all"]
         )
         XCTAssertEqual(
             try load(#"{"listen":4001,"rpc":4003,"state":"recent","stateWindows":{"Nexus/Alpha":5}}"#).contentServingArguments,
             ["--state", "recent"]
         )
-        XCTAssertEqual(
-            try load(#"{"listen":4001,"rpc":4003,"state":"none"}"#).contentServingArguments, ["--state", "none"]
-        )
+        // `none` was removed: a configuration that still names it is
+        // refused with what to use instead.
+        XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"state":"none"}"#)) { error in
+            XCTAssertTrue("\(error)".contains("use recent"), "\(error)")
+        }
         XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"state":"some"}"#))
         XCTAssertEqual(
             try load(#"{"listen":4001,"rpc":4003,"announceLifetime":3600}"#).contentServingArguments,

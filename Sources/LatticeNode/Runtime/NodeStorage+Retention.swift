@@ -245,9 +245,7 @@ extension NodeStorage {
 
     /// With a state window: what executions stored at heights more than a
     /// window below `height`, the tip's, goes, in one commit however many
-    /// heights that is, and their state diffs. On `recent` what the counts
-    /// name stays; on `none` what a newer block still names is read from
-    /// peers when something reads it.
+    /// heights that is, and their state diffs. What the counts name stays.
     nonisolated func letGoOfState(at path: ChainPath, below height: UInt64) async {
         guard let window = configuration.stateWindow(for: path) else { return }
         guard height >= window else { return }

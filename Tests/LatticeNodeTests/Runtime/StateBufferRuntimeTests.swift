@@ -26,7 +26,7 @@ final class StateBufferRuntimeTests: XCTestCase {
 
     private func configuration(
         _ directory: URL, buffer: Int = NodeResourcePolicy.defaultMaximumBufferedStateBytes,
-        state: StateRetention = .all
+        state: StateRetention = .all, stateWindow: UInt64? = nil
     ) throws -> (NodeConfiguration, IvyConfig) {
         let port = NetworkTransportTestPorts.allocate()
         let configuration = try NodeConfiguration(
@@ -34,7 +34,8 @@ final class StateBufferRuntimeTests: XCTestCase {
             privateKeyHex: String(repeating: "5b", count: 32),
             listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(), externalAddress: "127.0.0.1",
             resourcePolicy: NodeResourcePolicy(maximumBufferedStateBytes: buffer),
-            state: state
+            state: state,
+            stateWindows: FinalityWindows(all: stateWindow)
         )
         let overlay = IvyConfig(
             signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: [],
@@ -292,13 +293,13 @@ final class StateBufferRuntimeTests: XCTestCase {
         }
     }
 
-    /// A node that keeps no state lets go of what each tip replaced, which
+    /// A node that keeps one block of state lets go of what each tip replaced, which
     /// works on the store. With the disk stopped that waits, and the node
     /// goes on all the same: a second block submitted to it executes on the
     /// first, neither miner answered yet. When the disk answers both are,
     /// and a node started again is at the same tip.
     func testWithItsDiskStoppedANodeThatPrunesGoesOnExecutingBlocks() async throws {
-        let (configuration, overlay) = try configuration(directory("pruning-stalled"), state: .none)
+        let (configuration, overlay) = try configuration(directory("pruning-stalled"), state: .recent, stateWindow: 1)
         let payee = payee()
         let request = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: nexus, address: payee)])
         let before = try await run(configuration, overlay) { runtime -> String in

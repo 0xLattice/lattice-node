@@ -124,7 +124,8 @@ This is intentionally one schema:
 - rates must be finite and nonnegative;
 - `blockBodies`, when set, is `all` or `none` and is passed as
   `--block-bodies` (see "What a node keeps" in `operations.md`);
-- `state`, when set, is `all`, `recent` or `none` (`tip` means `recent`) and is
+- `state`, when set, is `all` or `recent` (`tip` means `recent`; `none` was
+  removed and is refused) and is
   passed as `--state` (same section);
 - `stateWindow`, when set, is at least 1 block and is passed as
   `--state-window N`; `stateWindows` maps a chain path to blocks over it and

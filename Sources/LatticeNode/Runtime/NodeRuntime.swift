@@ -2233,16 +2233,9 @@ extension NodeRuntime {
         /// until it commits; a store failure is tried again at the next
         /// settle or maintenance pass. A check, heal or state sync runs off
         /// the loop, one at a time, and settles again when it ends; one that
-        /// failed waits for a new peer or the next maintenance pass. True
-        /// when the counts reached the tip, or the operator keeps no counts.
+        /// failed waits for a new peer or the next maintenance pass.
         private mutating func settleCounted(at path: ChainPath, tip: String, height: UInt64) {
-            guard configuration.state == .recent, let window = configuration.stateWindow(for: path) else {
-                // No counts kept: what executions stored below the window
-                // goes, in the lane, after the facts of this step.
-                let storage = storage
-                storage.lane.run { await storage.letGoOfState(at: path, below: height) }
-                return
-            }
+            guard configuration.state == .recent, let window = configuration.stateWindow(for: path) else { return }
             var chain = counted[path] ?? CountedChain()
             defer { counted[path] = chain }
             guard chain.repair == nil, !chain.waiting else { return }

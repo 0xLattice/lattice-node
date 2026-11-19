@@ -118,7 +118,7 @@ extension NodeStorage {
             switch configuration.state {
             case .all:
                 stored.append(contentsOf: created)
-            case .recent, .none:
+            case .recent:
                 // A state no block fact of the step names (none does today)
                 // joins the chain's newest window below.
                 states[path] = produced

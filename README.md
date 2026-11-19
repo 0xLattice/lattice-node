@@ -194,7 +194,7 @@ fsync is not forced to the device, so disk timings understate Linux; the
 counts and the per-level split hold.
 
 What the follower keeps is set in the environment, for either script:
-`BENCH_STATE` (`all`, `recent` or `none`; default `recent`), `BENCH_BODIES`
+`BENCH_STATE` (`all` or `recent`; default `recent`), `BENCH_BODIES`
 (`all` or `none`; default `all`) and `BENCH_STATE_BUFFER` (the state
 buffer's limit in bytes; default the node's, `0` for none). They are the
 follower's alone: the recorder and the server keep everything. A value that

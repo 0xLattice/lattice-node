@@ -9,10 +9,8 @@ import cashew
 @testable import LatticeNode
 import LatticeNodeAPI
 
-/// `state: recent` and `none`: on `recent` a node keeps the whole current
-/// state of its chains and what their recent blocks replaced; on `none`
-/// what the last executions read and created. Either reads the rest from
-/// peers.
+/// `state: recent`: a node keeps the whole current state of its chains and
+/// what their recent blocks replaced, and reads the rest from peers.
 final class StateWindowTests: XCTestCase {
     private struct Host {
         let configuration: NodeConfiguration
@@ -110,68 +108,11 @@ final class StateWindowTests: XCTestCase {
         return counts
     }
 
-    /// A node on `none` syncs a chain whose blocks pay and spend, restarts
-    /// and keeps validating. Between blocks it holds only what the last
-    /// execution touched: no older block's state, and nothing a block read
-    /// once that block has executed.
-    func testANodeOnNoneSyncsAndKeepsValidatingHoldingNoState() async throws {
-        let (payer, payee): (Key, Key) = (CryptoUtils.generateKeyPair(), CryptoUtils.generateKeyPair())
-        let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(payer))])
-        let producer = try host(keyByte: 0xbc)
-        let (producerRuntime, _) = try await start(producer)
-        var nonce: UInt64 = 0
-        func produce(_ count: Int, paying: Bool = true) async throws -> [String] {
-            var blocks: [String] = []
-            for _ in 0..<count {
-                if paying {
-                    _ = try await producerRuntime.submitTransaction(SubmitTransactionRequest(
-                        transaction: try transaction(payer, nonce: nonce, moves: [(address(payer), -2), (address(payee), 1)])
-                    ))
-                    nonce += 1
-                }
-                blocks.append(try BlockHeader(node: try await producerRuntime.mineBlock(paid)).rawCID)
-            }
-            return blocks
-        }
-        var blocks = try await produce(2, paying: false)
-        blocks += try await produce(6)
-
-        let node = try host(keyByte: 0xbd, peers: [producer.endpoint], state: .none)
-        func holdsNoState(_ runtime: NodeRuntime, _ storage: NodeStorage, through tip: String) async throws {
-            try await eventually("the node executes \(tip.suffix(6))") { runtime.published.value?.actOnTip == tip }
-            // The checks below read the blocks' facts from the store itself.
-            await storage.written()
-            // The tip is published within the step that executed it; what it
-            // read is let go of at the end of that step.
-            try await eventually("nothing a block read is held once it has executed") {
-                (try? await storage.broker.retainedScopes(prefix: storage.scopes.chain + ":reads:"))?.isEmpty == true
-            }
-            // An older block's state is let go of behind the loop, so it
-            // can still be held when the tip is published.
-            let older = Array(blocks.dropLast())
-            try await eventually("an older block's state is not held") {
-                for block in older where try await stateNodes(of: block, in: storage) != nil { return false }
-                return true
-            }
-        }
-        do {
-            let (runtime, storage) = try await start(node)
-            try await holdsNoState(runtime, storage, through: try XCTUnwrap(blocks.last))
-            await runtime.stop()
-        }
-        blocks += try await produce(3)
-        let (runtime, storage) = try await start(node)
-        try await holdsNoState(runtime, storage, through: try XCTUnwrap(blocks.last))
-        let balance = await producerRuntime.reads.account(owner: address(payee), blockCID: try XCTUnwrap(blocks.last))?.balance
-        XCTAssertEqual(balance, 9, "the chain the node validated pays and spends")
-        await runtime.stop()
-        await producerRuntime.stop()
-    }
-
-    /// A node on `none` follows a chain whose blocks delete keys and empty
-    /// accounts: a deletion merges a node's neighbour into its parent, and
-    /// the neighbour, which no block's read set names, is read from a peer.
-    func testANodeOnNoneFollowsBlocksThatDeleteState() async throws {
+    /// A node keeping one block of state follows a chain whose blocks delete
+    /// keys and empty accounts: a deletion merges a node's neighbour into
+    /// its parent, and the neighbour, which no block's read set names, is
+    /// read from the state it holds or a peer.
+    func testANodeKeepingOneBlockOfStateFollowsBlocksThatDeleteState() async throws {
         let miner: Key = CryptoUtils.generateKeyPair()
         let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(miner))])
         let producer = try host(keyByte: 0xc4)
@@ -200,9 +141,9 @@ final class StateWindowTests: XCTestCase {
         }
         XCTAssertEqual(producerRuntime.published.value?.mempoolCount, 0)
 
-        let node = try host(keyByte: 0xc5, peers: [producer.endpoint], state: .none)
+        let node = try host(keyByte: 0xc5, peers: [producer.endpoint], state: .recent, stateWindow: 1)
         let (runtime, _) = try await start(node)
-        try await eventually("the node on none executes every block") { runtime.published.value?.actOnTip == tip }
+        try await eventually("the node on a window of one executes every block") { runtime.published.value?.actOnTip == tip }
         await runtime.stop()
         await producerRuntime.stop()
     }
@@ -1224,8 +1165,7 @@ final class StateWindowTests: XCTestCase {
     }
 
     /// Counts kept on `recent` are kept with the chain on `all`, then
-    /// dropped: the tip's whole state stays after a sweep. On `none` they
-    /// are dropped.
+    /// dropped: the tip's whole state stays after a sweep.
     func testLeavingRecentDropsTheCounts() async throws {
         let miner: Key = CryptoUtils.generateKeyPair()
         let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(miner))])
@@ -1237,18 +1177,17 @@ final class StateWindowTests: XCTestCase {
             try await eventuallyWithPasses(runtime, "the counts reach the tip") { try await self.settled(storage, at: tip) }
             await runtime.stop()
         }
-        for state in [StateRetention.all, .none] {
+        do {
+            let state = StateRetention.all
             let next = try host(keyByte: 0xf7, storageDirectory: node.configuration.storagePath, state: state)
             let (runtime, storage) = try await start(next)
             try await eventually("the node is at the tip") { runtime.published.value?.actOnTip == tip }
             await runtime.stop()
             let counts = try await storage.broker.countedScopes(prefix: storage.scopes.countedPrefix)
             XCTAssertEqual(counts, [], "no counts on \(state)")
-            if state == .all {
-                _ = try await storage.broker.sweep()
-                let whole = try await stateNodes(of: tip, in: storage)
-                XCTAssertNotNil(whole, "what the counts kept is kept with the chain")
-            }
+            _ = try await storage.broker.sweep()
+            let whole = try await stateNodes(of: tip, in: storage)
+            XCTAssertNotNil(whole, "what the counts kept is kept with the chain")
         }
     }
 
@@ -1268,7 +1207,7 @@ final class StateWindowTests: XCTestCase {
     }
 
     /// The window each setting gives a chain: 64 unless the operator sets
-    /// one, for every chain or for one; one block on `none`; none on `all`.
+    /// one, for every chain or for one; none on `all`. `none` was removed.
     func testTheStateWindowIsTheOperatorsWithASaneDefault() throws {
         func configuration(_ state: StateRetention, _ windows: FinalityWindows = FinalityWindows()) throws -> NodeConfiguration {
             try NodeConfiguration(
@@ -1281,11 +1220,11 @@ final class StateWindowTests: XCTestCase {
         }
         XCTAssertEqual(StateRetention(named: "tip"), .recent, "the earlier name")
         XCTAssertNil(StateRetention(named: "some"))
+        XCTAssertNil(StateRetention(named: "none"), "removed")
         XCTAssertEqual(try configuration(.recent).stateWindow(for: ["Nexus"]), 64)
         let set = try configuration(.recent, FinalityWindows(all: 10, byChain: [["Nexus", "Alpha"]: 500]))
         XCTAssertEqual(set.stateWindow(for: ["Nexus"]), 10)
         XCTAssertEqual(set.stateWindow(for: ["Nexus", "Alpha"]), 500)
-        XCTAssertEqual(try configuration(.none, FinalityWindows(all: 10)).stateWindow(for: ["Nexus"]), 1)
         XCTAssertNil(try configuration(.all, FinalityWindows(all: 10)).stateWindow(for: ["Nexus"]))
     }
 }

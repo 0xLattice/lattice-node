@@ -98,8 +98,6 @@ public enum StateRetention: String, Sendable, CaseIterable {
     /// blocks replaced, for its state window
     /// (`NodeConfiguration.stateWindow(for:)`).
     case recent
-    /// What the last execution read and created, until the next.
-    case none
 
     /// An operator's name for it. `tip`, which kept exactly the tip's state,
     /// is now `recent`.
@@ -252,7 +250,6 @@ public struct NodeConfiguration: Sendable {
         switch state {
         case .all: nil
         case .recent: max(1, stateWindows.window(for: path) ?? Self.defaultStateWindow)
-        case .none: 1
         }
     }
 

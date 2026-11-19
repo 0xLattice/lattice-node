@@ -126,7 +126,7 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   stored is named by its chain and the height of the step's newest block,
   and is let go of once the chain's tip is a state window or more above it
   (`--state-window`, 64 blocks unless the operator sets one, per chain or
-  for every chain); `none` is a window of one block, and on `recent` a
+  for every chain), and a
   window is let go of only once the chain's counts reached the tip. A start
   lets go of the scopes and counts earlier versions kept a tip's state
   under. State the store lacks is read from peers by execution, preflight
@@ -144,10 +144,10 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   adjustment, the old ones serving until then. Pinned by
   `StateWindowTests.testTheCountsFollowEveryMoveOfTheTip` and the other
   `StateWindowTests` that check the counts.
-- **NODE-STORAGE-002.i** — With `state: recent` or `none` what a stored
+- **NODE-STORAGE-002.i** — With `state: recent` what a stored
   block reads is named by that block until it executes or is found invalid
   (a start lets go of what an executed block's scope still names). Pinned
-  by `StateWindowTests.testANodeOnNoneSyncsAndKeepsValidatingHoldingNoState`.
+  by `StateWindowTests.testRecentKeepsAChildsSpecAndPolicyModulesWhileItIsHosted`.
 - **NODE-STORAGE-002.j** — A Volume the operator pins is named by the
   operator scope until it is unpinned, whatever the other rules keep. Pinned
   by `OperatorPinTests` and `DaemonHTTPTests.testOperatorPinRoutes`.
