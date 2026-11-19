@@ -92,8 +92,8 @@ can still move to a loop of their own later.
 
 | Role | Holds | Executes from |
 |---|---|---|
-| Archive | All bodies and all historical state | Its own store only |
-| Full | All current state and a recent window | Its own store only |
+| Archive | All bodies and all historical state, to answer reads of old state | Its own store only |
+| Full | All current state, a recent window, and every chain's receipt history | Its own store, and peers for what it let go |
 | Light | Headers, plus what it has fetched | Witnesses fetched from full or archive nodes |
 
 ## Store layout
