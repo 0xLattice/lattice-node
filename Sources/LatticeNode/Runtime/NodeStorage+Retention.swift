@@ -252,6 +252,10 @@ extension NodeStorage {
         // A release reclaims what no stored scope names: the newer windows'
         // retention must be stored first.
         guard await flushedState() else { return }
+        // Asked at an older tip: the act-on tip may have moved since to a
+        // heavier branch below it, whose window stays.
+        let height = min(height, actOnHeights.withLock { $0[path] } ?? height)
+        guard height >= window else { return }
         let kept = scopes.window(at: path, height: height - window + 1)
         do {
             try await broker.releaseRetainedScopes(

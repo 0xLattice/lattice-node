@@ -1667,6 +1667,12 @@ extension NodeRuntime {
                     )
                 }
             }
+            // The act-on heights this step decided, before its state is
+            // buffered: a window release behind the loop keeps their windows.
+            if configuration.state != .all {
+                let heights = core.levels.mapValues(\.snapshot.actOnHeight)
+                storage.actOnHeights.withLock { $0 = heights }
+            }
             // The facts transaction, then publish, then everything else, each
             // in order.
             func rank(_ effect: NodeEffect) -> Int {

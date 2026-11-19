@@ -61,6 +61,10 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// Transactions the pool gained whose store write waits in the lane
     /// (`storingBehind`): read as stored content is.
     nonisolated let poolBuffer = StateBuffer()
+    /// Each chain's act-on height as the loop last decided it, set before
+    /// that step's state is buffered. A window release asked at an older
+    /// tip runs behind the loop: it keeps what this height's window holds.
+    nonisolated let actOnHeights = Mutex<[[String]: UInt64]>([:])
     /// How many waiting writes hold each Volume of `poolBuffer`.
     private nonisolated let poolHolds = Mutex<[String: Int]>([:])
     /// What this node holds: the state buffer, then the store.
