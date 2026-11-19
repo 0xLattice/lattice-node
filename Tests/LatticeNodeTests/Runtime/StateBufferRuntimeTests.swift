@@ -291,4 +291,35 @@ final class StateBufferRuntimeTests: XCTestCase {
             }
         }
     }
+
+    /// A node that keeps no state lets go of what each tip replaced, which
+    /// works on the store. With the disk stopped that waits, and the node
+    /// goes on all the same: a second block submitted to it executes on the
+    /// first, neither miner answered yet. When the disk answers both are,
+    /// and a node started again is at the same tip.
+    func testWithItsDiskStoppedANodeThatPrunesGoesOnExecutingBlocks() async throws {
+        let (configuration, overlay) = try configuration(directory("pruning-stalled"), state: .none)
+        let payee = payee()
+        let request = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: nexus, address: payee)])
+        let before = try await run(configuration, overlay) { runtime -> String in
+            _ = try await self.mine(2, on: runtime, paying: payee)
+            let height = try XCTUnwrap(runtime.published.value?.actOnHeight)
+            let release = await self.stopDisk(of: runtime)
+            let first = Task { _ = try await runtime.mineBlock(request) }
+            try await eventually("the first block executes") {
+                runtime.published.value?.actOnHeight == height + 1
+            }
+            let second = Task { _ = try await runtime.mineBlock(request) }
+            try await eventually("the second block executes while the first's pruning waits") {
+                runtime.published.value?.actOnHeight == height + 2
+            }
+            release()
+            try await first.value
+            try await second.value
+            return try XCTUnwrap(runtime.published.value?.actOnTip)
+        }
+        try await run(configuration, overlay) { runtime in
+            try await eventually("the node is back at its tip") { runtime.published.value?.actOnTip == before }
+        }
+    }
 }
