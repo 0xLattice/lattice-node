@@ -144,9 +144,12 @@ final class StateWindowTests: XCTestCase {
             try await eventually("nothing a block read is held once it has executed") {
                 (try? await storage.broker.retainedScopes(prefix: storage.scopes.chain + ":reads:"))?.isEmpty == true
             }
-            for block in blocks.dropLast() {
-                let state = try await stateNodes(of: block, in: storage)
-                XCTAssertNil(state, "an older block's state is not held")
+            // An older block's state is let go of behind the loop, so it
+            // can still be held when the tip is published.
+            let older = Array(blocks.dropLast())
+            try await eventually("an older block's state is not held") {
+                for block in older where try await stateNodes(of: block, in: storage) != nil { return false }
+                return true
             }
         }
         do {
