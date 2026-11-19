@@ -124,9 +124,7 @@ though it were a complete boundary.
 bundle serving reads it, a node runs without it, and it may be deleted while
 the node is stopped.
 
-A block's body is written before the fact transaction that names it (and
-synced before any answer that promises it is kept: `volumes.db` does not
-wait for each write's sync, see `docs/operations.md`): a
+A block's body is durable before the fact transaction that names it: a
 block's Volumes, once its execution found it valid or it was mined here, are
 one `volumes.db` transaction, then retained. The complete `NodeBatch` then
 commits in one SQLite transaction across every affected chain path, including

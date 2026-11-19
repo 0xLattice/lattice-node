@@ -60,12 +60,7 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   it is never ahead of the store. At a start, an execution above its
   level's marker is forgotten (`NodeStore.forgetUnflushedExecutions`): the
   block is a header again and executes again. No fact a start restores
-  names a state the store lacks. The Volume store does not wait for a
-  write's sync (`BrokerDurability.deferred`), so a power loss takes its
-  writes since the last flush (`NodeStorage.flushVolumes`): it is flushed
-  before a marker moves, and before the facts of a child genesis whose
-  spec it holds, which a start reads and asks no peer for. Pinned by
-  `PowerLossTests`. The simulator models a store with no
+  names a state the store lacks. The simulator models a store with no
   buffer and enforces the unbuffered form: `SimBodies.checkStatesStored`
   and `Invariants.checkTree` ("weighed block … has no durable content").
 - **NODE-STORAGE-002.b** — Nothing is published, served, relayed or
@@ -80,14 +75,7 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   no peer could give back what they promise: an operator's submitted
   transaction is journaled before it is acknowledged, and its journal row
   goes only after the facts of the block that confirmed it; and a miner's
-  submitted block has its facts written before its miner is answered. Each
-  of those answers, and a pin's, also follows a flush of the Volume store,
-  which otherwise does not wait for a write's sync; a journal row goes
-  after one too, so the block that confirmed its transaction is kept
-  first. A journal row a start reads is given to the pool once its chain
-  has executed up to the heaviest block it knows: a start can stand below
-  the tip the node last executed, and a transaction refused there would
-  lose its row. Pinned by `PowerLossTests`. The simulator models a store that writes within the step and enforces
+  submitted block has its facts written before its miner is answered. The simulator models a store that writes within the step and enforces
   that form: `Simulator` and `LevelSimulator` ("published tip … is not
   durable", "served … before it was durable", "relayed … before it was
   durable").
