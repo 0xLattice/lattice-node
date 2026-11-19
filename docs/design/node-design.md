@@ -598,7 +598,8 @@ The sidecar is not part of the block: the block's bytes, CID and
 chain's store, kept and released with it, and sent whenever the block is
 sent: a peer that asks for the block gets the block, its transactions and
 its sidecar in one bundle. A block with withdrawals is complete only with
-its sidecar: a node does not store, weigh, serve or connect one without it. Whoever produces the block can always build them, since a
+its sidecar: a node does not connect one, or take it from a peer, without
+it. Whoever produces the block can always build them, since a
 child block anchors at its carrier's entering state, the one its miner builds
 on. Old parent state is then never needed to execute a child block, on any
 retention setting, by any node, whenever it hosts the child.
@@ -614,10 +615,12 @@ block and send its body on request; pushing the sidecar with the header
 would send it to peers that never execute the child. The sidecar's nodes are
 content addressed and checked against the block's `parentState`, so they
 may be taken from any peer; the child's hosts are the ones sure to hold
-them, since they keep them with the block. One path is
-best-effort: a block this node mined or was handed is stored without
-a witness it could not read (`NodeStorage.storingAndRetaining`). That path
-fails closed under this decision.
+them, since they keep them with the block. Every block a node executes,
+mined here or fetched, is stored through the connect job
+(`storeValidBlocks`), which stores one with withdrawals only with its
+sidecar; the content-first write of a block this node mines takes the
+sidecar when it can, and the block still executes only with it. The rule
+needs no code change.
 
 **Size.** A receipt path is about six trie nodes at a million receipts
 (16-way branching on hashed keys), each up to about 1.2 KB: roughly 6–8 KB
@@ -652,8 +655,8 @@ the witness. Other nodes fetch the complete body. Nothing is kept afterwards.
 
 **How it is tested.** A follower on `recent` with a small window syncs a
 parent and a child whose withdrawal is anchored below the parent's window
-and executes past it, from the witness alone. A block mined with a
-withdrawal whose witness cannot be read is not stored or weighed.
+and executes past it, from the sidecar alone. A block with a withdrawal
+whose sidecar no peer serves is not connected.
 
 ### 4.10 Workers and scheduling
 
@@ -870,8 +873,8 @@ progress or reports exactly why it cannot.
   status per chain (§4.4).
 - Simulator scenarios for starvation, missing bodies, delayed proofs,
   parent–child stalls, and reorganisations at several depths (§4.19).
-- Require the receipt-proof sidecar with every child block with withdrawals, and
-  repair testnet's block 3,921 once (§4.9a): the cause of the stall at
+- Receipt-proof sidecars travel with child blocks, as the code already does,
+  and testnet's block 3,921 is repaired once (§4.9a): the cause of the stall at
   3,920. Report a block that waits on missing parent state as that, not as
   an unavailable body (§4.4).
 
