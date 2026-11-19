@@ -458,6 +458,17 @@ public struct NodeSyncStatus: Codable, Sendable, Equatable {
     /// Blocks whose connect needs a fact of the parent chain this node has
     /// not executed yet.
     public var awaitingParentFacts = 0
+    /// When the tip this chain acts on last moved, in unix seconds, as this
+    /// process saw it (its first tip at a start counts as a move). Nil before
+    /// it has a tip.
+    public var tipAdvancedAt: Double? = nil
+    /// Seconds since `tipAdvancedAt`, when the answer was made. With the
+    /// status's `height` and `bestHeaderHeight`: a chain whose best header
+    /// is above its tip and whose tip has not moved for long is stalled; one
+    /// at its best header is only waiting for the network's next block. (A
+    /// best chain that is heavier but no longer reads as at the best
+    /// header, as Bitcoin Core's blocks against headers does.)
+    public var secondsSinceTipAdvanced: Double? = nil
 
     public init() {}
 
@@ -474,6 +485,8 @@ public struct NodeSyncStatus: Codable, Sendable, Equatable {
         bodiesUnavailable = try count(.bodiesUnavailable)
         bodiesParked = try count(.bodiesParked)
         awaitingParentFacts = try count(.awaitingParentFacts)
+        tipAdvancedAt = try values.decodeIfPresent(Double.self, forKey: .tipAdvancedAt)
+        secondsSinceTipAdvanced = try values.decodeIfPresent(Double.self, forKey: .secondsSinceTipAdvanced)
     }
 }
 

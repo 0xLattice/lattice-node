@@ -41,7 +41,7 @@ func makeApplication(
         levelReads: { Array(runtime.levelReads.values) },
         writes: runtime,
         status: { await runtime.status(chainPath: $0) },
-        metrics: { runtime.metricsExposition(peers: $0, processStartTime: $1) },
+        metrics: { await runtime.metricsExposition(peers: $0, processStartTime: $1) },
         host: host,
         port: port,
         peers: { ExplorerPeersResponse(count: runtime.peerCount, peers: []) },

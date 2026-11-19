@@ -1369,6 +1369,10 @@ extension NodeRuntime {
                 }
             }
             var sync = NodeSyncStatus()
+            // A move of the act-on tip, as this step left it: the first
+            // tip a start publishes counts as one.
+            sync.tipAdvancedAt = view.actOnTip == tip.hash ? view.sync.tipAdvancedAt
+                : tip.hash.isEmpty ? nil : Date().timeIntervalSince1970
             sync.pendingHeaders = level.sync.pending.entries.count
             sync.headersAwaitingProof = level.sync.proofs.awaiting.count
             sync.proofChecksRunning = level.sync.proofs.verifying.count

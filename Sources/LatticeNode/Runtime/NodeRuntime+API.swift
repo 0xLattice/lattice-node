@@ -628,21 +628,36 @@ extension NodeRuntime {
             version: LatticeNodeVersion.current
         )
         status.sync = await reads.tip().sync
+        if let advanced = status.sync?.tipAdvancedAt {
+            status.sync?.secondsSinceTipAdvanced = max(0, Date().timeIntervalSince1970 - advanced)
+        }
         return status
     }
 
     /// Ready overlay sessions: Nexus's current peers.
     public var peerCount: Int { readView.value?.peers ?? 0 }
 
-    public func metricsExposition(peers: Int, processStartTime: Date) -> String {
+    public func metricsExposition(peers: Int, processStartTime: Date) async -> String {
         let snapshot = published.value
+        var chains: [NodeMetricsSample.Chain] = []
+        // The root, then each hosted child level.
+        let levels = [(configuration.chainPath, reads)] + levelReads.filter { $0.key != configuration.chainPath }
+            .sorted { $0.key.joined(separator: "/") < $1.key.joined(separator: "/") }.map { ($0.key, $0.value) }
+        for (path, reads) in levels {
+            let tip = await reads.tip()
+            chains.append(NodeMetricsSample.Chain(
+                path: path, validatedTipHeight: tip.height, weighedTipHeight: tip.bestHeaderHeight,
+                tipAdvancedAt: tip.sync?.tipAdvancedAt
+            ))
+        }
         return renderNodeMetrics(NodeMetricsSample(
             chainPath: configuration.chainPath,
             validatedTipHeight: snapshot?.actOnHeight,
             weighedTipHeight: snapshot?.bestHeaderHeight,
             overlayPeers: peers,
             mempoolTransactions: snapshot?.mempoolCount ?? 0,
-            processStartTime: processStartTime
+            processStartTime: processStartTime,
+            chains: chains
         ))
     }
 
