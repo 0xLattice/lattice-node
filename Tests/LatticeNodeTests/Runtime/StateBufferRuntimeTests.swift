@@ -9,7 +9,8 @@ import LatticeNodeAPI
 /// Executed state is buffered in memory and flushed to the store in batches
 /// (`StateBuffer`). What an operator sees of that: a node reads the state of
 /// the blocks it executed, keeps it across a clean stop, and after a crash
-/// comes back to the same tip with the same balances, asking no peer.
+/// executes again what the crash lost and comes back to the same tip with
+/// the same balances, asking no peer.
 final class StateBufferRuntimeTests: XCTestCase {
     private let nexus = ["Nexus"]
 
@@ -79,8 +80,12 @@ final class StateBufferRuntimeTests: XCTestCase {
         return result
     }
 
-    /// The tip and `payee`'s balance at it, once the node can read it.
-    private func seen(by runtime: NodeRuntime, of payee: String) async throws -> Seen {
+    /// The tip and `payee`'s balance at it, once the node can read it; the
+    /// tip is `expected` when one is given, once the node has reached it.
+    private func seen(by runtime: NodeRuntime, of payee: String, at expected: String? = nil) async throws -> Seen {
+        if let expected {
+            try await eventually("the node is back at its tip") { runtime.published.value?.actOnTip == expected }
+        }
         let tip = try XCTUnwrap(runtime.published.value?.actOnTip)
         var balance: UInt64?
         try await eventually("the tip's state is read") {
@@ -113,7 +118,8 @@ final class StateBufferRuntimeTests: XCTestCase {
 
     /// The store's files as a crash would leave them: copied while the node
     /// runs, before any clean stop. A node started on the copy, with no
-    /// peer, comes back to the same tip with the same balance, and goes on.
+    /// peer, starts below its tip, executes again the blocks whose state
+    /// the crash lost, and is back at the same tip with the same balance.
     func testANodeStartedAfterACrashComesBackToTheSameTipAndBalances() async throws {
         let (configuration, overlay) = try configuration(directory("running"))
         let crashed = directory("crashed")
@@ -142,7 +148,7 @@ final class StateBufferRuntimeTests: XCTestCase {
         let held = await storage.broker.hasVolume(root: tipState)
         XCTAssertFalse(held, "the copied store still holds the tip's state: nothing was lost")
         let runtime = try await NodeRuntime.start(storage: storage, configuration: restarted, overlay: restartedOverlay)
-        let after = try await seen(by: runtime, of: payee)
+        let after = try await seen(by: runtime, of: payee, at: before.tip)
         XCTAssertEqual(after, before)
         let next = try await mine(1, on: runtime, paying: payee)
         XCTAssertNotEqual(next, before.tip)

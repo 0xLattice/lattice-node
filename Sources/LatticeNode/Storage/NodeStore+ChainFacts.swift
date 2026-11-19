@@ -14,8 +14,9 @@ struct NodeFactBatch: Sendable {
     /// state window (`state: recent`). A block fact never carries one.
     var keepsStateDiffs = false
     /// The state these facts' executions produced is in the state buffer,
-    /// not the store: each block they validate is named unflushed
-    /// (`unflushedBlocks`) in the same transaction, until a flush.
+    /// not the store: the level's flush marker stays where it is until a
+    /// flush moves it (`markFlushed`). False, the states were stored before
+    /// this transaction, and the marker moves with the facts.
     var buffersState = false
 }
 
@@ -85,11 +86,6 @@ extension NodeStore {
             )
         }
 
-        // Never an index a flush may already have cleared: it rises for as
-        // long as the store is open, from the newest row it opened with.
-        let namesUnflushed = prepared.contains(where: \.buffersState)
-        var unflushed = try namesUnflushed ? lastUnflushedBlock() : 0
-        defer { if namesUnflushed { lastUnflushedIndex = max(lastUnflushedIndex ?? 0, unflushed) } }
         try database.transaction {
             if !prepared.isEmpty {
                 try database.execute(
@@ -155,15 +151,11 @@ extension NodeStore {
                                 .text(cid), BlockStatus.header.sqlValue,
                             ]
                         )
-                        if level.buffersState {
-                            unflushed += 1
-                            try database.execute(
-                                "INSERT INTO core_meta (key, value) VALUES (?1, ?2)",
-                                params: [.text(Self.unflushedKey(unflushed)), .text(level.path + "\n" + cid)]
-                            )
-                        }
                     }
                 }
+                // The step's states were stored before this transaction:
+                // the level's marker moves with its facts.
+                if !level.buffersState { try Self.markFlushed(seq, at: level.path, in: database) }
                 // An empty log id is an ended cursor: the peer does not run
                 // this level (`StreamPage` with no log). It is a valid state.
                 for (peerKey, cursor) in level.cursors.sorted(by: { $0.key < $1.key }) {
@@ -210,57 +202,102 @@ extension NodeStore {
         )?.int("seq") ?? 0
     }
 
-    // MARK: - Blocks whose state is not flushed
+    // MARK: - The executions whose state is stored
 
-    /// The row of the `index`th block named unflushed: in key order, the
-    /// order the blocks were executed in.
-    static func unflushedKey(_ index: Int64) -> String {
-        "unflushed:" + String(repeating: "0", count: max(0, 19 - String(index).count)) + String(index)
+    /// The key of a level's flush marker: the seq up to which every
+    /// execution's state is in the content store.
+    static func flushedKey(_ path: String) -> String { "flushed:" + path }
+
+    static func flushed(at path: String, in database: NodeSQLite) throws -> Int64? {
+        guard case .text(let value)? = try database.query(
+            "SELECT value FROM core_meta WHERE key = ?1", params: [.text(flushedKey(path))]
+        ).first?["value"] else { return nil }
+        return Int64(value)
     }
 
-    /// The index of the newest unflushed row, 0 with none.
-    static func lastUnflushed(in database: NodeSQLite) throws -> Int64 {
-        try database.row(
-            ChainFactMetadataKeyRow.self,
-            "SELECT key FROM core_meta WHERE key >= 'unflushed:' AND key < 'unflushed;' ORDER BY key DESC LIMIT 1"
-        ).flatMap { Int64(try $0.key.dropFirst("unflushed:".count)) } ?? 0
+    /// Raises a level's marker to `seq`, never lowers it.
+    static func markFlushed(_ seq: Int64, at path: String, in database: NodeSQLite) throws {
+        guard seq > (try flushed(at: path, in: database) ?? -1) else { return }
+        try database.execute(
+            "INSERT OR REPLACE INTO core_meta (key, value) VALUES (?1, ?2)",
+            params: [.text(flushedKey(path)), .text(String(seq))]
+        )
     }
 
-    /// The executed blocks whose post-state was in the state buffer and in
-    /// no flush that completed, oldest first, each with its chain. After a
-    /// crash these are the blocks a start executes again; none after a
-    /// clean stop, which flushes.
-    func unflushedBlocks() throws -> [(index: Int64, path: ChainPath, cid: String)] {
-        try database.query(
-            "SELECT key, value FROM core_meta WHERE key >= 'unflushed:' AND key < 'unflushed;' ORDER BY key"
-        ).compactMap { row in
-            guard case .text(let key)? = row["key"], case .text(let value)? = row["value"],
-                  let index = Int64(key.dropFirst("unflushed:".count)),
-                  let split = value.firstIndex(of: "\n") else {
-                throw NodeStoreError.corrupt("an unflushed block row does not read")
+    /// Every level's newest seq.
+    func lastSeqs() throws -> [String: Int64] {
+        var seqs: [String: Int64] = [:]
+        for row in try database.query("SELECT chain_path, MAX(seq) AS seq FROM admission_facts GROUP BY chain_path") {
+            guard case .text(let path)? = row["chain_path"], case .int(let seq)? = row["seq"] else {
+                throw NodeStoreError.corrupt("a level's newest seq does not read")
             }
-            return (index, value[..<split].split(separator: "/").map(String.init), String(value[value.index(after: split)...]))
+            seqs[path] = seq
+        }
+        return seqs
+    }
+
+    /// The content store holds the state of every block executed in a batch
+    /// up to these seqs: each level's marker moves there. Written after the
+    /// states are, so a crash between the two leaves a marker behind the
+    /// state, never ahead of it.
+    func markFlushed(_ seqs: [String: Int64]) throws {
+        guard !seqs.isEmpty else { return }
+        try database.transaction {
+            for (path, seq) in seqs { try Self.markFlushed(seq, at: path, in: database) }
         }
     }
 
-    /// The index of the newest block ever named unflushed while this store
-    /// has been open, 0 with none: the newest row it opened with, then each
-    /// one it wrote, cleared since or not.
-    func lastUnflushedBlock() throws -> Int64 {
-        if let lastUnflushedIndex { return lastUnflushedIndex }
-        let stored = try Self.lastUnflushed(in: database)
-        lastUnflushedIndex = stored
-        return stored
-    }
-
-    /// The store holds the state of every block named unflushed up to
-    /// `index`: they are named so no more.
-    func clearUnflushedBlocks(through index: Int64) throws {
-        guard index > 0 else { return }
-        try database.execute(
-            "DELETE FROM core_meta WHERE key >= 'unflushed:' AND key <= ?1",
-            params: [.text(Self.unflushedKey(index))]
-        )
+    /// At a start: a block executed above its level's marker is one whose
+    /// state the content store may not hold, so it counts as not executed.
+    /// Its validation goes, its block is a header again, and the node
+    /// executes it as it executes any block, from the state below it; a
+    /// block whose state was stored after all produces the same state.
+    /// Returns how many executions were forgotten: none after a clean stop,
+    /// which flushes.
+    ///
+    /// A store no start has marked (one an older version wrote) stored
+    /// every state before the facts that name it: its markers start at its
+    /// newest seqs.
+    func forgetUnflushedExecutions() throws -> Int {
+        try database.transaction {
+            let seqs = try lastSeqs()
+            guard try !database.query("SELECT 1 AS one FROM core_meta WHERE key = 'flush_markers'").isEmpty else {
+                for (path, seq) in seqs { try Self.markFlushed(seq, at: path, in: database) }
+                try database.execute("INSERT INTO core_meta (key, value) VALUES ('flush_markers', '1')")
+                return 0
+            }
+            var forgotten = 0
+            for (path, last) in seqs.sorted(by: { $0.key < $1.key }) {
+                let marker = try Self.flushed(at: path, in: database) ?? 0
+                guard last > marker else { continue }
+                for row in try database.query(
+                    "SELECT fact_id, payload FROM admission_facts WHERE chain_path = ?1 AND seq > ?2 ORDER BY seq, ord",
+                    params: [.text(path), .int(marker)]
+                ) {
+                    guard case .blob(let id)? = row["fact_id"], case .blob(let payload)? = row["payload"] else {
+                        throw NodeStoreError.corrupt("an admission fact above the flush marker does not read")
+                    }
+                    guard case .validation(let validation) = try Self.decode(ChainFact.self, from: payload) else { continue }
+                    try database.execute(
+                        "DELETE FROM admission_facts WHERE chain_path = ?1 AND fact_id = ?2",
+                        params: [.text(path), .blob(id)]
+                    )
+                    try database.execute(
+                        "UPDATE accepted_blocks SET validated = ?1 WHERE chain_path = ?2 AND block_cid = ?3 AND validated = ?4",
+                        params: [
+                            BlockStatus.header.sqlValue, .text(path),
+                            .text(validation.blockHash), BlockStatus.executed.sqlValue,
+                        ]
+                    )
+                    try database.execute(
+                        "DELETE FROM state_diffs WHERE chain_path = ?1 AND block_cid = ?2",
+                        params: [.text(path), .text(validation.blockHash)]
+                    )
+                    forgotten += 1
+                }
+            }
+            return forgotten
+        }
     }
 
     /// The host weigh-log id recorded with the first fact, if any.
@@ -355,13 +392,6 @@ extension NodeStore {
     }
 }
 
-struct ChainFactMetadataKeyRow: NodeStoreRecord {
-    static let table = "core_meta"
-    private let row: Row
-
-    init(_ row: Row) { self.row = row }
-    var key: String { get throws { try row.text("key") } }
-}
 
 struct ChainFactMetadataRow: NodeStoreRecord {
     static let table = "core_meta"

@@ -516,9 +516,22 @@ and geth's `insertChain` writes a batch at once.
 (`--connect-batch`; default 32, at least 1) is the most blocks one batch
 executes; the body window (64 blocks ahead) bounds it too. A larger batch
 commits less often while a node catches up and
-holds more executed state in memory until its commit. A crash loses at most
-the batch being executed: the node restarts at the last batch committed and
-runs it again. A change takes effect on restart.
+holds more executed state in memory until its commit. A change takes effect
+on restart.
+
+Executed state is held in memory and written to the store in batches.
+`stateBufferBytes` in `lattice.json` or a `config.d` fragment
+(`--state-buffer-bytes`; default 67108864, 64 MiB) is how much is held
+before one write stores it, as Bitcoin Core's `-dbcache` bounds its coins
+cache. A clean stop writes it all. A crash loses the batch being executed
+and the state not yet written: on the next start the node logs how many
+executed blocks that was, counts them as not executed, and executes them
+again from the bodies it holds, while it weighs headers and answers
+requests as usual. Until it is back at its tip, reads at the tip answer
+for the lower tip. With 0 each step's state is written as it is produced
+and a crash loses at most the batch being executed. A node that keeps
+`recent` state writes at least once per state window, and one that keeps
+no state or no bodies writes every step, whatever the limit.
 
 ### What a node keeps
 

@@ -471,9 +471,6 @@ public final class NodeRuntime: Sendable {
         ))
         loop = Task {
             var state = initial.take()
-            // First: the state a crash lost is produced again, so everything
-            // after reads the store as a clean stop would have left it.
-            await state.replayUnflushedState()
             // With no bodies kept beyond the working set, a start lets go
             // of the ones a run that kept them left, before any step.
             for (path, level) in state.core.levels { state.bodyTips[path] = level.snapshot.actOnTip }
@@ -486,6 +483,10 @@ public final class NodeRuntime: Sendable {
             }
             await state.settleState()
             state.refreshView()
+            // The core takes a step before any peer or request gives it
+            // one: what it restored and has not executed (blocks weighed,
+            // and blocks whose state a crash lost) it asks for now.
+            inputs.yield(.event(.tick))
             // After the loop ends, inputs are only drained until the stream
             // finishes, so no RPC waits forever.
             var running = true
@@ -2035,62 +2036,6 @@ extension NodeRuntime {
                 await observeJob(job.kind, job.path, effect)
                 return await job.run()
             })
-        }
-
-        /// A start after a crash: the blocks whose post-state was in the
-        /// state buffer, and in no flush, are executed again in the order
-        /// they first were, each from its stored body and the state before
-        /// it, and their states buffered again and flushed. Nothing is
-        /// asked of peers, and no verdict is applied: the facts are held.
-        /// Bitcoin Core rolls its chainstate forward the same way after an
-        /// unclean shutdown. A block that does not execute again (its body
-        /// or a state it reads is not held) ends it: its state and the
-        /// later ones are read from peers when wanted, as state this node
-        /// does not hold always was.
-        mutating func replayUnflushedState() async {
-            let unflushed: [(index: Int64, path: ChainPath, cid: String)]
-            do {
-                unflushed = try await storage.unflushedBlocks()
-            } catch {
-                return failStop(error)
-            }
-            guard !unflushed.isEmpty else { return }
-            let started = ContinuousClock.now
-            var executed = 0
-            for block in unflushed {
-                let name = "\(block.path.joined(separator: "/")) \(block.cid)"
-                guard let job = core.replayJob(for: block.cid, at: block.path) else {
-                    logLine("lattice-node: state of \(name) not produced again: the block is not held")
-                    break
-                }
-                let (verdicts, _) = await ConnectRun.run(
-                    [job],
-                    fetcher: storage.workFetcher,
-                    parentFacts: RestoredParentFacts(levels: core.levels),
-                    validationContext: { ValidationContext(nowMilliseconds: NodeRuntime.now()) }
-                )
-                guard let verdict = verdicts.first, verdict.isValid, let state = verdict.materializedPostState else {
-                    let why = verdicts.first?.retryFailure.map { "\($0)" } ?? "no valid verdict"
-                    logLine("lattice-node: state of \(name) not produced again: \(why)")
-                    break
-                }
-                do {
-                    try await storage.bufferReplayedState(state, of: block.cid, at: block.path, index: block.index)
-                } catch {
-                    return failStop(error)
-                }
-                executed += 1
-            }
-            do {
-                try await storage.flushState()
-            } catch {
-                return failStop(error)
-            }
-            let took = started.duration(to: .now)
-            logLine(
-                "lattice-node: the last run left \(unflushed.count) blocks' state unflushed;"
-                    + " executed \(executed) again in \(Double(took.components.seconds) + Double(took.components.attoseconds) / 1e18) s"
-            )
         }
 
         /// The working set, when the operator keeps no bodies beyond it:

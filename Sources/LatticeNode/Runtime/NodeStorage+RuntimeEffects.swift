@@ -50,9 +50,9 @@ extension NodeStorage {
     /// headers, proofs, facts and cursors in one state.db transaction.
     ///
     /// The states the step's executions produced go to the state buffer
-    /// with their retention, where every read finds them, and each block
-    /// they belong to is named unflushed in the facts transaction; a flush
-    /// writes them to volumes.db in one transaction (`flushState`). A child
+    /// with their retention, where every read finds them; a flush writes
+    /// them to volumes.db in one transaction, then moves each level's flush
+    /// marker to the facts it covers (`flushState`). A child
     /// genesis's spec is stored at once: a start reads it before anything
     /// is executed again. With no buffer (`maximumBufferedStateBytes` 0)
     /// every affected level's Volumes are one volumes.db transaction,
@@ -159,36 +159,6 @@ extension NodeStorage {
             retaining: retaining.filter { !$0.value.isEmpty }
         )
         try await store.stageNodeFacts(durable, logID: logID)
-        await noteBuffered(through: try await store.lastUnflushedBlock())
-    }
-
-    /// The post-state a start produced executing again `cid`, the block
-    /// named unflushed at `index`: buffered with the retention its first
-    /// execution gave it (`persistNodeBatch`). Nothing else of the verdict
-    /// is applied: its facts are held.
-    nonisolated func bufferReplayedState(
-        _ state: LatticeState, of cid: String, at path: ChainPath, index: Int64
-    ) async throws {
-        let storage = NodeImportStorage(storage: broker)
-        try await Self.storeExecutedState(state, in: storage)
-        let roots = await storage.takeStoredVolumeRoots()
-        let scope: String
-        switch configuration.state {
-        case .all:
-            scope = retentionScope
-        case .recent, .none:
-            guard let fact = try await store.blockFact(cid, at: path) else {
-                throw NodeStorageError.missingBlockFact(cid)
-            }
-            scope = scopes.window(at: path, height: fact.blockHeight)
-        }
-        stateBuffer.add(await storage.takeVolumes(), retaining: roots.isEmpty ? [:] : [scope: roots])
-        await noteBuffered(through: index)
-    }
-
-    /// The blocks named unflushed, oldest first (`NodeStore.unflushedBlocks`).
-    nonisolated func unflushedBlocks() async throws -> [(index: Int64, path: ChainPath, cid: String)] {
-        try await store.unflushedBlocks()
     }
 
     /// Retains the roots this store holds, and returns the ones it lacks.

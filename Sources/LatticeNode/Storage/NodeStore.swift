@@ -66,9 +66,6 @@ actor NodeStore {
     /// and never waits on a commit.
     let reads: NodeSQLite
     let nexusGenesisCID: String
-    /// The newest block named unflushed while this store has been open
-    /// (`lastUnflushedBlock`).
-    var lastUnflushedIndex: Int64?
     private let executor = SerialQueueExecutor(label: "LatticeNode.NodeStore")
 
     nonisolated var unownedExecutor: UnownedSerialExecutor {

@@ -140,13 +140,18 @@ in one `volumes.db` transaction. It happens when the buffer reaches its
 limit (`NodeResourcePolicy.maximumBufferedStateBytes`, 64 MiB), on a clean
 stop, and before every operation on what the store retains (the counts, the
 window releases, a pin, a state sync, letting go of bodies), so those find
-every state in the store. A crash loses the buffer, and nothing else: each
-block whose state is only buffered is named unflushed in `state.db`, in the
-transaction of its facts, and a start executes those blocks again in order,
-from their stored bodies and the state before them, asking nothing of peers
-and applying nothing of the verdicts (Bitcoin Core's roll forward). A child
-genesis's spec is stored at once, since a start reads it before it executes
-anything.
+every state in the store. After the states, a flush moves each chain's
+flush marker in `state.db` to the facts it covers: the state of every
+execution up to the marker is stored. A crash loses the buffer. At the next
+start an execution above its chain's marker counts as not executed
+(`NodeStore.forgetUnflushedExecutions`): its block is a header again, and
+the node executes it as it executes any block, off the loop, from the body
+it holds and the state below it, while it weighs and answers as usual.
+Bitcoin Core and geth keep the same marker with their flushed state. The
+marker follows the states because they are in two stores; a crash between
+the two leaves it behind the state, never ahead, and the blocks between
+execute again into the same state. A child genesis's spec is stored at
+once, since a start reads it before it executes anything.
 
 Content stays in `volumes.db` because a retention scope names it, and each
 scope says why. A block's body (its own Volume and its transactions') is

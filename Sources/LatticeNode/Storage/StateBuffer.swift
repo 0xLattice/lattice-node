@@ -9,8 +9,9 @@ import cashew
 /// keeps its coins this way (`-dbcache`), and geth its trie nodes.
 ///
 /// A Volume here is in no store transaction yet, so a crash loses it. The
-/// blocks whose state is only here are named in state.db
-/// (`NodeStore.unflushedBlocks`), and a start executes them again.
+/// blocks whose state is only here are above their level's flush marker in
+/// state.db: a start counts them as not executed
+/// (`NodeStore.forgetUnflushedExecutions`), and they execute again.
 ///
 /// Reads and adds may come from any task. A flush takes a `batch`, stores
 /// it, then removes exactly that batch: what was added meanwhile stays.

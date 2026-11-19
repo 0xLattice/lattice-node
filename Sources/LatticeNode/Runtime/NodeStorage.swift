@@ -83,11 +83,6 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     private var operationInFlight = false
     private var operationWaiters: [OperationWaiter] = []
 
-    /// The newest block named unflushed (`NodeStore.unflushedBlocks`) whose
-    /// state this run put in the state buffer: by a step's persist, or by
-    /// executing it again at a start. A flush names no block above it
-    /// flushed, so rows a start has not executed again yet survive a flush.
-    private var bufferedThrough: Int64 = 0
     /// The flush asked for last, running or done: the next runs after it.
     private var lastFlush: Task<Void, any Error>?
 
@@ -123,6 +118,12 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         configuration: NodeConfiguration
     ) async throws -> NodeStorage {
         let recovered = try await BootRecovery.run(configuration: configuration)
+        // What a crash left executed in the facts and absent from the
+        // content store counts as not executed (`forgetUnflushedExecutions`).
+        let forgotten = try await recovered.store.forgetUnflushedExecutions()
+        if forgotten > 0 {
+            logLine("lattice-node: the last run left the state of \(forgotten) executed blocks unstored: they execute again")
+        }
         return NodeStorage(
             configuration: configuration,
             store: recovered.store,
@@ -159,16 +160,11 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         stateBuffer.bytes >= configuration.resourcePolicy.maximumBufferedStateBytes && !stateBuffer.isEmpty
     }
 
-    /// The state of every block named unflushed up to `index` is in the
-    /// state buffer.
-    func noteBuffered(through index: Int64) {
-        bufferedThrough = max(bufferedThrough, index)
-    }
-
     /// Writes the state buffer to the store: every buffered Volume and its
-    /// retention in one volumes.db transaction, then the blocks it covers
-    /// named unflushed no more. A crash between the two leaves blocks named
-    /// whose state is stored: a start executes them again and stores the
+    /// retention in one volumes.db transaction, then each level's flush
+    /// marker moved to the facts it covers (`NodeStore.markFlushed`). A
+    /// crash between the two leaves a marker behind the state: a start
+    /// counts those blocks as not executed, and executing them stores the
     /// same Volumes. One flush at a time; reads see the buffer until the
     /// store holds what it held.
     func flushState() async throws {
@@ -184,14 +180,15 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     }
 
     private func flushStateOnce() async throws {
-        // Read before the batch is taken: a block is named unflushed after
-        // its state is buffered, so the batch holds every one up to it.
-        let through = bufferedThrough
+        // Read before the batch is taken: a step buffers its states before
+        // its facts are written, so the batch holds the state of every
+        // execution up to these seqs.
+        let seqs = try await store.lastSeqs()
         let batch = stateBuffer.batch()
         if !batch.isEmpty {
             try await broker.storeVolumesLocal(batch.volumes, retaining: batch.retaining)
         }
-        try await store.clearUnflushedBlocks(through: through)
+        try await store.markFlushed(seqs)
         stateBuffer.remove(batch)
     }
 

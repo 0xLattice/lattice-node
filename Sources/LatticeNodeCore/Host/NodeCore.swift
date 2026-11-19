@@ -455,15 +455,6 @@ public struct NodeCore: Sendable {
         var touched: Set<ChainPath> = []
     }
 
-    /// What executing `cid`, a block the level at `path` holds, needs
-    /// (`ChainTree.connectJob`), for a block already executed: a start
-    /// executes again the blocks whose state a crash lost, and applies
-    /// nothing of the verdict. Nil for a level not hosted or a block not
-    /// held.
-    public mutating func replayJob(for cid: String, at path: ChainPath) -> ConnectJob? {
-        levels[path]?.tree.connectJob(for: cid)
-    }
-
     public mutating func step(_ event: NodeEvent, now: Int64) -> [NodeEffect] {
         var turn = Turn(now: now)
         switch event {
