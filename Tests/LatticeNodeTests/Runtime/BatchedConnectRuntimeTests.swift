@@ -20,7 +20,7 @@ final class BatchedConnectRuntimeTests: XCTestCase {
         configuration = try NodeConfiguration(
             chainPath: ["Nexus"], storagePath: directory,
             privateKeyHex: String(repeating: "5b", count: 32),
-            // No state buffer: each batch's state is stored with its
+            // A buffer of 0: each batch's state is flushed after its
             // commit, so what a crash keeps is the last committed batch.
             resourcePolicy: NodeResourcePolicy(maximumBufferedStateBytes: 0),
             connectBatch: 3

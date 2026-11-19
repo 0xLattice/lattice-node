@@ -96,7 +96,7 @@ public struct Topology: Codable, Sendable {
     public var maxAcquisitionBytes: Int?
     /// Bytes of executed state held in memory before one write stores
     /// them (`--state-buffer-bytes`). Absent = the node's default; 0
-    /// stores each step's state as it is produced.
+    /// writes each step's state behind it.
     public var stateBufferBytes: Int?
     /// The block bodies kept beyond what the node needs to operate
     /// (`--block-bodies`): `all` or `none`. Absent = `all`.

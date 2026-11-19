@@ -13,11 +13,6 @@ struct NodeFactBatch: Sendable {
     /// Keep the state diffs of the blocks these facts executed, for the
     /// state window (`state: recent`). A block fact never carries one.
     var keepsStateDiffs = false
-    /// The state these facts' executions produced is in the state buffer,
-    /// not the store: the level's flush marker stays where it is until a
-    /// flush moves it (`markFlushed`). False, the states were stored before
-    /// this transaction, and the marker moves with the facts.
-    var buffersState = false
 }
 
 extension NodeStore {
@@ -36,7 +31,6 @@ extension NodeStore {
             let evidence: PreparedEvidence
             let rows: [PreparedRow]
             let cursors: [String: StreamCursor]
-            let buffersState: Bool
         }
 
         guard Set(levels.map(\.path)).count == levels.count else {
@@ -81,8 +75,7 @@ extension NodeStore {
                     headers: level.headers, proofs: level.proofs, at: level.path
                 ),
                 rows: rows,
-                cursors: level.cursors,
-                buffersState: level.buffersState
+                cursors: level.cursors
             )
         }
 
@@ -158,9 +151,6 @@ extension NodeStore {
                     }
                 }
                 reached[level.path] = seq
-                // The step's states were stored before this transaction:
-                // the level's marker moves with its facts.
-                if !level.buffersState { try Self.markFlushed(seq, at: level.path, in: database) }
                 // An empty log id is an ended cursor: the peer does not run
                 // this level (`StreamPage` with no log). It is a valid state.
                 for (peerKey, cursor) in level.cursors.sorted(by: { $0.key < $1.key }) {

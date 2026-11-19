@@ -165,10 +165,9 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
 
     // MARK: - The state buffer
 
-    /// Whether executed state is buffered at all (`maximumBufferedStateBytes`).
-    nonisolated var buffersState: Bool { configuration.resourcePolicy.maximumBufferedStateBytes > 0 }
 
-    /// Whether the state buffer has reached its limit: the loop flushes.
+    /// Whether the state buffer has reached its limit: the loop flushes. A
+    /// limit of 0 is reached by any state: a flush after every step.
     nonisolated var stateBufferIsFull: Bool {
         stateBuffer.bytes >= configuration.resourcePolicy.maximumBufferedStateBytes && !stateBuffer.isEmpty
     }

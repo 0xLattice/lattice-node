@@ -518,8 +518,8 @@ operator submitted is journaled before it is acknowledged, a block a miner
 submitted has its facts written before its miner is answered, and a pin is
 synced before it is confirmed. A pending transaction's journal row is read
 at a start and returns to the pool once its chain has executed up to the
-heaviest block the node knows. With a buffer of 0 the old order holds: post-states stored,
-then the `NodeBatch` committed, then the snapshots published.
+heaviest block the node knows. A buffer of 0 is written after every step, the
+same way.
 
 ### Batched execution
 

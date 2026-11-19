@@ -54,22 +54,22 @@ extension NodeStorage {
     /// them to volumes.db in one transaction, then moves each level's flush
     /// marker to the facts it covers (`flushState`). A child
     /// genesis's spec is stored at once: a start reads it before anything
-    /// is executed again. With no buffer (`maximumBufferedStateBytes` 0)
-    /// every affected level's Volumes are one volumes.db transaction,
-    /// retained in the same one, before the facts.
+    /// is executed again. A buffer of 0 is flushed after every step.
     ///
-    /// Returns when the facts are written.
+    /// Returns when the facts are written, and the buffer flushed if it
+    /// reached its limit, as the loop asks.
     nonisolated func persistNodeBatch(_ batch: NodeBatch, logID: String) async throws {
-        try await persistNodeBatchBehind(batch, logID: logID)?.value
+        try await persistNodeBatchBehind(batch, logID: logID).value
+        if stateBufferIsFull { try await flushState() }
     }
 
     /// As `persistNodeBatch`, for the loop: returns once what the step
     /// created is where reads find it (its states in the state buffer, its
     /// facts in `PendingFacts`) and its facts transaction is asked of the
-    /// store's lane, with the task that writes it (nil when it was written
-    /// here, with no buffer). The loop does not wait for it.
+    /// store's lane, with the task that writes it. The loop does not wait for
+    /// it.
     @discardableResult
-    nonisolated func persistNodeBatchBehind(_ batch: NodeBatch, logID: String) async throws -> Task<Void, any Error>? {
+    nonisolated func persistNodeBatchBehind(_ batch: NodeBatch, logID: String) async throws -> Task<Void, any Error> {
         var durable: [NodeFactBatch] = []
         // What this step's executions created. An executed block's body was
         // pinned under its block's name by the job that executed it.
@@ -130,13 +130,12 @@ extension NodeStorage {
                 headers: level.headers,
                 proofs: level.proofs,
                 cursors: level.cursors,
-                keepsStateDiffs: configuration.state == .recent,
-                buffersState: buffersState
+                keepsStateDiffs: configuration.state == .recent
             ))
         }
         // A state of no known height joins the newest window the store
         // lists: the buffered windows must be in it.
-        if buffersState, states.values.contains(where: { $0.contains { $0.height == nil && !$0.roots.isEmpty } }) {
+        if states.values.contains(where: { $0.contains { $0.height == nil && !$0.roots.isEmpty } }) {
             try await flushState()
         }
         // Every root retained is one this batch stores.
@@ -156,13 +155,6 @@ extension NodeStorage {
             }
         }
         let volumes = await storage.takeVolumes()
-        guard buffersState else {
-            try await broker.storeVolumesLocal(volumes, retaining: retaining)
-            // Without a buffer each level's marker moves with these facts.
-            try await flushVolumes()
-            try await store.stageNodeFacts(durable, logID: logID)
-            return nil
-        }
         let specVolumes = volumes.filter { specRoots.contains($0.volume.root) }
         if !specVolumes.isEmpty {
             try await broker.storeVolumesLocal(specVolumes, retaining: [retentionScope: specRoots.sorted()])

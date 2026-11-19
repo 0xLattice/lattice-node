@@ -1796,7 +1796,7 @@ extension NodeRuntime {
                     // What the step decided is held where reads find it and
                     // asked of the store's lane: the loop waits for no
                     // commit and no flush.
-                    lastFacts = try await storage.persistNodeBatchBehind(batch, logID: core.logID) ?? lastFacts
+                    lastFacts = try await storage.persistNodeBatchBehind(batch, logID: core.logID)
                     storage.flushStateIfFull()
                     if configuration.blockBodies == .none { executedThisStep.append(contentsOf: persistedBodyKeys) }
                     readsDone.append(contentsOf: persistedBodyKeys)

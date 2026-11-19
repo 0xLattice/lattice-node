@@ -174,8 +174,7 @@ final class PowerLossTests: XCTestCase {
         try await answeredBlockOutlivesAPowerLoss(stateBuffer: NodeResourcePolicy.defaultMaximumBufferedStateBytes)
     }
 
-    /// The same with no state buffer, where each step's states are stored
-    /// before its facts.
+    /// The same with a buffer of 0, flushed after every step.
     func testABlockAMinerWasAnsweredForOutlivesAPowerLossWithNoStateBuffer() async throws {
         try await answeredBlockOutlivesAPowerLoss(stateBuffer: 0)
     }
