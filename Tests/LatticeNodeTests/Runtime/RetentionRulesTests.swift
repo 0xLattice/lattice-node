@@ -273,9 +273,6 @@ final class RetentionRulesTests: XCTestCase {
         try await eventually("the body is pinned under the block's own name") {
             try await storage.broker.retainedRoots(scope: storage.scopes.body(mined)).count == 2
         }
-        // Everything the node asked of its stores is written: the pool has
-        // let go of the transaction the block confirmed, which it held.
-        await storage.written()
         let chainBefore = try await storage.broker.retainedRoots(scope: storage.scopes.chain)
 
         await storage.releaseBody(mined)
