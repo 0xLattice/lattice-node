@@ -23,7 +23,8 @@ import XCTest
 ///   height and tip) and stops.
 /// - CHILD_BENCH=serve: starts a node on a recorded CHILD_BENCH_DIR and
 ///   serves it for CHILD_BENCH_SERVE seconds.
-/// - CHILD_BENCH=follow: a follower (state recent) in CHILD_BENCH_DIR syncs
+/// - CHILD_BENCH=follow: a follower (state BENCH_STATE, default recent;
+///   bodies BENCH_BODIES, default all) in CHILD_BENCH_DIR syncs
 ///   from CHILD_BENCH_PEER (key@host:port) until every level in
 ///   CHILD_BENCH_MANIFEST reaches its recorded height. With CHILD_BENCH_VFS
 ///   set it counts SQLite writes, commits and syncs and writes them there.
@@ -76,7 +77,7 @@ final class ChildSyncBench: XCTestCase {
 
     private func host(
         _ keyByte: UInt8, _ dir: URL, port: UInt16, levels: [[String]], specs: Bool,
-        peers: [PeerEndpoint], state: StateRetention
+        peers: [PeerEndpoint], state: StateRetention, bodies: BlockBodies = .all
     ) throws -> (NodeConfiguration, IvyConfig) {
         let configuration = try NodeConfiguration(
             chainPath: ["Nexus"], storagePath: dir,
@@ -88,7 +89,7 @@ final class ChildSyncBench: XCTestCase {
                 maximumBufferedStateBytes: ProcessInfo.processInfo.environment["BENCH_STATE_BUFFER"].flatMap(Int.init)
                     ?? NodeResourcePolicy.defaultMaximumBufferedStateBytes
             ),
-            state: state,
+            blockBodies: bodies, state: state,
             hostedChildren: levels,
             childSpecs: specs ? Dictionary(uniqueKeysWithValues: levels.map { ($0, Self.spec($0)) }) : [:]
         )
@@ -238,9 +239,13 @@ final class ChildSyncBench: XCTestCase {
         let (fc, fo) = try host(
             Self.followerKey, dir, port: NetworkTransportTestPorts.allocate(),
             levels: targets.map(\.0).filter { $0 != ["Nexus"] }, specs: false, peers: [peer],
-            // BENCH_STATE=all: a follower that keeps every state, where the
-            // state buffer's limit, not a window, decides when it flushes.
-            state: env["BENCH_STATE"] == "all" ? .all : .recent
+            // BENCH_STATE (all, recent, none; default recent) and
+            // BENCH_BODIES (all, none; default all): what the follower
+            // keeps. With all state the buffer's limit, not a window,
+            // decides when it flushes; with no state or no bodies it lets
+            // go of something every step.
+            state: StateRetention(rawValue: env["BENCH_STATE"] ?? "") ?? .recent,
+            bodies: BlockBodies(rawValue: env["BENCH_BODIES"] ?? "") ?? .all
         )
         // The node sizes its workers to the processors it sees; a container
         // limited to N CPUs still sees the host's, so run.sh passes what a

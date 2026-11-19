@@ -193,6 +193,14 @@ number of workers, as many times as asked. Nothing is pinned, and on macOS an
 fsync is not forced to the device, so disk timings understate Linux; the
 counts and the per-level split hold.
 
+What the follower keeps is set in the environment, for either script:
+`BENCH_STATE` (`all`, `recent` or `none`; default `recent`), `BENCH_BODIES`
+(`all` or `none`; default `all`) and `BENCH_STATE_BUFFER` (the state
+buffer's limit in bytes; default the node's, `0` for none). A follower that
+keeps all state flushes when the buffer fills; one that keeps `recent` state
+moves its counts once per window; one that keeps no state or no bodies lets
+go of something at every step. Compare runs of one setting only.
+
 ```bash
 Benchmarks/sync/native.sh /tmp/bench 1 3                 # 1 worker, 3 runs
 Benchmarks/sync/report.py /tmp/bench/runs/w1-*
