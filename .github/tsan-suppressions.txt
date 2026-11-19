@@ -1,0 +1,12 @@
+# ThreadSanitizer suppressions for the thread-sanitizer CI job
+# (.github/scripts/check-tsan.sh). Keep each entry to one named cause.
+
+# SwiftNIO's bridge from an EventLoopFuture to async/await
+# (EventLoopFuture.get(), NIOCore/AsyncAwaitSupport.swift) resumes an
+# UnsafeContinuation on the event loop's thread. The report pairs that
+# resume's read of the awaiting task's frame with the same task's write of
+# its next continuation into the same slot, made after it was resumed. The
+# resume orders the two, through the Swift runtime, which is not built with
+# the sanitizer, so it does not see the order. Seen on main at 52efea40 and
+# 51f435af, from NodeRuntime.start awaiting Ivy's start.
+race:EventLoopFuture.get
