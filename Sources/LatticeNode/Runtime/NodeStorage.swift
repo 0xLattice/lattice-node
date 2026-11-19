@@ -173,6 +173,8 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// asked for before it: the facts a marker covers are stored before it
     /// moves. Reads see the buffer until the store holds what it held.
     nonisolated func flushState() async throws {
+        // Asked by the lane's own work: flushed here, in its turn.
+        guard !lane.isCurrent else { return try await flushStateOnce() }
         try await flushStateBehind().value
     }
 
@@ -204,6 +206,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// works on the store itself and no read through `PendingFacts`
     /// answers: the facts log, the counts, a chain newly hosted.
     nonisolated func written() async {
+        guard !lane.isCurrent else { return }
         try? await lane.settled()
     }
 

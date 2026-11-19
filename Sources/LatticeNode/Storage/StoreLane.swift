@@ -22,6 +22,14 @@ final class StoreLane: Sendable {
 
     private let state = Mutex(State())
 
+    /// The lane whose work this task is doing, if it is doing one's: work
+    /// already in the lane does what it needs of the lane itself, where
+    /// asking and waiting would wait for itself.
+    @TaskLocal static var current: StoreLane?
+
+    /// Whether the calling task is this lane's work.
+    var isCurrent: Bool { Self.current === self }
+
     /// The writes asked for and not yet done.
     var depth: Int { state.withLock(\.depth) }
 
@@ -41,7 +49,7 @@ final class StoreLane: Sendable {
                 defer { self.state.withLock { $0.depth -= 1 } }
                 if let failure = self.state.withLock(\.failure) { throw failure }
                 do {
-                    try await work()
+                    try await Self.$current.withValue(self) { try await work() }
                 } catch {
                     let handler = self.state.withLock { state -> (@Sendable (any Error) -> Void)? in
                         guard state.failure == nil else { return nil }
