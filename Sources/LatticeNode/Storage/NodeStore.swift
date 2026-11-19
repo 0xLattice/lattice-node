@@ -70,6 +70,8 @@ actor NodeStore {
     /// The lane this store's writes of a running node are made in, in the
     /// order the loop asked for them, off the loop.
     nonisolated let lane = StoreLane()
+    /// Every level's newest seq, once read (`lastSeqs`).
+    var newestSeqs: [String: Int64]?
     let nexusGenesisCID: String
     private let executor = SerialQueueExecutor(label: "LatticeNode.NodeStore")
 

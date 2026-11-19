@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Ivy
 import Lattice
 import cashew
@@ -129,6 +130,10 @@ final class StateBufferRuntimeTests: XCTestCase {
         let before = try await run(configuration, overlay) { runtime in
             let tip = try await self.mine(6, on: runtime, paying: payee)
             let seen = try await self.seen(by: runtime, of: payee)
+            // Every write asked is made: the tip's fact is read from the
+            // store, and no write is under way while the files are copied,
+            // so the copy is the store at one moment, as a crash leaves it.
+            await runtime.storage.written()
             let fact = try await runtime.storage.store.blockFact(tip, at: self.nexus)
             tipState = try XCTUnwrap(fact).postStateCID
             try FileManager.default.createDirectory(at: crashed, withIntermediateDirectories: true)
@@ -171,27 +176,51 @@ final class StateBufferRuntimeTests: XCTestCase {
         }
     }
 
+    /// The store's lane held as a disk that stopped answering, once every
+    /// write asked before is made. `release()` lets it answer again.
+    private func stopDisk(of runtime: NodeRuntime) async -> @Sendable () -> Void {
+        let (answers, disk) = AsyncStream<Void>.makeStream()
+        let (stopped, stops) = AsyncStream<Void>.makeStream()
+        runtime.storage.lane.run {
+            stops.yield()
+            for await _ in answers { break }
+        }
+        for await _ in stopped { break }
+        return { disk.yield() }
+    }
+
     /// A disk that has stopped answering: a write waits in the store's
-    /// lane and every write behind it with it. The node goes on executing
-    /// the blocks it is given and answers for them, their balances and
-    /// their blocks, from what it holds in memory; when the disk answers,
-    /// a node started again is at the same tip with the same balance.
-    func testANodeWhoseDiskStoppedAnsweringGoesOnExecutingAndAnswering() async throws {
+    /// lane and every write behind it with it. The node goes on: a block
+    /// submitted to it executes, and it answers reads for that block, its
+    /// balance and its status, from what it holds in memory. The miner that
+    /// submitted it is not answered until the block is written: what a
+    /// miner is told is accepted is in the store. When the disk answers,
+    /// the miner is, and a node started again is at the same tip.
+    func testWithItsDiskStoppedANodeExecutesASubmittedBlockAndAnswersItsMinerOnceItIsWritten() async throws {
         let (configuration, overlay) = try configuration(directory("stalled"))
         let payee = payee()
-        let (answers, disk) = AsyncStream<Void>.makeStream()
         let before = try await run(configuration, overlay) { runtime in
             _ = try await self.mine(2, on: runtime, paying: payee)
             let height = try XCTUnwrap(runtime.published.value?.actOnHeight)
-            runtime.storage.lane.run { for await _ in answers { break } }
-            let tip = try await self.mine(4, on: runtime, paying: payee)
-            XCTAssertEqual(runtime.published.value?.actOnHeight, height + 4)
-            // Asked while nothing of the four blocks is written.
+            let release = await self.stopDisk(of: runtime)
+            let answered = Mutex(false)
+            let nexus = self.nexus
+            let submit = Task {
+                _ = try await runtime.mineBlock(MiningTemplateRequest(recipients: [
+                    MiningRecipient(chainPath: nexus, address: payee),
+                ]))
+                answered.withLock { $0 = true }
+            }
+            try await eventually("the submitted block executes") {
+                runtime.published.value?.actOnHeight == height + 1
+            }
+            // Asked while nothing of the block is written.
             let seen = try await self.seen(by: runtime, of: payee)
-            XCTAssertEqual(seen.tip, tip)
-            let executed = await runtime.storage.hasExecutedBlock(tip, at: self.nexus)
+            let executed = await runtime.storage.hasExecutedBlock(seen.tip, at: self.nexus)
             XCTAssertTrue(executed, "the tip is answered for as executed")
-            disk.yield()
+            XCTAssertFalse(answered.withLock { $0 }, "the miner was answered before its block was written")
+            release()
+            try await submit.value
             return seen
         }
         try await run(configuration, overlay) { runtime in
@@ -208,7 +237,6 @@ final class StateBufferRuntimeTests: XCTestCase {
         let (configuration, overlay) = try configuration(directory("submitted"))
         let crashed = directory("submitted-crashed")
         let payee = payee()
-        let (answers, disk) = AsyncStream<Void>.makeStream()
         let key = CryptoUtils.generateKeyPair()
         let body = try HeaderImpl(node: TransactionBody(
             accountActions: [], actions: [Action(key: "k", oldValue: nil, newValue: "v")],
@@ -227,8 +255,14 @@ final class StateBufferRuntimeTests: XCTestCase {
             let admitted = try await runtime.submitTransaction(SubmitTransactionRequest(transaction: transaction))
             XCTAssertEqual(admitted.mempoolCount, 1)
             // The disk stops answering; a block confirms the transaction.
-            runtime.storage.lane.run { for await _ in answers { break } }
-            _ = try await self.mine(1, on: runtime, paying: payee)
+            // Its miner is not answered while the block is unwritten.
+            let release = await self.stopDisk(of: runtime)
+            let nexus = self.nexus
+            let submit = Task {
+                _ = try await runtime.mineBlock(MiningTemplateRequest(recipients: [
+                    MiningRecipient(chainPath: nexus, address: payee),
+                ]))
+            }
             try await eventually("the block took the transaction from the pool") {
                 runtime.published.value?.mempoolCount == 0
             }
@@ -241,7 +275,8 @@ final class StateBufferRuntimeTests: XCTestCase {
                     to: crashed.appendingPathComponent(file)
                 )
             }
-            disk.yield()
+            release()
+            try await submit.value
             return tip
         }
 

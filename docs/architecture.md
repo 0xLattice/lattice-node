@@ -158,8 +158,8 @@ view of it, and that view is current in memory from the moment the loop
 decided it; the store follows. What a crash takes from the store the node
 reads from its peers and checks again. What no peer holds is not restored
 that way: a transaction an operator submitted, which is why its journal
-write is waited for; a block mined here that reached no peer, which its
-miner keeps until it sees it on the chain; and the newest blocks of a chain
+write is waited for; a block a miner submitted here that reached no peer, which is why
+its miner is answered only once the facts that hold it are written; and the newest blocks of a chain
 this node alone hosts. A step's states are in the state buffer and its facts,
 headers and proofs in `PendingFacts` before the step ends; every read a
 running node makes of them asks there first, then the store, through the
@@ -175,12 +175,16 @@ stops the node.
 Three things wait for the lane. An operation on what the store itself
 holds (the counts, the window releases, letting go of bodies, a chain newly
 hosted reading its facts log) waits for every write asked before it. The
-loop waits when it has run too far ahead of the store: more than 256 writes
-asked and not made, or a state buffer at twice its limit. And a pool change
-that adds a transaction is waited for, so a transaction an operator
-submitted is answered only once it is journaled; one that only removes
-transactions a block confirmed is not, and runs after that block's facts, so
-a crash cannot lose both the block and the journal's row.
+loop waits when it has run too far ahead of the store: the records not yet
+written hold as many bytes as the state buffer may, the state buffer holds
+twice its limit, or more than 256 writes are asked and not made. And two
+answers wait for a write, off the loop, because they promise something no
+peer could give back: a transaction an operator submitted is answered once
+it is journaled, and a block a miner submitted once its facts are written. A
+transaction a peer sent is not waited for: it is held in memory, mined and
+served from there, until the lane has stored it. A pool change that removes
+transactions a block confirmed runs after that block's facts, so a crash
+cannot lose both the block and the journal's row.
 
 Content stays in `volumes.db` because a retention scope names it, and each
 scope says why. A block's body (its own Volume and its transactions') is

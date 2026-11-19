@@ -27,12 +27,30 @@ final class PendingFacts: Sendable {
         var proofs: [String: [String: [String: ChildBlockProof]]] = [:]
         var accepted: Set<String> = []
         var executed: Set<String> = []
+        var bytes = 0
     }
+
+    /// What a held header and a held fact are counted as. A proof's entries
+    /// are counted by their bytes; a header and a fact are held as values,
+    /// and measuring one would serialize it on the loop, so each is counted
+    /// as more than its serialized size: a header's own node is a few
+    /// hundred bytes, each child its index names about 100 (its path
+    /// segment and a CID), a fact under 300. A header is counted by its
+    /// children, so a Nexus block that commits many child chains counts as
+    /// much more than one that commits none.
+    static let headerBytes = 1_024
+    static let childBytes = 256
+    static let factBytes = 512
 
     private struct Held {
         var next: UInt64 = 0
         var steps: [(id: UInt64, step: Step)] = []
+        var bytes = 0
     }
+
+    /// The bytes held, as counted above: what the loop's wait for the lane
+    /// bounds (`NodeStorage.laneIsBehind`).
+    var bytes: Int { held.withLock(\.bytes) }
 
     private let held = Mutex(Held())
 
@@ -43,6 +61,11 @@ final class PendingFacts: Sendable {
         var step = Step()
         for level in levels {
             let path = level.path.joined(separator: "/")
+            step.bytes += level.headers.reduce(0) { $0 + Self.headerBytes + $1.children.count * Self.childBytes }
+            step.bytes += level.facts.reduce(0) { $0 + $1.facts.count } * Self.factBytes
+            for stored in level.proofs {
+                step.bytes += stored.proof.entries.reduce(0) { $0 + $1.cid.utf8.count + $1.data.count }
+            }
             for header in level.headers {
                 step.headers[header.blockCID] = header
                 step.childIndexes[header.block.children.rawCID] = header.blockCID
@@ -60,6 +83,7 @@ final class PendingFacts: Sendable {
         }
         return held.withLock { held in
             held.next += 1
+            held.bytes += step.bytes
             held.steps.append((held.next, step))
             return held.next
         }
@@ -67,7 +91,11 @@ final class PendingFacts: Sendable {
 
     /// The store holds the step: it is read from there.
     func remove(_ id: UInt64) {
-        held.withLock { held in held.steps.removeAll { $0.id == id } }
+        held.withLock { held in
+            guard let index = held.steps.firstIndex(where: { $0.id == id }) else { return }
+            held.bytes -= held.steps[index].step.bytes
+            held.steps.remove(at: index)
+        }
     }
 
     /// The newest pending step that answers, if one does.

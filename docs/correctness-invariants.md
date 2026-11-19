@@ -65,10 +65,11 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   of the sync architecture). The store's writes are made in the order the
   loop decided them, each a transaction, so after a crash the store holds a
   prefix of what was decided; a node may come back below a tip it
-  published, and reaches it again. The one write an answer waits for is an
-  operator's submitted transaction, journaled before it is acknowledged,
-  and its journal row goes only after the facts of the block that confirmed
-  it. The simulator models a store that writes within the step and enforces
+  published, and reaches it again. Two answers wait for a write, because
+  no peer could give back what they promise: an operator's submitted
+  transaction is journaled before it is acknowledged, and its journal row
+  goes only after the facts of the block that confirmed it; and a miner's
+  submitted block has its facts written before its miner is answered. The simulator models a store that writes within the step and enforces
   that form: `Simulator` and `LevelSimulator` ("published tip … is not
   durable", "served … before it was durable", "relayed … before it was
   durable").

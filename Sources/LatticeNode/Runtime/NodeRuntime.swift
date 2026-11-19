@@ -662,6 +662,9 @@ extension NodeRuntime {
         /// RPCs waiting on their answer, by reply ID.
         var replies: [UInt64: (path: ChainPath, reply: CheckedContinuation<NodeRuntimeReply, any Error>)] = [:]
         var nextReply: UInt64 = 1
+        /// The write of the last step's facts, asked of the store's lane:
+        /// what an answer that promises a block is held waits for.
+        var lastFacts: Task<Void, any Error>?
         /// Announced transactions being fetched, by CID.
         var transactionFetches: Set<String> = []
         /// Transactions recently fetched, not refetched until a hosted chain's
@@ -1729,7 +1732,7 @@ extension NodeRuntime {
                     // What the step decided is held where reads find it and
                     // asked of the store's lane: the loop waits for no
                     // commit and no flush.
-                    try await storage.persistNodeBatchBehind(batch, logID: core.logID)
+                    lastFacts = try await storage.persistNodeBatchBehind(batch, logID: core.logID) ?? lastFacts
                     storage.flushStateIfFull()
                     if configuration.blockBodies == .none { executedThisStep.append(contentsOf: persistedBodyKeys) }
                     readsDone.append(contentsOf: persistedBodyKeys)
@@ -1925,7 +1928,24 @@ extension NodeRuntime {
             case .mining(let effect):
                 return await execute(effect, at: path)
             case .workSubmitted(let replyID, let outcome):
-                answer(replyID, .success(.work(outcome)))
+                // A submitted block is answered for once the facts that
+                // hold it are written: what a miner was told is accepted
+                // is in the store, and outlives a crash. The answer waits
+                // for the write, off the loop; the loop does not.
+                guard let entry = replies.removeValue(forKey: replyID) else { break }
+                guard let written = lastFacts else {
+                    entry.reply.resume(returning: .work(outcome))
+                    break
+                }
+                Task {
+                    do {
+                        try await written.value
+                        entry.reply.resume(returning: .work(outcome))
+                    } catch {
+                        // The write failed: the node stops, as it says.
+                        entry.reply.resume(throwing: NodeRuntimeError.stopped)
+                    }
+                }
             }
             return true
         }
@@ -1936,13 +1956,15 @@ extension NodeRuntime {
                 // In the store's lane, after the facts asked for before it:
                 // a transaction a block confirmed leaves the journal only
                 // once that block's facts are written, so a crash cannot
-                // lose both. What the pool gained is waited for: it is read
-                // from the store, and a transaction an operator submitted
-                // is answered only once it is journaled.
+                // lose both. What the pool gained is read from memory
+                // until it is stored. Only a transaction an operator
+                // submitted is waited for: it is answered once journaled.
                 let storage = storage
-                let written = storage.lane.run { try await storage.persistPoolDelta(delta) }
-                guard !delta.added.isEmpty || !delta.journaled.isEmpty else { break }
                 do {
+                    let written = try await storage.storingBehind(delta.added.map(\.transaction)) {
+                        try await storage.persistPoolDelta(delta)
+                    }
+                    guard !delta.journaled.isEmpty else { break }
                     try await written.value
                 } catch {
                     failStop(error)
