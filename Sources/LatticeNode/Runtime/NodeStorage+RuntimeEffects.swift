@@ -57,19 +57,7 @@ extension NodeStorage {
     /// is executed again. With no buffer (`maximumBufferedStateBytes` 0)
     /// every affected level's Volumes are one volumes.db transaction,
     /// retained in the same one, before the facts.
-    ///
-    /// Returns when the facts are written.
     nonisolated func persistNodeBatch(_ batch: NodeBatch, logID: String) async throws {
-        try await persistNodeBatchBehind(batch, logID: logID)?.value
-    }
-
-    /// As `persistNodeBatch`, for the loop: returns once what the step
-    /// created is where reads find it (its states in the state buffer, its
-    /// facts in `PendingFacts`) and its facts transaction is asked of the
-    /// store's lane, with the task that writes it (nil when it was written
-    /// here, with no buffer). The loop does not wait for it.
-    @discardableResult
-    nonisolated func persistNodeBatchBehind(_ batch: NodeBatch, logID: String) async throws -> Task<Void, any Error>? {
         var durable: [NodeFactBatch] = []
         // What this step's executions created. An executed block's body was
         // pinned under its block's name by the job that executed it.
@@ -159,7 +147,7 @@ extension NodeStorage {
         guard buffersState else {
             try await broker.storeVolumesLocal(volumes, retaining: retaining)
             try await store.stageNodeFacts(durable, logID: logID)
-            return nil
+            return
         }
         let specVolumes = volumes.filter { specRoots.contains($0.volume.root) }
         if !specVolumes.isEmpty {
@@ -170,15 +158,7 @@ extension NodeStorage {
             volumes.filter { !specRoots.contains($0.volume.root) },
             retaining: retaining.filter { !$0.value.isEmpty }
         )
-        // Held where every read finds them, then written behind the loop
-        // in the order the steps decided them. A write that fails leaves
-        // its step held: the node stops, and nothing reads further.
-        let (store, facts) = (store, durable)
-        let waiting = store.pending.add(facts)
-        return lane.run {
-            try await store.stageNodeFacts(facts, logID: logID)
-            store.pending.remove(waiting)
-        }
+        try await store.stageNodeFacts(durable, logID: logID)
     }
 
     /// Retains the roots this store holds, and returns the ones it lacks.

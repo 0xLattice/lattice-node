@@ -491,28 +491,22 @@ Persistence order is:
    retain it. A body fetched from peers is read into memory until then (and
    read again from peers if memory let it go), and a node does not serve it
    before;
-2. hold what the step decided in memory, where every read finds it: its
-   post-states in the state buffer, and the complete multi-level `NodeBatch`
-   (headers, child proofs, facts) with the records not yet written;
-3. publish the new snapshots;
-4. behind the loop, in the order the steps decided them: commit each step's
-   `NodeBatch` and cursors in one `state.db` transaction;
-5. later, at a flush, after the facts it covers: store the buffered
-   post-states in one `volumes.db` transaction, then move each chain's flush
-   marker in `state.db` to the facts those states belong to.
+2. put the step's post-states in the state buffer, where every read finds
+   them;
+3. commit the complete multi-level `NodeBatch` (headers, child proofs, facts,
+   and cursors) in one `state.db` transaction;
+4. publish the new snapshots;
+5. later, at a flush: store the buffered post-states in one `volumes.db`
+   transaction, then move each chain's flush marker in `state.db` to the
+   facts those states belong to.
 
-A block's body is committed before anything is announced, served or built on
-it. Its headers, facts and state are not: a tip is published, and its
-headers served, once the step that decided them has ended, while their
-writes may still wait. Each write is one synchronous transaction
-(`synchronous=FULL`) and they are made in order, so after a crash the stores
-hold everything the node decided up to some step and nothing after it. The
-node then reads from its peers what it had weighed after that, and executes
-again what is above the flush markers (`stateBufferBytes`, below). Two
-answers wait for a write: a transaction an operator submitted is journaled
-before it is acknowledged, and a block a miner submitted has its facts
-written before its miner is answered. With a buffer of 0 the old order holds: post-states stored,
-then the `NodeBatch` committed, then the snapshots published.
+A commit is synchronous (`synchronous=FULL`), and bodies, headers and facts
+are committed before anything is announced, served or built on. Executed
+state is not: a published tip's state may be in the buffer and not yet on
+disk. A crash then costs the executions above the flush markers, which run
+again at the next start (`stateBufferBytes`, below); with a buffer of 0 the
+post-states are stored in step 2's place and nothing is published before it
+is on disk.
 
 ### Batched execution
 
@@ -543,14 +537,7 @@ cache. A clean stop writes it all. A crash loses the batch being executed
 and the state not yet written: on the next start the node logs how many
 executed blocks that was, counts them as not executed, and executes them
 again from the bodies it holds, while it weighs headers and answers
-requests as usual. The node's own records (headers, facts, proofs) are
-written behind its decisions too, in order: a crash can also lose the last
-of those, and the node then asks its peers again for what it had weighed.
-A block submitted to this node is the exception: a miner (`submitWork`), or
-an author pushing a child block (`submitChildBlock`), is told the block is
-accepted or in the tree only once its records are written, so a block the
-node said it accepted is still there after a crash, on a chain this node alone hosts too. Its state
-may not be, and is produced again from the block. Until it is back at its tip, reads at the tip answer
+requests as usual. Until it is back at its tip, reads at the tip answer
 for the lower tip. With 0 each step's state is written as it is produced
 and a crash loses at most the batch being executed. A node that keeps
 `recent` state writes at least once per state window, and one that keeps

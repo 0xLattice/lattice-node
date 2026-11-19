@@ -469,9 +469,6 @@ public final class NodeRuntime: Sendable {
             observeJob: observeJob,
             peerMemory: peerMemory
         ))
-        // A write the lane could not make stops the node, as one the loop
-        // waited for did.
-        storage.lane.onFailure(failStop)
         loop = Task {
             var state = initial.take()
             // With no bodies kept beyond the working set, a start lets go
@@ -662,9 +659,6 @@ extension NodeRuntime {
         /// RPCs waiting on their answer, by reply ID.
         var replies: [UInt64: (path: ChainPath, reply: CheckedContinuation<NodeRuntimeReply, any Error>)] = [:]
         var nextReply: UInt64 = 1
-        /// The write of the last step's facts, asked of the store's lane:
-        /// what an answer that promises a block is held waits for.
-        var lastFacts: Task<Void, any Error>?
         /// Announced transactions being fetched, by CID.
         var transactionFetches: Set<String> = []
         /// Transactions recently fetched, not refetched until a hosted chain's
@@ -1055,8 +1049,6 @@ extension NodeRuntime {
         /// One child level started over what it journaled, as boot does,
         /// with the operator's own pooled transactions for it.
         private mutating func start(_ path: ChainPath, specs operatorSpecs: [ChainPath: ChainSpec]) async throws {
-            // The facts log itself is read: everything asked is written.
-            await storage.written()
             let facts = try await storage.nodeFacts(at: path)
             var specs: [ChainSpec] = []
             for case .block(let block) in facts.facts where block.parentBlockHash == nil {
@@ -1696,12 +1688,8 @@ extension NodeRuntime {
             // What an executed block read goes once the kept state holds
             // what of it the tip's state holds: its execution's window
             // until the counts reach it.
-            // After the facts of the step that executed it, in the lane.
-            if !readsDone.isEmpty {
-                let (storage, done) = (storage, readsDone)
-                storage.lane.run { for key in done { await storage.releaseReads(key.cid, at: key.path) } }
-                readsDone.removeAll()
-            }
+            for key in readsDone { await storage.releaseReads(key.cid, at: key.path) }
+            readsDone.removeAll()
             refreshView(core.touched)
             return true
         }
@@ -1717,25 +1705,18 @@ extension NodeRuntime {
                     }
                 }
                 do {
-                    // What the step decided is held where reads find it and
-                    // asked of the store's lane: the loop waits for no
-                    // commit and no flush.
-                    lastFacts = try await storage.persistNodeBatchBehind(batch, logID: core.logID) ?? lastFacts
-                    storage.flushStateIfFull()
+                    try await storage.persistNodeBatch(batch, logID: core.logID)
+                    // The loop waits on a flush, not on each step's state.
+                    if storage.stateBufferIsFull { try await storage.flushState() }
                     if configuration.blockBodies == .none { executedThisStep.append(contentsOf: persistedBodyKeys) }
                     readsDone.append(contentsOf: persistedBodyKeys)
-                    // A block found invalid is no block: its body goes,
-                    // after the fact that says so.
+                    // A block found invalid is no block: its body goes.
                     for (path, levelBatch) in batch.levels {
                         for case .exclusion(let excluded) in levelBatch.facts.flatMap(\.facts) {
-                            let storage = storage
-                            storage.lane.run { await storage.releaseBody(excluded.blockHash, at: path) }
+                            await storage.releaseBody(excluded.blockHash, at: path)
                             readsDone.append(BodyKey(path: path, cid: excluded.blockHash))
                         }
                     }
-                    // The loop has run too far ahead of the store: it
-                    // waits for it here, and only here.
-                    if storage.laneIsBehind { await storage.written() }
                 } catch {
                     // Fail-stop: no later effect of this step may run.
                     failStop(error)
@@ -1916,24 +1897,7 @@ extension NodeRuntime {
             case .mining(let effect):
                 return await execute(effect, at: path)
             case .workSubmitted(let replyID, let outcome):
-                // A submitted block is answered for once the facts that
-                // hold it are written: what a miner was told is accepted
-                // is in the store, and outlives a crash. The answer waits
-                // for the write, off the loop; the loop does not.
-                guard let entry = replies.removeValue(forKey: replyID) else { break }
-                guard let written = lastFacts else {
-                    entry.reply.resume(returning: .work(outcome))
-                    break
-                }
-                Task {
-                    do {
-                        try await written.value
-                        entry.reply.resume(returning: .work(outcome))
-                    } catch {
-                        // The write failed: the node stops, as it says.
-                        entry.reply.resume(throwing: NodeRuntimeError.stopped)
-                    }
-                }
+                answer(replyID, .success(.work(outcome)))
             }
             return true
         }
@@ -1941,19 +1905,8 @@ extension NodeRuntime {
         private mutating func execute(_ effect: MiningEffect, at path: ChainPath) async -> Bool {
             switch effect {
             case .poolChanged(let delta):
-                // In the store's lane, after the facts asked for before it:
-                // a transaction a block confirmed leaves the journal only
-                // once that block's facts are written, so a crash cannot
-                // lose both. What the pool gained is read from memory
-                // until it is stored. Only a transaction an operator
-                // submitted is waited for: it is answered once journaled.
-                let storage = storage
                 do {
-                    let written = try await storage.storingBehind(delta.added.map(\.transaction)) {
-                        try await storage.persistPoolDelta(delta)
-                    }
-                    guard !delta.journaled.isEmpty else { break }
-                    try await written.value
+                    try await storage.persistPoolDelta(delta)
                 } catch {
                     failStop(error)
                     return false

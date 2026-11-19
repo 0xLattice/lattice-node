@@ -87,22 +87,8 @@ extension NodeStore {
     /// takes a good copy again only if a peer re-sends it while the block
     /// still waits for proof (a block already credited is not re-written).
     nonisolated func savedProofs(at path: ChainPath, for children: [String]) throws -> [String: [ChildBlockProof]] {
-        guard path.count > 1, ChainAddress(path) != nil else { return [:] }
-        // What a step saved and the store has not written yet, over what
-        // the store holds: a proof is fixed by its block and root, and the
-        // newer copy of one replaces the older.
-        let waiting = pending.proofs(at: path.joined(separator: "/"), for: children)
-        var proofs = try storedProofs(at: path, for: children)
-        for (child, byRoot) in waiting {
-            var merged = Dictionary((proofs[child] ?? []).map { ($0.rootCID, $0) }) { _, newer in newer }
-            merged.merge(byRoot) { _, newer in newer }
-            proofs[child] = merged.keys.sorted().compactMap { merged[$0] }
-        }
-        return proofs
-    }
-
-    private nonisolated func storedProofs(at path: ChainPath, for children: [String]) throws -> [String: [ChildBlockProof]] {
         var proofs: [String: [ChildBlockProof]] = [:]
+        guard path.count > 1, ChainAddress(path) != nil else { return proofs }
         var bad: [Int64] = []
         var start = children.startIndex
         while start < children.endIndex {
@@ -168,7 +154,6 @@ extension NodeStore {
     }
 
     nonisolated func header(_ cid: String) -> (block: Block, children: FlatDictionary<BlockHeader>)? {
-        if let waiting = pending.header(cid) { return (waiting.block, waiting.children) }
         guard let row = try? reads.row(
             HeaderEvidenceRow.self,
             "SELECT h.block AS block, c.bytes AS children FROM headers h JOIN child_indexes c ON c.cid = h.children_cid WHERE h.cid = ?1",
@@ -182,15 +167,13 @@ extension NodeStore {
 
     /// A weighed block's own node, as it was weighed.
     nonisolated func headerBlockBytes(_ cid: String) -> Data? {
-        if let waiting = pending.header(cid), let bytes = waiting.block.toData() { return bytes }
-        return try? reads.row(
+        try? reads.row(
             HeaderBlockRow.self, "SELECT block FROM headers WHERE cid = ?1", params: [.text(cid)]
         )?.block
     }
 
     nonisolated func childIndexBytes(_ cid: String) -> Data? {
-        if let waiting = pending.headerCarrying(childIndex: cid), let bytes = waiting.children.toData() { return bytes }
-        return try? reads.row(
+        try? reads.row(
             ChildIndexEvidenceRow.self, "SELECT bytes FROM child_indexes WHERE cid = ?1", params: [.text(cid)]
         )?.bytes
     }

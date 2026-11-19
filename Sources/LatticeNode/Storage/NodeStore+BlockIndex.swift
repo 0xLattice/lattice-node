@@ -96,7 +96,6 @@ extension NodeStore {
         guard CIDIdentity.isCanonical(blockCID) else {
             throw NodeStoreError.corrupt("invalid accepted block lookup")
         }
-        if pending.accepted(blockCID, at: chainPath.joined(separator: "/")) { return true }
         return try !database.query(
             "SELECT 1 FROM accepted_blocks WHERE chain_path = ?1 AND block_cid = ?2 LIMIT 1",
             params: [.text(chainPath.joined(separator: "/")), .text(blockCID)]
@@ -117,7 +116,6 @@ extension NodeStore {
         guard CIDIdentity.isCanonical(blockCID) else {
             throw NodeStoreError.corrupt("invalid executed block lookup")
         }
-        if pending.executed(blockCID, at: chainPath.joined(separator: "/")) { return true }
         return try !database.query(
             "SELECT 1 FROM accepted_blocks WHERE chain_path = ?1 AND block_cid = ?2 AND validated != ?3 LIMIT 1",
             params: [.text(chainPath.joined(separator: "/")), .text(blockCID), BlockStatus.header.sqlValue]

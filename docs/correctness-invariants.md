@@ -64,21 +64,13 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   buffer and enforces the unbuffered form: `SimBodies.checkStatesStored`
   and `Invariants.checkTree` ("weighed block … has no durable content").
 - **NODE-STORAGE-002.b** — Nothing is published, served, relayed or
-  streamed before the step that decided it has ended, and so before every
-  read finds it: its states in the state buffer, its facts, headers and
-  proofs in `PendingFacts`. It may be published before the store has
-  written it: durability follows consistency, it does not gate it (rule 8
-  of the sync architecture). The store's writes are made in the order the
-  loop decided them, each a transaction, so after a crash the store holds a
-  prefix of what was decided; a node may come back below a tip it
-  published, and reaches it again. Two answers wait for a write, because
-  no peer could give back what they promise: an operator's submitted
-  transaction is journaled before it is acknowledged, and its journal row
-  goes only after the facts of the block that confirmed it; and a miner's
-  submitted block has its facts written before its miner is answered. The simulator models a store that writes within the step and enforces
-  that form: `Simulator` and `LevelSimulator` ("published tip … is not
-  durable", "served … before it was durable", "relayed … before it was
-  durable").
+  streamed before its facts are committed. An executed tip is published
+  while its state may still be in the state buffer: durability follows
+  consistency, it does not gate it (rule 8 of the sync architecture). A
+  crash may take a node back below a tip it published; it executes the
+  lost blocks again and reaches the same tip. Enforced for facts by
+  `Simulator` and `LevelSimulator` ("published tip … is not durable",
+  "served … before it was durable", "relayed … before it was durable").
 - **NODE-STORAGE-002.c** — Content stays because a scope names it, and a
   start leaves pins as it finds them: nothing is rebuilt from the facts.
   A block's body is named by that block on its chain, what executions read

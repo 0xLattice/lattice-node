@@ -1,5 +1,4 @@
 import Foundation
-import Synchronization
 import Ivy
 import Lattice
 import XCTest
@@ -205,63 +204,6 @@ final class ChildBlockBuildTests: XCTestCase {
         let mined = try await pair.builder.mine(template)
         let minedCarried = try await MiningTemplateAssembly.blockTransactions(in: mined, fetcher: fetcher)
         XCTAssertTrue(minedCarried.isEmpty, "and so does the block it mines")
-    }
-
-    /// A push its author is told is in the tree is written first: the author
-    /// stops pushing on that answer. With the hosting node's disk stopped,
-    /// a carried block it is pushed executes from memory, and its push is
-    /// not answered; when the disk answers, the push is answered `tree`.
-    func testAPushIsAnsweredInTheTreeOnlyOnceTheBlockIsWritten() async throws {
-        let pair = try await pair(("7f", "80"))
-        let builder = pair.builder
-        let built = try await builder.buildChildBlock(pair.build)
-        let commit = try await builder.submitTransaction(SubmitTransactionRequest(transaction: try await pair.commit(built))).transactionCID
-        try await eventually("the miner pools the relayed commit") {
-            await pair.miner.reads.explorerMempool().transactions.contains(commit)
-        }
-        _ = try await pair.miner.mineBlock(pair.mining)
-        try await eventually("the hosting node's Nexus carries the commit") {
-            try await builder.childCommitment(chainPath: Self.alpha).value == built.blockCID + "@" + built.parentState
-        }
-        let release = await stopDisk(of: builder)
-        // The author pushes until the hosting node holds the block.
-        let pushing = Task {
-            while true {
-                if try await builder.submitChildBlock(built.submit).status == .tree { return }
-                try await Task.sleep(for: .milliseconds(20))
-            }
-        }
-        let alphaReads = try XCTUnwrap(builder.levelReads[Self.alpha])
-        try await eventually("Alpha executes the pushed block") {
-            await alphaReads.readSnapshot().tipCID == built.blockCID
-        }
-        // A push now finds it in the tree, unwritten. The node answers two
-        // requests asked after it; the push is still unanswered.
-        let answered = Mutex(false)
-        let push = Task { () -> SubmitChildBlockStatus in
-            let status = try await builder.submitChildBlock(built.submit).status
-            answered.withLock { $0 = true }
-            return status
-        }
-        for _ in 0..<2 { _ = try await builder.childCommitment(chainPath: Self.alpha) }
-        XCTAssertFalse(answered.withLock { $0 }, "the push was answered in the tree before the block was written")
-        release()
-        let status = try await push.value
-        try await pushing.value
-        XCTAssertEqual(status, .tree)
-    }
-
-    /// The store's lane held as a disk that stopped answering, once every
-    /// write asked before is made. `release()` lets it answer again.
-    private func stopDisk(of runtime: NodeRuntime) async -> @Sendable () -> Void {
-        let (answers, disk) = AsyncStream<Void>.makeStream()
-        let (stopped, stops) = AsyncStream<Void>.makeStream()
-        runtime.storage.lane.run {
-            stops.yield()
-            for await _ in answers { break }
-        }
-        for await _ in stopped { break }
-        return { disk.yield() }
     }
 
     /// Genesis, then an existing chain, then a pending child transaction,

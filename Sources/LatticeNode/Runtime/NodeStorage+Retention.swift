@@ -373,7 +373,6 @@ extension NodeStorage {
     /// state is not held, or the check could not be made: then a state sync
     /// replaces them.
     nonisolated func auditCounted(at path: ChainPath, marker: String) async -> [String]? {
-        await written()
         do {
             guard let counted = CountedMarker(marker),
                   let tip = try await store.blockFact(counted.tip.cid, at: path),
@@ -407,7 +406,6 @@ extension NodeStorage {
     /// it is the tip itself, whose state needs no diff to reach it: snap
     /// sync's pivot at the head.
     nonisolated func countedSyncBlock(at path: ChainPath, below tip: String, window: UInt64) async throws -> CountedMarker.Block {
-        await written()
         guard let top = try await store.ancestor(of: tip, depth: 0, at: path),
               let block = try await store.ancestor(of: tip, depth: min(6, window / 2), at: path) else {
             throw NodeStorageError.missingBlockFact(tip)
