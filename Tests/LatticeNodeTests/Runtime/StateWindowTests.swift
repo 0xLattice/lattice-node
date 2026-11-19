@@ -1040,7 +1040,9 @@ final class StateWindowTests: XCTestCase {
             }
             var heights: [UInt64] = []
             do {
-                try await eventually("Alpha's window is its last 2 blocks") {
+                // With maintenance passes, as the other window checks: counts
+                // behind their tip are settled again at one.
+                try await eventuallyWithPasses(runtime, "Alpha's window is its last 2 blocks") {
                     heights = try await self.windowHeights(storage, at: Self.alpha)
                     return heights == [alphaHeight - 1, alphaHeight]
                 }
