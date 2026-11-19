@@ -16,6 +16,9 @@ public enum NodeStorageError: Error, Equatable, Sendable {
     case bodyExceedsLocalBudget(bytes: Int)
     /// No executed block's fact names this block.
     case missingBlockFact(String)
+    /// A child block's own content was obtained, and the receipt proofs its
+    /// withdrawals need, which travel with it, were not: no peer served them.
+    case receiptProofsUnavailable(String)
 }
 
 public enum ChainPhase: String, Sendable {

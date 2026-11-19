@@ -181,7 +181,8 @@ final class ReceiptWitnessTests: XCTestCase {
         // job does not connect it (`connectJob`).
         let content = NodeImportStorage(storage: nil, keepsVolumes: true)
         try await BlockHeader(rawCID: withdrawalBlock).storeBlockContent(fetcher: local, storer: content)
-        let unreadable = Set(witness).subtracting(await content.takeVolumes().map(\.volume.root))
+        let contentVolumes = await content.takeVolumes().map(\.volume)
+        let unreadable = Set(witness).subtracting(contentVolumes.map(\.root))
         XCTAssertFalse(unreadable.isEmpty)
         // Stored by a node holding nothing of it, so storing reads it.
         let empty = try await NodeStorage.open(configuration: try host(keyByte: 0xd3, blockBodies: .all).configuration)
@@ -189,6 +190,15 @@ final class ReceiptWitnessTests: XCTestCase {
             [(withdrawalBlock, nil)], at: Self.alpha, from: Unreadable(local, cids: unreadable)
         )
         XCTAssertNil(stored[withdrawalBlock], "a block whose witness cannot be read is not stored")
+        // A fetch that obtained the block's content and not its receipt
+        // proofs says so, as a wait of its own; one that obtained nothing
+        // reports the body as not obtained.
+        struct Unanswered: Error {}
+        let proofsMissing = await empty.incompleteBody(withdrawalBlock, read: contentVolumes, error: Unanswered())
+        XCTAssertEqual(BodyWait(fetchFailure: proofsMissing), .receiptProofsUnavailable)
+        XCTAssertEqual("\(BodyWait(fetchFailure: proofsMissing))", "its receipt proofs not obtained from any peer")
+        let nothingRead = await empty.incompleteBody(withdrawalBlock, read: [], error: Unanswered())
+        XCTAssertEqual(BodyWait(fetchFailure: nothingRead), .unavailable)
         let producerAlpha = await alphaReads.readSnapshot()
         // Its height, not its tip: the producer's last carried Alpha block
         // can connect after this read, and the follower then follows it.

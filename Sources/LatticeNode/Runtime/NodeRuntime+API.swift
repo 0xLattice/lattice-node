@@ -43,6 +43,9 @@ enum BodyWait: Sendable, Equatable, CustomStringConvertible {
     case exceedsLocalBudget
     /// No peer served the body's content.
     case unavailable
+    /// The block's own content arrived; the receipt proofs its withdrawals
+    /// need, which travel with it, did not.
+    case receiptProofsUnavailable
     /// This node's own store failed.
     case storageFailed
     /// The body is held and its connect ended without a verdict.
@@ -51,6 +54,7 @@ enum BodyWait: Sendable, Equatable, CustomStringConvertible {
     init(fetchFailure error: any Error) {
         switch error {
         case NodeStorageError.bodyExceedsLocalBudget: self = .exceedsLocalBudget
+        case NodeStorageError.receiptProofsUnavailable: self = .receiptProofsUnavailable
         case is NodeStorageError, is NodeStoreError, is BrokerError: self = .storageFailed
         default: self = .unavailable
         }
@@ -60,6 +64,7 @@ enum BodyWait: Sendable, Equatable, CustomStringConvertible {
         switch self {
         case .exceedsLocalBudget: return "exceeds this node's byte budget"
         case .unavailable: return "not obtained from any peer"
+        case .receiptProofsUnavailable: return "its receipt proofs not obtained from any peer"
         case .storageFailed: return "local storage failed"
         case .notConnected(let failure):
             let name = switch failure {

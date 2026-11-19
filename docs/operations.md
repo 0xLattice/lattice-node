@@ -831,6 +831,34 @@ Confirm the local tip really is stale, configured endpoints are reachable,
 provider discovery is enabled, clocks are sane, and all nodes use the same
 wire revision and Nexus genesis.
 
+### A child chain stops at a block: receipt proofs not obtained
+
+`/status` for the chain shows `blockedOn: bodiesUnavailable` and `waiting:
+body of <cid>: its receipt proofs not obtained from any peer`. The block
+carries a withdrawal, which is checked against a receipt in its parent
+chain's state at the block's anchor. The trie nodes that prove that receipt
+travel with the block, stored beside it and served with it; this block's
+were never kept. That happens to a block stored before receipt proofs
+travelled with blocks, when no node still holds the parent state it names.
+
+Repair it once, from one node:
+
+1. Start a node from an empty storage directory on this release, hosting the
+   parent and the stuck chain with `blockBodies: all`, and a parent state
+   window longer than the parent chain (`--state-window Nexus=<more than
+   Nexus's height>`). It needs peers that serve the parent's block bodies
+   from genesis.
+2. It executes the parent again from genesis, keeping its state, then the
+   child. At the stuck block the withdrawal reads its receipt from that
+   state, and storing the block stores its receipt proofs beside it.
+3. The stuck nodes ask the chain's hosts, this one included, for the block
+   again, and receive it with its proofs. Each stores them with the block
+   and serves them from then on.
+4. Once the stuck nodes have passed the block, stop the repair node or wipe
+   it back to its usual settings. No node keeps old parent state afterwards.
+
+If the repair node stops at the same block, the cause is something else.
+
 ### Public reads return 429
 
 Determine whether the code listener or nginx produced the response. The node's
