@@ -349,8 +349,11 @@ extension NodeRuntime {
         }) else { throw NodeRuntimeError.stopped }
         // In the tree: its author is told so, and stops pushing it, only
         // once the facts that hold it are written, as a miner is answered
-        // for a submitted block. The wait is this request's, off the loop.
-        if status == .tree { await storage.written() }
+        // for a submitted block. The wait is this request's, off the loop;
+        // a write that failed stopped the node, and the push is not answered.
+        if status == .tree {
+            do { try await storage.lane.settled() } catch { throw NodeRuntimeError.stopped }
+        }
         return SubmitChildBlockResponse(blockCID: cid, status: status)
     }
 

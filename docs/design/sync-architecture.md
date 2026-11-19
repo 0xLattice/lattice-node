@@ -158,10 +158,9 @@ rule here first.
 
 The measurements are the first
 [sync benchmark](../../README.md) baseline at `0ff1e87a`: 9,086 blocks over
-four chains, run natively on macOS (`Benchmarks/sync/native.sh`), where a
-plain fsync does not force the drive to flush: a sync costs less there than
-on Linux, which is not measured yet. A row is removed when the code no
-longer departs.
+four chains, one run per setting, on Linux (swift:6.1-jammy) under Docker on
+a macOS host, so fsync goes to the VM's disk. A row is removed when the code
+no longer departs.
 
 | Rule | Today | Measured |
 |---|---|---|
