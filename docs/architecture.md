@@ -158,8 +158,9 @@ view of it, and that view is current in memory from the moment the loop
 decided it; the store follows. What a crash takes from the store the node
 reads from its peers and checks again. What no peer holds is not restored
 that way: a transaction an operator submitted, which is why its journal
-write is waited for; a block mined here that reached no peer, which its
-miner keeps until it sees it on the chain; and the newest blocks of a chain
+write is waited for; a block mined here that reached no peer, which is its
+miner's to keep until it sees it on the chain (lattice-miner does not yet:
+it submits again only a block whose submit failed); and the newest blocks of a chain
 this node alone hosts. A step's states are in the state buffer and its facts,
 headers and proofs in `PendingFacts` before the step ends; every read a
 running node makes of them asks there first, then the store, through the

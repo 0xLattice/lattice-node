@@ -61,6 +61,8 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// Transactions the pool gained whose store write waits in the lane
     /// (`storingBehind`): read as stored content is.
     nonisolated let poolBuffer = StateBuffer()
+    /// How many waiting writes hold each Volume of `poolBuffer`.
+    private nonisolated let poolHolds = Mutex<[String: Int]>([:])
     /// What this node holds: the state buffer, then the store.
     nonisolated let held: CompositeContentSource
     let localFetcher: CoalescingFetcher
@@ -198,12 +200,21 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// The loop has run further ahead of the store than it may: the
     /// records it decided and the store has not written hold as many bytes
     /// as the state buffer may (`PendingFacts.bytes`), the state buffer
-    /// holds twice its limit, or more writes wait than a step asks for many
-    /// times over. The loop waits for the lane.
+    /// holds twice its limit, or more writes wait than `maximumLaneDepth`.
+    /// The loop waits for the lane.
     nonisolated var laneIsBehind: Bool {
         let limit = max(configuration.resourcePolicy.maximumBufferedStateBytes, 1)
-        return store.pending.bytes >= limit || stateBuffer.bytes >= 2 * limit || lane.depth > 256
+        return store.pending.bytes >= limit || stateBuffer.bytes >= 2 * limit
+            || lane.depth > Self.maximumLaneDepth
     }
+
+    /// The writes that may wait in the lane before the loop waits for it.
+    /// The bytes above bound what is held; this bounds the writes that hold
+    /// nothing counted (a release, a pool change that only removes), each a
+    /// closure and a task. A step asks for a handful at most, so this is
+    /// some dozens of steps: far more than a store that keeps up ever has
+    /// waiting, and few enough that the lane is never thousands behind.
+    static let maximumLaneDepth = 256
 
     /// Holds what the pool gained where every read of content finds it,
     /// until `work`, asked of the lane, has stored it: a transaction a peer
@@ -216,11 +227,24 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         for transaction in transactions {
             try await VolumeImpl<Transaction>(node: transaction).store(storer: walked)
         }
-        let held = StateBuffer.Batch(volumes: await walked.takeVolumes(), retaining: [:])
-        poolBuffer.add(held.volumes, retaining: [:])
-        return lane.run { [poolBuffer] in
+        // Held once for each write that still waits to store it: a
+        // transaction added, removed and added again is let go of only by
+        // the last of its writes.
+        let volumes = await walked.takeVolumes()
+        poolBuffer.add(volumes, retaining: [:])
+        poolHolds.withLock { holds in
+            for volume in volumes { holds[volume.volume.root, default: 0] += 1 }
+        }
+        return lane.run {
             try await work()
-            poolBuffer.remove(held)
+            let stored = self.poolHolds.withLock { holds in
+                volumes.filter { volume in
+                    let left = (holds[volume.volume.root] ?? 1) - 1
+                    holds[volume.volume.root] = left > 0 ? left : nil
+                    return left <= 0
+                }
+            }
+            self.poolBuffer.remove(StateBuffer.Batch(volumes: stored, retaining: [:]))
         }
     }
 

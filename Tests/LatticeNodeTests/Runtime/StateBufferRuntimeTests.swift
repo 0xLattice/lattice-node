@@ -129,11 +129,12 @@ final class StateBufferRuntimeTests: XCTestCase {
         let before = try await run(configuration, overlay) { runtime in
             let tip = try await self.mine(6, on: runtime, paying: payee)
             let seen = try await self.seen(by: runtime, of: payee)
+            // Every write asked is made: the tip's fact is read from the
+            // store, and no write is under way while the files are copied,
+            // so the copy is the store at one moment, as a crash leaves it.
+            await runtime.storage.written()
             let fact = try await runtime.storage.store.blockFact(tip, at: self.nexus)
             tipState = try XCTUnwrap(fact).postStateCID
-            // No write is under way while the files are copied: the copy
-            // is the store at one moment, as a crash leaves it.
-            await runtime.storage.written()
             try FileManager.default.createDirectory(at: crashed, withIntermediateDirectories: true)
             for file in try FileManager.default.contentsOfDirectory(atPath: configuration.storagePath.path)
             where file.hasSuffix(".db") || file.hasSuffix("-wal") {

@@ -34,9 +34,12 @@ final class PendingFacts: Sendable {
     /// are counted by their bytes; a header and a fact are held as values,
     /// and measuring one would serialize it on the loop, so each is counted
     /// as more than its serialized size: a header's own node is a few
-    /// hundred bytes and a child index entry about 100 per child, a fact
-    /// under 300.
-    static let headerBytes = 2_048
+    /// hundred bytes, each child its index names about 100 (its path
+    /// segment and a CID), a fact under 300. A header is counted by its
+    /// children, so a Nexus block that commits many child chains counts as
+    /// much more than one that commits none.
+    static let headerBytes = 1_024
+    static let childBytes = 256
     static let factBytes = 512
 
     private struct Held {
@@ -58,7 +61,7 @@ final class PendingFacts: Sendable {
         var step = Step()
         for level in levels {
             let path = level.path.joined(separator: "/")
-            step.bytes += level.headers.count * Self.headerBytes
+            step.bytes += level.headers.reduce(0) { $0 + Self.headerBytes + $1.children.count * Self.childBytes }
             step.bytes += level.facts.reduce(0) { $0 + $1.facts.count } * Self.factBytes
             for stored in level.proofs {
                 step.bytes += stored.proof.entries.reduce(0) { $0 + $1.cid.utf8.count + $1.data.count }
