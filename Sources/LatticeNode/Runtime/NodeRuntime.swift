@@ -662,6 +662,9 @@ extension NodeRuntime {
         /// RPCs waiting on their answer, by reply ID.
         var replies: [UInt64: (path: ChainPath, reply: CheckedContinuation<NodeRuntimeReply, any Error>)] = [:]
         var nextReply: UInt64 = 1
+        /// The write of the last step's facts, asked of the store's lane:
+        /// what an answer that promises a block is held waits for.
+        var lastFacts: Task<Void, any Error>?
         /// Announced transactions being fetched, by CID.
         var transactionFetches: Set<String> = []
         /// Transactions recently fetched, not refetched until a hosted chain's
@@ -1717,7 +1720,7 @@ extension NodeRuntime {
                     // What the step decided is held where reads find it and
                     // asked of the store's lane: the loop waits for no
                     // commit and no flush.
-                    try await storage.persistNodeBatchBehind(batch, logID: core.logID)
+                    lastFacts = try await storage.persistNodeBatchBehind(batch, logID: core.logID) ?? lastFacts
                     storage.flushStateIfFull()
                     if configuration.blockBodies == .none { executedThisStep.append(contentsOf: persistedBodyKeys) }
                     readsDone.append(contentsOf: persistedBodyKeys)
@@ -1913,7 +1916,24 @@ extension NodeRuntime {
             case .mining(let effect):
                 return await execute(effect, at: path)
             case .workSubmitted(let replyID, let outcome):
-                answer(replyID, .success(.work(outcome)))
+                // A submitted block is answered for once the facts that
+                // hold it are written: what a miner was told is accepted
+                // is in the store, and outlives a crash. The answer waits
+                // for the write, off the loop; the loop does not.
+                guard let entry = replies.removeValue(forKey: replyID) else { break }
+                guard let written = lastFacts else {
+                    entry.reply.resume(returning: .work(outcome))
+                    break
+                }
+                Task {
+                    do {
+                        try await written.value
+                        entry.reply.resume(returning: .work(outcome))
+                    } catch {
+                        // The write failed: the node stops, as it says.
+                        entry.reply.resume(throwing: NodeRuntimeError.stopped)
+                    }
+                }
             }
             return true
         }

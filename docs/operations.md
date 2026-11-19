@@ -508,9 +508,10 @@ writes may still wait. Each write is one synchronous transaction
 (`synchronous=FULL`) and they are made in order, so after a crash the stores
 hold everything the node decided up to some step and nothing after it. The
 node then reads from its peers what it had weighed after that, and executes
-again what is above the flush markers (`stateBufferBytes`, below). One write
-is waited for: a transaction an operator submitted is journaled before it is
-acknowledged. With a buffer of 0 the old order holds: post-states stored,
+again what is above the flush markers (`stateBufferBytes`, below). Two
+answers wait for a write: a transaction an operator submitted is journaled
+before it is acknowledged, and a block a miner submitted has its facts
+written before its miner is answered. With a buffer of 0 the old order holds: post-states stored,
 then the `NodeBatch` committed, then the snapshots published.
 
 ### Batched execution
@@ -545,9 +546,10 @@ again from the bodies it holds, while it weighs headers and answers
 requests as usual. The node's own records (headers, facts, proofs) are
 written behind its decisions too, in order: a crash can also lose the last
 of those, and the node then asks its peers again for what it had weighed.
-On a chain this node alone hosts there is no peer to ask: blocks accepted
-in the moments before a crash, and not yet written, are gone unless their
-miner submits them again. Until it is back at its tip, reads at the tip answer
+A block a miner submitted is the exception: its miner is answered only once
+the block's records are written, so a block the node said it accepted is
+still there after a crash, on a chain this node alone hosts too. Its state
+may not be, and is produced again from the block. Until it is back at its tip, reads at the tip answer
 for the lower tip. With 0 each step's state is written as it is produced
 and a crash loses at most the batch being executed. A node that keeps
 `recent` state writes at least once per state window, and one that keeps
