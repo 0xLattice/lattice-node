@@ -22,7 +22,7 @@ jobs:
 
       - name: Install dependencies for Linux
         run: |
-          apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev
+          .github/scripts/apt-install.sh libsqlite3-dev
 
       - name: Build test targets
         run: swift build --build-tests
