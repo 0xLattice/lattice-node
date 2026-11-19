@@ -564,7 +564,7 @@ to retain trie nodes on disk; geth moved away from hash-keyed state. Replace
 when an objective needs it, with geth's path scheme the nearest shape — but
 first make it replaceable (§6).
 
-### 4.9a Decision proposed: a child block carries its receipt proofs
+### 4.9a Decision proposed: receipt proofs travel with the child block
 
 **The failure.** Testnet nodes stopped child chains at height 3,920 (as
 reported by the owner's investigation). Block 3,921 carries a withdrawal. A
@@ -590,19 +590,29 @@ node still holds that Nexus state. No node can execute the block.
   need that proof from a remote same-chain peer" (§3.5). The protocol
   intends a per-withdrawal witness.
 
-**Decision proposed.** A child block's body includes the parent state trie
-nodes its withdrawals' receipt proofs read: from its `parentState` down each
-receipt's path (`Block.parentReceiptWitnessPaths`). A body with withdrawals
-is complete only with them: a node does not store, weigh, serve or connect
-one without them. Whoever produces the block can always build them, since a
+**Decision proposed.** Every child block with withdrawals has a sidecar: the
+parent state trie nodes its withdrawals' receipt proofs read, from its
+`parentState` down each receipt's path (`Block.parentReceiptWitnessPaths`).
+The sidecar is not part of the block: the block's bytes, CID and
+`maxBlockSize` are unchanged. It is indexed next to the block in the child
+chain's store, kept and released with it, and sent whenever the block is
+sent: a peer that asks for the block gets the block, its transactions and
+its sidecar in one bundle. A block with withdrawals is complete only with
+its sidecar: a node does not store, weigh, serve or connect one without it. Whoever produces the block can always build them, since a
 child block anchors at its carrier's entering state, the one its miner builds
 on. Old parent state is then never needed to execute a child block, on any
 retention setting, by any node, whenever it hosts the child.
 
-**What the code already does (#119, #129).** A body fetched from a peer
-requires the witness, counted against the fetch's byte reservation; a block
-the node executed is stored only with it; a served body includes it. One
-path is best-effort: a block this node mined or was handed is stored without
+**What the code already does (#119, #129).** The sidecar is retained under
+the block's own scope (`body(cid)`) and listed in the block's bundle record
+(`volume-bundles.db`, keyed by block CID). A block fetched from a peer
+requires it, counted against the fetch's byte reservation; a block the node
+executed is stored only with it; a served block's bundle includes it. A new
+block is advertised by its header, in its chain's header log, and peers pull
+the block and sidecar from its hosts, as Bitcoin and Ethereum announce a
+block and send its body on request; pushing the sidecar with the header
+would send it to peers that never execute the child. One path is
+best-effort: a block this node mined or was handed is stored without
 a witness it could not read (`NodeStorage.storingAndRetaining`). That path
 fails closed under this decision.
 
@@ -621,10 +631,11 @@ bodies.
 | A long state window for the parent | a node that sets it | the parent's recent state; a setting to get right per network | rejected: configuration, not design |
 | Hold a parent state until hosted children execute past it | a node syncing parent and children together | couples retention to other chains' progress; a stuck child holds state unless bounded | rejected: inelegant, no help to a node that hosts a child late |
 | Keep every version of each chain's receipt state | any node | about 7 KB per receipt ever made, forever, on every parent host (about 35 times the trie) | rejected: size, paid by every parent host for every receipt |
-| **The witness in the child's body, required** | **any node, any child, hosted whenever** | **the paths each withdrawal reads, kept with its body** | **proposed; the spec's design** |
+| **A sidecar indexed and sent with the child block, required** | **any node, any child, hosted whenever** | **the paths each withdrawal reads, kept with the block** | **proposed; the spec's design** |
 
-**How others do it.** Bitcoin blocks carry everything validating them reads
-beyond the node's own state. Ethereum's stateless-client work carries state
+**How others do it.** Ethereum's blob sidecars (EIP-4844) travel beside a
+block, outside its body, and are kept with it. Bitcoin blocks carry
+everything validating them reads beyond the node's own state. Ethereum's stateless-client work carries state
 witnesses with blocks, and moved toward Verkle trees because Merkle-Patricia
 witnesses are large: the same tradeoff, at much higher volume. Cosmos IBC
 proves packets against a counterparty's state at a past height, and its
@@ -856,7 +867,7 @@ progress or reports exactly why it cannot.
   status per chain (§4.4).
 - Simulator scenarios for starvation, missing bodies, delayed proofs,
   parent–child stalls, and reorganisations at several depths (§4.19).
-- Require the receipt witness in every child body with withdrawals, and
+- Require the receipt-proof sidecar with every child block with withdrawals, and
   repair testnet's block 3,921 once (§4.9a): the cause of the stall at
   3,920. Report a block that waits on missing parent state as that, not as
   an unavailable body (§4.4).
@@ -939,7 +950,7 @@ against an agreed target says otherwise.
 2. State retention extracted behind one interface, behaviour unchanged.
 3. The binary wire format as the next performance experiment, with a
    benchmark and a compatibility gate.
-4. A child block carries its receipt proofs (§4.9a).
+4. Receipt proofs travel with the child block, as an indexed sidecar (§4.9a).
 
 Everything else stays conditional on measurements.
 
