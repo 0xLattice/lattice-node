@@ -69,6 +69,7 @@ final class LivenessStatusTests: XCTestCase {
         }
         let after = await runtime.status(chainPath: ["Nexus"])
         XCTAssertEqual(after?.height, after?.bestHeaderHeight)
+        XCTAssertEqual(after?.sync?.blockedOn, "atTip", "it waits for the network's next block")
         await runtime.stop()
     }
 
@@ -101,6 +102,11 @@ final class LivenessStatusTests: XCTestCase {
         XCTAssertLessThan(later?.height ?? 0, height)
         XCTAssertEqual(later?.sync?.tipAdvancedAt, seen?.sync?.tipAdvancedAt, "its tip has not moved")
         XCTAssertGreaterThan(try XCTUnwrap(later?.sync?.secondsSinceTipAdvanced), before, "and has been still for longer")
+        // Why: the next block's body can be had from no one.
+        try await eventually("the follower says what its tip waits on") {
+            await follower.status(chainPath: ["Nexus"])?.sync?.blockedOn == "bodiesUnavailable"
+        }
+        XCTAssertEqual(later?.sync?.headersSynced, true, "it has weighed its peer's whole log")
         let metrics = await follower.metricsExposition(peers: 1, processStartTime: Date())
         let advancedAt = try XCTUnwrap(later?.sync?.tipAdvancedAt)
         XCTAssertTrue(

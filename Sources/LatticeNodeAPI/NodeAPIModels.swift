@@ -469,6 +469,20 @@ public struct NodeSyncStatus: Codable, Sendable, Equatable {
     /// best chain that is heavier but no longer reads as at the best
     /// header, as Bitcoin Core's blocks against headers does.)
     public var secondsSinceTipAdvanced: Double? = nil
+    /// What the tip waits on, as the chain's last step left it: `atTip`,
+    /// `headers`, `proofs`, `parent` (a child chain waiting on its parent
+    /// chain), `bodies`, `bodiesUnavailable`, `execution`, or `stalled`
+    /// (behind its best header with nothing under way for the next block,
+    /// which should never last). New values may be added; nil from a node
+    /// that does not send it.
+    public var blockedOn: String? = nil
+    /// Whether this chain has weighed a peer's whole log since the node
+    /// started (it opens child chains' sync), and whether it has caught up
+    /// (it admits peer transactions). Nil from a node that does not send it.
+    public var headersSynced: Bool? = nil
+    public var synced: Bool? = nil
+    /// This chain's jobs waiting for a worker.
+    public var jobsQueued = 0
 
     public init() {}
 
@@ -487,6 +501,10 @@ public struct NodeSyncStatus: Codable, Sendable, Equatable {
         awaitingParentFacts = try count(.awaitingParentFacts)
         tipAdvancedAt = try values.decodeIfPresent(Double.self, forKey: .tipAdvancedAt)
         secondsSinceTipAdvanced = try values.decodeIfPresent(Double.self, forKey: .secondsSinceTipAdvanced)
+        blockedOn = try values.decodeIfPresent(String.self, forKey: .blockedOn)
+        headersSynced = try values.decodeIfPresent(Bool.self, forKey: .headersSynced)
+        synced = try values.decodeIfPresent(Bool.self, forKey: .synced)
+        jobsQueued = try count(.jobsQueued)
     }
 }
 

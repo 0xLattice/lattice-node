@@ -1381,6 +1381,11 @@ extension NodeRuntime {
             sync.bodiesUnavailable = fetchWaits.keys.count(where: { $0.path == path })
             sync.bodiesParked = level.bodies.parked.count
             sync.awaitingParentFacts = level.bodies.awaitingParent.count
+            let parentWeighed = path.count > 1 ? core.levels[Array(path.dropLast())]?.headersSynced ?? true : true
+            sync.blockedOn = level.progress(parentWeighed: parentWeighed, next: windows[path]?.next).rawValue
+            sync.headersSynced = level.headersSynced
+            sync.synced = level.synced
+            sync.jobsQueued = queued.count(at: path)
             // The fee projection walks the pool, so a busy pool is projected
             // at most once a `projectionInterval`, and at once on a new tip.
             // A change inside the interval is projected when it ends, input
