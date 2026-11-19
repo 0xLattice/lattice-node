@@ -193,7 +193,6 @@ final class ReceiptWitnessTests: XCTestCase {
         // A fetch that obtained the block's content and not its receipt
         // proofs says so, as a wait of its own; one that obtained nothing
         // reports the body as not obtained.
-        struct Unanswered: Error {}
         let proofsMissing = await empty.incompleteBody(withdrawalBlock, read: contentVolumes, error: Unanswered())
         XCTAssertEqual(BodyWait(fetchFailure: proofsMissing), .receiptProofsUnavailable)
         XCTAssertEqual("\(BodyWait(fetchFailure: proofsMissing))", "its receipt proofs not obtained from any peer")
@@ -254,6 +253,9 @@ final class ReceiptWitnessTests: XCTestCase {
         await followerRuntime.stop()
         await runtime.stop()
     }
+
+    /// A fetch that ended with nothing served.
+    private struct Unanswered: Error {}
 
     /// Reads through `fetcher` except `cids`, which fail.
     private struct Unreadable: Fetcher {
