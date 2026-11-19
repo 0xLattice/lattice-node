@@ -42,14 +42,20 @@ When two conflict, the earlier one wins.
 5. **Compatibility.** This version and the previous one stay on one network:
    wire changes are additions, and older peers are still served. Storage may
    change; a node the team runs may be wiped and synced again.
-6. **Cost to verify.** Running a node, and hosting one more chain, stays cheap
+6. **Easy to understand and to change.** Each concern lives in one place,
+   behind one interface, in a shape an established client would recognise;
+   a change to one concern does not cross others, and its correctness does
+   not rest on rules every caller must remember. The node will keep
+   changing; how much each change costs decides how fast every other
+   outcome can be improved.
+7. **Cost to verify.** Running a node, and hosting one more chain, stays cheap
    enough that many can: CPU, memory, disk, bandwidth. Deeper paths cost
    more by design; whoever opts in pays.
-7. **Cross-chain transfers complete.** A deposit, its receipt and its
+8. **Cross-chain transfers complete.** A deposit, its receipt and its
    withdrawal go through, in a time a user can plan around.
-8. **Content stays available.** What a hosted chain needs can be had from its
+9. **Content stays available.** What a hosted chain needs can be had from its
    hosts.
-9. **Mining is served promptly.** Templates and submitted work are answered
+10. **Mining is served promptly.** Templates and submitted work are answered
    fast, and little work is spent on stale templates.
 
 Sync throughput is not an outcome. It matters only through time to tip
@@ -72,10 +78,15 @@ from the benchmark (`Benchmarks/sync`).
 | 3 Security | For each child, the share of parent hash rate whose templates commit it | network | **Owner to set** | Not measured |
 | 4 Promises | Acknowledged transactions or accepted blocks lost after a crash or power loss | tests | Zero | Zero in tests |
 | 5 Compatibility | Partitions or refused messages between this version and the previous | two-version runs | Zero | Zero in CI |
-| 6 Cost | CPU, peak memory, disk kept, disk written, bandwidth, for the root alone and per extra chain | benchmark, node | **Owner to set** (the root on one CPU) | About 4.4 ms CPU per block, 190 MiB, 90 MB kept, 2.9 GB written per benchmark sync; per-chain cost not measured |
-| 7 Transfers | Time from deposit to withdrawal on a parent–child pair; share that complete | network, tests | **Owner to set** | Not measured |
-| 8 Availability | Share of content requests served; how long a body stays unavailable; hosts per chain | node, network | **Owner to set** | Not measured |
-| 9 Mining | Time to answer a template request and a submission; share of work on stale templates | node | **Owner to set** | Not measured |
+| 6 Change | Layers a change to each concern crosses (consensus, wire, identifiers, writes, state retention, the loop, mining, operator surface) | code | One for each | Most are one; state retention crosses three (the loop, the store, a library); identifiers are in 32 files ([the node compared](node-architecture-compared.md) §1) |
+| 6 Change | Rules a caller must keep that the code does not enforce (ordering, flushing, waiting) | code, review | Zero beyond the write order | Zero for writes once the write-behind layer is reverted |
+| 6 Change | Components with no conventional equivalent, each with its reason | [the node compared](node-architecture-compared.md) | Each justified in writing | The deterministic core (kept: it makes liveness testable); content-addressed state counted on disk (to replace when an objective needs it) |
+| 6 Change | Review rounds per change, and repeated holes of one kind | review | A second round of the same kind stops the change for a design question | The write-behind layer took four rounds of ordering holes |
+| 6 Change | The largest files, where unrelated changes meet | code | **Owner to set** | The loop, 2,223 lines; the daemon's command file, 1,741 |
+| 7 Cost | CPU, peak memory, disk kept, disk written, bandwidth, for the root alone and per extra chain | benchmark, node | **Owner to set** (the root on one CPU) | About 4.4 ms CPU per block, 190 MiB, 90 MB kept, 2.9 GB written per benchmark sync; per-chain cost not measured |
+| 8 Transfers | Time from deposit to withdrawal on a parent–child pair; share that complete | network, tests | **Owner to set** | Not measured |
+| 9 Availability | Share of content requests served; how long a body stays unavailable; hosts per chain | node, network | **Owner to set** | Not measured |
+| 10 Mining | Time to answer a template request and a submission; share of work on stale templates | node | **Owner to set** | Not measured |
 
 **What to instrument first.** Liveness per chain path (outcome 2) is the
 outcome that is failing and the one a node can report about itself:
@@ -93,6 +104,8 @@ Lattice's own security model, and nobody observes them.
 - It reports what it adds: lines, new components, and every rule a caller
   must keep. A component with no conventional equivalent says so
   ([the node compared](node-architecture-compared.md)).
+- It says which concerns it touches. One that crosses more layers than the
+  concern it serves first asks whether the boundary is in the wrong place.
 
 ## Durability
 
