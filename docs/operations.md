@@ -504,14 +504,21 @@ Persistence order is:
 A block's body is committed before anything is announced, served or built on
 it. Its headers, facts and state are not: a tip is published, and its
 headers served, once the step that decided them has ended, while their
-writes may still wait. Each write is one synchronous transaction
-(`synchronous=FULL`) and they are made in order, so after a crash the stores
-hold everything the node decided up to some step and nothing after it. The
-node then reads from its peers what it had weighed after that, and executes
-again what is above the flush markers (`stateBufferBytes`, below). Two
-answers wait for a write: a transaction an operator submitted is journaled
-before it is acknowledged, and a block a miner submitted has its facts
-written before its miner is answered. With a buffer of 0 the old order holds: post-states stored,
+writes may still wait. Each write is one transaction and they are made in
+order. A `state.db` transaction waits for its sync (`synchronous=FULL`). A
+`volumes.db` transaction does not: if the process stops, nothing written is
+lost, and if the machine loses power, `volumes.db` holds everything written
+up to some earlier transaction and nothing after it. The node syncs it
+before a flush marker moves and before each answer below, so no marker and
+no promise is ahead of it. After a crash or a power loss the node reads from
+its peers what it had weighed and no longer holds, and executes again what
+is above the flush markers (`stateBufferBytes`, below). Three answers wait
+until what they promise would outlive a power loss: a transaction an
+operator submitted is journaled before it is acknowledged, a block a miner
+submitted has its facts written before its miner is answered, and a pin is
+synced before it is confirmed. A pending transaction's journal row is read
+at a start and returns to the pool once its chain has executed up to the
+heaviest block the node knows. With a buffer of 0 the old order holds: post-states stored,
 then the `NodeBatch` committed, then the snapshots published.
 
 ### Batched execution
