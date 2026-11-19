@@ -166,10 +166,8 @@ final class ReceiptWitnessTests: XCTestCase {
         let block = try XCTUnwrap(resolved.node)
         let anchored = try? await block.parentState.resolve(fetcher: local)
         XCTAssertNotNil(anchored?.node, "the producer holds the witness: the anchored state's root")
-        // Let go of behind the loop, once the counts reach the tip.
-        try await eventually("the producer lets go of the rest of the state the withdrawal names") {
-            (try? await block.parentState.resolveRecursive(fetcher: local)) == nil
-        }
+        let wholeState = try? await block.parentState.resolveRecursive(fetcher: local)
+        XCTAssertNil(wholeState, "and let go of the rest of the state the withdrawal names")
         let pinned = try await storage.broker.retainedRoots(scope: storage.scopes.body(withdrawalBlock, at: Self.alpha))
         let witness = await storage.receiptWitness(of: BlockHeader(rawCID: withdrawalBlock), fetcher: local).map(\.root)
         XCTAssertFalse(witness.isEmpty)
@@ -204,13 +202,10 @@ final class ReceiptWitnessTests: XCTestCase {
             try await eventually("the follower executes Nexus to the producer's tip") {
                 nexusRuntime.published.value?.actOnTip == nexusTip
             }
-            // Older state is let go of behind the loop, once the counts
-            // reach the tip: it can still be held when the tip is published.
-            let followerLocal = await nexusStorage.localFetcher
-            try await eventually("the follower let go of the state the withdrawal names") {
-                (try? await block.parentState.resolveRecursive(fetcher: followerLocal)) == nil
-            }
             await nexusRuntime.stop()
+            let followerLocal = await nexusStorage.localFetcher
+            let held = try? await block.parentState.resolveRecursive(fetcher: followerLocal)
+            XCTAssertNil(held, "the follower let go of the state the withdrawal names")
         }
         let follower = try host(
             keyByte: 0xd2, peers: [producer.endpoint], blockBodies: .none,
