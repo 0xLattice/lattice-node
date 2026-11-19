@@ -932,6 +932,18 @@ extension NodeRuntime {
                     SyncTrace.log(chain: path, "counts do not match the store: resync")
                     (chain.marker, chain.known, chain.audited) = (nil, nil, nil)
                 case .failed: chain.waiting = true
+                case .settled(let outcome, let tip, let window):
+                    countsSettled(outcome, at: path, &chain, tip: tip, window: window)
+                    counted[path] = chain
+                    // The counts moved, or wait on a repair just started:
+                    // settled again only if the tip climbed a window more
+                    // meanwhile, not at once as after a repair.
+                    if let level = core.levels[path], level.snapshot.actOnTip != tip,
+                       chain.repair == nil, !climbedLessThanAWindow(level, at: path) {
+                        stateTips[path] = nil
+                    }
+                    await settleState()
+                    return true
                 }
                 counted[path] = chain
                 stateTips[path] = nil
@@ -1655,6 +1667,12 @@ extension NodeRuntime {
                     )
                 }
             }
+            // The act-on heights this step decided, before its state is
+            // buffered: a window release behind the loop keeps their windows.
+            if configuration.state != .all {
+                let heights = core.levels.mapValues(\.snapshot.actOnHeight)
+                storage.actOnHeights.withLock { $0 = heights }
+            }
             // The facts transaction, then publish, then everything else, each
             // in order.
             func rank(_ effect: NodeEffect) -> Int {
@@ -2098,7 +2116,12 @@ extension NodeRuntime {
                 if let last = bodyTips[path], last != tip { past.append(last) }
                 bodyTips[path] = tip
                 past.removeAll { $0 == tip }
-                if !past.isEmpty { await storage.letGo(ofBodies: past, at: path) }
+                // In the store's lane, after the facts of the step that
+                // executed them: the loop does not wait.
+                if !past.isEmpty {
+                    let (storage, bodies) = (storage, past)
+                    storage.lane.run { await storage.letGo(ofBodies: bodies, at: path) }
+                }
             }
         }
 
@@ -2118,9 +2141,8 @@ extension NodeRuntime {
                 let asked = stateTips[path] == nil
                 stateTips[path] = level.snapshot.actOnTip
                 if !asked, climbedLessThanAWindow(level, at: path) { continue }
-                guard !level.snapshot.actOnTip.isEmpty,
-                      await settleCounted(at: path, tip: level.snapshot.actOnTip) else { continue }
-                await storage.letGoOfState(at: path, below: level.snapshot.actOnHeight)
+                guard !level.snapshot.actOnTip.isEmpty else { continue }
+                settleCounted(at: path, tip: level.snapshot.actOnTip, height: level.snapshot.actOnHeight)
             }
         }
 
@@ -2149,31 +2171,60 @@ extension NodeRuntime {
         /// the loop, one at a time, and settles again when it ends; one that
         /// failed waits for a new peer or the next maintenance pass. True
         /// when the counts reached the tip, or the operator keeps no counts.
-        private mutating func settleCounted(at path: ChainPath, tip: String) async -> Bool {
-            guard configuration.state == .recent, let window = configuration.stateWindow(for: path) else { return true }
+        private mutating func settleCounted(at path: ChainPath, tip: String, height: UInt64) {
+            guard configuration.state == .recent, let window = configuration.stateWindow(for: path) else {
+                // No counts kept: what executions stored below the window
+                // goes, in the lane, after the facts of this step.
+                let storage = storage
+                storage.lane.run { await storage.letGoOfState(at: path, below: height) }
+                return
+            }
             var chain = counted[path] ?? CountedChain()
             defer { counted[path] = chain }
-            guard chain.repair == nil, !chain.waiting else { return false }
-            let outcome: CountedOutcome
-            if let synced = chain.synced {
-                outcome = await storage.commitCounted(
-                    at: path, block: synced.block, places: synced.places, tip: tip, window: window
-                )
-            } else if let marker = chain.marker {
-                outcome = await storage.settleCounted(at: path, tip: tip, window: window, marker: marker, known: chain.known)
-            } else {
-                stateSync(path, &chain, tip: tip, window: window)
-                return false
+            guard chain.repair == nil, !chain.waiting else { return }
+            guard chain.synced != nil || chain.marker != nil else {
+                return stateSync(path, &chain, tip: tip, window: window)
             }
+            // The move runs in the store's lane, in its turn among the
+            // writes: it works on what the store holds, and the loop does
+            // not wait for it. It posts how it ended (`countsSettled`).
+            let (synced, marker, known) = (chain.synced, chain.marker, chain.known)
+            nextRepair += 1
+            let (id, storage, inputs) = (nextRepair, storage, inputs)
+            let task = storage.lane.run {
+                let outcome: CountedOutcome
+                if let synced {
+                    outcome = await storage.commitCounted(
+                        at: path, block: synced.block, places: synced.places, tip: tip, window: window
+                    )
+                } else {
+                    outcome = await storage.settleCounted(
+                        at: path, tip: tip, window: window, marker: marker ?? "", known: known
+                    )
+                }
+                if case .settled(let moved, _) = outcome {
+                    // What a state sync or heal read is counted now.
+                    if moved != marker { await storage.releaseStaging(at: path) }
+                    await storage.letGoOfState(at: path, below: height)
+                }
+                inputs.yield(.counted(path, repair: id, .settled(outcome, tip: tip, window: window)))
+            }
+            chain.repair = (id, Task { _ = await task.result })
+        }
+
+        /// A move of the chain's counts ended (`settleCounted`). Roots the
+        /// store lacks are healed; counts that cannot follow, or that the
+        /// store refuses, are replaced by a state sync, the old ones
+        /// serving until it commits; a store failure is tried again at the
+        /// next settle or maintenance pass.
+        private mutating func countsSettled(
+            _ outcome: CountedOutcome, at path: ChainPath, _ chain: inout CountedChain, tip: String, window: UInt64
+        ) {
             switch outcome {
             case .settled(let marker, let known):
-                let moved = marker != chain.marker
                 // A state sync's counts are checked anew.
                 if chain.synced != nil { chain.audited = nil }
                 (chain.marker, chain.known, chain.synced) = (marker, known, nil)
-                // What a state sync or heal read is counted now.
-                if moved { await storage.releaseStaging(at: path) }
-                return true
             case .missing(let roots):
                 SyncTrace.log(chain: path, "counts heal \(roots.count) roots this store lacks")
                 repair(path, &chain) { storage, remote in
@@ -2190,7 +2241,6 @@ extension NodeRuntime {
             case .failed(let reason):
                 SyncTrace.log(chain: path, "counts not moved: \(reason)")
             }
-            return false
         }
 
         private mutating func stateSync(_ path: ChainPath, _ chain: inout CountedChain, tip: String, window: UInt64) {
@@ -2287,4 +2337,6 @@ enum CountedRepair: Sendable {
     /// the store.
     case audited(String, [String]?)
     case failed
+    /// A move of the counts to `tip` ended this way (`settleCounted`).
+    case settled(CountedOutcome, tip: String, window: UInt64)
 }
