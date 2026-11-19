@@ -84,7 +84,13 @@ if [[ "${SKIP_TSAN_STRESS_TEST:-0}" == "1" ]]; then
 fi
 
 export LATTICE_TSAN_STRESS=1
-export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=1:exitcode=66:history_size=7:suppressions=$repo_root/.github/tsan-suppressions.txt}"
+suppressions="$repo_root/.github/tsan-suppressions.txt"
+if [[ ! -f "$suppressions" ]]; then
+    echo "TSan suppressions file is missing: $suppressions" >&2
+    exit 1
+fi
+# The suppressions are added to whatever options the caller set.
+export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=1:exitcode=66:history_size=7}:suppressions=$suppressions"
 
 test_list="$tmp_dir/swift-tests.txt"
 swift test list > "$test_list"
