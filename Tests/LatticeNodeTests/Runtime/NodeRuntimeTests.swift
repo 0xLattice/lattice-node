@@ -176,7 +176,11 @@ final class NodeRuntimeTests: XCTestCase {
             joinerRuntime.published.value?.actOnTip == blockCID
         }
         try await eventually("nothing is held once it executes") {
-            await joinerRuntime.status().sync == NodeSyncStatus()
+            // The counts; when its tip last moved is not a count.
+            var counts = await joinerRuntime.status().sync
+            counts?.tipAdvancedAt = nil
+            counts?.secondsSinceTipAdvanced = nil
+            return counts == NodeSyncStatus()
         }
         await joinerRuntime.stop()
         await producerRuntime.stop()
