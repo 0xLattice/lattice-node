@@ -191,7 +191,7 @@ final class TwoVersionE2ETests: XCTestCase {
         // behind would hold a pipe open past the command's own exit.
         let log = host.root.deletingLastPathComponent()
             .appendingPathComponent("\(host.name)-\(arguments.joined(separator: "-")).out")
-        FileManager.default.createFile(atPath: log.path, contents: nil)
+        XCTAssertTrue(FileManager.default.createFile(atPath: log.path, contents: nil), "the log file could not be created")
         let handle = try FileHandle(forWritingTo: log)
         defer { try? handle.close() }
         process.standardOutput = handle
@@ -214,7 +214,7 @@ final class TwoVersionE2ETests: XCTestCase {
         process.arguments = ["up", "--root", host.root.path]
         process.environment = Self.environment
         let log = host.root.deletingLastPathComponent().appendingPathComponent("\(host.name)-up.out")
-        FileManager.default.createFile(atPath: log.path, contents: nil)
+        XCTAssertTrue(FileManager.default.createFile(atPath: log.path, contents: nil), "the log file could not be created")
         let handle = try FileHandle(forWritingTo: log)
         process.standardOutput = handle
         process.standardError = handle
