@@ -1,6 +1,7 @@
 import Foundation
 import Ivy
 import Lattice
+import cashew
 import LatticeNodeCore
 import XCTest
 @testable import LatticeNode
@@ -196,6 +197,63 @@ final class StateBufferRuntimeTests: XCTestCase {
         try await run(configuration, overlay) { runtime in
             let after = try await self.seen(by: runtime, of: payee)
             XCTAssertEqual(after, before)
+        }
+    }
+
+    /// A transaction this node acknowledged to its operator is not lost to
+    /// a crash, whatever the crash took. A block confirms it, and the node
+    /// dies before that block is written: started again, the node is below
+    /// that block and holds the transaction in its pool, to be mined again.
+    func testATransactionAnOperatorSubmittedOutlivesACrashThatLostItsBlock() async throws {
+        let (configuration, overlay) = try configuration(directory("submitted"))
+        let crashed = directory("submitted-crashed")
+        let payee = payee()
+        let (answers, disk) = AsyncStream<Void>.makeStream()
+        let key = CryptoUtils.generateKeyPair()
+        let body = try HeaderImpl(node: TransactionBody(
+            accountActions: [], actions: [Action(key: "k", oldValue: nil, newValue: "v")],
+            depositActions: [], receiptActions: [], withdrawalActions: [],
+            signers: [CryptoUtils.createAddress(from: key.publicKey)],
+            nonce: 0, chainPath: nexus
+        ))
+        let transaction = Transaction(
+            signatures: [key.publicKey: try XCTUnwrap(TransactionSigning.sign(
+                bodyHeader: body, privateKeyHex: key.privateKey
+            ))],
+            body: body
+        )
+        let before = try await run(configuration, overlay) { runtime -> String in
+            let tip = try await self.mine(2, on: runtime, paying: payee)
+            let admitted = try await runtime.submitTransaction(SubmitTransactionRequest(transaction: transaction))
+            XCTAssertEqual(admitted.mempoolCount, 1)
+            // The disk stops answering; a block confirms the transaction.
+            runtime.storage.lane.run { for await _ in answers { break } }
+            _ = try await self.mine(1, on: runtime, paying: payee)
+            try await eventually("the block took the transaction from the pool") {
+                runtime.published.value?.mempoolCount == 0
+            }
+            // The crash: the store as it is now, the block unwritten.
+            try FileManager.default.createDirectory(at: crashed, withIntermediateDirectories: true)
+            for file in try FileManager.default.contentsOfDirectory(atPath: configuration.storagePath.path)
+            where file.hasSuffix(".db") || file.hasSuffix("-wal") {
+                try FileManager.default.copyItem(
+                    at: configuration.storagePath.appendingPathComponent(file),
+                    to: crashed.appendingPathComponent(file)
+                )
+            }
+            disk.yield()
+            return tip
+        }
+
+        let (restarted, restartedOverlay) = try self.configuration(crashed)
+        try await run(restarted, restartedOverlay) { runtime in
+            // The premise: the crash did lose the confirming block.
+            try await eventually("the node is at the tip below the lost block") {
+                runtime.published.value?.actOnTip == before
+            }
+            try await eventually("the transaction is in the pool again") {
+                runtime.published.value?.mempoolCount == 1
+            }
         }
     }
 }
