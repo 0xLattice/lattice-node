@@ -1,6 +1,8 @@
 import Foundation
+import Synchronization
 import Ivy
 import Lattice
+import cashew
 import LatticeNodeCore
 import XCTest
 @testable import LatticeNode
@@ -128,6 +130,10 @@ final class StateBufferRuntimeTests: XCTestCase {
         let before = try await run(configuration, overlay) { runtime in
             let tip = try await self.mine(6, on: runtime, paying: payee)
             let seen = try await self.seen(by: runtime, of: payee)
+            // Every write asked is made: the tip's fact is read from the
+            // store, and no write is under way while the files are copied,
+            // so the copy is the store at one moment, as a crash leaves it.
+            await runtime.storage.written()
             let fact = try await runtime.storage.store.blockFact(tip, at: self.nexus)
             tipState = try XCTUnwrap(fact).postStateCID
             try FileManager.default.createDirectory(at: crashed, withIntermediateDirectories: true)
@@ -168,5 +174,145 @@ final class StateBufferRuntimeTests: XCTestCase {
             let after = try await self.seen(by: runtime, of: payee)
             XCTAssertEqual(after, before)
         }
+    }
+
+    /// The store's lane held as a disk that stopped answering, once every
+    /// write asked before is made. `release()` lets it answer again.
+    private func stopDisk(of runtime: NodeRuntime) async -> @Sendable () -> Void {
+        let (answers, disk) = AsyncStream<Void>.makeStream()
+        let (stopped, stops) = AsyncStream<Void>.makeStream()
+        runtime.storage.lane.run {
+            stops.yield()
+            for await _ in answers { break }
+        }
+        for await _ in stopped { break }
+        return { disk.yield() }
+    }
+
+    /// A disk that has stopped answering: a write waits in the store's
+    /// lane and every write behind it with it. The node goes on: a block
+    /// submitted to it executes, and it answers reads for that block, its
+    /// balance and its status, from what it holds in memory. The miner that
+    /// submitted it is not answered until the block is written: what a
+    /// miner is told is accepted is in the store. When the disk answers,
+    /// the miner is, and a node started again is at the same tip.
+    func testWithItsDiskStoppedANodeExecutesASubmittedBlockAndAnswersItsMinerOnceItIsWritten() async throws {
+        let (configuration, overlay) = try configuration(directory("stalled"))
+        let payee = payee()
+        let before = try await run(configuration, overlay) { runtime in
+            _ = try await self.mine(2, on: runtime, paying: payee)
+            let height = try XCTUnwrap(runtime.published.value?.actOnHeight)
+            let release = await self.stopDisk(of: runtime)
+            let answered = Mutex(false)
+            let nexus = self.nexus
+            let submit = Task {
+                _ = try await runtime.mineBlock(MiningTemplateRequest(recipients: [
+                    MiningRecipient(chainPath: nexus, address: payee),
+                ]))
+                answered.withLock { $0 = true }
+            }
+            try await eventually("the submitted block executes") {
+                runtime.published.value?.actOnHeight == height + 1
+            }
+            // Asked while nothing of the block is written.
+            let seen = try await self.seen(by: runtime, of: payee)
+            let executed = await runtime.storage.hasExecutedBlock(seen.tip, at: self.nexus)
+            XCTAssertTrue(executed, "the tip is answered for as executed")
+            XCTAssertFalse(answered.withLock { $0 }, "the miner was answered before its block was written")
+            release()
+            try await submit.value
+            return seen
+        }
+        try await run(configuration, overlay) { runtime in
+            let after = try await self.seen(by: runtime, of: payee)
+            XCTAssertEqual(after, before)
+        }
+    }
+
+    /// A transaction this node acknowledged to its operator is not lost to
+    /// a crash, whatever the crash took. A block confirms it, and the node
+    /// dies before that block is written: started again, the node is below
+    /// that block and holds the transaction in its pool, to be mined again.
+    func testATransactionAnOperatorSubmittedOutlivesACrashThatLostItsBlock() async throws {
+        let (configuration, overlay) = try configuration(directory("submitted"))
+        let crashed = directory("submitted-crashed")
+        let payee = payee()
+        let key = CryptoUtils.generateKeyPair()
+        let body = try HeaderImpl(node: TransactionBody(
+            accountActions: [], actions: [Action(key: "k", oldValue: nil, newValue: "v")],
+            depositActions: [], receiptActions: [], withdrawalActions: [],
+            signers: [CryptoUtils.createAddress(from: key.publicKey)],
+            nonce: 0, chainPath: nexus
+        ))
+        let transaction = Transaction(
+            signatures: [key.publicKey: try XCTUnwrap(TransactionSigning.sign(
+                bodyHeader: body, privateKeyHex: key.privateKey
+            ))],
+            body: body
+        )
+        let before = try await run(configuration, overlay) { runtime -> String in
+            let tip = try await self.mine(2, on: runtime, paying: payee)
+            let admitted = try await runtime.submitTransaction(SubmitTransactionRequest(transaction: transaction))
+            XCTAssertEqual(admitted.mempoolCount, 1)
+            // The disk stops answering; a block confirms the transaction.
+            // Its miner is not answered while the block is unwritten.
+            let release = await self.stopDisk(of: runtime)
+            let nexus = self.nexus
+            let submit = Task {
+                _ = try await runtime.mineBlock(MiningTemplateRequest(recipients: [
+                    MiningRecipient(chainPath: nexus, address: payee),
+                ]))
+            }
+            try await eventually("the block took the transaction from the pool") {
+                runtime.published.value?.mempoolCount == 0
+            }
+            // The crash: the store as it is now, the block unwritten.
+            try FileManager.default.createDirectory(at: crashed, withIntermediateDirectories: true)
+            for file in try FileManager.default.contentsOfDirectory(atPath: configuration.storagePath.path)
+            where file.hasSuffix(".db") || file.hasSuffix("-wal") {
+                try FileManager.default.copyItem(
+                    at: configuration.storagePath.appendingPathComponent(file),
+                    to: crashed.appendingPathComponent(file)
+                )
+            }
+            release()
+            try await submit.value
+            return tip
+        }
+
+        let (restarted, restartedOverlay) = try self.configuration(crashed)
+        try await run(restarted, restartedOverlay) { runtime in
+            // The premise: the crash did lose the confirming block.
+            try await eventually("the node is at the tip below the lost block") {
+                runtime.published.value?.actOnTip == before
+            }
+            try await eventually("the transaction is in the pool again") {
+                runtime.published.value?.mempoolCount == 1
+            }
+        }
+    }
+
+    /// A write the store could not make stops the node, and it says why. A
+    /// miner that submits a block after it is not told the block is
+    /// accepted: nothing after the failed write is written.
+    func testAWriteTheStoreCouldNotMakeStopsTheNodeAndNoLaterBlockIsAnsweredAsAccepted() async throws {
+        let (configuration, overlay) = try configuration(directory("failed"))
+        let payee = payee()
+        let stopped = Mutex<String?>(nil)
+        let storage = try await NodeStorage.open(configuration: configuration)
+        let runtime = try await NodeRuntime.start(
+            storage: storage, configuration: configuration, overlay: overlay,
+            failStop: { error in stopped.withLock { $0 = "\(error)" } }, observeJob: nil
+        )
+        _ = try await mine(2, on: runtime, paying: payee)
+        storage.lane.run { throw CocoaError(.fileWriteOutOfSpace) }
+        try await eventually("the node stops on the failed write") { stopped.withLock { $0 != nil } }
+        do {
+            _ = try await runtime.mineBlock(MiningTemplateRequest(recipients: [
+                MiningRecipient(chainPath: nexus, address: payee),
+            ]))
+            XCTFail("a block was answered as accepted after the store's write failed")
+        } catch {}
+        await runtime.stop()
     }
 }

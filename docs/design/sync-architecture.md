@@ -107,10 +107,14 @@ commitment; storage does not mirror it.
 | Headers, facts, proofs, cursors | The node's own tables |
 | "State reflects block X" marker | Per chain, in the same transaction as state and facts |
 
-Durable writes are kept for promises to the operator: an acknowledged local
-transaction, pins and configuration. The node makes no durability promise
-for a submitted block: the miner keeps what it mined until it sees it on
-chain.
+Durable writes are kept for promises no peer could make good: an
+acknowledged local transaction, pins, configuration, and a block the node
+told its submitter it accepted (a miner's `submitWork`, an author's
+`submitChildBlock` answered "in tree"). A miner holds a work id and a nonce,
+never the block, so it cannot keep or submit again what it mined: the node
+writes the block's records before it answers. The answer waits for the
+write; the loop does not. The block's executed state is not part of the
+promise: it is produced again from the block.
 
 ## Rules
 
@@ -155,12 +159,12 @@ rule here first.
 The measurements are the first
 [sync benchmark](../../README.md) baseline at `0ff1e87a`: 9,086 blocks over
 four chains, one run per setting, on Linux (swift:6.1-jammy) under Docker on
-a macOS host, so fsync goes to the VM's disk.
+a macOS host, so fsync goes to the VM's disk. A row is removed when the code
+no longer departs.
 
 | Rule | Today | Measured |
 |---|---|---|
-| 8, 9 | The runtime loop awaits an fsynced commit on every step that has facts | The loop was busy 46% of wall time with one worker and 67% with three |
-| 8 | A submitted block's content is stored and retained before it is weighed (`storeMinedBlock`) | |
+| 8, 9 | With a state window (`recent`, or no state or bodies kept) the loop waits for the store's lane before it moves the counts and lets go of windows and bodies | |
 | 13 | State is content-addressed trie nodes in the content store, pruned by reference counts | 2.9 GB written for 82 MB kept |
 | 4 | Every job shares one worker pool behind three strict queues | Derivations of 0.7 ms waited 3.5 to 3.9 s for a worker |
 | 1, 2 | A child reads its peers only once its parent's executed tip has caught up | The grandchildren were idle for the first 6.7 s of a 25.8 s sync |

@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Lattice
 import VolumeBroker
 import cashew
@@ -57,6 +58,11 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// Executed state not yet flushed to `broker`. Every read of content
     /// asks it first (`held`).
     nonisolated let stateBuffer = StateBuffer()
+    /// Transactions the pool gained whose store write waits in the lane
+    /// (`storingBehind`): read as stored content is.
+    nonisolated let poolBuffer = StateBuffer()
+    /// How many waiting writes hold each Volume of `poolBuffer`.
+    private nonisolated let poolHolds = Mutex<[String: Int]>([:])
     /// What this node holds: the state buffer, then the store.
     nonisolated let held: CompositeContentSource
     let localFetcher: CoalescingFetcher
@@ -83,8 +89,11 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     private var operationInFlight = false
     private var operationWaiters: [OperationWaiter] = []
 
-    /// The flush asked for last, running or done: the next runs after it.
-    private var lastFlush: Task<Void, any Error>?
+    /// The lane every write of a running node's step is made in, in order,
+    /// off the loop: its facts, a flush, and what follows a fact.
+    nonisolated var lane: StoreLane { store.lane }
+    /// A flush is asked of the lane and not started yet: no second is asked.
+    private nonisolated let flushAsked = Mutex(false)
 
     private init(
         configuration: NodeConfiguration,
@@ -100,7 +109,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         self.store = store
         self.bundles = bundles
         self.broker = broker
-        let held = CompositeContentSource([stateBuffer, broker])
+        let held = CompositeContentSource([stateBuffer, poolBuffer, broker])
         self.held = held
         self.localFetcher = CoalescingFetcher(held)
         self.workSource = CompositeContentSource([held, HeaderRecords(store: store)])
@@ -165,21 +174,90 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// marker moved to the facts it covers (`NodeStore.markFlushed`). A
     /// crash between the two leaves a marker behind the state: a start
     /// counts those blocks as not executed, and executing them stores the
-    /// same Volumes. One flush at a time; reads see the buffer until the
-    /// store holds what it held.
-    func flushState() async throws {
-        // Each flush runs after the one asked for before it: a chain, so a
-        // caller waits once and nothing is polled.
-        let previous = lastFlush
-        let flush = Task {
-            _ = try? await previous?.value
-            try await self.flushStateOnce()
+    /// same Volumes. It runs in the store's lane, after every write
+    /// asked for before it: the facts a marker covers are stored before it
+    /// moves. Reads see the buffer until the store holds what it held.
+    nonisolated func flushState() async throws {
+        try await flushStateBehind().value
+    }
+
+    /// As `flushState`, not waited for: the loop asks and goes on.
+    @discardableResult
+    nonisolated func flushStateBehind() -> Task<Void, any Error> {
+        lane.run { try await self.flushStateOnce() }
+    }
+
+    /// The buffer reached its limit: a flush is asked of the lane, once
+    /// until it starts, and the loop goes on.
+    nonisolated func flushStateIfFull() {
+        guard stateBufferIsFull, flushAsked.withLock({ asked in
+            defer { asked = true }
+            return !asked
+        }) else { return }
+        flushStateBehind()
+    }
+
+    /// The loop has run further ahead of the store than it may: the
+    /// records it decided and the store has not written, with the pool's
+    /// transactions not yet stored, hold as many bytes as the state buffer
+    /// may (`PendingFacts.bytes`, `poolBuffer`), the state buffer
+    /// holds twice its limit, or more writes wait than `maximumLaneDepth`.
+    /// The loop waits for the lane.
+    nonisolated var laneIsBehind: Bool {
+        let limit = max(configuration.resourcePolicy.maximumBufferedStateBytes, 1)
+        return store.pending.bytes + poolBuffer.bytes >= limit || stateBuffer.bytes >= 2 * limit
+            || lane.depth > Self.maximumLaneDepth
+    }
+
+    /// The writes that may wait in the lane before the loop waits for it.
+    /// The bytes above bound what is held; this bounds the writes that hold
+    /// nothing counted (a release, a pool change that only removes), each a
+    /// closure and a task. A step asks for a handful at most, so this is
+    /// some dozens of steps: far more than a store that keeps up ever has
+    /// waiting, and few enough that the lane is never thousands behind.
+    static let maximumLaneDepth = 256
+
+    /// Holds what the pool gained where every read of content finds it,
+    /// until `work`, asked of the lane, has stored it: a transaction a peer
+    /// sent is mined and served from here at once, and the loop does not
+    /// wait for its write.
+    nonisolated func storingBehind(
+        _ transactions: [Transaction], _ work: @escaping @Sendable () async throws -> Void
+    ) async throws -> Task<Void, any Error> {
+        let walked = NodeImportStorage(storage: nil, keepsVolumes: true)
+        for transaction in transactions {
+            try await VolumeImpl<Transaction>(node: transaction).store(storer: walked)
         }
-        lastFlush = flush
-        try await flush.value
+        // Held once for each write that still waits to store it: a
+        // transaction added, removed and added again is let go of only by
+        // the last of its writes.
+        let volumes = await walked.takeVolumes()
+        poolBuffer.add(volumes, retaining: [:])
+        poolHolds.withLock { holds in
+            for volume in volumes { holds[volume.volume.root, default: 0] += 1 }
+        }
+        return lane.run {
+            try await work()
+            let stored = self.poolHolds.withLock { holds in
+                volumes.filter { volume in
+                    let left = (holds[volume.volume.root] ?? 1) - 1
+                    holds[volume.volume.root] = left > 0 ? left : nil
+                    return left <= 0
+                }
+            }
+            self.poolBuffer.remove(StateBuffer.Batch(volumes: stored, retaining: [:]))
+        }
+    }
+
+    /// Everything the loop asked the stores to write is written. For what
+    /// works on the store itself and no read through `PendingFacts`
+    /// answers: the facts log, the counts, a chain newly hosted.
+    nonisolated func written() async {
+        try? await lane.settled()
     }
 
     private func flushStateOnce() async throws {
+        flushAsked.withLock { $0 = false }
         // Read before the batch is taken: a step buffers its states before
         // its facts are written, so the batch holds the state of every
         // execution up to these seqs.
@@ -230,7 +308,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     func volume(_ rootCID: String) async -> SerializedVolume? {
         // Unflushed state is served as stored state is: a peer asking for
         // the newest blocks' state finds it here.
-        let found: SerializedVolume? = if let buffered = stateBuffer.volume(rootCID) {
+        let found: SerializedVolume? = if let buffered = stateBuffer.volume(rootCID) ?? poolBuffer.volume(rootCID) {
             buffered
         } else {
             await broker.fetchVolumeLocal(root: rootCID)
