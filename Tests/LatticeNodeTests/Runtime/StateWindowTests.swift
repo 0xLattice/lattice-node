@@ -139,6 +139,8 @@ final class StateWindowTests: XCTestCase {
         let node = try host(keyByte: 0xbd, peers: [producer.endpoint], state: .none)
         func holdsNoState(_ runtime: NodeRuntime, _ storage: NodeStorage, through tip: String) async throws {
             try await eventually("the node executes \(tip.suffix(6))") { runtime.published.value?.actOnTip == tip }
+            // The checks below read the blocks' facts from the store itself.
+            await storage.written()
             // The tip is published within the step that executed it; what it
             // read is let go of at the end of that step.
             try await eventually("nothing a block read is held once it has executed") {
@@ -1183,8 +1185,10 @@ final class StateWindowTests: XCTestCase {
         XCTAssertEqual(window, [node.configuration.nexusGenesisCID], "what they named is in the window at the tip's height")
         let gone = try await windowHeights(storage, at: ["Nexus", "Gone"])
         XCTAssertEqual(gone, [], "nothing is kept for a chain no longer hosted")
-        let counts = try await storage.store.legacyStateCountRows()
-        XCTAssertEqual(counts, 0, "the counts are forgotten")
+        // Forgotten after the last of those scopes is let go of.
+        try await eventually("the counts are forgotten") {
+            try await storage.store.legacyStateCountRows() == 0
+        }
         await runtime.stop()
     }
 
