@@ -198,13 +198,14 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     }
 
     /// The loop has run further ahead of the store than it may: the
-    /// records it decided and the store has not written hold as many bytes
-    /// as the state buffer may (`PendingFacts.bytes`), the state buffer
+    /// records it decided and the store has not written, with the pool's
+    /// transactions not yet stored, hold as many bytes as the state buffer
+    /// may (`PendingFacts.bytes`, `poolBuffer`), the state buffer
     /// holds twice its limit, or more writes wait than `maximumLaneDepth`.
     /// The loop waits for the lane.
     nonisolated var laneIsBehind: Bool {
         let limit = max(configuration.resourcePolicy.maximumBufferedStateBytes, 1)
-        return store.pending.bytes >= limit || stateBuffer.bytes >= 2 * limit
+        return store.pending.bytes + poolBuffer.bytes >= limit || stateBuffer.bytes >= 2 * limit
             || lane.depth > Self.maximumLaneDepth
     }
 
