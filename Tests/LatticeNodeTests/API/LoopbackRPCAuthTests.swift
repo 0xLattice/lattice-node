@@ -74,19 +74,12 @@ final class LoopbackRPCAuthTests: XCTestCase {
         let app = try await loopback()
         try await app.test(.router) { client in
             for uri in ["/status", "/status?chainPath=Nexus"] {
-                // A node just started answers before its loop has taken its
-                // first step, and counts its sync once it has.
-                var counted = false
-                for _ in 0..<1_000 where !counted {
-                    try await client.execute(uri: uri, method: .get, headers: [.authorization: "Bearer test-cookie"]) { response in
-                        XCTAssertEqual(response.status, .ok, uri)
-                        let status = try JSONDecoder().decode(NodeStatusResponse.self, from: Data(response.body.readableBytesView))
-                        XCTAssertEqual(status.chainPath, ["Nexus"], uri)
-                        counted = status.sync != nil
-                    }
-                    if !counted { try await Task.sleep(for: .milliseconds(10)) }
+                try await client.execute(uri: uri, method: .get, headers: [.authorization: "Bearer test-cookie"]) { response in
+                    XCTAssertEqual(response.status, .ok, uri)
+                    let status = try JSONDecoder().decode(NodeStatusResponse.self, from: Data(response.body.readableBytesView))
+                    XCTAssertEqual(status.chainPath, ["Nexus"], uri)
+                    XCTAssertNotNil(status.sync, uri)
                 }
-                XCTAssertTrue(counted, uri)
             }
             try await client.execute(
                 uri: "/status?chainPath=Nexus/unhosted", method: .get, headers: [.authorization: "Bearer test-cookie"]

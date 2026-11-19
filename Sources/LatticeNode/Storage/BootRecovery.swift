@@ -79,19 +79,9 @@ enum BootRecovery {
     private static func openStores(
         configuration: NodeConfiguration
     ) throws -> Stores {
-        // A write to the Volume store does not wait for its fsync: its
-        // content can be had again. What must outlive a power loss is
-        // flushed where it is promised (`NodeStorage.flushVolumes`).
-        let broker: DiskBroker
-        do {
-            broker = try DiskBroker(
-                path: configuration.storagePath.appendingPathComponent("volumes.db").path,
-                durability: .deferred
-            )
-        } catch BrokerError.migrationRequired(let found, let required) {
-            // A Volume store an earlier version wrote is not converted.
-            throw NodeStoreError.wipeRequired("volumes.db has schema \(found), this version reads \(required)")
-        }
+        let broker = try DiskBroker(
+            path: configuration.storagePath.appendingPathComponent("volumes.db").path
+        )
         let localFetcher = CoalescingFetcher(broker)
         let retentionScope = [
             configuration.nexusGenesisCID,

@@ -23,8 +23,10 @@ def run(d):
     r['blocks'], r['wall'], r['cpu'], r['written'], r['rss'], r['disk'] = int(m[1]), float(m[2]), float(m[3]), int(m[4]), int(m[5]), int(m[6])
     r['workers'] = re.search(r'workers (\d+)', out)[1]
     # What the follower kept: runs of different settings are told apart.
-    kept = re.search(r'CHILD_BENCH follower .* state (\w+) bodies (\w+) buffer (\d+)', out)
-    r['keeps'] = '%s/%s/%d MiB' % (kept[1], kept[2], int(kept[3]) >> 20) if kept else 'recent/all/-' 
+    # Runs from before the state buffer was removed also name its limit.
+    kept = re.search(r'CHILD_BENCH follower .* state (\w+) bodies (\w+)(?: buffer (\d+))?', out)
+    r['keeps'] = ('%s/%s' % (kept[1], kept[2]) + (' (buffer %d MiB)' % (int(kept[3]) >> 20) if kept[3] else '')
+                  if kept else 'recent/all')
     r['ref'] = open(os.path.join(d, 'ref')).read()[:9]
     r['levels'] = {l[0]: dict(height=int(l[1]), wall=float(l[2])) for l in
                    re.findall(r'CHILD_BENCH level (\S+) height (\d+) wall ([\d.]+)', out)}
@@ -58,7 +60,7 @@ def run(d):
 
 runs = [run(d) for d in sys.argv[1:]]
 dash = lambda r, x: x if r['traced'] else '-'
-print('| run | ref | workers | state/bodies/buffer | blocks | wall s | wall ms/blk | CPU ms/blk | commits/blk | fsyncs/blk | fsync ms/blk | SQLite KB/blk | disk write KB/blk | kept MiB | peak RSS MiB | steps/blk | P ms/blk | loop ms/blk |')
+print('| run | ref | workers | state/bodies | blocks | wall s | wall ms/blk | CPU ms/blk | commits/blk | fsyncs/blk | fsync ms/blk | SQLite KB/blk | disk write KB/blk | kept MiB | peak RSS MiB | steps/blk | P ms/blk | loop ms/blk |')
 print('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|')
 for r in runs:
     n, v = r['blocks'], r['vfs']

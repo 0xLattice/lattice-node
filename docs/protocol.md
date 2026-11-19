@@ -207,10 +207,6 @@ carry IDs only. `getData` and `getAncestors` return bounded header entries that
 contain the canonical block bytes, an optional child index, the credited
 `ChildBlockProof` values for that block, and a genesis spec when needed. The
 receiver verifies every header and proof before adding it to its own log.
-A peer keeps its place in a log as the log's id and a position. A log whose
-id changed is another log: the peer reads it from its start. A node changes
-its log's id when it starts after a run that did not stop cleanly, because
-that run may have lost the log's tail.
 A child index larger than the node's `maxChildIndexBytes` (default 1 MiB) or
 a proof larger than `maxProofBytes` (default 64 KiB) is unavailable on that
 node, like content it cannot fetch: never judged, never blamed. These are local

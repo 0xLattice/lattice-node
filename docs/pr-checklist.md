@@ -7,7 +7,6 @@
 - [ ] Local durability failures are non-punitive.
 - [ ] All ingress transports use the same mapping.
 - [ ] Dependency branch pins are replaced by released versions before merge.
-- [ ] Each new test states something an operator or a peer could observe, and would pass a rewrite that kept the behaviour ([testing](testing.md)).
 
 ## Architecture rules
 
@@ -22,6 +21,6 @@ For a change to sync, storage or the wire, against
 - [ ] A new wait has a typed reason and a wake, not only a timer.
 - [ ] A decision is made in the core; the shell only executes effects.
 - [ ] A liveness rule has a simulator scenario; a performance claim has a benchmark number.
-- [ ] Nothing new waits on each write reaching disk except a promise to the operator; writes are buffered and flushed in batches.
+- [ ] Facts and state are written by the loop alone, as each step ends: the content they name first, then the facts in one transaction, before anything is published. Content stored elsewhere is stored before anything names it; no caller orders writes across stores.
 - [ ] Content is verified once, and modules pass verified values.
 - [ ] A wire change is an addition behind a capability, and older peers are still served.

@@ -124,76 +124,14 @@ though it were a complete boundary.
 bundle serving reads it, a node runs without it, and it may be deleted while
 the node is stopped.
 
-A block's body is written before the fact transaction that names it (and
-synced before any answer that promises it is kept: `volumes.db` does not
-wait for each write's sync, see `docs/operations.md`): a
-block's Volumes, once its execution found it valid or it was mined here, are
-one `volumes.db` transaction, then retained. The complete `NodeBatch` then
-commits in one SQLite transaction across every affected chain path, including
-each path's headers, child proofs, and sync cursors. A crash cannot leave
-part of a block's content or a parent-level half of a multi-level grind.
-
-The states executions produce are buffered in memory and flushed in batches
-(`StateBuffer`), as Bitcoin Core's coins cache and geth's trie database are.
-A step's post-states go to the buffer with their retention, and every read
-of content asks the buffer before the store: execution, the API, mining, and
-what is served to peers. A flush writes the whole buffer and its retention
-in one `volumes.db` transaction. It happens when the buffer reaches its
-limit (`NodeResourcePolicy.maximumBufferedStateBytes`, 64 MiB), on a clean
-stop, and before every operation on what the store retains (the counts, the
-window releases, a pin, a state sync, letting go of bodies), so those find
-every state in the store. After the states, a flush moves each chain's
-flush marker in `state.db` to the facts it covers: the state of every
-execution up to the marker is stored. A crash loses the buffer. At the next
-start an execution above its chain's marker counts as not executed
-(`NodeStore.forgetUnflushedExecutions`): its block is a header again, and
-the node executes it as it executes any block, off the loop, from the body
-it holds and the state below it, while it weighs and answers as usual.
-Bitcoin Core and geth keep the same marker with their flushed state. The
-marker follows the states because they are in two stores; a crash between
-the two leaves it behind the state, never ahead, and the blocks between
-execute again into the same state. A child genesis's spec is stored at
-once, since a start reads it before it executes anything.
-
-The truth is the chain the network agrees on. A node holds its own checked
-view of it, and that view is current in memory from the moment the loop
-decided it; the store follows. What a crash takes from the store the node
-reads from its peers and checks again. What no peer holds is not restored
-that way: a transaction an operator submitted, which is why its journal
-write is waited for; a block a miner submitted here that reached no peer, which is why
-its miner is answered only once the facts that hold it are written; and the newest blocks of a chain
-this node alone hosts. A step's states are in the state buffer and its facts,
-headers and proofs in `PendingFacts` before the step ends; every read a
-running node makes of them asks there first, then the store, through the
-store's own read functions, so no reader knows or waits for when a write
-lands. The step's facts transaction, a flush, a pool change, and the
-releases that follow a fact are asked of the store's lane (`StoreLane`),
-which makes them one at a time in the order asked, off the loop: a write
-that waits on the disk holds up the writes behind it and no decision. A
-crash loses what the lane had not written, so the store holds a prefix of
-what the loop decided, and a start goes on from there. A write that fails
-stops the node.
-
-What works on the store itself runs in the lane too, in its turn among the
-writes: moving a chain's counts to its tip, letting go of the state windows
-below it, and letting go of bodies. The loop asks and goes on; a move of the
-counts posts how it ended, and the loop settles again only once the tip has
-climbed another window. So a node that keeps `recent` state, or no state or
-bodies, waits on its disk no more than one that keeps everything.
-
-Three things wait for the lane. A read of what only the store holds (a
-chain newly hosted reading its facts log, a check of the counts) waits for
-every write asked before it. The
-loop waits when it has run too far ahead of the store: the records not yet
-written hold as many bytes as the state buffer may, the state buffer holds
-twice its limit, or more than 256 writes are asked and not made. And two
-answers wait for a write, off the loop, because they promise something no
-peer could give back: a transaction an operator submitted is answered once
-it is journaled, and a block a miner submitted once its facts are written. A
-transaction a peer sent is not waited for: it is held in memory, mined and
-served from there, until the lane has stored it. A pool change that removes
-transactions a block confirmed runs after that block's facts, so a crash
-cannot lose both the block and the journal's row.
+Persistence is content-first: referenced Volumes become durable before the
+fact transaction that names them. One admission's Volumes (a block's once
+its execution found it valid or it was mined here, or the post-states of
+one step) are one `volumes.db` transaction,
+then retained. The complete `NodeBatch` then commits in one SQLite transaction
+across every affected chain path, including each path's headers, child
+proofs, and sync cursors. A crash cannot leave part of a block's content or a
+parent-level half of a multi-level grind.
 
 Content stays in `volumes.db` because a retention scope names it, and each
 scope says why. A block's body (its own Volume and its transactions') is
@@ -279,10 +217,7 @@ networking starts. `NodeRuntime.boot` then rebuilds each hosted level's
 `ChainCore`, parent before child, from that level's facts read in the order
 it first took them (`ChainTree.restore(facts:)`): one key range per level,
 and the weigh log rebuilt from it keeps every position a peer's stream
-cursor names. The log keeps its id across a clean stop. A run that did not
-stop cleanly may have lost the log's tail, so the next start gives the log a
-new id (`NodeStore.openWeighLog`) and every peer reads it again from its
-start. A saved child proof names its entries by CID: block nodes and
+cursor names. A saved child proof names its entries by CID: block nodes and
 child indexes are read from `headers` and `child_indexes`, and the rest
 from `proof_entries`, so it is served byte for byte as credited. Each
 commits in the transaction of the work fact it produced.

@@ -50,47 +50,16 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   proof check the shell cannot run. Pinned by
   `ChildGenesisSpecTests`.
 
-## NODE-STORAGE-002 — a fact names content the node can read, and after a crash only content the store holds
+## NODE-STORAGE-002 — content is stored before the facts that name it, and a fact never depends on it being held
 
-- **NODE-STORAGE-002.a** — A step's headers and specs are stored before
-  the facts that name them. Its post-states are where every read finds
-  them before its facts are written: in the state buffer, then in the
-  store once a flush wrote them. A level's flush marker in `state.db` is
-  moved only after the states of every execution up to it are stored, so
-  it is never ahead of the store. At a start, an execution above its
-  level's marker is forgotten (`NodeStore.forgetUnflushedExecutions`): the
-  block is a header again and executes again. No fact a start restores
-  names a state the store lacks. The Volume store does not wait for a
-  write's sync (`BrokerDurability.deferred`), so a power loss takes its
-  writes since the last flush (`NodeStorage.flushVolumes`): it is flushed
-  before a marker moves, and before the facts of a child genesis whose
-  spec it holds, which a start reads and asks no peer for. Pinned by
-  `PowerLossTests`. The simulator models a store with no
-  buffer and enforces the unbuffered form: `SimBodies.checkStatesStored`
-  and `Invariants.checkTree` ("weighed block … has no durable content").
+- **NODE-STORAGE-002.a** — A step's content (headers, post-states, specs)
+  is stored and retained before the facts that name it. Enforced by
+  `SimBodies.checkStatesStored` and `Invariants.checkTree` ("weighed block
+  … has no durable content").
 - **NODE-STORAGE-002.b** — Nothing is published, served, relayed or
-  streamed before the step that decided it has ended, and so before every
-  read finds it: its states in the state buffer, its facts, headers and
-  proofs in `PendingFacts`. It may be published before the store has
-  written it: durability follows consistency, it does not gate it (rule 8
-  of the sync architecture). The store's writes are made in the order the
-  loop decided them, each a transaction, so after a crash the store holds a
-  prefix of what was decided; a node may come back below a tip it
-  published, and reaches it again. Two answers wait for a write, because
-  no peer could give back what they promise: an operator's submitted
-  transaction is journaled before it is acknowledged, and its journal row
-  goes only after the facts of the block that confirmed it; and a miner's
-  submitted block has its facts written before its miner is answered. Each
-  of those answers, and a pin's, also follows a flush of the Volume store,
-  which otherwise does not wait for a write's sync; a journal row goes
-  after one too, so the block that confirmed its transaction is kept
-  first. A journal row a start reads is given to the pool once its chain
-  has executed up to the heaviest block it knows: a start can stand below
-  the tip the node last executed, and a transaction refused there would
-  lose its row. Pinned by `PowerLossTests`. The simulator models a store that writes within the step and enforces
-  that form: `Simulator` and `LevelSimulator` ("published tip … is not
-  durable", "served … before it was durable", "relayed … before it was
-  durable").
+  streamed before it is durable. Enforced by `Simulator` and
+  `LevelSimulator` ("published tip … is not durable", "served … before it
+  was durable", "relayed … before it was durable").
 - **NODE-STORAGE-002.c** — Content stays because a scope names it, and a
   start leaves pins as it finds them: nothing is rebuilt from the facts.
   A block's body is named by that block on its chain, what executions read

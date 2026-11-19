@@ -107,15 +107,6 @@ extension ChainCore {
         if snapshot.actOnTip == snapshot.bestHeaderTip || snapshot.actOnTip == heaviestObtainableTip() { synced = true }
     }
 
-    /// Whether the level has executed all it can: its act-on tip is the
-    /// heaviest block it knows, or the heaviest whose body can be had (the
-    /// condition `synced` latches on, without the read of a peer's log).
-    public var hasExecutedWhatItCan: Bool {
-        let snapshot = snapshot
-        guard !snapshot.actOnTip.isEmpty else { return false }
-        return snapshot.actOnTip == snapshot.bestHeaderTip || snapshot.actOnTip == heaviestObtainableTip()
-    }
-
     /// Whether `cid`'s body could not be obtained: it failed often enough
     /// that its backoff reached `bodyRetryCap`, and it waits that out
     /// (`bodies.parked`), not asked again, arrived or executed since. A

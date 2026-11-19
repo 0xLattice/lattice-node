@@ -24,25 +24,13 @@ public struct NodeResourcePolicy: Sendable, Equatable {
     /// top of it. What goes first is in `ReadCache`.
     public var maximumCachedContentBytes: Int { maximumAcquisitionBytes / 4 }
 
-    /// The bytes of executed state held in memory before it is written to
-    /// the store in one batch (`StateBuffer`), as Bitcoin Core's `-dbcache`
-    /// bounds its coins cache. Larger means fewer, larger writes and more
-    /// blocks to execute again after a crash; 0 writes each step's state as
-    /// it is produced.
-    public let maximumBufferedStateBytes: Int
-
-    public static let defaultMaximumBufferedStateBytes = 64 * 1_024 * 1_024
-
     public init(
         maximumAcquisitionStorageBytes: Int = 64 * 1_024 * 1_024,
-        maximumAcquisitionBytes: Int = Self.defaultMaximumAcquisitionBytes,
-        maximumBufferedStateBytes: Int = Self.defaultMaximumBufferedStateBytes
+        maximumAcquisitionBytes: Int = Self.defaultMaximumAcquisitionBytes
     ) {
         precondition(maximumAcquisitionStorageBytes > 0)
         precondition(maximumAcquisitionBytes >= maximumAcquisitionStorageBytes)
-        precondition(maximumBufferedStateBytes >= 0)
         self.maximumAcquisitionStorageBytes = maximumAcquisitionStorageBytes
         self.maximumAcquisitionBytes = maximumAcquisitionBytes
-        self.maximumBufferedStateBytes = maximumBufferedStateBytes
     }
 }

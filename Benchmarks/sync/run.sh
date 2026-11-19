@@ -31,7 +31,7 @@ TRACE_ENV="LATTICE_SYNC_TRACE=/dev/shm/trace LATTICE_SYNC_TRACE_MAX_BYTES=0"
 [ "${TRACE:-1}" = 0 ] && TRACE_ENV=
 # What the follower keeps, when set here (README): passed through as set.
 docker run --rm --network host --shm-size 1g --cpus $N --cpuset-cpus 0-$((N - 1)) \
-  -e BENCH_STATE -e BENCH_BODIES -e BENCH_STATE_BUFFER \
+  -e BENCH_STATE -e BENCH_BODIES \
   -v "$B":/bench:ro -v "$D":/data:ro -v "$O":/out $IMAGE sh -c "
   env CHILD_BENCH=follow CHILD_BENCH_WORKERS=$((N > 1 ? N - 1 : 1)) CHILD_BENCH_DIR=/follower \
     CHILD_BENCH_MANIFEST=/data/manifest.txt CHILD_BENCH_PEER=$PEER CHILD_BENCH_VFS=/out/vfs.txt $TRACE_ENV \

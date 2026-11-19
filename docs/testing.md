@@ -1,22 +1,5 @@
 # Testing
 
-## What a test states
-
-A test states something an operator or a peer could observe: a node that
-crashes comes back to the same tip with the same balances; two releases
-follow each other's blocks; a transaction a node accepted is in a block. It
-does not restate the implementation: it does not assert a setting's value,
-count internal jobs or syncs, read a store's contents after a step, or walk
-the branches of one function.
-
-The check: would the test still pass if the code were rewritten with the
-same behaviour? A test that would not breaks on a correct change and
-catches nothing else. When a behavioural test could pass without the thing
-it is about having happened, it asserts that premise once and says so. A
-guarantee about a failure is tested by making the failure: what a crash or
-a power cut leaves is put in front of a node, and the test states what the
-operator then finds, not which calls were made on the way.
-
 The default local suite covers the production runtime, storage, HTTP surface,
 mining components, and fast deterministic core tests:
 

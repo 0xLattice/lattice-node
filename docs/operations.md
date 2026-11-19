@@ -486,40 +486,17 @@ from local content.
 
 Persistence order is:
 
-1. store a block's body in one `volumes.db` transaction (its Volumes
-   together, once its execution found it valid or it was mined here), then
-   retain it. A body fetched from peers is read into memory until then (and
-   read again from peers if memory let it go), and a node does not serve it
-   before;
-2. hold what the step decided in memory, where every read finds it: its
-   post-states in the state buffer, and the complete multi-level `NodeBatch`
-   (headers, child proofs, facts) with the records not yet written;
-3. publish the new snapshots;
-4. behind the loop, in the order the steps decided them: commit each step's
-   `NodeBatch` and cursors in one `state.db` transaction;
-5. later, at a flush, after the facts it covers: store the buffered
-   post-states in one `volumes.db` transaction, then move each chain's flush
-   marker in `state.db` to the facts those states belong to.
+1. store the content in one `volumes.db` transaction (a block's Volumes
+   together, once its execution found it valid or it was mined here; a
+   step's post-states together), then retain it. A body fetched from peers
+   is read into memory until then (and read again from peers if memory
+   let it go), and a node does not serve it before;
+2. commit the complete multi-level `NodeBatch` (headers, child proofs, facts,
+   and cursors) in one `state.db` transaction;
+3. publish the new snapshots.
 
-A block's body is committed before anything is announced, served or built on
-it. Its headers, facts and state are not: a tip is published, and its
-headers served, once the step that decided them has ended, while their
-writes may still wait. Each write is one transaction and they are made in
-order. A `state.db` transaction waits for its sync (`synchronous=FULL`). A
-`volumes.db` transaction does not: if the process stops, nothing written is
-lost, and if the machine loses power, `volumes.db` holds everything written
-up to some earlier transaction and nothing after it. The node syncs it
-before a flush marker moves and before each answer below, so no marker and
-no promise is ahead of it. After a crash or a power loss the node reads from
-its peers what it had weighed and no longer holds, and executes again what
-is above the flush markers (`stateBufferBytes`, below). Three answers wait
-until what they promise would outlive a power loss: a transaction an
-operator submitted is journaled before it is acknowledged, a block a miner
-submitted has its facts written before its miner is answered, and a pin is
-synced before it is confirmed. A pending transaction's journal row is read
-at a start and returns to the pool once its chain has executed up to the
-heaviest block the node knows. With a buffer of 0 the old order holds: post-states stored,
-then the `NodeBatch` committed, then the snapshots published.
+Every commit is synchronous (`synchronous=FULL`): nothing is announced,
+served, or built on before the write that makes it durable returns.
 
 ### Batched execution
 
@@ -531,7 +508,7 @@ it. A batch is a run of consecutive blocks on one chain, the heavier branch
 first at a fork; each block reads the state the one before it produced from
 memory. Its valid blocks are stored and committed together, by the order
 above: one `volumes.db` transaction for their bodies, then one step's
-post-states into the buffer and its facts. The batch ends at its first block without a valid
+post-states and facts. The batch ends at its first block without a valid
 verdict. Bitcoin Core connects up to 32 blocks per `ActivateBestChainStep`,
 and geth's `insertChain` writes a batch at once.
 
@@ -539,29 +516,9 @@ and geth's `insertChain` writes a batch at once.
 (`--connect-batch`; default 32, at least 1) is the most blocks one batch
 executes; the body window (64 blocks ahead) bounds it too. A larger batch
 commits less often while a node catches up and
-holds more executed state in memory until its commit. A change takes effect
-on restart.
-
-Executed state is held in memory and written to the store in batches.
-`stateBufferBytes` in `lattice.json` or a `config.d` fragment
-(`--state-buffer-bytes`; default 67108864, 64 MiB) is how much is held
-before one write stores it, as Bitcoin Core's `-dbcache` bounds its coins
-cache. A clean stop writes it all. A crash loses the batch being executed
-and the state not yet written: on the next start the node logs how many
-executed blocks that was, counts them as not executed, and executes them
-again from the bodies it holds, while it weighs headers and answers
-requests as usual. The node's own records (headers, facts, proofs) are
-written behind its decisions too, in order: a crash can also lose the last
-of those, and the node then asks its peers again for what it had weighed.
-A block submitted to this node is the exception: a miner (`submitWork`), or
-an author pushing a child block (`submitChildBlock`), is told the block is
-accepted or in the tree only once its records are written, so a block the
-node said it accepted is still there after a crash, on a chain this node alone hosts too. Its state
-may not be, and is produced again from the block. Until it is back at its tip, reads at the tip answer
-for the lower tip. With 0 each step's state is written as it is produced
-and a crash loses at most the batch being executed. A node that keeps
-`recent` state writes at least once per state window, and one that keeps
-no state or no bodies writes every step, whatever the limit.
+holds more executed state in memory until its commit. A crash loses at most
+the batch being executed: the node restarts at the last batch committed and
+runs it again. A change takes effect on restart.
 
 ### What a node keeps
 

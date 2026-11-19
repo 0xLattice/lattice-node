@@ -45,9 +45,10 @@ Three services belong to the node, not to any chain:
   queues behind work in another, and shared resources have limits, not
   ordering policies.
 - **Store**: a verified cache of what the network holds. Writes are atomic
-  and ordered. State changes are buffered in memory, read from the buffer,
-  and flushed to disk in one atomic batch when the buffer reaches its limit; nothing waits for each write to reach disk
-  except a promise to the operator.
+  and ordered. Content (a body, a mined block) is stored by the job that
+  validated or built it, before anything names it; the loop then writes each
+  step's state and facts, content first and facts in one transaction, before
+  it publishes. Facts and state are written by the loop alone.
 - **Progress**: every module reports what it is waiting on, as a typed
   reason.
 
@@ -73,7 +74,7 @@ established clients are built. The node has no scheduler of its own.
 | Execution of a chain's blocks | One lane per chain, one job at a time: a batch of up to `connectBatch` ready blocks, one atomic change set | A chain executes in order anyway; chains run side by side |
 | Header work: proof checks and derivations | Its own lane per chain | It never queues behind execution. Batched per page |
 | What an RPC waits on | Its own lane | Latency |
-| Storage writes | State buffered in memory and flushed in batches on a size limit, as Bitcoin Core's coins cache (`-dbcache`) and geth's trie database do | The loop waits on a flush, not on every write |
+| Storage writes | Validated content by its job; then, as each step ends, the step's state and facts by the loop, facts in one transaction | One boundary, one order, one place. A write-behind layer (state buffer, write lane, deferred syncs) was tried and removed: it bought speed past the target and put the ordering on every caller |
 
 The loop only decides. It does not wait on each write, read content, or do
 bookkeeping that is not a decision. Each lane offers only its next job, and
@@ -107,14 +108,10 @@ commitment; storage does not mirror it.
 | Headers, facts, proofs, cursors | The node's own tables |
 | "State reflects block X" marker | Per chain, in the same transaction as state and facts |
 
-Durable writes are kept for promises no peer could make good: an
-acknowledged local transaction, pins, configuration, and a block the node
-told its submitter it accepted (a miner's `submitWork`, an author's
-`submitChildBlock` answered "in tree"). A miner holds a work id and a nonce,
-never the block, so it cannot keep or submit again what it mined: the node
-writes the block's records before it answers. The answer waits for the
-write; the loop does not. The block's executed state is not part of the
-promise: it is produced again from the block.
+Every write is made before the step that decided it is published, so what
+the node promises is on disk when it says so: an acknowledged local
+transaction, pins, configuration, and a block a miner or an author was told
+is accepted.
 
 ## Rules
 
@@ -134,10 +131,11 @@ rule here first.
    results.
 7. **Every liveness rule has a simulator scenario**, and every performance
    claim has a benchmark number.
-8. **The network is the durable record.** Consistency is strict and
-   durability catches up: local storage is a verified cache.
-9. **Writes are atomic and ordered, always.** A restart resumes from a
-   consistent earlier state and re-syncs the rest.
+8. **The network is the durable record.** Local storage is a verified cache:
+   what peers can give back again needs no care beyond atomic, ordered writes.
+9. **Writes are atomic and ordered, always, from one place.** Each step's
+   content, then its facts in one transaction, as the step ends. A restart
+   resumes from a consistent earlier state and re-syncs the rest.
 10. **Content is verified once, where it enters.** Modules pass verified,
     decoded values, never raw bytes.
 11. **Weigh, Fetch and Execute costs are measured by the sync benchmark**

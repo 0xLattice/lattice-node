@@ -212,15 +212,9 @@ public final class NodeRuntime: Sendable {
         var coreConfig = coreConfig
         coreConfig.mining.mempool.minRelayFee = configuration.minRelayFee
         coreConfig.finality = configuration.finality
-        // Before anything is journaled or served: a run that did not stop
-        // cleanly may have lost its log's tail, so the log gets a new id.
-        let (logID, replaced) = try await storage.openWeighLog()
-        if replaced {
-            logLine("lattice-node: the last run did not stop cleanly; peers read this node's weigh log again from its start")
-        }
         let core = try await boot(
             storage: storage, configuration: configuration,
-            coreConfig: coreConfig, logID: logID
+            coreConfig: coreConfig
         )
         let overlay = try overlay ?? OverlayConfiguration(configuration).overlay
         // What the journal replay below reads of the core, which the runtime
@@ -286,21 +280,18 @@ public final class NodeRuntime: Sendable {
 
     /// Rebuild the core from the durable facts, rooted at the configured
     /// Nexus genesis and nothing else.
-    /// The weigh log is derived from the fact log; its id is `logID`, the one
-    /// a starting run opened (`NodeStorage.openWeighLog`), or else the one
-    /// state.db recorded with its first fact (a fresh store: a new one,
-    /// recorded with the first fact it journals). Reads only.
+    /// The weigh log is derived from the fact log; its id is the one state.db
+    /// recorded with its first fact (a fresh store: a new one, recorded with
+    /// the first fact it journals).
     static func boot(
         storage: NodeStorage,
         configuration: NodeConfiguration,
-        coreConfig: ChainCoreConfig,
-        logID opened: String? = nil
+        coreConfig: ChainCoreConfig
     ) async throws -> NodeCore {
         guard configuration.address.isNexus else { throw NodeRuntimeError.notNexus }
         var coreConfig = coreConfig
         coreConfig.connectBatch = configuration.connectBatch
-        let stored = try await storage.chainLogID()
-        let logID = opened ?? stored ?? UUID().uuidString.lowercased()
+        let logID = try await storage.chainLogID() ?? UUID().uuidString.lowercased()
         var cursors: [ChainPath: [String: StreamCursor]] = [:]
         for path in [configuration.chainPath] + configuration.hostedChildren {
             cursors[path] = try await storage.chainCursors(at: path)
@@ -469,9 +460,6 @@ public final class NodeRuntime: Sendable {
             observeJob: observeJob,
             peerMemory: peerMemory
         ))
-        // A write the lane could not make stops the node, as one the loop
-        // waited for did.
-        storage.lane.onFailure(failStop)
         loop = Task {
             var state = initial.take()
             // With no bodies kept beyond the working set, a start lets go
@@ -486,10 +474,6 @@ public final class NodeRuntime: Sendable {
             }
             await state.settleState()
             state.refreshView()
-            // The core takes a step before any peer or request gives it
-            // one: what it restored and has not executed (blocks weighed,
-            // and blocks whose state a crash lost) it asks for now.
-            inputs.yield(.event(.tick))
             // After the loop ends, inputs are only drained until the stream
             // finishes, so no RPC waits forever.
             var running = true
@@ -532,12 +516,6 @@ public final class NodeRuntime: Sendable {
         inputs.yield(.stop)
         inputs.finish()
         await loop.value
-        // A clean stop leaves nothing in the state buffer: a start that
-        // follows executes nothing again.
-        _ = await storage.flushedState()
-        try? await storage.flushVolumes()
-        // Everything the loop journaled is written: the log keeps its id.
-        await storage.markCleanStop()
         templateDigest.finish()
     }
 
@@ -663,18 +641,6 @@ extension NodeRuntime {
         /// RPCs waiting on their answer, by reply ID.
         var replies: [UInt64: (path: ChainPath, reply: CheckedContinuation<NodeRuntimeReply, any Error>)] = [:]
         var nextReply: UInt64 = 1
-        /// The write of the last step's facts, asked of the store's lane:
-        /// what an answer that promises a block is held waits for.
-        var lastFacts: Task<Void, any Error>?
-        /// Journal rows a start read, by chain, not yet given to the pool:
-        /// held until the chain and every chain above it have executed all
-        /// they can (`ChainCore.hasExecutedWhatItCan`). A start can stand
-        /// below the tip the node last executed (the executions above the
-        /// flush marker are made again), and a transaction judged there, or
-        /// a child's judged against its parent's state there, can be
-        /// refused for what that tip does not hold yet, which would delete
-        /// its row.
-        var heldRestored: [ChainPath: [NodeEvent]] = [:]
         /// Announced transactions being fetched, by CID.
         var transactionFetches: Set<String> = []
         /// Transactions recently fetched, not refetched until a hosted chain's
@@ -812,58 +778,11 @@ extension NodeRuntime {
 
         /// Returns false once the loop must end.
         mutating func handle(_ input: Input) async -> Bool {
-            guard await take(input) else { return false }
-            return await releaseRestored()
-        }
-
-        /// Whether `path` and every chain above it have executed all they
-        /// can: a child's transaction is judged against its parent's state.
-        private func hasCaughtUp(_ path: ChainPath) -> Bool {
-            (1...path.count).allSatisfy { core.levels[Array(path.prefix($0))]?.hasExecutedWhatItCan == true }
-        }
-
-        /// A journal row read at a start: to the pool now, or held
-        /// (`heldRestored`).
-        private mutating func restore(_ event: NodeEvent, at path: ChainPath) async -> Bool {
-            guard hasCaughtUp(path) else {
-                heldRestored[path, default: []].append(event)
-                return true
-            }
-            return await step(event)
-        }
-
-        private mutating func releaseRestored() async -> Bool {
-            for path in heldRestored.keys.sorted(by: { $0.joined(separator: "/") < $1.joined(separator: "/") })
-            where hasCaughtUp(path) {
-                // A row that went while it was held (the same transaction
-                // came another way and a block confirmed it) is not pooled
-                // again: the pool would count it journaled with no row.
-                let rows: Set<String>
-                do {
-                    rows = Set(try await storage.localTransactions().map(\.transactionCID))
-                } catch {
-                    failStop(error)
-                    return false
-                }
-                for event in heldRestored.removeValue(forKey: path) ?? [] {
-                    guard case .level(_, .mining(.transactionReceived(let transaction, _))) = event,
-                          let cid = try? VolumeImpl<Transaction>(node: transaction).rawCID, rows.contains(cid)
-                    else { continue }
-                    guard await step(event) else { return false }
-                }
-            }
-            return true
-        }
-
-        private mutating func take(_ input: Input) async -> Bool {
             switch input {
             case .stop:
                 return false
             case .event(let event):
                 if case .tick = event { wake = nil }
-                if case .level(let path, .mining(.transactionReceived(_, origin: .restored(addedAt: _)))) = event {
-                    return await restore(event, at: path)
-                }
                 return await step(event)
             case .bodyStored(let path, let cid, let asked, let held):
                 SyncTrace.log(
@@ -989,18 +908,6 @@ extension NodeRuntime {
                     SyncTrace.log(chain: path, "counts do not match the store: resync")
                     (chain.marker, chain.known, chain.audited) = (nil, nil, nil)
                 case .failed: chain.waiting = true
-                case .settled(let outcome, let tip, let window):
-                    countsSettled(outcome, at: path, &chain, tip: tip, window: window)
-                    counted[path] = chain
-                    // The counts moved, or wait on a repair just started:
-                    // settled again only if the tip climbed a window more
-                    // meanwhile, not at once as after a repair.
-                    if let level = core.levels[path], level.snapshot.actOnTip != tip,
-                       chain.repair == nil, !climbedLessThanAWindow(level, at: path) {
-                        stateTips[path] = nil
-                    }
-                    await settleState()
-                    return true
                 }
                 counted[path] = chain
                 stateTips[path] = nil
@@ -1069,7 +976,6 @@ extension NodeRuntime {
             }
             for path in outputs.keys where core.levels[path] == nil {
                 outputs[path] = nil
-                heldRestored[path] = nil
                 views[path] = nil
                 digests[path] = nil
                 currentPeers[path] = nil
@@ -1125,8 +1031,6 @@ extension NodeRuntime {
         /// One child level started over what it journaled, as boot does,
         /// with the operator's own pooled transactions for it.
         private mutating func start(_ path: ChainPath, specs operatorSpecs: [ChainPath: ChainSpec]) async throws {
-            // The facts log itself is read: everything asked is written.
-            await storage.written()
             let facts = try await storage.nodeFacts(at: path)
             var specs: [ChainSpec] = []
             for case .block(let block) in facts.facts where block.parentBlockHash == nil {
@@ -1146,9 +1050,9 @@ extension NodeRuntime {
             await peerMemory?.track(path, now: NodeRuntime.now())
             for item in try await storage.localTransactions()
             where item.transaction.body.node?.chainPath == path {
-                guard await restore(.level(path, .mining(.transactionReceived(
+                guard await step(.level(path, .mining(.transactionReceived(
                     item.transaction, origin: .restored(addedAt: item.addedAt * 1_000)
-                ))), at: path) else { throw NodeRuntimeError.stopped }
+                )))) else { throw NodeRuntimeError.stopped }
             }
         }
 
@@ -1725,12 +1629,6 @@ extension NodeRuntime {
                     )
                 }
             }
-            // The act-on heights this step decided, before its state is
-            // buffered: a window release behind the loop keeps their windows.
-            if configuration.state != .all {
-                let heights = core.levels.mapValues(\.snapshot.actOnHeight)
-                storage.actOnHeights.withLock { $0 = heights }
-            }
             // The facts transaction, then publish, then everything else, each
             // in order.
             func rank(_ effect: NodeEffect) -> Int {
@@ -1772,12 +1670,8 @@ extension NodeRuntime {
             // What an executed block read goes once the kept state holds
             // what of it the tip's state holds: its execution's window
             // until the counts reach it.
-            // After the facts of the step that executed it, in the lane.
-            if !readsDone.isEmpty {
-                let (storage, done) = (storage, readsDone)
-                storage.lane.run { for key in done { await storage.releaseReads(key.cid, at: key.path) } }
-                readsDone.removeAll()
-            }
+            for key in readsDone { await storage.releaseReads(key.cid, at: key.path) }
+            readsDone.removeAll()
             refreshView(core.touched)
             return true
         }
@@ -1793,25 +1687,16 @@ extension NodeRuntime {
                     }
                 }
                 do {
-                    // What the step decided is held where reads find it and
-                    // asked of the store's lane: the loop waits for no
-                    // commit and no flush.
-                    lastFacts = try await storage.persistNodeBatchBehind(batch, logID: core.logID) ?? lastFacts
-                    storage.flushStateIfFull()
+                    try await storage.persistNodeBatch(batch, logID: core.logID)
                     if configuration.blockBodies == .none { executedThisStep.append(contentsOf: persistedBodyKeys) }
                     readsDone.append(contentsOf: persistedBodyKeys)
-                    // A block found invalid is no block: its body goes,
-                    // after the fact that says so.
+                    // A block found invalid is no block: its body goes.
                     for (path, levelBatch) in batch.levels {
                         for case .exclusion(let excluded) in levelBatch.facts.flatMap(\.facts) {
-                            let storage = storage
-                            storage.lane.run { await storage.releaseBody(excluded.blockHash, at: path) }
+                            await storage.releaseBody(excluded.blockHash, at: path)
                             readsDone.append(BodyKey(path: path, cid: excluded.blockHash))
                         }
                     }
-                    // The loop has run too far ahead of the store: it
-                    // waits for it here, and only here.
-                    if storage.laneIsBehind { await storage.written() }
                 } catch {
                     // Fail-stop: no later effect of this step may run.
                     failStop(error)
@@ -1992,30 +1877,7 @@ extension NodeRuntime {
             case .mining(let effect):
                 return await execute(effect, at: path)
             case .workSubmitted(let replyID, let outcome):
-                // A submitted block is answered for once the facts that
-                // hold it are written: what a miner was told is accepted
-                // is in the store, and outlives a crash. The answer waits
-                // for the write, off the loop; the loop does not.
-                guard let entry = replies.removeValue(forKey: replyID) else { break }
-                // No facts were written behind the loop: nothing was
-                // stored, or each step's write was made and flushed in it.
-                guard let written = lastFacts else {
-                    entry.reply.resume(returning: .work(outcome))
-                    break
-                }
-                let storage = storage
-                Task {
-                    do {
-                        // Its facts, then its body: the Volume store does
-                        // not wait for a write's fsync unless asked.
-                        try await written.value
-                        try await storage.flushVolumes()
-                        entry.reply.resume(returning: .work(outcome))
-                    } catch {
-                        // The write failed: the node stops, as it says.
-                        entry.reply.resume(throwing: NodeRuntimeError.stopped)
-                    }
-                }
+                answer(replyID, .success(.work(outcome)))
             }
             return true
         }
@@ -2023,19 +1885,8 @@ extension NodeRuntime {
         private mutating func execute(_ effect: MiningEffect, at path: ChainPath) async -> Bool {
             switch effect {
             case .poolChanged(let delta):
-                // In the store's lane, after the facts asked for before it:
-                // a transaction a block confirmed leaves the journal only
-                // once that block's facts are written, so a crash cannot
-                // lose both. What the pool gained is read from memory
-                // until it is stored. Only a transaction an operator
-                // submitted is waited for: it is answered once journaled.
-                let storage = storage
                 do {
-                    let written = try await storage.storingBehind(delta.added.map(\.transaction)) {
-                        try await storage.persistPoolDelta(delta)
-                    }
-                    guard !delta.journaled.isEmpty else { break }
-                    try await written.value
+                    try await storage.persistPoolDelta(delta)
                 } catch {
                     failStop(error)
                     return false
@@ -2180,12 +2031,7 @@ extension NodeRuntime {
                 if let last = bodyTips[path], last != tip { past.append(last) }
                 bodyTips[path] = tip
                 past.removeAll { $0 == tip }
-                // In the store's lane, after the facts of the step that
-                // executed them: the loop does not wait.
-                if !past.isEmpty {
-                    let (storage, bodies) = (storage, past)
-                    storage.lane.run { await storage.letGo(ofBodies: bodies, at: path) }
-                }
+                if !past.isEmpty { await storage.letGo(ofBodies: past, at: path) }
             }
         }
 
@@ -2205,8 +2051,9 @@ extension NodeRuntime {
                 let asked = stateTips[path] == nil
                 stateTips[path] = level.snapshot.actOnTip
                 if !asked, climbedLessThanAWindow(level, at: path) { continue }
-                guard !level.snapshot.actOnTip.isEmpty else { continue }
-                settleCounted(at: path, tip: level.snapshot.actOnTip, height: level.snapshot.actOnHeight)
+                guard !level.snapshot.actOnTip.isEmpty,
+                      await settleCounted(at: path, tip: level.snapshot.actOnTip) else { continue }
+                await storage.letGoOfState(at: path, below: level.snapshot.actOnHeight)
             }
         }
 
@@ -2235,60 +2082,31 @@ extension NodeRuntime {
         /// the loop, one at a time, and settles again when it ends; one that
         /// failed waits for a new peer or the next maintenance pass. True
         /// when the counts reached the tip, or the operator keeps no counts.
-        private mutating func settleCounted(at path: ChainPath, tip: String, height: UInt64) {
-            guard configuration.state == .recent, let window = configuration.stateWindow(for: path) else {
-                // No counts kept: what executions stored below the window
-                // goes, in the lane, after the facts of this step.
-                let storage = storage
-                storage.lane.run { await storage.letGoOfState(at: path, below: height) }
-                return
-            }
+        private mutating func settleCounted(at path: ChainPath, tip: String) async -> Bool {
+            guard configuration.state == .recent, let window = configuration.stateWindow(for: path) else { return true }
             var chain = counted[path] ?? CountedChain()
             defer { counted[path] = chain }
-            guard chain.repair == nil, !chain.waiting else { return }
-            guard chain.synced != nil || chain.marker != nil else {
-                return stateSync(path, &chain, tip: tip, window: window)
+            guard chain.repair == nil, !chain.waiting else { return false }
+            let outcome: CountedOutcome
+            if let synced = chain.synced {
+                outcome = await storage.commitCounted(
+                    at: path, block: synced.block, places: synced.places, tip: tip, window: window
+                )
+            } else if let marker = chain.marker {
+                outcome = await storage.settleCounted(at: path, tip: tip, window: window, marker: marker, known: chain.known)
+            } else {
+                stateSync(path, &chain, tip: tip, window: window)
+                return false
             }
-            // The move runs in the store's lane, in its turn among the
-            // writes: it works on what the store holds, and the loop does
-            // not wait for it. It posts how it ended (`countsSettled`).
-            let (synced, marker, known) = (chain.synced, chain.marker, chain.known)
-            nextRepair += 1
-            let (id, storage, inputs) = (nextRepair, storage, inputs)
-            let task = storage.lane.run {
-                let outcome: CountedOutcome
-                if let synced {
-                    outcome = await storage.commitCounted(
-                        at: path, block: synced.block, places: synced.places, tip: tip, window: window
-                    )
-                } else {
-                    outcome = await storage.settleCounted(
-                        at: path, tip: tip, window: window, marker: marker ?? "", known: known
-                    )
-                }
-                if case .settled(let moved, _) = outcome {
-                    // What a state sync or heal read is counted now.
-                    if moved != marker { await storage.releaseStaging(at: path) }
-                    await storage.letGoOfState(at: path, below: height)
-                }
-                inputs.yield(.counted(path, repair: id, .settled(outcome, tip: tip, window: window)))
-            }
-            chain.repair = (id, Task { _ = await task.result })
-        }
-
-        /// A move of the chain's counts ended (`settleCounted`). Roots the
-        /// store lacks are healed; counts that cannot follow, or that the
-        /// store refuses, are replaced by a state sync, the old ones
-        /// serving until it commits; a store failure is tried again at the
-        /// next settle or maintenance pass.
-        private mutating func countsSettled(
-            _ outcome: CountedOutcome, at path: ChainPath, _ chain: inout CountedChain, tip: String, window: UInt64
-        ) {
             switch outcome {
             case .settled(let marker, let known):
+                let moved = marker != chain.marker
                 // A state sync's counts are checked anew.
                 if chain.synced != nil { chain.audited = nil }
                 (chain.marker, chain.known, chain.synced) = (marker, known, nil)
+                // What a state sync or heal read is counted now.
+                if moved { await storage.releaseStaging(at: path) }
+                return true
             case .missing(let roots):
                 SyncTrace.log(chain: path, "counts heal \(roots.count) roots this store lacks")
                 repair(path, &chain) { storage, remote in
@@ -2305,6 +2123,7 @@ extension NodeRuntime {
             case .failed(let reason):
                 SyncTrace.log(chain: path, "counts not moved: \(reason)")
             }
+            return false
         }
 
         private mutating func stateSync(_ path: ChainPath, _ chain: inout CountedChain, tip: String, window: UInt64) {
@@ -2401,6 +2220,4 @@ enum CountedRepair: Sendable {
     /// the store.
     case audited(String, [String]?)
     case failed
-    /// A move of the counts to `tip` ended this way (`settleCounted`).
-    case settled(CountedOutcome, tip: String, window: UInt64)
 }
