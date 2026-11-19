@@ -141,7 +141,7 @@ extension ChainEvent {
         case .transactionsRead: "transactionsRead"
         case .parentFactsPresent: "parentFactsPresent"
         case .tick: "tick"
-        case .parentSynced: "parentSynced"
+        case .parentWeighed: "parentWeighed"
         case .proofsVerified: "proofsVerified"
         case .derived: "derived"
         case .submitted: "submitted"
@@ -505,16 +505,18 @@ public struct NodeCore: Sendable {
         return effects
     }
 
-    /// Whole-chain top-down: a child level reads its peers' streams only once
-    /// its parent level has caught up, a one-way latch (Bitcoin Core's
-    /// initial block download). After every step, however the parent
-    /// latched (a peer's page, a run, a connect), a child level that held
-    /// back its peers while gated reads them now. It follows live from then
+    /// Top-down by weight: a child level reads its peers' streams only once
+    /// its parent level has weighed a peer's whole log (`headersSynced`), a
+    /// one-way latch, as headers-first sync reads headers to the end before
+    /// it asks for anything that hangs from them. It does not wait for the
+    /// parent to execute what it weighed. After every step, however the
+    /// parent latched, a child level that held back its peers while gated
+    /// reads them now. It follows live from then
     /// on; its own children open in turn.
     mutating func openGates(_ turn: inout Turn) {
         for path in ordered where path.count > 1 && levels[path]?.heldBack == true
-            && levels[Array(path.dropLast())]?.synced != false {
-            run(path, .parentSynced, &turn)
+            && levels[Array(path.dropLast())]?.headersSynced != false {
+            run(path, .parentWeighed, &turn)
         }
     }
 
@@ -533,7 +535,7 @@ public struct NodeCore: Sendable {
         let parent = path.count > 1 ? Array(path.dropLast()) : nil
         let effects = core.step(
             event, now: turn.now,
-            parent: parent.flatMap { levels[$0]?.tree }, parentSynced: parent.flatMap { levels[$0]?.synced } ?? true
+            parent: parent.flatMap { levels[$0]?.tree }, parentWeighed: parent.flatMap { levels[$0]?.headersSynced } ?? true
         )
         turn.weighed[path, default: []].formUnion(core.weighed)
         turn.arrived[path, default: []].formUnion(core.arrived)

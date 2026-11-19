@@ -394,6 +394,14 @@ public struct LevelSimulator {
         if let lost = synced.first(where: { node.core.levels[$0]?.synced == false }) {
             throw Invariants.fail(name, "level \(lost) went back to unsynced")
         }
+        // A gate is not left shut: after a step in which its parent has
+        // weighed a whole log, no child still holds its peers back.
+        if let shut = node.core.levels.first(where: { path, level in
+            path.count > 1 && level.heldBack && node.core.levels[Array(path.dropLast())]?.headersSynced == true
+        })?.key {
+            throw Invariants.fail(name, "level \(shut) still holds its peers back after its parent weighed a whole log")
+        }
+
         var persisted = false
         var persists = 0
         var minedLevels = 0

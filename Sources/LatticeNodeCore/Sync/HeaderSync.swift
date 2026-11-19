@@ -24,7 +24,8 @@ public struct PeerSync: Sendable, Equatable {
     /// This peer read our log to its end: we push what we append.
     public internal(set) var subscribed = false
     /// We read this peer's log to its end at least once (a page we asked
-    /// for said nothing more follows): what `ChainCore.synced` waits for.
+    /// for said nothing more follows): what `ChainCore.headersSynced`, and so
+    /// `synced`, waits for. A peer whose log is replaced has not.
     public internal(set) var readToEnd = false
     /// The ancestors asked for by CID (a parent this peer's header named).
     public internal(set) var parentRequest: InFlightHeader?
