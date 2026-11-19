@@ -166,6 +166,16 @@ struct ParentContinuity: ParentChainFacts {
     }
 }
 
+/// A child's parent facts from levels as they stood when it was made: what a
+/// start reads while it executes blocks again, before its loop takes inputs.
+struct RestoredParentFacts: ParentChainFacts {
+    let levels: [ChainPath: ChainCore]
+
+    func hasContinuity(_ link: ParentStateContinuityLink) async -> Bool {
+        levels[link.parentPath]?.tree.executedSetAdvanced(from: link.fromStateCID, to: link.toStateCID) ?? false
+    }
+}
+
 /// The hosted levels as the loop holds them, read from a job: `read` runs
 /// on the loop between steps, as Bitcoin reads its live block index under
 /// `cs_main`, and is nil once the loop has stopped. A recheck's tip still

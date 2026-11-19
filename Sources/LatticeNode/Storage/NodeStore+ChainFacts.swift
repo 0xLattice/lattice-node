@@ -13,6 +13,10 @@ struct NodeFactBatch: Sendable {
     /// Keep the state diffs of the blocks these facts executed, for the
     /// state window (`state: recent`). A block fact never carries one.
     var keepsStateDiffs = false
+    /// The state these facts' executions produced is in the state buffer,
+    /// not the store: each block they validate is named unflushed
+    /// (`unflushedBlocks`) in the same transaction, until a flush.
+    var buffersState = false
 }
 
 extension NodeStore {
@@ -31,6 +35,7 @@ extension NodeStore {
             let evidence: PreparedEvidence
             let rows: [PreparedRow]
             let cursors: [String: StreamCursor]
+            let buffersState: Bool
         }
 
         guard Set(levels.map(\.path)).count == levels.count else {
@@ -75,10 +80,16 @@ extension NodeStore {
                     headers: level.headers, proofs: level.proofs, at: level.path
                 ),
                 rows: rows,
-                cursors: level.cursors
+                cursors: level.cursors,
+                buffersState: level.buffersState
             )
         }
 
+        // Never an index a flush may already have cleared: it rises for as
+        // long as the store is open, from the newest row it opened with.
+        let namesUnflushed = prepared.contains(where: \.buffersState)
+        var unflushed = try namesUnflushed ? lastUnflushedBlock() : 0
+        defer { if namesUnflushed { lastUnflushedIndex = max(lastUnflushedIndex ?? 0, unflushed) } }
         try database.transaction {
             if !prepared.isEmpty {
                 try database.execute(
@@ -144,6 +155,13 @@ extension NodeStore {
                                 .text(cid), BlockStatus.header.sqlValue,
                             ]
                         )
+                        if level.buffersState {
+                            unflushed += 1
+                            try database.execute(
+                                "INSERT INTO core_meta (key, value) VALUES (?1, ?2)",
+                                params: [.text(Self.unflushedKey(unflushed)), .text(level.path + "\n" + cid)]
+                            )
+                        }
                     }
                 }
                 // An empty log id is an ended cursor: the peer does not run
@@ -190,6 +208,59 @@ extension NodeStore {
             "SELECT COALESCE(MAX(seq), 0) AS seq FROM admission_facts WHERE chain_path = ?1",
             params: [.text(path)]
         )?.int("seq") ?? 0
+    }
+
+    // MARK: - Blocks whose state is not flushed
+
+    /// The row of the `index`th block named unflushed: in key order, the
+    /// order the blocks were executed in.
+    static func unflushedKey(_ index: Int64) -> String {
+        "unflushed:" + String(repeating: "0", count: max(0, 19 - String(index).count)) + String(index)
+    }
+
+    /// The index of the newest unflushed row, 0 with none.
+    static func lastUnflushed(in database: NodeSQLite) throws -> Int64 {
+        try database.row(
+            ChainFactMetadataKeyRow.self,
+            "SELECT key FROM core_meta WHERE key >= 'unflushed:' AND key < 'unflushed;' ORDER BY key DESC LIMIT 1"
+        ).flatMap { Int64(try $0.key.dropFirst("unflushed:".count)) } ?? 0
+    }
+
+    /// The executed blocks whose post-state was in the state buffer and in
+    /// no flush that completed, oldest first, each with its chain. After a
+    /// crash these are the blocks a start executes again; none after a
+    /// clean stop, which flushes.
+    func unflushedBlocks() throws -> [(index: Int64, path: ChainPath, cid: String)] {
+        try database.query(
+            "SELECT key, value FROM core_meta WHERE key >= 'unflushed:' AND key < 'unflushed;' ORDER BY key"
+        ).compactMap { row in
+            guard case .text(let key)? = row["key"], case .text(let value)? = row["value"],
+                  let index = Int64(key.dropFirst("unflushed:".count)),
+                  let split = value.firstIndex(of: "\n") else {
+                throw NodeStoreError.corrupt("an unflushed block row does not read")
+            }
+            return (index, value[..<split].split(separator: "/").map(String.init), String(value[value.index(after: split)...]))
+        }
+    }
+
+    /// The index of the newest block ever named unflushed while this store
+    /// has been open, 0 with none: the newest row it opened with, then each
+    /// one it wrote, cleared since or not.
+    func lastUnflushedBlock() throws -> Int64 {
+        if let lastUnflushedIndex { return lastUnflushedIndex }
+        let stored = try Self.lastUnflushed(in: database)
+        lastUnflushedIndex = stored
+        return stored
+    }
+
+    /// The store holds the state of every block named unflushed up to
+    /// `index`: they are named so no more.
+    func clearUnflushedBlocks(through index: Int64) throws {
+        guard index > 0 else { return }
+        try database.execute(
+            "DELETE FROM core_meta WHERE key >= 'unflushed:' AND key <= ?1",
+            params: [.text(Self.unflushedKey(index))]
+        )
     }
 
     /// The host weigh-log id recorded with the first fact, if any.
@@ -282,6 +353,14 @@ extension NodeStore {
             childCommitments: fact.childCommitments
         )
     }
+}
+
+struct ChainFactMetadataKeyRow: NodeStoreRecord {
+    static let table = "core_meta"
+    private let row: Row
+
+    init(_ row: Row) { self.row = row }
+    var key: String { get throws { try row.text("key") } }
 }
 
 struct ChainFactMetadataRow: NodeStoreRecord {

@@ -181,6 +181,9 @@ extension NodeStorage {
     /// node holds each chain's genesis block.
     nonisolated func letGo(ofBodies blockCIDs: [String], at path: ChainPath) async {
         guard configuration.blockBodies == .none else { return }
+        // A block whose state is only buffered is executed again from its
+        // body after a crash: the body stays until that state is stored.
+        guard await flushedState() else { return }
         for cid in blockCIDs {
             guard (try? await store.isGenesis(cid, at: path)) == false else { continue }
             await releaseBody(cid, at: path)
@@ -191,6 +194,7 @@ extension NodeStorage {
     /// its block's name but each chain's tip.
     nonisolated func letGoOfBodies(except tips: [ChainPath: String]) async {
         guard configuration.blockBodies == .none else { return }
+        guard await flushedState() else { return }
         do {
             for scope in try await broker.retainedScopes(prefix: scopes.bodyPrefix) {
                 guard let (path, cid) = scopes.block(named: scope), tips[path] != cid,
@@ -213,6 +217,7 @@ extension NodeStorage {
     /// provides it in `entries`, each checked against its CID. The node does
     /// not look inside it or follow what it names.
     nonisolated func pin(_ root: String, entries: [String: Data]?) async throws {
+        try await flushState()
         if await !broker.hasVolume(root: root) {
             guard let entries else { throw NodeStorageError.missingMaterializedVolume(root) }
             let volume = SerializedVolume(root: root, entries: entries)
@@ -244,6 +249,9 @@ extension NodeStorage {
     nonisolated func letGoOfState(at path: ChainPath, below height: UInt64) async {
         guard let window = configuration.stateWindow(for: path) else { return }
         guard height >= window else { return }
+        // A release reclaims what no stored scope names: the newer windows'
+        // retention must be stored first.
+        guard await flushedState() else { return }
         let kept = scopes.window(at: path, height: height - window + 1)
         do {
             try await broker.releaseRetainedScopes(
@@ -258,6 +266,7 @@ extension NodeStorage {
     /// When the chain at `path` is no longer hosted: every state window it
     /// kept goes.
     nonisolated func letGoOfWindows(at path: ChainPath) async {
+        guard await flushedState() else { return }
         guard let listed = try? await broker.retainedScopes(prefix: scopes.windowPrefix(at: path)) else { return }
         for scope in listed { await letGoOfWindow(scope) }
     }
@@ -279,6 +288,8 @@ extension NodeStorage {
     nonisolated func settleCounted(
         at path: ChainPath, tip: String, window: UInt64, marker: String, known: [String]?
     ) async -> CountedOutcome {
+        // The store refuses to count a node it does not hold.
+        guard await flushedState() else { return .failed("state buffer not flushed") }
         var (marker, known, retry) = (marker, known, false)
         while true {
             guard let counted = CountedMarker(marker) else { return .resync("marker \(marker) unreadable") }
@@ -319,6 +330,7 @@ extension NodeStorage {
     nonisolated func commitCounted(
         at path: ChainPath, block: CountedMarker.Block, places: [String: Int], tip: String, window: UInt64
     ) async -> CountedOutcome {
+        guard await flushedState() else { return .failed("state buffer not flushed") }
         let current: (marker: String?, counts: [String: Int])
         let change: CountedChange
         do {
@@ -415,6 +427,7 @@ extension NodeStorage {
     nonisolated func syncCountedState(
         at path: ChainPath, block: CountedMarker.Block, remote: IvyRootContentSource
     ) async throws -> [String: Int] {
+        try await flushState()
         guard let fact = try await store.blockFact(block.cid, at: path) else {
             throw NodeStorageError.missingBlockFact(block.cid)
         }
@@ -491,6 +504,9 @@ extension NodeStorage {
     /// peers, each checked against its CID, stored, and pinned under the
     /// chain's staging scope until the counts name them.
     nonisolated func healCounted(_ roots: [String], at path: ChainPath, remote: IvyRootContentSource) async throws {
+        // The store is asked which of these it holds: a buffered state
+        // must be in it, or it is read from peers for nothing.
+        try await flushState()
         let scope = scopes.staging(at: path)
         let hosts = ChainHosts.of(path, nexusGenesisCID: configuration.nexusGenesisCID)
         for root in try await retainHeld(roots, scope: scope) {
@@ -520,6 +536,7 @@ extension NodeStorage {
     /// When the chain at `path` is no longer hosted: its counts go, and
     /// what its staging held.
     nonisolated func dropCounted(at path: ChainPath) async {
+        guard await flushedState() else { return }
         do {
             try await broker.dropCountedScope(scope: scopes.counted(at: path))
         } catch {
@@ -540,6 +557,7 @@ extension NodeStorage {
         }
         let recent = configuration.state == .recent
         var markers: [ChainPath: String] = [:]
+        guard await flushedState() else { return markers }
         do {
             for scope in try await broker.countedScopes(prefix: scopes.countedPrefix) {
                 let chain = path(scope, after: scopes.countedPrefix)
