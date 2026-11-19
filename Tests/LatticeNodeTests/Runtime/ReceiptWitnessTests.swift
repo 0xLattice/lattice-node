@@ -140,7 +140,14 @@ final class ReceiptWitnessTests: XCTestCase {
             )],
             signers: [withdrawerAddress], nonce: 0, chainPath: Self.alpha
         )), on: alphaReads, "Alpha confirms the withdrawal")
-        // The Alpha block carrying it: down from the tip.
+        // A later receipt replaces the receipt tree's root, and the blocks
+        // after it move the anchored state out of the producer's window.
+        try await confirm(try receipt(nonce: 2, signerNonce: 1), on: nexusReads, "Nexus confirms a later receipt")
+        for _ in 0..<6 { _ = try await runtime.mineBlock(recipients) }
+        // The Alpha block carrying it: down from the tip, read once the
+        // chain has grown past it. A block mined before Alpha executed the
+        // one before it is that one's sibling and carries the withdrawal
+        // too, and the chain keeps only one of them.
         let local = await storage.localFetcher
         let alphaHead = await alphaReads.readSnapshot()
         var walk = alphaHead.tipCID
@@ -154,10 +161,6 @@ final class ReceiptWitnessTests: XCTestCase {
             walk = block.parent?.rawCID
         }
         let withdrawalBlock = try XCTUnwrap(placed)
-        // A later receipt replaces the receipt tree's root, and the blocks
-        // after it move the anchored state out of the producer's window.
-        try await confirm(try receipt(nonce: 2, signerNonce: 1), on: nexusReads, "Nexus confirms a later receipt")
-        for _ in 0..<6 { _ = try await runtime.mineBlock(recipients) }
 
         let resolved = try await BlockHeader(rawCID: withdrawalBlock).resolve(fetcher: local)
         let block = try XCTUnwrap(resolved.node)
