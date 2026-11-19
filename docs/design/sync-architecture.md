@@ -158,16 +158,18 @@ rule here first.
 
 The measurements are the first
 [sync benchmark](../../README.md) baseline at `0ff1e87a`: 9,086 blocks over
-four chains, one run per setting, on Linux (swift:6.1-jammy) under Docker on
-a macOS host, so fsync goes to the VM's disk. A row is removed when the code
-no longer departs.
+four chains, four runs per setting, natively on a 14-core Mac
+(`Benchmarks/sync/native.sh`). A plain fsync on macOS does not force the
+drive to flush, so a sync costs less there than on Linux, where the nodes
+run; no run of this baseline on Linux is recorded. A row is removed when the
+code no longer departs.
 
 | Rule | Today | Measured |
 |---|---|---|
 | 13 | State is content-addressed trie nodes in the content store, pruned by reference counts | 2.9 GB written for 82 MB kept |
 | 4 | Every job shares one worker pool behind three strict queues | Derivations of 0.7 ms waited 3.5 to 3.9 s for a worker |
-| 1, 2 | A child reads its peers only once its parent's executed tip has caught up | The grandchildren were idle for the first 6.7 s of a 25.8 s sync |
-| 3 | A child's step receives its parent's whole tree and a `parentSynced` flag | |
+| 2 | A child reads its peers only once its parent has applied every header of one peer's log. A parent header that never applies (its child index not obtainable, say) holds its child's weight back, as does a parent with no peer running it. And the log is whichever peer's ended first: a peer that is behind opens the child on a parent that has weighed little, and the child then checks peers' proofs where it could have derived them | Not measured |
+| 3 | A child's step receives its parent's whole tree and a `parentWeighed` flag | |
 | 5 | Backoff, wake and let-go logic is separate per subsystem | |
 | 12 | CID text keys throughout the core; canonical JSON on the wire | Header messages cost the loop about 0.6 s of 25.8 s |
 | 14 | Any node reads missing state from peers while executing | |

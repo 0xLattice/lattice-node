@@ -88,11 +88,21 @@ extension ChainCore {
     /// (`setBlockIndexCandidates` holds only tips with data), a body no
     /// provider had, its backoff at the cap, does not hold the latch: it
     /// stays one-way, and a body that arrives later moves only fork choice.
+    ///
+    /// The first half alone sets `headersSynced`, once this level holds a
+    /// weighed block: a level with none (a child whose genesis it has not
+    /// weighed) opens no child, whatever log it read. It says what this
+    /// level read, not how much there is: the log is one peer's, and a peer
+    /// that is itself behind has a short one. A child opened on a parent
+    /// that has weighed little weighs what proofs let it, and the rest as
+    /// its parent weighs on (`ChildProofs`).
     mutating func latchSynced() {
         guard !synced, sync.peers.contains(where: { peer, state in
             state.readToEnd && !state.more && state.holes.isEmpty && sync.cursors[peer.key]?.logID.isEmpty == false
         }) else { return }
         let snapshot = snapshot
+        guard !snapshot.bestHeaderTip.isEmpty else { return }
+        headersSynced = true
         guard !snapshot.actOnTip.isEmpty else { return }
         if snapshot.actOnTip == snapshot.bestHeaderTip || snapshot.actOnTip == heaviestObtainableTip() { synced = true }
     }
