@@ -130,7 +130,10 @@ final class RetentionCrashTests: XCTestCase {
 
     /// Waits until the storage a stopped runtime opened is released.
     private func closed(_ storage: inout NodeStorage?) async throws {
-        weak var released = storage
+        // Assigned after its declaration: Linux's compiler refuses a weak
+        // `let`, and macOS's warns of a weak `var` never assigned.
+        weak var released: NodeStorage?
+        released = storage
         storage = nil
         try await eventually("the first storage is closed") { released == nil }
     }
@@ -262,7 +265,12 @@ final class RetentionCrashTests: XCTestCase {
             let runtime = try await NodeRuntime.start(
                 storage: storage, configuration: follower.0, overlay: follower.1, failStop: { _ in }, observeJob: nil
             )
+            // Counts less than a window below a tip that stopped wait for
+            // a maintenance pass (`Retention.settleState`), as on a node.
+            var polls = 0
             try await eventually("\(boundary): Alpha's counts reach its tip", within: .seconds(60)) {
+                polls += 1
+                if polls % 50 == 0 { runtime.inputs.yield(.maintenance) }
                 let counted = try await storage.broker(at: Self.alpha).countedState(scope: storage.scopes.counted(at: Self.alpha))
                 return counted.marker.flatMap(CountedMarker.init)?.tip.cid == alphaTip
             }
@@ -283,7 +291,10 @@ final class RetentionCrashTests: XCTestCase {
         let alone = try node(keyByte: 0xc4, directory: followerDirectory, peers: [producer.2], state: .recent, bodies: .none)
         let storage = try await NodeStorage.open(configuration: alone.0)
         let runtime = try await NodeRuntime.start(storage: storage, configuration: alone.0, overlay: alone.1)
+        var polls = 0
         try await eventually("\(boundary): after the restart Nexus is at its tip and its counts match", within: .seconds(60)) {
+            polls += 1
+            if polls % 50 == 0 { runtime.inputs.yield(.maintenance) }
             guard runtime.published.value?.actOnTip == nexusTip else { return false }
             let counted = try await storage.broker.countedState(scope: storage.scopes.counted(at: ["Nexus"]))
             guard let marker = counted.marker, CountedMarker(marker)?.tip.cid == nexusTip else { return false }
