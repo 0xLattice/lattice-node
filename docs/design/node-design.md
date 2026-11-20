@@ -1066,8 +1066,8 @@ content the node serves or promised to keep, whatever state it keeps.
 
 On `recent` the counts move with the tip once per window, are checked at
 start and maintenance, healed when roots are missing, and replaced by a state
-sync when they cannot follow. (`state: none` is still on main; #152
-removes it.)
+sync when they cannot follow. (`state: none` remains a supported setting; #152, which
+would have removed it, was closed.)
 
 **Why.** #94 batched the counts to once per window: they had been four synced
 commits per block, a quarter of each step.
