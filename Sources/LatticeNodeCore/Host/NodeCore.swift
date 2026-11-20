@@ -166,7 +166,7 @@ extension ChainEffect {
         case .publish: "publish"
         case .wakeAt: "wakeAt"
         case .verifyProofs: "verifyProofs"
-        case .deriveProof: "deriveProof"
+        case .deriveProofs: "deriveProofs"
         case .workSubmitted: "workSubmitted"
         case .readTransactions: "readTransactions"
         case .mining(let effect): "mining.\(traceCase(effect))"

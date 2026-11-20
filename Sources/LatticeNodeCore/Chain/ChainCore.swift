@@ -63,7 +63,7 @@ public enum ChainEvent: Sendable {
     /// A child level: a `verifyProofs` job finished, every check answered
     /// (nil for one whose block was not held: no verdict, no blame).
     case proofsVerified([ChildProofAnswer])
-    /// A child level: a `deriveProof` job finished, every time it ran.
+    /// A child level: a derivation of `deriveProofs` finished, every time it ran.
     case derived(ChildDerivation)
     /// A child level: a header submitted on this node (its author's push),
     /// taken as the same header gossiped from no peer.
@@ -144,10 +144,12 @@ public enum ChainEffect: Sendable {
     /// pure) in one job off the step, reading from the store a block the
     /// batch does not carry, and answer `proofsVerified` once.
     case verifyProofs(ChildProofBatch)
-    /// A child level: derive a held block's proofs from a parent-level
-    /// block that commits it, from this node's own content only, and answer
-    /// `derived` (`ChildDeriveJob`).
-    case deriveProof(ChildDeriveJob)
+    /// A child level: derive held blocks' proofs from the parent-level
+    /// blocks that commit them, from this node's own content only, and
+    /// answer `derived` for each (`ChildDeriveJob`). One per level and
+    /// step, as `verifyProofs`: the shell runs it in at most one job per
+    /// worker.
+    case deriveProofs([ChildDeriveJob])
     /// The answer to a mined grind (`NodeEvent.mined` with a reply ID): at
     /// once unless its root waits to execute, then from its verdict.
     case workSubmitted(replyID: UInt64, MinedOutcome)

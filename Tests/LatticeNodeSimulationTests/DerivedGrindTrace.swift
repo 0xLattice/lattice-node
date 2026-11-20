@@ -174,13 +174,14 @@ final class GrindTracer: @unchecked Sendable {
         let s1 = snapshot(core)
         var sub: [[String: Any]] = []
         var issued: [JobKey] = []
-        for effect in effects {
-            guard case .level(let at, .deriveProof(let job)) = effect, at == path else { continue }
-            guard let child = childLabel[job.childCID], let carrier = carrierLabel[job.carrier] else {
-                anomalies.append("\(name): derivation of an unmodelled pair \(job.carrier.suffix(8)) -> \(job.childCID.suffix(8))")
-                continue
+        for case .level(let at, .deriveProofs(let batch)) in effects where at == path {
+            for job in batch {
+                guard let child = childLabel[job.childCID], let carrier = carrierLabel[job.carrier] else {
+                    anomalies.append("\(name): derivation of an unmodelled pair \(job.carrier.suffix(8)) -> \(job.childCID.suffix(8))")
+                    continue
+                }
+                issued.append(JobKey(carrier: carrier, child: child, grinds: grinds(job.grinds)))
             }
-            issued.append(JobKey(carrier: carrier, child: child, grinds: grinds(job.grinds)))
         }
 
         var main: [String: Any]?

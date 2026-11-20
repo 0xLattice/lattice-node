@@ -589,8 +589,6 @@ extension NodeRuntime {
         var replies: [UInt64: (path: ChainPath, reply: CheckedContinuation<NodeRuntimeReply, any Error>)] = [:]
         var nextReply: UInt64 = 1
         var wake: (time: Int64, task: Task<Void, Never>)?
-        /// The step's derivations by level, until each level's are queued.
-        var derivations: [ChainPath: [ChildDeriveJob]] = [:]
 
         // The components each effect and result is dispatched to. Each owns
         // its own state, and none calls another: what one needs of another
@@ -1127,10 +1125,6 @@ extension NodeRuntime {
             let ordered = effects.enumerated()
                 .sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }
                 .map(\.element)
-            // A level's derivations of the step run as at most one job per
-            // worker, queued where its first one is (`deriveProofs`).
-            derivations = [:]
-            for case .level(let path, .deriveProof(let job)) in ordered { derivations[path, default: []].append(job) }
             for effect in ordered {
                 guard SyncTrace.enabled, case .persist = effect else {
                     guard await execute(effect) else { return false }
@@ -1279,11 +1273,9 @@ extension NodeRuntime {
                 )
             case .cancelBody(let cid):
                 bodyFetches.cancel(cid, at: path)
-            case .deriveProof:
-                // The level's first derivation of the step queues them all,
-                // in at most one job per worker, so a burst of carriers still
-                // runs side by side.
-                guard let batch = derivations.removeValue(forKey: path) else { break }
+            case .deriveProofs(let batch):
+                // A level's derivations of the step, in at most one job per
+                // worker, so a burst of carriers still runs side by side.
                 let size = (batch.count + jobs.workers - 1) / jobs.workers
                 for start in stride(from: 0, to: batch.count, by: size) {
                     jobs.enqueue(deriveProofs(Array(batch[start..<min(start + size, batch.count)]), at: path))
