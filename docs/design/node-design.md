@@ -1397,10 +1397,39 @@ removes is 0.6% of CPU and 26% of header bytes. (2) The decode cache is a
 hook in cashew (`DecodedNodeCache`, consulted in `fetchAndDecodeNode` before
 the fetch, filled after the decode, keyed by CID and node type, bounded by
 bytes, no invalidation), worth up to about 16% of CPU (inferred); it waits
-on a cashew release. (3) Fixed-width identifiers are deferred: first the
-codec-name lookup as a table and a hash check that compares digests without
-building a multihash, then measure what text CIDs still cost before
-touching 32 files.
+on a cashew release. (3) Fixed-width identifiers inside the node: not
+done, decided on where the cost sits. Two profiles of the four-chain sync
+(main at #170, `PROFILE=1`, 26,780 and 36,326 busy samples), each parse
+attributed to the frame that called it:
+
+| CID text parsed, by caller | Library | Share of busy CPU |
+|---|---|---|
+| `verifyContentAddress` (content checked against its CID) | cashew | 6.2–6.7% |
+| `BlockGraph.handle`, `stateHandle` | Lattice | 0.8–1.0% |
+| `CryptoUtils.isValidAddress` | Lattice | 0.7% |
+| `SerializedVolume.validate` | VolumeBroker | 0.5–0.7% |
+| `CIDIdentity.canonicalString` (row and wire checks) | Lattice | 0.5–0.6% |
+| `Block.hasStandardLinks` | Lattice | 0.2% |
+| All (node code calling none of it directly) | | 9.0–10.0% |
+
+Every parse is inside a library, behind an API that takes text: cashew's
+`Header.rawCID`, `Fetcher.fetch(rawCid:)` and `ContentSource` (`Set<String>`
+to `[String: Data]`), Lattice's `ChainTree` and facts (block hashes and
+state CIDs as `String`), VolumeBroker's stores. A 32-byte identifier in the
+node would leave all 9–10% in place and add a formatting at each of those
+calls, on the hot paths (the core and runtime query `ChainTree` by hash
+at 46 call sites, many inside per-step loops). Of the 4.2–4.8% spent hashing
+dictionary and set keys, the node's own dictionaries are about 1.5%
+(`ChainCore.connectOrder` 0.8–1.0%, rebuilt from `ChainTree` on every call,
+an algorithm cost more than a key-width one); the rest is in cashew,
+VolumeBroker and the CBOR codec. So the change belongs at the source, in
+order of gain: cashew's content check comparing the SHA-256 digest of the
+bytes with the CID's digest, decoding the standard CID directly as
+Lattice's `CIDDigest` does, 6–7%; then 32-byte identifiers in the
+`ChainTree`, `ContentSource` and Volume store APIs, after which the node
+converts at its edges (wire, rows, HTTP, logs) with one type and one
+conversion pair. The node changes when those APIs do; it builds no
+adapter around them.
 
 ### 4.13 Mining
 
@@ -1644,9 +1673,10 @@ consensus unchanged.
   about 16% of CPU.
 - Measure repeated CID parsing and repeated decoding before adding any cache
   (done on macOS, §2: 90% of reads by CID repeat, CID text is 10–11% of CPU).
-- Fixed-width identifiers: deferred (§4.12). First the codec-name lookup in
-  swift-multicodec (5.2–5.3% of CPU) and a digest-comparing hash check; then
-  measure what text CIDs still cost.
+- Fixed-width identifiers: measured (§4.12). All CID parsing (9–10% of CPU)
+  is inside cashew, Lattice and VolumeBroker behind text APIs; first cashew's
+  content check comparing digests (6–7%), then 32-byte identifiers in those
+  APIs, then the node's edges.
 - Break down the write amplification by operation (done on macOS, §2:
   content 2%, its bookkeeping keyed by text CIDs the rest).
 - Measure memory, bandwidth and CPU as the number of hosted chains grows
