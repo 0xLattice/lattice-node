@@ -280,7 +280,7 @@ enum ChainSyncWire {
             return (message.chainPath, .getAncestors(requestID: message.requestID, cid: message.cid, max: message.maximum))
         case ChainSyncTopic.headersResponse:
             let message = try HeadersResponseMessage.decoded(payload)
-            SyncTrace.log(chain: message.chainPath, "headers received \(Self.fieldsLine(message.entries, payload: payload.count))")
+            SyncTrace.log(chain: message.chainPath, "headers received \(Self.fieldsLine(message.entries, payload: payload.count)) request \(message.requestID)")
             return (message.chainPath, .headers(HeadersResponse(
                 requestID: message.requestID,
                 entries: try message.entries.map {
@@ -296,6 +296,18 @@ enum ChainSyncWire {
 }
 
 extension ChainSyncWire {
+    /// A trace line's name for a message this node sends: its kind, request
+    /// and size.
+    static func traceLabel(_ message: SyncMessage) -> String {
+        switch message {
+        case .getStream(let id, _, let after, _): "getStream request \(id) after \(after)"
+        case .getData(let id, let cids): "getData request \(id) cids \(cids.count)"
+        case .getAncestors(let id, _, let max): "getAncestors request \(id) max \(max)"
+        case .stream(let page): "stream request \(page.requestID) entries \(page.entries.count)"
+        case .headers(let response): "headers request \(response.requestID) entries \(response.entries.count)"
+        }
+    }
+
     /// A trace line's account of a headers response: the bytes of each
     /// field its entries carry, before the JSON text that frames them.
     static func fieldsLine(_ entries: [WireHeaderEntry], payload: Int) -> String {

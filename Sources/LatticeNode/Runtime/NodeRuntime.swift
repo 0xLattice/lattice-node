@@ -1208,6 +1208,7 @@ extension NodeRuntime {
                 outputs[path]?.published.publish(snapshot)
             case .send(let peer, let message):
                 guard let session = session(peer), let frame = try? ChainSyncWire.encode(message, at: path) else { break }
+                SyncTrace.log(chain: path, "sent \(ChainSyncWire.traceLabel(message))")
                 await outbox.send(to: session.peer, topic: frame.topic, payload: frame.payload)
             case .serveHeaders(let peer, let token, let requestID, let blockCIDs, let hasMore):
                 guard let session = session(peer) else { break }
