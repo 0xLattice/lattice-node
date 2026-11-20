@@ -104,7 +104,7 @@ from the sync benchmark (`Benchmarks/sync`).
 | 6 Change | Components with no conventional equivalent, each with its reason | this document | Each justified in writing | Two (§5) |
 | 6 Change | Review rounds per change; repeated holes of one kind | review | A second round of the same kind stops the change | The write-behind layer took four rounds of ordering holes |
 | 6 Change | The largest files, where unrelated changes meet | code | No file over 1,000 lines | The daemon's command file, 1,741 lines; the loop's file, 1,444 (start-up and boot included), after Phase 2 moved seven components out (§4.1) |
-| 7 Cost | CPU, peak memory, disk kept, disk written, bandwidth; root alone and per extra chain | benchmark, node | The root on one CPU at 5 ms a block and 256 MiB; a chain's writes per block do not grow with the chains hosted | About 4.4 ms CPU per block, 190 MiB, 90 MB kept, 2.9 GB written per benchmark sync; on macOS each added chain of 1,498 blocks costs about 5.8–7.1 s CPU, 18–26 MiB memory, 11–13 MiB kept, 12 MiB of bandwidth, and, with a Volume store per chain (schema epoch 50), 179–193 MiB written (122–132 KiB a block), flat with the chains already hosted, against 307–483 MiB rising before; that costs 10–17% more CPU and about thirteen open files a chain (§2, §4.9b) |
+| 7 Cost | CPU, peak memory, disk kept, disk written, bandwidth; root alone and per extra chain | benchmark, node | The root on one CPU at 5 ms a block and 256 MiB; a chain's writes per block do not grow with the chains hosted | About 4.4 ms CPU per block, 190 MiB, 90 MB kept, 2.9 GB written per benchmark sync; on macOS each added chain of 1,498 blocks costs about 5.8–7.1 s CPU, 18–26 MiB memory, 11–13 MiB kept, 12 MiB of bandwidth, and, with a Volume store per chain (schema epoch 50), 176–192 MiB written (120–131 KiB a block), flat with the chains already hosted, against 307–483 MiB rising before, at CPU within 3% and about thirteen open files a chain (§2, §4.9b) |
 | 8 Transfers | Time from deposit to withdrawal on a parent–child pair; share that complete | network, tests | Every transfer completes; in the time its two chains' confirmations take | Not measured |
 | 9 Availability | Content requests served; how long a body stays unavailable; hosts per chain | node, network | Two hosts per chain keep every body; none unavailable for an hour | Not measured |
 | 10 Mining | Time to answer a template request and a submission; share of work on stale templates | node | A template in 100 ms and a submission in 50 ms at the 99th percentile; at most 1% of work on stale templates | Not measured |
@@ -526,19 +526,21 @@ The inferred cause is the layout, random-key rows every chain shares; Phase
 worth taking on its own.
 
 **After per-chain stores (schema epoch 50).** The same runs, one each with
-the page attribution and two each without for time and CPU, each build
-syncing a tree it recorded:
+the page attribution for what is written, two each without for time and
+CPU at four and eight, each build syncing a tree it recorded; after the
+reads were made to name their chain (§4.9b):
 
-| Hosted children | Written before | Written after | Written per added leaf, after | CPU before | CPU after | Peak memory | Kept | Open files |
-|---|---|---|---|---|---|---|---|---|
-| 1 | 213 MiB | 199 MiB | — | 5.4 s | 5.5 s | 105 → 103 MiB | 29 → 29 MiB | — |
-| 2 | 520 MiB | 378 MiB | 179 MiB (122 KiB a block) | 11.3 s | 12.0 s | 135 → 137 MiB | 40 → 45 MiB | — |
-| 4 | 1,310 MiB | 757 MiB | 190 MiB (130 KiB) | 23.3 s | 25.5 s | 163 → 171 MiB | 64 → 76 MiB | 74 → 126 |
-| 8 | 3,240 MiB | 1,528 MiB | 193 MiB (132 KiB) | 48.3 s | 56.3 s | 234 → 253 MiB | 108 → 138 MiB | 74 → 178 |
+| Hosted children | Written before | Written after | Written per added leaf, after | CPU before | CPU after | Wall before | Wall after | Peak memory | Kept while running | Open files |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 213 MiB | 204 MiB | — | 5.4 s | 5.6 s | 3.0 s | 3.2 s | 105 → 103 MiB | 29 → 27 MiB | 74 → 91 |
+| 2 | 520 MiB | 380 MiB | 176 MiB (120 KiB a block) | 11.3 s | 11.8 s | 6.8 s | 6.9 s | 135 → 138 MiB | 40 → 44 MiB | 74 → 105 |
+| 4 | 1,310 MiB | 754 MiB | 187 MiB (128 KiB) | 23.3 s | 23.9 s | 15.0 s | 14.3 s | 163 → 172 MiB | 64 → 78 MiB | 74 → 126 |
+| 8 | 3,240 MiB | 1,520 MiB | 192 MiB (131 KiB) | 48.3 s | 49.2 s | 33.3 s | 30.1 s | 234 → 255 MiB | 108 → 138 MiB | 74 → 178 |
 
 Writes per added leaf are flat; each chain's own store writes the same
-whatever else is hosted (§4.9b). CPU, memory, disk kept and open files rise
-with the number of stores.
+whatever else is hosted (§4.9b). CPU is within 2–3%, wall time 4–10%
+lower; memory, disk kept while running and open files rise with the number
+of stores.
 
 #### Where the CPU goes after the header fix
 
@@ -1267,20 +1269,34 @@ again in the same run finds its bodies. Files are named by the SHA-256 of
 the chain's path.
 
 The target is met: a chain's writes per block no longer grow with the
-chains hosted. Each leaf's own store wrote 118–120 MiB whether two, four or
-eight children were hosted, and Alpha's 133–134 MiB whether one or eight;
-per added leaf the follower wrote 179, 190 and 193 MiB in all (122, 130 and
-132 KiB a block, against 210, 270 and 330 before), the rest being its
-facts in `state.db`, which grow slightly (51, 58, 59 MiB a leaf). With eight
-children the sync wrote 1,528 MiB against 3,240 (53% less). The costs:
-CPU rose 10% with four children and 17% with eight (25.5 against 23.3 s,
-56.3 against 48.3 s), wall time 2–3%, peak memory 6–8%, disk kept 20–30%
-(138 against 108 MiB with eight), and open files from 74 to 126 and 178
-(about thirteen a store: its file, log and shared memory, and the Volume
-store's reader connections). Not yet measured: where the CPU goes; the
-likely causes are reads that name no chain, which ask the stores one by one
-and miss in all but one, and a page cache per store; and how far the WAL
-and free pages each store keeps explain the disk kept.
+chains hosted. Each leaf's own store writes the same 118–120 MiB whether
+two, four or eight children are hosted, and Alpha's 133–134 MiB whether
+one or eight; per added leaf the follower wrote 176, 187 and 192 MiB in all
+(120, 128 and 131 KiB a block, against 210, 270 and 330 before), the rest
+being its facts in `state.db`, which grow slightly (48 to 57 MiB a leaf).
+With eight children the sync writes 1,520 MiB against 3,240 (53% less).
+
+The first build cost 17% more CPU with eight children. Profiled, it was
+reads: the Volume store's reads went from 9.8% to 20.2% of busy samples
+while its writes fell, because reads that named no chain asked the stores
+one by one, root first, and missed in all but one (a body's fetch walked
+every store for each entry before asking peers; so did the work fetchers
+and the connect job's check of the block's own Volume). A chain's reads now
+ask its own store, then its ancestors', and nothing else (a template and a
+mined block also their descendants'); each chain keeps one fetcher, and its
+reading order is worked out when the set of stores changes. With that, CPU
+is within 2–3% of the single store (49.2 against 48.3 s with eight
+children, 23.9 against 23.3 s with four; busy samples equal), and the sync
+is 4–10% faster (30.1 against 33.3 s with eight): the stores' writes and
+checkpoints no longer contend. What remains: reads that miss a leaf's store
+and its ancestors' before going to peers (store reads 12.9% of busy against
+9.8%, offset by writes), peak memory 6–9% higher (each store has its own
+page caches), and open files 74 to 126 and 178, about thirteen a store (its
+file, log and shared memory, and four read connections, which VolumeBroker
+does not let a caller reduce). Disk kept reads 20–30% higher while the node
+runs (138 against 108 MiB with eight): each store holds its log up to 4 MiB
+(`journal_size_limit`), nine logs here. Closed, the stores are the size of
+the one store (101 against 100 MiB), with under 1 MiB of free pages.
 
 **Recovery contract, as the code stands.**
 
@@ -1626,10 +1642,10 @@ compatibility or correctness.
   with the chains hosted (§2), so:
 - ~~Give each hosted chain its own Volume store (§4.9b).~~ Done: schema
   epoch 50, one wipe. A chain's writes per block no longer grow with the
-  chains hosted (122–132 KiB a block per added leaf, flat; 53% less written
-  with eight children). It costs 10–17% more CPU, 20–30% more disk kept
-  and about thirteen open files a chain (§2, §4.9b); where that CPU goes is
-  the next measurement.
+  chains hosted (120–131 KiB a block per added leaf, flat; 53% less written
+  with eight children), CPU within 2–3% once reads name their chain, wall
+  time 4–10% lower; it costs 6–9% more memory, each store's log while
+  running, and about thirteen open files a chain (§2, §4.9b).
 
 *Exit:* a simpler storage model with measured benefits and a written recovery
 contract.
