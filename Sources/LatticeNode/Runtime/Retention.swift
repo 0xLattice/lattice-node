@@ -46,7 +46,7 @@ extension NodeRuntime {
         /// Lets go of the chains the configuration no longer hosts, unless
         /// a job of theirs still runs: they store what they execute.
         mutating func release(jobsRunning: Bool) async {
-            guard releasing, !jobsRunning else { return }
+            guard releasing, !jobsRunning, !state.stops(at: .letGoOfChain) else { return }
             releasing = false
             await storage.letGoOfChains(except: configured)
         }
@@ -59,7 +59,7 @@ extension NodeRuntime {
             // With no bodies kept beyond the working set, a start lets go
             // of the ones a run that kept them left, before any step.
             for (path, level) in levels { bodyTips[path] = level.snapshot.actOnTip }
-            await storage.letGoOfBodies(except: bodyTips)
+            if !state.stops(at: .startBodies) { await storage.letGoOfBodies(except: bodyTips) }
             counts.start(await state.start(tips: levels.mapValues(\.snapshot.actOnHeight)))
             await settleState(levels, counts: &counts)
         }
@@ -119,7 +119,9 @@ extension NodeRuntime {
         /// stays while it is its chain's tip. One that executed this step
         /// and is not, and the tip another block replaced, are let go.
         mutating func settleBodies(_ levels: [ChainPath: ChainCore], configuration: NodeConfiguration) async {
-            for key in excludedThisStep { await storage.releaseBody(key.cid, at: key.path) }
+            for key in excludedThisStep where !state.stops(at: .releaseExcludedBody) {
+                await storage.releaseBody(key.cid, at: key.path)
+            }
             excludedThisStep.removeAll()
             guard configuration.blockBodies == .none else { return }
             let executed = Dictionary(grouping: executedThisStep, by: \.path)

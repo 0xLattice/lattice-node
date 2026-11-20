@@ -38,7 +38,10 @@ struct StateBackend: Sendable {
 
     /// The retention writes a test can crash the node at.
     enum Boundary: Sendable, CaseIterable {
-        /// The working set lets go of bodies (`blockBodies: none`).
+        /// After a step: an excluded block's body goes.
+        case releaseExcludedBody
+        /// After a step: the working set lets go of bodies
+        /// (`blockBodies: none`).
         case letGoOfBodies
         case releaseReads
         /// State below the window goes.
@@ -48,7 +51,15 @@ struct StateBackend: Sendable {
         case releaseStaging
         case syncCounts
         case healCounts
-        case auditCounts
+        /// At a start: bodies beyond the working set, executed blocks'
+        /// reads, what earlier versions or unhosted chains kept, and the
+        /// counted scopes.
+        case startBodies
+        case startReads
+        case startLegacyState
+        case startCounts
+        /// A chain the configuration no longer hosts has its data let go of.
+        case letGoOfChain
     }
 
     typealias Stop = @Sendable (Boundary) -> Bool
@@ -202,9 +213,8 @@ struct StateBackend: Sendable {
     }
 
     /// The counts checked against the store: their chain when they match.
-    func auditCounts(at path: ChainPath, marker: String) async throws -> [String]? {
-        guard !stops(at: .auditCounts) else { throw Stopped() }
-        return await storage.auditCounted(at: path, marker: marker)
+    func auditCounts(at path: ChainPath, marker: String) async -> [String]? {
+        await storage.auditCounted(at: path, marker: marker)
     }
 
     /// At a start, before any step, with `tips` the hosted chains' act-on
@@ -213,8 +223,9 @@ struct StateBackend: Sendable {
     /// longer hosted kept is moved or let go of, and the counts of the
     /// hosted chains are found. Returns their markers.
     func start(tips: [ChainPath: UInt64]) async -> [ChainPath: String] {
-        await letGoOfReads()
-        await moveLegacyState(tips: tips)
+        if !stops(at: .startReads) { await letGoOfReads() }
+        if !stops(at: .startLegacyState) { await moveLegacyState(tips: tips) }
+        guard !stops(at: .startCounts) else { return [:] }
         return await settleCountedScopes(hosted: Set(tips.keys))
     }
 

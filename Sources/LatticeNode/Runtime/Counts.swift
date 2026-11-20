@@ -181,7 +181,7 @@ extension NodeRuntime {
         /// at a maintenance pass when they moved since the last check.
         mutating func audit(_ path: ChainPath) {
             guard var chain = counted[path], let marker = chain.marker else { return }
-            repair(path, &chain) { state, _ in .audited(marker, try await state.auditCounts(at: path, marker: marker)) }
+            repair(path, &chain) { state, _ in .audited(marker, await state.auditCounts(at: path, marker: marker)) }
             counted[path] = chain
         }
 
