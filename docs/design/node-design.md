@@ -330,9 +330,9 @@ that is behind opens it early.
 heaviest executed block; siblings are ordered by GHOST subtree weight
 (`ChainSelection.swift`). The node mines, preflights and answers reads on the
 act-on tip. Two one-way latches: `headersSynced` (a peer's log read to its
-end with no holes) opens child levels; `synced` (additionally the act-on tip
-is the best tip or the heaviest whose bodies can be had) gates peer
-transactions and relaying of peer-learned entries.
+end with no holes) opens child levels and the relay of peer-learned
+entries; `synced` (additionally the act-on tip is the best tip or the
+heaviest whose bodies can be had) gates peer transactions.
 
 **Why.** Acting only on executed state keeps the node from building on
 blocks it has not validated. The latch keeps a syncing node from admitting
@@ -347,17 +347,37 @@ this node uses GHOST, the heaviest subtree
 
 **Performance.** Inside core decisions. **Ease of change.** Easy, in the core.
 
-**Open, and a design question.** The latches have been patched three times
-(#125, #128, #141), and they encode several different questions in two
-booleans: has this peer's log been read to its end; has the node caught up
-with the network; can a child chain start reading its peers; may peer
-transactions be admitted and peer-learned entries relayed. Reading one
-peer's log to its end does not establish that the peer has the network's
-best chain, yet it opens child chains. The better shape is to keep facts as
-facts — what is weighed, what is executed, which bodies cannot be had — and
-derive each readiness question from them where it is asked, instead of
-storing latched answers. This is the first suspect for the production stall:
-a correctness and liveness investigation, not a speed one.
+**The latch review (Phase 1).** The latches have been patched three times
+(#125, #128, #141) and answer several questions with two booleans. Read
+against the outcomes (§1), none of their uses protects agreement: each saves
+cost, and each, if it never opened, would break an outcome ranked above
+cost.
+
+| Use | Serves | If it never opens |
+|---|---|---|
+| A child level reads its peers once its parent has weighed a peer's whole log | 7, cost: no weighing headers the parent cannot vouch for yet | 2: the child never syncs |
+| Peer transactions are ignored, and announced ones not fetched, until `synced` | 7 and 10: no checks against a tip about to move | 8 and 10: the chain takes no transactions |
+| Peer-learned headers are pushed to subscribers | 3 and 2: new blocks reach hosts fast, and a peer reading only from this node keeps following | 3 and 2: propagation through this node stops |
+
+Two principles follow. A gate that saves cost must fail open: if its
+condition can never hold, it is a wait with no wake, which §1 calls a bug.
+And each use asks its own question, of the facts that answer it.
+
+*Relay, decided.* The relay exists for propagation (outcomes 3 and 2); its
+gate (`f84c7f6b`) exists so that a node far behind does not push every
+historic header it weighs to each subscriber. That is a question of weight,
+not of execution: once this level has weighed a peer's whole log
+(`headersSynced`), what it appends is new. Gating the relay on `synced`, an
+execution fact, broke sync rule 1 (weight never waits on execution) and let
+an execution stall stop propagation. The relay is gated on `headersSynced`;
+a block this node produced is pushed before it, as before. As Bitcoin's
+BIP152 high-bandwidth relay announces a block once its proof of work is
+checked, before it is validated.
+
+*Still open.* Whether the child gate is needed at all, since each child
+header already waits for its own proof; and what fact the transaction gate
+should ask (the act-on tip is the best tip, or nothing more is executable
+here now), so that a block waiting on a parent fact cannot hold it shut.
 
 ### 4.4 Liveness reporting (#158, in review)
 

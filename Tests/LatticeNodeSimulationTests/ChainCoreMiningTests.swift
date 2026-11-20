@@ -108,10 +108,12 @@ final class ChainCoreMiningTests: XCTestCase {
     /// answers the stream request in flight (or is pushed), and the headers
     /// it asks for are sent.
     @discardableResult
-    private func show(_ blocks: [SimBlock], from: UInt64, to core: inout ChainCore) -> [ChainEffect] {
+    private func show(
+        _ blocks: [SimBlock], from: UInt64, to core: inout ChainCore, hasMore: Bool = false
+    ) -> [ChainEffect] {
         let ids = blocks.enumerated().map { StreamEntry(position: from + UInt64($0.offset), entry: .header($0.element.cid)) }
         let page = core.step(.received(peer, .stream(StreamPage(
-            requestID: core.sync.peers[peer]?.stream?.requestID ?? 0, logID: "peer", entries: ids, hasMore: false
+            requestID: core.sync.peers[peer]?.stream?.requestID ?? 0, logID: "peer", entries: ids, hasMore: hasMore
         ))), now: Self.now)
         var effects = page
         for case .send(_, .getData(let id, _)) in page {
@@ -208,17 +210,17 @@ final class ChainCoreMiningTests: XCTestCase {
         XCTAssertTrue(try peerArrival(&restarted, nonce: 11).isEmpty)
     }
 
-    /// The stream's tail is pushed only once the level is synced, as Bitcoin
-    /// Core announces no block during initial download. A peer that read our
-    /// log to its end before the latch misses what was weighed meanwhile.
-    /// The step that latches (a connect, appending nothing) pushes the log's
-    /// last entry, past the peer's position, so it pulls the gap with no
-    /// further block.
-    func testTheStreamIsPushedOnlyOnceSynced() async throws {
+    /// The stream's tail is the relay, and it waits on weight, never on
+    /// execution. While this level is still reading its peer's log it
+    /// pushes nothing: what it appends is history a subscriber has, as
+    /// Bitcoin Core announces nothing during initial download. Once it has
+    /// weighed the peer's whole log it pushes what it appends, whether or
+    /// not it has executed any of it. A peer that read our log to its end
+    /// before then pulls the gap from where it stood.
+    func testTheStreamIsPushedOnceAPeersLogIsWeighedWhateverIsExecuted() async throws {
         var rng = SplitMix64(state: 0x5E7C)
         let world = try await World.generate(rng: &rng, honestBlocks: 6, forkProbability: 0, spamBlocks: 0)
         let chain = world.honest.compactMap { world.blocks[$0] }
-        let content = SimCAS(world.genesisContent)
         let subscriber = PeerID(key: "subscriber", session: 1)
         func pushes(_ effects: [ChainEffect]) -> [StreamPage] {
             effects.compactMap { if case .send(subscriber, .stream(let page)) = $0, page.requestID == 0 { page } else { nil } }
@@ -231,20 +233,18 @@ final class ChainCoreMiningTests: XCTestCase {
         _ = core.step(.received(subscriber, .getStream(requestID: 1, logID: core.sync.log.id, after: subscribedAt, own: "")), now: Self.now)
         XCTAssertEqual(core.sync.peers[subscriber]?.subscribed, true)
 
-        XCTAssertTrue(pushes(show(Array(chain.prefix(4)), from: 1, to: &core)).isEmpty, "unsynced: nothing is pushed")
+        let reading = show(Array(chain.prefix(2)), from: 1, to: &core, hasMore: true)
+        XCTAssertGreaterThan(core.sync.log.count, subscribedAt, "the first page is weighed")
+        XCTAssertFalse(core.headersSynced)
+        XCTAssertTrue(pushes(reading).isEmpty, "still reading the peer's log: nothing is pushed")
+
+        let read = show(Array(chain[2..<4]), from: 3, to: &core)
+        XCTAssertTrue(core.headersSynced, "the peer's whole log is weighed")
+        XCTAssertFalse(core.synced, "and nothing of it is executed")
+        let push = try XCTUnwrap(pushes(read).first, "the step that weighs the rest pushes it")
+        let next = try XCTUnwrap(pushes(show(Array(chain[4...]), from: 5, to: &core)).first, "and every later header")
         XCTAssertFalse(core.synced)
-        let early = try await execute(Array(chain.prefix(3)), world: world, content: content, on: &core)
-        XCTAssertTrue(pushes(early).isEmpty)
-        XCTAssertFalse(core.synced)
-        let missed = core.sync.log.count
-        XCTAssertGreaterThan(missed, subscribedAt)
-        let latching = try await execute([chain[3]], world: world, content: content, on: &core)
-        XCTAssertTrue(core.synced)
-        XCTAssertEqual(core.sync.log.count, missed, "the latching step appends nothing")
-        let push = try XCTUnwrap(pushes(latching).first, "the latching step pushes the log's last entry")
-        XCTAssertEqual(push.entries.map(\.position), [missed])
-        let next = try XCTUnwrap(pushes(show(Array(chain[4...]), from: 5, to: &core)).first, "synced: the tail is pushed")
-        XCTAssertEqual(next.entries.first?.position, missed + 1)
+        XCTAssertEqual(next.entries.first?.position, (push.entries.last?.position ?? 0) + 1)
 
         // The subscriber, at `subscribedAt` in our log, pulls the gap.
         let server = PeerID(key: "server", session: 1)
