@@ -222,7 +222,6 @@ public struct LevelWorld: Sendable {
         var grinds: [LevelGrind] = []
         var proofs: [ChainPath: [String: [String: ProofTruth]]] = [:]
         var invalid: [ChainPath: Set<String>] = [:]
-        var nexusNonce: UInt64 = 0
         var zeroWork: LevelHeader?
         var offSchedule: LevelHeader?
         /// Per level: the valid blocks honest miners build on, and their work.
