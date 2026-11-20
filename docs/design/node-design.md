@@ -90,8 +90,8 @@ from the sync benchmark (`Benchmarks/sync`).
 | Outcome | Measure | Where from | Target | Today |
 |---|---|---|---|---|
 | 1 Agreement | Divergences when replaying a real chain, in mixed-version runs, in the simulator | tests | Zero | Zero in CI; no replay of a real chain |
-| 2 Liveness | Acted-on height against best header height, per chain path, over time | node | **Owner to set** (for example, at the best header 99% of the time) | Reported once `node/liveness-status` lands (see §4.4) |
-| 2 Liveness | Stalls: a chain behind its best header whose tip has not moved for longer than a threshold | node | Zero | A production node stopped at height 3,920, unexplained |
+| 2 Liveness | Acted-on height against best header height, per chain path, over time | node | **Owner to set** (for example, at the best header 99% of the time) | Reported per chain in `/status` and `/metrics` (#158, #161, #163); not yet tracked over time |
+| 2 Liveness | Stalls: a chain behind its best header whose tip has not moved for longer than a threshold | node | Zero; threshold **owner to set** | Testnet's child chains stopped at 3,920: a withdrawal whose receipt proofs no node held (§4.9a); repaired |
 | 2 Liveness | Time to tip from empty, and from a restart, per chain path | benchmark, node | **Owner to set** | 9,086 blocks over four chains in about 74 s, one worker, 4-CPU Linux runner |
 | 3 Security | Time for a block to reach most hosts, per chain | network | **Owner to set** | Not measured |
 | 3 Security | Share of blocks that go stale, per chain | network | **Owner to set** | Not measured |
@@ -181,7 +181,7 @@ costs; one sample window, one machine.
 
 ### Not measured, and should be
 
-Liveness per chain path in production (instrumented by #158, §4.4), propagation and stale rate, each child's share of parent hash rate,
+Liveness per chain path in production over time (reported since #158, §4.4), propagation and stale rate, each child's share of parent hash rate,
 per-chain hosting cost, cross-chain transfer time, template latency, and
 time to tip per chain as a latency, not only as total throughput.
 
@@ -382,28 +382,26 @@ header already waits for its own proof; and what fact the transaction gate
 should ask (the act-on tip is the best tip, or nothing more is executable
 here now), so that a block waiting on a parent fact cannot hold it shut.
 
-### 4.4 Liveness reporting (#158, in review)
+### 4.4 Liveness reporting
 
 **What.** `/status` reports, for each chain path, its acted-on height and
-best header height (already there) and now `tipAdvancedAt` (when the
-acted-on tip last moved, as this process saw it) and
-`secondsSinceTipAdvanced`. `/metrics` reports tip heights for every hosted
-chain, not only the root, and `lattice_chain_tip_advanced_timestamp_seconds`.
-Behind its best header and not moving is a stall.
+best header height, `tipAdvancedAt` (when the acted-on tip last moved, as
+this process saw it) and `secondsSinceTipAdvanced` (#158); `blockedOn`, what
+the tip waits on (`atTip`, `headers`, `proofs`, `parent`, `bodies`,
+`bodiesUnavailable`, `execution`, or `stalled`), derived in the core
+(`ChainProgress`), with the `headersSynced` and `synced` latches and the
+chain's queued jobs (#161); and in `waiting`, a block whose receipt proofs
+no peer served (#163). `/metrics` reports tip heights for every hosted chain
+and `lattice_chain_tip_advanced_timestamp_seconds`. Behind its best header
+and not moving is a stall.
 
 **Why.** Outcome 2 is the one failing, and it was not visible as a number.
 
-**What it does not yet say: why.** A stalled chain may be waiting for its
-parent, for a header proof, for a body, on a body nobody has, on a queued
-job, on parent state, on a latch, or be on a heavier branch of lower height.
-Some of this is already reported: `waiting` names why the next block cannot
-execute (body not fetched, or connect without a verdict), and `sync` counts
-pending headers, headers awaiting proof, proof checks running, the body
-window, bodies requested, unavailable and parked, and blocks awaiting parent
-facts. Missing, and worth adding as values derived from the core's state
-(not new state): the phase the chain is blocked in (headers, proofs, bodies,
-execution, at tip), the oldest wait and its age, jobs pending for the chain,
-and the parent chain's own status. With those, most stalls can be diagnosed
+**What it does not yet say.** The oldest wait and its age, and the parent
+chain's own status beside the child's (a reader can ask for the parent's
+path today). `sync` also counts pending headers, headers awaiting proof,
+proof checks running, the body window, bodies requested, unavailable and
+parked, and blocks awaiting parent facts. With those, most stalls can be diagnosed
 from `/status` alone, and the same predicates can drive simulator
 assertions. Height alone also misses a heavier but shorter branch; comparing
 the acted-on tip with the best executable tip is the precise measure.
@@ -888,18 +886,17 @@ says it is needed, not before.
 **Phase 1 — Prove liveness (highest priority).** Every hosted chain makes
 progress or reports exactly why it cannot.
 
-- Land per-chain liveness reporting (§4.4), deploy it, and diagnose the node
-  stopped at height 3,920.
+- ~~Land per-chain liveness reporting (§4.4), deploy it, and diagnose the node
+  stopped at height 3,920.~~ Done: #158, #161, #163; the cause is in §4.9a.
 - Review what `synced` and `headersSynced` encode, and derive readiness from
   facts (§4.3).
-- Report the blocking phase, the oldest wait, pending jobs and the parent's
-  status per chain (§4.4).
+- Report the blocking phase and pending jobs (done, #161), the oldest wait,
+  and the parent's status per chain (§4.4).
 - Simulator scenarios for starvation, missing bodies, delayed proofs,
   parent–child stalls, and reorganisations at several depths (§4.19).
-- Receipt-proof sidecars travel with child blocks, as the code already does,
-  and testnet's block 3,921 is repaired once (§4.9a): the cause of the stall at
-  3,920. A block whose receipt proofs no peer served is reported as that
-  (#163); the operator guide has the repair.
+- ~~Receipt-proof sidecars travel with child blocks, and testnet's block
+  3,921 is repaired once (§4.9a).~~ Done: the decision is #162, the report
+  and the operator's repair #163, and testnet was repaired.
 
 *Exit:* no unexplained stalled chain in production; every known blocking
 condition is observable and recoverable.
@@ -918,7 +915,7 @@ and to change.
 - Write the loop's contract (§4.1a) and the persistence order down, and test
   a crash at every boundary, retention releases and count repair included.
 - Bound the worker queues; make per-chain resource use visible (§4.17).
-- Correct the sync architecture's rule 4 to the queues that are built.
+- ~~Correct the sync architecture's rule 4 to the queues that are built.~~ Done (#160).
 
 *Exit:* a change to retention, API views or maintenance needs no change to
 the core or to how events are processed.
