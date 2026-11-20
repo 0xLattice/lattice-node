@@ -94,6 +94,28 @@ func makePublicReadApplication(
     )
 }
 
+/// The public submit route's body: capped before decoding, with none of the
+/// operator decoder's Host and Content-Type checks.
+private func decode<Value: Decodable>(
+    _ request: Request,
+    upTo maximumBytes: Int
+) async throws -> Value {
+    let buffer: ByteBuffer
+    do {
+        buffer = try await request.body.collect(upTo: maximumBytes)
+    } catch {
+        throw HTTPError(.contentTooLarge)
+    }
+    do {
+        return try JSONDecoder().decode(
+            Value.self,
+            from: Data(buffer.readableBytesView)
+        )
+    } catch {
+        throw HTTPError(.badRequest)
+    }
+}
+
 /// A complete Volume archive, immutable by its CID.
 private func volumeArchiveResponse(_ archive: ByteBuffer) -> Response {
     Response(

@@ -275,26 +275,6 @@ private func addOperatorWriteRoutes(
     }
 }
 
-func decode<Value: Decodable>(
-    _ request: Request,
-    upTo maximumBytes: Int
-) async throws -> Value {
-    let buffer: ByteBuffer
-    do {
-        buffer = try await request.body.collect(upTo: maximumBytes)
-    } catch {
-        throw HTTPError(.contentTooLarge)
-    }
-    do {
-        return try JSONDecoder().decode(
-            Value.self,
-            from: Data(buffer.readableBytesView)
-        )
-    } catch {
-        throw HTTPError(.badRequest)
-    }
-}
-
 /// The one body decoder of the loopback operator POST routes. It first
 /// refuses what a web page could send: a body that is not declared JSON (a
 /// cross-origin form or text/plain POST is a "simple" request that needs no
