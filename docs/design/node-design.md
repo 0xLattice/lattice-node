@@ -1035,11 +1035,16 @@ and to change.
   a crash at every boundary, retention releases and count repair included.~~
   Done: the contract and the order are in the [sync
   architecture](sync-architecture.md#the-loops-contract) and the PR
-  checklist; `RetentionCrashTests` crashes a node at each retention write
-  after a step (body let-go, reads, window, the counts' move, commit,
-  staging, sync, check) and restarts it over the same store. The persist
-  boundary itself was covered (`BatchedConnectRuntimeTests`, the
-  simulator's crash modes). A heal's crash is not reached by a follower.
+  checklist; `RetentionCrashTests` crashes a node at retention writes after
+  a step (body let-go, reads, window, the counts' move, commit, staging,
+  sync), in the start-up sweep (bodies, reads, earlier and unhosted state,
+  counted scopes) and while a chain is let go (windows, rules, counts),
+  restarts it over the same store, and checks it follows on and keeps only
+  what it should. The persist boundary itself was covered
+  (`BatchedConnectRuntimeTests`, the simulator's crash modes). Not covered:
+  an invalid block's body and a heal, which a follower of an honest producer
+  does not reach; and the start's reads sweep is not mutation-checked, since
+  only a child genesis's empty state is ever kept as reads.
 - ~~Bound the worker queues~~ (derivations batched per level and step;
   §4.17); make per-chain resource use visible (§4.17).
 - ~~Correct the sync architecture's rule 4 to the queues that are built.~~ Done (#160).

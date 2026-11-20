@@ -114,8 +114,9 @@ the runtime to them:
    retention runs, none of it needed to be right: the bodies of blocks found
    invalid and the body working set's let-go, then each chain's state (the counts' move or commit, then the
    window's let-go), the read cache's order, then the reads of the blocks
-   the step executed. A crash anywhere in it is repaired by the next start
-   (`RetentionCrashTests`).
+   the step executed. A crash in it is repaired by the next start's sweep or
+   by later steps (`RetentionCrashTests`, which crashes at each of these
+   writes but an invalid block's body).
 6. **Every job and task has a rule for when it is superseded**, listed
    below; a new kind adds its row. A result of a level no longer hosted is
    dropped by the core.
