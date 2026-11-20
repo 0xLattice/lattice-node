@@ -17,6 +17,8 @@ struct NodeMetadataRow: NodeStoreRecord {
 }
 
 extension NodeStore {
+    /// Epoch 50: one Volume store per hosted chain, `volumes/<chain>.db`,
+    /// replaces the one `volumes.db`; a store from before is not converted.
     /// Epoch 49: volumes.db is VolumeBroker schema v3, which drops the second
     /// index by root and refuses v2. state.db and volumes.db are one recovery
     /// unit, so both are rebuilt.
@@ -31,7 +33,7 @@ extension NodeStore {
     /// Epoch 46: weighed header material and credited child proofs live in
     /// this store, written with their facts. Older stores must be wiped; Nexus
     /// deterministically recreates the configured exact genesis.
-    static let currentSchemaEpoch: Int64 = 49
+    static let currentSchemaEpoch: Int64 = 50
 
     static func validateMetadata(
         in database: NodeSQLite,

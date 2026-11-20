@@ -170,7 +170,7 @@ final class ReceiptWitnessTests: XCTestCase {
         try await eventually("the producer lets go of the rest of the state the withdrawal names") {
             (try? await block.parentState.resolveRecursive(fetcher: local)) == nil
         }
-        let pinned = try await storage.broker.retainedRoots(scope: storage.scopes.body(withdrawalBlock, at: Self.alpha))
+        let pinned = try await storage.broker(at: Self.alpha).retainedRoots(scope: storage.scopes.body(withdrawalBlock, at: Self.alpha))
         let witness = await storage.receiptWitness(of: BlockHeader(rawCID: withdrawalBlock), fetcher: local).map(\.root)
         XCTAssertFalse(witness.isEmpty)
         XCTAssertTrue(Set(witness).isSubset(of: Set(pinned)), "the witness is pinned with the body")
@@ -239,7 +239,7 @@ final class ReceiptWitnessTests: XCTestCase {
         let row = followerStorage.bundles.bundle(root: withdrawalBlock)
         let missing = Set(witness).subtracting(row ?? [])
         var held: [String: Bool] = [:]
-        for root in missing { held[root] = await followerStorage.broker.hasVolume(root: root) }
+        for root in missing { held[root] = await followerStorage.stores.hasVolume(root: root) }
         XCTAssertTrue(
             missing.isEmpty,
             "the follower stored the witness with the body: bundle row \(row.map { "of \($0.count) roots" } ?? "absent"), "

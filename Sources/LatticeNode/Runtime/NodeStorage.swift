@@ -56,7 +56,9 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
 
     let store: NodeStore
     nonisolated let bundles: VolumeBundleCache
-    let broker: DiskBroker
+    /// One Volume store per hosted chain (`VolumeStores`). The root's also
+    /// holds the mempool's pins.
+    nonisolated let stores: VolumeStores
     let localFetcher: CoalescingFetcher
     /// Local content, and behind it the header records: a block's own node
     /// is read from them when its body is not held. Execution and mining
@@ -85,7 +87,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         configuration: NodeConfiguration,
         store: NodeStore,
         bundles: VolumeBundleCache,
-        broker: DiskBroker,
+        stores: VolumeStores,
         localFetcher: CoalescingFetcher,
         retentionScope: String,
         durableMempoolOwner: String,
@@ -95,9 +97,9 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         self.configuration = configuration
         self.store = store
         self.bundles = bundles
-        self.broker = broker
+        self.stores = stores
         self.localFetcher = localFetcher
-        self.workSource = CompositeContentSource([ReadTally.wrap("store", broker), ReadTally.wrap("headers", HeaderRecords(store: store))])
+        self.workSource = CompositeContentSource([ReadTally.wrap("store", stores), ReadTally.wrap("headers", HeaderRecords(store: store))])
         self.workFetcher = CoalescingFetcher(workSource)
         self.readCache = ReadCache(maximumBytes: configuration.resourcePolicy.maximumCachedContentBytes)
         self.retentionScope = retentionScope
@@ -116,7 +118,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
             configuration: configuration,
             store: recovered.store,
             bundles: VolumeBundleCache(directory: configuration.storagePath),
-            broker: recovered.broker,
+            stores: recovered.stores,
             localFetcher: recovered.localFetcher,
             retentionScope: recovered.retentionScope,
             durableMempoolOwner: recovered.durableMempoolOwner,
@@ -144,13 +146,13 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     }
 
     public func fetch(_ cids: Set<String>) async -> [String: Data] {
-        await broker.fetchDataLocal(cids: cids)
+        await stores.fetch(cids)
     }
 
     /// A block's own node: from its Volume, or from its header record when
     /// its body is not held. Enough to reach the state it commits to.
     nonisolated func blockNodeBytes(_ cid: String) async -> Data? {
-        if let held = await broker.fetchDataLocal(cid: cid) { return held }
+        if let held = await stores.fetchDataLocal(cid: cid) { return held }
         return store.headerBlockBytes(cid)
     }
 
@@ -161,7 +163,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// against its CIDs first: bytes damaged in the store read as absent,
     /// never handed on. This node's own reads (`fetch`) take them unhashed.
     func volume(_ rootCID: String) async -> SerializedVolume? {
-        guard let volume = await broker.fetchVolumeLocal(root: rootCID),
+        guard let volume = await stores.fetchVolumeLocal(root: rootCID),
               (try? volume.validate()) != nil else { return nil }
         return volume
     }
@@ -173,13 +175,13 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     }
 
     public func store(volume: SerializedVolume) async throws {
-        try await broker.store(volume: volume)
+        try await stores.root.store(volume: volume)
     }
 
     /// Stores a Volume Cashew serializes from `volume`'s node, which hashes
     /// each entry as it does: the broker does not hash it again.
     private func storeHashed(_ volume: some Volume) async throws {
-        let storage = NodeImportStorage(storage: broker)
+        let storage = NodeImportStorage(storage: stores.root)
         try await volume.store(storer: storage)
         try await storage.commit()
     }
@@ -204,14 +206,14 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         }
         try await storeHashed(volume)
         try Task.checkCancellation()
-        try await broker.retain([volume.rawCID], owner: durableMempoolOwner)
+        try await stores.root.retain([volume.rawCID], owner: durableMempoolOwner)
         do {
             try await store.persistLocalMempoolTransaction(
                 transactionCID: volume.rawCID,
                 addedAt: addedAt
             )
         } catch {
-            try await broker.release([volume.rawCID], owner: durableMempoolOwner
+            try await stores.root.release([volume.rawCID], owner: durableMempoolOwner
             )
             throw error
         }
@@ -229,7 +231,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         // Eviction uses the same storage mutation gate, so publishing the
         // complete Volume and its live owner pin is atomic at the node boundary.
         if !livePinnedMempoolRoots.contains(volume.rawCID) {
-            try await broker.retain([volume.rawCID], owner: liveMempoolOwner)
+            try await stores.root.retain([volume.rawCID], owner: liveMempoolOwner)
             livePinnedMempoolRoots.insert(volume.rawCID)
         }
         return volume.rawCID
@@ -246,13 +248,13 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         let added = adding.subtracting(livePinnedMempoolRoots)
         let removed = removing.intersection(livePinnedMempoolRoots)
         if !added.isEmpty {
-            try await broker.retain(added.sorted(),
+            try await stores.root.retain(added.sorted(),
                 owner: liveMempoolOwner
             )
             livePinnedMempoolRoots.formUnion(added)
         }
         if !removed.isEmpty {
-            try await broker.release(Set(removed.sorted()), owner: liveMempoolOwner)
+            try await stores.root.release(Set(removed.sorted()), owner: liveMempoolOwner)
             livePinnedMempoolRoots.subtract(removed)
         }
     }
@@ -262,7 +264,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     func releaseLivePool(of path: [String]) async throws {
         var gone: Set<String> = []
         for root in livePinnedMempoolRoots {
-            let read = try? await VolumeImpl<Transaction>(rawCID: root).resolveRecursive(source: broker)
+            let read = try? await VolumeImpl<Transaction>(rawCID: root).resolveRecursive(source: stores.root)
             if read?.node?.body.node?.chainPath == path { gone.insert(root) }
         }
         try await updateLiveMempoolRoots(adding: [], removing: gone)
@@ -274,7 +276,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         try await store.removeLocalMempoolTransaction(
             transactionCID: transactionCID
         )
-        try await broker.release([transactionCID], owner: durableMempoolOwner
+        try await stores.root.release([transactionCID], owner: durableMempoolOwner
         )
     }
 
@@ -285,7 +287,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         for record in try await store.localMempoolTransactions() {
             let volume = try await VolumeImpl<Transaction>(
                 rawCID: record.transactionCID
-            ).resolveRecursive(source: broker)
+            ).resolveRecursive(source: stores.root)
             guard let transaction = volume.node else {
                 throw NodeStorageError.missingMaterializedVolume(
                     record.transactionCID

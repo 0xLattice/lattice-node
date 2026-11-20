@@ -217,9 +217,9 @@ final class RetentionCrashTests: XCTestCase {
         await producerRuntime.stop()
     }
 
-    /// A crash while a chain is let go, at its windows, its rules or its
-    /// counts: the next start, hosting Nexus alone, lets go of what the
-    /// chain kept, and Nexus's counts still match the store.
+    /// A crash while a chain is let go, before its store goes: the next
+    /// start, hosting Nexus alone, removes the chain's store, and Nexus's
+    /// counts still match the store.
     func testACrashWhileAChainIsLetGoRecoversOnTheNextStart() async throws {
         try await crashWhileUnhosting(at: .letGoOfChain)
     }
@@ -261,7 +261,7 @@ final class RetentionCrashTests: XCTestCase {
                 stopRetention: { crash.stops($0) }
             )
             try await eventually("\(boundary): Alpha's counts reach its tip", within: .seconds(60)) {
-                let counted = try await storage.broker.countedState(scope: storage.scopes.counted(at: Self.alpha))
+                let counted = try await storage.broker(at: Self.alpha).countedState(scope: storage.scopes.counted(at: Self.alpha))
                 return counted.marker.flatMap(CountedMarker.init)?.tip.cid == alphaTip
             }
             crash.arm()
@@ -280,16 +280,12 @@ final class RetentionCrashTests: XCTestCase {
             guard let marker = counted.marker, CountedMarker(marker)?.tip.cid == nexusTip else { return false }
             return await storage.auditCounted(at: ["Nexus"], marker: marker) != nil
         }
-        // The start's sweep runs before the loop's first step, behind the
-        // published tip.
-        let scopes = storage.scopes
-        try await eventually("\(boundary): the start lets go of what Alpha kept: windows, rules, counts, staging") {
-            let windows = try await storage.broker.retainedScopes(prefix: scopes.windowPrefix(at: Self.alpha))
-            let rules = try await storage.broker.retainedRoots(scope: scopes.rules(at: Self.alpha))
-            let counts = try await storage.broker.countedScopes(prefix: scopes.counted(at: Self.alpha))
-            let staged = try await storage.broker.retainedRoots(scope: scopes.staging(at: Self.alpha))
-            return windows.isEmpty && rules.isEmpty && counts.isEmpty && staged.isEmpty
-        }
+        // A chain's store holds all it kept: its windows, rules, counts,
+        // staging and bodies.
+        let file = followerDirectory.appendingPathComponent("volumes")
+            .appendingPathComponent(VolumeStores.fileName(Self.alpha))
+        XCTAssertNil(storage.stores.opened(at: Self.alpha), "\(boundary): Alpha has no store open")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path), "\(boundary): nor a file")
         await runtime.stop()
         await producerRuntime.stop()
     }

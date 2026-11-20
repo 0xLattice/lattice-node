@@ -819,12 +819,12 @@ extension NodeRuntime {
     static func transactions(
         ofLeftBlock cid: String, at path: ChainPath, storage: NodeStorage, remote: IvyRootContentSource?
     ) async -> [Transaction] {
-        guard let remote, await !storage.broker.hasVolume(root: cid) else {
+        guard let remote, await !storage.stores.hasVolume(root: cid) else {
             return await transactions(ofBlock: cid, fetcher: storage.localFetcher)
         }
         let hosts = ChainHosts.of(path, nexusGenesisCID: storage.configuration.nexusGenesisCID)
         return await remote.withRootTracing(cid, bundle: false, hosts: hosts) { session in
-            await transactions(ofBlock: cid, fetcher: CoalescingFetcher(CompositeContentSource([storage.broker, session])))
+            await transactions(ofBlock: cid, fetcher: CoalescingFetcher(CompositeContentSource([storage.stores, session])))
         }.value
     }
 
@@ -948,7 +948,7 @@ extension NodeRuntime {
         remote: IvyRootContentSource?,
         _ work: @Sendable (any Fetcher) async -> T
     ) async -> T {
-        guard let remote else { return await work(storage.workFetcher) }
+        guard let remote else { return await work(storage.workFetcher(at: path)) }
         // A child chain's content is asked first of the chain's own hosts,
         // as its bodies are; Nexus's of any peer.
         let hosts = ChainHosts.of(path, nexusGenesisCID: storage.configuration.nexusGenesisCID)
@@ -958,11 +958,11 @@ extension NodeRuntime {
             // is read from it, not asked of peers one entry at a time.
             // One this node derived fetching the block's body is read from
             // memory, as is all of that body.
-            if await !storage.broker.hasVolume(root: rootCID),
+            if await !storage.stores.hasVolume(root: rootCID),
                await storage.readCache.volume(rootCID) == nil {
                 _ = await session.volume(rootCID: rootCID)
             }
-            return await work(storage.ownReads(through: session))
+            return await work(storage.ownReads(through: session, at: path))
         }.value
     }
 

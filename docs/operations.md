@@ -9,7 +9,7 @@ process owns:
 - one Ivy overlay listener;
 - one loopback operator RPC;
 - optionally one public-read listener (GET-only unless public submit is on);
-- one `state.db` and `volumes.db` recovery unit.
+- one `state.db` and `volumes/` recovery unit (a Volume store per hosted chain).
 
 Run mining outside the node with `lattice-mining-coordinator` and one or more
 workers. Use a supervisor for both processes.
@@ -471,22 +471,23 @@ The tree storage directory contains:
 
 ```text
 state.db
-volumes.db
+volumes/            one Volume store per hosted chain: Nexus.db, Nexus.Alpha.db, …
 volume-bundles.db
 storage.lock
 ```
 
 `state.db` holds path-keyed facts, weighed headers, saved child proofs,
 indexes, durable sync cursors, the state diffs of the state window, and the
-local mempool journal. `volumes.db`
-holds content and retained roots. Those two are the recovery unit.
+local mempool journal. `volumes/` holds each hosted chain's content and
+retained roots, one file per chain; the root chain's file also holds the
+constants, the operator's pins and the mempool's. Those two are the recovery unit.
 `volume-bundles.db` is a cache of which Volume roots are served together for a
 block: it may be lost or deleted while the node is stopped, and is rebuilt
 from local content.
 
 Persistence order is:
 
-1. store the content in one `volumes.db` transaction (a block's Volumes
+1. store the content in one transaction of its chain's Volume store (a block's Volumes
    together, once its execution found it valid or it was mined here; a
    step's post-states together), then retain it. A body fetched from peers
    is read into memory until then (and read again from peers if memory
@@ -507,7 +508,7 @@ state is not executed yet is not run; it waits, and no other block waits on
 it. A batch is a run of consecutive blocks on one chain, the heavier branch
 first at a fork; each block reads the state the one before it produced from
 memory. Its valid blocks are stored and committed together, by the order
-above: one `volumes.db` transaction for their bodies, then one step's
+above: one transaction of the chain's Volume store for their bodies, then one step's
 post-states and facts. The batch ends at its first block without a valid
 verdict. Bitcoin Core connects up to 32 blocks per `ActivateBestChainStep`,
 and geth's `insertChain` writes a batch at once.
@@ -594,7 +595,7 @@ of the chain reads them, so they are not state that a window lets go of.
 On `recent` a node counts, for each chain, the places each node holds in the
 state of the chain's tip, plus the places the blocks above a cursor replaced,
 and keeps every node it counts, and the state diff of each block it executed
-within the window (in `state.db`): the counts are kept in `volumes.db`, written
+within the window (in `state.db`): the counts are kept in the chain's Volume store, written
 with the cursor and the tip they were moved to in one transaction, so a stop
 never leaves them half moved. As the tip moves, the counts follow it in one
 write once it has climbed a window above them, at once when it is on another
@@ -710,7 +711,7 @@ executed body but the tips' and the genesis blocks' before the node answers
 anything: the time that takes grows with the number of bodies it held.
 Bodies stored by a version before this setting are not let go of: sync the
 node again to drop them. Switching back to `all` keeps every body from then
-on and brings none back. `volumes.db` does not shrink: the
+on and brings none back. A Volume store does not shrink: the
 space is reused.
 
 Content outside the chain, such as a file an application names by CID, is
@@ -737,9 +738,9 @@ Startup fails closed when:
 
 - the schema epoch or Nexus genesis does not match;
 - a stored fact does not decode, or a hosted level's facts do not restore;
-- a hosted child chain's genesis spec is in neither `volumes.db` nor the
+- a hosted child chain's genesis spec is in neither the Volume stores nor the
   node's own `specs`, or one of the node's own pending transactions is
-  missing from `volumes.db`;
+  missing from the root chain's Volume store;
 - another process owns the storage lock.
 
 Do not repair or combine database files by hand. Restore one matched snapshot
@@ -839,7 +840,7 @@ enable it only for diagnosis and rotate or remove it afterwards.
 
 ### `wipe required`
 
-The store belongs to another schema epoch or Nexus genesis, or `volumes.db`
+The store belongs to another schema epoch or Nexus genesis, or a Volume store
 was written by a version with another Volume store schema. Stop the complete
 tree and use `lattice wipe`; there is no migration path.
 
@@ -853,16 +854,25 @@ Schema epoch 49 moves `volumes.db` to the Volume store's schema v3, which
 drops a redundant index (about 14% of what a sync writes). Every node is
 wiped once to run it; an older store reports `wipe required`.
 
+Schema epoch 50 gives each hosted chain a Volume store of its own,
+`volumes/<chain>.db` beside `state.db` (`volumes/Nexus.db`,
+`volumes/Nexus.Alpha.db`), in place of the one `volumes.db`, so a chain's
+writes no longer grow with the chains hosted beside it. Every node is wiped
+once to run it. A chain the node stops hosting has its file removed; the
+root chain's file also holds the operator's pins, the protocol constants
+and the mempool's journal. Back up the whole storage directory, `volumes/`
+included.
+
 ### `missingMaterializedVolume`
 
-A hosted child chain's genesis spec is in neither `volumes.db` nor this
+A hosted child chain's genesis spec is in neither the Volume stores nor this
 node's own `specs`, or a transaction in the node's own pending journal is
-absent from `volumes.db`. Restore the whole backup set or wipe.
+absent from the root chain's Volume store. Restore the whole backup set or wipe.
 
 Other content a fact names may be absent without stopping the node. It
 starts on its facts, stores the Nexus genesis block again, and reads what it
 needs to execute a block or build a template from its peers, each entry
-checked against its CID. A `state.db` copied without its `volumes.db`
+checked against its CID. A `state.db` copied without its `volumes/`
 therefore runs, but it holds only what the blocks it has executed and mined
 since have stored:
 the public read routes and the check of a submitted transaction answer from
@@ -874,9 +884,9 @@ such a transaction pooled. Resync it to hold the rest.
 Startup refuses to serve child headers without their recorded proof evidence.
 Restore the matched backup or wipe the tree.
 
-### Damaged `volumes.db` content
+### Damaged Volume store content
 
-For its own use the node does not hash what it reads back from `volumes.db`:
+For its own use the node does not hash what it reads back from a Volume store:
 every entry was checked against its CID on its way in. Bytes damaged on disk
 since are caught wherever they are read against their CID. A block whose
 content they are never connects: its fetch and connect wait, again and

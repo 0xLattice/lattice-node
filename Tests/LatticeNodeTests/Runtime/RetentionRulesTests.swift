@@ -140,7 +140,7 @@ final class RetentionRulesTests: XCTestCase {
             let storer = NodeImportStorage(storage: producerBroker)
             try await header.storeBlock(fetcher: producer, storer: storer)
             try await storer.commit()
-            try await producer.retainHeld(await storer.takeStoredVolumeRoots())
+            try await producer.retainHeld(await storer.takeStoredVolumeRoots(), in: producerBroker)
             let valid = try await block.validateNexus(fetcher: producer.localFetcher).0
             XCTAssertTrue(valid, "key \(key)")
 

@@ -55,7 +55,7 @@ extension NodeRuntime {
         /// the counts found are checked, and the state settled.
         mutating func start(_ levels: [ChainPath: ChainCore], counts: inout Counts) async {
             // What a chain the configuration does not host left goes first.
-            await storage.letGoOfChains(except: configured, blocks: true)
+            await storage.letGoOfChains(except: configured)
             // With no bodies kept beyond the working set, a start lets go
             // of the ones a run that kept them left, before any step.
             for (path, level) in levels { bodyTips[path] = level.snapshot.actOnTip }

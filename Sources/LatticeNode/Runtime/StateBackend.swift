@@ -1,5 +1,6 @@
 import Foundation
 import LatticeNodeCore
+import VolumeBroker
 
 /// What the node does with executed state, behind one interface: keep what
 /// a block's storing and execution stored, let go of what a block read once
@@ -120,7 +121,7 @@ struct StateBackend: Sendable {
                 let scope = if let height = state.height {
                     storage.scopes.window(at: path, height: height)
                 } else {
-                    try await storage.broker.retainedScopes(prefix: storage.scopes.windowPrefix(at: path)).max()
+                    try await storage.stores.store(at: path).retainedScopes(prefix: storage.scopes.windowPrefix(at: path)).max()
                         ?? storage.scopes.window(at: path, height: 0)
                 }
                 retaining[scope, default: []] += state.roots
@@ -135,13 +136,14 @@ struct StateBackend: Sendable {
     /// policy modules with the chain at `path` while it is hosted, and any
     /// state with the block until it executes.
     func keepStored(_ rest: [String], ofBlock blockCID: String, at path: ChainPath) async throws {
+        let store = try storage.stores.store(at: path)
         guard scheme != .all else {
-            try await storage.retainHeld(rest)
+            try await storage.retainHeld(rest, in: store)
             return
         }
         let rules = rest.isEmpty ? [] : await storage.rules(ofBlock: blockCID, fetcher: storage.localFetcher)
-        try await storage.retainHeld(rest.filter(rules.contains), scope: storage.scopes.rules(at: path))
-        try await storage.retainHeld(rest.filter { !rules.contains($0) }, scope: storage.scopes.reads(blockCID, at: path))
+        try await storage.retainHeld(rest.filter(rules.contains), scope: storage.scopes.rules(at: path), in: store)
+        try await storage.retainHeld(rest.filter { !rules.contains($0) }, scope: storage.scopes.reads(blockCID, at: path), in: store)
     }
 
     /// Where a block a connect found valid keeps what is neither its body
@@ -233,10 +235,10 @@ struct StateBackend: Sendable {
     /// stop came between), or when the operator keeps all state.
     func letGoOfReads() async {
         do {
-            for scope in try await storage.broker.retainedScopes(prefix: storage.scopes.readsPrefix) {
+            for (broker, scope) in try await storage.stores.retainedScopes(prefix: storage.scopes.readsPrefix) {
                 guard let (path, cid) = storage.scopes.block(named: scope, after: storage.scopes.readsPrefix) else { continue }
-                if scheme == .all, let roots = try? await storage.broker.retainedRoots(scope: scope) {
-                    try await storage.broker.releaseRetainedRoots(scope: scope, roots: roots)
+                if scheme == .all, let roots = try? await broker.retainedRoots(scope: scope) {
+                    try await broker.releaseRetainedRoots(scope: scope, roots: roots)
                 } else if try await storage.store.hasExecutedBlock(cid, at: path) {
                     await releaseReads(cid, at: path)
                 }
@@ -260,23 +262,24 @@ struct StateBackend: Sendable {
         let recent = scheme == .recent
         var markers: [ChainPath: String] = [:]
         do {
-            for scope in try await storage.broker.countedScopes(prefix: storage.scopes.countedPrefix) {
+            for (broker, scope) in try await storage.stores.countedScopes(prefix: storage.scopes.countedPrefix) {
                 let chain = path(scope, after: storage.scopes.countedPrefix)
                 guard !recent || !hosted.contains(chain) else { continue }
                 if scheme == .all, hosted.contains(chain) {
-                    try await storage.retainHeld(Array(try await storage.broker.countedState(scope: scope).counts.keys))
+                    try await storage.retainHeld(Array(try await broker.countedState(scope: scope).counts.keys), in: broker)
                 }
-                try await storage.broker.dropCountedScope(scope: scope)
+                try await broker.dropCountedScope(scope: scope)
             }
             if recent {
                 for chain in hosted {
-                    let marker = try await storage.broker.countedState(scope: storage.scopes.counted(at: chain)).marker
+                    guard let broker = storage.stores.opened(at: chain) else { continue }
+                    let marker = try await broker.countedState(scope: storage.scopes.counted(at: chain)).marker
                     if let marker, CountedMarker(marker) != nil { markers[chain] = marker }
                 }
             }
-            for scope in try await storage.broker.retainedScopes(prefix: storage.scopes.stagingPrefix) {
+            for (broker, scope) in try await storage.stores.retainedScopes(prefix: storage.scopes.stagingPrefix) {
                 let chain = path(scope, after: storage.scopes.stagingPrefix)
-                if markers[chain] != nil || !recent || !hosted.contains(chain) { try await storage.release(scope: scope) }
+                if markers[chain] != nil || !recent || !hosted.contains(chain) { try await storage.release(scope: scope, in: broker) }
             }
         } catch {
             storage.syncTrace("counts not settled at start: \(error)")
@@ -299,36 +302,36 @@ struct StateBackend: Sendable {
         }
         // Each scope on its own: one that fails stays for the next start,
         // and the rest move.
-        func each(_ prefix: String, _ move: (String) async throws -> Void) async {
-            guard let listed = try? await storage.broker.retainedScopes(prefix: prefix) else { return }
-            for scope in listed {
-                do { try await move(scope) } catch { storage.syncTrace("\(scope) not moved at start: \(error)") }
+        func each(_ prefix: String, _ move: (DiskBroker, String) async throws -> Void) async {
+            guard let listed = try? await storage.stores.retainedScopes(prefix: prefix) else { return }
+            for (broker, scope) in listed {
+                do { try await move(broker, scope) } catch { storage.syncTrace("\(scope) not moved at start: \(error)") }
             }
         }
-        await each(storage.scopes.windowsPrefix) { scope in
+        await each(storage.scopes.windowsPrefix) { broker, scope in
             guard let colon = scope.lastIndex(of: ":") else { return }
             if tips[path(String(scope[..<colon]), after: storage.scopes.windowsPrefix)] == nil {
-                await storage.letGoOfWindow(scope)
+                await storage.letGoOfWindow(scope, in: broker)
             }
         }
-        await each(storage.scopes.rulesPrefix) { scope in
-            if tips[path(scope, after: storage.scopes.rulesPrefix)] == nil { try await storage.release(scope: scope) }
+        await each(storage.scopes.rulesPrefix) { broker, scope in
+            if tips[path(scope, after: storage.scopes.rulesPrefix)] == nil { try await storage.release(scope: scope, in: broker) }
         }
         for prefix in storage.scopes.legacyStatePrefixes {
-            await each(prefix) { scope in
+            await each(prefix) { broker, scope in
                 let path = path(scope, after: prefix)
                 if let tip = tips[path] {
                     // What this store no longer holds is not kept: it is
                     // read again, as any state let go of is.
                     var held: [String] = []
-                    for root in try await storage.broker.retainedRoots(scope: scope) where await storage.broker.hasVolume(root: root) {
+                    for root in try await broker.retainedRoots(scope: scope) where await broker.hasVolume(root: root) {
                         held.append(root)
                     }
                     let kept = window(for: path) == nil
                         ? storage.retentionScope : storage.scopes.window(at: path, height: tip)
-                    if !held.isEmpty { try await storage.broker.mergeRetainedRoots(scope: kept, roots: held) }
+                    if !held.isEmpty { try await broker.mergeRetainedRoots(scope: kept, roots: held) }
                 }
-                try await storage.release(scope: scope)
+                try await storage.release(scope: scope, in: broker)
             }
         }
         do { try await storage.store.forgetStateCounts() } catch { storage.syncTrace("earlier counts not forgotten: \(error)") }

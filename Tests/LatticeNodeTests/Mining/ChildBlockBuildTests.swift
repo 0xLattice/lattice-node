@@ -94,9 +94,9 @@ final class ChildBlockBuildTests: XCTestCase {
         let entering = try await Self.tipState(node.reads)
         XCTAssertEqual(built.parentState, entering)
         XCTAssertNil(built.previous)
-        let held = await storage.broker.fetchDataLocal(cid: built.blockCID)
+        let held = await storage.stores.fetchDataLocal(cid: built.blockCID)
         XCTAssertNotNil(held, "the block's body is stored")
-        let retained = try await storage.broker.retainedRoots(scope: storage.scopes.body(built.blockCID, at: Self.alpha))
+        let retained = try await storage.broker(at: Self.alpha).retainedRoots(scope: storage.scopes.body(built.blockCID, at: Self.alpha))
         XCTAssertTrue(retained.contains(built.blockCID), "and retained")
         await XCTAssertThrowsErrorAsync(
             try await node.buildChildBlock(BuildChildBlockRequest(chainPath: ["Nexus", "Beta"]))

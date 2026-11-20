@@ -104,7 +104,7 @@ extension NodeStorage {
         _ roots: [String], body: [String], ofBlock blockCID: String, at path: ChainPath = ["Nexus"]
     ) async throws {
         let named = Set(body)
-        try await broker.mergeRetainedRoots(scope: scopes.body(blockCID, at: path), roots: named.sorted())
+        try await stores.store(at: path).mergeRetainedRoots(scope: scopes.body(blockCID, at: path), roots: named.sorted())
         try await stateBackend.keepStored(roots.filter { !named.contains($0) }, ofBlock: blockCID, at: path)
     }
 
@@ -121,11 +121,10 @@ extension NodeStorage {
         return Set([block.spec.rawCID] + spec.wasmPolicies.map(\.moduleCID))
     }
 
-
     /// What a block read goes (`StateBackend.releaseReads`).
     nonisolated func releaseReads(_ blockCID: String, at path: ChainPath) async {
         do {
-            try await release(scope: scopes.reads(blockCID, at: path))
+            try await release(scope: scopes.reads(blockCID, at: path), at: path)
         } catch {
             syncTrace("reads of \(blockCID) not released: \(error)")
         }
@@ -135,7 +134,7 @@ extension NodeStorage {
     /// also names stays.
     nonisolated func releaseBody(_ blockCID: String, at path: ChainPath = ["Nexus"]) async {
         do {
-            try await release(scope: scopes.body(blockCID, at: path))
+            try await release(scope: scopes.body(blockCID, at: path), at: path)
         } catch {
             syncTrace("body of \(blockCID) not released: \(error)")
         }
@@ -159,7 +158,7 @@ extension NodeStorage {
     nonisolated func letGoOfBodies(except tips: [ChainPath: String]) async {
         guard configuration.blockBodies == .none else { return }
         do {
-            for scope in try await broker.retainedScopes(prefix: scopes.bodyPrefix) {
+            for (_, scope) in try await stores.retainedScopes(prefix: scopes.bodyPrefix) {
                 guard let (path, cid) = scopes.block(named: scope), tips[path] != cid,
                       try await store.hasExecutedBlock(cid, at: path) else { continue }
                 await letGo(ofBodies: [cid], at: path)
@@ -171,18 +170,24 @@ extension NodeStorage {
 
     // MARK: - Operator pins
 
-    /// The Volumes the operator pinned.
+    /// The Volumes the operator pinned, kept in the root chain's store
+    /// whichever chain's they are.
     nonisolated func operatorPins() async -> [String] {
-        (try? await broker.retainedRoots(scope: scopes.operatorPins)) ?? []
+        (try? await stores.root.retainedRoots(scope: scopes.operatorPins)) ?? []
     }
 
     /// Pins the Volume `root` names, already stored or as the operator
     /// provides it in `entries`, each checked against its CID. The node does
     /// not look inside it or follow what it names.
+    /// One a chain's store holds is copied into the root's, which keeps
+    /// every pin.
     nonisolated func pin(_ root: String, entries: [String: Data]?) async throws {
+        let broker = stores.root
         if await !broker.hasVolume(root: root) {
-            guard let entries else { throw NodeStorageError.missingMaterializedVolume(root) }
-            let volume = SerializedVolume(root: root, entries: entries)
+            guard let volume = await stores.fetchVolumeLocal(root: root)
+                    ?? entries.map({ SerializedVolume(root: root, entries: $0) }) else {
+                throw NodeStorageError.missingMaterializedVolume(root)
+            }
             guard let validated = try? ValidatedVolume(validating: volume) else { throw NodeStorageError.invalidVolume(root) }
             try await broker.storeVolumesLocal([validated])
         }
@@ -192,25 +197,23 @@ extension NodeStorage {
     /// Unpinning what the operator did not pin changes nothing.
     nonisolated func unpin(_ root: String) async throws {
         guard await operatorPins().contains(root) else { return }
-        try await broker.releaseRetainedRoots(scope: scopes.operatorPins, roots: [root])
+        try await stores.root.releaseRetainedRoots(scope: scopes.operatorPins, roots: [root])
     }
 
     // MARK: - Chains the configuration does not host
 
     /// With `hosted` what the configuration hosts (a chain that failed to
-    /// start among them): every other chain this store holds anything of
+    /// start among them): every other chain this node holds anything of
     /// has its data let go of; hosting it again syncs it from peers like
     /// any new chain. The configuration is the record: a release a stop or
     /// a failure cuts short leaves the chain's facts, and the next call,
     /// at the latest the next start, finishes it. Returns the chains not
     /// let go of (logged).
-    /// With `blocks` (a start), a chain is found by its blocks' bodies and
-    /// reads too: one row per block kept.
     @discardableResult
-    nonisolated func letGoOfChains(except hosted: Set<ChainPath>, blocks: Bool = false) async -> [ChainPath] {
+    nonisolated func letGoOfChains(except hosted: Set<ChainPath>) async -> [ChainPath] {
         let held: Set<ChainPath>
         do {
-            held = try await heldChains(blocks: blocks)
+            held = try await store.chainPaths().union(stores.byChain.map(\.path))
         } catch {
             logLine("lattice-node: chains not hosted not let go of, tried again at the next start: \(error)")
             return []
@@ -223,54 +226,20 @@ extension NodeStorage {
         return failed
     }
 
-    /// The chains this store keeps anything of by chain: facts, cursors or
-    /// child proofs, a spec, state windows, counts or staging. One index
-    /// seek per chain, and one row per kept window. A block's body or reads
-    /// are found through its chain's facts (`letGo(ofChain:)` releases them
-    /// before the facts), and with `blocks` by their own names too: what a
-    /// late write left after its chain's facts went.
-    private nonisolated func heldChains(blocks: Bool) async throws -> Set<ChainPath> {
-        func path(_ text: Substring) -> ChainPath { text.split(separator: "/").map(String.init) }
-        var held = try await store.chainPaths()
-        for prefix in blocks ? [scopes.bodyPrefix, scopes.readsPrefix] : [] {
-            for scope in try await broker.retainedScopes(prefix: prefix) {
-                guard let colon = scope.lastIndex(of: ":") else { continue }
-                held.insert(path(scope[scope.index(scope.startIndex, offsetBy: prefix.count)..<colon]))
-            }
-        }
-        for prefix in [scopes.rulesPrefix, scopes.stagingPrefix] {
-            for scope in try await broker.retainedScopes(prefix: prefix) { held.insert(path(scope.dropFirst(prefix.count))) }
-        }
-        for scope in try await broker.countedScopes(prefix: scopes.countedPrefix) {
-            held.insert(path(scope.dropFirst(scopes.countedPrefix.count)))
-        }
-        for scope in try await broker.retainedScopes(prefix: scopes.windowsPrefix) {
-            guard let colon = scope.lastIndex(of: ":") else { continue }
-            held.insert(path(scope[scope.index(scope.startIndex, offsetBy: scopes.windowsPrefix.count)..<colon]))
-        }
-        return held
-    }
-
     /// Everything kept only for the chain at `path` goes, content first:
-    /// its blocks' bodies and what they read, its state windows, spec and
-    /// policy modules, counts and staging, its local and pooled
-    /// transactions, and its blocks' cached bundles; then its facts, in one
-    /// transaction. A fact naming content that is gone is no fault: it is
-    /// read again from peers (NODE-STORAGE-002.f), so a release cut short
-    /// leaves a store the node runs on, and its facts name the chain for the
-    /// next try. What another scope also names stays: another chain's
-    /// blocks, the operator's pins, and the chain scope on `all`. False,
+    /// its Volume store, with every body, read, window, rule, count and
+    /// staged node it held; its local and pooled transactions (pinned in
+    /// the root's store) and its blocks' cached bundles; then its facts, in
+    /// one transaction. What another chain needs is in that chain's own
+    /// store, and the operator's pins in the root's. A fact naming content
+    /// that is gone is no fault: it is read again from peers
+    /// (NODE-STORAGE-002.f), so a release cut short leaves a store the
+    /// node runs on, and its facts name the chain for the next try. False,
     /// logged, when it failed.
     private nonisolated func letGo(ofChain path: ChainPath) async -> Bool {
         let chain = path.joined(separator: "/")
         do {
-            for prefix in [scopes.bodyPrefix + chain + ":", scopes.readsPrefix + chain + ":", scopes.windowPrefix(at: path)] {
-                try await broker.releaseRetainedScopes(try await broker.retainedScopes(prefix: prefix))
-            }
-            for scope in [scopes.rules(at: path), scopes.staging(at: path)] + scopes.legacyStatePrefixes.map({ $0 + chain }) {
-                try await release(scope: scope)
-            }
-            try await broker.dropCountedScope(scope: scopes.counted(at: path))
+            stores.remove(at: path)
             for item in try await localTransactions() where item.transaction.body.node?.chainPath == path {
                 try await removeLocalTransaction(item.transactionCID)
             }
@@ -285,10 +254,18 @@ extension NodeStorage {
         }
     }
 
-    /// Lets go of everything `scope` names.
-    nonisolated func release(scope: String) async throws {
+    /// Lets go of everything `scope` names in `broker`.
+    nonisolated func release(scope: String, in broker: DiskBroker) async throws {
         let roots = try await broker.retainedRoots(scope: scope)
         if !roots.isEmpty { try await broker.releaseRetainedRoots(scope: scope, roots: roots) }
+    }
+
+    /// Lets go of everything `scope` names in the store of the chain at
+    /// `path`; nothing when that store is not open (the chain is not
+    /// hosted).
+    nonisolated func release(scope: String, at path: ChainPath) async throws {
+        guard let broker = stores.opened(at: path) else { return }
+        try await release(scope: scope, in: broker)
     }
 
     // MARK: - State: recent
@@ -302,6 +279,7 @@ extension NodeStorage {
         guard height >= window else { return }
         let kept = scopes.window(at: path, height: height - window + 1)
         do {
+            let broker = try stores.store(at: path)
             try await broker.releaseRetainedScopes(
                 try await broker.retainedScopes(prefix: scopes.windowPrefix(at: path)).filter { $0 < kept }
             )
@@ -311,8 +289,8 @@ extension NodeStorage {
         }
     }
 
-    nonisolated func letGoOfWindow(_ scope: String) async {
-        do { try await release(scope: scope) } catch { syncTrace("\(scope) not released: \(error)") }
+    nonisolated func letGoOfWindow(_ scope: String, in broker: DiskBroker) async {
+        do { try await release(scope: scope, in: broker) } catch { syncTrace("\(scope) not released: \(error)") }
     }
 
     // MARK: - State: the whole current state, on recent
@@ -328,6 +306,8 @@ extension NodeStorage {
     nonisolated func settleCounted(
         at path: ChainPath, tip: String, window: UInt64, marker: String, known: [String]?
     ) async -> CountedOutcome {
+        let broker: DiskBroker
+        do { broker = try stores.store(at: path) } catch { return .failed("\(error)") }
         var (marker, known, retry) = (marker, known, false)
         while true {
             guard let counted = CountedMarker(marker) else { return .resync("marker \(marker) unreadable") }
@@ -370,7 +350,9 @@ extension NodeStorage {
     ) async -> CountedOutcome {
         let current: (marker: String?, counts: [String: Int])
         let change: CountedChange
+        let broker: DiskBroker
         do {
+            broker = try stores.store(at: path)
             current = try await broker.countedState(scope: scopes.counted(at: path))
             guard let found = try await store.countedChange(
                 at: path, from: CountedMarker(cursor: block, tip: block), to: tip, window: window, known: [block.cid]
@@ -426,7 +408,7 @@ extension NodeStorage {
                 guard let diff = try await store.stateDiff(cid, at: path) else { return nil }
                 for (cid, count) in NodeStore.net(diff).replaced { expected[cid, default: 0] += count }
             }
-            let stored = try await broker.countedState(scope: scopes.counted(at: path))
+            let stored = try await stores.store(at: path).countedState(scope: scopes.counted(at: path))
             return stored.marker == marker && stored.counts == expected ? chain : nil
         } catch {
             syncTrace("counts of \(path) not checked: \(error)")
@@ -476,7 +458,7 @@ extension NodeStorage {
             }
         } catch {
             let scope = scopes.staging(at: path)
-            if let staged = try? await broker.retainedRoots(scope: scope) {
+            if let broker = stores.opened(at: path), let staged = try? await broker.retainedRoots(scope: scope) {
                 let unreached = staged.filter { places[$0] == nil }
                 if !unreached.isEmpty { _ = try? await broker.releaseRetainedRoots(scope: scope, roots: unreached) }
             }
@@ -516,7 +498,8 @@ extension NodeStorage {
         _ batch: [any Header], of root: String, at path: ChainPath, hosts: ChainHosts?, remote: IvyRootContentSource
     ) async throws -> [String: [any Header]] {
         let scope = scopes.staging(at: path)
-        let lacked = Set(try await retainHeld(batch.map(\.rawCID), scope: scope))
+        let broker = try stores.store(at: path)
+        let lacked = Set(try await retainHeld(batch.map(\.rawCID), scope: scope, in: broker))
         return try await remote.withRootTracing(root, bundle: false, hosts: hosts) { session in
             let fetcher = readersReads(through: session)
             let resolved = try await withThrowingTaskGroup(of: (any Header).self) { group in
@@ -529,7 +512,7 @@ extension NodeStorage {
                 try await volume.store(storer: storage)
             }
             try await storage.commit()
-            if let missed = try await retainHeld(Array(lacked), scope: scope).first {
+            if let missed = try await retainHeld(Array(lacked), scope: scope, in: broker).first {
                 throw NodeStorageError.missingMaterializedVolume(missed)
             }
             return Dictionary(resolved.map { ($0.rawCID, Self.children(of: $0)) }) { first, _ in first }
@@ -542,7 +525,8 @@ extension NodeStorage {
     nonisolated func healCounted(_ roots: [String], at path: ChainPath, remote: IvyRootContentSource) async throws {
         let scope = scopes.staging(at: path)
         let hosts = ChainHosts.of(path, nexusGenesisCID: configuration.nexusGenesisCID)
-        for root in try await retainHeld(roots, scope: scope) {
+        let broker = try stores.store(at: path)
+        for root in try await retainHeld(roots, scope: scope, in: broker) {
             try Task.checkCancellation()
             let read = await remote.withRootTracing(root, bundle: false, hosts: hosts) { session in
                 await session.volume(rootCID: root)
@@ -550,7 +534,7 @@ extension NodeStorage {
             guard let volume = read.value else { throw NodeStorageError.missingMaterializedVolume(root) }
             // The session holds only what it checked on receipt.
             try await broker.storeVolumesLocal([try ValidatedVolume(trusting: volume)])
-            if let missed = try await retainHeld([root], scope: scope).first {
+            if let missed = try await retainHeld([root], scope: scope, in: broker).first {
                 throw NodeStorageError.missingMaterializedVolume(missed)
             }
         }
@@ -560,7 +544,7 @@ extension NodeStorage {
     /// once the counts name it, or the chain is no longer counted.
     nonisolated func releaseStaging(at path: ChainPath) async {
         do {
-            try await release(scope: scopes.staging(at: path))
+            try await release(scope: scopes.staging(at: path), at: path)
         } catch {
             syncTrace("staging of \(path) not released: \(error)")
         }

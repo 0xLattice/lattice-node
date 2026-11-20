@@ -11,7 +11,7 @@ enum BootRecovery {
     /// What `NodeStorage.open` builds the storage from.
     struct Result {
         let store: NodeStore
-        let broker: DiskBroker
+        let stores: VolumeStores
         let localFetcher: CoalescingFetcher
         let retentionScope: String
         let durableMempoolOwner: String
@@ -22,7 +22,10 @@ enum BootRecovery {
     /// The two stores, and the retention scopes derived from the tree's
     /// identity.
     private struct Stores {
-        let broker: DiskBroker
+        let stores: VolumeStores
+        /// The root chain's Volume store: constants, the Nexus genesis and
+        /// the mempool's pins.
+        var broker: DiskBroker { stores.root }
         let localFetcher: CoalescingFetcher
         let retentionScope: String
         let durableMempoolOwner: String
@@ -41,11 +44,11 @@ enum BootRecovery {
         // Content stays only because a scope names it. What none does (a
         // write a crash cut short, a pool entry of the last run) goes now,
         // while nothing is being stored.
-        try await stores.broker.sweep()
+        try await stores.stores.sweep()
         logLine("lattice-node: boot recovery done in \(seconds(started.duration(to: .now)))")
         return Result(
             store: stores.store,
-            broker: stores.broker,
+            stores: stores.stores,
             localFetcher: stores.localFetcher,
             retentionScope: stores.retentionScope,
             durableMempoolOwner: stores.durableMempoolOwner,
@@ -75,18 +78,15 @@ enum BootRecovery {
         return directoryLock
     }
 
-    /// Stage 2: volumes.db, state.db, and the scopes and owners they use.
+    /// Stage 2: a Volume store per hosted chain (`VolumeStores`), state.db,
+    /// and the scopes and owners they use.
     private static func openStores(
         configuration: NodeConfiguration
     ) throws -> Stores {
-        let broker: DiskBroker
-        do {
-            broker = try DiskBroker(path: configuration.storagePath.appendingPathComponent("volumes.db").path)
-        } catch BrokerError.migrationRequired(let found, let required) {
-            // A Volume store another version wrote is not converted.
-            throw NodeStoreError.wipeRequired("volumes.db has schema \(found), this version reads \(required)")
-        }
-        let localFetcher = CoalescingFetcher(ReadTally.wrap("store", broker))
+        let volumes = try VolumeStores(
+            directory: configuration.storagePath, root: configuration.chainPath, hosted: configuration.hostedChildren
+        )
+        let localFetcher = CoalescingFetcher(ReadTally.wrap("store", volumes))
         let retentionScope = [
             configuration.nexusGenesisCID,
             configuration.address.key,
@@ -98,7 +98,7 @@ enum BootRecovery {
             nexusGenesisCID: configuration.nexusGenesisCID
         )
         return Stores(
-            broker: broker,
+            stores: volumes,
             localFetcher: localFetcher,
             retentionScope: retentionScope,
             durableMempoolOwner: durableMempoolOwner,

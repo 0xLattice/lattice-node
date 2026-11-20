@@ -116,7 +116,8 @@ though it were a complete boundary.
 ```text
 <storage>/
   state.db             facts, headers, child proofs, indexes, cursors, state diffs, local mempool
-  volumes.db           shared materialized content and retained roots
+  volumes/<chain>.db   each hosted chain's content and retained roots (the root's
+                       also holds the constants, the operator's pins and the mempool's)
   volume-bundles.db    cache: per block, the Volume roots served together
 ```
 
@@ -127,13 +128,14 @@ the node is stopped.
 Persistence is content-first: referenced Volumes become durable before the
 fact transaction that names them. One admission's Volumes (a block's once
 its execution found it valid or it was mined here, or the post-states of
-one step) are one `volumes.db` transaction,
+one step) are one transaction of their chain's Volume store, store by store,
 then retained. The complete `NodeBatch` then commits in one SQLite transaction
 across every affected chain path, including each path's headers, child
 proofs, and sync cursors. A crash cannot leave part of a block's content or a
-parent-level half of a multi-level grind.
+parent-level half of a multi-level grind; one between two chains' stores
+leaves content no fact names, which the next start sweeps.
 
-Content stays in `volumes.db` because a retention scope names it, and each
+Content stays in its chain's Volume store because a retention scope names it, and each
 scope says why. A block's body (its own Volume and its transactions') is
 named by that block on its chain, so a transaction two blocks carry stays
 until both are let go of. What executions read and create (state, specs,
@@ -222,7 +224,7 @@ child indexes are read from `headers` and `child_indexes`, and the rest
 from `proof_entries`, so it is served byte for byte as credited. Each
 commits in the transaction of the work fact it produced.
 
-There are no storage migrations. `state.db` and `volumes.db` are one recovery
+There are no storage migrations. `state.db` and `volumes/` are one recovery
 unit and must be wiped together on a schema cutover.
 
 ## Networking and synchronization

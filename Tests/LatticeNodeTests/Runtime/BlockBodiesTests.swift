@@ -267,7 +267,7 @@ final class BlockBodiesTests: XCTestCase {
                 let heldChildren = await self.bodiesHeld(storage, of: children)
                 return heldRoots == [rootTip] && heldChildren == [childGenesis, childTip]
             }
-            let named = try await storage.broker.retainedRoots(scope: storage.scopes.body(childTip, at: Self.alpha))
+            let named = try await storage.broker(at: Self.alpha).retainedRoots(scope: storage.scopes.body(childTip, at: Self.alpha))
             XCTAssertTrue(named.contains(childTip), "a body is named by its block on its chain")
             await runtime.stop()
         }

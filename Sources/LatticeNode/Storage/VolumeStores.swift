@@ -1,0 +1,210 @@
+import Foundation
+import LatticeNodeCore
+import Synchronization
+import VolumeBroker
+import cashew
+
+/// One Volume store per hosted chain path, each a file of its own under
+/// `volumes/` beside `state.db`: a chain's content, its retention scopes and
+/// its counts live in its store and nowhere else, so a chain's tables hold
+/// only its rows and its writes do not grow with the chains hosted beside it
+/// (node design §4.9b). The root chain's store also holds what belongs to
+/// the node rather than a chain: the protocol constants, the Nexus genesis,
+/// the operator's policy modules and pins, and the mempool's journal pins.
+///
+/// Writes name their chain (`store(at:)`); reads compose. A chain's work
+/// reads its own store, then its ancestors' (a child's receipt proofs travel
+/// with its blocks, so a child's execution needs nothing of a sibling's),
+/// then the rest; a read by CID from the API or a peer, or one that names
+/// no chain, asks every store, root first.
+///
+/// The set changes only when the operator hosts or drops a chain; the
+/// lock guards that set, not any store, and is held only to read or
+/// change it.
+final class VolumeStores: ContentSource, Sendable {
+    let directory: URL
+    let rootPath: ChainPath
+    /// The root chain's store, open for the stores' life.
+    let root: DiskBroker
+    private let opened: Mutex<Open>
+
+    /// The open stores, and the same in reading order: the root's first,
+    /// then by depth and path.
+    private struct Open {
+        var stores: [ChainPath: DiskBroker]
+        var ordered: [(path: ChainPath, store: DiskBroker)]
+
+        init(_ stores: [ChainPath: DiskBroker]) {
+            self.stores = stores
+            ordered = stores.map { (path: $0.key, store: $0.value) }
+                .sorted { ($0.path.count, $0.path.joined(separator: "/")) < ($1.path.count, $1.path.joined(separator: "/")) }
+        }
+    }
+
+    /// Opens the root's store and each of `hosted`'s, and removes the store
+    /// of any chain no longer hosted.
+    init(directory storage: URL, root rootPath: ChainPath, hosted: [ChainPath]) throws {
+        directory = storage.appendingPathComponent("volumes", isDirectory: true)
+        self.rootPath = rootPath
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let wanted = Set([rootPath] + hosted)
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [] {
+            guard let path = Self.path(fileName: name), !wanted.contains(path) else { continue }
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+        }
+        root = try Self.open(directory, rootPath)
+        var stores = [rootPath: root]
+        for path in hosted where path != rootPath { stores[path] = try Self.open(directory, path) }
+        opened = Mutex(Open(stores))
+    }
+
+    /// The store of the chain at `path`, opened if it is not yet: every
+    /// write names the chain it is for.
+    func store(at path: ChainPath) throws -> DiskBroker {
+        if let held = opened.withLock({ $0.stores[path] }) { return held }
+        let made = try Self.open(directory, path)
+        return opened.withLock { open in
+            if let raced = open.stores[path] { return raced }
+            var stores = open.stores
+            stores[path] = made
+            open = Open(stores)
+            return made
+        }
+    }
+
+    /// The store of the chain at `path` if it is open.
+    func opened(at path: ChainPath) -> DiskBroker? {
+        opened.withLock { $0.stores[path] }
+    }
+
+    /// Every open store, the root's first, then by depth and path.
+    var all: [DiskBroker] {
+        opened.withLock { $0.ordered.map(\.store) }
+    }
+
+    /// Every open store with its chain, the root's first.
+    var byChain: [(path: ChainPath, store: DiskBroker)] {
+        opened.withLock { $0.ordered }
+    }
+
+    /// The stores the work of the chain at `path` reads, in order: its own,
+    /// its ancestors' nearest first, then every other.
+    func reading(at path: ChainPath) -> [DiskBroker] {
+        let lineage = (rootPath.count...max(rootPath.count, path.count)).reversed().map { Array(path.prefix($0)) }
+        return opened.withLock { open in
+            lineage.compactMap { open.stores[$0] } + open.ordered.filter { !lineage.contains($0.path) }.map(\.store)
+        }
+    }
+
+    /// A content source over `reading(at:)`.
+    func source(at path: ChainPath) -> any ContentSource {
+        Reading(stores: self, path: path)
+    }
+
+    /// The chain at `path` is no longer hosted: its store closes and its
+    /// file goes, with everything in it. A read in flight on it finishes on
+    /// the file it opened.
+    func remove(at path: ChainPath) {
+        guard path != rootPath else { return }
+        opened.withLock { open in
+            var stores = open.stores
+            stores[path] = nil
+            open = Open(stores)
+        }
+        let file = directory.appendingPathComponent(Self.fileName(path))
+        for suffix in ["", "-wal", "-shm"] {
+            try? FileManager.default.removeItem(atPath: file.path + suffix)
+        }
+    }
+
+    // MARK: - Reads by CID, every store
+
+    func fetch(_ cids: Set<String>) async -> [String: Data] {
+        var found: [String: Data] = [:]
+        var missing = cids
+        for store in all {
+            guard !missing.isEmpty else { break }
+            let held = await store.fetchDataLocal(cids: missing)
+            found.merge(held) { first, _ in first }
+            missing.subtract(held.keys)
+        }
+        return found
+    }
+
+    func fetchDataLocal(cid: String) async -> Data? {
+        for store in all { if let held = await store.fetchDataLocal(cid: cid) { return held } }
+        return nil
+    }
+
+    func fetchVolumeLocal(root cid: String) async -> SerializedVolume? {
+        for store in all { if let held = await store.fetchVolumeLocal(root: cid) { return held } }
+        return nil
+    }
+
+    func hasVolume(root cid: String) async -> Bool {
+        for store in all where await store.hasVolume(root: cid) { return true }
+        return false
+    }
+
+    /// What no scope names goes, store by store.
+    func sweep() async throws {
+        for store in all { _ = try await store.sweep() }
+    }
+
+    /// Each store's scopes beginning with `prefix`, with its chain.
+    func retainedScopes(prefix: String) async throws -> [(store: DiskBroker, scope: String)] {
+        var listed: [(store: DiskBroker, scope: String)] = []
+        for store in all { listed += try await store.retainedScopes(prefix: prefix).map { (store, $0) } }
+        return listed
+    }
+
+    /// Each store's counted scopes beginning with `prefix`.
+    func countedScopes(prefix: String) async throws -> [(store: DiskBroker, scope: String)] {
+        var listed: [(store: DiskBroker, scope: String)] = []
+        for store in all { listed += try await store.countedScopes(prefix: prefix).map { (store, $0) } }
+        return listed
+    }
+
+    private struct Reading: ContentSource {
+        let stores: VolumeStores
+        let path: ChainPath
+
+        func fetch(_ cids: Set<String>) async -> [String: Data] {
+            var found: [String: Data] = [:]
+            var missing = cids
+            for store in stores.reading(at: path) {
+                guard !missing.isEmpty else { break }
+                let held = await store.fetchDataLocal(cids: missing)
+                found.merge(held) { first, _ in first }
+                missing.subtract(held.keys)
+            }
+            return found
+        }
+    }
+
+    // MARK: - Files
+
+    private static func open(_ directory: URL, _ path: ChainPath) throws -> DiskBroker {
+        let file = directory.appendingPathComponent(fileName(path)).path
+        do {
+            return try DiskBroker(path: file)
+        } catch BrokerError.migrationRequired(let found, let required) {
+            // A Volume store another version wrote is not converted.
+            throw NodeStoreError.wipeRequired("\(fileName(path)) has schema \(found), this version reads \(required)")
+        }
+    }
+
+    /// A chain's file: each directory name percent-encoded, joined by dots.
+    static func fileName(_ path: ChainPath) -> String {
+        path.map { $0.addingPercentEncoding(withAllowedCharacters: allowed) ?? $0 }.joined(separator: ".") + ".db"
+    }
+
+    static func path(fileName name: String) -> ChainPath? {
+        guard name.hasSuffix(".db") else { return nil }
+        let parts = name.dropLast(3).split(separator: ".", omittingEmptySubsequences: false)
+        let path = parts.compactMap { String($0).removingPercentEncoding }
+        return path.count == parts.count && !path.isEmpty ? path : nil
+    }
+
+    private static let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
+}
