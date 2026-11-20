@@ -111,8 +111,8 @@ the runtime to them:
    journal), then `publish`, then every other effect in order. This is the
    loop's one deliberate wait. Content a job stored (a body, a mined block)
    is stored before the effect that names it. After the effects the step's
-   retention runs, none of it needed to be right: the body working set's
-   let-go, then each chain's state (the counts' move or commit, then the
+   retention runs, none of it needed to be right: the bodies of blocks found
+   invalid and the body working set's let-go, then each chain's state (the counts' move or commit, then the
    window's let-go), the read cache's order, then the reads of the blocks
    the step executed. A crash anywhere in it is repaired by the next start
    (`RetentionCrashTests`).

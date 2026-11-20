@@ -14,6 +14,8 @@ extension NodeRuntime {
         /// tip as of the last step: what the working set compares to let
         /// go of a body when the operator keeps none beyond it.
         var executedThisStep: [BodyKey] = []
+        /// Blocks this step found invalid, whose bodies go after its effects.
+        var excludedThisStep: [BodyKey] = []
         var bodyTips: [ChainPath: String] = [:]
         /// Each level's tip the kept state was last moved to, or held back
         /// at (none: move it at the next settle), and the blocks executed or
@@ -73,10 +75,11 @@ extension NodeRuntime {
             }
             if configuration.blockBodies == .none { executedThisStep.append(contentsOf: persistedBodyKeys) }
             readsDone.append(contentsOf: persistedBodyKeys)
-            // A block found invalid is no block: its body goes.
+            // A block found invalid is no block: its body goes after the
+            // step's effects (`settleBodies`).
             for (path, levelBatch) in batch.levels {
                 for case .exclusion(let excluded) in levelBatch.facts.flatMap(\.facts) {
-                    await storage.releaseBody(excluded.blockHash, at: path)
+                    excludedThisStep.append(BodyKey(path: path, cid: excluded.blockHash))
                     readsDone.append(BodyKey(path: path, cid: excluded.blockHash))
                 }
             }
@@ -111,10 +114,13 @@ extension NodeRuntime {
             counts.auditMoved()
         }
 
-        /// The working set, when the operator keeps no bodies beyond it:
-        /// a body stays while it is its chain's tip. One that executed this
-        /// step and is not, and the tip another block replaced, are let go.
+        /// The bodies of the blocks this step found invalid go. Then the
+        /// working set, when the operator keeps no bodies beyond it: a body
+        /// stays while it is its chain's tip. One that executed this step
+        /// and is not, and the tip another block replaced, are let go.
         mutating func settleBodies(_ levels: [ChainPath: ChainCore], configuration: NodeConfiguration) async {
+            for key in excludedThisStep { await storage.releaseBody(key.cid, at: key.path) }
+            excludedThisStep.removeAll()
             guard configuration.blockBodies == .none else { return }
             let executed = Dictionary(grouping: executedThisStep, by: \.path)
             executedThisStep.removeAll()
