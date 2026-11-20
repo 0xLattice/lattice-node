@@ -37,6 +37,8 @@ extension NodeRuntime {
         /// when the operator changes them.
         let levelReads: PublishedValue<[ChainPath: ChainReads]>
         let hosted: PublishedValue<Set<ChainPath>>
+        /// Counts submissions on stale templates (`MiningMetrics`).
+        let miningMetrics: MiningMetrics
         let inputs: Inputs
         let gate: NodeRuntimeInputGate
         let helloTimeout: Duration
@@ -114,6 +116,7 @@ extension NodeRuntime {
             levelReads: PublishedValue<[ChainPath: ChainReads]>,
             hosted: PublishedValue<Set<ChainPath>>,
             templateDigest: PublishedValue<String>,
+            miningMetrics: MiningMetrics,
             inputs: Inputs,
             gate: NodeRuntimeInputGate,
             helloTimeout: Duration,
@@ -136,6 +139,7 @@ extension NodeRuntime {
             self.outputs = outputs
             self.levelReads = levelReads
             self.hosted = hosted
+            self.miningMetrics = miningMetrics
             self.inputs = inputs
             self.remote = remote
             self.bodyFetches = BodyFetches(storage: storage, remote: remote, inputs: inputs)
@@ -224,6 +228,14 @@ extension NodeRuntime {
                 if case .templateRequested = mining, !mined(path) {
                     reply.resume(throwing: TemplateError.executing)
                     return true
+                }
+                // Work on a template whose digest is no longer the one
+                // miners were last told of (`miningEvents()`) is stale; one
+                // whose work this node does not know cannot be told.
+                if case .submitWork(_, let workID, _) = mining,
+                   let template = core.levels[path]?.mining.templates.template(workID),
+                   let current = readModel.views[path]?.templateDigest, template.digest != current {
+                    miningMetrics.submittedOnStaleTemplate()
                 }
                 nextReply += 1
                 replies[id] = (path, reply)

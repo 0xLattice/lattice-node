@@ -440,6 +440,7 @@ extension NodeRuntime {
     public func miningTemplate(
         _ request: MiningTemplateRequest
     ) async throws -> MiningTemplateResponse {
+        let started = ContinuousClock.now
         let chainPath = configuration.chainPath
         // One plan for every level the template carries: each hosted
         // child's recipient and minimum work by path.
@@ -456,6 +457,7 @@ extension NodeRuntime {
         guard case .template(let template) = try await ask({
             .templateRequested(replyID: $0, plan)
         }) else { throw NodeRuntimeError.stopped }
+        miningMetrics.templates.observe(started.duration(to: .now))
         return MiningTemplateResponse(
             workID: template.workID,
             block: template.block,
@@ -477,7 +479,20 @@ extension NodeRuntime {
         templateDigest.updates()
     }
 
+    /// A miner's nonce for `request.workID`, answered and timed by outcome.
     public func submitWork(_ request: SubmitWorkRequest) async throws -> SubmitWorkResponse {
+        let started = ContinuousClock.now
+        do {
+            let response = try await work(request)
+            miningMetrics.submitted(response.disposition.rawValue, after: started.duration(to: .now))
+            return response
+        } catch {
+            miningMetrics.submitted(MiningMetrics.outcome(of: error), after: started.duration(to: .now))
+            throw error
+        }
+    }
+
+    private func work(_ request: SubmitWorkRequest) async throws -> SubmitWorkResponse {
         guard !request.workID.isEmpty, request.workID.utf8.count <= _wireAtomCapacity else {
             throw NodeAPIError.invalidWorkID
         }
@@ -663,7 +678,8 @@ extension NodeRuntime {
             overlayPeers: peers,
             mempoolTransactions: snapshot?.mempoolCount ?? 0,
             processStartTime: processStartTime,
-            chains: chains
+            chains: chains,
+            mining: miningMetrics.snapshot
         ))
     }
 }

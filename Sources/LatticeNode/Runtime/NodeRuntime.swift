@@ -70,6 +70,9 @@ public final class NodeRuntime: Sendable {
     /// The root's template digest, published as it changes: see
     /// `miningEvents()`.
     let templateDigest: PublishedValue<String>
+    /// Template and submission answer times, and submissions on stale
+    /// templates, for `/metrics`.
+    let miningMetrics = MiningMetrics()
     /// The RPC read surface, over `published` and the view.
     public let reads: ChainReads
     /// Each hosted child level's read surface, over its own published
@@ -451,6 +454,7 @@ public final class NodeRuntime: Sendable {
             levelReads: publishedLevelReads,
             hosted: hosted,
             templateDigest: templateDigest,
+            miningMetrics: miningMetrics,
             inputs: inputs,
             gate: gate,
             helloTimeout: helloTimeout,

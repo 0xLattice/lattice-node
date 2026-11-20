@@ -16,6 +16,9 @@ struct NodeMetricsSample: Sendable {
     /// Every hosted chain, the root first: its tip heights, and when its
     /// acted-on tip last moved (nil before it has a tip).
     let chains: [Chain]
+    /// Template and submission answer times, and submissions on stale
+    /// templates (`MiningMetrics`); nil renders none.
+    let mining: MiningMetrics.Snapshot?
 
     struct Chain: Sendable {
         let path: [String]
@@ -38,7 +41,8 @@ struct NodeMetricsSample: Sendable {
         overlayPeers: Int,
         mempoolTransactions: Int,
         processStartTime: Date,
-        chains: [Chain] = []
+        chains: [Chain] = [],
+        mining: MiningMetrics.Snapshot? = nil
     ) {
         self.chainPath = chainPath
         self.validatedTipHeight = validatedTipHeight
@@ -47,6 +51,7 @@ struct NodeMetricsSample: Sendable {
         self.mempoolTransactions = mempoolTransactions
         self.processStartTime = processStartTime
         self.chains = chains
+        self.mining = mining
     }
 }
 
@@ -114,6 +119,35 @@ func renderNodeMetrics(_ sample: NodeMetricsSample) -> String {
         "Each hosted chain's jobs waiting for a worker.",
         sample.chains.compactMap { chain in chain.jobsQueued.map { (label(chain.path), String($0)) } }
     )
+    if let mining = sample.mining {
+        func histogram(_ name: String, _ help: String, _ series: [(String, MiningMetrics.Histogram.Snapshot)]) {
+            output += "# HELP \(name) \(help)\n# TYPE \(name) histogram\n"
+            let bounds = MiningMetrics.bounds.map { "\($0)" } + ["+Inf"]
+            for (labels, histogram) in series {
+                for (bound, count) in zip(bounds, histogram.cumulative) {
+                    output += "\(name)_bucket{\(labels),le=\"\(bound)\"} \(count)\n"
+                }
+                output += "\(name)_sum{\(labels)} \(histogram.seconds)\n"
+                output += "\(name)_count{\(labels)} \(histogram.count)\n"
+            }
+        }
+        histogram(
+            "lattice_template_build_seconds",
+            "Time to answer a mining template request with a template, from the request reaching the node to its template.",
+            [(chain, mining.templates)]
+        )
+        histogram(
+            "lattice_work_submission_seconds",
+            "Time to answer a work submission, by outcome: the disposition answered (canonicalized, acceptedSide, childOnly, duplicate, invalid), unknownWork, missesSearchTarget, or error.",
+            mining.submissions.map { ("\(chain),outcome=\"\($0.outcome)\"", $0.1) }
+        )
+        family(
+            "lattice_work_submissions_stale_total",
+            "Work submissions on a template whose digest was no longer the root's, so miners had been told to fetch another.",
+            [(chain, String(mining.staleSubmissions))],
+            type: "counter"
+        )
+    }
     family(
         "process_start_time_seconds",
         "Start time of the process since unix epoch in seconds.",

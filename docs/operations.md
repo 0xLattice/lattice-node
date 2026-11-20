@@ -835,6 +835,31 @@ reacquired or re-mined according to their specs and network availability.
 and node-wide `lattice_overlay_peers`, `lattice_mempool_transactions` and
 `process_start_time_seconds`.
 
+For mining, under the root's `chain` label:
+
+- `lattice_template_build_seconds`: a histogram of the time to answer a
+  template request with a template, from the request reaching the node
+  (queueing, the build job, and the answer); refusals (`executing`, `busy`,
+  `buildFailed`) are not counted;
+- `lattice_work_submission_seconds{outcome=...}`: a histogram of the time to
+  answer a work submission, by the disposition answered (`canonicalized`,
+  `acceptedSide`, `childOnly`, `duplicate`, `invalid`), the refusal
+  (`unknownWork`, `missesSearchTarget`), or `error` (a malformed work ID, or a
+  submission the node could not finish); an outcome appears once seen;
+- `lattice_work_submissions_stale_total`: submissions on a template whose
+  digest was no longer the root's when the submission arrived, so the
+  coordinator had been told to fetch another (`GET /mining/events`). Its
+  work may still count (a side block, or a child's block); a submission of
+  work the node no longer holds (`unknownWork`) cannot be told stale.
+
+Outcome 10's measures (node-design §1) read from these: the 99th
+percentile, e.g.
+`histogram_quantile(0.99, rate(lattice_template_build_seconds_bucket[1h]))`,
+and the stale share,
+`rate(lattice_work_submissions_stale_total[1h]) / sum without (outcome) (rate(lattice_work_submission_seconds_count[1h]))`.
+Each submission is one share at the template's search target, so the stale
+share of submissions is the stale share of work at a steady search target.
+
 `deploy/prometheus/lattice-alerts.yml` has alert rules on these: a chain
 behind and still, a chain stalled with no reason, content no peer serves,
 a chain not caught up an hour after start, no peers, and a restart loop.
@@ -945,4 +970,3 @@ If the repair node stops at the same block, the cause is something else.
 
 Determine whether the code listener or nginx produced the response. The node's
 limits are listener-wide (`--public-read-max-rate`, `--public-submit-rate`); a
-429 from the node means the listener as a whole is over its ceiling.

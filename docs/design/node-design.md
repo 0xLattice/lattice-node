@@ -108,7 +108,7 @@ from the sync benchmark (`Benchmarks/sync`).
 | 7 Cost | CPU, peak memory, disk kept, disk written, bandwidth; root alone and per extra chain | benchmark, node | The root on one CPU at 5 ms a block and 256 MiB; a chain's writes per block do not grow with the chains hosted | About 4.4 ms CPU per block, 190 MiB, 90 MB kept, 2.9 GB written per benchmark sync; on macOS each added chain of 1,498 blocks costs about 5.8–7.1 s CPU, 18–26 MiB memory, 11–13 MiB kept, 12 MiB of bandwidth, and, with a Volume store per chain (schema epoch 50), 176–192 MiB written (120–131 KiB a block), flat with the chains already hosted, against 307–483 MiB rising before, at CPU within 3% and about thirteen open files a chain (§2, §4.9b) |
 | 8 Transfers | Time from deposit to withdrawal on a parent–child pair; share that complete | network, tests | Every transfer completes; in the time its two chains' confirmations take | Not measured |
 | 9 Availability | Content requests served; how long a body stays unavailable; hosts per chain | node, network | Two hosts per chain keep every body; none unavailable for an hour | Not measured |
-| 10 Mining | Time to answer a template request and a submission; share of work on stale templates | node | A template in 100 ms and a submission in 50 ms at the 99th percentile; at most 1% of work on stale templates | Not measured |
+| 10 Mining | Time to answer a template request and a submission; share of work on stale templates | node | A template in 100 ms and a submission in 50 ms at the 99th percentile; at most 1% of work on stale templates | Measurable, not yet read from a running node: `/metrics` reports both answer times as histograms and the submissions on a template whose digest had changed (operator guide, Observability) |
 
 **How the targets were chosen.** Each serves its outcome, in the order of
 §1, and reuses what the node already reports.
@@ -1685,7 +1685,13 @@ contract.
   chain inside shared stores; the targets are §1's.
 - Propagation, stale-block and child hash-share measurements on the network.
   Not done: they need observations of the live network.
-- Cross-chain transfer completion; template latency. Not done.
+- Cross-chain transfer completion. Not done.
+- ~~Template latency~~ Done: `/metrics` reports the time to answer a template
+  request (`lattice_template_build_seconds`) and a submission, by outcome
+  (`lattice_work_submission_seconds`), timed in the RPCs, and the
+  submissions on a stale template (`lattice_work_submissions_stale_total`),
+  judged by the loop against the root's template digest. Outcome 10 is now
+  measurable; its figures wait for a running node.
 - ~~Operator alerts~~ Done: per-chain `/metrics` (what the tip waits on, the
   latches, queued jobs) and `deploy/prometheus/lattice-alerts.yml`.
   Recovery procedures: the operator guide's common failures, with the
