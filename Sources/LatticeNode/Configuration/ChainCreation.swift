@@ -27,6 +27,13 @@ public enum ChainCreation {
         }
     }
 
+    /// The operator unhosted `path` on a stopped node: the release is
+    /// recorded in its store, and the node lets go of the chain's data at
+    /// its next start. The caller holds the storage lock.
+    public static func recordRelease(_ path: String, layout: HostLayout) throws {
+        try NodeStore.recordRelease(of: path, storage: layout.chainDirectory(for: ChainAddress.nexus))
+    }
+
     /// Whether `path` was created here (its spec is under `specs/`).
     public static func isCreated(_ path: String, layout: HostLayout) -> Bool {
         FileManager.default.fileExists(atPath: layout.childSpec(for: path).path)

@@ -120,12 +120,19 @@ set, GHOST, continuity) are the architecture doc's and are checked by
 - **NODE-STORAGE-002.j** — A Volume the operator pins is named by the
   operator scope until it is unpinned, whatever the other rules keep. Pinned
   by `OperatorPinTests` and `DaemonHTTPTests.testOperatorPinRoutes`.
-- **NODE-STORAGE-002.l** — A chain no longer hosted, unhosted or left out
-  of the configuration at a start, keeps nothing that only it named: its
-  facts go first, in one transaction, then what its own scopes name, so no
-  fact names content that is gone; what another scope names stays. Pinned
-  by `HostChainsRuntimeTests.testUnhostingAChainLetsGoOfItsDataAndHostingItAgainSyncsIt`
-  and `HostChainsRuntimeTests.testAStartWithoutAChainLetsGoOfItsData`.
+- **NODE-STORAGE-002.l** — Only the operator's unhost lets go of a
+  chain's data; a chain left out of the configuration keeps it. An unhost
+  is recorded before anything goes, then what the chain's own scopes name
+  goes, then its facts with the record, in one transaction: content before
+  facts, as a fact naming absent content is no fault (002.f). A release a
+  stop or a failure cut short is finished at the next start. What another
+  scope names stays. Not covered: a block a mined grind or a built child
+  block pins for the chain while the unhost runs stays pinned until the
+  chain is hosted and unhosted again. Pinned by
+  `HostChainsRuntimeTests.testUnhostingAChainLetsGoOfItsDataAndHostingItAgainSyncsIt`,
+  `HostChainsRuntimeTests.testUnhostingAChainLeavesASiblingServedAndSyncing`,
+  `HostChainsRuntimeTests.testAChainLeftOutOfTheConfigurationKeepsItsData`
+  and `HostChainsRuntimeTests.testAReleaseCutShortIsFinishedAtTheNextStart`.
 - **NODE-STORAGE-002.d** — Levels write parent before child; a crash
   between them restores with the child behind, never ahead. Pinned by
   `ChildLevelRestartTests.testACrashBetweenLevelWritesRestoresTheParentAhead`.

@@ -1060,8 +1060,9 @@ final class StateWindowTests: XCTestCase {
             scope: storage.scopes.staging(at: Self.alpha), roots: [node.configuration.nexusGenesisCID]
         )
         try await runtime.host([])
+        try await runtime.release(Self.alpha)
         let kept = try await windowHeights(storage, at: Self.alpha)
-        XCTAssertEqual(kept, [], "a chain no longer hosted keeps no state window")
+        XCTAssertEqual(kept, [], "an unhosted chain keeps no state window")
         let counts = try await storage.broker.countedScopes(prefix: storage.scopes.counted(at: Self.alpha))
         XCTAssertEqual(counts, [], "nor counts")
         let staged = try await storage.broker.retainedRoots(scope: storage.scopes.staging(at: Self.alpha))
@@ -1118,8 +1119,11 @@ final class StateWindowTests: XCTestCase {
         XCTAssertFalse(nexusRules.isEmpty, "Nexus keeps its spec too")
 
         try await runtime.host([])
+        let stopped = try await storage.broker.retainedRoots(scope: storage.scopes.rules(at: Self.alpha))
+        XCTAssertTrue(stopped.contains(moduleCID), "a chain left out of the hosted list keeps its rules")
+        try await runtime.release(Self.alpha)
         let left = try await storage.broker.retainedRoots(scope: storage.scopes.rules(at: Self.alpha))
-        XCTAssertEqual(left, [], "a chain no longer hosted keeps no rules")
+        XCTAssertEqual(left, [], "an unhosted chain keeps no rules")
         _ = try await storage.broker.sweep()
         let kept = await storage.broker.hasVolume(root: moduleCID)
         XCTAssertFalse(kept, "its policy module goes")
@@ -1147,8 +1151,9 @@ final class StateWindowTests: XCTestCase {
 
     /// A start moves what an earlier version kept a hosted chain's tip
     /// state under into the chain's window at its tip's height, and forgets
-    /// that version's counts. What either kept for a chain no longer hosted
-    /// goes.
+    /// that version's counts. What an earlier version kept for a chain not
+    /// hosted goes; the windows of one only left out of the configuration
+    /// stay until the operator unhosts it.
     func testAStartMovesWhatEarlierVersionsKeptIntoTheWindow() async throws {
         let node = try host(keyByte: 0xd3, state: .recent)
         do {
@@ -1173,8 +1178,8 @@ final class StateWindowTests: XCTestCase {
         }
         let window = try await storage.broker.retainedRoots(scope: storage.scopes.window(at: ["Nexus"], height: 0))
         XCTAssertEqual(window, [node.configuration.nexusGenesisCID], "what they named is in the window at the tip's height")
-        let gone = try await windowHeights(storage, at: ["Nexus", "Gone"])
-        XCTAssertEqual(gone, [], "nothing is kept for a chain no longer hosted")
+        let kept = try await windowHeights(storage, at: ["Nexus", "Gone"])
+        XCTAssertEqual(kept, [5], "a chain left out of the configuration keeps its window")
         // Forgotten after the last of those scopes is let go of.
         try await eventually("the counts are forgotten") {
             try await storage.store.legacyStateCountRows() == 0
@@ -1182,9 +1187,9 @@ final class StateWindowTests: XCTestCase {
         await runtime.stop()
     }
 
-    /// A start on `recent` lets go of the counts of a chain no longer
-    /// hosted with its staging, and of the staging of a chain whose counts
-    /// have a marker, and hands the loop that marker.
+    /// A start on `recent` lets go of the staging of a chain whose counts
+    /// have a marker, and hands the loop that marker. A chain left out of
+    /// the configuration keeps its counts and staging.
     func testAStartLetsGoOfCountsNoLongerNeeded() async throws {
         let node = try host(keyByte: 0xf6, state: .recent)
         let genesis = node.configuration.nexusGenesisCID
@@ -1206,9 +1211,12 @@ final class StateWindowTests: XCTestCase {
         let markers = await storage.settleCountedScopes(hosted: [["Nexus"]])
         XCTAssertEqual(markers, [["Nexus"]: "0 \(genesis) 0 \(genesis)"])
         let counts = try await storage.broker.countedScopes(prefix: storage.scopes.countedPrefix)
-        XCTAssertEqual(counts, [storage.scopes.counted(at: ["Nexus"])], "the counts of a chain no longer hosted go")
+        XCTAssertEqual(
+            counts, [storage.scopes.counted(at: ["Nexus"]), storage.scopes.counted(at: ["Nexus", "Gone"])],
+            "the counts of a chain left out of the configuration stay"
+        )
         let staging = try await storage.broker.retainedScopes(prefix: storage.scopes.stagingPrefix)
-        XCTAssertEqual(staging, [], "with its staging, and the staging of counts with a marker")
+        XCTAssertEqual(staging, [storage.scopes.staging(at: ["Nexus", "Gone"])], "the staging of counts with a marker goes")
     }
 
     /// Counts kept on `recent` are kept with the chain on `all`, then

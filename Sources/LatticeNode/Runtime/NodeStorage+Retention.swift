@@ -11,7 +11,7 @@ import cashew
 ///   (state, specs, policy modules) and the Nexus genesis block.
 /// - When the operator does not keep all state, a chain's rules scope holds
 ///   its spec and the policy modules the spec names, which every block of
-///   the chain reads, until it is no longer hosted.
+///   the chain reads, until the operator unhosts it.
 /// - When the operator keeps recent state, a chain's window scopes hold
 ///   what its last executions stored, and its counted scope (counted
 ///   roots, not retained ones) every node of its current state and what
@@ -126,16 +126,6 @@ extension NodeStorage {
         return Set([block.spec.rawCID] + spec.wasmPolicies.map(\.moduleCID))
     }
 
-    /// When the chain at `path` is no longer hosted: its spec and policy
-    /// modules go.
-    nonisolated func letGoOfRules(at path: ChainPath) async {
-        do {
-            try await release(scope: scopes.rules(at: path))
-        } catch {
-            syncTrace("rules of \(path) not released: \(error)")
-        }
-    }
-
     /// At a start: what a block read goes when the block has executed (a
     /// stop came between), or when the operator keeps all state.
     nonisolated func letGoOfReads() async {
@@ -228,51 +218,73 @@ extension NodeStorage {
         try await broker.releaseRetainedRoots(scope: scopes.operatorPins, roots: [root])
     }
 
-    // MARK: - A chain no longer hosted
+    // MARK: - A chain the operator unhosted
 
-    /// When the chain at `path` is no longer hosted: everything kept only
-    /// for it goes, and hosting it again syncs it from peers like any new
-    /// chain. Its facts go first, in one transaction, and its local
-    /// transactions, so no fact names content that is gone; then what its
-    /// own scopes name: its blocks' bodies and what they read, its spec and
-    /// policy modules, its state windows and its counts. What another scope
-    /// also names stays: another chain's blocks, the operator's pins, and
-    /// the chain scope on `all`. Facts that could not be dropped keep the
-    /// rest for the next start.
-    nonisolated func letGo(ofChain path: ChainPath) async {
+    /// The operator unhosted the chain at `path` (`lattice child unhost`),
+    /// and `hosted` is what this node hosts now: everything kept only for
+    /// it, and for the chains under it this node does not host, goes;
+    /// hosting it again syncs it from peers like any new chain. A chain
+    /// that is only left out of the configuration keeps its data. The
+    /// release is recorded first, so one a stop or a failure cuts short is
+    /// finished at the next start.
+    nonisolated func release(_ path: ChainPath, hosted: Set<ChainPath>) async throws {
+        try await store.recordReleases([path])
+        await letGo(under: path, hosted: hosted)
+    }
+
+    /// At a start, with `hosted` what the configuration hosts: each release
+    /// recorded and not finished is finished, or forgotten when the chain
+    /// is hosted again (its facts may then name content that went, which
+    /// is read again from peers).
+    nonisolated func finishReleases(hosted: Set<ChainPath>) async {
         do {
-            bundles.forget(try await store.forget(path))
+            for path in try await store.pendingReleases() {
+                if hosted.contains(path) {
+                    try await store.cancelRelease(path)
+                } else {
+                    await letGo(under: path, hosted: hosted)
+                }
+            }
         } catch {
-            syncTrace("facts of \(path) not dropped: \(error)")
-            return
+            logLine("lattice-node: unhosted chains not let go of at start: \(error)")
         }
+    }
+
+    /// `path` and every chain under it this store holds and `hosted` does
+    /// not name, deepest first: `path`'s own record goes last.
+    private nonisolated func letGo(under path: ChainPath, hosted: Set<ChainPath>) async {
+        let held = (try? await store.chainPaths()) ?? []
+        let chains = held.union([path]).filter { $0.starts(with: path) && !hosted.contains($0) }
+        for chain in chains.sorted(by: { $0.count > $1.count }) { await letGo(ofChain: chain) }
+    }
+
+    /// Everything kept only for the chain at `path` goes, content first:
+    /// its blocks' bodies and what they read, its state windows, spec and
+    /// policy modules, counts and staging, and its local and pooled
+    /// transactions; then its facts, with its release's record, in one
+    /// transaction. A fact naming content that is gone is no fault: it is
+    /// read again from peers (NODE-STORAGE-002.f), so a release cut short
+    /// leaves a store the node runs on. What another scope also names stays:
+    /// another chain's blocks, the operator's pins, and the chain scope on
+    /// `all`.
+    nonisolated func letGo(ofChain path: ChainPath) async {
+        let chain = path.joined(separator: "/")
         do {
+            for prefix in [scopes.bodyPrefix + chain + ":", scopes.readsPrefix + chain + ":", scopes.windowPrefix(at: path)] {
+                try await broker.releaseRetainedScopes(try await broker.retainedScopes(prefix: prefix))
+            }
+            try await release(scope: scopes.rules(at: path))
+            try await broker.dropCountedScope(scope: scopes.counted(at: path))
+            try await release(scope: scopes.staging(at: path))
             for item in try await localTransactions() where item.transaction.body.node?.chainPath == path {
                 try await removeLocalTransaction(item.transactionCID)
             }
+            try await releaseLivePool(of: path)
+            let blocks = try await store.forget(path)
+            bundles.forget(blocks)
+            logLine("lattice-node: let go of \(chain): \(blocks.count) blocks, and what only they named")
         } catch {
-            syncTrace("local transactions of \(path) not dropped: \(error)")
-        }
-        let chain = path.joined(separator: "/") + ":"
-        for prefix in [scopes.bodyPrefix, scopes.readsPrefix] {
-            do {
-                try await broker.releaseRetainedScopes(try await broker.retainedScopes(prefix: prefix + chain))
-            } catch {
-                syncTrace("\(prefix + chain) not released: \(error)")
-            }
-        }
-        await letGoOfWindows(at: path)
-        await letGoOfRules(at: path)
-        await dropCounted(at: path)
-    }
-
-    /// At a start: what is kept for a chain the configuration no longer
-    /// hosts goes, as when it was unhosted.
-    nonisolated func letGoOfChains(except hosted: Set<ChainPath>) async {
-        do {
-            for path in try await store.chainPaths().subtracting(hosted) { await letGo(ofChain: path) }
-        } catch {
-            syncTrace("chains no longer hosted not let go of at start: \(error)")
+            logLine("lattice-node: \(chain) not let go of, tried again at the next start: \(error)")
         }
     }
 
@@ -301,17 +313,6 @@ extension NodeStorage {
         } catch {
             syncTrace("state below \(height) not let go of: \(error)")
         }
-    }
-
-    /// When the chain at `path` is no longer hosted: every state window it
-    /// kept goes.
-    nonisolated func letGoOfWindows(at path: ChainPath) async {
-        guard let listed = try? await broker.retainedScopes(prefix: scopes.windowPrefix(at: path)) else { return }
-        for scope in listed { await letGoOfWindow(scope) }
-    }
-
-    private nonisolated func letGoOfWindow(_ scope: String) async {
-        do { try await release(scope: scope) } catch { syncTrace("\(scope) not released: \(error)") }
     }
 
     // MARK: - State: the whole current state, on recent
@@ -565,23 +566,13 @@ extension NodeStorage {
         }
     }
 
-    /// When the chain at `path` is no longer hosted: its counts go, and
-    /// what its staging held.
-    nonisolated func dropCounted(at path: ChainPath) async {
-        do {
-            try await broker.dropCountedScope(scope: scopes.counted(at: path))
-        } catch {
-            syncTrace("counts of \(path) not dropped: \(error)")
-        }
-        await releaseStaging(at: path)
-    }
-
     /// At a start, with `hosted` the chains this node hosts: the markers of
     /// the hosted chains' counts when the operator keeps recent state, and
     /// the staging of each chain with one let go of (a chain without keeps
-    /// it for its state sync). Counts kept for a chain no longer hosted go,
-    /// as do every chain's when the operator keeps recent state no more:
-    /// on `all` what they counted is kept with the chain first.
+    /// it for its state sync). A chain not hosted keeps its counts and
+    /// staging, inert, until the operator unhosts it. Every chain's counts
+    /// go when the operator keeps recent state no more: on `all` what a
+    /// hosted chain's counted is kept with the chain first.
     nonisolated func settleCountedScopes(hosted: Set<ChainPath>) async -> [ChainPath: String] {
         func path(_ scope: String, after prefix: String) -> ChainPath {
             scope.dropFirst(prefix.count).split(separator: "/").map(String.init)
@@ -591,7 +582,7 @@ extension NodeStorage {
         do {
             for scope in try await broker.countedScopes(prefix: scopes.countedPrefix) {
                 let chain = path(scope, after: scopes.countedPrefix)
-                guard !recent || !hosted.contains(chain) else { continue }
+                guard !recent else { continue }
                 if configuration.state == .all, hosted.contains(chain) {
                     try await retainHeld(Array(try await broker.countedState(scope: scope).counts.keys))
                 }
@@ -605,7 +596,7 @@ extension NodeStorage {
             }
             for scope in try await broker.retainedScopes(prefix: scopes.stagingPrefix) {
                 let chain = path(scope, after: scopes.stagingPrefix)
-                if markers[chain] != nil || !recent || !hosted.contains(chain) { try await release(scope: scope) }
+                if markers[chain] != nil || !recent { try await release(scope: scope) }
             }
         } catch {
             syncTrace("counts not settled at start: \(error)")
@@ -619,8 +610,9 @@ extension NodeStorage {
     /// goes from there as any state does, a window later on `recent`; the
     /// counts it kept are forgotten. The state windows of a run that kept
     /// recent state stay: they go by height as the tips move, or are kept
-    /// with everything else on `all`. What either kept for a chain no
-    /// longer hosted goes, as do its spec and policy modules.
+    /// with everything else on `all`, and a chain not hosted keeps them,
+    /// with its spec and policy modules, until the operator unhosts it.
+    /// What an earlier version kept for a chain not hosted goes.
     nonisolated func moveLegacyState(tips: [ChainPath: UInt64]) async {
         func path(_ scope: String, after prefix: String) -> ChainPath {
             scope.dropFirst(prefix.count).split(separator: "/").map(String.init)
@@ -632,15 +624,6 @@ extension NodeStorage {
             for scope in listed {
                 do { try await move(scope) } catch { syncTrace("\(scope) not moved at start: \(error)") }
             }
-        }
-        await each(scopes.windowsPrefix) { scope in
-            guard let colon = scope.lastIndex(of: ":") else { return }
-            if tips[path(String(scope[..<colon]), after: scopes.windowsPrefix)] == nil {
-                await letGoOfWindow(scope)
-            }
-        }
-        await each(scopes.rulesPrefix) { scope in
-            if tips[path(scope, after: scopes.rulesPrefix)] == nil { try await release(scope: scope) }
         }
         for prefix in scopes.legacyStatePrefixes {
             await each(prefix) { scope in

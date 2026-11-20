@@ -24,7 +24,8 @@ public enum NodeEvent: Sendable {
     /// when it was last hosted (nothing for a new one).
     case host(ChainPath, facts: StoredFacts, specs: [ChainSpec], cursors: [String: StreamCursor])
     /// Stop hosting a child level and every level below it. What they
-    /// journaled stays.
+    /// journaled stays: the shell lets go of it only when the operator
+    /// unhosts the chain, never because the configuration left it out.
     case unhost(ChainPath)
 }
 

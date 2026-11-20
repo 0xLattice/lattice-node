@@ -257,6 +257,17 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         }
     }
 
+    /// The live pool's pins of the transactions of the chain at `path` go:
+    /// its pool went with its level.
+    func releaseLivePool(of path: [String]) async throws {
+        var gone: Set<String> = []
+        for root in livePinnedMempoolRoots {
+            let read = try? await VolumeImpl<Transaction>(rawCID: root).resolveRecursive(source: broker)
+            if read?.node?.body.node?.chainPath == path { gone.insert(root) }
+        }
+        try await updateLiveMempoolRoots(adding: [], removing: gone)
+    }
+
     func removeLocalTransaction(_ transactionCID: String) async throws {
         try await acquireMutationOperation()
         defer { releaseOperation() }

@@ -317,9 +317,12 @@ ancestors too: a chain stays hosted, implied, while a chain under it is
 listed, and `unhost` says so (`Nexus/Alpha: no longer listed; still hosted
 for Nexus/Alpha/Beta`); it stops once those are unhosted too. Its peers and
 windows, if any layer sets them, stay where they are, inert until it is
-hosted again. What the node stored only for it goes (see
-[What a node keeps](operations.md#what-a-node-keeps)); hosting it again
-syncs it from peers like any new chain.
+hosted again. Once it is no longer hosted, `unhost` has the node let go of
+what it stored only for it (a stopped node does so at its next start; see
+[What a node keeps](operations.md#what-a-node-keeps)), and hosting it again
+syncs it from peers like any new chain. Removing a chain from the
+configuration any other way (editing or deleting a fragment, a start
+without it) stops it and keeps its data.
 
 ### Committing a child block on its parent
 
