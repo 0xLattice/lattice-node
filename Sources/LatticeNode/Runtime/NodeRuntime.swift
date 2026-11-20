@@ -462,7 +462,7 @@ public final class NodeRuntime: Sendable {
         ))
         loop = Task {
             var state = initial.take()
-            await state.retention.start(state.core.levels, configuration: state.configuration)
+            await state.retention.start(state.core.levels, counts: &state.counts)
             state.refreshView()
             // After the loop ends, inputs are only drained until the stream
             // finishes, so no RPC waits forever.
@@ -481,7 +481,7 @@ public final class NodeRuntime: Sendable {
             }
             state.cancelAll()
             await state.jobs.stop()
-            await state.retention.stop()
+            await state.counts.stop()
         }
     }
 
@@ -569,7 +569,7 @@ extension NodeRuntime {
                 if ready.isEmpty { maintenance.sessionsClosed() }
                 if ready.count > oldValue.values.filter(\.ready).count {
                     startNetworkMaintenance()
-                    retention.sessionReady()
+                    for path in counts.retryWaiting() { retention.resettle(path) }
                 }
             }
         }
@@ -588,8 +588,10 @@ extension NodeRuntime {
         var jobs: JobPool
         /// The body fetches, their waits and the body windows.
         var bodyFetches: BodyFetches
-        /// The loop's side of retention: bodies, reads, state and counts.
+        /// The loop's side of retention: bodies, reads and state.
         var retention: Retention
+        /// The counts of each chain's current state, and their repairs.
+        var counts: Counts
         /// The read views and template digests published for RPC.
         var readModel: ReadModel
         /// Peer search, provider announcements and each chain's current
@@ -645,10 +647,12 @@ extension NodeRuntime {
             self.inputs = inputs
             self.remote = remote
             self.bodyFetches = BodyFetches(storage: storage, remote: remote, inputs: inputs)
+            let state = storage.stateBackend
             self.retention = Retention(
-                storage: storage, remote: remote, inputs: inputs,
+                storage: storage, state: state,
                 configured: Set([configuration.chainPath] + configuration.hostedChildren)
             )
+            self.counts = Counts(state: state, remote: remote, inputs: inputs)
             self.readModel = ReadModel(inputs: inputs, templateDigest: templateDigest)
             self.transactionFetches = TransactionFetches(ivy: ivy, inputs: inputs)
             self.maintenance = Maintenance(ivy: ivy, inputs: inputs, capabilities: remote.peerCapabilities, peerMemory: peerMemory)
@@ -742,9 +746,7 @@ extension NodeRuntime {
             case .maintenance:
                 await maintenance.readPins(from: storage, configuration: configuration)
                 startNetworkMaintenance()
-                if configuration.state == .recent {
-                    await retention.maintain(core.levels, configuration: configuration)
-                }
+                await retention.maintain(core.levels, counts: &counts)
                 return true
             case .currentPeers(let current):
                 maintenance.counted(current)
@@ -756,7 +758,10 @@ extension NodeRuntime {
                 refreshView(path)
                 return true
             case .counted(let path, let id, let repair):
-                await retention.repaired(path, repair: id, repair, core.levels, configuration: configuration)
+                if counts.repaired(path, repair: id, repair) {
+                    retention.resettle(path)
+                    await retention.settleState(core.levels, counts: &counts)
+                }
                 return true
             case .read(let read):
                 read(core.levels)
@@ -799,7 +804,10 @@ extension NodeRuntime {
             retention.configure(listed.union([core.rootPath]))
             for path in core.ordered where path != core.rootPath && !listed.contains(path) {
                 guard await step(.unhost(path)) else { throw NodeRuntimeError.stopped }
-                await retention.unhost(path)
+                // The count repair first: none writes after the chain's
+                // data is let go of.
+                await counts.unhost(path)
+                retention.unhost(path)
             }
             var failure: (any Error)?
             for path in next.hostedChildren where core.levels[path] == nil {
@@ -1116,7 +1124,7 @@ extension NodeRuntime {
                 persisting += SyncTrace.now() - before
             }
             await retention.settleBodies(core.levels, configuration: configuration)
-            await retention.settleState(core.levels, configuration: configuration)
+            await retention.settleState(core.levels, counts: &counts)
             await bodyFetches.order(reordered)
             await retention.releaseReads()
             refreshView(core.touched)

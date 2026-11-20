@@ -41,13 +41,12 @@ extension NodeStorage {
     /// state.db transaction.
     nonisolated func persistNodeBatch(_ batch: NodeBatch, logID: String) async throws {
         var durable: [NodeFactBatch] = []
-        // What this step's executions created. An executed block's body was
-        // pinned under its block's name by the job that executed it.
-        var stored: [String] = []
-        // With recent state kept, or none: the state each level's
-        // executions stored, each under the height of the block that
-        // produced it (a batch's blocks keep their own windows).
-        var states: [ChainPath: [(height: UInt64?, roots: [String])]] = [:]
+        // Where what this step's executions created is kept, by scope
+        // (`StateBackend.keepExecuted`). An executed block's body was pinned
+        // under its block's name by the job that executed it. Every root
+        // retained is one this batch stores.
+        var retaining: [String: [String]] = [:]
+        let backend = stateBackend
         let storage = NodeImportStorage(storage: broker)
         for (path, level) in batch.levels.sorted(by: {
             $0.path.count != $1.path.count
@@ -82,42 +81,19 @@ extension NodeStorage {
                 try await VolumeImpl<ChainSpec>(node: spec).store(storer: storage)
             }
             let specs = await storage.takeStoredVolumeRoots()
-            let created = executed + specs
-            switch configuration.state {
-            case .all:
-                stored.append(contentsOf: created)
-            case .recent, .none:
-                // A state no block fact of the step names (none does today)
-                // joins the chain's newest window below.
-                states[path] = produced
-                stored.append(contentsOf: specs)
-            }
+            retaining.merge(try await backend.keepExecuted(produced, specs: specs, at: path)) { $0 + $1 }
             durable.append(NodeFactBatch(
                 path: path,
                 facts: level.facts,
                 headers: level.headers,
                 proofs: level.proofs,
                 cursors: level.cursors,
-                keepsStateDiffs: configuration.state == .recent
+                keepsStateDiffs: backend.keepsStateDiffs
             ))
         }
-        // Every root retained is one this batch stores.
-        var retaining: [String: [String]] = [:]
-        if !stored.isEmpty { retaining[retentionScope] = stored }
-        for (path, produced) in states {
-            for state in produced where !state.roots.isEmpty {
-                // A state of no known height goes with the newest the chain
-                // keeps: kept as long as that, never let go of before it.
-                let scope = if let height = state.height {
-                    scopes.window(at: path, height: height)
-                } else {
-                    try await broker.retainedScopes(prefix: scopes.windowPrefix(at: path)).max()
-                        ?? scopes.window(at: path, height: 0)
-                }
-                retaining[scope, default: []] += state.roots
-            }
-        }
-        try await broker.storeVolumesLocal(await storage.takeVolumes(), retaining: retaining)
+        try await broker.storeVolumesLocal(
+            await storage.takeVolumes(), retaining: retaining.filter { !$0.value.isEmpty }
+        )
         try await store.stageNodeFacts(durable, logID: logID)
     }
 
@@ -244,7 +220,7 @@ extension NodeStorage {
         var retaining: [String: [String]] = [:]
         var carried: [String: [String]] = [:]
         var bundled: [(root: String, roots: [String])] = []
-        let rulesScope = configuration.state == .all ? retentionScope : scopes.rules(at: path)
+        let backend = stateBackend
         for (cid, decoded) in blocks {
             do {
                 let volumes: [SerializedVolume]
@@ -272,8 +248,7 @@ extension NodeStorage {
                 let roots = Set(volumes.map(\.root))
                 let rules = await rules(of: block, fetcher: fetcher)
                 let body = roots.subtracting(rules).union([cid] + transactions)
-                var rest = roots.subtracting(body)
-                if configuration.state != .all { rest.formIntersection(rules) }
+                let (rulesScope, rest) = backend.keepWithValidBlock(roots.subtracting(body), rules: rules, at: path)
                 for volume in volumes where body.contains(volume.root) || rest.contains(volume.root) {
                     stored[volume.root] = volume
                 }

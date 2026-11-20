@@ -1203,7 +1203,7 @@ final class StateWindowTests: XCTestCase {
             )
             try await storage.broker.mergeRetainedRoots(scope: scopes.staging(at: ["Nexus"]), roots: [genesis])
         }
-        let markers = await storage.settleCountedScopes(hosted: [["Nexus"]])
+        let markers = await storage.stateBackend.settleCountedScopes(hosted: [["Nexus"]])
         XCTAssertEqual(markers, [["Nexus"]: "0 \(genesis) 0 \(genesis)"])
         let counts = try await storage.broker.countedScopes(prefix: storage.scopes.countedPrefix)
         XCTAssertEqual(counts, [storage.scopes.counted(at: ["Nexus"])], "the counts of a chain no longer hosted go")
