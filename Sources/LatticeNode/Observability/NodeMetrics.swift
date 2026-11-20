@@ -1,4 +1,5 @@
 import Foundation
+import LatticeNodeCore
 
 /// Prometheus text exposition format 0.0.4.
 public let nodeMetricsContentType = "text/plain; version=0.0.4"
@@ -89,8 +90,14 @@ func renderNodeMetrics(_ sample: NodeMetricsSample) -> String {
     )
     family(
         "lattice_chain_blocked_on",
-        "What each hosted chain's acted-on tip waits on, 1 for the current reason (atTip, headers, proofs, parent, bodies, bodiesUnavailable, execution, stalled).",
-        sample.chains.compactMap { chain in chain.blockedOn.map { ("\(label(chain.path)),on=\"\(escapeMetricLabelValue($0))\"", "1") } }
+        "What each hosted chain's acted-on tip waits on: every reason (atTip, headers, proofs, parent, bodies, bodiesUnavailable, execution, stalled), 1 for the current one and 0 for the rest.",
+        sample.chains.flatMap { chain in
+            chain.blockedOn.map { current in
+                ChainProgress.allCases.map { reason in
+                    ("\(label(chain.path)),on=\"\(escapeMetricLabelValue(reason.rawValue))\"", reason.rawValue == current ? "1" : "0")
+                }
+            } ?? []
+        }
     )
     family(
         "lattice_chain_synced",

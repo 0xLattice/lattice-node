@@ -115,6 +115,8 @@ final class LivenessStatusTests: XCTestCase {
         XCTAssertTrue(metrics.contains("lattice_chain_tip_height{chain=\"Nexus\",tier=\"weighed\"} \(height)"), metrics)
         // What an alert reads: why the chain waits, and its latches.
         XCTAssertTrue(metrics.contains("lattice_chain_blocked_on{chain=\"Nexus\",on=\"bodiesUnavailable\"} 1"), metrics)
+        // Every other reason reads 0, so one that ends does not vanish.
+        XCTAssertTrue(metrics.contains("lattice_chain_blocked_on{chain=\"Nexus\",on=\"atTip\"} 0"), metrics)
         XCTAssertTrue(metrics.contains("lattice_chain_headers_synced{chain=\"Nexus\"} 1"), metrics)
         XCTAssertTrue(metrics.contains("lattice_chain_synced{chain=\"Nexus\"} "), metrics)
         XCTAssertTrue(metrics.contains("lattice_chain_jobs_queued{chain=\"Nexus\"} "), metrics)
