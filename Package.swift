@@ -41,7 +41,7 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/0xLattice/VolumeBroker.git",
-            exact: "10.1.3"
+            exact: "10.3.1"
         ),
         // Lattice's own UInt256, declared for the core's and simulator's direct imports.
         .package(url: "https://github.com/0xLattice/UInt256.git", from: "2.0.0"),

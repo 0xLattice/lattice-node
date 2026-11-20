@@ -849,6 +849,10 @@ must be wiped before it runs this version: its store may hold facts whose
 state it never wrote, and a `stateBufferBytes` key left in `lattice.json` or
 `config.d` is refused at start.
 
+Schema epoch 49 moves `volumes.db` to the Volume store's schema v3, which
+drops a redundant index (about 14% of what a sync writes). Every node is
+wiped once to run it; an older store reports `wipe required`.
+
 ### `missingMaterializedVolume`
 
 A hosted child chain's genesis spec is in neither `volumes.db` nor this
