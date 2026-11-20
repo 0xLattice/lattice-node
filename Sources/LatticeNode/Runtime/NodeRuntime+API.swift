@@ -652,7 +652,8 @@ extension NodeRuntime {
             let tip = await reads.tip()
             chains.append(NodeMetricsSample.Chain(
                 path: path, validatedTipHeight: tip.height, weighedTipHeight: tip.bestHeaderHeight,
-                tipAdvancedAt: tip.sync?.tipAdvancedAt
+                tipAdvancedAt: tip.sync?.tipAdvancedAt, blockedOn: tip.sync?.blockedOn, synced: tip.sync?.synced,
+                headersSynced: tip.sync?.headersSynced, jobsQueued: tip.sync?.jobsQueued
             ))
         }
         return renderNodeMetrics(NodeMetricsSample(

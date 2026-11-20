@@ -1,0 +1,70 @@
+# Prometheus alerting rules for a Lattice node's /metrics.
+#
+# Each alert reads only what the node reports per chain path (`chain`).
+# Thresholds are starting points: the node design's liveness targets are the
+# owner's to set (docs/design/node-design.md, §1 measures and targets).
+groups:
+  - name: lattice-node
+    rules:
+      # A chain whose best header is above its acted-on tip, and whose tip
+      # has not moved for 30 minutes, is stalled (outcome 2).
+      - alert: LatticeChainBehindAndStill
+        expr: |
+          (
+            lattice_chain_tip_height{tier="weighed"}
+              - ignoring(tier) lattice_chain_tip_height{tier="validated"}
+          ) > 0
+          and on(chain)
+          (time() - lattice_chain_tip_advanced_timestamp_seconds) > 1800
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.chain }} is behind its best header and its tip has not moved for 30 minutes"
+          description: "Read GET /status?chain=<path>: sync.blockedOn and waiting say what it waits on. See docs/operations.md, Common failures."
+
+      # Behind with nothing under way for the next block: never expected.
+      - alert: LatticeChainStalled
+        expr: lattice_chain_blocked_on{on="stalled"} == 1
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.chain }} is behind with nothing under way for its next block"
+          description: "A stall with no wait the node can name is a bug; capture /status and the sync trace (LATTICE_SYNC_TRACE=1)."
+
+      # Waiting on content no peer serves, for an hour.
+      - alert: LatticeChainContentUnavailable
+        expr: lattice_chain_blocked_on{on="bodiesUnavailable"} == 1
+        for: 1h
+        labels:
+          severity: warn
+        annotations:
+          summary: "{{ $labels.chain }} waits on a block body, or its receipt proofs, that no peer serves"
+          description: "See docs/operations.md: 'A child chain stops at a block: receipt proofs not obtained'."
+
+      # Not caught up an hour after start: takes no peer transactions.
+      - alert: LatticeChainNotCaughtUp
+        expr: |
+          lattice_chain_synced == 0
+          and on() (time() - process_start_time_seconds) > 3600
+        for: 15m
+        labels:
+          severity: warn
+        annotations:
+          summary: "{{ $labels.chain }} has not caught up since the node started, and ignores peer transactions"
+
+      - alert: LatticeNoPeers
+        expr: lattice_overlay_peers == 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "The node has no overlay peers"
+
+      - alert: LatticeRestartLoop
+        expr: changes(process_start_time_seconds[1h]) > 3
+        labels:
+          severity: page
+        annotations:
+          summary: "The node restarted more than three times in an hour"

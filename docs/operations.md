@@ -810,14 +810,26 @@ reacquired or re-mined according to their specs and network availability.
 
 ## Observability
 
-`/metrics` is operator-only Prometheus text. Monitor at least:
+`/metrics` is operator-only Prometheus text. Per hosted chain path (label
+`chain`) it reports:
 
-- process restarts and clean-shutdown failures;
-- connected peer count;
-- Nexus and child act-on heights;
-- time since the last accepted Nexus block;
-- mempool size and template errors;
-- storage growth, free space, and backup age.
+- `lattice_chain_tip_height{tier="validated"|"weighed"}`: the acted-on tip
+  and the best header;
+- `lattice_chain_tip_advanced_timestamp_seconds`: when the acted-on tip
+  last moved;
+- `lattice_chain_blocked_on{on=...}`: what the tip waits on, 1 for the
+  current reason (`/status`'s `sync.blockedOn`);
+- `lattice_chain_synced`, `lattice_chain_headers_synced`: its latches;
+- `lattice_chain_jobs_queued`: its jobs waiting for a worker;
+
+and node-wide `lattice_overlay_peers`, `lattice_mempool_transactions` and
+`process_start_time_seconds`.
+
+`deploy/prometheus/lattice-alerts.yml` has alert rules on these: a chain
+behind and still, a chain stalled with no reason, content no peer serves,
+a chain not caught up an hour after start, no peers, and a restart loop.
+Their thresholds are starting points. Monitor also storage growth, free
+space and backup age, which the host's own exporter reports.
 
 Set `LATTICE_SYNC_TRACE=1` for temporary stderr tracing, or set it to a file
 prefix. The trace includes absolute chain paths and can grow without bound;

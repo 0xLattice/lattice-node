@@ -21,6 +21,13 @@ struct NodeMetricsSample: Sendable {
         let validatedTipHeight: UInt64?
         let weighedTipHeight: UInt64?
         let tipAdvancedAt: Double?
+        /// What its tip waits on (`ChainProgress`), its latches, and its jobs
+        /// waiting for a worker, as `/status` reports them; nil before the
+        /// chain's first step.
+        var blockedOn: String? = nil
+        var synced: Bool? = nil
+        var headersSynced: Bool? = nil
+        var jobsQueued: Int? = nil
     }
 
     init(
@@ -79,6 +86,26 @@ func renderNodeMetrics(_ sample: NodeMetricsSample) -> String {
         "lattice_chain_tip_advanced_timestamp_seconds",
         "When each hosted chain's acted-on tip last moved, in unix seconds; with tip heights below the weighed tip, an old one is a stall.",
         sample.chains.compactMap { chain in chain.tipAdvancedAt.map { (label(chain.path), String($0)) } }
+    )
+    family(
+        "lattice_chain_blocked_on",
+        "What each hosted chain's acted-on tip waits on, 1 for the current reason (atTip, headers, proofs, parent, bodies, bodiesUnavailable, execution, stalled).",
+        sample.chains.compactMap { chain in chain.blockedOn.map { ("\(label(chain.path)),on=\"\(escapeMetricLabelValue($0))\"", "1") } }
+    )
+    family(
+        "lattice_chain_synced",
+        "Whether each hosted chain has caught up since the process started (1) and so takes peer transactions.",
+        sample.chains.compactMap { chain in chain.synced.map { (label(chain.path), $0 ? "1" : "0") } }
+    )
+    family(
+        "lattice_chain_headers_synced",
+        "Whether each hosted chain has weighed a peer's whole log since the process started (1): its children read their peers, and it relays.",
+        sample.chains.compactMap { chain in chain.headersSynced.map { (label(chain.path), $0 ? "1" : "0") } }
+    )
+    family(
+        "lattice_chain_jobs_queued",
+        "Each hosted chain's jobs waiting for a worker.",
+        sample.chains.compactMap { chain in chain.jobsQueued.map { (label(chain.path), String($0)) } }
     )
     family(
         "process_start_time_seconds",
