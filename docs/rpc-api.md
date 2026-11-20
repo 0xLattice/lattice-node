@@ -873,7 +873,7 @@ log).
 
 ```json
 {"storage": "/var/lib/lattice/chains/Nexus",
- "stores": [{"name": "state.db", "bytes": 7352320}, {"name": "volumes.db", "bytes": 1744896}],
+ "stores": [{"name": "state.db", "bytes": 7352320}, {"name": "volumes", "bytes": 1744896}],
  "totalBytes": 15183872, "freeBytes": 112642072576}
 ```
 

@@ -174,7 +174,7 @@ The running tree stores data under `node-data/chains/Nexus/`:
 
 ```text
 state.db
-volumes.db
+volumes/            a Volume store per hosted chain
 volume-bundles.db
 storage.lock
 ```

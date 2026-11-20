@@ -567,7 +567,7 @@ rewards.
   specs/Nexus%2FAlpha.json
   chains/Nexus/
     state.db
-    volumes.db
+    volumes/             (a Volume store per hosted chain)
     volume-bundles.db
     storage.lock
   operator-tokens.json   (operatorTokens, when set)
