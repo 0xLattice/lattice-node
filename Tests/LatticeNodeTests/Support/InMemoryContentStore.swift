@@ -39,8 +39,6 @@ actor InMemoryContentStore: Fetcher, Storer, VolumeStorer, ContentSource, IvyCon
         entries[cid] = data
     }
 
-    func allEntries() -> [String: Data] { entries }
-
     func volume(root: String) -> SerializedVolume? { volumes[root] }
 
     // MARK: IvyContentSource

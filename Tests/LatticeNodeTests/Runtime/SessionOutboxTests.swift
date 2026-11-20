@@ -281,13 +281,6 @@ private extension Sequence {
     }
 }
 
-private extension SendMessageResult {
-    var isEnqueued: Bool {
-        if case .enqueued = self { return true }
-        return false
-    }
-}
-
 private extension Ivy {
     func setTestDelegateForOutbox(_ delegate: IvyDelegate) {
         self.delegate = delegate

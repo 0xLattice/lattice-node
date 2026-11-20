@@ -38,15 +38,6 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
         cid("safety-net-wire-\(generator.next())")
     }
 
-    /// `count` distinct canonical CIDs, sorted.
-    private func randomCIDs(
-        _ generator: inout SplitMix64, count: Int
-    ) -> [String] {
-        var set = Set<String>()
-        while set.count < count { set.insert(randomCID(&generator)) }
-        return set.sorted()
-    }
-
     private func randomInt(
         _ generator: inout SplitMix64, _ range: ClosedRange<Int>
     ) -> Int {
