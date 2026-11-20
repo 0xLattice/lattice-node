@@ -131,9 +131,15 @@ the runtime to them:
 | Returned transactions after a reorganisation | the rest queue | never: they go back to the pool, which judges them on its tip |
 | Body fetches | a task per body | cancelled when the body leaves its level's window (`cancelBody`), and when the level is no longer hosted |
 | Count repairs (check, heal, state sync) | a task, one per chain at a time | cancelled when the chain is no longer hosted; a result whose id is not the one running is dropped |
-| Maintenance passes | a task, one at a time | never: one asked for meanwhile runs next, once |
-| Transaction fetches | a task per announcement, at most 64 | never: bounded by the cap and the fetch's timeout; a fetched one already pooled is refused by the pool |
-| Header pages served, child indexes fetched, mined blocks stored | a task each | never: bounded by the serving budget, the request's deadline, the RPC |
+| Maintenance passes | a task (`NodeRuntime.spawn`), one at a time | never: one asked for meanwhile runs next, once |
+| Maintenance cadence | one task for the runtime's life | cancelled first when the node stops |
+| Transaction fetches | a task per announcement (`spawn`), at most 64 | never: bounded by the cap and the fetch's timeout; a fetched one already pooled is refused by the pool |
+| Header pages served, child indexes fetched, mined blocks stored | a task each (`spawn`) | never: bounded by the serving budget, the request's deadline, the RPC |
+| The wake timer | one task | a `wakeAt` at or after the pending wake keeps it; an earlier one cancels it and takes its place; a `tick` clears it |
+| A session's hello deadline | a timer per session | does nothing when the session is no longer that one, or became ready |
+| A level's fee reprojection | a timer, at most one per level | never: when it fires the view is refreshed from the core as it is then |
+| Relay upgrade (a direct connection for a relayed peer) | a task per relayed session | never: the connector bounds its attempts, and a session that cannot be upgraded stays relayed |
+| Messages to a peer (`SessionOutbox`) | a task per message, in order per session | ends, sending nothing, when the session ends or the transport refuses it; bounded per session by message and byte caps |
 
 Work that runs to completion needs no rule beyond these: its result is a
 fact, or is judged again where it lands, and its cost is bounded. A problem
