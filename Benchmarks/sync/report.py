@@ -62,6 +62,7 @@ def run(d):
     if not r['traced']: return r
     jobs = collections.defaultdict(lambda: [0, 0.0]); bodies = collections.defaultdict(lambda: [0, 0.0])
     stored = collections.defaultdict(lambda: [0, 0, 0, 0, 0, 0]); r['stored'] = stored
+    received = collections.defaultdict(lambda: [0, 0, 0]); r['received'] = received
     steps = [0, 0.0, 0.0, 0.0]; inside = None
     for line in open(os.path.join(d, 'trace'), errors='replace'):
         if '[bench] follower start' in line: inside = True; continue
@@ -76,6 +77,10 @@ def run(d):
             s = stored[m[1]]; s[0] += 1
             for i in range(5): s[i + 1] += int(m[i + 2])
             continue
+        m = re.search(r'\] message received (\S+) bytes (\d+)', line)
+        if m: x = received['message ' + m[1]]; x[0] += 1; x[1] += int(m[2]); continue
+        m = re.search(r'\] content received entries (\d+) bytes (\d+) cidBytes (\d+)', line)
+        if m: x = received['volume entries']; x[0] += int(m[1]); x[1] += int(m[2]); x[2] += int(m[3]); continue
         m = re.search(r'node-runtime step .* core ([\d.]+) ms total ([\d.]+) ms persist ([\d.]+) ms', line)
         if m: steps[0] += 1; steps[1] += float(m[1]); steps[2] += float(m[2]); steps[3] += float(m[3])
     if inside is None: fail(d, 'no follower start marker in the trace')
@@ -132,6 +137,16 @@ for r in runs:
     print('|---|---|---|---|---|---|---|')
     for kind, s in sorted(r['stored'].items()):
         print('| %s | %d | %d | %d | %.1f | %.1f | %d |' % (kind, s[0], s[1], s[2], s[3] / MiB, s[4] / MiB, s[5]))
+for r in runs:
+    if not r.get('received'): continue
+    print()
+    print('Received from peers, %s (payloads, before transport framing; loopback carried %s MiB)' % (
+        r['name'], '%.0f' % (r['net'] / MiB) if r['net'] is not None else '-'))
+    print()
+    print('| what | count | MiB | of which CID text MiB |')
+    print('|---|---|---|---|')
+    for what, x in sorted(r['received'].items(), key=lambda kv: -kv[1][1]):
+        print('| %s | %d | %.1f | %s |' % (what, x[0], x[1] / MiB, '%.1f' % (x[2] / MiB) if x[2] else '-'))
 for r in runs:
     if not r['reads']: continue
     print()

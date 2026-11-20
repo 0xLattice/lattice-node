@@ -382,6 +382,14 @@ public struct IvyRootContentSource: Sendable {
             if complete { await creditServer(of: response, volume: volume) }
             if !valid, let peer = response.servedBy { await report(context.rootCID, peer) }
             context.trace.record(response, complete: complete)
+            SyncTrace.log(chain: [], "content \(Self.receivedLine(volume))")
+        }
+
+        /// A trace line's account of a Volume a peer sent: its entries,
+        /// their bytes and their CIDs' text.
+        static func receivedLine(_ volume: SerializedVolume) -> String {
+            "received entries \(volume.entries.count) bytes \(volume.entries.values.reduce(0) { $0 + $1.count })"
+                + " cidBytes \(volume.entries.keys.reduce(0) { $0 + $1.utf8.count })"
         }
 
         public func fetch(_ cids: Set<String>) async -> [String: Data] {
@@ -419,6 +427,7 @@ public struct IvyRootContentSource: Sendable {
                     let blamed = valid ? nil : response.servedBy.flatMap { reported.insert($0).inserted ? $0 : nil }
                     if let blamed { await report(rootCID, blamed) }
                     context.trace.record(response, complete: complete)
+                    SyncTrace.log(chain: [], "content \(Self.receivedLine(volume))")
                     guard !valid, bundled != nil || blamed != nil else { break }
                     if let session = bundled?.session {
                         peerCapabilities.revoke(ChainHandshake.volumeBundle, from: session)
