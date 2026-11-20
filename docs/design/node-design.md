@@ -98,11 +98,11 @@ from the sync benchmark (`Benchmarks/sync`).
 | 3 Security | For each child, the share of parent hash rate whose templates commit it | network | **Owner to set** | Not measured |
 | 4 Promises | Acknowledged transactions or accepted blocks lost after a crash or power loss | tests | Zero | Zero in tests |
 | 5 Compatibility | Partitions or refused messages between this version and the previous | two-version runs | Zero | Zero in CI |
-| 6 Change | Layers a change to each concern crosses | code | One for each | Most cross one; state retention crosses three; identifiers are in 32 files (§5) |
+| 6 Change | Layers a change to each concern crosses | code | One for each | Most cross one; state retention, one to replace its scheme (`StateBackend`) and three to change the counted scheme; identifiers are in 32 files (§5) |
 | 6 Change | Rules a caller must keep that the code does not enforce | code, review | Zero beyond the write order | Zero for writes |
 | 6 Change | Components with no conventional equivalent, each with its reason | this document | Each justified in writing | Two (§5) |
 | 6 Change | Review rounds per change; repeated holes of one kind | review | A second round of the same kind stops the change | The write-behind layer took four rounds of ordering holes |
-| 6 Change | The largest files, where unrelated changes meet | code | **Owner to set** | The daemon's command file, 1,741 lines; the loop's file, 1,406 (start-up and boot included), after Phase 2 moved six components out (§4.1) |
+| 6 Change | The largest files, where unrelated changes meet | code | **Owner to set** | The daemon's command file, 1,741 lines; the loop's file, 1,404 (start-up and boot included), after Phase 2 moved seven components out (§4.1) |
 | 7 Cost | CPU, peak memory, disk kept, disk written, bandwidth; root alone and per extra chain | benchmark, node | **Owner to set** (the root on one CPU) | About 4.4 ms CPU per block, 190 MiB, 90 MB kept, 2.9 GB written per benchmark sync; per-chain cost not measured |
 | 8 Transfers | Time from deposit to withdrawal on a parent–child pair; share that complete | network, tests | **Owner to set** | Not measured |
 | 9 Availability | Content requests served; how long a body stays unavailable; hosts per chain | node, network | **Owner to set** | Not measured |
@@ -261,12 +261,16 @@ runs it; a job's or task's result comes back as an input. The components
 are structs the loop owns, each in its own file under `LatticeNode/Runtime/`
 with only its own state: `JobPool` (workers and queues), `BodyFetches`
 (body fetches, their waits, the body windows), `Retention` (the loop's side
-of retention: what is let go of as tips move, counts and their repair),
-`ReadModel` (views and template digests, rebuilt from the core),
-`Maintenance` (peer search, announcements, current peers) and
-`TransactionFetches`. None reads another's state; the loop passes what one
-needs. So a change to retention, the read views or maintenance touches its
-own file, not the core or how events are processed.
+of retention: what is let go of as tips move), `Counts` (each chain's counts
+on `recent` and their repair), `ReadModel` (views and template digests,
+rebuilt from the core), `Maintenance` (peer search, announcements, current
+peers) and `TransactionFetches`. No component calls another or reaches into
+its state: the loop reads what one needs of another (a level's body window,
+a chain's current peers, its queued jobs) and passes it in, and passes
+`Counts` to `Retention`'s settles, which wait on it. Most hold only what is
+rebuilt from the core or the store; `Counts` holds a state sync's result,
+the only copy until its commit. So a change to retention, the read views or
+maintenance touches its own file, not the core or how events are processed.
 
 **Why.** Sync was rebuilt several times after nodes stopped making progress;
 a deterministic core the simulator steps exactly as the node does makes
@@ -604,17 +608,40 @@ the stores themselves. **Judgment.** Keep SQLite.
 whatever no scope or count still names, in the same transaction; a full
 sweep runs at start.
 
-| Scope | Keeps | Released |
-|---|---|---|
-| chain | constants, Nexus genesis; on `state: all` every state created | never |
-| body (per block) | a block's own Volume, transactions, receipt witness | with `blockBodies: none`, once another block is the tip; when the chain is no longer hosted |
-| rules (per chain) | spec and policy modules, when state is not `all` | when the chain is no longer hosted |
-| reads (per block) | the state a stored block reads, until it executes | after execution or invalidity, and at start; when the chain is no longer hosted |
-| window (per chain and height) | what executions stored, on `recent` | once the tip is a window above, after the counts reach the tip; when the chain is no longer hosted |
-| counted (per chain) | on `recent`, every node of the current state, by count | moved with the tip; dropped when the chain is no longer hosted |
-| staging | what a state sync or heal fetched | once the counts move; when the chain is no longer hosted |
-| operator | pins | on unpin |
-| durable / live mempool | journaled and pooled transactions | as they leave |
+| Scope | Keeps | Released | For | Concept or detail |
+|---|---|---|---|---|
+| chain | constants, Nexus genesis; on `state: all` every state created | never | what every node needs for good; on `all`, the archive | concept |
+| body (per block) | a block's own Volume, transactions, receipt witness | with `blockBodies: none`, once another block is the tip; when the chain is no longer hosted | serving and re-executing blocks | concept (bodies, beside state) |
+| rules (per chain) | spec and policy modules, when state is not `all` | when the chain is no longer hosted | what every block of a hosted chain reads | detail: with `all` they are in chain; a path scheme keeps them as chain metadata |
+| reads (per block) | the state a stored block reads, until it executes | after execution or invalidity, and at start; when the chain is no longer hosted | a fetched block's inputs surviving until it runs | detail of a content-addressed store |
+| window (per chain and height) | what executions stored, on `recent` and `none` | once the tip is a window above, after the counts reach the tip; when the chain is no longer hosted | recent history: reorganisations within the window without a peer | concept (geth's in-memory layers and reverse diffs); per-height scopes are the detail |
+| counted (per chain) | on `recent`, every node of the current state, by count | moved with the tip; dropped when the chain is no longer hosted | the current state | the concept is current state; counting nodes is this scheme's detail |
+| staging | what a state sync or heal fetched | once the counts move; when the chain is no longer hosted | a sync's progress surviving a crash before it commits | detail |
+| operator | pins | on unpin | the operator's promise | concept (beside state) |
+| durable / live mempool | journaled and pooled transactions | as they leave | the journal's promise; the live pool's cache | concept / detail |
+
+**The interface.** `StateBackend` (`Runtime/StateBackend.swift`) is what the
+node does with executed state: keep what a block's storing and execution
+stored (`keepExecuted`, `keepStored`, `keepWithValidBlock`), let go of what
+a block read once it executed or was found invalid (`releaseReads`), move
+with each chain's act-on tip (`letGo` below the window, and the counts'
+move, commit, heal, sync and audit, roll-back included: a move to a tip on
+another branch within the window is a move like any other), bring the
+current state into reach at a start (`start`: reads, earlier versions'
+state, counted scopes); a chain the configuration no longer hosts has its
+data let go of (`NodeStorage.letGoOfChains`). The
+operator's `state` picks its scheme once, when the store opens; every
+decision that depends on it is in that one type, as an enum-dispatched
+struct: the three schemes share most of their mechanism (`none` is `recent`
+with a window of one and no counts), so a protocol would add a type per
+scheme and duplicate it. A replacing backend (geth's path scheme the
+nearest shape) changes that type's insides and the mechanism under it, not
+its callers: `persistNodeBatch`, block storing, and the loop's `Retention`
+and `Counts`. The mechanism stays in `NodeStorage+Retention.swift`
+(scopes, pins, releases, the counts' moves, checks, heals and syncs) and
+`NodeStore+StatePins.swift` (state diffs). Reads stay on the store's
+fetchers. Bodies and operator pins are beside it, not inside: they are
+content the node serves or promised to keep, whatever state it keeps.
 
 On `recent` the counts move with the tip once per window, are checked at
 start and maintenance, healed when roots are missing, and replaced by a state
@@ -638,11 +665,12 @@ commits per block, a quarter of each step.
 **Performance.** This is where the disk goes: about 2.9 GB written to keep
 90 MB. Retention's CPU is small (about 1.5%), but every content read is
 decoded and hash-checked, a large share of CPU, because state is stored as
-hash-addressed encoded nodes. **Ease of change.** Hard: retention crosses
-three layers — the loop's side (`Runtime/Retention.swift`, behind the
-calls the loop makes after each step), the store
-(`NodeStorage+Retention.swift`, 631 lines; `NodeStore+StatePins.swift`, 181),
-and VolumeBroker's counted index. **Judgment.** The largest remaining
+hash-addressed encoded nodes. **Ease of change.** Medium: the policy is one
+type, `StateBackend` (303 lines), behind which the loop (`Retention`, 129;
+`Counts`, 238) and the write paths call; a new scheme replaces it and the
+mechanism under it (`NodeStorage+Retention.swift`, 521 lines;
+`NodeStore+StatePins.swift`, 181), and changing the counted scheme itself
+still crosses into VolumeBroker's counted index. **Judgment.** The largest remaining
 machinery and the biggest disk cost. No established client counts references
 to retain trie nodes on disk; geth moved away from hash-keyed state. Replace
 when an objective needs it, with geth's path scheme the nearest shape — but
@@ -927,11 +955,11 @@ blocks may anchor to. Those deserve dedicated adversarial scenarios.
 | Sync wire format | `ChainSyncWire.swift`, its adapter, one call site | one | one codec at the edge, as others; text JSON where others use binary | **easy** |
 | Identifiers | text CIDs in 32 files, the core included | all | others use fixed 32-byte hashes and convert at the edge | **hard but mechanical** |
 | Write order and persistence | the loop's persist effect and two store files | two | Bitcoin's order | **easy** |
-| State retention | retention and state-pin store files, `Retention` (the loop's side), VolumeBroker's counted index | three | no established client counts references on disk | **hard** |
-| The shell's loop | `NodeRuntime.swift` (1,406, start-up and boot included) | one | receives input, steps the core, dispatches effects to the components below, takes results back; Bitcoin Core's `PeerManager` and validation-interface subscribers, geth's handler and fetchers | **easy** |
+| State retention | `StateBackend` (the policy, one type), the retention and state-pin store files (the mechanism), VolumeBroker's counted index; the loop's `Retention` and `Counts` call only `StateBackend` | one to replace the scheme, three to change the counted one | the interface is triedb's or a `StateProvider`'s; no established client counts references on disk | **medium** |
+| The shell's loop | `NodeRuntime.swift` (1,404, start-up and boot included) | one | receives input, steps the core, dispatches effects to the components below, takes results back; Bitcoin Core's `PeerManager` and validation-interface subscribers, geth's handler and fetchers | **easy** |
 | Read model | `ReadModel.swift` (167) | one | a chain-head subscriber that rebuilds views; owns no authoritative state | **easy** |
-| Maintenance | `Maintenance.swift` (285) | one | peer search and provider announcement, off the loop | **easy** |
-| Body and transaction fetches | `BodyFetches.swift` (207), `TransactionFetches.swift` (93) | one | geth's block and transaction fetchers | **easy** |
+| Maintenance | `Maintenance.swift` (286) | one | peer search and provider announcement, off the loop | **easy** |
+| Body and transaction fetches | `BodyFetches.swift` (214), `TransactionFetches.swift` (93) | one | geth's block and transaction fetchers | **easy** |
 | Work queues | `JobPool.swift` (137) | one | one pool with queues | **easy** |
 | Mining | separate processes behind HTTP | one | `getblocktemplate` | **easy** |
 | Operator surface | `LatticeCtl`, `LatticeNodeDaemon` | one | systemd, drop-in configuration | **easy** |
@@ -983,18 +1011,21 @@ and to change.
   effect order, and hands each effect to one component under
   `LatticeNode/Runtime/`, passing in what it reads of the others —
   `ReadModel.swift` (167 lines: views, digests, fee reprojections),
-  `Retention.swift` (331: the body working set, reads to release, state
-  tips, counts and their repair), `Maintenance.swift` (285: peer search,
-  passes, announcements, current peers, pins), `BodyFetches.swift` (207:
-  fetches, waits, body windows and the read cache's order),
-  `JobPool.swift` (137: running and queued jobs), `TransactionFetches.swift`
-  (93). `NodeRuntime.swift` went from 2,232 lines to 1,406, about 860 of
-  them the loop. Sessions stay in the loop: their changes start maintenance
-  and retry repairs, and every network input reads them.
-- Put state retention behind one interface (load current state, apply a
+  `Retention.swift` (129: the body working set, reads to release, state
+  tips), `Counts.swift` (238: counts and their repair), `Maintenance.swift`
+  (286: peer search, passes, announcements, current peers, pins),
+  `BodyFetches.swift` (214: fetches, waits, body windows and the read
+  cache's order), `JobPool.swift` (137: running and queued jobs),
+  `TransactionFetches.swift` (93). `NodeRuntime.swift` went from 2,232
+  lines to 1,404 (the 2,223 measured earlier was before Phase 1's last
+  changes), about 860 of them the loop. Sessions stay in the loop: their
+  changes start maintenance and retry repairs, and every network input
+  reads them.
+- ~~Put state retention behind one interface (load current state, apply a
   block, roll back, read, prune), without changing its behaviour, and write
   down what each retention scope is for; some may be implementation details,
-  not concepts.
+  not concepts.~~ Done, behaviour unchanged: `StateBackend` (§4.9), with
+  each scope's purpose and whether it is a concept in §4.9's table.
 - Write the loop's contract (§4.1a) and the persistence order down, and test
   a crash at every boundary, retention releases and count repair included.
 - Bound the worker queues; make per-chain resource use visible (§4.17).
