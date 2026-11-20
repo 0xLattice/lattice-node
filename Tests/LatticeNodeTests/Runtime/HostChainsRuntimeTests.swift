@@ -27,7 +27,7 @@ final class HostChainsRuntimeTests: XCTestCase {
 
     private func start(
         keyByte: UInt8, hosted: [[String]], peers: [PeerEndpoint] = [], storagePath: URL? = nil,
-        stopAtTeardown: Bool = true
+        stopAtTeardown: Bool = true, observe: NodeRuntime.JobObserver? = nil
     ) async throws -> (runtime: NodeRuntime, endpoint: PeerEndpoint, storage: NodeStorage) {
         let port = NetworkTransportTestPorts.allocate()
         let configuration = try NodeConfiguration(
@@ -39,7 +39,9 @@ final class HostChainsRuntimeTests: XCTestCase {
             bootstrapPeers: peers,
             externalAddress: "127.0.0.1",
             hostedChildren: hosted,
-            childSpecs: [Self.alpha: Self.spec, Self.beta: Self.betaSpec].filter { hosted.contains($0.key) }
+            childSpecs: [Self.alpha: Self.spec, Self.beta: Self.betaSpec].filter { hosted.contains($0.key) },
+            // One block per connect: a held connect holds one block.
+            connectBatch: observe == nil ? NodeConfiguration.defaultConnectBatch : 1
         )
         let overlay = IvyConfig(
             signingKey: configuration.signingKey,
@@ -52,7 +54,10 @@ final class HostChainsRuntimeTests: XCTestCase {
             mode: .overlay
         )
         let storage = try await NodeStorage.open(configuration: configuration)
-        let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration, overlay: overlay)
+        let runtime = try await NodeRuntime.start(
+            storage: storage, configuration: configuration, overlay: overlay,
+            workers: observe == nil ? max(1, ProcessInfo.processInfo.activeProcessorCount - 1) : 2, observeJob: observe
+        )
         // A node the test stops itself is not held: its store is opened again.
         if stopAtTeardown { addTeardownBlock { await runtime.stop() } }
         return (runtime, PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port), storage)
@@ -203,6 +208,57 @@ final class HostChainsRuntimeTests: XCTestCase {
         try await eventually("the follower syncs Alpha again", within: .seconds(20)) {
             await self.servesAgain(app, dropped)
         }
+    }
+
+    /// A chain dropped while one of its blocks is being executed: the
+    /// change returns at once, the node keeps answering, and the chain's
+    /// data is let go of once that execution ends.
+    func testAChainDroppedWhileItsBlockExecutesIsLetGoOfAfter() async throws {
+        actor Gate {
+            private(set) var holding = false
+            private(set) var held = 0
+            func hold() { holding = true }
+            func release() { holding = false }
+            func pass() async {
+                guard holding else { return }
+                held += 1
+                while holding { try? await Task.sleep(for: .milliseconds(5)) }
+            }
+        }
+        actor Flag {
+            private(set) var set = false
+            func raise() { set = true }
+        }
+        let gate = Gate()
+        let host = try await mining(keyByte: 0x8b, [Self.alpha])
+        let follower = try await start(
+            keyByte: 0x8c, hosted: [Self.alpha], peers: [host.endpoint],
+            observe: { kind, path, _ in if kind == .connect, path == Self.alpha { await gate.pass() } }
+        )
+        let (_, dropped) = try await twoBlocks(follower.runtime, Self.alpha)
+        await gate.hold()
+        try await eventually("a block of Alpha is being executed (held)", within: .seconds(20)) { await gate.held > 0 }
+
+        let returned = Flag()
+        let change = Task {
+            try await follower.runtime.host([])
+            await returned.raise()
+        }
+        defer { change.cancel() }
+        do {
+            try await eventually("the change returns while the execution is held", within: .seconds(10)) { await returned.set }
+        } catch {
+            await gate.release()
+            throw error
+        }
+        await gate.release()
+
+        let app = makeApplication(service: follower.runtime, host: "127.0.0.1", port: 0)
+        try await eventually("Alpha's data is let go of once the execution ends") {
+            (try? await app.test(.router) { client in try await Self.volumeStatus(client, dropped) }) == .notFound
+        }
+        let status = await follower.runtime.status()
+        XCTAssertEqual(status.chainPath, ["Nexus"], "the node still answers")
     }
 
     /// The same for a chain a start's configuration does not host.

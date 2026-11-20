@@ -723,6 +723,13 @@ extension NodeRuntime {
             }
         }
 
+        /// Drops the waiting jobs `dropped` names.
+        mutating func drop(where dropped: (RuntimeJob) -> Bool) {
+            answered.removeAll(where: dropped)
+            connects.removeAll(where: dropped)
+            rest.removeAll(where: dropped)
+        }
+
         /// The next job a free worker runs.
         mutating func next(in core: NodeCore) -> RuntimeJob? {
             while !isEmpty {

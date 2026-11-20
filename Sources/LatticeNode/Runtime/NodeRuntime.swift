@@ -639,6 +639,12 @@ extension NodeRuntime {
         /// The running jobs, which the loop waits for before it lets the
         /// store go: a job reading from peers can outlast a step.
         var jobs: [UInt64: (path: ChainPath, task: Task<Void, Never>)] = [:]
+        /// The running jobs of levels that stopped, cancelled: what they
+        /// report is dropped.
+        var abandonedJobs: Set<UInt64> = []
+        /// The chains no longer configured whose data is let go of once no
+        /// running job is theirs.
+        var releasing: Set<ChainPath> = []
         var nextJob: UInt64 = 0
         /// The jobs waiting for a worker (`JobQueues`).
         var queued = JobQueues()
@@ -816,6 +822,12 @@ extension NodeRuntime {
                 runningJobs -= 1
                 jobs[id] = nil
                 startJobs()
+                // A stopped level's job: what it reports is for no level,
+                // or for one hosted again since, which starts over.
+                guard abandonedJobs.remove(id) == nil else {
+                    await releaseWhenIdle()
+                    return true
+                }
                 for event in events {
                     // A connect without a verdict is a wait with its reason.
                     if case .level(let path, .connected(let results)) = event {
@@ -952,13 +964,15 @@ extension NodeRuntime {
 
         /// Host the children `next` lists, and only those: a level no longer
         /// listed stops with every level below it, and a newly listed one
-        /// starts, parent first, as it would at boot. What a stopped level
-        /// stored is let go of once its body fetches end; listing it again
-        /// syncs it from peers. A level that cannot start is left out, and
-        /// the error says why; its data stays, as it is still configured.
+        /// starts, parent first, as it would at boot. What a chain no longer
+        /// configured stored is let go of once its level's running jobs end;
+        /// listing it again syncs it from peers. A level that cannot start
+        /// is left out, and the error says why; its data stays, as it is
+        /// still configured.
         mutating func host(_ next: NodeConfiguration) async throws {
             try await storage.storePolicyModules(next.policyModules)
             let listed = Set(next.hostedChildren)
+            let wasConfigured = configured
             configured = listed.union([core.rootPath])
             for path in core.ordered where path != core.rootPath && !listed.contains(path) {
                 guard await step(.unhost(path)) else { throw NodeRuntimeError.stopped }
@@ -991,16 +1005,18 @@ extension NodeRuntime {
             for key in bodies.keys where core.levels[key.path] == nil {
                 bodies.removeValue(forKey: key)?.cancel()
             }
-            // A stopped level's running jobs store what they execute
-            // (bodies, rules, bundles): each ends before its chain is let go
-            // of, and what it reports finds no level.
-            for (_, job) in jobs where core.levels[job.path] == nil {
+            // A stopped level's jobs: a queued one never runs, and a running
+            // one is cancelled, not awaited (it may wait on this loop), and
+            // what it reports is dropped. Its chain is let go of once none
+            // of them still runs: they store what they execute.
+            queued.drop { core.levels[$0.path] == nil }
+            for (id, job) in jobs where core.levels[job.path] == nil {
                 job.task.cancel()
-                await job.task.value
+                abandonedJobs.insert(id)
             }
-            // A chain the configuration no longer hosts has its data let go
-            // of; one that did not start is still configured, and keeps it.
-            await storage.letGoOfChains(except: configured)
+            releasing.formUnion(wasConfigured.subtracting(configured))
+            releasing.subtract(configured)
+            await releaseWhenIdle()
             fetchWaits = fetchWaits.filter { core.levels[$0.key.path] != nil }
             connectWaits = connectWaits.filter { core.levels[$0.key.path] != nil }
             for (id, entry) in replies where core.levels[entry.path] == nil {
@@ -1040,6 +1056,14 @@ extension NodeRuntime {
             }
             startNetworkMaintenance()
             if let failure { throw failure }
+        }
+
+        /// Lets go of the chains the configuration no longer hosts, once
+        /// no running job is one of theirs.
+        mutating func releaseWhenIdle() async {
+            guard !releasing.isEmpty, !jobs.values.contains(where: { releasing.contains($0.path) }) else { return }
+            releasing = []
+            await storage.letGoOfChains(except: configured)
         }
 
         /// One child level started over what it journaled, as boot does,

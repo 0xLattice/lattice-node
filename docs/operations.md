@@ -635,7 +635,8 @@ The configuration is what the node hosts, and what it keeps: a chain the
 merged configuration does not host has its data let go of, however it left
 (`lattice child unhost`, a fragment edited or deleted, a SIGHUP re-read, a
 start without it). A running node does so once the chain's level has
-stopped and the jobs executing its blocks have ended; every start does so
+stopped and its running jobs have ended (its queued ones never run); the
+change itself returns at once. Every start does so
 for any chain it holds data of and does not host, found by its facts, its
 per-chain scopes and the names of its blocks' bodies and reads (one name
 per kept block, held in memory while the start lists them: 30,000 list in
@@ -660,9 +661,10 @@ block that carries no child; a parent chain's may be its own. Hosting the
 chain again syncs it from peers like any new chain.
 
 Two writes can land after a running node let go of a chain, and go at the
-next start: the body a mined grind's storing stores for a block the chain
-had carried, when the grind began before the chain stopped; and a child
-block a template build at its parent stores, when the build began before.
+next start: the chain's block carried by a block mined from a template
+built before the chain stopped, stored with that block; and the chain's
+block that a template build at its parent, running when the chain
+stopped, stores.
 
 Letting go holds the node's loop while it runs: about 45 µs per block kept
 with its bodies (a 10,000-block chain takes about 0.45 s, a 100,000-block

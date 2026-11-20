@@ -132,14 +132,16 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   release a stop or a failure cuts short leaves the chain's facts, which
   name it for the next start. What another scope names stays. A chain the
   configuration lists that did not start keeps its data. A running node
-  lets go once the chain's level has stopped and the jobs executing its
-  blocks have ended. Not covered, and gone at the next start: the body a
-  mined grind that began before the chain stopped stores for a block the
-  chain carried, and a child block a template build at its parent that
-  began before stores. Pinned by
+  lets go once the chain's level has stopped and its running jobs have
+  ended; its queued jobs never run. Not covered, and gone at the next
+  start: the chain's block that a block mined from a template built before
+  the chain stopped carries (stored with that block), and the chain's
+  block that a template build at its parent, running when the chain
+  stopped, stores. Pinned by
   `HostChainsRuntimeTests.testAChainRemovedFromTheConfigurationHasItsDataLetGoOf`,
   `HostChainsRuntimeTests.testAChainAStartDoesNotHostHasItsDataLetGoOf`,
   `HostChainsRuntimeTests.testAReleaseCutShortIsFinishedAtTheNextStart`,
+  `HostChainsRuntimeTests.testAChainDroppedWhileItsBlockExecutesIsLetGoOfAfter`,
   `OperatorConfigTests.testAChainThatDidNotStartIsDroppedWhenNoLongerListed`
   and `LatticeCtlE2ETests.testAChildChainIsCreatedMergeMinedTransactedAndResumedThroughTheCLI`.
 

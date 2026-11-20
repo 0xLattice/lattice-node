@@ -269,10 +269,10 @@ actor OperatorConfig {
                 chainPeer: files.chainPeer, policyModule: files.policyModule
             ))
             appliedPeers = peers
+            appliedChains = hosted
         } catch {
             reason = "\(error)"
         }
-        appliedChains = hosted
         let now = Set(runtime.hostedChildren.map { $0.joined(separator: "/") })
         hostErrors = [:]
         for path in target.hostedChains ?? [] where !now.contains(path) {
