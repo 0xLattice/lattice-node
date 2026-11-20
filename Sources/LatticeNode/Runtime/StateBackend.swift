@@ -5,10 +5,15 @@ import LatticeNodeCore
 /// a block's storing and execution stored, let go of what a block read once
 /// it executed, move with each chain's act-on tip, bring the current state
 /// into reach after a start, and let go of a chain no longer hosted. The
-/// operator's `state` setting picks the scheme once, when the store opens;
-/// every decision that depends on it is made here and nowhere else, so
-/// another scheme (geth's path scheme the nearest) replaces this type's
-/// insides, not its callers. Reads stay on the store's fetchers.
+/// operator's `state` setting (all, recent, none) is its `scheme`, read from
+/// the configuration, which does not change while the store is open
+/// (`NodeStorage.stateBackend` builds one on each access). The write paths'
+/// and the store's choices by scheme are made here; the loop's `Retention`
+/// and `Counts` ask it whether to settle, count or hold back (`keepsAll`,
+/// `counts`, `window(for:)`). The mechanism under it is the counted
+/// scopes'; a different one (geth's path scheme, say) would change this
+/// type, `Counts`, `Retention.settleState` and the scope-to-roots map the
+/// write path takes from `keepExecuted`. Reads stay on the store's fetchers.
 ///
 /// The schemes, over the scopes `RetentionScopes` names:
 ///
@@ -185,7 +190,7 @@ struct StateBackend: Sendable {
                 if scheme == .all, let roots = try? await storage.broker.retainedRoots(scope: scope) {
                     try await storage.broker.releaseRetainedRoots(scope: scope, roots: roots)
                 } else if try await storage.store.hasExecutedBlock(cid, at: path) {
-                    await storage.releaseReads(cid, at: path)
+                    await releaseReads(cid, at: path)
                 }
             }
         } catch {

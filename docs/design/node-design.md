@@ -98,7 +98,7 @@ from the sync benchmark (`Benchmarks/sync`).
 | 3 Security | For each child, the share of parent hash rate whose templates commit it | network | **Owner to set** | Not measured |
 | 4 Promises | Acknowledged transactions or accepted blocks lost after a crash or power loss | tests | Zero | Zero in tests |
 | 5 Compatibility | Partitions or refused messages between this version and the previous | two-version runs | Zero | Zero in CI |
-| 6 Change | Layers a change to each concern crosses | code | One for each | Most cross one; state retention, one to replace its scheme (`StateBackend`) and three to change the counted scheme; identifiers are in 32 files (§5) |
+| 6 Change | Layers a change to each concern crosses | code | One for each | Most cross one; state retention, one for a setting's policy (`StateBackend`) and three or more for its counted mechanism; identifiers are in 32 files (§5) |
 | 6 Change | Rules a caller must keep that the code does not enforce | code, review | Zero beyond the write order | Zero for writes |
 | 6 Change | Components with no conventional equivalent, each with its reason | this document | Each justified in writing | Two (§5) |
 | 6 Change | Review rounds per change; repeated holes of one kind | review | A second round of the same kind stops the change | The write-behind layer took four rounds of ordering holes |
@@ -633,14 +633,17 @@ another branch within the window is a move like any other), bring the
 current state into reach at a start (`start`: reads, earlier versions'
 state, counted scopes); a chain the configuration no longer hosts has its
 data let go of (`NodeStorage.letGoOfChains`). The
-operator's `state` picks its scheme once, when the store opens; every
-decision that depends on it is in that one type, as an enum-dispatched
-struct: the three schemes share most of their mechanism (`none` is `recent`
-with a window of one and no counts), so a protocol would add a type per
-scheme and duplicate it. A replacing backend (geth's path scheme the
-nearest shape) changes that type's insides and the mechanism under it, not
-its callers: `persistNodeBatch`, block storing, and the loop's `Retention`
-and `Counts`. The mechanism stays in `NodeStorage+Retention.swift`
+three settings, `all`, `recent` and `none`, are behind this one type, a
+struct with a `scheme` field read from the configuration (which does not
+change while the store is open): the write paths and the store's start
+choose by it there, and the loop's `Retention` (`settleState`, `maintain`)
+and `Counts` ask it (`keepsAll`, `counts`, `window(for:)`) rather than
+reading the setting. One struct, not a protocol: the three share their
+mechanism (`none` is `recent` with a window of one and no counts), and no
+second mechanism is being built: Phase 4's per-chain stores keep scopes
+and counts. A different mechanism (geth's path scheme) would change this
+type, `Counts`, `Retention.settleState` and the scope-to-roots map
+`keepExecuted` gives the write path. The mechanism stays in `NodeStorage+Retention.swift`
 (scopes, pins, releases, the counts' moves, checks, heals and syncs) and
 `NodeStore+StatePins.swift` (state diffs). Reads stay on the store's
 fetchers. Bodies and operator pins are beside it, not inside: they are
@@ -668,12 +671,11 @@ commits per block, a quarter of each step.
 **Performance.** This is where the disk goes: about 2.9 GB written to keep
 90 MB. Retention's CPU is small (about 1.5%), but every content read is
 decoded and hash-checked, a large share of CPU, because state is stored as
-hash-addressed encoded nodes. **Ease of change.** Medium: the policy is one
-type, `StateBackend` (303 lines), behind which the loop (`Retention`, 129;
-`Counts`, 238) and the write paths call; a new scheme replaces it and the
-mechanism under it (`NodeStorage+Retention.swift`, 521 lines;
-`NodeStore+StatePins.swift`, 181), and changing the counted scheme itself
-still crosses into VolumeBroker's counted index. **Judgment.** The largest remaining
+hash-addressed encoded nodes. **Ease of change.** Medium: a change to a
+setting's policy is in `StateBackend`; a change to the counted mechanism
+crosses `StateBackend`, the loop's `Counts` and `Retention`, the store
+(`NodeStorage+Retention.swift`, 521 lines; `NodeStore+StatePins.swift`,
+181) and VolumeBroker's counted index. **Judgment.** The largest remaining
 machinery and the biggest disk cost. No established client counts references
 to retain trie nodes on disk; geth moved away from hash-keyed state. Replace
 when an objective needs it, with geth's path scheme the nearest shape — but
@@ -958,7 +960,7 @@ blocks may anchor to. Those deserve dedicated adversarial scenarios.
 | Sync wire format | `ChainSyncWire.swift`, its adapter, one call site | one | one codec at the edge, as others; text JSON where others use binary | **easy** |
 | Identifiers | text CIDs in 32 files, the core included | all | others use fixed 32-byte hashes and convert at the edge | **hard but mechanical** |
 | Write order and persistence | the loop's persist effect and two store files | two | Bitcoin's order | **easy** |
-| State retention | `StateBackend` (the policy, one type), the retention and state-pin store files (the mechanism), VolumeBroker's counted index; the loop's `Retention` and `Counts` call only `StateBackend` | one to replace the scheme, three to change the counted one | the interface is triedb's or a `StateProvider`'s; no established client counts references on disk | **medium** |
+| State retention | `StateBackend` (the three settings, one type), the loop's `Retention` and `Counts`, the retention and state-pin store files (the mechanism), VolumeBroker's counted index | one for a setting's policy; three or more for the counted mechanism | the shape of triedb's or a `StateProvider`'s interface, over one mechanism; no established client counts references on disk | **medium** |
 | The shell's loop | `NodeRuntime.swift` (1,404, start-up and boot included) | one | receives input, steps the core, dispatches effects to the components below, takes results back; Bitcoin Core's `PeerManager` and validation-interface subscribers, geth's handler and fetchers | **easy** |
 | Read model | `ReadModel.swift` (167) | one | a chain-head subscriber that rebuilds views; owns no authoritative state | **easy** |
 | Maintenance | `Maintenance.swift` (286) | one | peer search and provider announcement, off the loop | **easy** |

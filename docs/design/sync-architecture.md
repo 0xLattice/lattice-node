@@ -96,7 +96,11 @@ the runtime to them:
 1. **The core performs no I/O.** It returns effects; the loop runs them.
 2. **The loop never waits for the network or for long computation.** That
    work runs as a job on the worker pool or as a task, and its result comes
-   back as an input.
+   back as an input. One exception: when a chain stops being hosted, and
+   when the node stops, the loop cancels that chain's count repair and
+   waits for it to end, so no repair writes after its chain's counts are
+   dropped; a state sync or heal deep in a network read keeps the loop until
+   its fetch notices the cancellation.
 3. **The loop never waits on something only the loop can finish.** A job or
    an RPC handler that needs live state sends the loop an input
    (`LiveLevels`) and waits; the loop never waits on a job.
