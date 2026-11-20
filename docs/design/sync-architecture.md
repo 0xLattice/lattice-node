@@ -9,7 +9,8 @@ progress, and each fix was a sound local decision. This document is the
 global design those decisions are checked against. Nothing in it changes a
 hashed byte or a consensus decision; the [protocol
 specification](https://github.com/0xLattice/Lattice/blob/57.5.0/docs/spec.md)
-stays normative.
+stays normative. What the node optimises, in what order and to what
+targets, is in [node design](node-design.md), §1.
 
 ## What sync produces
 
