@@ -12,7 +12,6 @@ enum BootRecovery {
     struct Result {
         let store: NodeStore
         let stores: VolumeStores
-        let localFetcher: CoalescingFetcher
         let retentionScope: String
         let durableMempoolOwner: String
         let liveMempoolOwner: String
@@ -26,7 +25,8 @@ enum BootRecovery {
         /// The root chain's Volume store: constants, the Nexus genesis and
         /// the mempool's pins.
         var broker: DiskBroker { stores.root }
-        let localFetcher: CoalescingFetcher
+        /// Boot reads every store: it names no chain.
+        var localFetcher: CoalescingFetcher { stores.readers(.anyChain).local }
         let retentionScope: String
         let durableMempoolOwner: String
         let liveMempoolOwner: String
@@ -49,7 +49,6 @@ enum BootRecovery {
         return Result(
             store: stores.store,
             stores: stores.stores,
-            localFetcher: stores.localFetcher,
             retentionScope: stores.retentionScope,
             durableMempoolOwner: stores.durableMempoolOwner,
             liveMempoolOwner: stores.liveMempoolOwner,
@@ -90,9 +89,9 @@ enum BootRecovery {
             nexusGenesisCID: configuration.nexusGenesisCID
         )
         let volumes = try VolumeStores(
-            directory: configuration.storagePath, root: configuration.chainPath, hosted: configuration.hostedChildren
+            directory: configuration.storagePath, root: configuration.chainPath, hosted: configuration.hostedChildren,
+            headers: HeaderRecords(store: store)
         )
-        let localFetcher = CoalescingFetcher(ReadTally.wrap("store", volumes))
         let retentionScope = [
             configuration.nexusGenesisCID,
             configuration.address.key,
@@ -101,7 +100,6 @@ enum BootRecovery {
         let liveMempoolOwner = retentionScope + ":live-mempool"
         return Stores(
             stores: volumes,
-            localFetcher: localFetcher,
             retentionScope: retentionScope,
             durableMempoolOwner: durableMempoolOwner,
             liveMempoolOwner: liveMempoolOwner,

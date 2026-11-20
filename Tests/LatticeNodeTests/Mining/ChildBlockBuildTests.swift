@@ -94,7 +94,7 @@ final class ChildBlockBuildTests: XCTestCase {
         let entering = try await Self.tipState(node.reads)
         XCTAssertEqual(built.parentState, entering)
         XCTAssertNil(built.previous)
-        let held = await storage.stores.fetchDataLocal(cid: built.blockCID)
+        let held = await storage.stores.anyChain.fetchDataLocal(cid: built.blockCID)
         XCTAssertNotNil(held, "the block's body is stored")
         let retained = try await storage.broker(at: Self.alpha).retainedRoots(scope: storage.scopes.body(built.blockCID, at: Self.alpha))
         XCTAssertTrue(retained.contains(built.blockCID), "and retained")
@@ -195,7 +195,7 @@ final class ChildBlockBuildTests: XCTestCase {
         let pooled = await pair.builder.reads.readSnapshot().mempoolCount
         XCTAssertEqual(pooled, 1, "the hosting node pools the commit")
         let template = try await pair.builder.miningTemplate(pair.mining)
-        let fetcher = pair.builderStorage.workFetcher
+        let fetcher = pair.builderStorage.workFetcher(.anyChain)
         let carried = try await MiningTemplateAssembly.blockTransactions(in: template.block, fetcher: fetcher)
         XCTAssertTrue(carried.isEmpty, "the hosting node's template leaves the commit out")
         let own = template.block.children.node?[Self.alpha[1]]?.rawCID

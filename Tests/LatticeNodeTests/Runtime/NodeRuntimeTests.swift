@@ -125,7 +125,7 @@ final class NodeRuntimeTests: XCTestCase {
         // The body comes to be held another way: the next retry finds it,
         // the block executes, and the wait is gone from the status.
         try await BlockHeader(rawCID: blockCID).storeBlock(
-            fetcher: producerStorage.localFetcher, storer: joinerStorage
+            fetcher: producerStorage.localFetcher(.anyChain), storer: joinerStorage
         )
         try await eventually("the joiner executes the block") {
             joinerRuntime.published.value?.actOnTip == blockCID
@@ -170,7 +170,7 @@ final class NodeRuntimeTests: XCTestCase {
         XCTAssertFalse(health.contains("\"sync\""), "public health shows no sync counts: \(health)")
 
         try await BlockHeader(rawCID: blockCID).storeBlock(
-            fetcher: producerStorage.localFetcher, storer: joinerStorage
+            fetcher: producerStorage.localFetcher(.anyChain), storer: joinerStorage
         )
         try await eventually("the joiner executes the block") {
             joinerRuntime.published.value?.actOnTip == blockCID
@@ -216,7 +216,7 @@ final class NodeRuntimeTests: XCTestCase {
             try await eventually("the joiner waits on \(cid)") {
                 await joinerRuntime.status().waiting?.hasPrefix("body of \(cid)") == true
             }
-            try await BlockHeader(rawCID: cid).storeBlock(fetcher: producerStorage.localFetcher, storer: joinerStorage)
+            try await BlockHeader(rawCID: cid).storeBlock(fetcher: producerStorage.localFetcher(.anyChain), storer: joinerStorage)
             try await Task.sleep(for: .milliseconds(500 * testTimeScale))
             XCTAssertNotEqual(joinerRuntime.published.value?.actOnTip, cid, "nothing asks before the wait ends")
             return cid

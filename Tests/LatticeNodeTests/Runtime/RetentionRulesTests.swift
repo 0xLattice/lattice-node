@@ -141,7 +141,7 @@ final class RetentionRulesTests: XCTestCase {
             try await header.storeBlock(fetcher: producer, storer: storer)
             try await storer.commit()
             try await producer.retainHeld(await storer.takeStoredVolumeRoots(), in: producerBroker)
-            let valid = try await block.validateNexus(fetcher: producer.localFetcher).0
+            let valid = try await block.validateNexus(fetcher: producer.localFetcher(.anyChain)).0
             XCTAssertTrue(valid, "key \(key)")
 
             let source = NodeStorageIvyContentSource(storage: producer)
@@ -203,7 +203,7 @@ final class RetentionRulesTests: XCTestCase {
         for root in fetched where await joiner.volume(root) != nil { heldBefore.insert(root) }
         let joinerBroker = await joiner.broker
         // As the connect job stores it: with the block its connect decoded.
-        let decoded = try await BlockHeader(rawCID: mined).resolve(fetcher: producer.localFetcher).node
+        let decoded = try await BlockHeader(rawCID: mined).resolve(fetcher: producer.localFetcher(.anyChain)).node
         let transactions = try await joiner.storeValidBlock(
             mined, decoded: try XCTUnwrap(decoded), at: ["Nexus"],
             from: CoalescingFetcher(CompositeContentSource([joinerBroker, joiner.readCache]))

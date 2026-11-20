@@ -95,7 +95,7 @@ final class StateWindowTests: XCTestCase {
     private func stateNodes(of block: String, in storage: NodeStorage) async throws -> [String: Int]? {
         let fact = try await storage.store.blockFact(block, at: ["Nexus"])
         let root = try XCTUnwrap(fact?.postStateCID)
-        guard let state = try? await LatticeStateHeader(rawCID: root).resolveRecursive(fetcher: storage.localFetcher) else {
+        guard let state = try? await LatticeStateHeader(rawCID: root).resolveRecursive(fetcher: storage.localFetcher(.anyChain)) else {
             return nil
         }
         var counts: [String: Int] = [:]
@@ -258,7 +258,7 @@ final class StateWindowTests: XCTestCase {
             await runtime.stop()
             let fact = try await storage.store.blockFact(tip, at: ["Nexus"])
             let state = try await LatticeStateHeader(rawCID: try XCTUnwrap(fact?.postStateCID))
-                .resolve(fetcher: storage.localFetcher)
+                .resolve(fetcher: storage.localFetcher(.anyChain))
             let accounts = try XCTUnwrap(state.node).accountState.rawCID
             for scope in try await storage.broker.retainedScopes(prefix: storage.scopes.chain) {
                 guard try await storage.broker.retainedRoots(scope: scope).contains(accounts) else { continue }
@@ -350,7 +350,7 @@ final class StateWindowTests: XCTestCase {
     private func places(of block: String, in storage: NodeStorage, at path: [String] = ["Nexus"]) async throws -> [String: Int] {
         let fact = try await storage.store.blockFact(block, at: path)
         let state = try await LatticeStateHeader(rawCID: try XCTUnwrap(fact?.postStateCID))
-            .resolveRecursive(fetcher: storage.localFetcher)
+            .resolveRecursive(fetcher: storage.localFetcher(.anyChain))
         var places: [String: Int] = [:]
         func count(_ header: any Header) {
             places[header.rawCID, default: 0] += 1
@@ -493,7 +493,7 @@ final class StateWindowTests: XCTestCase {
         var blocks: [String] = []
         for _ in 0..<4 { blocks.append(try BlockHeader(node: try await runtime.mineBlock(paid)).rawCID) }
         let fact = try await storage.store.blockFact(blocks[1], at: ["Nexus"])
-        let state = try await LatticeStateHeader(rawCID: try XCTUnwrap(fact?.postStateCID)).resolve(fetcher: storage.localFetcher)
+        let state = try await LatticeStateHeader(rawCID: try XCTUnwrap(fact?.postStateCID)).resolve(fetcher: storage.localFetcher(.anyChain))
         let replaced = try XCTUnwrap(state.node).accountState.rawCID
         let tipState = try await places(of: blocks[3], in: storage)
         XCTAssertNil(tipState[replaced], "the tip's state does not hold block 2's account tree")
@@ -656,7 +656,7 @@ final class StateWindowTests: XCTestCase {
             try await eventually("the counts reach its tip") { try await self.settled(storage, at: abandoned[3]) }
             await runtime.stop()
             let fact = try await storage.store.blockFact(abandoned[3], at: ["Nexus"])
-            let state = try await LatticeStateHeader(rawCID: try XCTUnwrap(fact?.postStateCID)).resolve(fetcher: storage.localFetcher)
+            let state = try await LatticeStateHeader(rawCID: try XCTUnwrap(fact?.postStateCID)).resolve(fetcher: storage.localFetcher(.anyChain))
             counted = try XCTUnwrap(state.node).accountState.rawCID
         }
         await shorterRuntime.stop()
@@ -1127,7 +1127,7 @@ final class StateWindowTests: XCTestCase {
             storage.stores.opened(at: Self.alpha) == nil
         }
         try await storage.stores.sweep()
-        let kept = await storage.stores.hasVolume(root: moduleCID)
+        let kept = await storage.stores.anyChain.hasVolume(root: moduleCID)
         XCTAssertFalse(kept, "its policy module goes")
         await runtime.stop()
     }

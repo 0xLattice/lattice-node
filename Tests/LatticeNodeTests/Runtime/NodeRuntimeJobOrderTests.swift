@@ -276,7 +276,7 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
 
         let tree = harness.host.levels[root]!.tree
         let copy = try XCTUnwrap(ChainLevel(tree: tree))
-        let fetcher = harness.storage.workFetcher
+        let fetcher = harness.storage.workFetcher(.anyChain)
         var dispositions: [TransactionPreflightDisposition] = []
         var anchors = 0
         for effect in harness.spawned {

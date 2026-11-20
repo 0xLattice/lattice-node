@@ -176,7 +176,7 @@ public struct ChainReads: Sendable {
         return try await remote.withRootTracing(
             rootCID, bundle: false, hosts: hosts, reserving: Int(IvyConfig.defaultProtocolMaxFrameSize)
         ) { session in
-            try await work(storage.readersReads(through: session))
+            try await work(storage.readersReads(through: session, .anyChain))
         }.value
     }
 

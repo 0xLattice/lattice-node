@@ -1,5 +1,4 @@
 import Foundation
-import Synchronization
 import Lattice
 import VolumeBroker
 import cashew
@@ -60,22 +59,6 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// One Volume store per hosted chain (`VolumeStores`). The root's also
     /// holds the mempool's pins.
     nonisolated let stores: VolumeStores
-    let localFetcher: CoalescingFetcher
-    /// Local content, and behind it the header records: a block's own node
-    /// is read from them when its body is not held. Execution and mining
-    /// build on blocks through this.
-    nonisolated let workFetcher: CoalescingFetcher
-    nonisolated let workSource: CompositeContentSource
-    /// One fetcher per chain, its own stores first (`workFetcher(at:)`,
-    /// `localFetcher(at:)`), so concurrent jobs of a chain share reads in
-    /// flight.
-    nonisolated let fetchers = Mutex<[FetcherKey: CoalescingFetcher]>([:])
-
-    struct FetcherKey: Hashable {
-        let path: [String]
-        let below: Bool
-        let work: Bool
-    }
     /// Verified content finished sessions took from peers, in memory.
     nonisolated let readCache: ReadCache
     let retentionScope: String
@@ -99,7 +82,6 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         store: NodeStore,
         bundles: VolumeBundleCache,
         stores: VolumeStores,
-        localFetcher: CoalescingFetcher,
         retentionScope: String,
         durableMempoolOwner: String,
         liveMempoolOwner: String,
@@ -109,9 +91,6 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         self.store = store
         self.bundles = bundles
         self.stores = stores
-        self.localFetcher = localFetcher
-        self.workSource = CompositeContentSource([ReadTally.wrap("store", stores), ReadTally.wrap("headers", HeaderRecords(store: store))])
-        self.workFetcher = CoalescingFetcher(workSource)
         self.readCache = ReadCache(maximumBytes: configuration.resourcePolicy.maximumCachedContentBytes)
         self.retentionScope = retentionScope
         self.durableMempoolOwner = durableMempoolOwner
@@ -130,7 +109,6 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
             store: recovered.store,
             bundles: VolumeBundleCache(directory: configuration.storagePath),
             stores: recovered.stores,
-            localFetcher: recovered.localFetcher,
             retentionScope: recovered.retentionScope,
             durableMempoolOwner: recovered.durableMempoolOwner,
             liveMempoolOwner: recovered.liveMempoolOwner,
@@ -157,13 +135,13 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     }
 
     public func fetch(_ cids: Set<String>) async -> [String: Data] {
-        await stores.fetch(cids)
+        await stores.anyChain.fetch(cids)
     }
 
     /// A block's own node: from its Volume, or from its header record when
     /// its body is not held. Enough to reach the state it commits to.
     nonisolated func blockNodeBytes(_ cid: String) async -> Data? {
-        if let held = await stores.fetchDataLocal(cid: cid) { return held }
+        if let held = await stores.anyChain.fetchDataLocal(cid: cid) { return held }
         return store.headerBlockBytes(cid)
     }
 
@@ -174,7 +152,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// against its CIDs first: bytes damaged in the store read as absent,
     /// never handed on. This node's own reads (`fetch`) take them unhashed.
     func volume(_ rootCID: String) async -> SerializedVolume? {
-        guard let volume = await stores.fetchVolumeLocal(root: rootCID),
+        guard let volume = await stores.anyChain.fetchVolumeLocal(root: rootCID),
               (try? volume.validate()) != nil else { return nil }
         return volume
     }
@@ -182,7 +160,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// The public storage fetch port is deliberately local-only. Network
     /// acquisition is explicit and root-scoped at admission/retry boundaries.
     public func fetch(rawCid: String) async throws -> Data {
-        try await localFetcher.fetch(rawCid: rawCid)
+        try await localFetcher(.anyChain).fetch(rawCid: rawCid)
     }
 
     public func store(volume: SerializedVolume) async throws {

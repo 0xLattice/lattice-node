@@ -1,9 +1,24 @@
 import Crypto
 import Foundation
 import LatticeNodeCore
-import Synchronization
 import VolumeBroker
 import cashew
+
+/// Which stores a read asks, in order.
+enum ReadScope: Hashable, Sendable {
+    /// The chain's own store, then its ancestors' nearest first: a child's
+    /// receipt proofs travel with its blocks, so a chain's work needs
+    /// nothing of a sibling's.
+    case chain(ChainPath)
+    /// As `chain`, then its descendants': a template carries the levels
+    /// below it, as does a mined block.
+    case subtree(ChainPath)
+    /// Every store, root first: only reads that name no chain, a read by
+    /// CID from the API or a peer, a bundle served, a header page served
+    /// when the header record lacks it, a child genesis's spec at a start,
+    /// and boot.
+    case anyChain
+}
 
 /// One Volume store per hosted chain path, each a file of its own under
 /// `volumes/` beside `state.db`: a chain's content, its retention scopes and
@@ -13,49 +28,73 @@ import cashew
 /// the node rather than a chain: the protocol constants, the Nexus genesis,
 /// the operator's policy modules and pins, and the mempool's journal pins.
 ///
-/// Writes name their chain (`store(at:)`); reads compose. A chain's work
-/// reads its own store, then its ancestors' (a child's receipt proofs travel
-/// with its blocks, so a child's execution needs nothing of a sibling's),
-/// and what none of them holds is asked of peers. Only reads that name no
-/// chain ask every store, root first: a read by CID from the API or a
-/// peer, a bundle served, a header page served when the header record lacks
-/// it, a child genesis's spec at a start, and boot. A chain's reads that
-/// asked every store probed each in turn and
-/// missed in all but one, which cost 17% more CPU with eight children.
+/// Writes name their chain (`store(at:)`); reads name their scope
+/// (`reads(_:)`, `ReadScope`). A chain's reads that asked every store probed
+/// each in turn and missed in all but one, which cost 17% more CPU with
+/// eight children.
 ///
-/// The set changes only when the operator hosts or drops a chain; the
-/// lock guards that set, not any store, and is held only to read or
-/// change it.
-final class VolumeStores: ContentSource, Sendable {
+/// The set of stores changes only on the loop, when the operator's
+/// configuration hosts or drops a chain, and at a start; each change
+/// publishes an immutable `Snapshot` (the stores, each scope's reading
+/// order, and its readers), which every read takes as it is
+/// (`PublishedValue`).
+final class VolumeStores: Sendable {
     let directory: URL
     let rootPath: ChainPath
     /// The root chain's store, open for the stores' life.
     let root: DiskBroker
-    private let opened: Mutex<Open>
+    private let headers: any ContentSource
+    private let current: PublishedValue<Snapshot>
 
-    /// The open stores, and the same in reading order: the root's first,
-    /// then by depth and path.
-    private struct Open {
-        var stores: [ChainPath: DiskBroker]
-        var ordered: [(path: ChainPath, store: DiskBroker)]
-        /// Each open chain's reading order (`reading(at:below:)`), worked
-        /// out once per change of the set, not per read.
-        var lineage: [ChainPath: [DiskBroker]] = [:]
-        var subtree: [ChainPath: [DiskBroker]] = [:]
+    /// The open stores, each scope's reading order, and its readers, as the
+    /// last change of the set left them.
+    struct Snapshot: Sendable {
+        let stores: [ChainPath: DiskBroker]
+        /// The root's first, then by depth and path.
+        let ordered: [(path: ChainPath, store: DiskBroker)]
+        let readers: [ReadScope: Readers]
 
-        init(_ stores: [ChainPath: DiskBroker], root: ChainPath) {
+        init(_ stores: [ChainPath: DiskBroker], root: ChainPath, headers: any ContentSource) {
             self.stores = stores
             ordered = stores.map { (path: $0.key, store: $0.value) }
                 .sorted { ($0.path.count, $0.path.joined(separator: "/")) < ($1.path.count, $1.path.joined(separator: "/")) }
+            var readers: [ReadScope: Readers] = [.anyChain: Readers(ordered.map(\.store), headers: headers)]
             for path in stores.keys {
-                let line = Open.lineage(of: path, root: root, in: stores)
-                lineage[path] = line
-                subtree[path] = line + ordered.filter { $0.path.count > path.count && $0.path.starts(with: path) }.map(\.store)
+                for scope in [ReadScope.chain(path), .subtree(path)] {
+                    readers[scope] = Readers(Self.order(scope, root: root, stores: stores, ordered: ordered), headers: headers)
+                }
             }
+            self.readers = readers
         }
 
-        static func lineage(of path: ChainPath, root: ChainPath, in stores: [ChainPath: DiskBroker]) -> [DiskBroker] {
-            (root.count...max(root.count, path.count)).reversed().compactMap { stores[Array(path.prefix($0))] }
+        static func order(
+            _ scope: ReadScope, root: ChainPath, stores: [ChainPath: DiskBroker],
+            ordered: [(path: ChainPath, store: DiskBroker)]
+        ) -> [DiskBroker] {
+            switch scope {
+            case .anyChain:
+                return ordered.map(\.store)
+            case .chain(let path), .subtree(let path):
+                let lineage = (root.count...max(root.count, path.count)).reversed().compactMap { stores[Array(path.prefix($0))] }
+                guard case .subtree = scope else { return lineage }
+                return lineage + ordered.filter { $0.path.count > path.count && $0.path.starts(with: path) }.map(\.store)
+            }
+        }
+    }
+
+    /// A scope's readers: its stores alone, and behind them the header
+    /// records, each as a fetcher its reads in flight share.
+    struct Readers: Sendable {
+        let stores: StoreReads
+        let local: CoalescingFetcher
+        let workSource: CompositeContentSource
+        let work: CoalescingFetcher
+
+        init(_ stores: [DiskBroker], headers: any ContentSource) {
+            self.stores = StoreReads(stores: stores)
+            local = CoalescingFetcher(ReadTally.wrap("store", self.stores))
+            workSource = CompositeContentSource([ReadTally.wrap("store", self.stores), ReadTally.wrap("headers", headers)])
+            work = CoalescingFetcher(workSource)
         }
     }
 
@@ -63,24 +102,27 @@ final class VolumeStores: ContentSource, Sendable {
     /// here: a chain not hosted is let go of at the start, after state.db
     /// is validated, content first (`NodeStorage.letGoOfChains`, then
     /// `removeFiles(except:)`).
-    init(directory storage: URL, root rootPath: ChainPath, hosted: [ChainPath]) throws {
+    init(directory storage: URL, root rootPath: ChainPath, hosted: [ChainPath], headers: any ContentSource) throws {
         directory = storage.appendingPathComponent("volumes", isDirectory: true)
         self.rootPath = rootPath
+        self.headers = headers
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         root = try Self.open(directory, rootPath)
         var stores = [rootPath: root]
         for path in hosted where path != rootPath { stores[path] = try Self.open(directory, path) }
-        opened = Mutex(Open(stores, root: rootPath))
+        current = PublishedValue(Snapshot(stores, root: rootPath, headers: headers))
+    }
+
+    private var snapshot: Snapshot {
+        guard let held = current.value else { preconditionFailure("the stores are published at init") }
+        return held
     }
 
     /// The store of the chain at `path`: every write names the chain it is
-    /// for. A chain not hosted since the start has none (`NotHosted`), so
-    /// no write makes a file. In practice this does not fire: stores are
-    /// never closed while the node runs, so a late job of a level unhosted
-    /// writes into its still-open store, and may retain its bodies and rules
-    /// again, until the next start removes the file.
+    /// for. A chain not hosted has none (`NotHosted`), so no write makes a
+    /// file: a late job of a chain let go of writes nowhere.
     func store(at path: ChainPath) throws -> DiskBroker {
-        guard let held = opened.withLock({ $0.stores[path] }) else { throw NotHosted(path: path) }
+        guard let held = snapshot.stores[path] else { throw NotHosted(path: path) }
         return held
     }
 
@@ -90,60 +132,52 @@ final class VolumeStores: ContentSource, Sendable {
     }
 
     /// A chain this node starts to host: its store is opened (made, the
-    /// first time). It stays open until the node stops, hosted or not.
+    /// first time). On the loop only.
     func open(at path: ChainPath) throws {
-        if opened.withLock({ $0.stores[path] }) != nil { return }
-        let made = try Self.open(directory, path)
-        return opened.withLock { open in
-            guard open.stores[path] == nil else { return }
-            var stores = open.stores
-            stores[path] = made
-            open = Open(stores, root: rootPath)
-        }
+        var stores = snapshot.stores
+        guard stores[path] == nil else { return }
+        stores[path] = try Self.open(directory, path)
+        current.publish(Snapshot(stores, root: rootPath, headers: headers))
     }
 
     /// The store of the chain at `path` if it is open.
     func opened(at path: ChainPath) -> DiskBroker? {
-        opened.withLock { $0.stores[path] }
-    }
-
-    /// Every open store, the root's first, then by depth and path.
-    var all: [DiskBroker] {
-        opened.withLock { $0.ordered.map(\.store) }
+        snapshot.stores[path]
     }
 
     /// Every open store with its chain, the root's first.
     var byChain: [(path: ChainPath, store: DiskBroker)] {
-        opened.withLock { $0.ordered }
+        snapshot.ordered
     }
 
-    /// The stores the work of the chain at `path` reads, in order: its own,
-    /// then its ancestors' nearest first; with `below`, then its
-    /// descendants' (a template built at a chain carries the levels below).
-    func reading(at path: ChainPath, below: Bool = false) -> [DiskBroker] {
-        opened.withLock { open in
-            (below ? open.subtree[path] : open.lineage[path])
-                ?? Open.lineage(of: path, root: rootPath, in: open.stores)
-                + (below ? open.ordered.filter { $0.path.count > path.count && $0.path.starts(with: path) }.map(\.store) : [])
-        }
+    /// The readers of `scope`: one worked out when the set changed for a
+    /// hosted chain, else for this read.
+    func readers(_ scope: ReadScope) -> Readers {
+        let held = snapshot
+        return held.readers[scope]
+            ?? Readers(Snapshot.order(scope, root: rootPath, stores: held.stores, ordered: held.ordered), headers: headers)
     }
 
-    /// A content source over `reading(at:below:)`.
-    func source(at path: ChainPath, below: Bool = false) -> any ContentSource {
-        Reading(stores: self, path: path, below: below)
+    /// The stores `scope` reads, by CID.
+    func reads(_ scope: ReadScope) -> StoreReads {
+        readers(scope).stores
+    }
+
+    /// Every store, root first: reads that name no chain.
+    var anyChain: StoreReads {
+        reads(.anyChain)
     }
 
     /// The chain at `path` is let go of: its store closes and its file
     /// goes, with its log and shared memory, and everything in it. Its jobs
     /// have ended (`Retention.release`); a read in flight finishes on the
     /// file it opened, and a write that comes late is refused (`NotHosted`).
+    /// On the loop, or at the start.
     func remove(at path: ChainPath) {
         guard path != rootPath else { return }
-        opened.withLock { open in
-            var stores = open.stores
-            stores[path] = nil
-            open = Open(stores, root: rootPath)
-        }
+        var stores = snapshot.stores
+        stores[path] = nil
+        current.publish(Snapshot(stores, root: rootPath, headers: headers))
         let file = directory.appendingPathComponent(Self.fileName(path))
         for suffix in ["", "-wal", "-shm"] {
             try? FileManager.default.removeItem(atPath: file.path + suffix)
@@ -161,76 +195,25 @@ final class VolumeStores: ContentSource, Sendable {
         }
     }
 
-    // MARK: - Reads by CID, every store
-
-    func fetch(_ cids: Set<String>) async -> [String: Data] {
-        var found: [String: Data] = [:]
-        var missing = cids
-        for store in all {
-            guard !missing.isEmpty else { break }
-            let held = await store.fetchDataLocal(cids: missing)
-            found.merge(held) { first, _ in first }
-            missing.subtract(held.keys)
-        }
-        return found
-    }
-
-    func fetchDataLocal(cid: String) async -> Data? {
-        for store in all { if let held = await store.fetchDataLocal(cid: cid) { return held } }
-        return nil
-    }
-
-    func fetchVolumeLocal(root cid: String) async -> SerializedVolume? {
-        for store in all { if let held = await store.fetchVolumeLocal(root: cid) { return held } }
-        return nil
-    }
-
-    func hasVolume(root cid: String) async -> Bool {
-        for store in all where await store.hasVolume(root: cid) { return true }
-        return false
-    }
-
-    /// Whether the stores the chain at `path` reads hold `cid`'s Volume.
-    func hasVolume(root cid: String, at path: ChainPath, below: Bool = false) async -> Bool {
-        for store in reading(at: path, below: below) where await store.hasVolume(root: cid) { return true }
-        return false
-    }
+    // MARK: - Maintenance across every store
 
     /// What no scope names goes, store by store.
     func sweep() async throws {
-        for store in all { _ = try await store.sweep() }
+        for (_, store) in byChain { _ = try await store.sweep() }
     }
 
-    /// Each store's scopes beginning with `prefix`, with its chain.
+    /// Each store's scopes beginning with `prefix`, with its store.
     func retainedScopes(prefix: String) async throws -> [(store: DiskBroker, scope: String)] {
         var listed: [(store: DiskBroker, scope: String)] = []
-        for store in all { listed += try await store.retainedScopes(prefix: prefix).map { (store, $0) } }
+        for (_, store) in byChain { listed += try await store.retainedScopes(prefix: prefix).map { (store, $0) } }
         return listed
     }
 
     /// Each store's counted scopes beginning with `prefix`.
     func countedScopes(prefix: String) async throws -> [(store: DiskBroker, scope: String)] {
         var listed: [(store: DiskBroker, scope: String)] = []
-        for store in all { listed += try await store.countedScopes(prefix: prefix).map { (store, $0) } }
+        for (_, store) in byChain { listed += try await store.countedScopes(prefix: prefix).map { (store, $0) } }
         return listed
-    }
-
-    private struct Reading: ContentSource {
-        let stores: VolumeStores
-        let path: ChainPath
-        let below: Bool
-
-        func fetch(_ cids: Set<String>) async -> [String: Data] {
-            var found: [String: Data] = [:]
-            var missing = cids
-            for store in stores.reading(at: path, below: below) {
-                guard !missing.isEmpty else { break }
-                let held = await store.fetchDataLocal(cids: missing)
-                found.merge(held) { first, _ in first }
-                missing.subtract(held.keys)
-            }
-            return found
-        }
     }
 
     // MARK: - Files
@@ -251,5 +234,37 @@ final class VolumeStores: ContentSource, Sendable {
     /// system cannot confuse with another's.
     static func fileName(_ path: ChainPath) -> String {
         SHA256.hash(data: Data(path.joined(separator: "/").utf8)).map { String(format: "%02x", $0) }.joined() + ".db"
+    }
+}
+
+/// Reads by CID over a fixed list of stores, in order (`ReadScope`).
+struct StoreReads: ContentSource {
+    let stores: [DiskBroker]
+
+    func fetch(_ cids: Set<String>) async -> [String: Data] {
+        var found: [String: Data] = [:]
+        var missing = cids
+        for store in stores {
+            guard !missing.isEmpty else { break }
+            let held = await store.fetchDataLocal(cids: missing)
+            found.merge(held) { first, _ in first }
+            missing.subtract(held.keys)
+        }
+        return found
+    }
+
+    func fetchDataLocal(cid: String) async -> Data? {
+        for store in stores { if let held = await store.fetchDataLocal(cid: cid) { return held } }
+        return nil
+    }
+
+    func fetchVolumeLocal(root cid: String) async -> SerializedVolume? {
+        for store in stores { if let held = await store.fetchVolumeLocal(root: cid) { return held } }
+        return nil
+    }
+
+    func hasVolume(root cid: String) async -> Bool {
+        for store in stores where await store.hasVolume(root: cid) { return true }
+        return false
     }
 }

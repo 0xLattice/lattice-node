@@ -181,7 +181,7 @@ extension NodeStorage {
     nonisolated func pin(_ root: String, entries: [String: Data]?) async throws {
         let broker = stores.root
         if await !broker.hasVolume(root: root) {
-            guard let volume = await stores.fetchVolumeLocal(root: root)
+            guard let volume = await stores.anyChain.fetchVolumeLocal(root: root)
                     ?? entries.map({ SerializedVolume(root: root, entries: $0) }) else {
                 throw NodeStorageError.missingMaterializedVolume(root)
             }
@@ -501,7 +501,7 @@ extension NodeStorage {
         let broker = try stores.store(at: path)
         let lacked = Set(try await retainHeld(batch.map(\.rawCID), scope: scope, in: broker))
         return try await remote.withRootTracing(root, bundle: false, hosts: hosts) { session in
-            let fetcher = readersReads(through: session, at: path)
+            let fetcher = readersReads(through: session, .chain(path))
             let resolved = try await withThrowingTaskGroup(of: (any Header).self) { group in
                 for header in batch { group.addTask { try await header.resolve(fetcher: fetcher) } }
                 return try await group.reduce(into: [any Header]()) { $0.append($1) }
