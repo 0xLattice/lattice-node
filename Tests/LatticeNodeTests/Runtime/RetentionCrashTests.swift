@@ -95,7 +95,7 @@ final class RetentionCrashTests: XCTestCase {
         // These happen as the node first starts and syncs its counts; the
         // rest as it follows blocks after that.
         let early: Set<StateBackend.Boundary> = [
-            .syncCounts, .commitCounts, .releaseStaging, .startBodies, .startReads, .startLegacyState, .startCounts,
+            .syncCounts, .commitCounts, .releaseStaging, .startBodies, .startReads, .startCounts,
         ]
         // A crash at a block's reads leaks nothing these nodes reach: only a
         // block stored by `storingAndRetaining` (a mined block and the child

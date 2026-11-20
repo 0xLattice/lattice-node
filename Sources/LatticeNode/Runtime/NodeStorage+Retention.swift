@@ -51,9 +51,6 @@ struct RetentionScopes: Sendable {
 
     var stagingPrefix: String { chain + ":staging:" }
 
-    /// Scopes earlier versions kept state under: a chain's tip state, and
-    /// what its last executions stored.
-    var legacyStatePrefixes: [String] { [chain + ":state:", chain + ":executed:"] }
 
     var readsPrefix: String { chain + ":reads:" }
 
@@ -292,9 +289,6 @@ extension NodeStorage {
         }
     }
 
-    nonisolated func letGoOfWindow(_ scope: String, in broker: DiskBroker) async {
-        do { try await release(scope: scope, in: broker) } catch { syncTrace("\(scope) not released: \(error)") }
-    }
 
     // MARK: - State: the whole current state, on recent
 

@@ -57,7 +57,6 @@ struct StateBackend: Sendable {
         /// counted scopes.
         case startBodies
         case startReads
-        case startLegacyState
         case startCounts
         /// A chain the configuration no longer hosts has its data let go of.
         case letGoOfChain
@@ -221,12 +220,10 @@ struct StateBackend: Sendable {
 
     /// At a start, before any step, with `tips` the hosted chains' act-on
     /// tip heights: what a block read goes once it executed (all of it,
-    /// when all state is kept), what an earlier version or a chain no
-    /// longer hosted kept is moved or let go of, and the counts of the
-    /// hosted chains are found. Returns their markers.
+    /// when all state is kept), and the counts of the hosted chains are
+    /// found. Returns their markers.
     func start(tips: [ChainPath: UInt64]) async -> [ChainPath: String] {
         if !stops(at: .startReads) { await letGoOfReads() }
-        if !stops(at: .startLegacyState) { await moveLegacyState(tips: tips) }
         guard !stops(at: .startCounts) else { return [:] }
         return await settleCountedScopes(hosted: Set(tips.keys))
     }
@@ -249,12 +246,13 @@ struct StateBackend: Sendable {
     }
 
 
-    /// At a start, with `hosted` the chains this node hosts: the markers of
-    /// the hosted chains' counts when the operator keeps recent state, and
-    /// the staging of each chain with one let go of (a chain without keeps
-    /// it for its state sync). Counts kept for a chain no longer hosted go,
-    /// as do every chain's when the operator keeps recent state no more:
-    /// on `all` what they counted is kept with the chain first.
+    /// At a start, with `hosted` the chains this node hosts (every store
+    /// open is one of theirs: a chain not hosted was let go of with its
+    /// store): the markers of their counts when the operator keeps recent
+    /// state, and the staging of each chain with one let go of (a chain
+    /// without keeps it for its state sync). When the operator keeps recent
+    /// state no more, every chain's counts go: on `all` what they counted
+    /// is kept with the chain first.
     func settleCountedScopes(hosted: Set<ChainPath>) async -> [ChainPath: String] {
         func path(_ scope: String, after prefix: String) -> ChainPath {
             scope.dropFirst(prefix.count).split(separator: "/").map(String.init)
@@ -263,9 +261,8 @@ struct StateBackend: Sendable {
         var markers: [ChainPath: String] = [:]
         do {
             for (broker, scope) in try await storage.stores.countedScopes(prefix: storage.scopes.countedPrefix) {
-                let chain = path(scope, after: storage.scopes.countedPrefix)
-                guard !recent || !hosted.contains(chain) else { continue }
-                if scheme == .all, hosted.contains(chain) {
+                guard !recent else { continue }
+                if scheme == .all {
                     try await storage.retainHeld(Array(try await broker.countedState(scope: scope).counts.keys), in: broker)
                 }
                 try await broker.dropCountedScope(scope: scope)
@@ -279,7 +276,7 @@ struct StateBackend: Sendable {
             }
             for (broker, scope) in try await storage.stores.retainedScopes(prefix: storage.scopes.stagingPrefix) {
                 let chain = path(scope, after: storage.scopes.stagingPrefix)
-                if markers[chain] != nil || !recent || !hosted.contains(chain) { try await storage.release(scope: scope, in: broker) }
+                if markers[chain] != nil || !recent { try await storage.release(scope: scope, in: broker) }
             }
         } catch {
             storage.syncTrace("counts not settled at start: \(error)")
@@ -288,54 +285,6 @@ struct StateBackend: Sendable {
     }
 
 
-    /// At a start, with `tips` the hosted chains' tip heights: what an
-    /// earlier version kept a hosted chain's tip state under moves to the
-    /// chain's window at its tip's height, or to the chain on `all`, and
-    /// goes from there as any state does, a window later on `recent`; the
-    /// counts it kept are forgotten. The state windows of a run that kept
-    /// recent state stay: they go by height as the tips move, or are kept
-    /// with everything else on `all`. What either kept for a chain no
-    /// longer hosted goes, as do its spec and policy modules.
-    func moveLegacyState(tips: [ChainPath: UInt64]) async {
-        func path(_ scope: String, after prefix: String) -> ChainPath {
-            scope.dropFirst(prefix.count).split(separator: "/").map(String.init)
-        }
-        // Each scope on its own: one that fails stays for the next start,
-        // and the rest move.
-        func each(_ prefix: String, _ move: (DiskBroker, String) async throws -> Void) async {
-            guard let listed = try? await storage.stores.retainedScopes(prefix: prefix) else { return }
-            for (broker, scope) in listed {
-                do { try await move(broker, scope) } catch { storage.syncTrace("\(scope) not moved at start: \(error)") }
-            }
-        }
-        await each(storage.scopes.windowsPrefix) { broker, scope in
-            guard let colon = scope.lastIndex(of: ":") else { return }
-            if tips[path(String(scope[..<colon]), after: storage.scopes.windowsPrefix)] == nil {
-                await storage.letGoOfWindow(scope, in: broker)
-            }
-        }
-        await each(storage.scopes.rulesPrefix) { broker, scope in
-            if tips[path(scope, after: storage.scopes.rulesPrefix)] == nil { try await storage.release(scope: scope, in: broker) }
-        }
-        for prefix in storage.scopes.legacyStatePrefixes {
-            await each(prefix) { broker, scope in
-                let path = path(scope, after: prefix)
-                if let tip = tips[path] {
-                    // What this store no longer holds is not kept: it is
-                    // read again, as any state let go of is.
-                    var held: [String] = []
-                    for root in try await broker.retainedRoots(scope: scope) where await broker.hasVolume(root: root) {
-                        held.append(root)
-                    }
-                    let kept = window(for: path) == nil
-                        ? storage.retentionScope : storage.scopes.window(at: path, height: tip)
-                    if !held.isEmpty { try await broker.mergeRetainedRoots(scope: kept, roots: held) }
-                }
-                try await storage.release(scope: scope, in: broker)
-            }
-        }
-        do { try await storage.store.forgetStateCounts() } catch { storage.syncTrace("earlier counts not forgotten: \(error)") }
-    }
 }
 
 extension NodeStorage {
