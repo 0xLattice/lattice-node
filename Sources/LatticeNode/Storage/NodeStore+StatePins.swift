@@ -4,9 +4,7 @@ import Lattice
 /// What the counts of a chain's current state, on `recent`, are moved by:
 /// the facts of its executed blocks, each naming its parent and its height,
 /// and how each one's execution changed the places of the state's nodes
-/// (its state diff, kept for the state window). Also
-/// the counts earlier versions kept (rows of `core_meta`), which a start
-/// forgets.
+/// (its state diff, kept for the state window).
 extension NodeStore {
     /// The executed block's fact, which names the state it produced.
     func blockFact(_ blockCID: String, at chainPath: [String]) throws -> ChainBlockFact? {

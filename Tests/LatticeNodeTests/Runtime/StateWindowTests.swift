@@ -284,8 +284,8 @@ final class StateWindowTests: XCTestCase {
     /// The heights a chain's state window scopes name, in order.
     private func windowHeights(_ storage: NodeStorage, at path: [String] = ["Nexus"]) async throws -> [UInt64] {
         let prefix = storage.scopes.windowPrefix(at: path)
-        // A chain not hosted has no store: what an earlier version kept
-        // for it was in the one store, the root's.
+        // A chain not hosted has no store of its own: the root's is read,
+        // which holds none of its windows.
         let broker = storage.stores.opened(at: path) ?? storage.stores.root
         return try await broker.retainedScopes(prefix: prefix).compactMap { UInt64($0.dropFirst(prefix.count)) }.sorted()
     }
