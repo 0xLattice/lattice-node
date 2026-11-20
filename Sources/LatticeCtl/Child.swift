@@ -34,10 +34,11 @@ struct Child: AsyncParsableCommand {
         }
     }
 
-    /// Stop hosting a child chain; what it stored stays.
+    /// Stop hosting a child chain: a chain the configuration does not host
+    /// has its data let go of; hosting it again syncs it again.
     struct Unhost: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Stop hosting a child chain; its data stays."
+            abstract: "Stop hosting a child chain; the node lets go of its data."
         )
 
         @OptionGroup var target: NodeTarget
@@ -65,7 +66,7 @@ struct Child: AsyncParsableCommand {
                 let named = below.prefix(5).joined(separator: ", ") + (below.count > 5 ? " and \(below.count - 5) more" : "")
                 print("\(path): no longer listed; still hosted for \(named), until they are unhosted")
             } else {
-                print("\(path): no longer hosted")
+                print("\(path): no longer hosted; the node lets go of its data")
             }
         }
     }

@@ -524,12 +524,12 @@ sweep runs at start.
 | Scope | Keeps | Released |
 |---|---|---|
 | chain | constants, Nexus genesis; on `state: all` every state created | never |
-| body (per block) | a block's own Volume, transactions, receipt witness | with `blockBodies: none`, once another block is the tip |
+| body (per block) | a block's own Volume, transactions, receipt witness | with `blockBodies: none`, once another block is the tip; when the chain is no longer hosted |
 | rules (per chain) | spec and policy modules, when state is not `all` | when the chain is no longer hosted |
-| reads (per block) | the state a stored block reads, until it executes | after execution or invalidity, and at start |
-| window (per chain and height) | what executions stored, on `recent` | once the tip is a window above, after the counts reach the tip |
-| counted (per chain) | on `recent`, every node of the current state, by count | moved with the tip |
-| staging | what a state sync or heal fetched | once the counts move |
+| reads (per block) | the state a stored block reads, until it executes | after execution or invalidity, and at start; when the chain is no longer hosted |
+| window (per chain and height) | what executions stored, on `recent` | once the tip is a window above, after the counts reach the tip; when the chain is no longer hosted |
+| counted (per chain) | on `recent`, every node of the current state, by count | moved with the tip; dropped when the chain is no longer hosted |
+| staging | what a state sync or heal fetched | once the counts move; when the chain is no longer hosted |
 | operator | pins | on unpin |
 | durable / live mempool | journaled and pooled transactions | as they leave |
 

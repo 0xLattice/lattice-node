@@ -78,6 +78,18 @@ final class VolumeBundleCache: @unchecked Sendable {
         }
     }
 
+    /// The bundles of `roots` go, in one transaction.
+    func forget(_ roots: [String]) throws {
+        guard let database, !roots.isEmpty else { return }
+        try writes.withLock {
+            try database.transaction {
+                for root in roots {
+                    try database.execute("DELETE FROM volume_bundles WHERE root = ?1", params: [.text(root)])
+                }
+            }
+        }
+    }
+
     private func report(_ message: String) {
         guard lock.withLock({ reported ? false : { reported = true; return true }() }) else { return }
         logLine("lattice-node volume-bundles: \(message)")

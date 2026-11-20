@@ -462,6 +462,7 @@ public final class NodeRuntime: Sendable {
         ))
         loop = Task {
             var state = initial.take()
+            await storage.letGoOfChains(except: state.configured, blocks: true)
             // With no bodies kept beyond the working set, a start lets go
             // of the ones a run that kept them left, before any step.
             for (path, level) in state.core.levels { state.bodyTips[path] = level.snapshot.actOnTip }
@@ -490,7 +491,7 @@ public final class NodeRuntime: Sendable {
                 }
             }
             state.cancelAll()
-            for job in state.jobs.values {
+            for job in state.jobs.values.map(\.task) {
                 job.cancel()
                 await job.value
             }
@@ -584,6 +585,9 @@ extension NodeRuntime {
         /// Whether this node's overlay relays, as its hello says.
         let relays: Bool
         var configuration: NodeConfiguration
+        /// The chains the operator's configuration hosts, a level that did
+        /// not start among them: none of their data is let go of.
+        var configured: Set<ChainPath>
         var outputs: [ChainPath: LevelOutput]
         /// What RPC and the overlay read of the hosted levels, republished
         /// when the operator changes them.
@@ -634,7 +638,13 @@ extension NodeRuntime {
         var announcedRoots: [String: UInt64] = [:]
         /// The running jobs, which the loop waits for before it lets the
         /// store go: a job reading from peers can outlast a step.
-        var jobs: [UInt64: Task<Void, Never>] = [:]
+        var jobs: [UInt64: (path: ChainPath, task: Task<Void, Never>)] = [:]
+        /// The running jobs of levels that stopped, cancelled: what they
+        /// report is dropped.
+        var abandonedJobs: Set<UInt64> = []
+        /// Chains left the configuration: their data is let go of once no
+        /// running job is of a chain not configured.
+        var releasing = false
         var nextJob: UInt64 = 0
         /// The jobs waiting for a worker (`JobQueues`).
         var queued = JobQueues()
@@ -765,6 +775,7 @@ extension NodeRuntime {
             self.outbox = SessionOutbox(ivy: ivy)
             self.relays = relays
             self.configuration = configuration
+            self.configured = Set([configuration.chainPath] + configuration.hostedChildren)
             self.outputs = outputs
             self.levelReads = levelReads
             self.hosted = hosted
@@ -811,6 +822,12 @@ extension NodeRuntime {
                 runningJobs -= 1
                 jobs[id] = nil
                 startJobs()
+                // A stopped level's job: what it reports is for no level,
+                // or for one hosted again since, which starts over.
+                guard abandonedJobs.remove(id) == nil else {
+                    await releaseWhenIdle()
+                    return true
+                }
                 for event in events {
                     // A connect without a verdict is a wait with its reason.
                     if case .level(let path, .connected(let results)) = event {
@@ -947,22 +964,23 @@ extension NodeRuntime {
 
         /// Host the children `next` lists, and only those: a level no longer
         /// listed stops with every level below it, and a newly listed one
-        /// starts, parent first, as it would at boot. What a stopped level
-        /// journaled stays, so listing it again resumes it. A level that
-        /// cannot start is left out, and the error says why.
+        /// starts, parent first, as it would at boot. What a chain no longer
+        /// configured stored is let go of once its level's running jobs end;
+        /// listing it again syncs it from peers. A level that cannot start
+        /// is left out, and the error says why; its data stays, as it is
+        /// still configured.
         mutating func host(_ next: NodeConfiguration) async throws {
             try await storage.storePolicyModules(next.policyModules)
             let listed = Set(next.hostedChildren)
+            let wasConfigured = configured
+            configured = listed.union([core.rootPath])
             for path in core.ordered where path != core.rootPath && !listed.contains(path) {
                 guard await step(.unhost(path)) else { throw NodeRuntimeError.stopped }
                 stateTips[path] = nil
-                await storage.letGoOfWindows(at: path)
-                await storage.letGoOfRules(at: path)
                 if let repair = counted.removeValue(forKey: path)?.repair {
                     repair.task.cancel()
                     await repair.task.value
                 }
-                await storage.dropCounted(at: path)
             }
             var failure: (any Error)?
             for path in next.hostedChildren where core.levels[path] == nil {
@@ -987,6 +1005,17 @@ extension NodeRuntime {
             for key in bodies.keys where core.levels[key.path] == nil {
                 bodies.removeValue(forKey: key)?.cancel()
             }
+            // A stopped level's jobs: a queued one never runs, and a running
+            // one is cancelled, not awaited (it may wait on this loop), and
+            // what it reports is dropped. Its chain is let go of once none
+            // of them still runs: they store what they execute.
+            queued.drop { core.levels[$0.path] == nil }
+            for (id, job) in jobs where core.levels[job.path] == nil {
+                job.task.cancel()
+                abandonedJobs.insert(id)
+            }
+            releasing = releasing || !wasConfigured.isSubset(of: configured)
+            await releaseWhenIdle()
             fetchWaits = fetchWaits.filter { core.levels[$0.key.path] != nil }
             connectWaits = connectWaits.filter { core.levels[$0.key.path] != nil }
             for (id, entry) in replies where core.levels[entry.path] == nil {
@@ -1026,6 +1055,14 @@ extension NodeRuntime {
             }
             startNetworkMaintenance()
             if let failure { throw failure }
+        }
+
+        /// Lets go of the chains the configuration no longer hosts, once
+        /// no running job is one of theirs.
+        mutating func releaseWhenIdle() async {
+            guard releasing, !jobs.values.contains(where: { !configured.contains($0.path) }) else { return }
+            releasing = false
+            await storage.letGoOfChains(except: configured)
         }
 
         /// One child level started over what it journaled, as boot does,
@@ -2006,11 +2043,11 @@ extension NodeRuntime {
                 runningJobs += 1
                 nextJob += 1
                 let (inputs, id, started) = (inputs, nextJob, SyncTrace.now())
-                jobs[id] = Task {
+                jobs[id] = (job.path, Task {
                     let events = await job.run()
                     let times = SyncTrace.enabled ? TraceTimes(queued: job.queued, started: started, done: SyncTrace.now()) : nil
                     inputs.yield(.jobDone(id, events, times))
-                }
+                })
             }
         }
 

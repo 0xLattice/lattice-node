@@ -52,6 +52,8 @@ actor OperatorConfig {
     /// What else does not match, by what it concerns (`reload`, a listener).
     private var problems: [String: String] = [:]
     private var appliedPeers: [String: [String]]
+    /// The hosted chains the runtime was last told, started or not.
+    private var appliedChains: Set<String>
     private let runtime: any HostingRuntime
     private var busy = false
     private var waiting: [CheckedContinuation<Void, Never>] = []
@@ -61,6 +63,7 @@ actor OperatorConfig {
         self.desired = desired
         self.started = started
         self.appliedPeers = Self.childPeers(started)
+        self.appliedChains = Set(started.hostedChains ?? [])
         self.runtime = runtime
     }
 
@@ -251,7 +254,10 @@ actor OperatorConfig {
         let target = desired.topology
         let peers = Self.childPeers(target)
         let running = Set(runtime.hostedChildren.map { $0.joined(separator: "/") })
-        guard Set(target.hostedChains ?? []) != running || peers != appliedPeers else {
+        let hosted = Set(target.hostedChains ?? [])
+        // A chain that did not start and is no longer listed changes no
+        // running level, but the node lets go of its data.
+        guard hosted != running || hosted != appliedChains || peers != appliedPeers else {
             hostErrors = [:]
             return
         }
@@ -263,6 +269,7 @@ actor OperatorConfig {
                 chainPeer: files.chainPeer, policyModule: files.policyModule
             ))
             appliedPeers = peers
+            appliedChains = hosted
         } catch {
             reason = "\(error)"
         }

@@ -126,15 +126,6 @@ extension NodeStorage {
         return Set([block.spec.rawCID] + spec.wasmPolicies.map(\.moduleCID))
     }
 
-    /// When the chain at `path` is no longer hosted: its spec and policy
-    /// modules go.
-    nonisolated func letGoOfRules(at path: ChainPath) async {
-        do {
-            try await release(scope: scopes.rules(at: path))
-        } catch {
-            syncTrace("rules of \(path) not released: \(error)")
-        }
-    }
 
     /// At a start: what a block read goes when the block has executed (a
     /// stop came between), or when the operator keeps all state.
@@ -228,6 +219,96 @@ extension NodeStorage {
         try await broker.releaseRetainedRoots(scope: scopes.operatorPins, roots: [root])
     }
 
+    // MARK: - Chains the configuration does not host
+
+    /// With `hosted` what the configuration hosts (a chain that failed to
+    /// start among them): every other chain this store holds anything of
+    /// has its data let go of; hosting it again syncs it from peers like
+    /// any new chain. The configuration is the record: a release a stop or
+    /// a failure cuts short leaves the chain's facts, and the next call,
+    /// at the latest the next start, finishes it. Returns the chains not
+    /// let go of (logged).
+    /// With `blocks` (a start), a chain is found by its blocks' bodies and
+    /// reads too: one row per block kept.
+    @discardableResult
+    nonisolated func letGoOfChains(except hosted: Set<ChainPath>, blocks: Bool = false) async -> [ChainPath] {
+        let held: Set<ChainPath>
+        do {
+            held = try await heldChains(blocks: blocks)
+        } catch {
+            logLine("lattice-node: chains not hosted not let go of, tried again at the next start: \(error)")
+            return []
+        }
+        var failed: [ChainPath] = []
+        // Deepest first: a chain's facts outlive those of the chains under it.
+        for path in held.subtracting(hosted).sorted(by: { $0.count > $1.count }) where await !letGo(ofChain: path) {
+            failed.append(path)
+        }
+        return failed
+    }
+
+    /// The chains this store keeps anything of by chain: facts, cursors or
+    /// child proofs, a spec, state windows, counts or staging. One index
+    /// seek per chain, and one row per kept window. A block's body or reads
+    /// are found through its chain's facts (`letGo(ofChain:)` releases them
+    /// before the facts), and with `blocks` by their own names too: what a
+    /// late write left after its chain's facts went.
+    private nonisolated func heldChains(blocks: Bool) async throws -> Set<ChainPath> {
+        func path(_ text: Substring) -> ChainPath { text.split(separator: "/").map(String.init) }
+        var held = try await store.chainPaths()
+        for prefix in blocks ? [scopes.bodyPrefix, scopes.readsPrefix] : [] {
+            for scope in try await broker.retainedScopes(prefix: prefix) {
+                guard let colon = scope.lastIndex(of: ":") else { continue }
+                held.insert(path(scope[scope.index(scope.startIndex, offsetBy: prefix.count)..<colon]))
+            }
+        }
+        for prefix in [scopes.rulesPrefix, scopes.stagingPrefix] {
+            for scope in try await broker.retainedScopes(prefix: prefix) { held.insert(path(scope.dropFirst(prefix.count))) }
+        }
+        for scope in try await broker.countedScopes(prefix: scopes.countedPrefix) {
+            held.insert(path(scope.dropFirst(scopes.countedPrefix.count)))
+        }
+        for scope in try await broker.retainedScopes(prefix: scopes.windowsPrefix) {
+            guard let colon = scope.lastIndex(of: ":") else { continue }
+            held.insert(path(scope[scope.index(scope.startIndex, offsetBy: scopes.windowsPrefix.count)..<colon]))
+        }
+        return held
+    }
+
+    /// Everything kept only for the chain at `path` goes, content first:
+    /// its blocks' bodies and what they read, its state windows, spec and
+    /// policy modules, counts and staging, its local and pooled
+    /// transactions, and its blocks' cached bundles; then its facts, in one
+    /// transaction. A fact naming content that is gone is no fault: it is
+    /// read again from peers (NODE-STORAGE-002.f), so a release cut short
+    /// leaves a store the node runs on, and its facts name the chain for the
+    /// next try. What another scope also names stays: another chain's
+    /// blocks, the operator's pins, and the chain scope on `all`. False,
+    /// logged, when it failed.
+    private nonisolated func letGo(ofChain path: ChainPath) async -> Bool {
+        let chain = path.joined(separator: "/")
+        do {
+            for prefix in [scopes.bodyPrefix + chain + ":", scopes.readsPrefix + chain + ":", scopes.windowPrefix(at: path)] {
+                try await broker.releaseRetainedScopes(try await broker.retainedScopes(prefix: prefix))
+            }
+            for scope in [scopes.rules(at: path), scopes.staging(at: path)] + scopes.legacyStatePrefixes.map({ $0 + chain }) {
+                try await release(scope: scope)
+            }
+            try await broker.dropCountedScope(scope: scopes.counted(at: path))
+            for item in try await localTransactions() where item.transaction.body.node?.chainPath == path {
+                try await removeLocalTransaction(item.transactionCID)
+            }
+            try await releaseLivePool(of: path)
+            try bundles.forget(try await store.ownBlocks(path))
+            let blocks = try await store.forget(path)
+            logLine("lattice-node: \(chain) is not hosted: let go of its data (\(blocks) blocks)")
+            return true
+        } catch {
+            logLine("lattice-node: \(chain) is not hosted, and its data was not let go of; tried again at the next start: \(error)")
+            return false
+        }
+    }
+
     /// Lets go of everything `scope` names.
     nonisolated func release(scope: String) async throws {
         let roots = try await broker.retainedRoots(scope: scope)
@@ -253,13 +334,6 @@ extension NodeStorage {
         } catch {
             syncTrace("state below \(height) not let go of: \(error)")
         }
-    }
-
-    /// When the chain at `path` is no longer hosted: every state window it
-    /// kept goes.
-    nonisolated func letGoOfWindows(at path: ChainPath) async {
-        guard let listed = try? await broker.retainedScopes(prefix: scopes.windowPrefix(at: path)) else { return }
-        for scope in listed { await letGoOfWindow(scope) }
     }
 
     private nonisolated func letGoOfWindow(_ scope: String) async {
@@ -515,17 +589,6 @@ extension NodeStorage {
         } catch {
             syncTrace("staging of \(path) not released: \(error)")
         }
-    }
-
-    /// When the chain at `path` is no longer hosted: its counts go, and
-    /// what its staging held.
-    nonisolated func dropCounted(at path: ChainPath) async {
-        do {
-            try await broker.dropCountedScope(scope: scopes.counted(at: path))
-        } catch {
-            syncTrace("counts of \(path) not dropped: \(error)")
-        }
-        await releaseStaging(at: path)
     }
 
     /// At a start, with `hosted` the chains this node hosts: the markers of

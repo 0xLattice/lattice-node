@@ -522,9 +522,9 @@ runs it again. A change takes effect on restart.
 
 ### What a node keeps
 
-Facts and headers are kept for good, and so is each credited child proof
-unless it no longer reads back (an entry it names is gone, or a row is
-damaged): then it is deleted when read, the block is served without it,
+Facts and headers are kept while their chain is hosted, and so is each
+credited child proof unless it no longer reads back (an entry it names is
+gone, or a row is damaged): then it is deleted when read, the block is served without it,
 and a peer's copy is taken again while the block still waits for proof.
 They grow with the number of blocks weighed, as Bitcoin's block index
 does. Content is kept because a rule says so.
@@ -631,9 +631,54 @@ walking the tip's state from the store alone; counts that do not match it (as
 facts an older version wrote with an inexact diff may leave them) are replaced
 by a state sync.
 
-A chain no longer hosted (removed from a running node's hosted chains, or
-left out at a start) loses its counts, what its state sync held, and its
-spec and policy modules; hosting it again starts with a state sync.
+The configuration is what the node hosts, and what it keeps: a chain the
+merged configuration does not host has its data let go of, however it left
+(`lattice child unhost`, a fragment edited or deleted, a SIGHUP re-read, a
+start without it). A running node does so once the chain's level has
+stopped and its running jobs have ended (its queued ones never run); the
+change does not wait for the chain's running jobs. Every start does so
+for any chain it holds data of and does not host, found by its facts, its
+per-chain scopes and the names of its blocks' bodies and reads (one name
+per kept block, held in memory while the start lists them: 30,000 list in
+about 16 ms). One that the configuration lists and that did not start keeps
+its data.
+
+Its content goes first: from `volumes.db` its blocks' bodies and what they
+read, its state windows, spec and policy modules, counts and what its state
+sync held, and its pooled transactions; its local transactions (their rows
+in `state.db` and what they pinned); and its Volume bundles from
+`volume-bundles.db`. Then, in one `state.db` transaction, its facts and
+block index, cursors, state diffs and child proofs go, with the header
+records and proof entries no other chain's rows name. A fact whose content
+is gone is no fault (it is read again from peers), so content goes first: a
+stop or a failure in between leaves the chain's facts, a store the node
+runs on, and the next start finishes the release. Each chain let go of, or
+not, is a line in the node's log, naming it. Content another scope also
+names stays: an operator pin, another chain's block, and on `state: all`
+the state its executions stored, which is kept with every chain's. Child
+indexes stay too: a leaf chain's blocks all share one, with every other
+block that carries no child; a parent chain's may be its own. Hosting the
+chain again syncs it from peers like any new chain.
+
+Two writes can land after a running node let go of a chain, and go at the
+next start: the chain's block body that a mined block's storing step,
+begun before the chain stopped, stores under the chain's own body scope;
+and a child block that the build-child-block RPC stores after passing its
+hosted check before the chain stopped.
+
+Letting go holds the node's loop while it runs: about 45 µs per block kept
+with its bodies (a 10,000-block chain takes about 0.45 s, a 100,000-block
+one about 4.5 s), plus a pass over every child proof the node keeps when the
+chain's proofs named entries of their own (about 0.7 s with 100,000 proofs
+of other chains). Its pooled transactions cost one read each of the
+transactions in the pool.
+
+Letting go frees space for the node's later writes, not for the system:
+`state.db`, `volumes.db` and `volume-bundles.db` are SQLite files without
+`auto_vacuum`, so deleted rows' pages go to each file's free list and are
+reused by later writes, and the files do not shrink. Nor does
+`state.db-wal`: a checkpoint reuses it from its start, and it is not
+truncated.
 
 Kept state is a cache, not a promise: execution, a submitted transaction's
 check, and state reads all read the state this node does not hold from
@@ -651,7 +696,7 @@ it names.
 A start after a version that kept exactly the tip's state (`tip`) moves that
 state into each chain's window at its tip, so it goes a window later like
 any state, and forgets its counts. What a node kept for a chain it no longer
-hosts goes at its next start, and its counts go when it stops hosting it.
+hosts goes when it stops hosting it, as every chain's data does.
 Switching from `recent` to `all` keeps what the counts held with the chain;
 switching to `none` lets it go.
 

@@ -813,8 +813,10 @@ read none.
 Removes the fragment, answering as `GET /config`; `400` when what is left
 does not check, `404` when there is none, `412` as for `PUT` with an
 `If-Match` that is not its version. A chain no layer lists any more stops,
-unless a chain listed under it keeps it, implied; what it stored stays, and
-hosting it again resumes it.
+unless a chain listed under it keeps it, implied. A chain the configuration
+does not host has its data let go of; hosting it again syncs it again from
+its peers (see [What a node keeps](operations.md#what-a-node-keeps)). The
+same holds for a `PUT` that leaves a chain out.
 
 ### `POST /chains`
 

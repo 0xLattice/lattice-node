@@ -262,8 +262,8 @@ extension NodeRuntime {
     /// Host these child chains, and only these, while running: they and
     /// their specs, premine recipients, genesis transactions, seeds and
     /// policy modules replace
-    /// what the node was started or last told. A dropped level keeps what it
-    /// journaled. Throws `NodeConfigurationError` for a list that does not
+    /// what the node was started or last told. A dropped level's chain has
+    /// its data let go of; one listed that does not start keeps it. Throws `NodeConfigurationError` for a list that does not
     /// hold together, before anything changes.
     public func host(
         _ hostedChildren: [ChainPath],
@@ -721,6 +721,13 @@ extension NodeRuntime {
             case .connect: connects.append(job)
             case .other: rest.append(job)
             }
+        }
+
+        /// Drops the waiting jobs `dropped` names.
+        mutating func drop(where dropped: (RuntimeJob) -> Bool) {
+            answered.removeAll(where: dropped)
+            connects.removeAll(where: dropped)
+            rest.removeAll(where: dropped)
         }
 
         /// The next job a free worker runs.
