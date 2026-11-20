@@ -130,7 +130,7 @@ final class RetentionCrashTests: XCTestCase {
 
     /// Waits until the storage a stopped runtime opened is released.
     private func closed(_ storage: inout NodeStorage?) async throws {
-        weak let released = storage
+        weak var released = storage
         storage = nil
         try await eventually("the first storage is closed") { released == nil }
     }
