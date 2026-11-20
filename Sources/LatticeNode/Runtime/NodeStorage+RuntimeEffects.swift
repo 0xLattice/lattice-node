@@ -562,8 +562,6 @@ extension NodeStorage {
         }
     }
 
-    /// A header's content for serving: the runtime's header store, or a full
-    /// block boundary already held by the Volume store.
     /// The spec a stored genesis header names, from local content.
     /// A child genesis header lives in the header store (its body may not be
     /// fetched yet); its spec Volume was stored with it.

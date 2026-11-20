@@ -24,7 +24,7 @@ public enum NodeRuntimeError: Error, Equatable, Sendable {
 /// effects in order — persist, then publish, then everything else. Every
 /// decision remains in the core.
 ///
-/// - `persist` (one `NodeBatch`) → the opened `NodeStorage`'s Volume store and state.db
+/// - `persist` (one `NodeBatch`) → the opened `NodeStorage`'s Volume stores and state.db
 ///   (content fsynced first, then the facts in one transaction). A failure
 ///   stops the storage: restart replays the journal.
 /// - `publish` → `published`, read by RPC without touching the loop.
