@@ -377,10 +377,32 @@ weighs a peer's log, and still relays what it mines. As Bitcoin's BIP152
 high-bandwidth relay announces a block once its proof of work is checked,
 before it is validated.
 
-*Still open.* Whether the child gate is needed at all, since each child
-header already waits for its own proof; and what fact the transaction gate
-should ask (the act-on tip is the best tip, or nothing more is executable
-here now), so that a block waiting on a parent fact cannot hold it shut.
+*The child gate, kept.* It came in (`cd2f4fa0`) in place of a per-header
+frontier (weighed-state sets, re-asks, a timed let-go): a child header is
+weighed only once its parent has weighed the block it anchors on
+(`a915b276`), so a child reading its peers beside a lagging parent reads
+headers it must drop and ask for again. Reading headers to the end before
+anything that hangs from them is Bitcoin's headers-first download. It fails
+open in the only sense that matters: it holds only while the parent has not
+weighed a peer's whole log, and while that is so the child could not weigh
+what it read anyway. Nothing changes.
+
+*The transaction gate, decided.* It asks a question of execution, rightly:
+a transaction is checked against the executed tip. `synced` latches when
+the act-on tip is the best tip or the heaviest whose bodies can be had; a
+body counts as unobtainable once its retries reach the cap (#125, #128). A
+child block whose connect waits on a parent fact its parent has not executed
+did not count, so a heavier branch through one held the gate shut for good,
+with the parent caught up and the fact coming from nowhere (§4.9a's spec
+references: "not proven here", retriable, owed by no one). Such a block now
+counts as unobtainable once the parent level is itself caught up: while the
+parent is still syncing the fact is likely on its way, as a body is while
+its retries are below the cap. The latch stays one-way, as Bitcoin's
+`IsInitialBlockDownload` is, and now its condition can always come to hold.
+
+The simulator checks both, at every level of every honest core after the
+quiet point: both latches set (`synced` once the level has a tip), and no tip `stalled`
+(`LevelInvariants.checkGatesOpen`).
 
 ### 4.4 Liveness reporting
 
@@ -397,14 +419,28 @@ and not moving is a stall.
 
 **Why.** Outcome 2 is the one failing, and it was not visible as a number.
 
-**What it does not yet say.** The oldest wait and its age, and the parent
-chain's own status beside the child's (a reader can ask for the parent's
-path today). `sync` also counts pending headers, headers awaiting proof,
-proof checks running, the body window, bodies requested, unavailable and
-parked, and blocks awaiting parent facts. With those, most stalls can be diagnosed
-from `/status` alone, and the same predicates can drive simulator
-assertions. Height alone also misses a heavier but shorter branch; comparing
-the acted-on tip with the best executable tip is the precise measure.
+`sync` also counts pending headers, headers awaiting proof, proof checks
+running, the body window, bodies requested, unavailable and parked, and
+blocks awaiting parent facts.
+
+**Not added, and why.** Phase 1 also listed the oldest wait and the parent's
+status beside the child's. Neither earns a field. How long a chain has been
+held is `secondsSinceTipAdvanced`: whatever it waits on, its tip has not
+moved since. The parent's status is the parent path's own `/status`, and
+`blockedOn: parent` says to read it; copying it into every child's answer
+would put one chain's state in another's. Bitcoin Core and geth answer one
+chain per call; this answers one chain path per call.
+
+**Simulator assertions.** The same predicates drive the simulator: after
+the quiet point, every level of every honest core has both latches set and
+no tip `stalled` (`LevelInvariants.checkGatesOpen`), across the scenarios
+that cover each Phase 1 case: missing bodies (the body withholder,
+`WithheldBodiesLivenessTests`), delayed proofs (the proof withholder, the
+zero-work peer), parent–child stalls (`ForwardAnchorSimulationTests`,
+`CrossLevelForkChoiceTests`) and reorganisations at several depths (fork
+probabilities up to 0.6; `StateWindowTests` within and beyond the window).
+Worker starvation is the runtime's job order, outside the simulator, and is
+covered by `NodeRuntimeJobOrderTests`.
 
 **How others do it.** Bitcoin Core's `getblockchaininfo` returns blocks and
 headers; geth's `eth_syncing` returns current and highest block; both leave
@@ -888,12 +924,16 @@ progress or reports exactly why it cannot.
 
 - ~~Land per-chain liveness reporting (§4.4), deploy it, and diagnose the node
   stopped at height 3,920.~~ Done: #158, #161, #163; the cause is in §4.9a.
-- Review what `synced` and `headersSynced` encode, and derive readiness from
-  facts (§4.3).
-- Report the blocking phase and pending jobs (done, #161), the oldest wait,
-  and the parent's status per chain (§4.4).
-- Simulator scenarios for starvation, missing bodies, delayed proofs,
-  parent–child stalls, and reorganisations at several depths (§4.19).
+- ~~Review what `synced` and `headersSynced` encode, and derive readiness
+  from facts (§4.3).~~ Done: the relay waits on weight; the transaction gate
+  counts a block not proven here as unobtainable; the child gate is kept.
+- ~~Report the blocking phase, the oldest wait, pending jobs and the parent's
+  status per chain (§4.4).~~ Done (#161); the oldest wait and the parent's
+  status are answered without new fields (§4.4).
+- ~~Simulator scenarios for starvation, missing bodies, delayed proofs,
+  parent–child stalls, and reorganisations at several depths (§4.19).~~ The
+  scenarios existed; every one now asserts liveness at its quiet point
+  (§4.4).
 - ~~Receipt-proof sidecars travel with child blocks, and testnet's block
   3,921 is repaired once (§4.9a).~~ Done: the decision is #162, the report
   and the operator's repair #163, and testnet was repaired.
