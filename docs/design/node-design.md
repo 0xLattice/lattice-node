@@ -102,7 +102,7 @@ from the sync benchmark (`Benchmarks/sync`).
 | 6 Change | Rules a caller must keep that the code does not enforce | code, review | Zero beyond the write order | Zero for writes |
 | 6 Change | Components with no conventional equivalent, each with its reason | this document | Each justified in writing | Two (§5) |
 | 6 Change | Review rounds per change; repeated holes of one kind | review | A second round of the same kind stops the change | The write-behind layer took four rounds of ordering holes |
-| 6 Change | The largest files, where unrelated changes meet | code | **Owner to set** | The loop, 2,223 lines; the daemon's command file, 1,741 |
+| 6 Change | The largest files, where unrelated changes meet | code | **Owner to set** | The daemon's command file, 1,741 lines; the loop's file, 1,406 (start-up and boot included), after Phase 2 moved six components out (§4.1) |
 | 7 Cost | CPU, peak memory, disk kept, disk written, bandwidth; root alone and per extra chain | benchmark, node | **Owner to set** (the root on one CPU) | About 4.4 ms CPU per block, 190 MiB, 90 MB kept, 2.9 GB written per benchmark sync; per-chain cost not measured |
 | 8 Transfers | Time from deposit to withdrawal on a parent–child pair; share that complete | network, tests | **Owner to set** | Not measured |
 | 9 Availability | Content requests served; how long a body stays unavailable; hosts per chain | node, network | **Owner to set** | Not measured |
@@ -254,6 +254,19 @@ are `NodeEffect`s. The simulator (`LatticeNodeSim`) checks after every step
 that published tips and served headers are durable, no honest peer is
 disconnected, the weighed graph equals the stored headers, GHOST weights
 match a reference, and no gate is left shut.
+
+The shell's loop (`RT`, `struct Loop`) takes each input, steps the core, and
+hands each effect, in the contract's order (§4.1a), to the component that
+runs it; a job's or task's result comes back as an input. The components
+are structs the loop owns, each in its own file under `LatticeNode/Runtime/`
+with only its own state: `JobPool` (workers and queues), `BodyFetches`
+(body fetches, their waits, the body windows), `Retention` (the loop's side
+of retention: what is let go of as tips move, counts and their repair),
+`ReadModel` (views and template digests, rebuilt from the core),
+`Maintenance` (peer search, announcements, current peers) and
+`TransactionFetches`. None reads another's state; the loop passes what one
+needs. So a change to retention, the read views or maintenance touches its
+own file, not the core or how events are processed.
 
 **Why.** Sync was rebuilt several times after nodes stopped making progress;
 a deterministic core the simulator steps exactly as the node does makes
@@ -626,7 +639,8 @@ commits per block, a quarter of each step.
 90 MB. Retention's CPU is small (about 1.5%), but every content read is
 decoded and hash-checked, a large share of CPU, because state is stored as
 hash-addressed encoded nodes. **Ease of change.** Hard: retention crosses
-three layers — the loop (a count-repair state machine in `RT`), the store
+three layers — the loop's side (`Runtime/Retention.swift`, behind the
+calls the loop makes after each step), the store
 (`NodeStorage+Retention.swift`, 631 lines; `NodeStore+StatePins.swift`, 181),
 and VolumeBroker's counted index. **Judgment.** The largest remaining
 machinery and the biggest disk cost. No established client counts references
@@ -732,8 +746,9 @@ whose sidecar no peer serves is not connected.
 
 **What.** `max(1, processors − 1)` workers; three queues served strictly in
 order — what an RPC waits on, each chain's next blocks, the rest — first in,
-first out within each; a recheck whose tip moved is dropped (`API`,
-`JobQueues`).
+first out within each; a recheck whose tip moved is dropped
+(`Runtime/JobPool.swift`: `JobQueues`, and `JobPool`, which owns them and the
+running jobs).
 
 **Why.** #64: a testnet root chain executed one block every five minutes, its
 next block queued behind thousands of child proof checks; #76 made three
@@ -912,9 +927,12 @@ blocks may anchor to. Those deserve dedicated adversarial scenarios.
 | Sync wire format | `ChainSyncWire.swift`, its adapter, one call site | one | one codec at the edge, as others; text JSON where others use binary | **easy** |
 | Identifiers | text CIDs in 32 files, the core included | all | others use fixed 32-byte hashes and convert at the edge | **hard but mechanical** |
 | Write order and persistence | the loop's persist effect and two store files | two | Bitcoin's order | **easy** |
-| State retention | retention and state-pin store files, a state machine in the loop, VolumeBroker's counted index | three | no established client counts references on disk | **hard** |
-| The shell's loop | `NodeRuntime.swift` (2,223) and `NodeRuntime+API.swift` (1,419) | — | decides effects, builds views and digests, runs count repair and maintenance | **a hotspot** |
-| Work queues | `JobQueues` | one | one pool with queues | **easy** |
+| State retention | retention and state-pin store files, `Retention` (the loop's side), VolumeBroker's counted index | three | no established client counts references on disk | **hard** |
+| The shell's loop | `NodeRuntime.swift` (1,406, start-up and boot included) | one | receives input, steps the core, dispatches effects to the components below, takes results back; Bitcoin Core's `PeerManager` and validation-interface subscribers, geth's handler and fetchers | **easy** |
+| Read model | `ReadModel.swift` (167) | one | a chain-head subscriber that rebuilds views; owns no authoritative state | **easy** |
+| Maintenance | `Maintenance.swift` (285) | one | peer search and provider announcement, off the loop | **easy** |
+| Body and transaction fetches | `BodyFetches.swift` (207), `TransactionFetches.swift` (93) | one | geth's block and transaction fetchers | **easy** |
+| Work queues | `JobPool.swift` (137) | one | one pool with queues | **easy** |
 | Mining | separate processes behind HTTP | one | `getblocktemplate` | **easy** |
 | Operator surface | `LatticeCtl`, `LatticeNodeDaemon` | one | systemd, drop-in configuration | **easy** |
 
@@ -957,10 +975,22 @@ condition is observable and recoverable.
 **Phase 2 — Reduce complexity (high).** Make the node easier to understand
 and to change.
 
-- Make the runtime coordinator boring: receive input, step the core, run
+- ~~Make the runtime coordinator boring: receive input, step the core, run
   effects, take results. Move the read model (views, digests), maintenance,
   and count repair out of the loop file, each behind the effects it already
-  is, none owning authoritative state.
+  is, none owning authoritative state.~~ Done, behaviour unchanged: the loop
+  keeps the core, the sessions and RPC replies, input dispatch, stepping and
+  effect order, and hands each effect to one component under
+  `LatticeNode/Runtime/`, passing in what it reads of the others —
+  `ReadModel.swift` (167 lines: views, digests, fee reprojections),
+  `Retention.swift` (331: the body working set, reads to release, state
+  tips, counts and their repair), `Maintenance.swift` (285: peer search,
+  passes, announcements, current peers, pins), `BodyFetches.swift` (207:
+  fetches, waits, body windows and the read cache's order),
+  `JobPool.swift` (137: running and queued jobs), `TransactionFetches.swift`
+  (93). `NodeRuntime.swift` went from 2,232 lines to 1,406, about 860 of
+  them the loop. Sessions stay in the loop: their changes start maintenance
+  and retry repairs, and every network input reads them.
 - Put state retention behind one interface (load current state, apply a
   block, roll back, read, prune), without changing its behaviour, and write
   down what each retention scope is for; some may be implementation details,
