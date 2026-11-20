@@ -206,6 +206,38 @@ Benchmarks/sync/native.sh /tmp/bench 1 3                 # 1 worker, 3 runs
 Benchmarks/sync/report.py /tmp/bench/runs/w1-*
 ```
 
+Each run also reports, per chain, when its act-on tip first moved, reached
+half its recorded height and reached it (time to tip), and the totals a
+comparison across hosted chains needs: CPU, peak memory, disk kept, SQLite
+bytes written and loopback bytes. `native.sh` takes more settings from the
+environment (its header lists them):
+
+- `HOSTED=k`: the follower hosts Nexus and the first k child levels only.
+  Record a wider tree for it (`LEAVES=7`) into its own `DATA` directory.
+- `PAGES=1`: the bytes written to each table and index, through the log and
+  the checkpoint, attributed every second (costs CPU; not for timing).
+- `TALLY=1`: how many times the node's work read each CID (repeated decodes).
+- `PROFILE=1` (macOS): a CPU profile of the follower; `profile.py` gives
+  each activity's share of it.
+
+With the trace on, the report also gives what the node handed the Volume
+store by kind, what it received by message and by field, and the tally.
+
+```bash
+TRACE=0 TAG=base Benchmarks/sync/native.sh /tmp/bench 1 3
+PAGES=1 TALLY=1 TAG=writes Benchmarks/sync/native.sh /tmp/bench 1 1
+TRACE=0 PROFILE=1 TAG=profile Benchmarks/sync/native.sh /tmp/bench 1 1
+Benchmarks/sync/profile.py /tmp/bench/runs/profile-1/sample.txt
+for k in 0 1 2 4 8; do
+  DATA=/tmp/bench/data/wide LEAVES=7 BLOCKS=1500 TRACE=0 HOSTED=$k TAG=hosted$k \
+    Benchmarks/sync/native.sh /tmp/bench 1 2
+done
+Benchmarks/sync/report.py /tmp/bench/runs/hosted*
+```
+
+The Linux workflow (`.github/workflows/sync-benchmark.yml`) runs `native.sh`
+pinned to one CPU when a `bench/` branch is pushed, or by hand.
+
 Record the dataset once and sync every build from it, so every build syncs the
 same blocks. Record it again only after a storage flag day. A PR that changes
 sync reports `report.py` for its base and its head, at 1 and 2 CPUs.

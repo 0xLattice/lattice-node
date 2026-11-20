@@ -3,7 +3,8 @@
 macOS `sample` call graph (native.sh PROFILE=1).
 
 Busy samples are the samples whose innermost frame is not a wait (a thread
-parked in the kernel). Each activity's share is the busy samples under its
+parked in the kernel), nor a sync to the disk (fsync, fcntl), which is
+counted apart as I/O wait. Each activity's share is the busy samples under its
 first matching frame on a stack, so nested matches count once; different
 activities overlap where one calls another (decoding content includes the
 CID parsing it does). With --top, the N frames with the most busy samples
@@ -15,8 +16,20 @@ IDLE = re.compile(r'^(__workq_kernreturn|kevent|kevent_id|mach_msg2_trap|mach_ms
                   r'|__semwait_signal|__ulock_wait2?|semaphore_wait_trap|__select|poll|start_wqthread|syscall_thread_switch'
                   r'|__bsdthread_ctl|thread_start|_pthread_start)$')
 
+# Innermost frames that are a thread waiting for the disk to sync.
+IO_WAIT = re.compile(r'^(__fcntl|fcntl|fsync|fdatasync)$')
+
 # Activities, by the frames that start them. Order is only the table's.
 ACTIVITIES = [
+    ('Wire frames decoded (ChainSyncWire.decode)', r'ChainSyncWire\.decode\(topic:payload:\)'),
+    ('  of which JSON parsed and checked canonical', r'CanonicalJSONMessage\.decoded'),
+    ('  of which header entries decoded (DAG-CBOR, proofs)', r'WireHeaderEntry\.decoded'),
+    ('Volume store reads (SQLite)', r'CASVolumeStore\.(fetchDataLocal|loadServableData|fetchVolumeLocal)'),
+    ('Volume store writes (SQLite)', r'CASVolumeStore\.storeVolumesLocal|RetainedRootIndex\.|CountedRootIndex\.'),
+    ('Facts written (state.db)', r'NodeStore\.stageNodeFacts'),
+    ('Execution (connect jobs)', r'NodeRuntime\.connectJob'),
+    ('Derivations (child blocks from the parent)', r'ChildDeriveJob\.run'),
+    ('Core decisions (NodeCore.step)', r'NodeCore\.step'),
     ('CID text parsed (CID.init from a string)', r'^(specialized )?CID\.init\(_:(base:)?\)|^CIDDigest\.init\(_:\)|CIDDigest\.words\(decoding:\)'),
     ('CID text formatted (CID to string)', r'CIDDigest\.string\.getter|^(specialized )?CID\.description|CIDIdentity\.canonicalString|^(specialized )?CID\.encoded'),
     ('CID computed for content (encode + hash)', r'computeCID\(for:codec:\)|_standardCID\(of:\)'),
@@ -29,7 +42,6 @@ ACTIVITIES = [
     ('Base64', r'Base64\.'),
     ('SHA-256', r'SHA2\.|SHA256|AccelerateCrypto_SHA256'),
     ('SQLite', r'^sqlite3_|^sqlite3[A-Z]'),
-    ('fsync', r'^fsync$|^fcntl$|^__fcntl$'),
     ('Hashing for Swift dictionaries and sets', r'^Hasher\.|hash\(into:\)|_rawHashValue'),
     ('Allocation and reference counting', r'^swift_(retain|release|allocObject|bridgeObject)|malloc|^_free$|_xzm_'),
 ]
@@ -66,7 +78,8 @@ def main():
         while stack and rows[stack[-1]][0] >= depth: stack.pop()
         if stack: selfs[stack[-1]] -= count
         stack.append(i)
-    busy_self = [0 if IDLE.match(rows[i][2]) else max(selfs[i], 0) for i in range(n)]
+    io_wait = sum(max(selfs[i], 0) for i in range(n) if IO_WAIT.match(rows[i][2]))
+    busy_self = [0 if IDLE.match(rows[i][2]) or IO_WAIT.match(rows[i][2]) else max(selfs[i], 0) for i in range(n)]
     # Busy samples under each row (its own and its descendants').
     under = busy_self[:]
     parents = [-1] * n
@@ -102,7 +115,7 @@ def main():
         if not on_symbol[sym]: by_symbol[sym] += under[i]
         on_symbol[sym] += 1
         stack.append(i)
-    print('%s: %d samples, %d busy (%.0f%%)' % (path, total, busy, 100 * busy / max(total, 1)))
+    print('%s: %d samples, %d busy, %d in disk syncs (%.0f%% of busy)' % (path, total, busy, io_wait, 100 * io_wait / max(busy, 1)))
     print()
     print('| activity | busy samples | share of busy |')
     print('|---|---|---|')
