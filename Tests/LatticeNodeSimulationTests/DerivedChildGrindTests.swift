@@ -1308,6 +1308,43 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertEqual(Self.ancestorsAsked(host.take()), [line.c.cid], "D's announcer is asked for C")
     }
 
+    /// G is not held here. C comes from one peer and D, on C, from
+    /// another, which holds and serves G, C and D. D's check answers first
+    /// and D waits on C; C's sender is gone before C's check answers. C,
+    /// promoted, takes D's announcer as its own (that peer holds D, so it
+    /// holds C's ancestors), asks it for G, and all three are weighed.
+    func testAPromotedHeaderAsksForItsParentOfItsChildsAnnouncer() async throws {
+        let line = try await lineWorld()
+        var host = Host(line.world)
+        await host.step(.mined(line.n0))
+        await host.meet(Self.miner)
+        await host.meet(Self.alphaHost)
+        await host.meet(Self.otherHost)
+        host.serving[Self.alpha, default: [:]][Self.alphaHost] = [
+            line.g.cid: HeaderEntry(block: line.g.block, children: line.g.children, proofs: [line.proofs.g], spec: line.world.specs[Self.alpha]),
+            line.c.cid: HeaderEntry(block: line.c.block, children: line.c.children, proofs: [line.proofs.c]),
+            line.d.cid: HeaderEntry(block: line.d.block, children: line.d.children, proofs: [line.proofs.d]),
+        ]
+        host.deferChecks = true
+        await host.relay(line.c, at: Self.alpha, from: Self.otherHost, proofs: [line.proofs.c])
+        await host.relay(line.d, at: Self.alpha, from: Self.alphaHost, proofs: [line.proofs.d])
+        XCTAssertEqual(host.deferred.count, 2, "C's and D's checks have not answered")
+        _ = host.take()
+        let (cAnswer, dAnswer) = (host.deferred[0], host.deferred[1])
+        host.deferred = []
+        await host.step(dAnswer)
+        XCTAssertEqual(Self.ancestorsAsked(host.take()), [], "C is in hand: nobody is asked for it")
+        await host.step(.peerGone(Self.otherHost))
+        host.deferChecks = false
+        await host.step(cAnswer)
+        XCTAssertEqual(Self.ancestorsAsked(host.take()), [line.g.cid], "C's parent is asked of D's announcer")
+        await host.step(.tick)
+        let alpha = try host.digest(Self.alpha)
+        for (name, block) in [("G", line.g), ("C", line.c), ("D", line.d)] {
+            XCTAssertNotNil(alpha.blocks[block.cid], "\(name) is weighed")
+        }
+    }
+
     // MARK: - Many carriers
 
     /// N0 and N1 (carrying Alpha's genesis G); C on G; `count` siblings on

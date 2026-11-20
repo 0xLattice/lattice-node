@@ -438,9 +438,18 @@ extension ChainCore {
 
     /// A waiting header has verified work: it enters the pending queue, at
     /// its root's achieved hash, as `accept` enters a root header, and is
-    /// weighed at once when its parent is.
+    /// weighed at once when its parent is. As there, a peer that sent a
+    /// header holds its ancestors: it inherits the announcers of its pending
+    /// children (which wait on it rather than ask for it while its work is
+    /// checked), and its own announcers announce its pending parent.
     mutating func promote(_ waiting: AwaitingChildProof, evidence: VerifiedChildEvidence, proof: ChildBlockProof, _ turn: inout Turn) {
         let cid = waiting.blockCID
+        var announcers = waiting.announcers
+        for child in (sync.pending.childrenOf[cid] ?? []).sorted() {
+            for other in sync.pending.entries[child]?.announcers ?? [] where !announcers.contains(other) {
+                announcers.append(other)
+            }
+        }
         var header = PendingHeader(
             blockCID: cid,
             block: waiting.block,
@@ -449,13 +458,16 @@ extension ChainCore {
             hash: evidence.rootHash,
             bytes: Self.size(of: waiting.block) + (waiting.children.map(Self.size) ?? 0)
                 + ((try? proof.serialize().count) ?? 0),
-            announcers: waiting.announcers
+            announcers: announcers
         )
         header.evidence[evidence.grindID] = evidence
         header.proofs[evidence.grindID] = proof
         sync.pending.insert(header)
-        for peer in waiting.announcers { sync.announced[peer, default: []].insert(cid) }
+        for peer in announcers { sync.announced[peer, default: []].insert(cid) }
         dirty(cid, &turn)
+        if let parent = waiting.block.parent?.rawCID {
+            for peer in announcers { announce(parent, by: peer, &turn) }
+        }
     }
 
     // MARK: - Weighing
