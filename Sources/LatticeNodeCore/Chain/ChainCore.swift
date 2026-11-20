@@ -555,6 +555,7 @@ public struct ChainCore: Sendable {
             guard !isRoot else { break }
             sync.proofs.finishDeriving(derivation.job.childCID)
             derived(derivation, &turn)
+            released(derivation.job.childCID, &turn)
         case .submitted(let entry):
             guard !isRoot else { break }
             _ = accept(entry, from: nil, &turn)
@@ -1136,7 +1137,7 @@ public struct ChainCore: Sendable {
             } else {
                 insert(header, &turn)
             }
-        } else if sync.pending.entries[parent] == nil, !header.askedParent {
+        } else if sync.pending.entries[parent] == nil, !awaitsItsWork(parent), !header.askedParent {
             want(header, parent: true, &turn)
         }
     }

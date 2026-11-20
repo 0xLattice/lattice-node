@@ -1214,6 +1214,100 @@ final class DerivedChildGrindTests: XCTestCase {
         }
     }
 
+    /// G (Alpha's genesis), C on G and D on C, each carried by the Nexus
+    /// block after it (N1, N2, N3), and each carrier's proof.
+    private struct Line {
+        let world: LevelWorld
+        let n0: MinedGrind
+        let g: SimBlock
+        let c: SimBlock
+        let d: SimBlock
+        let proofs: (g: ChildBlockProof, c: ChildBlockProof, d: ChildBlockProof)
+        let n2: SimBlock
+    }
+
+    private func lineWorld() async throws -> Line {
+        var builder = try await LevelWorld.Builder(levels: 2)
+        let n0 = try await builder.grind(on: try XCTUnwrap(builder.geneses[Self.nexus]), carrying: [], at: Self.t + Self.interval / 2, outcome: .block)
+        let g = try await builder.childGenesis(Self.alpha, parentState: n0.root.block.postState.rawCID, at: Self.t + Self.interval)
+        let n1 = try await builder.grind(on: n0.root, carrying: [(Self.alpha, g)], at: Self.t + Self.interval, outcome: .block)
+        let c = try await builder.build(on: g, carrierPrevState: n1.root.block.postState.rawCID, timestamp: Self.t + 2 * Self.interval, nonce: 1)
+        let n2 = try await builder.grind(on: n1.root, carrying: [(Self.alpha, c)], at: Self.t + 2 * Self.interval, outcome: .block)
+        let d = try await builder.build(on: c, carrierPrevState: n2.root.block.postState.rawCID, timestamp: Self.t + 3 * Self.interval, nonce: 1)
+        let n3 = try await builder.grind(on: n2.root, carrying: [(Self.alpha, d)], at: Self.t + 3 * Self.interval, outcome: .block)
+        return Line(
+            world: builder.world(), n0: n0.grind, g: g, c: c, d: d,
+            proofs: (
+                try XCTUnwrap(n1.grind.carried.first).proof, try XCTUnwrap(n2.grind.carried.first).proof,
+                try XCTUnwrap(n3.grind.carried.first).proof
+            ),
+            n2: n2.root
+        )
+    }
+
+    /// A host that weighed G and reads the Alpha hosts, Nexus's carriers
+    /// unknown to it (so every credit is a peer's proof, none derived).
+    private func lineHost(_ line: Line) async -> Host {
+        var host = Host(line.world)
+        await host.step(.mined(line.n0))
+        await host.meet(Self.miner)
+        await host.meet(Self.alphaHost)
+        await host.meet(Self.otherHost)
+        await host.relay(line.g, at: Self.alpha, from: Self.alphaHost, proofs: [line.proofs.g], spec: line.world.specs[Self.alpha])
+        _ = host.take()
+        return host
+    }
+
+    private static func ancestorsAsked(_ sent: [(path: ChainPath, message: SyncMessage)]) -> [String] {
+        sent.compactMap { if case .getAncestors(_, let cid, _) = $0.message { return cid } else { return nil } }
+    }
+
+    /// C and then D arrive, each with its proof, and D's check answers
+    /// first: D waits pending on C, whose check is still running, and the
+    /// host asks no peer for C again (with a page of ancestors it holds).
+    /// When C's check answers, both are weighed: each header was received
+    /// once.
+    func testAHeaderWhoseParentsCheckIsRunningDoesNotAskForThatParent() async throws {
+        let line = try await lineWorld()
+        var host = await lineHost(line)
+        host.deferChecks = true
+        await host.relay(line.c, at: Self.alpha, from: Self.alphaHost, proofs: [line.proofs.c])
+        await host.relay(line.d, at: Self.alpha, from: Self.alphaHost, proofs: [line.proofs.d])
+        XCTAssertEqual(host.deferred.count, 2, "C's and D's checks have not answered")
+        _ = host.take()
+        let (cAnswer, dAnswer) = (host.deferred[0], host.deferred[1])
+        host.deferred = []
+        await host.step(dAnswer)
+        XCTAssertEqual(Self.ancestorsAsked(host.take()), [], "C is in hand: nobody is asked for it")
+        await host.step(cAnswer)
+        XCTAssertEqual(Self.ancestorsAsked(host.take()), [])
+        let alpha = try host.digest(Self.alpha)
+        XCTAssertNotNil(alpha.blocks[line.c.cid], "C is weighed")
+        XCTAssertNotNil(alpha.blocks[line.d.cid], "D is weighed")
+        XCTAssertTrue(host.disconnects.isEmpty)
+    }
+
+    /// As above, but C came with a bogus proof from another peer: its check
+    /// fails, C still waits with nothing in flight, and D (its parent no
+    /// longer in hand) asks D's announcer for C.
+    func testAHeaderWhoseParentsCheckFailsAsksForThatParent() async throws {
+        let line = try await lineWorld()
+        var host = await lineHost(line)
+        host.deferChecks = true
+        let bogus = ChildBlockProof(rootCID: line.n2.cid, directoryPath: [Self.alpha[1]], entries: [])
+        await host.relay(line.c, at: Self.alpha, from: Self.otherHost, proofs: [bogus])
+        await host.relay(line.d, at: Self.alpha, from: Self.alphaHost, proofs: [line.proofs.d])
+        XCTAssertEqual(host.deferred.count, 2)
+        _ = host.take()
+        let (cAnswer, dAnswer) = (host.deferred[0], host.deferred[1])
+        host.deferred = []
+        await host.step(dAnswer)
+        XCTAssertEqual(Self.ancestorsAsked(host.take()), [])
+        await host.step(cAnswer)
+        XCTAssertEqual(host.disconnects, [Self.otherHost], "the bogus proof's sender")
+        XCTAssertEqual(Self.ancestorsAsked(host.take()), [line.c.cid], "D's announcer is asked for C")
+    }
+
     // MARK: - Many carriers
 
     /// N0 and N1 (carrying Alpha's genesis G); C on G; `count` siblings on
