@@ -564,7 +564,7 @@ to retain trie nodes on disk; geth moved away from hash-keyed state. Replace
 when an objective needs it, with geth's path scheme the nearest shape — but
 first make it replaceable (§6).
 
-### 4.9a Decision proposed: receipt proofs travel with the child block
+### 4.9a Decision: receipt proofs travel with the child block
 
 **The failure.** Testnet nodes stopped child chains at height 3,920 (as
 reported by the owner's investigation). Block 3,921 carries a withdrawal. A
@@ -590,7 +590,7 @@ node still holds that Nexus state. No node can execute the block.
   need that proof from a remote same-chain peer" (§3.5). The protocol
   intends a per-withdrawal witness.
 
-**Decision proposed.** Every child block with withdrawals has a sidecar: the
+**Decision.** Every child block with withdrawals has a sidecar: the
 parent state trie nodes its withdrawals' receipt proofs read, from its
 `parentState` down each receipt's path (`Block.parentReceiptWitnessPaths`).
 The sidecar is not part of the block: the block's bytes, CID and
@@ -637,7 +637,7 @@ bodies.
 | A long state window for the parent | a node that sets it | the parent's recent state; a setting to get right per network | rejected: configuration, not design |
 | Hold a parent state until hosted children execute past it | a node syncing parent and children together | couples retention to other chains' progress; a stuck child holds state unless bounded | rejected: inelegant, no help to a node that hosts a child late |
 | Keep every version of each chain's receipt state | any node | about 7 KB per receipt ever made, forever, on every parent host (about 35 times the trie) | rejected: size, paid by every parent host for every receipt |
-| **A sidecar indexed and sent with the child block, required** | **any node, any child, hosted whenever** | **the paths each withdrawal reads, kept with the block** | **proposed; the spec's design** |
+| **A sidecar indexed and sent with the child block, required** | **any node, any child, hosted whenever** | **the paths each withdrawal reads, kept with the block** | **decided; the spec's design** |
 
 **How others do it.** Ethereum's blob sidecars (EIP-4844) travel beside a
 block, outside its body, and are kept with it. Bitcoin blocks carry
@@ -875,8 +875,8 @@ progress or reports exactly why it cannot.
   parent–child stalls, and reorganisations at several depths (§4.19).
 - Receipt-proof sidecars travel with child blocks, as the code already does,
   and testnet's block 3,921 is repaired once (§4.9a): the cause of the stall at
-  3,920. Report a block that waits on missing parent state as that, not as
-  an unavailable body (§4.4).
+  3,920. A block whose receipt proofs no peer served is reported as that
+  (#163); the operator guide has the repair.
 
 *Exit:* no unexplained stalled chain in production; every known blocking
 condition is observable and recoverable.
