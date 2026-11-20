@@ -104,7 +104,7 @@ from the sync benchmark (`Benchmarks/sync`).
 | 6 Change | Components with no conventional equivalent, each with its reason | this document | Each justified in writing | Two (§5) |
 | 6 Change | Review rounds per change; repeated holes of one kind | review | A second round of the same kind stops the change | The write-behind layer took four rounds of ordering holes |
 | 6 Change | The largest files, where unrelated changes meet | code | No file over 1,000 lines | The daemon's command file, 1,741 lines; the loop's file, 1,444 (start-up and boot included), after Phase 2 moved seven components out (§4.1) |
-| 7 Cost | CPU, peak memory, disk kept, disk written, bandwidth; root alone and per extra chain | benchmark, node | The root on one CPU at 5 ms a block and 256 MiB; a chain's writes per block do not grow with the chains hosted | About 4.4 ms CPU per block, 190 MiB, 90 MB kept, 2.9 GB written per benchmark sync; on macOS each added chain of 1,498 blocks costs about 5.8–7.1 s CPU, 18–26 MiB memory, 11–13 MiB kept, 12 MiB of bandwidth, and 368–581 MiB written, rising with the chains already hosted (§2) |
+| 7 Cost | CPU, peak memory, disk kept, disk written, bandwidth; root alone and per extra chain | benchmark, node | The root on one CPU at 5 ms a block and 256 MiB; a chain's writes per block do not grow with the chains hosted | About 4.4 ms CPU per block, 190 MiB, 90 MB kept, 2.9 GB written per benchmark sync; on macOS each added chain of 1,498 blocks costs about 5.8–7.1 s CPU, 18–26 MiB memory, 11–13 MiB kept, 12 MiB of bandwidth, and, with a Volume store per chain (schema epoch 50), 179–193 MiB written (122–132 KiB a block), flat with the chains already hosted, against 307–483 MiB rising before; that costs 10–17% more CPU and about thirteen open files a chain (§2, §4.9b) |
 | 8 Transfers | Time from deposit to withdrawal on a parent–child pair; share that complete | network, tests | Every transfer completes; in the time its two chains' confirmations take | Not measured |
 | 9 Availability | Content requests served; how long a body stays unavailable; hosts per chain | node, network | Two hosts per chain keep every body; none unavailable for an hour | Not measured |
 | 10 Mining | Time to answer a template request and a submission; share of work on stale templates | node | A template in 100 ms and a submission in 50 ms at the 99th percentile; at most 1% of work on stale templates | Not measured |
@@ -525,6 +525,21 @@ The inferred cause is the layout, random-key rows every chain shares; Phase
 4 gives each hosted chain its own Volume store (§4.9b). The index drop is
 worth taking on its own.
 
+**After per-chain stores (schema epoch 50).** The same runs, one each with
+the page attribution and two each without for time and CPU, each build
+syncing a tree it recorded:
+
+| Hosted children | Written before | Written after | Written per added leaf, after | CPU before | CPU after | Peak memory | Kept | Open files |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 213 MiB | 199 MiB | — | 5.4 s | 5.5 s | 105 → 103 MiB | 29 → 29 MiB | — |
+| 2 | 520 MiB | 378 MiB | 179 MiB (122 KiB a block) | 11.3 s | 12.0 s | 135 → 137 MiB | 40 → 45 MiB | — |
+| 4 | 1,310 MiB | 757 MiB | 190 MiB (130 KiB) | 23.3 s | 25.5 s | 163 → 171 MiB | 64 → 76 MiB | 74 → 126 |
+| 8 | 3,240 MiB | 1,528 MiB | 193 MiB (132 KiB) | 48.3 s | 56.3 s | 234 → 253 MiB | 108 → 138 MiB | 74 → 178 |
+
+Writes per added leaf are flat; each chain's own store writes the same
+whatever else is hosted (§4.9b). CPU, memory, disk kept and open files rise
+with the number of stores.
+
 #### Where the CPU goes after the header fix
 
 Three profiles of the four-chain sync (v2 schema), shares of busy samples,
@@ -589,8 +604,8 @@ parent hash rate need observations of the network.
         │             (connect, proofs, derive,   write, then  │ │
         │              preflight, templates)      publish      │ │
         │                                                      │ │
-        │   state.db (facts, headers, journal)   volumes.db    │ │
-        │   synchronous=FULL                     (content)     │ │
+        │   state.db (facts, headers, journal)   volumes/      │ │
+        │   synchronous=FULL          (content, a store a chain) │ │
         └────────────────────────────────────────────────────────┘
         Core (LatticeNodeCore): deterministic; one ChainCore per hosted chain
 ```
@@ -887,7 +902,7 @@ consider compact relay once blocks carry many transactions.
 **What.** A connect job takes up to 32 ready blocks of one chain, each the
 previous one's child, whose parent state and continuity fact are present.
 One job per chain runs at a time. It executes them in order, stores the
-valid blocks' content in one `volumes.db` write, then reports verdicts. A
+valid blocks' content in one write to the chain's Volume store, then reports verdicts. A
 valid block whose body could not be stored is reported not stored. Invalid
 becomes an exclusion; a missing input parks the block.
 
@@ -912,7 +927,7 @@ should not need to.
 
 **What.** Effects run in one order: `persist` and the mempool's pool change
 first, then `publish`, then everything else (`RT`, `rank`), each awaited.
-`persist` writes executed state Volumes in one `volumes.db` write, then every
+`persist` writes executed state Volumes in one write to each chain's Volume store, then every
 level's headers, proofs, facts, cursors and state diffs in one `state.db`
 transaction (`NSE`, `persistNodeBatch`). Bodies were stored before, by the
 job that validated them. A store write that throws stops the node
@@ -956,7 +971,7 @@ state and its marker together.
 | File | Holds | Settings |
 |---|---|---|
 | `state.db` (schema epoch 48) | facts (kept forever), accepted blocks, headers, child indexes, proofs, stream cursors, the local mempool journal, state diffs for the window, the weigh log id | WAL, `synchronous=FULL`; one writer, one reader; the store's actor on its own serial queue |
-| `volumes.db` | content by hash: bodies, transactions, specs, policy modules, state trie nodes; retention scopes and counted roots (VolumeBroker 10.1.3) | WAL, `synchronous=FULL` |
+| `volumes/<chain>.db` | one per hosted chain: its content by hash (bodies, transactions, state trie nodes, its rules), its retention scopes and counted roots; the root's also the constants, specs, policy modules, pins and the mempool's (VolumeBroker 10.3.1) | WAL, `synchronous=FULL` |
 | `volume-bundles.db` | a cache of which Volumes a block's bundle holds | WAL, `synchronous=NORMAL`; may be deleted |
 
 A different schema epoch, genesis or set of tables means "wipe required".
@@ -985,7 +1000,7 @@ the stores themselves. **Judgment.** Keep SQLite.
 
 ### 4.9 State and its retention
 
-**What.** `volumes.db` keeps what a named scope retains; a release reclaims
+**What.** Each hosted chain's Volume store (`volumes/<chain>.db`, §4.9b) keeps what a named scope retains; a release reclaims
 whatever no scope or count still names, in the same transaction; a full
 sweep runs at start.
 
@@ -1232,7 +1247,37 @@ store by store, then the facts in one `state.db` transaction, as now: a crash
 between stores leaves content no fact names, which the start-up sweep
 removes. The cost is one more commit per chain a step touches; a step
 usually touches one or two. geth's path scheme stays the next step if one
-chain's own growth over time ever misses a target.**Recovery contract, as the code stands.**
+chain's own growth over time ever misses a target.
+
+**Result (schema epoch 50, measured on macOS).** Built as chosen:
+`VolumeStores` (`Storage/VolumeStores.swift`) owns a store per hosted chain,
+`volumes/<chain>.db`, and routes by chain path. A chain's writes go to its
+store; its work reads its own store, then its ancestors', then the rest; a
+read by CID asks every store. The root chain's store also holds what is the
+node's: the protocol constants, the Nexus genesis, policy modules and child
+genesis specs, the operator's pins and the mempool's journal pins. Unhosting
+a chain removes its store; a start removes the store of any chain not
+hosted. A step's persist writes one chain's store in practice: a step
+executes one level, and a child genesis's spec goes to the root's store in
+the step that weighs it.
+
+The target is met: a chain's writes per block no longer grow with the
+chains hosted. Each leaf's own store wrote 118–120 MiB whether two, four or
+eight children were hosted, and Alpha's 133–134 MiB whether one or eight;
+per added leaf the follower wrote 179, 190 and 193 MiB in all (122, 130 and
+132 KiB a block, against 210, 270 and 330 before), the rest being its
+facts in `state.db`, which grow slightly (51, 58, 59 MiB a leaf). With eight
+children the sync wrote 1,528 MiB against 3,240 (53% less). The costs:
+CPU rose 10% with four children and 17% with eight (25.5 against 23.3 s,
+56.3 against 48.3 s), wall time 2–3%, peak memory 6–8%, disk kept 20–30%
+(138 against 108 MiB with eight), and open files from 74 to 126 and 178
+(about thirteen a store: its file, log and shared memory, and the Volume
+store's reader connections). Not yet measured: where the CPU goes; the
+likely causes are reads that name no chain, which ask the stores one by one
+and miss in all but one, and a page cache per store; and how far the WAL
+and free pages each store keeps explain the disk kept.
+
+**Recovery contract, as the code stands.**
 
 - Content (a body, its sidecar, a mined block) is stored, fsynced, before
   anything names it.
@@ -1440,7 +1485,7 @@ blocks may anchor to. Those deserve dedicated adversarial scenarios.
 | Consensus decisions and sync rules | `LatticeNodeCore`, checked by `LatticeNodeSim` | one | the separation is this node's own, and it pays | **easy** |
 | Sync wire format | `ChainSyncWire.swift`, its adapter, one call site | one | one codec at the edge, as others; text JSON where others use binary | **easy** |
 | Identifiers | text CIDs in 32 files, the core included | all | others use fixed 32-byte hashes and convert at the edge | **hard but mechanical** |
-| Write order and persistence | the loop's persist effect and two store files | two | Bitcoin's order | **easy** |
+| Write order and persistence | the loop's persist effect, two store files and `VolumeStores` (a Volume store per hosted chain, routed by chain path) | two | Bitcoin's order; a store per chain, as a chain is hosted by those that opt in | **easy** |
 | State retention | `StateBackend` (the three settings, one type), the loop's `Retention` and `Counts`, the retention and state-pin store files (the mechanism), VolumeBroker's counted index | one for a setting's policy; three or more for the counted mechanism | the shape of triedb's or a `StateProvider`'s interface, over one mechanism; no established client counts references on disk | **medium** |
 | The shell's loop | `NodeRuntime.swift` (1,444, start-up and boot included) | one | receives input, steps the core, dispatches effects to the components below, takes results back; Bitcoin Core's `PeerManager` and validation-interface subscribers, geth's handler and fetchers | **easy** |
 | Read model | `ReadModel.swift` (167) | one | a chain-head subscriber that rebuilds views; owns no authoritative state | **easy** |
@@ -1574,7 +1619,12 @@ compatibility or correctness.
   Done: VolumeBroker 10.3.1 (its schema v3 already drops it), schema epoch
   49, one wipe. Measured after it, a chain's writes per block still grow
   with the chains hosted (§2), so:
-- Give each hosted chain its own Volume store (§4.9b).
+- ~~Give each hosted chain its own Volume store (§4.9b).~~ Done: schema
+  epoch 50, one wipe. A chain's writes per block no longer grow with the
+  chains hosted (122–132 KiB a block per added leaf, flat; 53% less written
+  with eight children). It costs 10–17% more CPU, 20–30% more disk kept
+  and about thirteen open files a chain (§2, §4.9b); where that CPU goes is
+  the next measurement.
 
 *Exit:* a simpler storage model with measured benefits and a written recovery
 contract.
