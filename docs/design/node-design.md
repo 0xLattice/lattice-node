@@ -102,7 +102,7 @@ from the sync benchmark (`Benchmarks/sync`).
 | 6 Change | Rules a caller must keep that the code does not enforce | code, review | Zero beyond the write order | Zero for writes |
 | 6 Change | Components with no conventional equivalent, each with its reason | this document | Each justified in writing | Two (§5) |
 | 6 Change | Review rounds per change; repeated holes of one kind | review | A second round of the same kind stops the change | The write-behind layer took four rounds of ordering holes |
-| 6 Change | The largest files, where unrelated changes meet | code | **Owner to set** | The daemon's command file, 1,741 lines; the loop's file, 1,404 (start-up and boot included), after Phase 2 moved seven components out (§4.1) |
+| 6 Change | The largest files, where unrelated changes meet | code | **Owner to set** | The daemon's command file, 1,741 lines; the loop's file, 1,444 (start-up and boot included), after Phase 2 moved seven components out (§4.1) |
 | 7 Cost | CPU, peak memory, disk kept, disk written, bandwidth; root alone and per extra chain | benchmark, node | **Owner to set** (the root on one CPU) | About 4.4 ms CPU per block, 190 MiB, 90 MB kept, 2.9 GB written per benchmark sync; per-chain cost not measured |
 | 8 Transfers | Time from deposit to withdrawal on a parent–child pair; share that complete | network, tests | **Owner to set** | Not measured |
 | 9 Availability | Content requests served; how long a body stays unavailable; hosts per chain | node, network | **Owner to set** | Not measured |
@@ -916,7 +916,7 @@ not be able to take what others need. What is bounded today, by reading:
 | Messages queued to a peer | per-session message and byte limits (`SessionOutbox`) |
 | Content served to peers | concurrent and in-flight byte limits (`servingMaxConcurrent`, `servingMaxInFlightVolumeBytes`) |
 | Mempool | per-chain limits |
-| Worker queues | **not bounded**: proof checks can queue in the thousands while a tree of chains syncs |
+| Worker queues | per step, not in total: a level's proof checks of a step are one job, a page under a byte budget; its derivations at most one per worker; its connects one at a time; a mining recheck whose tip moved is dropped. On the child-sync benchmark the peak queued fell from 1,993 jobs (one per derivation) to 23, with 7–9% less CPU and the same wall time. Steps can still queue faster than workers drain them; no total bound |
 | Bodies fetched but not yet executed | bounded by the window and the byte budget; not reported |
 
 Not yet measured: how these behave with many hosted chains, and whether one
@@ -961,7 +961,7 @@ blocks may anchor to. Those deserve dedicated adversarial scenarios.
 | Identifiers | text CIDs in 32 files, the core included | all | others use fixed 32-byte hashes and convert at the edge | **hard but mechanical** |
 | Write order and persistence | the loop's persist effect and two store files | two | Bitcoin's order | **easy** |
 | State retention | `StateBackend` (the three settings, one type), the loop's `Retention` and `Counts`, the retention and state-pin store files (the mechanism), VolumeBroker's counted index | one for a setting's policy; three or more for the counted mechanism | the shape of triedb's or a `StateProvider`'s interface, over one mechanism; no established client counts references on disk | **medium** |
-| The shell's loop | `NodeRuntime.swift` (1,404, start-up and boot included) | one | receives input, steps the core, dispatches effects to the components below, takes results back; Bitcoin Core's `PeerManager` and validation-interface subscribers, geth's handler and fetchers | **easy** |
+| The shell's loop | `NodeRuntime.swift` (1,444, start-up and boot included) | one | receives input, steps the core, dispatches effects to the components below, takes results back; Bitcoin Core's `PeerManager` and validation-interface subscribers, geth's handler and fetchers | **easy** |
 | Read model | `ReadModel.swift` (167) | one | a chain-head subscriber that rebuilds views; owns no authoritative state | **easy** |
 | Maintenance | `Maintenance.swift` (286) | one | peer search and provider announcement, off the loop | **easy** |
 | Body and transaction fetches | `BodyFetches.swift` (214), `TransactionFetches.swift` (93) | one | geth's block and transaction fetchers | **easy** |
@@ -1022,8 +1022,8 @@ and to change.
   `BodyFetches.swift` (214: fetches, waits, body windows and the read
   cache's order), `JobPool.swift` (137: running and queued jobs),
   `TransactionFetches.swift` (93). `NodeRuntime.swift` went from 2,232
-  lines to 1,404 (the 2,223 measured earlier was before Phase 1's last
-  changes), about 860 of them the loop. Sessions stay in the loop: their
+  lines to 1,444 (the 2,223 measured earlier was before Phase 1's last
+  changes), about 880 of them the loop. Sessions stay in the loop: their
   changes start maintenance and retry repairs, and every network input
   reads them.
 - ~~Put state retention behind one interface (load current state, apply a
@@ -1031,9 +1031,17 @@ and to change.
   down what each retention scope is for; some may be implementation details,
   not concepts.~~ Done, behaviour unchanged: `StateBackend` (§4.9), with
   each scope's purpose and whether it is a concept in §4.9's table.
-- Write the loop's contract (§4.1a) and the persistence order down, and test
-  a crash at every boundary, retention releases and count repair included.
-- Bound the worker queues; make per-chain resource use visible (§4.17).
+- ~~Write the loop's contract (§4.1a) and the persistence order down, and test
+  a crash at every boundary, retention releases and count repair included.~~
+  Done: the contract and the order are in the [sync
+  architecture](sync-architecture.md#the-loops-contract) and the PR
+  checklist; `RetentionCrashTests` crashes a node at each retention write
+  after a step (body let-go, reads, window, the counts' move, commit,
+  staging, sync, check) and restarts it over the same store. The persist
+  boundary itself was covered (`BatchedConnectRuntimeTests`, the
+  simulator's crash modes). A heal's crash is not reached by a follower.
+- ~~Bound the worker queues~~ (derivations batched per level and step;
+  §4.17); make per-chain resource use visible (§4.17).
 - ~~Correct the sync architecture's rule 4 to the queues that are built.~~ Done (#160).
 
 *Exit:* a change to retention, API views or maintenance needs no change to

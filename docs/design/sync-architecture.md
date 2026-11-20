@@ -109,7 +109,13 @@ the runtime to them:
 5. **Writes complete before what they make true is published.** Each step:
    the step's state and facts in one transaction (`persist`, with the pool's
    journal), then `publish`, then every other effect in order. This is the
-   loop's one deliberate wait.
+   loop's one deliberate wait. Content a job stored (a body, a mined block)
+   is stored before the effect that names it. After the effects the step's
+   retention runs, none of it needed to be right: the body working set's
+   let-go, then each chain's state (the counts' move or commit, then the
+   window's let-go), the read cache's order, then the reads of the blocks
+   the step executed. A crash anywhere in it is repaired by the next start
+   (`RetentionCrashTests`).
 6. **Every job and task has a rule for when it is superseded**, listed
    below; a new kind adds its row. A result of a level no longer hosted is
    dropped by the core.
@@ -118,7 +124,7 @@ the runtime to them:
 |---|---|---|
 | Connect (a level's next blocks) | the connect queue, one per level at a time | never: a verdict is a fact about a block and counts on any branch; a run is at most `connectBatch` blocks |
 | Proof checks | the rest queue, one job per level per step, a page under a byte budget | never: a verdict is a fact about a header |
-| Derivations | the rest queue | never: a derived proof is a fact; bounded by the carriers weighed |
+| Derivations | the rest queue, a level's of one step in at most one job per worker | never: a derived proof is a fact |
 | Transaction reads (`readTransactions`) | the rest queue | never: local reads, cheap |
 | Mining preflight (an RPC's, or a recheck) | the answered queue (awaited) or the rest | a recheck whose mining tip moved is dropped before it runs; an admission always runs, its submit is waiting |
 | Template build | the answered queue | never: it is answered on any tip, and the miner asks again on a new digest |
