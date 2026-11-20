@@ -378,6 +378,8 @@ extension NodeStorage {
                     // Past the chain's own maxBlockSize the block is invalid,
                     // and its execution proves it from what was read: run it
                     // rather than retry a fetch that can never succeed.
+                } catch {
+                    throw await incompleteBody(cid, read: walked.takeVolumes().map(\.volume), error: error)
                 }
                 return await walked.takeStoredVolumeRoots()
             }.value
@@ -387,6 +389,20 @@ extension NodeStorage {
             guard capture.snapshot()?.byteBudgetExceeded == true else { throw error }
             throw NodeStorageError.bodyExceedsLocalBudget(bytes: bytes)
         }
+    }
+
+    /// Why a body's walk failed: when what it read, with this store, holds
+    /// the block's whole content, what no peer served is the receipt proofs
+    /// that travel with it (`receiptProofsUnavailable`); otherwise `error`.
+    nonisolated func incompleteBody(_ cid: String, read: [SerializedVolume], error: any Error) async -> any Error {
+        var entries: [String: Data] = [:]
+        for volume in read { entries.merge(volume.entries) { first, _ in first } }
+        let local = CompositeContentSource([InMemoryContentSource(entries), broker])
+        let content = NodeImportStorage(storage: nil, keepsVolumes: true)
+        guard (try? await BlockHeader(rawCID: cid).storeBlockContent(
+            fetcher: CoalescingFetcher(local), storer: content
+        )) != nil else { return error }
+        return NodeStorageError.receiptProofsUnavailable(cid)
     }
 
     /// The Volume roots served together for `rootCID`, its own first: the
