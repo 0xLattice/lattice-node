@@ -1255,8 +1255,10 @@ chain's own growth over time ever misses a target.
 `VolumeStores` (`Storage/VolumeStores.swift`) owns a store per hosted chain
 under `volumes/`, and routes by chain path. A chain's writes go to its
 store; its work reads its own store, then its ancestors' (a template's and
-a mined block's, its descendants' too); only a read by CID from the API or
-a peer asks every store. The root chain's store also holds what is the
+a mined block's, its descendants' too). Only reads that name no chain ask every store, root first: a read by CID from
+the API or a peer, a bundle served, a header page served when the header
+record lacks it, a child genesis's spec at a start, and boot. A chain's
+count check reads its own store alone. The root chain's store also holds what is the
 node's: the protocol constants, the Nexus genesis, policy modules and child
 genesis specs, the operator's pins and the mempool's journal pins. A step's persist writes the store of each level whose executions
 it journals, and the root's for a child genesis's spec it weighs; a

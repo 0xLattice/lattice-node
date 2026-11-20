@@ -16,9 +16,11 @@ import cashew
 /// Writes name their chain (`store(at:)`); reads compose. A chain's work
 /// reads its own store, then its ancestors' (a child's receipt proofs travel
 /// with its blocks, so a child's execution needs nothing of a sibling's),
-/// and what none of them holds is asked of peers; only a read by CID from
-/// the API or a peer, or one that names no chain, asks every store, root
-/// first. A chain's reads that asked every store probed each in turn and
+/// and what none of them holds is asked of peers. Only reads that name no
+/// chain ask every store, root first: a read by CID from the API or a
+/// peer, a bundle served, a header page served when the header record lacks
+/// it, a child genesis's spec at a start, and boot. A chain's reads that
+/// asked every store probed each in turn and
 /// missed in all but one, which cost 17% more CPU with eight children.
 ///
 /// The set changes only when the operator hosts or drops a chain; the
@@ -76,9 +78,11 @@ final class VolumeStores: ContentSource, Sendable {
     }
 
     /// The store of the chain at `path`: every write names the chain it is
-    /// for. A chain this node does not host, and has not hosted since the
-    /// start, has none (`NotHosted`): a late job of a level gone writes
-    /// nowhere rather than making a file.
+    /// for. A chain not hosted since the start has none (`NotHosted`), so
+    /// no write makes a file. In practice this does not fire: stores are
+    /// never closed while the node runs, so a late job of a level unhosted
+    /// writes into its still-open store, and may retain its bodies and rules
+    /// again, until the next start removes the file.
     func store(at path: ChainPath) throws -> DiskBroker {
         guard let held = opened.withLock({ $0.stores[path] }) else { throw NotHosted(path: path) }
         return held

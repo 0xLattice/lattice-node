@@ -451,7 +451,8 @@ extension NodeStorage {
     /// is no block this node holds whole bundles only itself.
     nonisolated func volumeBundle(_ rootCID: String) async -> [String] {
         // A recording outlives a store a start removed: one whose block is
-        // no longer held is not advertised.
+        // no longer held is not advertised. A served bundle names no chain,
+        // so this asks every store: a known cost per bundle served.
         if let recorded = bundles.bundle(root: rootCID) {
             return await stores.hasVolume(root: rootCID) ? recorded : [rootCID]
         }
@@ -489,7 +490,7 @@ extension NodeStorage {
         }
         return try await remote.withRootTracing(header.rawCID, bundle: false) { session in
             let children = try await storeMinedBlock(
-                header, block, at: path, fetcher: ownReads(through: session)
+                header, block, at: path, fetcher: ownReads(through: session, at: path, below: true)
             )
             return children
         }.value
@@ -521,7 +522,7 @@ extension NodeStorage {
         let rootCID = try BlockHeader(node: root).rawCID
         return try await remote.withRootTracing(rootCID, bundle: false) { session in
             let carried = try await carriedGrinds(
-                of: root, hosted: hosted, fetcher: ownReads(through: session)
+                of: root, hosted: hosted, fetcher: ownReads(through: session, at: stores.rootPath, below: true)
             )
             return carried
         }.value

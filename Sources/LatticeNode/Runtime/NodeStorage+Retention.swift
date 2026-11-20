@@ -396,10 +396,13 @@ extension NodeStorage {
             guard let counted = CountedMarker(marker),
                   let tip = try await store.blockFact(counted.tip.cid, at: path),
                   let chain = try await store.chain(from: counted.tip, down: counted.cursor, at: path) else { return nil }
+            // The counts are their chain's store's: the walk reads that
+            // store alone, not even its ancestors'.
+            let own = CoalescingFetcher(try stores.store(at: path))
             var expected: [String: Int] = [:]
             try await walkState(tip.postStateCID, into: &expected) { batch in
                 let resolved = try await withThrowingTaskGroup(of: (any Header).self) { group in
-                    for header in batch { group.addTask { try await header.resolve(fetcher: self.localFetcher) } }
+                    for header in batch { group.addTask { try await header.resolve(fetcher: own) } }
                     return try await group.reduce(into: [any Header]()) { $0.append($1) }
                 }
                 return Dictionary(resolved.map { ($0.rawCID, Self.children(of: $0)) }) { first, _ in first }
