@@ -49,6 +49,12 @@ extension NodeRuntime {
                 let window = level.connectOrder
                 moved.append((windows.updateValue(window, forKey: path)?.distances ?? [:], window.distances))
             }
+            // A block the window left (executed, excluded, or no longer
+            // asked for) waits no more.
+            if !fetchWaits.isEmpty || !connectWaits.isEmpty {
+                connectWaits = connectWaits.filter { windows[$0.key.path]?.distances[$0.key.cid] != nil }
+                fetchWaits = fetchWaits.filter { windows[$0.key.path]?.distances[$0.key.cid] != nil }
+            }
             return moved.isEmpty
                 ? []
                 : Self.reorder(&cachedBodyOrder, moved: moved, windows: windows.values.map(\.distances))
@@ -150,17 +156,12 @@ extension NodeRuntime {
         }
 
         /// The wait of the block after `tip`, the act-on tip of `level` at
-        /// `path`: its heaviest child the window asks for. A block the
-        /// window left (executed, excluded, or no longer asked for) waits
-        /// no more, and its wait goes.
-        mutating func waiting(at path: ChainPath, level: ChainCore, tip: String) -> NodeReadView.Waiting? {
+        /// `path`: its heaviest child the window asks for.
+        func waiting(at path: ChainPath, level: ChainCore, tip: String) -> NodeReadView.Waiting? {
             guard !fetchWaits.isEmpty || !connectWaits.isEmpty else { return nil }
-            // The level's window as its last step left it: every window
-            // block has a distance, and one whose parent is the act-on
-            // tip is among those to connect next.
+            // The level's window as its last step left it: one whose parent
+            // is the act-on tip is among those to connect next.
             let window = windows[path] ?? level.connectOrder
-            connectWaits = connectWaits.filter { $0.key.path != path || window.distances[$0.key.cid] != nil }
-            fetchWaits = fetchWaits.filter { $0.key.path != path || window.distances[$0.key.cid] != nil }
             return window.next.first { (level.parent(of: $0) ?? "") == tip }.flatMap { cid in
                 let key = BodyKey(path: path, cid: cid)
                 return (fetchWaits[key] ?? connectWaits[key]).map { NodeReadView.Waiting(cid: cid, reason: $0) }
