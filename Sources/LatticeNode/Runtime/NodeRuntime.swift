@@ -575,13 +575,8 @@ extension NodeRuntime {
         /// RPCs waiting on their answer, by reply ID.
         var replies: [UInt64: (path: ChainPath, reply: CheckedContinuation<NodeRuntimeReply, any Error>)] = [:]
         var nextReply: UInt64 = 1
-        /// Announced transactions being fetched, by CID.
-        var transactionFetches: Set<String> = []
-        /// Transactions recently fetched, not refetched until a hosted chain's
-        /// act-on tip moves (Bitcoin's recent rejects): a refused one is not fetched
-        /// again in a loop. Bounded, oldest out.
-        var recentlyFetched = RecentSet(capacity: 4_096)
-        var recentlyFetchedTips: [String] = []
+        /// Announced transactions being fetched and recently fetched.
+        var transactionFetches: TransactionFetches
         /// The read views and template digests published for RPC.
         var readModel: ReadModel
         /// Peer search, provider announcements and each chain's current
@@ -591,25 +586,6 @@ extension NodeRuntime {
         var connectedHosts = ConnectedHosts()
 
 
-        /// A bounded set, oldest out.
-        struct RecentSet {
-            let capacity: Int
-            private(set) var members: Set<String> = []
-            private var order: [String] = []
-
-            init(capacity: Int) { self.capacity = capacity }
-
-            mutating func insert(_ cid: String) {
-                guard members.insert(cid).inserted else { return }
-                order.append(cid)
-                if order.count > capacity { members.remove(order.removeFirst()) }
-            }
-
-            mutating func removeAll() {
-                members.removeAll()
-                order.removeAll()
-            }
-        }
         var wake: (time: Int64, task: Task<Void, Never>)?
         /// The body fetches, their waits and the body windows.
         var bodyFetches: BodyFetches
@@ -669,6 +645,7 @@ extension NodeRuntime {
                 configured: Set([configuration.chainPath] + configuration.hostedChildren)
             )
             self.readModel = ReadModel(inputs: inputs, templateDigest: templateDigest)
+            self.transactionFetches = TransactionFetches(ivy: ivy, inputs: inputs)
             self.maintenance = Maintenance(ivy: ivy, inputs: inputs, remote: remote, peerMemory: peerMemory)
             self.jobs = JobPool(workers: workers, inputs: inputs, observeJob: observeJob)
             self.failStop = failStop
@@ -757,8 +734,7 @@ extension NodeRuntime {
                 answer(id, result)
                 return true
             case .transactionFetched(let cid, let event):
-                transactionFetches.remove(cid)
-                recentlyFetched.insert(cid)
+                transactionFetches.fetched(cid)
                 guard let event else { return true }
                 return await step(event)
             case .maintenance:
@@ -1092,47 +1068,9 @@ extension NodeRuntime {
                       session.ready else {
                     return true
                 }
-                fetchAnnounced(cid, from: session)
+                transactionFetches.fetch(cid, from: session.peer, as: session.coreID, levels: core.levels)
             }
             return true
-        }
-
-        /// A peer announced a transaction: fetch it from that peer, and hand
-        /// it, as the peer's, to the pool of the chain it names. An
-        /// announcement carries only the transaction's CID, so its chain is
-        /// known once it is fetched: every hosted level is asked whether it
-        /// already holds it, and one naming a chain this host does not run is
-        /// dropped. Only one not pooled, not awaiting its verdict, not being
-        /// fetched and not recently fetched, within the cap on concurrent
-        /// fetches; anything else is dropped, never blamed.
-        private mutating func fetchAnnounced(_ cid: String, from session: Session) {
-            // No hosted level would take it yet (`ChainCore.synced`).
-            guard core.levels.values.contains(where: \.synced) else { return }
-            let pools = core.levels.sorted { $0.key.lexicographicallyPrecedes($1.key) }.map(\.value.mining)
-            // A fetched transaction may be worth fetching again once any
-            // hosted chain moves: a child's tip moves without the root's.
-            let tips = pools.map(\.tipCID)
-            if recentlyFetchedTips != tips {
-                recentlyFetchedTips = tips
-                recentlyFetched.removeAll()
-            }
-            guard !pools.contains(where: { $0.mempool.contains(cid) || $0.isPending(cid) }),
-                  !transactionFetches.contains(cid), !recentlyFetched.members.contains(cid),
-                  transactionFetches.count < 64
-            else { return }
-            transactionFetches.insert(cid)
-            let (ivy, inputs, peer) = (ivy, inputs, session.coreID)
-            let hosted = Set(core.levels.keys)
-            NodeRuntime.spawn {
-                let response = await ivy.fetchVolume(rootCID: cid, from: session.peer)
-                let transaction = try? await VolumeImpl<Transaction>(rawCID: cid, node: nil, encryptionInfo: nil)
-                    .resolveRecursive(source: InMemoryContentSource(response.entries)).node
-                // A transaction names its chain: it goes to that level's pool.
-                let path = transaction?.body.node?.chainPath
-                inputs.yield(.transactionFetched(cid: cid, transaction.flatMap { transaction in
-                    path.flatMap { hosted.contains($0) ? .level($0, .mining(.transactionReceived(transaction, origin: .peer(peer)))) : nil }
-                }))
-            }
         }
 
         // MARK: - Step and effects
