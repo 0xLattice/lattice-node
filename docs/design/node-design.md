@@ -12,7 +12,8 @@
 >
 > Every external figure is cited. A project's own benchmark, or a third
 > party's, is marked as a claim. Where nothing comparable is published, this
-> document says so. Targets marked **Owner to set** need a number.
+> document says so. Each target's reasoning is in "How the targets were
+chosen" below the table.
 >
 > Paths are under `Sources/`. `RT` is `LatticeNode/Runtime/NodeRuntime.swift`,
 > `API` is `NodeRuntime+API.swift`, `NSE` is `NodeStorage+RuntimeEffects.swift`.
@@ -90,23 +91,49 @@ from the sync benchmark (`Benchmarks/sync`).
 | Outcome | Measure | Where from | Target | Today |
 |---|---|---|---|---|
 | 1 Agreement | Divergences when replaying a real chain, in mixed-version runs, in the simulator | tests | Zero | Zero in CI; no replay of a real chain |
-| 2 Liveness | Acted-on height against best header height, per chain path, over time | node | **Owner to set** (for example, at the best header 99% of the time) | Reported per chain in `/status` and `/metrics` (#158, #161, #163); not yet tracked over time |
-| 2 Liveness | Stalls: a chain behind its best header whose tip has not moved for longer than a threshold | node | Zero; threshold **owner to set** | Testnet's child chains stopped at 3,920: a withdrawal whose receipt proofs no node held (§4.9a); repaired |
-| 2 Liveness | Time to tip from empty, and from a restart, per chain path | benchmark, node | **Owner to set** | 9,086 blocks over four chains in about 74 s, one worker, 4-CPU Linux runner; per chain on macOS, a leaf reaches its tip only near the end of the whole sync (§2) |
-| 3 Security | Time for a block to reach most hosts, per chain | network | **Owner to set** | Not measured |
-| 3 Security | Share of blocks that go stale, per chain | network | **Owner to set** | Not measured |
-| 3 Security | For each child, the share of parent hash rate whose templates commit it | network | **Owner to set** | Not measured |
+| 2 Liveness | Acted-on height against best header height, per chain path, over time | node | At its best header 99% of the time after its first catch-up | Reported per chain in `/status` and `/metrics` (#158, #161, #163); not yet tracked over time |
+| 2 Liveness | Stalls: a chain behind its best header whose tip has not moved for longer than a threshold | node | Zero. Stalled: behind its best header and still for 10 target block times, at least 10 minutes | Testnet's child chains stopped at 3,920: a withdrawal whose receipt proofs no node held (§4.9a); repaired |
+| 2 Liveness | Time to tip from empty, and from a restart, per chain path | benchmark, node | From empty, 50 blocks a second per chain path on one CPU; from a restart, its tip within a minute, then the same | 9,086 blocks over four chains in about 74 s, one worker, 4-CPU Linux runner; per chain on macOS, a leaf reaches its tip only near the end of the whole sync (§2) |
+| 3 Security | Time for a block to reach most hosts, per chain | network | 90% of its hosts within 5% of its target block time | Not measured |
+| 3 Security | Share of blocks that go stale, per chain | network | At most 1% | Not measured |
+| 3 Security | For each child, the share of parent hash rate whose templates commit it | network | Every template of a node hosting the child commits it | Not measured |
 | 4 Promises | Acknowledged transactions or accepted blocks lost after a crash or power loss | tests | Zero | Zero in tests |
 | 5 Compatibility | Partitions or refused messages between this version and the previous | two-version runs | Zero | Zero in CI |
 | 6 Change | Layers a change to each concern crosses | code | One for each | Most cross one; state retention, one for a setting's policy (`StateBackend`) and three or more for its counted mechanism; identifiers are in 32 files (§5) |
 | 6 Change | Rules a caller must keep that the code does not enforce | code, review | Zero beyond the write order | Zero for writes |
 | 6 Change | Components with no conventional equivalent, each with its reason | this document | Each justified in writing | Two (§5) |
 | 6 Change | Review rounds per change; repeated holes of one kind | review | A second round of the same kind stops the change | The write-behind layer took four rounds of ordering holes |
-| 6 Change | The largest files, where unrelated changes meet | code | **Owner to set** | The daemon's command file, 1,741 lines; the loop's file, 1,444 (start-up and boot included), after Phase 2 moved seven components out (§4.1) |
-| 7 Cost | CPU, peak memory, disk kept, disk written, bandwidth; root alone and per extra chain | benchmark, node | **Owner to set** (the root on one CPU) | About 4.4 ms CPU per block, 190 MiB, 90 MB kept, 2.9 GB written per benchmark sync; on macOS each added chain of 1,498 blocks costs about 5.8–7.1 s CPU, 18–26 MiB memory, 11–13 MiB kept, 12 MiB of bandwidth, and 368–581 MiB written, rising with the chains already hosted (§2) |
-| 8 Transfers | Time from deposit to withdrawal on a parent–child pair; share that complete | network, tests | **Owner to set** | Not measured |
-| 9 Availability | Content requests served; how long a body stays unavailable; hosts per chain | node, network | **Owner to set** | Not measured |
-| 10 Mining | Time to answer a template request and a submission; share of work on stale templates | node | **Owner to set** | Not measured |
+| 6 Change | The largest files, where unrelated changes meet | code | No file over 1,000 lines | The daemon's command file, 1,741 lines; the loop's file, 1,444 (start-up and boot included), after Phase 2 moved seven components out (§4.1) |
+| 7 Cost | CPU, peak memory, disk kept, disk written, bandwidth; root alone and per extra chain | benchmark, node | The root on one CPU at 5 ms a block and 256 MiB; a chain's writes per block do not grow with the chains hosted | About 4.4 ms CPU per block, 190 MiB, 90 MB kept, 2.9 GB written per benchmark sync; on macOS each added chain of 1,498 blocks costs about 5.8–7.1 s CPU, 18–26 MiB memory, 11–13 MiB kept, 12 MiB of bandwidth, and 368–581 MiB written, rising with the chains already hosted (§2) |
+| 8 Transfers | Time from deposit to withdrawal on a parent–child pair; share that complete | network, tests | Every transfer completes; in the time its two chains' confirmations take | Not measured |
+| 9 Availability | Content requests served; how long a body stays unavailable; hosts per chain | node, network | Two hosts per chain keep every body; none unavailable for an hour | Not measured |
+| 10 Mining | Time to answer a template request and a submission; share of work on stale templates | node | A template in 100 ms and a submission in 50 ms at the 99th percentile; at most 1% of work on stale templates | Not measured |
+
+**How the targets were chosen.** Each serves its outcome, in the order of
+§1, and reuses what the node already reports.
+
+- *Liveness* is scaled to each chain's own target block time, so one rule
+  fits a fast root and a slow child: a chain still for ten of its blocks is
+  past any honest gap, and ten minutes covers short block times' noise.
+  Time to tip keeps the throughput target the node already meets on one CPU
+  (§2), now per chain path.
+- *Security* takes Bitcoin's order of magnitude: a stale rate around 1% or
+  below, and propagation a small fraction of the block time, since the stale
+  rate grows with the share of the block time a block spends in flight. A
+  child's security is the parent work that commits it, so every template a
+  host builds must carry it.
+- *Change*: a file over 1,000 lines is where unrelated changes meet; the
+  loop file was twice that.
+- *Cost*: the root runs today at 4.4–4.6 ms a block and 190 MiB (§2); the
+  target keeps it there. A chain's writes per block must not grow with the
+  number of chains hosted, or hosting is not "pay for what you opt into"
+  (outcome 7). Measured, they do grow (§4.9b), so this target is missed now.
+- *Transfers*, *availability* and *mining* follow from their outcomes: no
+  transfer stranded; content survives one host going away; a miner waits on
+  the node no longer than a round trip.
+
+Where a target cannot be met by the node alone (propagation, stale rate),
+it is still the node's: it decides how fast it relays and what it builds.
 
 ---
 
@@ -493,10 +520,10 @@ writes). Key width does not change this, and no single table causes it:
 membership, retention and content per added leaf all grow (149, 194, 245
 MiB; 47, 65, 87 MiB; 47, 60, 77 MiB), while facts in `state.db`, keyed by
 chain and height, stay nearly flat (50, 57, 61 MiB). **Decision input for
-Phase 4:** per-leaf writes per block still grow with the chains hosted, so
-the retention backend's layout (random-key rows shared by every chain) is
-the cause, and Phase 4 replaces it; the index drop is worth taking on its
-own.
+Phase 4:** per-leaf writes per block still grow with the chains hosted.
+The inferred cause is the layout, random-key rows every chain shares; Phase
+4 gives each hosted chain its own Volume store (§4.9b). The index drop is
+worth taking on its own.
 
 #### Where the CPU goes after the header fix
 
@@ -1028,9 +1055,10 @@ crosses `StateBackend`, the loop's `Counts` and `Retention`, the store
 (`NodeStorage+Retention.swift`, 521 lines; `NodeStore+StatePins.swift`,
 181) and VolumeBroker's counted index. **Judgment.** The largest remaining
 machinery and the biggest disk cost. No established client counts references
-to retain trie nodes on disk; geth moved away from hash-keyed state. Replace
-when an objective needs it, with geth's path scheme the nearest shape — but
-first make it replaceable (§6).
+to retain trie nodes on disk; geth moved away from hash-keyed state. Phase 4
+gives each hosted chain its own Volume store, which removes the measured
+growth across chains (§4.9b); geth's path scheme stays the nearest shape if
+one chain's own growth ever misses a target.
 
 ### 4.9a Decision: receipt proofs travel with the child block
 
@@ -1125,6 +1153,99 @@ the witness. Other nodes fetch the complete body. Nothing is kept afterwards.
 parent and a child whose withdrawal is anchored below the parent's window
 and executes past it, from the sidecar alone. A block with a withdrawal
 whose sidecar no peer serves is not connected.
+
+### 4.9b Storage: three requirements, one mechanism (Phase 4 analysis)
+
+**Three requirements.** What the node stores serves three different needs:
+
+1. *Current state*: every execution and every transaction check reads the
+   act-on tip's state, and each block writes its changes.
+2. *Recent history*: a reorganisation within the state window is undone
+   without fetching anything (§4.19).
+3. *Old content*: peers syncing from scratch need old bodies and, with
+   them, their receipt proofs (§4.9a); nothing in sync needs old state.
+   Old state matters only to readers of past state, on `state: all`.
+
+Today one mechanism serves all three: content-addressed trie nodes in the
+Volume store, kept by retention scopes, per-height windows and a counted
+index of the current state (§4.9).
+
+**What it costs (Phase 3, measured on macOS, §2).** About 2.8 GiB is
+written to keep what the stores are handed, 12.3 MiB, 227 times over. By
+operation: the Volume store's membership tables 54%, facts 15%, retention
+13%, content and its CID index 13% (the content itself 2%), bundles 3%,
+counts 1%. One index, `idx_ve_root` in `VolumeBroker`, repeats the index of
+its table's own primary key and is 14% of all writes. Writes per added
+chain grow with the chains already hosted (245, 320, 396 KB per block for
+the second, third and fourth), so disk written grows faster than the
+number of chains.
+
+**Options.**
+
+| Option | Current state | Recent history | Old content | Writes | Change |
+|---|---|---|---|---|---|
+| Keep; drop the redundant index | trie nodes by CID | per-height windows | bodies and sidecars | about 14% fewer | one schema change in `VolumeBroker` |
+| geth's path scheme | one trie, nodes by path | reverse diffs, a window of in-memory layers | unchanged | in place: no new node per version | the retention backend (§4.9, Phase 2's interface) |
+| Flat state and changesets (Erigon, Reth) | key–value state; the trie hashed separately | changesets per block | unchanged | far fewer random writes | the state layout and its hashing |
+| Bitcoin's UTXO set and undo data | not this model | — | — | — | does not apply to account and trie state |
+
+The path scheme and flat state answer requirements 1 and 2 with structures
+built for them, and leave 3 to bodies and sidecars as now. Either would
+replace the retention mechanism: `StateBackend`, `Counts` and the write
+path's retention map (§4.9). Neither changes consensus bytes, which hash
+the trie, not its storage.
+
+**Decision.** The per-chain cost target (§1: a chain's writes per block do
+not grow with the chains hosted) is missed, so Phase 4 starts. First drop
+the redundant index: it is measured and changes no design, and the Volume
+store's own schema v3 (VolumeBroker 10.3) already drops it, so it is a
+dependency bump and one wipe (schema epoch 49).
+
+Measured again on schema v3: total writes fall 15–18%, and a chain's writes
+per block still grow with the chains hosted (212, 275, 339 KiB per block
+for the second, third and fourth leaf). The cause is measured too: commits
+per chain do not grow, bytes per commit do. Every chain's rows share the
+same hash-keyed tables, so as they grow, fewer of a commit's inserts share
+a page, and each insert costs nearer a whole page in the log and again at
+the checkpoint (the checkpoint's share 28% → 42%). Facts, keyed by chain and
+height, stay flat. Random keys shared across chains are the cause, not key
+width and not one table.
+
+**Options against that cause.**
+
+| Option | What it changes | Fixes the cause | Cost and risk |
+|---|---|---|---|
+| One Volume store per hosted chain | a store file per chain path, beside `state.db` | yes: a chain's tables hold only its rows | a commit per touched chain per step; a file per chain |
+| Rows keyed by chain within one store | the Volume store's keys and indexes | yes: each chain's rows cluster | a schema change in `VolumeBroker`, another repository |
+| geth's path scheme | the state model: nodes by path, reverse diffs | yes, and in-place updates besides | the largest change; a new backend for `StateBackend`, `Counts` and the write path |
+| Larger pages, WAL tuning | settings | no: it scales the same growth | cheap; no target met |
+
+**Chosen: one Volume store per hosted chain.** It removes the cause with the
+smallest change in this repository, and it matches what a chain is in
+Lattice: hosted by the nodes that opt in, independent of its siblings.
+Retention scopes and counts are already per chain, so they move with their
+chain's store unchanged; unhosting a chain removes its file. Reads compose:
+a chain's executions read its own store and its ancestors' (a child's
+receipt proofs travel with its blocks, §4.9a); a read by CID from the API or
+a peer asks every store. Content is written before the facts that name it,
+store by store, then the facts in one `state.db` transaction, as now: a crash
+between stores leaves content no fact names, which the start-up sweep
+removes. The cost is one more commit per chain a step touches; a step
+usually touches one or two. geth's path scheme stays the next step if one
+chain's own growth over time ever misses a target.**Recovery contract, as the code stands.**
+
+- Content (a body, its sidecar, a mined block) is stored, fsynced, before
+  anything names it.
+- Each step's state and facts commit in one `state.db` transaction, after
+  the content they name and before anything is published (§4.7). A start
+  finds every step either whole or absent.
+- Releases (a window, a body, what a block read) run after the step; a
+  release lost to a crash leaves content kept longer, never content missing
+  that a fact names. A start sweeps what no scope names.
+- The counts (on `recent`) are moved after the step under a marker; a crash
+  leaves them at an earlier marker, and a start audits them and heals or
+  syncs them again.
+- An acknowledged transaction is journaled before it is acknowledged.
 
 ### 4.10 Workers and scheduling
 
@@ -1444,14 +1565,16 @@ compatibility or correctness.
 
 **Phase 4 — Simplify storage (when an objective needs it).**
 
-- Separate what current state needs, what recent history (reorganisations)
-  needs, and what serving old content needs: three requirements, not one
-  storage problem.
-- Evaluate geth's path scheme and flat state with changesets against them;
-  benchmark disk writes and restart time.
-- Replace the retention implementation: measured (§2, "Without the second
-  index by root"), its writes per block grow with the chains hosted, from
-  random-key rows every chain shares, with or without `idx_ve_root`.
+- ~~Separate what current state needs, what recent history needs, and what
+  serving old content needs.~~ Done: §4.9b.
+- ~~Evaluate geth's path scheme and flat state with changesets against
+  them.~~ Compared in §4.9b, from the measured writes; restart time not yet
+  measured.
+- ~~Drop `VolumeBroker`'s redundant `idx_ve_root` (about 14% of writes).~~
+  Done: VolumeBroker 10.3.1 (its schema v3 already drops it), schema epoch
+  49, one wipe. Measured after it, a chain's writes per block still grow
+  with the chains hosted (§2), so:
+- Give each hosted chain its own Volume store (§4.9b).
 
 *Exit:* a simpler storage model with measured benefits and a written recovery
 contract.
@@ -1459,11 +1582,18 @@ contract.
 **Phase 5 — Operational maturity.**
 
 - Per-chain resource budgets (CPU, memory, disk growth per million blocks,
-  bandwidth, outstanding work, restart time).
+  bandwidth, outstanding work, restart time). Measured per added chain by the
+  benchmark (§2); outstanding work per chain is reported
+  (`lattice_chain_jobs_queued`). Disk and memory cannot be attributed per
+  chain inside shared stores; the targets are §1's.
 - Propagation, stale-block and child hash-share measurements on the network.
-- Cross-chain transfer completion; template latency.
-- Long-running and capacity soak tests; documented recovery procedures and
-  operator alerts.
+  Not done: they need observations of the live network.
+- Cross-chain transfer completion; template latency. Not done.
+- ~~Operator alerts~~ Done: per-chain `/metrics` (what the tip waits on, the
+  latches, queued jobs) and `deploy/prometheus/lattice-alerts.yml`.
+  Recovery procedures: the operator guide's common failures, with the
+  receipt-proof repair (#163). Long-running and capacity soak tests: not
+  done.
 
 *Exit:* operators can understand a node's health, capacity and recovery
 without a developer.
@@ -1477,15 +1607,15 @@ sequential execution per chain, the three work queues, the journal before
 acknowledgement, the separate mining process — each until a measurement
 against an agreed target says otherwise.
 
-### Decisions for the owner now
+### Decisions taken
 
-1. Liveness investigation as the top engineering priority.
-2. State retention extracted behind one interface, behaviour unchanged.
-3. The binary wire format as the next performance experiment, with a
-   benchmark and a compatibility gate.
+1. Liveness first (Phase 1).
+2. State retention behind one interface, behaviour unchanged (Phase 2).
+3. Representation in the order the measurements give (§2): the header
+   redundancy and a decode cache before identifiers; the binary wire format
+   last, if at all.
 4. Receipt proofs travel with the child block, as an indexed sidecar (§4.9a).
-
-Everything else stays conditional on measurements.
+5. The latch review (§4.3); storage per §4.9b; the targets above.
 
 ---
 
