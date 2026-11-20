@@ -531,8 +531,8 @@ extension NodeRuntime {
     /// Everything the loop task owns. Only the loop touches it. It takes
     /// each input, steps the core, and hands each effect, in order, to the
     /// component that runs it (`JobPool`, `BodyFetches`, `Retention`,
-    /// `ReadModel`, `Maintenance`, `TransactionFetches`); a job's or a
-    /// task's result comes back as an input.
+    /// `Counts`, `ReadModel`, `Maintenance`, `TransactionFetches`); a job's
+    /// or a task's result comes back as an input.
     struct Loop: Sendable {
         var core: NodeCore
         let storage: NodeStorage
@@ -582,7 +582,8 @@ extension NodeRuntime {
         var wake: (time: Int64, task: Task<Void, Never>)?
 
         // The components each effect and result is dispatched to. Each owns
-        // its own state; what one needs of another the loop passes in.
+        // its own state, and none calls another: what one needs of another
+        // the loop reads and passes in.
 
         /// The worker pool and its queues.
         var jobs: JobPool
