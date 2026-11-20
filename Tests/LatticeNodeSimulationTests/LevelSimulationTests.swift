@@ -236,7 +236,9 @@ final class LevelSimulationTests: XCTestCase {
     /// credited everywhere within a bounded latency, no honest peer is
     /// blamed, and state stays within the caps (checked every step). A page
     /// of junk costs its check, never a verdict: nothing bounds a flood but
-    /// the network.
+    /// the network. A flooder whose every push names a header already held
+    /// or asked of another is never asked, so its junk is never checked and
+    /// it stays: harmless, and which flooder that is depends on timing.
     func testSybilFloodersAreDisconnectedAndCannotStarveHonestProofs() async throws {
         let proofs = ChildProofConfig(maxQueuedBytes: Self.tightProofBudget, maxAwaiting: 64)
         let flooders = 5
@@ -249,7 +251,11 @@ final class LevelSimulationTests: XCTestCase {
             $0.zeroWork = false
             $0.scheduleLiar = false
         })
-        XCTAssertEqual(Set(report.disconnects.map(\.peer)), Set((0..<flooders).map { "flooder\($0)" }))
+        // Every flooder whose proofs a core took is disconnected, and no one else.
+        let served = report.servedProofs.filter { $0.hasPrefix("flooder") }
+        XCTAssertFalse(served.isEmpty)
+        XCTAssertEqual(Set(report.disconnects.map(\.peer)), served)
+        XCTAssertLessThanOrEqual(served.count, flooders)
         XCTAssertTrue(report.disconnects.allSatisfy { $0.reason == .proofOfWorkInvalid })
         XCTAssertLessThan(report.creditLatency, 20_000, "an honest proof waited too long")
     }

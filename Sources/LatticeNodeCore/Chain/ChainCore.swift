@@ -555,6 +555,7 @@ public struct ChainCore: Sendable {
             guard !isRoot else { break }
             sync.proofs.finishDeriving(derivation.job.childCID)
             derived(derivation, &turn)
+            released(derivation.job.childCID, &turn)
         case .submitted(let entry):
             guard !isRoot else { break }
             _ = accept(entry, from: nil, &turn)
@@ -1090,7 +1091,7 @@ public struct ChainCore: Sendable {
     /// of the pending chain (the header whose parent is asked for). The walk
     /// stops at the first that already has it, whose ancestors have it too.
     /// A header whose announcers had all gone may be asked again.
-    private mutating func announce(_ cid: String, by peer: PeerID, _ turn: inout Turn) {
+    mutating func announce(_ cid: String, by peer: PeerID, _ turn: inout Turn) {
         var current = cid
         while var header = sync.pending.entries[current], !header.announcers.contains(peer) {
             if header.announcers.isEmpty { header.askedParent = false }
@@ -1136,7 +1137,7 @@ public struct ChainCore: Sendable {
             } else {
                 insert(header, &turn)
             }
-        } else if sync.pending.entries[parent] == nil, !header.askedParent {
+        } else if sync.pending.entries[parent] == nil, !awaitsItsWork(parent), !header.askedParent {
             want(header, parent: true, &turn)
         }
     }

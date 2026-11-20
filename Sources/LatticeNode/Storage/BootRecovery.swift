@@ -86,7 +86,7 @@ enum BootRecovery {
             // A Volume store another version wrote is not converted.
             throw NodeStoreError.wipeRequired("volumes.db has schema \(found), this version reads \(required)")
         }
-        let localFetcher = CoalescingFetcher(broker)
+        let localFetcher = CoalescingFetcher(ReadTally.wrap("store", broker))
         let retentionScope = [
             configuration.nexusGenesisCID,
             configuration.address.key,

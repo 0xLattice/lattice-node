@@ -1214,6 +1214,182 @@ final class DerivedChildGrindTests: XCTestCase {
         }
     }
 
+    /// G (Alpha's genesis), C on G and D on C, each carried by the Nexus
+    /// block after it (N1, N2, N3), and each carrier's proof.
+    private struct Line {
+        let world: LevelWorld
+        let n0: MinedGrind
+        let g: SimBlock
+        let c: SimBlock
+        let d: SimBlock
+        let e: SimBlock
+        let proofs: (g: ChildBlockProof, c: ChildBlockProof, d: ChildBlockProof)
+        let eProof: ChildBlockProof
+        let n2: SimBlock
+
+        /// What a peer holding all of it serves.
+        var served: [String: HeaderEntry] {
+            [
+                g.cid: HeaderEntry(block: g.block, children: g.children, proofs: [proofs.g], spec: world.specs[DerivedChildGrindTests.alpha]),
+                c.cid: HeaderEntry(block: c.block, children: c.children, proofs: [proofs.c]),
+                d.cid: HeaderEntry(block: d.block, children: d.children, proofs: [proofs.d]),
+                e.cid: HeaderEntry(block: e.block, children: e.children, proofs: [eProof]),
+            ]
+        }
+    }
+
+    private func lineWorld() async throws -> Line {
+        var builder = try await LevelWorld.Builder(levels: 2)
+        let n0 = try await builder.grind(on: try XCTUnwrap(builder.geneses[Self.nexus]), carrying: [], at: Self.t + Self.interval / 2, outcome: .block)
+        let g = try await builder.childGenesis(Self.alpha, parentState: n0.root.block.postState.rawCID, at: Self.t + Self.interval)
+        let n1 = try await builder.grind(on: n0.root, carrying: [(Self.alpha, g)], at: Self.t + Self.interval, outcome: .block)
+        let c = try await builder.build(on: g, carrierPrevState: n1.root.block.postState.rawCID, timestamp: Self.t + 2 * Self.interval, nonce: 1)
+        let n2 = try await builder.grind(on: n1.root, carrying: [(Self.alpha, c)], at: Self.t + 2 * Self.interval, outcome: .block)
+        let d = try await builder.build(on: c, carrierPrevState: n2.root.block.postState.rawCID, timestamp: Self.t + 3 * Self.interval, nonce: 1)
+        let n3 = try await builder.grind(on: n2.root, carrying: [(Self.alpha, d)], at: Self.t + 3 * Self.interval, outcome: .block)
+        let e = try await builder.build(on: d, carrierPrevState: n3.root.block.postState.rawCID, timestamp: Self.t + 4 * Self.interval, nonce: 1)
+        let n4 = try await builder.grind(on: n3.root, carrying: [(Self.alpha, e)], at: Self.t + 4 * Self.interval, outcome: .block)
+        return Line(
+            world: builder.world(), n0: n0.grind, g: g, c: c, d: d, e: e,
+            proofs: (
+                try XCTUnwrap(n1.grind.carried.first).proof, try XCTUnwrap(n2.grind.carried.first).proof,
+                try XCTUnwrap(n3.grind.carried.first).proof
+            ),
+            eProof: try XCTUnwrap(n4.grind.carried.first).proof,
+            n2: n2.root
+        )
+    }
+
+    /// A host that weighed G and reads the Alpha hosts, Nexus's carriers
+    /// unknown to it (so every credit is a peer's proof, none derived).
+    private func lineHost(_ line: Line) async -> Host {
+        var host = Host(line.world)
+        await host.step(.mined(line.n0))
+        await host.meet(Self.miner)
+        await host.meet(Self.alphaHost)
+        await host.meet(Self.otherHost)
+        await host.relay(line.g, at: Self.alpha, from: Self.alphaHost, proofs: [line.proofs.g], spec: line.world.specs[Self.alpha])
+        _ = host.take()
+        return host
+    }
+
+    private static func ancestorsAsked(_ sent: [(path: ChainPath, message: SyncMessage)]) -> [String] {
+        sent.compactMap { if case .getAncestors(_, let cid, _) = $0.message { return cid } else { return nil } }
+    }
+
+    /// C and then D arrive, each with its proof, and D's check answers
+    /// first: D waits pending on C, whose check is still running, and the
+    /// host asks no peer for C again (with a page of ancestors it holds).
+    /// When C's check answers, both are weighed: each header was received
+    /// once.
+    func testAHeaderWhoseParentsCheckIsRunningDoesNotAskForThatParent() async throws {
+        let line = try await lineWorld()
+        var host = await lineHost(line)
+        host.deferChecks = true
+        await host.relay(line.c, at: Self.alpha, from: Self.alphaHost, proofs: [line.proofs.c])
+        await host.relay(line.d, at: Self.alpha, from: Self.alphaHost, proofs: [line.proofs.d])
+        XCTAssertEqual(host.deferred.count, 2, "C's and D's checks have not answered")
+        _ = host.take()
+        let (cAnswer, dAnswer) = (host.deferred[0], host.deferred[1])
+        host.deferred = []
+        await host.step(dAnswer)
+        XCTAssertEqual(Self.ancestorsAsked(host.take()), [], "C is in hand: nobody is asked for it")
+        await host.step(cAnswer)
+        XCTAssertEqual(Self.ancestorsAsked(host.take()), [])
+        let alpha = try host.digest(Self.alpha)
+        XCTAssertNotNil(alpha.blocks[line.c.cid], "C is weighed")
+        XCTAssertNotNil(alpha.blocks[line.d.cid], "D is weighed")
+        XCTAssertTrue(host.disconnects.isEmpty)
+    }
+
+    /// As above, but C came with a bogus proof from another peer: its check
+    /// fails, C still waits with nothing in flight, and D (its parent no
+    /// longer in hand) asks D's announcer for C.
+    func testAHeaderWhoseParentsCheckFailsAsksForThatParent() async throws {
+        let line = try await lineWorld()
+        var host = await lineHost(line)
+        host.deferChecks = true
+        let bogus = ChildBlockProof(rootCID: line.n2.cid, directoryPath: [Self.alpha[1]], entries: [])
+        await host.relay(line.c, at: Self.alpha, from: Self.otherHost, proofs: [bogus])
+        await host.relay(line.d, at: Self.alpha, from: Self.alphaHost, proofs: [line.proofs.d])
+        XCTAssertEqual(host.deferred.count, 2)
+        _ = host.take()
+        let (cAnswer, dAnswer) = (host.deferred[0], host.deferred[1])
+        host.deferred = []
+        await host.step(dAnswer)
+        XCTAssertEqual(Self.ancestorsAsked(host.take()), [])
+        await host.step(cAnswer)
+        XCTAssertEqual(host.disconnects, [Self.otherHost], "the bogus proof's sender")
+        XCTAssertEqual(Self.ancestorsAsked(host.take()), [line.c.cid], "D's announcer is asked for C")
+    }
+
+    /// G is not held here. C comes from one peer and D, on C, from
+    /// another, which holds and serves G, C and D. D's check answers first
+    /// and D waits on C; C's sender is gone before C's check answers. C,
+    /// promoted, takes D's announcer as its own (that peer holds D, so it
+    /// holds C's ancestors), asks it for G, and all three are weighed.
+    func testAPromotedHeaderAsksForItsParentOfItsChildsAnnouncer() async throws {
+        let line = try await lineWorld()
+        var host = Host(line.world)
+        await host.step(.mined(line.n0))
+        await host.meet(Self.miner)
+        await host.meet(Self.alphaHost)
+        await host.meet(Self.otherHost)
+        host.serving[Self.alpha, default: [:]][Self.alphaHost] = line.served
+        host.deferChecks = true
+        await host.relay(line.c, at: Self.alpha, from: Self.otherHost, proofs: [line.proofs.c])
+        await host.relay(line.d, at: Self.alpha, from: Self.alphaHost, proofs: [line.proofs.d])
+        XCTAssertEqual(host.deferred.count, 2, "C's and D's checks have not answered")
+        _ = host.take()
+        let (cAnswer, dAnswer) = (host.deferred[0], host.deferred[1])
+        host.deferred = []
+        await host.step(dAnswer)
+        XCTAssertEqual(Self.ancestorsAsked(host.take()), [], "C is in hand: nobody is asked for it")
+        await host.step(.peerGone(Self.otherHost))
+        host.deferChecks = false
+        await host.step(cAnswer)
+        XCTAssertEqual(Self.ancestorsAsked(host.take()), [line.g.cid], "C's parent is asked of D's announcer")
+        await host.step(.tick)
+        let alpha = try host.digest(Self.alpha)
+        for (name, block) in [("G", line.g), ("C", line.c), ("D", line.d)] {
+            XCTAssertNotNil(alpha.blocks[block.cid], "\(name) is weighed")
+        }
+    }
+
+    /// G is not held. C came from a peer that is gone: it waits pending
+    /// with no announcer. D and E come from another peer, which holds and
+    /// serves all of them; E's check answers first and E waits on D. When
+    /// D's check answers, D takes E's announcer and announces it to C, its
+    /// pending parent: C asks that peer for G, and all four are weighed.
+    func testAPromotedHeaderAnnouncesItsPendingParentToItsAnnouncers() async throws {
+        let line = try await lineWorld()
+        var host = Host(line.world)
+        await host.step(.mined(line.n0))
+        await host.meet(Self.miner)
+        await host.meet(Self.alphaHost)
+        await host.meet(Self.otherHost)
+        host.serving[Self.alpha, default: [:]][Self.alphaHost] = line.served
+        await host.relay(line.c, at: Self.alpha, from: Self.otherHost, proofs: [line.proofs.c])
+        await host.step(.peerGone(Self.otherHost))
+        XCTAssertEqual(host.core.levels[Self.alpha]?.sync.pending.entries[line.c.cid]?.announcers, [], "C waits with no announcer")
+        host.deferChecks = true
+        await host.relay(line.d, at: Self.alpha, from: Self.alphaHost, proofs: [line.proofs.d])
+        await host.relay(line.e, at: Self.alpha, from: Self.alphaHost, proofs: [line.eProof])
+        XCTAssertEqual(host.deferred.count, 2, "D's and E's checks have not answered")
+        _ = host.take()
+        let (dAnswer, eAnswer) = (host.deferred[0], host.deferred[1])
+        host.deferred = []
+        host.deferChecks = false
+        await host.step(eAnswer)
+        XCTAssertEqual(Self.ancestorsAsked(host.take()), [], "D is in hand: nobody is asked for it")
+        await host.step(dAnswer)
+        XCTAssertEqual(Self.ancestorsAsked(host.take()), [line.g.cid], "C asks E's announcer for G")
+        let alpha = try host.digest(Self.alpha)
+        for (name, block) in [("G", line.g), ("C", line.c), ("D", line.d), ("E", line.e)] {
+            XCTAssertNotNil(alpha.blocks[block.cid], "\(name) is weighed")
+        }
+    }
+
     // MARK: - Many carriers
 
     /// N0 and N1 (carrying Alpha's genesis G); C on G; `count` siblings on

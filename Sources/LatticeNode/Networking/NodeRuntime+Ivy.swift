@@ -90,6 +90,7 @@ final class NodeRuntimeIvyDelegate: IvyDelegate {
     /// Decoded here, off the loop. A frame of another topic, or a malformed
     /// one, is dropped: only the core blames, and only for proof-of-work.
     func ivy(_ ivy: Ivy, didReceiveMessage message: PeerMessage, from peer: AuthenticatedPeer) async {
+        SyncTrace.log(chain: [], "message received \(message.topic) bytes \(message.payload.count)")
         let input: NodeRuntimeNetworkInput
         if message.topic == ReadEndpointTopic.request {
             if let request = try? ReadEndpointRequestMessage.decoded(message.payload),

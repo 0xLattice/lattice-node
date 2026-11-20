@@ -92,7 +92,7 @@ from the sync benchmark (`Benchmarks/sync`).
 | 1 Agreement | Divergences when replaying a real chain, in mixed-version runs, in the simulator | tests | Zero | Zero in CI; no replay of a real chain |
 | 2 Liveness | Acted-on height against best header height, per chain path, over time | node | **Owner to set** (for example, at the best header 99% of the time) | Reported per chain in `/status` and `/metrics` (#158, #161, #163); not yet tracked over time |
 | 2 Liveness | Stalls: a chain behind its best header whose tip has not moved for longer than a threshold | node | Zero; threshold **owner to set** | Testnet's child chains stopped at 3,920: a withdrawal whose receipt proofs no node held (§4.9a); repaired |
-| 2 Liveness | Time to tip from empty, and from a restart, per chain path | benchmark, node | **Owner to set** | 9,086 blocks over four chains in about 74 s, one worker, 4-CPU Linux runner |
+| 2 Liveness | Time to tip from empty, and from a restart, per chain path | benchmark, node | **Owner to set** | 9,086 blocks over four chains in about 74 s, one worker, 4-CPU Linux runner; per chain on macOS, a leaf reaches its tip only near the end of the whole sync (§2) |
 | 3 Security | Time for a block to reach most hosts, per chain | network | **Owner to set** | Not measured |
 | 3 Security | Share of blocks that go stale, per chain | network | **Owner to set** | Not measured |
 | 3 Security | For each child, the share of parent hash rate whose templates commit it | network | **Owner to set** | Not measured |
@@ -103,7 +103,7 @@ from the sync benchmark (`Benchmarks/sync`).
 | 6 Change | Components with no conventional equivalent, each with its reason | this document | Each justified in writing | Two (§5) |
 | 6 Change | Review rounds per change; repeated holes of one kind | review | A second round of the same kind stops the change | The write-behind layer took four rounds of ordering holes |
 | 6 Change | The largest files, where unrelated changes meet | code | **Owner to set** | The daemon's command file, 1,741 lines; the loop's file, 1,444 (start-up and boot included), after Phase 2 moved seven components out (§4.1) |
-| 7 Cost | CPU, peak memory, disk kept, disk written, bandwidth; root alone and per extra chain | benchmark, node | **Owner to set** (the root on one CPU) | About 4.4 ms CPU per block, 190 MiB, 90 MB kept, 2.9 GB written per benchmark sync; per-chain cost not measured |
+| 7 Cost | CPU, peak memory, disk kept, disk written, bandwidth; root alone and per extra chain | benchmark, node | **Owner to set** (the root on one CPU) | About 4.4 ms CPU per block, 190 MiB, 90 MB kept, 2.9 GB written per benchmark sync; on macOS each added chain of 1,498 blocks costs about 5.8–7.1 s CPU, 18–26 MiB memory, 11–13 MiB kept, 12 MiB of bandwidth, and 368–581 MiB written, rising with the chains already hosted (§2) |
 | 8 Transfers | Time from deposit to withdrawal on a parent–child pair; share that complete | network, tests | **Owner to set** | Not measured |
 | 9 Availability | Content requests served; how long a body stays unavailable; hosts per chain | node, network | **Owner to set** | Not measured |
 | 10 Mining | Time to answer a template request and a submission; share of work on stale templates | node | **Owner to set** | Not measured |
@@ -116,7 +116,7 @@ from the sync benchmark (`Benchmarks/sync`).
 
 | Measure | Value | Where |
 |---|---|---|
-| Sync, one worker | about 123 blocks/s (73.6–73.9 s for 9,086 blocks) | Linux, GitHub runner, 4 CPUs; code before #137, which this branch restores |
+| Sync, one worker | about 123 blocks/s (73.6–73.9 s for 9,086 blocks) | Linux, GitHub runner, 4 CPUs; code before #137 (main is that code again since #156) |
 | Sync, three workers | about 155 blocks/s | same |
 | Sync, one CPU | about 84–87 blocks/s (104.1–108.2 s) | Linux, follower pinned to one CPU, server on the other three; code before #137 |
 | Sync, one worker, this branch | 25–26 s for 9,086 blocks | macOS, 14 cores (an fsync there does not reach the device) |
@@ -154,8 +154,10 @@ repeated writes of the same content.
 
 ### Where the CPU goes
 
-From 10 seconds of samples of a one-worker sync on this branch (macOS).
-Shares are of busy samples and include what each calls, so they overlap.
+From 10 seconds of samples of a one-worker sync (macOS), before the header
+fix (§2, "Why each header arrived 7–13 times"); the profile after it is in
+"Where the CPU goes after the header fix". Shares are of busy samples and
+include what each calls, so they overlap.
 
 | Activity | Share |
 |---|---|
@@ -179,11 +181,359 @@ next to it. Caveats: the benchmark's blocks are small, so execution's share
 is lower than on a chain with heavy transactions; macOS understates disk
 costs; one sample window, one machine.
 
+### Measured: per chain, by chain count, writes by operation, CID and decoding
+
+**Where and how.** macOS 26.7 on an Apple M4 Pro (14 cores, 48 GB), not the
+Linux target: an fsync there does not reach the device, and nothing is
+pinned, so wall times and disk timings understate Linux. Counts (blocks,
+bytes, reads, pages) do not depend on the machine. Release build of
+`perf/measure` (main plus instrumentation that is off unless asked for), one
+worker, `BENCH_STATE=recent`, `Benchmarks/sync/native.sh`; the commands are
+in the README's "Sync benchmark". Timings come from runs without the trace
+(`TRACE=0`); the breakdowns from traced runs, whose wall and CPU they do not
+claim. Every figure is a range over the runs named; each was repeated 2 or 3
+times and moved by under 2% unless shown. The pinned Linux run is the
+`Sync benchmark (Linux)` workflow: push a `bench/` branch, or dispatch it with
+the commits to compare; it was not run for this section.
+
+The baseline: 9,086 blocks over four chains in 25.6–25.8 s wall, 41.8–42.0 s
+CPU (4.6 ms a block), 187–189 MiB peak memory, 81–83 MiB kept, 2.80–2.82 GiB
+written through SQLite (316 KB a block), 461–471 MiB over loopback, both
+directions (three runs).
+
+#### Time to tip, per chain
+
+When each chain's act-on tip (what `/status` reports as `height`) first
+moved, reached half its recorded height, and reached the producer's tip. The
+benchmark polls the follower's tips every 50 ms.
+
+| Chain | Blocks | First moved | Half | At tip | Blocks/s while moving |
+|---|---|---|---|---|---|
+| Nexus | 90 | 0.1 s | 0.2 s | 0.2–0.3 s | 740–800 |
+| Nexus/Alpha | 3,000 | 0.3–0.4 s | 3.4 s | 6.7–6.8 s | 464–469 |
+| Nexus/Alpha/Leaf0 | 2,998 | 7.0–7.1 s | 14.3 s | 24.2–25.2 s | 165–174 |
+| Nexus/Alpha/Leaf1 | 2,998 | 7.7–7.8 s | 16.0–16.1 s | 25.6–25.8 s | 166–168 |
+
+With seven leaves (the wider tree below, eight hosted children), Alpha
+reaches its tip in 3.6–3.7 s, against 3.2–3.3 s when it is the only child;
+the leaves first move at 3.8–8.0 s and reach their tips at 27.1–38.3 s, each
+at 49–65 blocks/s.
+
+**What it says.** No leaf moved before its parent was at its tip: the first
+leaf moves 0.2–0.4 s after Alpha reaches its own, the others over the next
+seconds. The leaves then share the node at close rates, and every one of
+them reaches its tip near the end of the whole sync: a leaf's time to tip is
+the time to sync everything, not its own blocks. A parent is slowed only a
+little by its children (Alpha 3.6–3.7 s with seven leaves, 3.2–3.3 s alone). Whether the wait for the
+parent is required (a derived child needs its parent's blocks connected) or
+only the order work is queued in is not established here. **For Phase 3:**
+nothing in representation changes this shape; it is a scheduling property
+to set a target for (Outcome 2), not a reason to change formats.
+
+#### Cost by number of hosted chains
+
+A tree of Nexus, Alpha (1,500 blocks) and seven leaves under Alpha (1,498
+blocks each), recorded once; the follower hosts Nexus and the first k child
+levels (`HOSTED=k`). Two runs each, without the trace; means. Measured with
+the header fix below (a child header no longer asks for a parent whose check
+is running); the figures before it follow the table.
+
+| Hosted children | Blocks | Wall | CPU | CPU/block | Peak memory | Kept | Written (SQLite) | Written/block | Loopback |
+|---|---|---|---|---|---|---|---|---|---|
+| 0 (Nexus alone) | 46 | 0.2 s | 0.2 s | 3.4 ms | 41 MiB | 2 MiB | 2 MiB | 46 KB | under 1 MiB |
+| 1 (Alpha) | 1,546 | 3.1 s | 5.2 s | 3.3 ms | 94 MiB | 27 MiB | 251 MiB | 166 KB | 12 MiB |
+| 2 | 3,044 | 7.0 s | 10.9 s | 3.6 ms | 120 MiB | 40 MiB | 619 MiB | 208 KB | 24 MiB |
+| 4 | 6,040 | 15.5 s | 23.0 s | 3.8 ms | 155 MiB | 63 MiB | 1,578 MiB | 267 KB | 50 MiB |
+| 8 | 12,032 | 36.8 s | 51.6 s | 4.3 ms | 226 MiB | 109 MiB | 3,901 MiB | 332 KB | 100 MiB |
+
+Each leaf added (1,498 blocks) costs about 5.8–7.1 s of CPU (3.8–4.8 ms a
+block, rising with the leaves already hosted), 18–26 MiB of peak memory,
+11–13 MiB kept, and 12 MiB of loopback traffic (8 KB a block). The bytes
+written per added leaf grow with the number already hosted, as before the
+fix: 368 MiB for the first leaf, 480 MiB each from two to four, 581 MiB each
+from four to eight (251, 328 and 397 KiB a block). Before the fix, CPU was
+5.9, 13.6, 28.4 and 60.2 s for one, two, four and eight children, peak memory
+104, 129, 164 and 235 MiB, and loopback 40, 138, 339 and 735 MiB (99 MiB a
+leaf); bytes written were the same.
+
+**What it says.** Memory, disk kept and bandwidth grow about linearly with
+hosted chains; CPU a little faster (3.3 ms a block with one child, 4.3 ms
+with eight); disk written faster still, and the header
+fix did not change it. Bandwidth per block is now about 6 times the content
+each block stores (8 KB against 1.4 KB; the proofs a child header carries
+are most of it). **For Phase 3:** the representation items are worth about
+a tenth of CPU each (below); none of them changes the superlinear writes,
+which come from how state is stored (next).
+
+#### Disk writes by operation
+
+Every page SQLite wrote, to its log and when copying the log into the
+database (the checkpoint), attributed to the table or index the page belonged
+to (`PAGES=1`: the benchmark's VFS counts bytes per page number, and every
+second maps page numbers to tables and indexes through SQLite's `dbstat`).
+A page freed and reused within the second can be misattributed; pages in no
+table at the time were 0.3% of bytes. Two traced runs, 2.79 and 2.82 GiB in
+all; the first:
+
+| Operation | Tables and indexes | Written | Share |
+|---|---|---|---|
+| Volume membership | `volume_metadata`, `volume_entries`, and their four indexes | 1,514 MiB | 54% |
+| Facts (`state.db`) | admission facts, accepted blocks, headers, proofs, state diffs, child indexes | 404 MiB | 15% |
+| Retention | `retained_roots` and its two indexes | 371 MiB | 13% |
+| Content | `cas_data` (the bytes: 63 MiB) and its CID key index (305 MiB) | 367 MiB | 13% |
+| Bundles (a cache) | `volume_bundles` | 70 MiB | 3% |
+| Counts | `counted_roots` and its two indexes | 38 MiB | 1% |
+
+The largest single trees: the `(root, cid)` key of `volume_entries` 510 MiB
+(18%), `idx_ve_root` 389 MiB (14%), `idx_ve_cid` 323 MiB (12%), the CID key of
+`cas_data` 305 MiB (11%). Of the 2.79 GiB, 1.63 GiB went to the logs and 1.09
+GiB to checkpoints; `volumes.db` took 2.25 GiB of it in 1,147 commits, about
+285 pages a commit.
+
+What the node handed the Volume store over the same sync: 55,055 entries in
+36,877 Volumes, 12.3 MiB of bytes (3.1 MiB of which is their CIDs' text),
+and 45,539 roots to retain. Written to disk: 227 times the bytes handed.
+State Volumes hold one entry each (27,355 Volumes, 27,355 entries), so every
+changed trie node costs a content row, a membership row, a metadata row and a
+retention row, each with its own index entries keyed by a 59-byte text CID:
+about eleven random-key B-tree changes per node. A random key lands on its
+own page: about 530 such changes a commit wrote about 285 pages to the log,
+roughly half a 4 KB page each, and the checkpoint wrote most of them again
+(an estimate from the counts above, not a per-change measurement).
+
+**What it says.** Content is 2% of the bytes written; the bookkeeping around
+it, keyed by text CIDs, is the rest. Two findings beyond representation:
+`idx_ve_root` indexes the leading column of `volume_entries`'s own primary
+key, so by inspection of the schema it duplicates that key's index for any
+lookup by root (14% of all writes; `VolumeBroker` is a dependency); and
+giving a trie node its own Volume makes the membership tables (54%) a
+per-node cost. **For Phase 3: fixed-width identifiers do not fix the
+writes.** The index entries average 65.6 bytes (59 of them the text CID);
+binary CIDs (36 bytes) would shrink them by about a third, but with about 48
+random inserts a commit into an index of several hundred leaf pages (705 for
+`idx_ve_cid` after the eight-child sync), nearly every insert dirties its own
+page either way: inferred, about 2% fewer pages written. The writes are a
+storage-layout question (Phase 4), not a representation one.
+
+#### CID parsing and repeated decoding
+
+Two measurements. A CPU profile of the follower (`PROFILE=1`, macOS
+`sample`; three runs, 16,478–32,283 busy samples each), with each activity's
+share of busy samples; time in disk syncs (10–13% more) is left out of
+"busy". Shares include what each activity calls, so they overlap. And a count
+of every read by CID the node's work made through its content sources
+(`TALLY=1`): each such read is hashed and decoded by the walk that asked,
+so a CID read twice is decoded twice. Reads served from a job's in-memory
+produced states are not counted, so this is a lower bound.
+
+| Activity | Share of busy CPU |
+|---|---|
+| Content read by CID, hashed and decoded (`fetchAndDecodeNode`) | 14.6–15.6% |
+| DAG-CBOR decoding, all callers | 17.3–17.8% |
+| of which the canonical check re-encoding what was decoded | 7.4–7.7% |
+| Wire frames decoded (`ChainSyncWire.decode`) | 13.5–14.5% |
+| of which header entries decoded (DAG-CBOR, proofs) | 9.4–10.0% |
+| of which JSON parsed and checked canonical | 4.1–4.5% |
+| Base64 | 0.5–0.6% |
+| CID text parsed (to a CID) | 8.3–8.9% |
+| CID text formatted (from a CID) | 1.8–2.0% |
+| Content hashed against its CID | 9.9–10.7% |
+| Hashing Swift dictionary and set keys | 4.1–4.5% |
+| SQLite | 19.4–21.3% |
+
+About three quarters of CID parsing is checking content against its CID
+(content read by CID, and Volumes validated): the check parses the CID's
+text to learn which digest to compare. About a tenth is the core turning
+text CIDs into its own fixed-width digests (`BlockGraph.handle`).
+
+| Reads by CID | Reads | Distinct CIDs | Reads of a CID already read | Bytes of those |
+|---|---|---|---|---|
+| Four chains (9,086 blocks) | 131,537–131,544 | 13,456–13,463 | 118,081 (90%) | 33.9 of 42.1 MB |
+| Wide tree, Alpha only (1,546 blocks) | 20,330 | 3,254 | 17,076 (84%) | 5.5 of 7.6 MB |
+| Wide tree, eight children (12,032 blocks) | 179,399 | 15,407 | 163,992 (91%) | 51.5 of 62.6 MB |
+
+In the four-chain sync, 9,178 CIDs were read 3–4 times and 2,998 (about one
+per leaf block) 5–8 times; with seven leaves, 3,010 CIDs (about one per
+Alpha block) were read 9 or more times: inferred, a parent's block is read
+again for each child derived from it. Reads came from the Volume store
+(68%), block header records (22%) and peers (9%).
+
+The wire. Header responses were 94% of what the follower received (428 MiB
+of 458 MiB on loopback); Volumes fetched for bodies 7.8 MiB. The follower
+received 92,945 header entries for 9,086 blocks: 1.0 per Nexus block, 6.8
+per Alpha block, 10.9–13.2 per leaf block. Inside a response, the raw fields
+are 74% of the payload (proofs 77% of those, then blocks); base64 and JSON
+are the other 26%.
+
+**Why each header arrived 7–13 times, and after the fix.** The requests the
+follower sent, matched to the responses (trace): 85% of the header entries
+received answered `getAncestors`, the rest `getData`; Nexus sent none. A
+child header waits apart until a proof of its work verifies, and checks
+answer in any order: a header whose check answered before its parent's
+entered the pending queue with its parent neither pending nor weighed, so
+it asked its announcer for the parent and up to a page of ancestors
+(`ChainCore.evaluate`), all held here already. 319 such asks brought 84,439
+entries. Now a header waits while its parent's check or derivation is in
+flight, and asks only if that answers and the parent still waits. After it
+(three runs, same macOS host): no `getAncestors`, 9,089 header entries for
+9,086 blocks, loopback 69–70 MiB (from 461–471), CPU 34.5–36.5 s (from
+41.8–42.0), wall 24.0–25.2 s (from 25.6–25.8), wire decoding 1.6–1.8% of busy
+CPU (from 13.5–14.5%). With eight children: loopback 100 MiB (from 731–738),
+CPU 48.5–48.7 s (from 59.6–60.8). The CPU shares above are from before it.
+
+**What the repeated reads are** (four-chain sync after the header fix,
+`TALLY=1`: each CID classed by its top-level DAG-CBOR keys).
+118,084 of 131,569 reads repeat one already made:
+
+| What is read | Reads | Repeats |
+|---|---|---|
+| Child indexes (`children`, `count`) | 36,799 | 36,367 |
+| Block nodes | 42,349 | 33,259 |
+| Chain specs (three distinct CIDs) | 27,268 | 27,264 |
+| Empty maps | 12,001 | 12,000 |
+| Child directories (`Alpha`, `Leaf0,Leaf1`) | 12,266 | 9,177 |
+| State trie nodes, transactions | about 900 | about 20 |
+
+The tally also labels each read with the job that made it, but reads that
+cashew's `CoalescingFetcher` batches together carry the label of the job
+that started the batch, so that split is not reported.
+
+Blocks are 81% of the repeated bytes (27.5 of 33.9 MB). State trie nodes are
+almost never read twice: a decode cache is a cache of per-block structure,
+not of state.
+
+**Where a decode cache can sit.** These reads are resolve walks inside
+`ChainTree.connect`, `Block.validateNexus`, `ChildBlockProof.generate` and
+`storeBlockContent`, through the node's fetchers; each read's bytes are
+hashed and decoded inside cashew (`Header.fetchAndDecodeNode`). A cache
+inside the node, at the fetcher or content-source layer, can only hand back
+bytes: it saves the store read for a repeat (the Volume store's reads are
+9.1% of busy CPU), but not the hash check or the decode, which are most of
+the 18.5% under `fetchAndDecodeNode`. Saving those needs the decoded node
+kept where cashew decodes it: a hook in cashew, consulted before the fetch
+and filled after the decode, keyed by CID and node type, bounded by bytes,
+with no invalidation (content-addressed). Not implemented; the design is in
+the report that accompanies this section.
+
+**What it says, item by item.**
+
+- **Decode cache: keep, first among the three, as a hook in cashew.** 90% of
+  reads by CID are of content already read, rising with hosted chains (84%
+  with one child, 91% with eight), and they are blocks, child indexes and
+  specs. Read, hash and decode by CID is 17.7–18.5% of busy CPU after the
+  header fix, so a cache of decoded nodes would save up to about 16%
+  (inferred: assuming every repeated read's hash check and decode is
+  skipped, and the bounded cache holds the repeats). A byte cache inside the node would save only the repeated
+  store reads (at most about 8%); the rest needs the decoded node kept where
+  cashew decodes it. The distinct content read is small (8 MB in the
+  four-chain sync), so a small bounded cache holds the working set.
+- **Fixed-width identifiers: keep, second.** Parsing and formatting CID text
+  is 10.1–10.9% of CPU, most of it the hash check, which with a fixed-width
+  digest compares 32 bytes. Part of the 4.1–4.5% spent hashing dictionary keys
+  is CID strings, not separated here. On disk, about 2% of writes (above).
+- **Binary wire format: defer.** JSON parsing and its canonical check are
+  4.1–4.5% of CPU and base64 0.5%; the header entries inside, which any format
+  must decode, are 9.4–10.0%. A binary frame would save about 26% of header
+  payload bytes. Receiving each header once instead of 7–13 times saved
+  85% of the bytes and most of the wire decoding (above); after it, the JSON
+  the format would remove is 0.6% of busy CPU. Defer it until bandwidth or
+  a measured cost asks for it.
+- **Not representation, but as large as one of these items:** the canonical
+  check inside every DAG-CBOR decode re-encodes the value, 7.4–7.7% of CPU on
+  its own; a decode cache would also spare it for every repeated read.
+
+**How established clients compare** (from their specifications and source,
+not measured here). geth and reth keep 32-byte hashes as fixed-width values
+and speak RLP on devp2p, where a peer asks for headers by number with a count
+and a skip ([eth protocol](https://github.com/ethereum/devp2p/blob/master/caps/eth.md));
+geth keeps caches of recent headers, bodies and blocks in its chain object
+and a cache of clean trie nodes. Bitcoin Core keeps 256-bit hashes as
+`uint256`, speaks a binary protocol, and answers `getheaders` with up to
+2,000 headers of 80 bytes
+([protocol reference](https://developer.bitcoin.org/reference/p2p_networking.html#headers)).
+Ethereum consensus clients send SSZ compressed with Snappy
+([p2p interface](https://github.com/ethereum/consensus-specs/blob/dev/specs/phase0/p2p-interface.md)).
+None of them keeps identifiers as text inside the node.
+
+#### Without the second index by root, and where the growth comes from
+
+VolumeBroker 10.3.1 (schema v3, node schema epoch 49) drops `idx_ve_root`.
+Measured on a scratch branch (`perf/measure` with that commit), on chains
+recorded again for schema v3 (the same shapes, other blocks), after the
+header fix. Two runs each, without the trace.
+
+| Hosted children | Written v2 | Written v3 | Written/block v3 | CPU v3 | Peak memory v3 |
+|---|---|---|---|---|---|
+| 1 | 251 MiB | 210 MiB | 139 KB | 5.4 s | 97 MiB |
+| 2 | 619 MiB | 520 MiB | 175 KB | 11.6 s | 127 MiB |
+| 4 | 1,578 MiB | 1,325 MiB | 225 KB | 23.9 s | 166 MiB |
+| 8 | 3,901 MiB | 3,307 MiB | 281 KB | 50.2 s | 237 MiB |
+| Four chains | 2,810–2,826 MiB | 2,313–2,314 MiB | 261 KB | 34.7–34.8 s | 189 MiB |
+
+Writes fall 15–18%. Per added leaf they still grow with the leaves already
+hosted: 311 MiB for the first, 402 MiB each from two to four, 496 MiB each
+from four to eight (212, 275 and 339 KiB a block; v2 251, 328, 397). By
+operation (four chains, v3, `PAGES=1`): Volume membership 47%, facts 16%,
+retention 16%, content 16%, bundles 3%, counts 2%.
+
+**The mechanism.** Commits do not grow with chains: `volumes.db` committed
+165, 389, 829 and 1,715 times for one, two, four and eight children, about
+221 commits per leaf every time. What grows is the bytes each commit and
+each checkpoint write: the log wrote 0.65 MiB a commit with one child and
+0.93 MiB with eight, the checkpoint 0.25 and 0.67 MiB (v2 alike: 0.79 to
+1.15, 0.34 to 0.89). Every chain's rows go to the same tables, keyed by
+hashes, so a block's inserts land on random pages of trees that grow with
+everything hosted (kept 29 MiB with one child, 107 MiB with eight). What
+follows is inferred from those counts, not measured page by page: in a
+small tree many of a commit's inserts share a page, and a checkpoint copies
+a page rewritten by many commits once; as the trees grow, fewer share, so
+each insert costs nearer a whole page in the log and again in the
+checkpoint (the checkpoint's share rose from 28% to 42% of `volumes.db`'s
+writes). Key width does not change this, and no single table causes it:
+membership, retention and content per added leaf all grow (149, 194, 245
+MiB; 47, 65, 87 MiB; 47, 60, 77 MiB), while facts in `state.db`, keyed by
+chain and height, stay nearly flat (50, 57, 61 MiB). **Decision input for
+Phase 4:** per-leaf writes per block still grow with the chains hosted, so
+the retention backend's layout (random-key rows shared by every chain) is
+the cause, and Phase 4 replaces it; the index drop is worth taking on its
+own.
+
+#### Where the CPU goes after the header fix
+
+Three profiles of the four-chain sync (v2 schema), shares of busy samples,
+overlapping where one activity calls another; disk syncs (12–15% more) are
+apart.
+
+| Rank | Activity | Share |
+|---|---|---|
+| 1 | SQLite (store reads 8.9–9.2%, store writes 10.2–10.8%, facts 4.9–5.1%) | 21.9–22.4% |
+| 2 | Content read, hashed and decoded by CID (`fetchAndDecodeNode`) | 17.7–18.5% |
+| 3 | Allocation and reference counting | 16.8–17.3% |
+| 4 | DAG-CBOR decode (and, apart, encode 12.2–12.8%) | 12.5–12.8% |
+| 5 | Execution (connect jobs) | 12.4–12.6% |
+| 6 | Content hashed against its CID | 11.3–12.3% |
+| 7 | CID text parsed | 9.5–10.1% |
+| 8 | Core decisions (`NodeCore.step`) | 7.1–7.5% |
+| 9 | Derivations | 6.3–6.8% |
+| 10 | Hashing Swift dictionary and set keys | 4.7–5.2% |
+
+Text CIDs now cost 11.4–12.2% (parsed 9.5–10.1%, formatted 1.9–2.1%). Half
+the parsing is one function: `Codecs.name` in swift-multicodec
+(`Codecs.swift:690`, `"\(self)".replacingOccurrences(of: "_", with: "-")`,
+a reflection-based enum description and a Foundation string replace) is
+5.2–5.3% of busy CPU, called by swift-multihash's `decodeMultihashBuffer`
+(`Multihash.swift:350`) on every CID parsed. Most parses are hash checks
+(`verifyContentAddress`), 6.0–6.1% of them of content this node encoded and
+hashed a moment before (`verifiedSerializedDataForStorage`, storing a
+produced state).
+
 ### Not measured, and should be
 
-Liveness per chain path in production over time (reported since #158, §4.4), propagation and stale rate, each child's share of parent hash rate,
-per-chain hosting cost, cross-chain transfer time, template latency, and
-time to tip per chain as a latency, not only as total throughput.
+Liveness per chain path in production over time (reported since #158, §4.4),
+propagation and stale rate, each child's share of parent hash rate,
+cross-chain transfer time, template latency, and time to tip from a restart.
+Per-chain hosting cost and time to tip per chain are measured above on
+macOS only; the pinned Linux run of them is still to do.
 
 **Scale is not measured at all.** The benchmark is 9,086 blocks over four
 chains. How the node behaves with a hundred hosted chains, large state, many
@@ -338,9 +688,10 @@ for a quarter of the benchmark).
 | Merged mining, proof carried in the block | Namecoin (AuxPoW) | child secured by parent work | proof bytes in every child block |
 | Work facts derived from the parent graph; peer proofs checked otherwise | this node | weighs a child without trusting peers' proofs | the gate's timing (open) |
 
-**Performance.** Decoding the wire frames that carry headers is about 13.5%
-of CPU — more than executing blocks. The cost is the representation (§4.12),
-not the weighing. **Ease of change.** Easy, in the core.
+**Performance.** Decoding the wire frames that carry headers was 13.5–14.5%
+of CPU, more than executing blocks, because a child header whose proof
+verified before its parent's asked for the parent and a page of ancestors
+it held: each header arrived 7–13 times. Asked once (§2), it is 1.6–1.8%. **Ease of change.** Easy, in the core.
 **Open.** The child gate opens on whichever peer's log ends first; a peer
 that is behind opens it early.
 
@@ -825,13 +1176,22 @@ as DAG-CBOR, decoded on read and checked against its hash.
 **How others do it.** Bitcoin Core: fixed 32-byte hashes inside, binary
 messages. geth: fixed 32-byte hashes, RLP on devp2p.
 
-**Performance.** The largest share of CPU: decoding wire frames about 13.5%,
-parsing CIDs and multihashes about 8%, and much of the DAG-CBOR decoding
-comes from content re-read by text identifier. **Ease of change.** Split: the
+**Performance** (§2, after the header fix). Text CIDs cost 11.4–12.2% of
+busy CPU, half of it one codec-name lookup in swift-multicodec; reading,
+hashing and decoding content by CID 17.7–18.5%, 90% of it repeated reads;
+the wire format's JSON 0.6% (before the fix, when each child header arrived
+7–13 times, wire decoding was 13.5–14.5%). **Ease of change.** Split: the
 wire format sits in one codec file and its adapter (easy); identifiers appear
-in 32 files including the core (hard but mechanical). **Judgment.** The
-biggest single lever, already decided in the design (rule 12), and
-consensus-neutral. Wire format first.
+in 32 files including the core (hard but mechanical). **Judgment** (decided
+on these measurements). (1) The binary wire format is deferred: what it
+removes is 0.6% of CPU and 26% of header bytes. (2) The decode cache is a
+hook in cashew (`DecodedNodeCache`, consulted in `fetchAndDecodeNode` before
+the fetch, filled after the decode, keyed by CID and node type, bounded by
+bytes, no invalidation), worth up to about 16% of CPU (inferred); it waits
+on a cashew release. (3) Fixed-width identifiers are deferred: first the
+codec-name lookup as a table and a hash check that compares digests without
+building a multihash, then measure what text CIDs still cost before
+touching 32 files.
 
 ### 4.13 Mining
 
@@ -1002,6 +1362,12 @@ progress or reports exactly why it cannot.
   3,921 is repaired once (§4.9a).~~ Done: the decision is #162, the report
   and the operator's repair #163, and testnet was repaired.
 
+- A pending header whose announcers are all gone, or that never had one (a
+  child header submitted here), waits until a peer sends it again. Asking
+  the level's peers on a tick (fail open) disconnected honest peers as
+  `proofOfWorkInvalid` in the level simulator: settle how an answer to an
+  ask the peer never announced is judged, then fail open.
+
 *Exit:* no unexplained stalled chain in production; every known blocking
 condition is observable and recoverable.
 
@@ -1056,15 +1422,22 @@ the core or to how events are processed.
 consensus unchanged.
 
 - The Linux benchmark pinned to one CPU is in place (`Benchmarks/sync`,
-  `FOLLOWER_CPUS`); add time to tip per chain as well as throughput.
-- The binary wire format, measured on its own, behind a compatibility gate:
-  canonical and unambiguous, older peers still served, no hashed byte
-  changed.
-- Measure repeated CID parsing and repeated decoding before adding any cache.
-- Then fixed-width identifiers inside the node, converted at the edges; text
-  kept for logs and APIs.
-- Break down the write amplification by operation (§2).
-- Measure memory, bandwidth and CPU as the number of hosted chains grows.
+  `FOLLOWER_CPUS`); add time to tip per chain as well as throughput (the
+  report has it now; measured on macOS in §2).
+- Each header received once (done: a child header no longer asks for a
+  parent whose check is running; loopback 85% less, CPU 13–19% less).
+- The binary wire format: deferred (§4.12); its JSON is 0.6% of CPU now.
+- The decode cache as a cashew hook (§4.12), when cashew releases it: up to
+  about 16% of CPU.
+- Measure repeated CID parsing and repeated decoding before adding any cache
+  (done on macOS, §2: 90% of reads by CID repeat, CID text is 10–11% of CPU).
+- Fixed-width identifiers: deferred (§4.12). First the codec-name lookup in
+  swift-multicodec (5.2–5.3% of CPU) and a digest-comparing hash check; then
+  measure what text CIDs still cost.
+- Break down the write amplification by operation (done on macOS, §2:
+  content 2%, its bookkeeping keyed by text CIDs the rest).
+- Measure memory, bandwidth and CPU as the number of hosted chains grows
+  (done on macOS, §2; writes grow faster than linearly).
 
 *Exit:* a measured improvement against the baseline, with no regression in
 compatibility or correctness.
@@ -1076,7 +1449,9 @@ compatibility or correctness.
   storage problem.
 - Evaluate geth's path scheme and flat state with changesets against them;
   benchmark disk writes and restart time.
-- Replace the retention implementation only if a defined target warrants it.
+- Replace the retention implementation: measured (§2, "Without the second
+  index by root"), its writes per block grow with the chains hosted, from
+  random-key rows every chain shares, with or without `idx_ve_root`.
 
 *Exit:* a simpler storage model with measured benefits and a written recovery
 contract.
