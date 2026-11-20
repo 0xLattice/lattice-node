@@ -335,7 +335,8 @@ public struct ChainCore: Sendable {
     /// weighed graph, never in what this level has executed (weight never
     /// waits on execution, its own chain's or its parent's). What a child
     /// block's execution needs of this level, the state its parent block
-    /// produced, it waits for block by block (`awaitingParent`).
+    /// produced, it waits for block by block (`awaitingParent`). Also when
+    /// the relay starts: what this level appends from then on is new.
     public internal(set) var headersSynced = false
     public let config: ChainCoreConfig
     /// The level's mempool and template book, on the act-on tip.
@@ -609,11 +610,11 @@ public struct ChainCore: Sendable {
                 proofs: turn.indexed, cursors: turn.cursors
             )))
         }
-        let wasSynced = synced
+        let wasWeighed = headersSynced
         latchSynced()
         // The step that latches pushes at least the log's last entry: a
         // subscriber from before the latch pulls the gap from its position.
-        let tail = appended.entries.isEmpty && !wasSynced && synced && sync.log.count > 0
+        let tail = appended.entries.isEmpty && !wasWeighed && headersSynced && sync.log.count > 0
             ? sync.log.page(after: sync.log.count - 1, limit: 1) : appended
         let current = snapshot(actOn: actOn)
         // A best tip that moved down moved the finality window with it: what
@@ -628,12 +629,14 @@ public struct ChainCore: Sendable {
         // Push what was appended to every peer that read our log to its end:
         // the stream's tail is the relay. Relaying a header is not acting on
         // its weight: only tip announces and templates act, and they come
-        // from the executed tip. A block learned from peers is not pushed
-        // before `synced`, as Bitcoin Core announces none during initial
-        // download, but one this node produced always is: it may be
-        // canonical and it adds weight. A peer still pulls our log, and a
-        // push past its position has it pull the gap.
-        if synced || turn.own, !tail.entries.isEmpty {
+        // from the executed tip. So the relay waits on weight, never on
+        // execution: a block learned from peers is pushed once this level
+        // has weighed a peer's whole log (`headersSynced`), before which
+        // what it appends is history a subscriber has, as Bitcoin Core
+        // announces nothing during initial download. One this node produced
+        // always is: it may be canonical and it adds weight. A peer still
+        // pulls our log, and a push past its position has it pull the gap.
+        if headersSynced || turn.own, !tail.entries.isEmpty {
             for peer in sync.peers.keys.sorted() where sync.peers[peer]?.subscribed == true {
                 effects.append(.send(peer, .stream(StreamPage(
                     requestID: 0, logID: sync.log.id, entries: tail.entries, hasMore: tail.hasMore
