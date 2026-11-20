@@ -646,46 +646,45 @@ merged configuration does not host has its data let go of, however it left
 (`lattice child unhost`, a fragment edited or deleted, a SIGHUP re-read, a
 start without it). A running node does so once the chain's level has
 stopped and its running jobs have ended (its queued ones never run); the
-change does not wait for the chain's running jobs. Every start does so
-for any chain it holds data of and does not host, found by its facts, its
-per-chain scopes and the names of its blocks' bodies and reads (one name
-per kept block, held in memory while the start lists them: 30,000 list in
-about 16 ms). One that the configuration lists and that did not start keeps
-its data.
+change does not wait for the chain's running jobs. Every start does so,
+after `state.db` is opened and its epoch and Nexus genesis checked, for any
+chain it holds data of and does not host, found by its facts and its
+Volume store. One that the configuration lists and that did not start
+keeps its data.
 
-Its content goes first: from `volumes.db` its blocks' bodies and what they
-read, its state windows, spec and policy modules, counts and what its state
-sync held, and its pooled transactions; its local transactions (their rows
-in `state.db` and what they pinned); and its Volume bundles from
-`volume-bundles.db`. Then, in one `state.db` transaction, its facts and
-block index, cursors, state diffs and child proofs go, with the header
+Its content goes first: its Volume store under `volumes/`, with its log and
+shared memory, which holds everything the chain kept (its blocks' bodies
+and what they read, its state windows, spec and policy modules, counts and
+what its state sync held); its pooled and local transactions (their pins in
+the root chain's store, their rows in `state.db`); and its Volume bundles
+from `volume-bundles.db`. Then, in one `state.db` transaction, its facts
+and block index, cursors, state diffs and child proofs go, with the header
 records and proof entries no other chain's rows name. A fact whose content
 is gone is no fault (it is read again from peers), so content goes first: a
 stop or a failure in between leaves the chain's facts, a store the node
-runs on, and the next start finishes the release. Each chain let go of, or
-not, is a line in the node's log, naming it. Content another scope also
-names stays: an operator pin, another chain's block, and on `state: all`
-the state its executions stored, which is kept with every chain's. Child
-indexes stay too: a leaf chain's blocks all share one, with every other
-block that carries no child; a parent chain's may be its own. Hosting the
-chain again syncs it from peers like any new chain.
+runs on, and the next start finishes the release; a file under `volumes/`
+that no hosted chain's name and no fact explains is removed then too. Each
+chain let go of, or not, is a line in the node's log, naming it. What
+another chain needs is in that chain's own store, and the operator's pins
+are in the root chain's. Child indexes stay: a leaf chain's blocks all
+share one, with every other block that carries no child; a parent chain's
+may be its own. Hosting the chain again syncs it from peers like any new
+chain.
 
-Two writes can land after a running node let go of a chain, and go at the
-next start: the chain's block body that a mined block's storing step,
-begun before the chain stopped, stores under the chain's own body scope;
-and a child block that the build-child-block RPC stores after passing its
-hosted check before the chain stopped.
+A write that comes for a chain after its store went (a mined block's
+storing step, or a block the build-child-block RPC built, begun before the
+chain stopped) finds no store and writes nothing.
 
-Letting go holds the node's loop while it runs: about 45 µs per block kept
-with its bodies (a 10,000-block chain takes about 0.45 s, a 100,000-block
-one about 4.5 s), plus a pass over every child proof the node keeps when the
-chain's proofs named entries of their own (about 0.7 s with 100,000 proofs
-of other chains). Its pooled transactions cost one read each of the
-transactions in the pool.
+Letting go holds the node's loop while it runs: the store's removal is one
+file operation; its facts cost about 45 µs per block kept (a 10,000-block
+chain about 0.45 s, a 100,000-block one about 4.5 s), plus a pass over every
+child proof the node keeps when the chain's proofs named entries of their
+own (about 0.7 s with 100,000 proofs of other chains). Its pooled
+transactions cost one read each of the transactions in the pool.
 
-Letting go frees space for the node's later writes, not for the system:
-`state.db`, `volumes.db` and `volume-bundles.db` are SQLite files without
-`auto_vacuum`, so deleted rows' pages go to each file's free list and are
+A chain's store, removed, frees its space for the system. `state.db`,
+the other stores and `volume-bundles.db` are SQLite files without
+`auto_vacuum`: rows deleted from them free pages to each file's free list,
 reused by later writes, and the files do not shrink. Nor does
 `state.db-wal`: a checkpoint reuses it from its start, and it is not
 truncated.

@@ -972,7 +972,7 @@ state and its marker together.
 
 | File | Holds | Settings |
 |---|---|---|
-| `state.db` (schema epoch 48) | facts (kept forever), accepted blocks, headers, child indexes, proofs, stream cursors, the local mempool journal, state diffs for the window, the weigh log id | WAL, `synchronous=FULL`; one writer, one reader; the store's actor on its own serial queue |
+| `state.db` (schema epoch 50) | facts (kept forever), accepted blocks, headers, child indexes, proofs, stream cursors, the local mempool journal, state diffs for the window, the weigh log id | WAL, `synchronous=FULL`; one writer, one reader; the store's actor on its own serial queue |
 | `volumes/<hash>.db` | one per hosted chain, named by the SHA-256 of its path: its content by hash (bodies, transactions, state trie nodes, its rules), its retention scopes and counted roots; the root's also the constants, specs, policy modules, pins and the mempool's (VolumeBroker 10.3.1) | WAL, `synchronous=FULL` |
 | `volume-bundles.db` | a cache of which Volumes a block's bundle holds | WAL, `synchronous=NORMAL`; may be deleted |
 
@@ -1265,11 +1265,27 @@ it journals, and the root's for a child genesis's spec it weighs; a
 connect step executes one level, so most write one store, and a crash
 between two leaves content no fact names, kept under its window's scope
 until the tip is a window past it.
-Unhosting a chain lets its windows, rules and counts go as before and keeps
-its store, bodies included, until the next start removes it: a job of the
-chain still running writes to a store that is there, and a chain hosted
-again in the same run finds its bodies. Files are named by the SHA-256 of
-the chain's path.
+A chain the configuration no longer hosts has its data let go of as #164
+has it, live once its jobs have ended and at every start (after `state.db`
+is validated, so a wrong configuration removes nothing before the store is
+known to be this node's): its store goes, with its log and shared memory
+and everything the chain kept, then its facts in one `state.db`
+transaction. A write that comes for it after its store went finds none
+(`NotHosted`) and writes nothing. Files are named by the SHA-256 of the
+chain's path.
+
+**The ordering between stores (gate decision, §7).** A step's content is
+written store by store, the shallowest level first and the root's for a
+child genesis's spec, each in one transaction, then the step's facts in
+one `state.db` transaction, then the step is published. *Conventional
+equivalent:* Bitcoin Core's block files then chainstate, flushed in that
+order by one routine, and geth's ancient store then key-value store; both
+order content before what names it, as here, across more than one file.
+*Measured gain:* a chain's writes per added leaf flat at 120–131 KiB a
+block, 53% less written with eight children (§2). *Cost:* a commit per
+store a step touches (most touch one), about thirteen open files a chain,
+and a crash between stores leaving content no fact names, which its
+window's scope holds until the tip passes it: no new recovery mechanism.
 
 The target is met: a chain's writes per block no longer grow with the
 chains hosted. Each leaf's own store writes the same 118–120 MiB whether
@@ -1692,6 +1708,10 @@ against an agreed target says otherwise.
    last, if at all.
 4. Receipt proofs travel with the child block, as an indexed sidecar (§4.9a).
 5. The latch review (§4.3); storage per §4.9b; the targets above.
+6. A Volume store per hosted chain, written store by store before the
+   step's facts (§4.9b, its ordering recorded there as §7 asks); a chain
+   the configuration does not host has its store, then its facts, let go
+   of (#164).
 
 ---
 

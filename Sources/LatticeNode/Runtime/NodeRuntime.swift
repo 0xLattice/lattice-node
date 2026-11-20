@@ -591,8 +591,10 @@ extension NodeRuntime {
         var wake: (time: Int64, task: Task<Void, Never>)?
 
         // The components each effect and result is dispatched to. Each owns
-        // its own state, and none calls another: what one needs of another
-        // the loop reads and passes in.
+        // its own state; what one needs of another the loop reads and passes
+        // in. One exception: Retention's settles (`start`, `maintain`,
+        // `settleState`) take Counts in, inout, because a level's state goes
+        // only once its counts have moved.
 
         /// The worker pool and its queues.
         var jobs: JobPool

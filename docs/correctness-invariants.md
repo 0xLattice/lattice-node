@@ -126,23 +126,23 @@ set, GHOST, continuity) are the architecture doc's and are checked by
 - **NODE-STORAGE-002.e** — Replaying the store reproduces the trees.
   Enforced by `Simulator.checkReplay` and `LevelSimulator.checkReplay`.
 - **NODE-STORAGE-002.l** — A chain the configuration does not host has its
-  data let go of, live once its level stops and at every start: first what
-  its own scopes name, then its facts in one transaction. Content goes
+  data let go of, live once its level stops and at every start (after
+  `state.db` is validated): first its content, its own Volume store with
+  everything in it, then its facts in one transaction. Content goes
   before facts, as a fact naming absent content is no fault (002.f): a
   release a stop or a failure cuts short leaves the chain's facts, which
-  name it for the next start. What another scope names stays. A chain the
-  configuration lists that did not start keeps its data. A running node
-  lets go once the chain's level has stopped and its running jobs have
-  ended; its queued jobs never run. Not covered, and gone at the next
-  start: the chain's block body that a mined block's storing step, begun
-  before the chain stopped, stores under the chain's own body scope, and
-  a child block that the build-child-block RPC (`buildChildBlock`) stores
-  after passing its hosted check before the chain stopped. Pinned by
+  name it for the next start. What another chain needs is in its own
+  store; the operator's pins are in the root's. A chain the configuration
+  lists that did not start keeps its data. A running node lets go once
+  the chain's level has stopped and its running jobs have ended; its
+  queued jobs never run, and a write that comes for the chain after its
+  store went finds none and writes nothing. Pinned by
   `HostChainsRuntimeTests.testAChainRemovedFromTheConfigurationHasItsDataLetGoOf`,
   `HostChainsRuntimeTests.testAChainAStartDoesNotHostHasItsDataLetGoOf`,
   `HostChainsRuntimeTests.testAReleaseCutShortIsFinishedAtTheNextStart`,
   `HostChainsRuntimeTests.testAChainDroppedWhileItsBlockExecutesIsLetGoOfAfter`,
-  `OperatorConfigTests.testAChainThatDidNotStartIsDroppedWhenNoLongerListed`
+  `OperatorConfigTests.testAChainThatDidNotStartIsDroppedWhenNoLongerListed`,
+  `RetentionCrashTests.testACrashWhileAChainIsLetGoRecoversOnTheNextStart`
   and `LatticeCtlE2ETests.testAChildChainIsCreatedMergeMinedTransactedAndResumedThroughTheCLI`.
 
 ## NODE-MEMPOOL-001 — the mempool is tip-relative, not consensus
