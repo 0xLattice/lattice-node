@@ -1392,9 +1392,9 @@ extension NodeRuntime {
         /// step that weighed it, before this effect. Each posts its own
         /// `derived` event, as when each was a job.
         private func deriveProofs(_ batch: [ChildDeriveJob], at path: ChainPath) -> RuntimeJob {
+            let (storage, failStop) = (storage, failStop)
             let held = batch.map { $0.block ?? storage.store.header($0.childCID)?.block }
             let parent = Array(path.dropLast())
-            let (storage, failStop) = (storage, failStop)
             return RuntimeJob(path: path, tipCID: nil) {
                 var derived: [NodeEvent] = []
                 for (job, held) in zip(batch, held) {
