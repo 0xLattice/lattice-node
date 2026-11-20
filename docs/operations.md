@@ -837,26 +837,29 @@ and node-wide `lattice_overlay_peers`, `lattice_mempool_transactions` and
 
 For mining, under the root's `chain` label:
 
-- `lattice_template_build_seconds`: a histogram of the time to answer a
-  template request with a template, from the request reaching the node
-  (queueing, the build job, and the answer); refusals (`executing`, `busy`,
-  `buildFailed`) are not counted;
+- `lattice_template_build_seconds{outcome=...}`: a histogram of the time to
+  answer a template request, from the request reaching the node (queueing,
+  the build job, and the answer), by outcome: `ok` for a template, or the
+  refusal (`busy`, `executing`, `buildFailed`), which appears once seen;
 - `lattice_work_submission_seconds{outcome=...}`: a histogram of the time to
   answer a work submission, by the disposition answered (`canonicalized`,
   `acceptedSide`, `childOnly`, `duplicate`, `invalid`), the refusal
   (`unknownWork`, `missesSearchTarget`), or `error` (a malformed work ID, or a
   submission the node could not finish); an outcome appears once seen;
-- `lattice_work_submissions_stale_total`: submissions on a template whose
-  digest was no longer the root's when the submission arrived, so the
-  coordinator had been told to fetch another (`GET /mining/events`). Its
-  work may still count (a side block, or a child's block); a submission of
-  work the node no longer holds (`unknownWork`) cannot be told stale.
+- `lattice_work_submissions_stale_total`: stale work as a pool counts it:
+  submissions whose nonce cleared the work's search target while the tip
+  the work's block builds on was no longer the act-on tip, so the block can
+  only be a side block (a child's block it carries may still count). A
+  change to what a new template would carry (a transaction, a child's tip)
+  changes the template digest but leaves the work current. A nonce that
+  misses its target, and work the node no longer holds (`unknownWork`), are
+  not counted.
 
 Outcome 10's measures (node-design §1) read from these: the 99th
 percentile, e.g.
-`histogram_quantile(0.99, rate(lattice_template_build_seconds_bucket[1h]))`,
-and the stale share,
-`rate(lattice_work_submissions_stale_total[1h]) / sum without (outcome) (rate(lattice_work_submission_seconds_count[1h]))`.
+`histogram_quantile(0.99, rate(lattice_template_build_seconds_bucket{outcome="ok"}[1h]))`,
+and the stale share of submissions whose nonce cleared their target,
+`rate(lattice_work_submissions_stale_total[1h]) / sum without (outcome) (rate(lattice_work_submission_seconds_count{outcome=~"canonicalized|acceptedSide|childOnly|duplicate|invalid"}[1h]))`.
 Each submission is one share at the template's search target, so the stale
 share of submissions is the stale share of work at a steady search target.
 

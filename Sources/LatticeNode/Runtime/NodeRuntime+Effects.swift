@@ -354,6 +354,8 @@ extension NodeRuntime.Loop {
                 )
             }
         case .mined(let replyID, let block):
+            // Its nonce cleared the search target: stale work is counted.
+            if staleWork.remove(replyID) != nil { miningMetrics.submittedOnStaleTemplate() }
             // Content first: the block is stored before the grind's one
             // step weighs it.
             // The carried blocks of hosted levels, each with its proof

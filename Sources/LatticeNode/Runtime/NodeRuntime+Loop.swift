@@ -70,6 +70,10 @@ extension NodeRuntime {
         /// RPCs waiting on their answer, by reply ID.
         var replies: [UInt64: (path: ChainPath, reply: CheckedContinuation<NodeRuntimeReply, any Error>)] = [:]
         var nextReply: UInt64 = 1
+        /// Submissions taken while their work's root tip was no longer the
+        /// act-on tip, by reply ID, until the core judges their nonce: one
+        /// it mines is counted stale (`MiningMetrics`), a refused one not.
+        var staleWork: Set<UInt64> = []
         var wake: (time: Int64, task: Task<Void, Never>)?
 
         // The components each effect and result is dispatched to. Each owns
@@ -229,13 +233,15 @@ extension NodeRuntime {
                     reply.resume(throwing: TemplateError.executing)
                     return true
                 }
-                // Work on a template whose digest is no longer the one
-                // miners were last told of (`miningEvents()`) is stale; one
-                // whose work this node does not know cannot be told.
+                // Work is stale, as a pool counts it, when the tip its
+                // block builds on is no longer the act-on tip: its block can
+                // only be a side block. A change to what a template would
+                // carry (the pool, a child) leaves it current. Work this node
+                // does not know cannot be told.
                 if case .submitWork(_, let workID, _) = mining,
-                   let template = core.levels[path]?.mining.templates.template(workID),
-                   let current = readModel.views[path]?.templateDigest, template.digest != current {
-                    miningMetrics.submittedOnStaleTemplate()
+                   let level = core.levels[path], let template = level.mining.templates.template(workID),
+                   template.tipCID != level.snapshot.actOnTip {
+                    staleWork.insert(id)
                 }
                 nextReply += 1
                 replies[id] = (path, reply)
@@ -421,6 +427,7 @@ extension NodeRuntime {
         }
 
         mutating func answer(_ id: UInt64, _ result: Result<NodeRuntimeReply, any Error>) {
+            staleWork.remove(id)
             replies.removeValue(forKey: id)?.reply.resume(with: result)
         }
 

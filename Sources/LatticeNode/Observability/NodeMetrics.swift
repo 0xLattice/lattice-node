@@ -133,8 +133,8 @@ func renderNodeMetrics(_ sample: NodeMetricsSample) -> String {
         }
         histogram(
             "lattice_template_build_seconds",
-            "Time to answer a mining template request with a template, from the request reaching the node to its template.",
-            [(chain, mining.templates)]
+            "Time to answer a mining template request, by outcome: ok (a template), or the refusal (busy, executing, buildFailed).",
+            mining.templates.map { ("\(chain),outcome=\"\($0.outcome)\"", $0.1) }
         )
         histogram(
             "lattice_work_submission_seconds",
@@ -143,7 +143,7 @@ func renderNodeMetrics(_ sample: NodeMetricsSample) -> String {
         )
         family(
             "lattice_work_submissions_stale_total",
-            "Work submissions on a template whose digest was no longer the root's, so miners had been told to fetch another.",
+            "Work submissions whose nonce cleared the search target on work whose tip was no longer the act-on tip.",
             [(chain, String(mining.staleSubmissions))],
             type: "counter"
         )

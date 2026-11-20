@@ -454,10 +454,15 @@ extension NodeRuntime {
                 recipients.descendants.map { ($0.chainPath, $0.address) }, uniquingKeysWith: { first, _ in first }
             )
         )
-        guard case .template(let template) = try await ask({
-            .templateRequested(replyID: $0, plan)
-        }) else { throw NodeRuntimeError.stopped }
-        miningMetrics.templates.observe(started.duration(to: .now))
+        let answer: NodeRuntimeReply
+        do {
+            answer = try await ask { .templateRequested(replyID: $0, plan) }
+        } catch let refusal as TemplateError {
+            miningMetrics.templateAnswered(refusal, after: started.duration(to: .now))
+            throw refusal
+        }
+        guard case .template(let template) = answer else { throw NodeRuntimeError.stopped }
+        miningMetrics.templateAnswered(nil, after: started.duration(to: .now))
         return MiningTemplateResponse(
             workID: template.workID,
             block: template.block,

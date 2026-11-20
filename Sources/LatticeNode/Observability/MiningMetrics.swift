@@ -4,7 +4,7 @@ import Synchronization
 
 /// Outcome 10's measures (docs/design/node-design.md §1): how long the node
 /// takes to answer a template request and a work submission, and how many
-/// submissions were on a stale template. Recorded where each is answered —
+/// submissions were on stale work. Recorded where each is answered —
 /// the template and submission RPCs, and the loop for staleness — into
 /// atomic counters: no lock, and nothing the loop waits on.
 final class MiningMetrics: Sendable {
@@ -16,19 +16,31 @@ final class MiningMetrics: Sendable {
     /// answered with, the work refusal's case, or `error` for one refused
     /// before it reached a template (a malformed work ID) or one the node
     /// could not finish (it stopped, or storing the block failed).
-    static let outcomes = [
-        WorkDisposition.canonicalized, .acceptedSide, .childOnly, .duplicate, .invalid,
-    ].map(\.rawValue) + [TemplateError.unknownWork, .missesSearchTarget].map { "\($0)" } + ["error"]
+    static let outcomes = WorkDisposition.allCases.map(\.rawValue)
+        + [TemplateError.unknownWork, .missesSearchTarget].map { "\($0)" } + ["error"]
 
-    /// The templates answered, by how long each took.
-    let templates = Histogram()
+    /// A template request's `outcome` label: `ok` for a template, or the
+    /// refusal's case.
+    static let templateOutcomes = ["ok"] + [TemplateError.busy, .executing, .buildFailed].map { "\($0)" }
+
+    /// The template requests answered, by outcome, by how long each took.
+    let templates: [String: Histogram] = Dictionary(
+        uniqueKeysWithValues: MiningMetrics.templateOutcomes.map { ($0, Histogram()) }
+    )
     /// The submissions answered, by outcome, by how long each took.
     let submissions: [String: Histogram] = Dictionary(
         uniqueKeysWithValues: MiningMetrics.outcomes.map { ($0, Histogram()) }
     )
-    /// Submissions whose template's digest was no longer the root's: the
-    /// node had told miners (`GET /mining/events`, status) to fetch another.
+    /// Submissions whose nonce cleared their work's search target while
+    /// the tip the work builds on was no longer the act-on tip.
     private let stale = Atomic<UInt64>(0)
+
+    /// A template request answered: `nil` for a template, else why not. A
+    /// refusal of another kind (the request's plan, the node stopping) is
+    /// not counted.
+    func templateAnswered(_ refusal: TemplateError?, after duration: Duration) {
+        templates[refusal.map { "\($0)" } ?? "ok"]?.observe(duration)
+    }
 
     func submitted(_ outcome: String, after duration: Duration) {
         (submissions[outcome] ?? submissions["error"])?.observe(duration)
@@ -48,18 +60,24 @@ final class MiningMetrics: Sendable {
 
     var snapshot: Snapshot {
         Snapshot(
-            templates: templates.snapshot,
-            submissions: Self.outcomes.compactMap { outcome in
-                submissions[outcome].map { (outcome, $0.snapshot) }
-            }.filter { $0.1.count > 0 },
+            templates: Self.seen(Self.templateOutcomes, in: templates, always: "ok"),
+            submissions: Self.seen(Self.outcomes, in: submissions),
             staleSubmissions: stale.load(ordering: .relaxed)
         )
     }
 
+    /// Only the outcomes seen (and `always`), as a Prometheus client
+    /// exposes a label set once it is first used.
+    private static func seen(
+        _ outcomes: [String], in histograms: [String: Histogram], always: String? = nil
+    ) -> [(outcome: String, Histogram.Snapshot)] {
+        outcomes.compactMap { outcome in
+            histograms[outcome].map { (outcome, $0.snapshot) }
+        }.filter { $0.outcome == always || $0.1.count > 0 }
+    }
+
     struct Snapshot: Sendable {
-        let templates: Histogram.Snapshot
-        /// Only the outcomes seen, as a Prometheus client exposes a label
-        /// set once it is first used.
+        let templates: [(outcome: String, Histogram.Snapshot)]
         let submissions: [(outcome: String, Histogram.Snapshot)]
         let staleSubmissions: UInt64
     }

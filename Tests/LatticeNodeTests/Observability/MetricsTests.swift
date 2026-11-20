@@ -136,13 +136,47 @@ final class MetricsTests: XCTestCase {
                 return try JSONDecoder().decode(SubmitWorkResponse.self, from: Data(response.body.readableBytesView))
             }
 
+            let ok = #"chain="Nexus",outcome="ok""#
             var samples = try await scrape(client)
-            XCTAssertEqual(samples[#"\#(templates)_count{chain="Nexus"}"#], "0")
+            XCTAssertEqual(samples["\(templates)_count{\(ok)}"], "0")
             XCTAssertEqual(samples[stale], "0")
             XCTAssertNil(samples.keys.first { $0.hasPrefix(submissions) })
 
+            // A transaction joins the pool after the template: what a new
+            // template would carry changes, but the work's tip does not, so
+            // its work is not stale.
+            let pooled = try await template(MiningTemplateRequest())
+            let key = CryptoUtils.generateKeyPair()
+            let bodyHeader = try HeaderImpl(node: TransactionBody(
+                accountActions: [], actions: [], depositActions: [], receiptActions: [], withdrawalActions: [],
+                signers: [CryptoUtils.createAddress(from: key.publicKey)], nonce: 0, chainPath: ["Nexus"]
+            ))
+            let transaction = Transaction(
+                signatures: [key.publicKey: try XCTUnwrap(TransactionSigning.sign(
+                    bodyHeader: bodyHeader, privateKeyHex: key.privateKey
+                ))],
+                body: bodyHeader
+            )
+            let submitted = try await client.execute(
+                uri: "/transactions", method: .post, headers: headers,
+                body: ByteBuffer(bytes: try JSONEncoder().encode(SubmitTransactionRequest(transaction: transaction)))
+            )
+            XCTAssertEqual(submitted.status, .ok)
+            let changed = try await template(MiningTemplateRequest())
+            XCTAssertNotEqual(changed.templateDigest, pooled.templateDigest)
+            let current = try await submit(pooled.workID).disposition
+            XCTAssertEqual(current, .canonicalized)
+            samples = try await scrape(client)
+            XCTAssertEqual(samples["\(templates)_count{\(ok)}"], "2")
+            XCTAssertEqual(samples["\(templates)_bucket{\(ok),le=\"+Inf\"}"], "2")
+            XCTAssertNotNil(samples["\(templates)_bucket{\(ok),le=\"0.1\"}"])
+            XCTAssertNotNil(samples["\(templates)_sum{\(ok)}"])
+            XCTAssertEqual(samples[#"\#(submissions)_count{chain="Nexus",outcome="canonicalized"}"#], "1")
+            XCTAssertEqual(samples[#"\#(submissions)_bucket{chain="Nexus",outcome="canonicalized",le="+Inf"}"#], "1")
+            XCTAssertEqual(samples[stale], "0")
+
             // Two templates on one tip, then the first's block moves the tip:
-            // the second's digest is no longer the root's.
+            // the second's work is on a tip that is no longer the act-on tip.
             let first = try await template(MiningTemplateRequest())
             let second = try await template(MiningTemplateRequest(recipients: [
                 MiningRecipient(chainPath: ["Nexus"], address: CryptoUtils.createAddress(
@@ -153,12 +187,6 @@ final class MetricsTests: XCTestCase {
             let accepted = try await submit(first.workID).disposition
             XCTAssertEqual(accepted, .canonicalized)
             samples = try await scrape(client)
-            XCTAssertEqual(samples[#"\#(templates)_count{chain="Nexus"}"#], "2")
-            XCTAssertEqual(samples[#"\#(templates)_bucket{chain="Nexus",le="+Inf"}"#], "2")
-            XCTAssertNotNil(samples[#"\#(templates)_bucket{chain="Nexus",le="0.1"}"#])
-            XCTAssertNotNil(samples[#"\#(templates)_sum{chain="Nexus"}"#])
-            XCTAssertEqual(samples[#"\#(submissions)_count{chain="Nexus",outcome="canonicalized"}"#], "1")
-            XCTAssertEqual(samples[#"\#(submissions)_bucket{chain="Nexus",outcome="canonicalized",le="+Inf"}"#], "1")
             XCTAssertEqual(samples[stale], "0")
 
             // Its block is a sibling of the first: kept aside, or the tip
@@ -167,7 +195,7 @@ final class MetricsTests: XCTestCase {
             XCTAssertTrue(late.accepted)
             samples = try await scrape(client)
             XCTAssertEqual(samples.filter { $0.key.hasPrefix("\(submissions)_count{") }
-                .compactMap { UInt64($0.value) }.reduce(0, +), 2)
+                .compactMap { UInt64($0.value) }.reduce(0, +), 3)
             XCTAssertEqual(samples[stale], "1")
 
             // Work the node does not know is answered and counted, and cannot
