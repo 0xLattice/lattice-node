@@ -300,6 +300,26 @@ public enum LevelInvariants {
         }
     }
 
+    /// After the quiet point a level's gates are open and its tip waits on
+    /// nothing inside the node (node design §4.3: a gate that saves cost
+    /// fails open; §1: a stall is a bug). It has weighed a peer's whole log
+    /// (`headersSynced`: its children read their peers, it relays), caught
+    /// up (`synced`: it takes peer transactions) once it has a tip to check
+    /// them on, and its progress is not `stalled`.
+    public static func checkGatesOpen(_ name: String, path: ChainPath, host: NodeCore) throws {
+        guard let level = host.levels[path] else { return }
+        let parentWeighed = path.count > 1 ? host.levels[Array(path.dropLast())]?.headersSynced ?? true : true
+        let progress = level.progress(parentWeighed: parentWeighed)
+        let at = "at \(path), its tip waiting on \(progress.rawValue)"
+        guard level.headersSynced else { throw Invariants.fail(name, "never weighed a peer's whole log \(at)") }
+        // A level that has executed nothing has no tip to check a
+        // transaction against; its gate costs nothing (`latchSynced`).
+        guard level.synced || level.snapshot.actOnTip.isEmpty else {
+            throw Invariants.fail(name, "never caught up, so takes no peer transaction, \(at)")
+        }
+        guard progress != .stalled else { throw Invariants.fail(name, "stalled \(at)") }
+    }
+
     /// After the quiet point: every honest core hosts every level, and at
     /// each holds the identical weighed graph (blocks, grinds, subtree work)
     /// and head, every block mined publicly, and each attributed run in full.
@@ -357,6 +377,7 @@ public enum LevelInvariants {
                     throw Invariants.fail(name, "selects differently at \(path) than \(first)")
                 }
                 try checkExecutionStop(name, path: path, host: host, digest: digest)
+                try checkGatesOpen(name, path: path, host: host)
                 // Every public honest proof of a held block is credited.
                 for (cid, roots) in world.proofs[path] ?? [:] where digest.blocks[cid] != nil {
                     for (root, truth) in roots where truth.releaseAt <= now && digest.blocks[cid]?.grinds[root] == nil {
