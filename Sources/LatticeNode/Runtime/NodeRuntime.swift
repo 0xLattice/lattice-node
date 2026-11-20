@@ -198,7 +198,9 @@ public final class NodeRuntime: Sendable {
     typealias JobObserver = @Sendable (RuntimeJob.Kind, ChainPath, MiningEffect?) async -> Void
 
     /// `start`, with `observeJob` awaited on each job's worker before the
-    /// job runs (a test's view of the worker pool).
+    /// job runs (a test's view of the worker pool), and `stopRetention`
+    /// asked at each retention write (`StateBackend.Boundary`), where a test
+    /// crashes the node.
     static func start(
         storage: NodeStorage,
         configuration: NodeConfiguration,
@@ -206,7 +208,8 @@ public final class NodeRuntime: Sendable {
         coreConfig: ChainCoreConfig = ChainCoreConfig(),
         workers: Int = max(1, ProcessInfo.processInfo.activeProcessorCount - 1),
         failStop: @escaping @Sendable (any Error) -> Void = { fatalError("node runtime: persist failed: \($0)") },
-        observeJob: JobObserver?
+        observeJob: JobObserver?,
+        stopRetention: StateBackend.Stop? = nil
     ) async throws -> NodeRuntime {
         let started = ContinuousClock.now
         var coreConfig = coreConfig
@@ -234,7 +237,8 @@ public final class NodeRuntime: Sendable {
             helloTimeout: overlay.requestTimeout,
             workers: workers,
             failStop: failStop,
-            observeJob: observeJob
+            observeJob: observeJob,
+            stopRetention: stopRetention
         )
         await runtime.ivy.installNodeRuntime(
             delegate: runtime.punch,
@@ -354,7 +358,8 @@ public final class NodeRuntime: Sendable {
         helloTimeout: Duration,
         workers: Int,
         failStop: @escaping @Sendable (any Error) -> Void,
-        observeJob: JobObserver?
+        observeJob: JobObserver?,
+        stopRetention: StateBackend.Stop?
     ) {
         let (stream, continuation) = AsyncStream<Input>.makeStream()
         let inputs = Inputs(continuation: continuation)
@@ -458,6 +463,7 @@ public final class NodeRuntime: Sendable {
             workers: max(1, workers),
             failStop: failStop,
             observeJob: observeJob,
+            stopRetention: stopRetention,
             peerMemory: peerMemory
         ))
         loop = Task {
@@ -639,6 +645,7 @@ extension NodeRuntime {
             workers: Int,
             failStop: @escaping @Sendable (any Error) -> Void,
             observeJob: JobObserver?,
+            stopRetention: StateBackend.Stop?,
             peerMemory: PeerMemory?
         ) {
             self.peerMemory = peerMemory
@@ -657,7 +664,7 @@ extension NodeRuntime {
             self.inputs = inputs
             self.remote = remote
             self.bodyFetches = BodyFetches(storage: storage, remote: remote, inputs: inputs)
-            let state = storage.stateBackend
+            let state = StateBackend(storage: storage, stop: stopRetention)
             self.retention = Retention(
                 storage: storage, state: state,
                 configured: Set([configuration.chainPath] + configuration.hostedChildren)

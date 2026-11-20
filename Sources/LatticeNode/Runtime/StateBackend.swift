@@ -30,10 +30,41 @@ import LatticeNodeCore
 struct StateBackend: Sendable {
     let storage: NodeStorage
     let scheme: StateRetention
+    /// A test's crash: asked before each retention write the loop makes
+    /// after a step, it answers true from the boundary where the node is to
+    /// stop, and that write and every one after it are not made, as in a
+    /// process that died there. Nil outside tests.
+    let stop: Stop?
 
-    init(storage: NodeStorage) {
+    /// The retention writes a test can crash the node at.
+    enum Boundary: Sendable, CaseIterable {
+        /// The working set lets go of bodies (`blockBodies: none`).
+        case letGoOfBodies
+        case releaseReads
+        /// State below the window goes.
+        case letGo
+        case moveCounts
+        case commitCounts
+        case releaseStaging
+        case syncCounts
+        case healCounts
+        case auditCounts
+    }
+
+    typealias Stop = @Sendable (Boundary) -> Bool
+
+    /// A crash a test asked for at `boundary` stopped the write there.
+    struct Stopped: Error {}
+
+    init(storage: NodeStorage, stop: Stop? = nil) {
         self.storage = storage
         scheme = storage.configuration.state
+        self.stop = stop
+    }
+
+    /// Whether a test's crash stops the write at `boundary`.
+    func stops(at boundary: Boundary) -> Bool {
+        stop?(boundary) ?? false
     }
 
     /// The blocks of the chain at `path` whose executions' state is kept,
@@ -117,7 +148,7 @@ struct StateBackend: Sendable {
     /// What a block read goes once it has executed, or was found invalid,
     /// when the operator does not keep all state.
     func releaseReads(_ blockCID: String, at path: ChainPath) async {
-        guard scheme != .all else { return }
+        guard scheme != .all, !stops(at: .releaseReads) else { return }
         await storage.releaseReads(blockCID, at: path)
     }
 
@@ -126,14 +157,15 @@ struct StateBackend: Sendable {
     /// What executions of the chain at `path` stored more than a window
     /// below `height`, the tip's, goes, with their state diffs.
     func letGo(at path: ChainPath, below height: UInt64) async {
-        guard let window = window(for: path) else { return }
+        guard let window = window(for: path), !stops(at: .letGo) else { return }
         await storage.letGoOfState(at: path, below: height, window: window)
     }
 
     /// Moves the counts of the chain at `path` from `marker` to `tip`
     /// (`NodeStorage.settleCounted`).
     func moveCounts(at path: ChainPath, tip: String, window: UInt64, marker: String, known: [String]?) async -> CountedOutcome {
-        await storage.settleCounted(at: path, tip: tip, window: window, marker: marker, known: known)
+        guard !stops(at: .moveCounts) else { return .failed("stopped") }
+        return await storage.settleCounted(at: path, tip: tip, window: window, marker: marker, known: known)
     }
 
     /// Commits a state sync's counts moved on to `tip`
@@ -141,11 +173,13 @@ struct StateBackend: Sendable {
     func commitCounts(
         at path: ChainPath, block: CountedMarker.Block, places: [String: Int], tip: String, window: UInt64
     ) async -> CountedOutcome {
-        await storage.commitCounted(at: path, block: block, places: places, tip: tip, window: window)
+        guard !stops(at: .commitCounts) else { return .failed("stopped") }
+        return await storage.commitCounted(at: path, block: block, places: places, tip: tip, window: window)
     }
 
     /// What a state sync or heal read is counted now.
     func releaseStaging(at path: ChainPath) async {
+        guard !stops(at: .releaseStaging) else { return }
         await storage.releaseStaging(at: path)
     }
 
@@ -156,18 +190,21 @@ struct StateBackend: Sendable {
     func syncCounts(
         at path: ChainPath, below tip: String, window: UInt64, remote: IvyRootContentSource
     ) async throws -> (CountedMarker.Block, [String: Int]) {
+        guard !stops(at: .syncCounts) else { throw Stopped() }
         let block = try await storage.countedSyncBlock(at: path, below: tip, window: window)
         return (block, try await storage.syncCountedState(at: path, block: block, remote: remote))
     }
 
     /// The roots a move found missing, read from peers.
     func healCounts(_ roots: [String], at path: ChainPath, remote: IvyRootContentSource) async throws {
+        guard !stops(at: .healCounts) else { throw Stopped() }
         try await storage.healCounted(roots, at: path, remote: remote)
     }
 
     /// The counts checked against the store: their chain when they match.
-    func auditCounts(at path: ChainPath, marker: String) async -> [String]? {
-        await storage.auditCounted(at: path, marker: marker)
+    func auditCounts(at path: ChainPath, marker: String) async throws -> [String]? {
+        guard !stops(at: .auditCounts) else { throw Stopped() }
+        return await storage.auditCounted(at: path, marker: marker)
     }
 
     /// At a start, before any step, with `tips` the hosted chains' act-on

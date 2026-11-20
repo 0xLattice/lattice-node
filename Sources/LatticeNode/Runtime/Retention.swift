@@ -124,7 +124,7 @@ extension NodeRuntime {
                 if let last = bodyTips[path], last != tip { past.append(last) }
                 bodyTips[path] = tip
                 past.removeAll { $0 == tip }
-                if !past.isEmpty { await storage.letGo(ofBodies: past, at: path) }
+                if !past.isEmpty, !state.stops(at: .letGoOfBodies) { await storage.letGo(ofBodies: past, at: path) }
             }
         }
 
