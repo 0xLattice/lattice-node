@@ -595,6 +595,8 @@ extension NodeRuntime {
         var replies: [UInt64: (path: ChainPath, reply: CheckedContinuation<NodeRuntimeReply, any Error>)] = [:]
         var nextReply: UInt64 = 1
         var wake: (time: Int64, task: Task<Void, Never>)?
+        /// The step's derivations by level, until each level's are queued.
+        var derivations: [ChainPath: [ChildDeriveJob]] = [:]
 
         // The components each effect and result is dispatched to. Each owns
         // its own state, and none calls another: what one needs of another
@@ -1131,6 +1133,10 @@ extension NodeRuntime {
             let ordered = effects.enumerated()
                 .sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }
                 .map(\.element)
+            // A level's derivations of the step run as at most one job per
+            // worker, queued where its first one is (`deriveProofs`).
+            derivations = [:]
+            for case .level(let path, .deriveProof(let job)) in ordered { derivations[path, default: []].append(job) }
             for effect in ordered {
                 guard SyncTrace.enabled, case .persist = effect else {
                     guard await execute(effect) else { return false }
@@ -1278,26 +1284,15 @@ extension NodeRuntime {
                 )
             case .cancelBody(let cid):
                 bodyFetches.cancel(cid, at: path)
-            case .deriveProof(let job):
-                // From this node's own content only, never peers: the block
-                // (read from this store when weighed), the carrier, its child
-                // index and its saved proofs, written by the step that
-                // weighed it, before this effect.
-                let held = job.block ?? storage.store.header(job.childCID)?.block
-                let parent = Array(path.dropLast())
-                let (storage, failStop) = (storage, failStop)
-                jobs.enqueue(RuntimeJob(path: path, tipCID: nil) {
-                    var upstream: [ChildBlockProof] = []
-                    if parent.count > 1 {
-                        do {
-                            upstream = try storage.store.savedProofs(at: parent, for: [job.carrier])[job.carrier] ?? []
-                        } catch {
-                            failStop(error)
-                            return []
-                        }
-                    }
-                    return [.level(path, .derived(await job.run(held: held, upstream: upstream, fetcher: storage.workFetcher)))]
-                })
+            case .deriveProof:
+                // The level's first derivation of the step queues them all,
+                // in at most one job per worker, so a burst of carriers still
+                // runs side by side.
+                guard let batch = derivations.removeValue(forKey: path) else { break }
+                let size = (batch.count + jobs.workers - 1) / jobs.workers
+                for start in stride(from: 0, to: batch.count, by: size) {
+                    jobs.enqueue(deriveProofs(Array(batch[start..<min(start + size, batch.count)]), at: path))
+                }
                 jobs.start(in: core)
             case .verifyProofs(let batch):
                 // Off the loop: a check without its block reads it from the
@@ -1388,6 +1383,34 @@ extension NodeRuntime {
                 jobs.start(in: core)
             }
             return true
+        }
+
+        /// One job for derivations of one level and step, as its proof
+        /// checks are one: each derivation from this node's own content
+        /// only, never peers: the block (read from this store when weighed),
+        /// the carrier, its child index and its saved proofs, written by the
+        /// step that weighed it, before this effect. Each posts its own
+        /// `derived` event, as when each was a job.
+        private func deriveProofs(_ batch: [ChildDeriveJob], at path: ChainPath) -> RuntimeJob {
+            let held = batch.map { $0.block ?? storage.store.header($0.childCID)?.block }
+            let parent = Array(path.dropLast())
+            let (storage, failStop) = (storage, failStop)
+            return RuntimeJob(path: path, tipCID: nil) {
+                var derived: [NodeEvent] = []
+                for (job, held) in zip(batch, held) {
+                    var upstream: [ChildBlockProof] = []
+                    if parent.count > 1 {
+                        do {
+                            upstream = try storage.store.savedProofs(at: parent, for: [job.carrier])[job.carrier] ?? []
+                        } catch {
+                            failStop(error)
+                            return []
+                        }
+                    }
+                    derived.append(.level(path, .derived(await job.run(held: held, upstream: upstream, fetcher: storage.workFetcher))))
+                }
+                return derived
+            }
         }
 
         func mined(_ path: ChainPath) -> Bool {
