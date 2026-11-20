@@ -73,6 +73,9 @@ public struct LevelSimReport: Sendable {
     public var steps = 0
     public var trace: UInt64 = 0xCBF2_9CE4_8422_2325
     public var disconnects: [(by: String, peer: String, reason: DisconnectReason)] = []
+    /// The scripts that answered a core's request for headers with proofs:
+    /// the peers whose proofs a core took and checked.
+    public var servedProofs: Set<String> = []
     /// Each core's final digest per level.
     public var digests: [String: [ChainPath: TreeDigest]] = [:]
     /// Per mined handoff: the persists its step emitted and the levels the
@@ -360,6 +363,10 @@ public struct LevelSimulator {
             switch action {
             case .send(let peer, let path, let message):
                 guard session(script, peer.key) == peer.session else { continue }
+                if case .headers(let response) = message, response.requestID != 0,
+                   response.entries.contains(where: { !$0.proofs.isEmpty }) {
+                    report.servedProofs.insert(script)
+                }
                 send(.host(.received(PeerID(key: script, session: peer.session), path, message)), from: script, to: peer.key)
             case .wakeAt(let time):
                 schedule(at: max(time, now), to: script, .scriptTick)
