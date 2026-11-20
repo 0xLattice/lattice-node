@@ -630,12 +630,12 @@ public struct ChainCore: Sendable {
         // the stream's tail is the relay. Relaying a header is not acting on
         // its weight: only tip announces and templates act, and they come
         // from the executed tip. So the relay waits on weight, never on
-        // execution: a block learned from peers is pushed once this level
-        // has weighed a peer's whole log (`headersSynced`), before which
-        // what it appends is history a subscriber has, as Bitcoin Core
-        // announces nothing during initial download. One this node produced
-        // always is: it may be canonical and it adds weight. A peer still
-        // pulls our log, and a push past its position has it pull the gap.
+        // execution, and pushes what is new: a block this node produced,
+        // which no peer has yet, or anything appended once this level has
+        // weighed a peer's whole log (`headersSynced`). Before that, what it
+        // appends is history a subscriber has, as Bitcoin Core announces
+        // nothing during initial download. A peer still pulls our log, and
+        // a push past its position has it pull the gap.
         if headersSynced || turn.own, !tail.entries.isEmpty {
             for peer in sync.peers.keys.sorted() where sync.peers[peer]?.subscribed == true {
                 effects.append(.send(peer, .stream(StreamPage(

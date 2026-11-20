@@ -369,10 +369,13 @@ historic header it weighs to each subscriber. That is a question of weight,
 not of execution: once this level has weighed a peer's whole log
 (`headersSynced`), what it appends is new. Gating the relay on `synced`, an
 execution fact, broke sync rule 1 (weight never waits on execution) and let
-an execution stall stop propagation. The relay is gated on `headersSynced`;
-a block this node produced is pushed before it, as before. As Bitcoin's
-BIP152 high-bandwidth relay announces a block once its proof of work is
-checked, before it is validated.
+an execution stall stop propagation. The relay pushes what is new to its
+peers: a block this node produced, which no peer has yet, or anything
+appended once this level has weighed a peer's whole log (`headersSynced`).
+One rule, two facts that establish newness; a node with no peers never
+weighs a peer's log, and still relays what it mines. As Bitcoin's BIP152
+high-bandwidth relay announces a block once its proof of work is checked,
+before it is validated.
 
 *Still open.* Whether the child gate is needed at all, since each child
 header already waits for its own proof; and what fact the transaction gate
