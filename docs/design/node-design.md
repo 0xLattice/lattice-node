@@ -303,11 +303,14 @@ checked against the code by reading:
 | The loop never waits on something only the loop can finish | Yes: jobs and RPC handlers read live state by sending the loop an input (`LiveLevels`) and waiting; the loop never waits on a job |
 | Workers never change the core's state | Yes: results return as events the loop steps |
 | Writes complete before what they make true is published | Yes (§4.7); this is the one deliberate wait |
-| Every dispatched job has a rule for when it is superseded | Partly: a recheck whose tip moved is dropped; body fetches are cancelled when they leave the window; other jobs run to completion |
+| Every dispatched job has a rule for when it is superseded | Yes: each kind's rule is listed; a recheck whose tip moved is dropped, body fetches and count repairs are cancelled, the rest run to completion because their results are facts or are judged again where they land, at a bounded cost |
 
-These rules should be written as the loop's contract and kept by review; a
-problem that seems to need another actor, scheduler or background state
-manager is first solved through the loop's existing events and effects.
+The contract is written where review keeps it: [the sync architecture's
+loop contract](sync-architecture.md#the-loops-contract), the [PR
+checklist](../pr-checklist.md), and the doc comment on `NodeRuntime.Loop`.
+No job that runs to completion was given a supersede rule: none has a cost
+that one would remove (derivations' queue growth is a bound, §4.17, not a
+supersede rule).
 
 ### 4.2 Weigh: headers and work
 

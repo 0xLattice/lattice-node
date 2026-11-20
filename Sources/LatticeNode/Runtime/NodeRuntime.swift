@@ -533,6 +533,14 @@ extension NodeRuntime {
     /// component that runs it (`JobPool`, `BodyFetches`, `Retention`,
     /// `Counts`, `ReadModel`, `Maintenance`, `TransactionFetches`); a job's
     /// or a task's result comes back as an input.
+    ///
+    /// Its contract (docs/design/sync-architecture.md, "The loop's
+    /// contract"): the core performs no I/O; the loop never waits for the
+    /// network or long computation, nor on anything only the loop can
+    /// finish; only the loop changes the core, by stepping it; a step's
+    /// writes complete before what they make true is published (persist,
+    /// then publish, then the rest); and every job and task has a rule for
+    /// when it is superseded, listed there.
     struct Loop: Sendable {
         var core: NodeCore
         let storage: NodeStorage
