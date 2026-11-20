@@ -564,6 +564,100 @@ to retain trie nodes on disk; geth moved away from hash-keyed state. Replace
 when an objective needs it, with geth's path scheme the nearest shape — but
 first make it replaceable (§6).
 
+### 4.9a Decision: receipt proofs travel with the child block
+
+**The failure.** Testnet nodes stopped child chains at height 3,920 (as
+reported by the owner's investigation). Block 3,921 carries a withdrawal. A
+withdrawal is checked against a receipt in its parent's state at the block's
+anchor, `parentState.receiptState`. The block's body was stored before #119,
+so it carries no receipt witness, and every host runs `state: recent`, so no
+node still holds that Nexus state. No node can execute the block.
+
+**What the protocol says.**
+
+- A withdrawal is the only thing in a child block that reads its parent
+  state's contents: a proof of the receipt in `parentState.receiptState`
+  (spec §7.3, §8.1 phase 3, §8.3). A child genesis and parent continuity
+  rest on what the parent executed, not on its state's contents (§5.3 step 6).
+- The anchor can be any state the parent executed (§5.3 step 6, §9.5), and a
+  child may be synced long after its anchors were current. A receipt being
+  immutable does not let today's trie stand in for the anchor's: a receipt
+  inserted after the anchor must fail against it, and one inserted only on a
+  parent branch that lost exists only under the old root.
+- The parent-receipt closure is "validation witness data outside
+  `maxBlockSize` … each node bounds acquisition before decoding it", and
+  receipt keys are hashed into 64-character hex paths "because a child may
+  need that proof from a remote same-chain peer" (§3.5). The protocol
+  intends a per-withdrawal witness.
+
+**Decision.** Every child block with withdrawals has a sidecar: the
+parent state trie nodes its withdrawals' receipt proofs read, from its
+`parentState` down each receipt's path (`Block.parentReceiptWitnessPaths`).
+The sidecar is not part of the block: the block's bytes, CID and
+`maxBlockSize` are unchanged. It is indexed next to the block in the child
+chain's store, kept and released with it, and sent whenever the block is
+sent: a peer that asks for the block gets the block, its transactions and
+its sidecar in one bundle. A block with withdrawals is complete only with
+its sidecar: a node does not connect one, or take it from a peer, without
+it. Whoever produces the block can always build them, since a
+child block anchors at its carrier's entering state, the one its miner builds
+on. Old parent state is then never needed to execute a child block, on any
+retention setting, by any node, whenever it hosts the child.
+
+**What the code already does (#119, #129).** The sidecar is retained under
+the block's own scope (`body(cid)`) and listed in the block's bundle record
+(`volume-bundles.db`, keyed by block CID). A block fetched from a peer
+requires it, counted against the fetch's byte reservation; a block the node
+executed is stored only with it; a served block's bundle includes it. A new
+block is advertised by its header, in its chain's header log, and peers pull
+the block and sidecar from its hosts, as Bitcoin and Ethereum announce a
+block and send its body on request; pushing the sidecar with the header
+would send it to peers that never execute the child. The sidecar's nodes are
+content addressed and checked against the block's `parentState`, so they
+may be taken from any peer; the child's hosts are the ones sure to hold
+them, since they keep them with the block. Every block a node executes,
+mined here or fetched, is stored through the connect job
+(`storeValidBlocks`), which stores one with withdrawals only with its
+sidecar; the content-first write of a block this node mines takes the
+sidecar when it can, and the block still executes only with it. The rule
+needs no code change.
+
+**Size.** A receipt path is about six trie nodes at a million receipts
+(16-way branching on hashed keys), each up to about 1.2 KB: roughly 6–8 KB
+per withdrawal, with the upper levels shared among a block's withdrawals.
+Estimated from the trie format, to be measured. It is paid only where
+withdrawals happen, by the hosts of that child, for as long as they keep its
+bodies.
+
+**Alternatives.**
+
+| Approach | Works for | Cost and shape | Verdict |
+|---|---|---|---|
+| `state: all` on some nodes (archive) | any node that can reach one | every version of all state; liveness rests on operators running archives | rejected: an operator role for a protocol need |
+| A long state window for the parent | a node that sets it | the parent's recent state; a setting to get right per network | rejected: configuration, not design |
+| Hold a parent state until hosted children execute past it | a node syncing parent and children together | couples retention to other chains' progress; a stuck child holds state unless bounded | rejected: inelegant, no help to a node that hosts a child late |
+| Keep every version of each chain's receipt state | any node | about 7 KB per receipt ever made, forever, on every parent host (about 35 times the trie) | rejected: size, paid by every parent host for every receipt |
+| **A sidecar indexed and sent with the child block, required** | **any node, any child, hosted whenever** | **the paths each withdrawal reads, kept with the block** | **decided; the spec's design** |
+
+**How others do it.** Ethereum's blob sidecars (EIP-4844) travel beside a
+block, outside its body, and are kept with it. Bitcoin blocks carry
+everything validating them reads beyond the node's own state. Ethereum's stateless-client work carries state
+witnesses with blocks, and moved toward Verkle trees because Merkle-Patricia
+witnesses are large: the same tradeoff, at much higher volume. Cosmos IBC
+proves packets against a counterparty's state at a past height, and its
+relayers need nodes that keep that state: the shape this avoids.
+
+**Legacy bodies.** Bodies stored before #119 lack the witness; as far as is
+known, only testnet's 3,921 has a withdrawal among them. One node executes
+Nexus again from genesis keeping its state (about 6,300 blocks; a wipe on a
+node that let it go), executes 3,921, and stores and serves its body with
+the witness. Other nodes fetch the complete body. Nothing is kept afterwards.
+
+**How it is tested.** A follower on `recent` with a small window syncs a
+parent and a child whose withdrawal is anchored below the parent's window
+and executes past it, from the sidecar alone. A block with a withdrawal
+whose sidecar no peer serves is not connected.
+
 ### 4.10 Workers and scheduling
 
 **What.** `max(1, processors − 1)` workers; three queues served strictly in
@@ -779,6 +873,10 @@ progress or reports exactly why it cannot.
   status per chain (§4.4).
 - Simulator scenarios for starvation, missing bodies, delayed proofs,
   parent–child stalls, and reorganisations at several depths (§4.19).
+- Receipt-proof sidecars travel with child blocks, as the code already does,
+  and testnet's block 3,921 is repaired once (§4.9a): the cause of the stall at
+  3,920. A block whose receipt proofs no peer served is reported as that
+  (#163); the operator guide has the repair.
 
 *Exit:* no unexplained stalled chain in production; every known blocking
 condition is observable and recoverable.
@@ -858,6 +956,7 @@ against an agreed target says otherwise.
 2. State retention extracted behind one interface, behaviour unchanged.
 3. The binary wire format as the next performance experiment, with a
    benchmark and a compatibility gate.
+4. Receipt proofs travel with the child block, as an indexed sidecar (§4.9a).
 
 Everything else stays conditional on measurements.
 
