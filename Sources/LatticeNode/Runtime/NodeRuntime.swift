@@ -903,6 +903,7 @@ extension NodeRuntime {
         /// One child level started over what it journaled, as boot does,
         /// with the operator's own pooled transactions for it.
         private mutating func start(_ path: ChainPath, specs operatorSpecs: [ChainPath: ChainSpec]) async throws {
+            try storage.stores.open(at: path)
             let facts = try await storage.nodeFacts(at: path)
             var specs: [ChainSpec] = []
             for case .block(let block) in facts.facts where block.parentBlockHash == nil {

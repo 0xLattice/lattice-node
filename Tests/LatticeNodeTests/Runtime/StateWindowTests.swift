@@ -1056,13 +1056,16 @@ final class StateWindowTests: XCTestCase {
             transaction: try transaction(payer, nonce: 0, moves: [(address(payer), -1)], chainPath: Self.alpha)
         ))
         XCTAssertEqual(response.mempoolCount, 1, "the Alpha transaction is checked against this store's state, and pooled")
-        let file = node.configuration.storagePath.appendingPathComponent("volumes")
-            .appendingPathComponent(VolumeStores.fileName(Self.alpha))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path), "Alpha keeps a store of its own")
+        try await storage.broker(at: Self.alpha).mergeRetainedRoots(
+            scope: storage.scopes.staging(at: Self.alpha), roots: [node.configuration.nexusGenesisCID]
+        )
         try await runtime.host([])
-        // Its windows, counts, staging and bodies with it.
-        XCTAssertNil(storage.stores.opened(at: Self.alpha), "a chain no longer hosted keeps no store")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path), "nor its file")
+        let kept = try await windowHeights(storage, at: Self.alpha)
+        XCTAssertEqual(kept, [], "a chain no longer hosted keeps no state window")
+        let counts = try await storage.broker(at: Self.alpha).countedScopes(prefix: storage.scopes.counted(at: Self.alpha))
+        XCTAssertEqual(counts, [], "nor counts")
+        let staged = try await storage.broker(at: Self.alpha).retainedRoots(scope: storage.scopes.staging(at: Self.alpha))
+        XCTAssertEqual(staged, [], "nor staging")
         await runtime.stop()
     }
 
@@ -1115,7 +1118,8 @@ final class StateWindowTests: XCTestCase {
         XCTAssertFalse(nexusRules.isEmpty, "Nexus keeps its spec too")
 
         try await runtime.host([])
-        XCTAssertNil(storage.stores.opened(at: Self.alpha), "a chain no longer hosted keeps no store, so no rules")
+        let left = try await storage.broker(at: Self.alpha).retainedRoots(scope: storage.scopes.rules(at: Self.alpha))
+        XCTAssertEqual(left, [], "a chain no longer hosted keeps no rules")
         try await storage.stores.sweep()
         let kept = await storage.stores.hasVolume(root: moduleCID)
         XCTAssertFalse(kept, "its policy module goes")

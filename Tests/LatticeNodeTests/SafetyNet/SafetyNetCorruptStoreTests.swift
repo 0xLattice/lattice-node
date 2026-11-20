@@ -135,7 +135,7 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
     func testBootOpensAStoreWhoseVolumesAreGone() async throws {
         let fixture = try await buildFixture()
         let root = try damagedCopy(
-            of: fixture, database: "volumes/Nexus.db",
+            of: fixture, database: "volumes/" + VolumeStores.fileName(["Nexus"]),
             // Members before manifests, so the store stays self-consistent
             // and only the facts' references dangle.
             applying: ["DELETE FROM volume_entries", "DELETE FROM volume_metadata"]
@@ -154,7 +154,7 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         let fixture = try await buildFixture()
         let genesis = try configuration(fixture).nexusGenesisCID
         let root = try damagedCopy(
-            of: fixture, database: "volumes/Nexus.db",
+            of: fixture, database: "volumes/" + VolumeStores.fileName(["Nexus"]),
             applying: ["UPDATE cas_data SET data = X'00' WHERE cid = '\(genesis)'"]
         )
         let storage = try await NodeStorage.open(configuration: try configuration(root))
@@ -204,7 +204,7 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
     /// A copy of `fixture` whose `cid` bytes in the root chain's Volume store are damaged, opened.
     private func openDamaged(_ fixture: URL, cid: String) async throws -> NodeStorage {
         let root = try damagedCopy(
-            of: fixture, database: "volumes/Nexus.db",
+            of: fixture, database: "volumes/" + VolumeStores.fileName(["Nexus"]),
             applying: ["UPDATE cas_data SET data = X'00' WHERE cid = '\(cid)'"]
         )
         return try await NodeStorage.open(configuration: try configuration(root))

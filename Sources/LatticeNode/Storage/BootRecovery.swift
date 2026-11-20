@@ -19,7 +19,7 @@ enum BootRecovery {
         let directoryLock: StorageDirectoryLock
     }
 
-    /// The two stores, and the retention scopes derived from the tree's
+    /// The Volume stores and state.db, and the retention scopes derived from the tree's
     /// identity.
     private struct Stores {
         let stores: VolumeStores

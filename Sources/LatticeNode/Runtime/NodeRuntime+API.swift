@@ -894,6 +894,9 @@ extension NodeRuntime {
                 if !valid.isEmpty {
                     do {
                         carried = try await store(storage, valid, path, reads)
+                    } catch is VolumeStores.NotHosted {
+                        // The level is gone: nothing to store, no one to tell.
+                        return []
                     } catch {
                         failStop(error)
                         return []

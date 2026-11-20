@@ -29,7 +29,13 @@ Before exposing a node:
 8. Configure a mining recipient for every chain that should pay rewards.
 9. Reserve enough disk for unbounded fact history and retained content, or
    set `blockBodies` and `state` (see "What a node keeps").
-10. Test a clean shutdown, restart, and recovery before accepting traffic.
+10. Allow open files for the chains hosted: each chain's Volume store holds
+    about thirteen (its file, log and shared memory, and four read
+    connections), beside the overlay's sockets. The shipped systemd unit sets
+    `LimitNOFILE=65536`; macOS shells default to 256, about fifteen chains.
+    Each store also keeps up to 64 MiB of write cache and 16 MiB of read cache
+    in memory, filled as its chain is used.
+11. Test a clean shutdown, restart, and recovery before accepting traffic.
 
 ## How a node finds the network
 
@@ -471,7 +477,7 @@ The tree storage directory contains:
 
 ```text
 state.db
-volumes/            one Volume store per hosted chain: Nexus.db, Nexus.Alpha.db, …
+volumes/            one Volume store per hosted chain, <hash>.db (below)
 volume-bundles.db
 storage.lock
 ```
@@ -854,14 +860,16 @@ Schema epoch 49 moves `volumes.db` to the Volume store's schema v3, which
 drops a redundant index (about 14% of what a sync writes). Every node is
 wiped once to run it; an older store reports `wipe required`.
 
-Schema epoch 50 gives each hosted chain a Volume store of its own,
-`volumes/<chain>.db` beside `state.db` (`volumes/Nexus.db`,
-`volumes/Nexus.Alpha.db`), in place of the one `volumes.db`, so a chain's
+Schema epoch 50 gives each hosted chain a Volume store of its own under
+`volumes/` beside `state.db`, in place of the one `volumes.db`, so a chain's
 writes no longer grow with the chains hosted beside it. Every node is wiped
-once to run it. A chain the node stops hosting has its file removed; the
-root chain's file also holds the operator's pins, the protocol constants
-and the mempool's journal. Back up the whole storage directory, `volumes/`
-included.
+once to run it. A chain's file is named by the SHA-256 of its path, so
+names never collide on a case-insensitive disk and stay short however deep
+the chain; `printf %s Nexus/Alpha | shasum -a 256` gives Nexus/Alpha's
+(`volumes/<that>.db`). A chain the node stops hosting keeps its store until
+the next start, which removes it with its log; the root chain's store also
+holds the operator's pins, the protocol constants and the mempool's
+journal. Back up the whole storage directory, `volumes/` included.
 
 ### `missingMaterializedVolume`
 

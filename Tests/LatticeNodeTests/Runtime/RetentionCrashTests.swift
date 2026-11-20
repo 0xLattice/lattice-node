@@ -217,9 +217,10 @@ final class RetentionCrashTests: XCTestCase {
         await producerRuntime.stop()
     }
 
-    /// A crash while a chain is let go, before its store goes: the next
-    /// start, hosting Nexus alone, removes the chain's store, and Nexus's
-    /// counts still match the store.
+    /// A crash while a chain is let go, at its windows, its rules or its
+    /// counts (the case where windows went and counts still name them): the
+    /// next start, hosting Nexus alone, removes the chain's store, and
+    /// Nexus's counts still match the store.
     func testACrashWhileAChainIsLetGoRecoversOnTheNextStart() async throws {
         try await crashWhileUnhosting(at: .letGoOfChain)
     }

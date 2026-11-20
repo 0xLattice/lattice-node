@@ -1,3 +1,4 @@
+import Crypto
 import Foundation
 import LatticeNodeCore
 import Synchronization
@@ -56,15 +57,16 @@ final class VolumeStores: ContentSource, Sendable {
         }
     }
 
-    /// Opens the root's store and each of `hosted`'s, and removes the store
-    /// of any chain no longer hosted.
+    /// Opens the root's store and each of `hosted`'s, and removes every
+    /// other file under `volumes/`: the store of a chain no longer hosted,
+    /// with its log and shared memory, so a stale log never pairs with a
+    /// new file.
     init(directory storage: URL, root rootPath: ChainPath, hosted: [ChainPath]) throws {
         directory = storage.appendingPathComponent("volumes", isDirectory: true)
         self.rootPath = rootPath
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let wanted = Set([rootPath] + hosted)
-        for name in (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [] {
-            guard let path = Self.path(fileName: name), !wanted.contains(path) else { continue }
+        let wanted = Set(([rootPath] + hosted).flatMap { path in ["", "-wal", "-shm"].map { Self.fileName(path) + $0 } })
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [] where !wanted.contains(name) {
             try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
         }
         root = try Self.open(directory, rootPath)
@@ -73,17 +75,30 @@ final class VolumeStores: ContentSource, Sendable {
         opened = Mutex(Open(stores, root: rootPath))
     }
 
-    /// The store of the chain at `path`, opened if it is not yet: every
-    /// write names the chain it is for.
+    /// The store of the chain at `path`: every write names the chain it is
+    /// for. A chain this node does not host, and has not hosted since the
+    /// start, has none (`NotHosted`): a late job of a level gone writes
+    /// nowhere rather than making a file.
     func store(at path: ChainPath) throws -> DiskBroker {
-        if let held = opened.withLock({ $0.stores[path] }) { return held }
+        guard let held = opened.withLock({ $0.stores[path] }) else { throw NotHosted(path: path) }
+        return held
+    }
+
+    /// The chain at `path` is not hosted here.
+    struct NotHosted: Error, Equatable {
+        let path: ChainPath
+    }
+
+    /// A chain this node starts to host: its store is opened (made, the
+    /// first time). It stays open until the node stops, hosted or not.
+    func open(at path: ChainPath) throws {
+        if opened.withLock({ $0.stores[path] }) != nil { return }
         let made = try Self.open(directory, path)
         return opened.withLock { open in
-            if let raced = open.stores[path] { return raced }
+            guard open.stores[path] == nil else { return }
             var stores = open.stores
             stores[path] = made
             open = Open(stores, root: rootPath)
-            return made
         }
     }
 
@@ -118,9 +133,10 @@ final class VolumeStores: ContentSource, Sendable {
         Reading(stores: self, path: path, below: below)
     }
 
-    /// The chain at `path` is no longer hosted: its store closes and its
-    /// file goes, with everything in it. A read in flight on it finishes on
-    /// the file it opened.
+    /// The chain at `path` is let go of: its store closes and its file
+    /// goes, with its log and shared memory, and everything in it. Its jobs
+    /// have ended (`Retention.release`); a read in flight finishes on the
+    /// file it opened, and a write that comes late is refused (`NotHosted`).
     func remove(at path: ChainPath) {
         guard path != rootPath else { return }
         opened.withLock { open in
@@ -218,17 +234,11 @@ final class VolumeStores: ContentSource, Sendable {
         }
     }
 
-    /// A chain's file: each directory name percent-encoded, joined by dots.
+    /// A chain's file: the hex SHA-256 of its path's directory names joined
+    /// by "/" (`printf %s Nexus/Alpha | shasum -a 256`), so any directory
+    /// name makes a file name of one length that a case-insensitive file
+    /// system cannot confuse with another's.
     static func fileName(_ path: ChainPath) -> String {
-        path.map { $0.addingPercentEncoding(withAllowedCharacters: allowed) ?? $0 }.joined(separator: ".") + ".db"
+        SHA256.hash(data: Data(path.joined(separator: "/").utf8)).map { String(format: "%02x", $0) }.joined() + ".db"
     }
-
-    static func path(fileName name: String) -> ChainPath? {
-        guard name.hasSuffix(".db") else { return nil }
-        let parts = name.dropLast(3).split(separator: ".", omittingEmptySubsequences: false)
-        let path = parts.compactMap { String($0).removingPercentEncoding }
-        return path.count == parts.count && !path.isEmpty ? path : nil
-    }
-
-    private static let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
 }

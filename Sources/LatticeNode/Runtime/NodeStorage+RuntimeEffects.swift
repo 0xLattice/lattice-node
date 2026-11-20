@@ -38,7 +38,7 @@ extension NodeStorage {
 
     /// `NodeEffect.persist`: content first — each affected level's Volumes
     /// in one transaction of its own chain's store, retained in the same
-    /// one, store by store, root first — then the complete node step's
+    /// one, store by store, shallowest level first — then the complete node step's
     /// headers, proofs, facts and cursors in one state.db transaction. A
     /// crash between stores leaves content no fact names, which the next
     /// start sweeps.
@@ -256,7 +256,7 @@ extension NodeStorage {
     }
 
     /// Stores the blocks of one connect job execution found valid, and pins
-    /// them, in one volumes.db transaction. A body fetched from peers is
+    /// them, in one transaction of the chain's Volume store. A body fetched from peers is
     /// held in memory until then. Each block's Volumes are the ones its
     /// body's fetch derived and kept, or else derived again as `fetcher`
     /// reads them: its content (`storeBlockContent`) and its receipt witness
@@ -450,7 +450,11 @@ extension NodeStorage {
     /// walk over local content only, recorded once it completes. A root that
     /// is no block this node holds whole bundles only itself.
     nonisolated func volumeBundle(_ rootCID: String) async -> [String] {
-        if let recorded = bundles.bundle(root: rootCID) { return recorded }
+        // A recording outlives a store a start removed: one whose block is
+        // no longer held is not advertised.
+        if let recorded = bundles.bundle(root: rootCID) {
+            return await stores.hasVolume(root: rootCID) ? recorded : [rootCID]
+        }
         // Not a block this node holds: nothing to walk, and nothing to say.
         guard let bytes = await stores.fetchDataLocal(cid: rootCID), Block(data: bytes) != nil else {
             return [rootCID]

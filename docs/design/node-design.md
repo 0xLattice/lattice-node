@@ -971,7 +971,7 @@ state and its marker together.
 | File | Holds | Settings |
 |---|---|---|
 | `state.db` (schema epoch 48) | facts (kept forever), accepted blocks, headers, child indexes, proofs, stream cursors, the local mempool journal, state diffs for the window, the weigh log id | WAL, `synchronous=FULL`; one writer, one reader; the store's actor on its own serial queue |
-| `volumes/<chain>.db` | one per hosted chain: its content by hash (bodies, transactions, state trie nodes, its rules), its retention scopes and counted roots; the root's also the constants, specs, policy modules, pins and the mempool's (VolumeBroker 10.3.1) | WAL, `synchronous=FULL` |
+| `volumes/<hash>.db` | one per hosted chain, named by the SHA-256 of its path: its content by hash (bodies, transactions, state trie nodes, its rules), its retention scopes and counted roots; the root's also the constants, specs, policy modules, pins and the mempool's (VolumeBroker 10.3.1) | WAL, `synchronous=FULL` |
 | `volume-bundles.db` | a cache of which Volumes a block's bundle holds | WAL, `synchronous=NORMAL`; may be deleted |
 
 A different schema epoch, genesis or set of tables means "wipe required".
@@ -1000,7 +1000,7 @@ the stores themselves. **Judgment.** Keep SQLite.
 
 ### 4.9 State and its retention
 
-**What.** Each hosted chain's Volume store (`volumes/<chain>.db`, §4.9b) keeps what a named scope retains; a release reclaims
+**What.** Each hosted chain's Volume store (`volumes/<hash>.db`, §4.9b) keeps what a named scope retains; a release reclaims
 whatever no scope or count still names, in the same transaction; a full
 sweep runs at start.
 
@@ -1250,16 +1250,21 @@ usually touches one or two. geth's path scheme stays the next step if one
 chain's own growth over time ever misses a target.
 
 **Result (schema epoch 50, measured on macOS).** Built as chosen:
-`VolumeStores` (`Storage/VolumeStores.swift`) owns a store per hosted chain,
-`volumes/<chain>.db`, and routes by chain path. A chain's writes go to its
-store; its work reads its own store, then its ancestors', then the rest; a
-read by CID asks every store. The root chain's store also holds what is the
+`VolumeStores` (`Storage/VolumeStores.swift`) owns a store per hosted chain
+under `volumes/`, and routes by chain path. A chain's writes go to its
+store; its work reads its own store, then its ancestors' (a template's and
+a mined block's, its descendants' too); only a read by CID from the API or
+a peer asks every store. The root chain's store also holds what is the
 node's: the protocol constants, the Nexus genesis, policy modules and child
-genesis specs, the operator's pins and the mempool's journal pins. Unhosting
-a chain removes its store; a start removes the store of any chain not
-hosted. A step's persist writes one chain's store in practice: a step
-executes one level, and a child genesis's spec goes to the root's store in
-the step that weighs it.
+genesis specs, the operator's pins and the mempool's journal pins. A step's persist writes the store of each level whose executions
+it journals, and the root's for a child genesis's spec it weighs; a
+connect step executes one level, so most write one store, and a crash
+between two leaves content no fact names, which the next start sweeps.
+Unhosting a chain lets its windows, rules and counts go as before and keeps
+its store, bodies included, until the next start removes it: a job of the
+chain still running writes to a store that is there, and a chain hosted
+again in the same run finds its bodies. Files are named by the SHA-256 of
+the chain's path.
 
 The target is met: a chain's writes per block no longer grow with the
 chains hosted. Each leaf's own store wrote 118–120 MiB whether two, four or

@@ -116,7 +116,8 @@ though it were a complete boundary.
 ```text
 <storage>/
   state.db             facts, headers, child proofs, indexes, cursors, state diffs, local mempool
-  volumes/<chain>.db   each hosted chain's content and retained roots (the root's
+  volumes/<hash>.db    each hosted chain's content and retained roots, named by the
+                       SHA-256 of its path (the root's
                        also holds the constants, the operator's pins and the mempool's)
   volume-bundles.db    cache: per block, the Volume roots served together
 ```
