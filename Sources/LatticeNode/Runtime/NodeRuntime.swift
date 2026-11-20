@@ -535,41 +535,6 @@ public final class NodeRuntime: Sendable {
     static let rememberedPeerDials = 4
 }
 
-extension NodeRuntime.Loop {
-    /// Moves the body order (each window block's nearest distance in any
-    /// window) with the windows that moved, each from `old` to `new`, and
-    /// returns the blocks whose order changed. `windows` are every window
-    /// after the moves. A block is looked up across windows only where its
-    /// nearest distance may have grown or left; elsewhere the work is the
-    /// moved windows' entries.
-    static func reorder(
-        _ order: inout [String: Int], moved: [(old: [String: Int], new: [String: Int])], windows: [[String: Int]]
-    ) -> Set<String> {
-        var reordered: Set<String> = []
-        var lookUp: Set<String> = []
-        for (old, new) in moved {
-            for (cid, distance) in new where old[cid] != distance {
-                if order[cid].map({ distance < $0 }) ?? true {
-                    order[cid] = distance
-                    reordered.insert(cid)
-                } else if order[cid] == old[cid] {
-                    lookUp.insert(cid)
-                }
-            }
-            for (cid, distance) in old where new[cid] == nil && order[cid] == distance {
-                lookUp.insert(cid)
-            }
-        }
-        for cid in lookUp {
-            let nearest = windows.compactMap { $0[cid] }.min()
-            guard order[cid] != nearest else { continue }
-            order[cid] = nearest
-            reordered.insert(cid)
-        }
-        return reordered
-    }
-}
-
 extension NodeRuntime {
     /// Everything the loop task owns. Only the loop touches it.
     struct Loop: Sendable {
@@ -685,27 +650,14 @@ extension NodeRuntime {
         var wake: (time: Int64, task: Task<Void, Never>)?
         /// Levels with a `reproject` timer pending.
         var reprojections: Set<ChainPath> = []
-        var bodies: [BodyKey: Task<Void, Never>] = [:]
-        /// Why each body the window asks for has not arrived: its last
-        /// fetch's failure, until it arrives or the window leaves it. A body
-        /// with one is fetched again without a bundle.
-        var fetchWaits: [BodyKey: BodyWait] = [:]
-        /// Why each held block's connect ended without a verdict, until the
-        /// block leaves the body window.
-        var connectWaits: [BodyKey: BodyWait] = [:]
+        /// The body fetches, their waits and the body windows.
+        var bodyFetches: BodyFetches
 
         /// Blocks whose execution this step journaled, and each level's
         /// tip as of the last step: what the working set compares to let
         /// go of a body when the operator keeps none beyond it.
         var executedThisStep: [BodyKey] = []
         var bodyTips: [ChainPath: String] = [:]
-        /// The window blocks' distances from their chains' next blocks to
-        /// connect, each its nearest in any window: the read cache's order.
-        var cachedBodyOrder: [String: Int] = [:]
-        /// Each level's next blocks to connect and window distances, as of
-        /// the last step that ran it (`NodeCore.touched`): a level no step
-        /// ran has the same tree, so the same window.
-        var windows: [ChainPath: (next: [String], distances: [String: Int])] = [:]
         /// Each level's tip the kept state was last moved to, or held back
         /// at (none: move it at the next settle), and the blocks executed or
         /// found invalid this step, whose reads go after it.
@@ -715,11 +667,6 @@ extension NodeRuntime {
         /// them, and the repair running for them.
         var counted: [ChainPath: CountedChain] = [:]
         var nextRepair: UInt64 = 0
-
-        struct BodyKey: Hashable {
-            let path: ChainPath
-            let cid: String
-        }
 
         struct Session {
             let peer: AuthenticatedPeer
@@ -769,6 +716,7 @@ extension NodeRuntime {
             self.templateDigest = templateDigest
             self.inputs = inputs
             self.remote = remote
+            self.bodyFetches = BodyFetches(storage: storage, remote: remote, inputs: inputs)
             self.jobs = JobPool(workers: workers, inputs: inputs, observeJob: observeJob)
             self.failStop = failStop
         }
@@ -786,14 +734,10 @@ extension NodeRuntime {
                     chain: path,
                     "body \(cid) fetch \(SyncTrace.ms(asked, held)) loop \(SyncTrace.ms(held, SyncTrace.now())) ms"
                 )
-                let key = BodyKey(path: path, cid: cid)
-                bodies[key] = nil
-                fetchWaits[key] = nil
+                bodyFetches.stored(BodyKey(path: path, cid: cid))
                 return await step(.level(path, .bodyFetched(cid: cid)))
             case .bodyWaiting(let path, let cid, let reason, let detail):
-                let key = BodyKey(path: path, cid: cid)
-                guard bodies.removeValue(forKey: key) != nil else { return true }
-                wait(key, reason, detail: detail, in: \.fetchWaits)
+                guard bodyFetches.failed(BodyKey(path: path, cid: cid), reason, detail: detail) else { return true }
                 return await step(.level(path, .bodyUnavailable(cid: cid)))
             case .helloDeadline(let key, let id):
                 guard let session = sessions[key], session.id == id, !session.ready else { return true }
@@ -818,7 +762,7 @@ extension NodeRuntime {
                     if case .level(let path, .connected(let results)) = event {
                         for verdict in results.map(\.verdict) {
                             guard let failure = verdict.retryFailure else { continue }
-                            wait(
+                            bodyFetches.wait(
                                 BodyKey(path: path, cid: verdict.blockHash), .notConnected(failure),
                                 detail: "\(failure)", in: \.connectWaits
                             )
@@ -987,9 +931,7 @@ extension NodeRuntime {
             // A stopped level's body fetches would run on though nobody
             // wants them: no `cancelBody` comes from a level that is gone. Its RPCs would
             // wait for good: no answer comes from it either.
-            for key in bodies.keys where core.levels[key.path] == nil {
-                bodies.removeValue(forKey: key)?.cancel()
-            }
+            bodyFetches.keep(only: Set(core.levels.keys))
             // A stopped level's jobs: a queued one never runs, and a running
             // one is cancelled, not awaited (it may wait on this loop), and
             // what it reports is dropped. Its chain is let go of once none
@@ -997,8 +939,6 @@ extension NodeRuntime {
             jobs.abandon { core.levels[$0] == nil }
             releasing = releasing || !wasConfigured.isSubset(of: configured)
             await releaseWhenIdle()
-            fetchWaits = fetchWaits.filter { core.levels[$0.key.path] != nil }
-            connectWaits = connectWaits.filter { core.levels[$0.key.path] != nil }
             for (id, entry) in replies where core.levels[entry.path] == nil {
                 replies[id] = nil
                 entry.reply.resume(throwing: NodeRuntimeError.unknownChain)
@@ -1274,20 +1214,6 @@ extension NodeRuntime {
             replies.removeValue(forKey: id)?.reply.resume(with: result)
         }
 
-        /// Record why a block waits. A reason is logged when it changes,
-        /// never per retry, with the error behind it: `detail` goes to the
-        /// log and nowhere else.
-        private mutating func wait(
-            _ key: BodyKey, _ reason: BodyWait, detail: String,
-            in waits: WritableKeyPath<Loop, [BodyKey: BodyWait]>
-        ) {
-            guard self[keyPath: waits][key] != reason else { return }
-            self[keyPath: waits][key] = reason
-            let line = "waiting: body of \(key.cid): \(reason) (\(detail))"
-            SyncTrace.log(chain: key.path, line)
-            logLine("lattice-node [\(key.path.joined(separator: "/"))] \(line)")
-        }
-
         /// Republish the read view when the act-on chain, the pool or the
         /// peers changed: the act-on chain by height (walked down from its
         /// top only as far as it changed), the pool listing and the digest.
@@ -1370,22 +1296,8 @@ extension NodeRuntime {
                 )
                 digests[path] = (key, digest)
             }
-            // Status names the wait of the block after the act-on tip, its
-            // heaviest child the window asks for. A block the window left
-            // (executed, excluded, or no longer asked for) waits no more.
-            var waiting: NodeReadView.Waiting?
-            if !fetchWaits.isEmpty || !connectWaits.isEmpty {
-                // The level's window as its last step left it: every window
-                // block has a distance, and one whose parent is the act-on
-                // tip is among those to connect next.
-                let window = windows[path] ?? level.connectOrder
-                connectWaits = connectWaits.filter { $0.key.path != path || window.distances[$0.key.cid] != nil }
-                fetchWaits = fetchWaits.filter { $0.key.path != path || window.distances[$0.key.cid] != nil }
-                waiting = window.next.first { (level.parent(of: $0) ?? "") == tip.hash }.flatMap { cid in
-                    let key = BodyKey(path: path, cid: cid)
-                    return (fetchWaits[key] ?? connectWaits[key]).map { NodeReadView.Waiting(cid: cid, reason: $0) }
-                }
-            }
+            // Status names the wait of the block after the act-on tip.
+            let waiting = bodyFetches.waiting(at: path, level: level, tip: tip.hash)
             var sync = NodeSyncStatus()
             // A move of the act-on tip, as this step left it: the first
             // tip a start publishes counts as one.
@@ -1394,13 +1306,13 @@ extension NodeRuntime {
             sync.pendingHeaders = level.sync.pending.entries.count
             sync.headersAwaitingProof = level.sync.proofs.awaiting.count
             sync.proofChecksRunning = level.sync.proofs.verifying.count
-            sync.bodyWindow = windows[path]?.distances.count ?? 0
+            sync.bodyWindow = bodyFetches.windows[path]?.distances.count ?? 0
             sync.bodiesRequested = level.bodies.requested.count
-            sync.bodiesUnavailable = fetchWaits.keys.count(where: { $0.path == path })
+            sync.bodiesUnavailable = bodyFetches.unavailable(at: path)
             sync.bodiesParked = level.bodies.parked.count
             sync.awaitingParentFacts = level.bodies.awaitingParent.count
             let parentWeighed = path.count > 1 ? core.levels[Array(path.dropLast())]?.headersSynced ?? true : true
-            sync.blockedOn = level.progress(parentWeighed: parentWeighed, next: windows[path]?.next).rawValue
+            sync.blockedOn = level.progress(parentWeighed: parentWeighed, next: bodyFetches.windows[path]?.next).rawValue
             sync.headersSynced = level.headersSynced
             sync.synced = level.synced
             sync.jobsQueued = jobs.waiting(at: path)
@@ -1635,17 +1547,7 @@ extension NodeRuntime {
             let stepped = SyncTrace.now()
             // Only the step moves a level: its window is read once, here,
             // before any effect refreshes a view.
-            var moved: [(old: [String: Int], new: [String: Int])] = []
-            for path in windows.keys where core.levels[path] == nil {
-                moved.append((windows.removeValue(forKey: path)?.distances ?? [:], [:]))
-            }
-            for (path, level) in core.levels where core.touched.contains(path) || windows[path] == nil {
-                let window = level.connectOrder
-                moved.append((windows.updateValue(window, forKey: path)?.distances ?? [:], window.distances))
-            }
-            let reordered = moved.isEmpty
-                ? []
-                : Self.reorder(&cachedBodyOrder, moved: moved, windows: windows.values.map(\.distances))
+            let reordered = bodyFetches.moveWindows(core)
             // Time in the step's facts transaction, for the trace.
             var persisting = 0.0
             defer {
@@ -1679,21 +1581,7 @@ extension NodeRuntime {
             }
             await settleBodies()
             await settleState()
-            // The blocks each chain can connect next wait for the content
-            // budget ahead of bodies fetched ahead of them. Refreshed only
-            // while someone waits: a waiter that arrives between steps is
-            // ordered by the last set, and moves up at the next step.
-            if remote.budget.waiting > 0 {
-                remote.budget.prioritize(Set(windows.values.flatMap(\.next)))
-            }
-            // Fetched bodies stay in memory in the order their connects
-            // need them: the furthest ahead go first when room is needed.
-            if !reordered.isEmpty {
-                await storage.readCache.order(
-                    bodies: reordered.reduce(into: [:]) { $0[$1] = cachedBodyOrder[$1] },
-                    leaving: reordered.filter { cachedBodyOrder[$0] == nil }
-                )
-            }
+            await bodyFetches.order(reordered)
             // What an executed block read goes once the kept state holds
             // what of it the tip's state holds: its execution's window
             // until the counts reach it.
@@ -1842,35 +1730,12 @@ extension NodeRuntime {
                     inputs.yield(.event(.level(path, .childIndexFetched(peer, cid: cid, index))))
                 }
             case .fetchBody(let cid):
-                let key = BodyKey(path: path, cid: cid)
-                guard bodies[key] == nil else { break }
-                let (storage, remote, inputs) = (storage, remote, inputs)
-                // Every peer hosts Nexus; a child's body is asked of its
-                // hosts (its current peers), then of the root's known
-                // providers.
-                let rendezvous = ChainHosts.of(path, nexusGenesisCID: configuration.nexusGenesisCID)
-                let maxBlockSize = core.levels[path]?.maxBlockSize(of: cid)
-                // A bundle is an optimisation: a block whose fetch failed is
-                // fetched one Volume at a time, as from peers that speak no
-                // bundles, so a bad bundle cannot withhold it.
-                let bundle = fetchWaits[key] == nil
-                let asked = SyncTrace.now()
-                // One attempt: the core asks again after its backoff, or
-                // at once when the body may now be had.
-                bodies[key] = Task {
-                    do {
-                        _ = try await storage.fetchChainBody(
-                            cid, remote: remote, bundle: bundle, hosts: rendezvous, maxBlockSize: maxBlockSize
-                        )
-                        inputs.yield(.bodyStored(path, cid: cid, asked: asked, held: SyncTrace.now()))
-                    } catch {
-                        guard !Task.isCancelled else { return }
-                        inputs.yield(.bodyWaiting(path, cid: cid, BodyWait(fetchFailure: error), detail: "\(error)"))
-                    }
-                }
+                bodyFetches.fetch(
+                    cid, at: path, nexusGenesisCID: configuration.nexusGenesisCID,
+                    maxBlockSize: core.levels[path]?.maxBlockSize(of: cid)
+                )
             case .cancelBody(let cid):
-                bodies.removeValue(forKey: BodyKey(path: path, cid: cid))?.cancel()
-                fetchWaits[BodyKey(path: path, cid: cid)] = nil
+                bodyFetches.cancel(cid, at: path)
             case .deriveProof(let job):
                 // From this node's own content only, never peers: the block
                 // (read from this store when weighed), the carrier, its child
@@ -2176,8 +2041,7 @@ extension NodeRuntime {
             for entry in replies.values { entry.reply.resume(throwing: NodeRuntimeError.stopped) }
             replies.removeAll()
             wake?.task.cancel()
-            for task in bodies.values { task.cancel() }
-            bodies.removeAll()
+            bodyFetches.cancelAll()
         }
     }
 }
