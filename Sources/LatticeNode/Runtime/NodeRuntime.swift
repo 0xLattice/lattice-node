@@ -538,7 +538,6 @@ extension NodeRuntime {
         /// when the operator changes them.
         let levelReads: PublishedValue<[ChainPath: ChainReads]>
         let hosted: PublishedValue<Set<ChainPath>>
-        let templateDigest: PublishedValue<String>
         let inputs: Inputs
         let gate: NodeRuntimeInputGate
         let helloTimeout: Duration
@@ -585,10 +584,8 @@ extension NodeRuntime {
         /// again in a loop. Bounded, oldest out.
         var recentlyFetched = RecentSet(capacity: 4_096)
         var recentlyFetchedTips: [String] = []
-        var views: [ChainPath: NodeReadView] = [:]
-        /// Each view's template digest and the tips and pool versions it was
-        /// computed from: selection runs only when one of them moves.
-        var digests: [ChainPath: (key: String, digest: String)] = [:]
+        /// The read views and template digests published for RPC.
+        var readModel: ReadModel
         var peerSearch = PeerSearch()
         var maintenanceInFlight = false
         /// When a lost session last brought maintenance forward.
@@ -623,8 +620,6 @@ extension NodeRuntime {
             }
         }
         var wake: (time: Int64, task: Task<Void, Never>)?
-        /// Levels with a `reproject` timer pending.
-        var reprojections: Set<ChainPath> = []
         /// The body fetches, their waits and the body windows.
         var bodyFetches: BodyFetches
         /// The loop's side of retention: bodies, reads, state and counts.
@@ -675,7 +670,6 @@ extension NodeRuntime {
             self.outputs = outputs
             self.levelReads = levelReads
             self.hosted = hosted
-            self.templateDigest = templateDigest
             self.inputs = inputs
             self.remote = remote
             self.bodyFetches = BodyFetches(storage: storage, remote: remote, inputs: inputs)
@@ -683,6 +677,7 @@ extension NodeRuntime {
                 storage: storage, remote: remote, inputs: inputs,
                 configured: Set([configuration.chainPath] + configuration.hostedChildren)
             )
+            self.readModel = ReadModel(inputs: inputs, templateDigest: templateDigest)
             self.jobs = JobPool(workers: workers, inputs: inputs, observeJob: observeJob)
             self.failStop = failStop
         }
@@ -790,7 +785,7 @@ extension NodeRuntime {
                 refreshView()
                 return running
             case .reproject(let path):
-                reprojections.remove(path)
+                readModel.reprojected(path)
                 refreshView(path)
                 return true
             case .counted(let path, let id, let repair):
@@ -855,8 +850,7 @@ extension NodeRuntime {
             }
             for path in outputs.keys where core.levels[path] == nil {
                 outputs[path] = nil
-                views[path] = nil
-                digests[path] = nil
+                readModel.drop(path)
                 currentPeers[path] = nil
                 connectedHosts.keys[path] = nil
             }
@@ -1181,132 +1175,20 @@ extension NodeRuntime {
             for path in paths.union([core.rootPath]) { refreshView(path) }
         }
 
-        /// One level's read view: its act-on chain by height, pool listing
-        /// and template digest.
+        /// One level's read view, from the core and what the other
+        /// components hold of it (`ReadModel`).
         mutating func refreshView(_ path: ChainPath) {
             guard let level = core.levels[path], let output = outputs[path] else { return }
-            var view = views[path] ?? NodeReadView()
-            view.children = level.executedChildren
             let snapshot = level.snapshot
-            let tip = (hash: snapshot.actOnTip, height: snapshot.actOnHeight)
             let peers = hosts(of: path).count
-            let pool = level.mining.mempool
-            // The digest names what a template would carry: a level with a
-            // backlog to execute names nothing, and it and every level below
-            // it are left out of the root's (`mined`).
-            let mined = !level.holdsBacklog
-            // A child is mined while neither it nor a level above it holds a
-            // backlog (`NodeRuntime.mined`): parents come first, so each
-            // level's backlog is read once.
-            var unmined: Set<ChainPath> = []
-            let children = path == core.rootPath && mined
-                ? core.ordered.dropFirst().filter { child in
-                    guard !unmined.contains(Array(child.dropLast())), core.levels[child]?.holdsBacklog != true else {
-                        unmined.insert(child)
-                        return false
-                    }
-                    return true
-                }.compactMap { child in
-                    core.levels[child].map { (path: child, level: $0, snapshot: $0.snapshot) }
-                }
-                : []
-            let key = ([("", tip.hash, "\(mined)", pool.version)] + children.map {
-                ($0.path.joined(separator: "/"), $0.snapshot.actOnTip, "\(!$0.snapshot.bestHeaderTip.isEmpty)",
-                 $0.level.mining.mempool.version)
-            }).map { "\($0.0):\($0.1)/\($0.2)/\($0.3)" }.joined(separator: "\n")
-            let digest: String
-            if let cached = digests[path], cached.key == key {
-                digest = cached.digest
-            } else {
-                digest = NodeRuntime.templateDigest(
-                    tip: mined ? tip.hash : "", carrying: mined ? level.mining.nextBlock : [],
-                    levels: children.map {
-                        ($0.path, $0.snapshot.actOnTip, !$0.snapshot.bestHeaderTip.isEmpty, $0.level.mining.nextBlock)
-                    }
-                )
-                digests[path] = (key, digest)
-            }
             // Status names the wait of the block after the act-on tip.
-            let waiting = bodyFetches.waiting(at: path, level: level, tip: tip.hash)
-            var sync = NodeSyncStatus()
-            // A move of the act-on tip, as this step left it: the first
-            // tip a start publishes counts as one.
-            sync.tipAdvancedAt = view.actOnTip == tip.hash ? view.sync.tipAdvancedAt
-                : tip.hash.isEmpty ? nil : Date().timeIntervalSince1970
-            sync.pendingHeaders = level.sync.pending.entries.count
-            sync.headersAwaitingProof = level.sync.proofs.awaiting.count
-            sync.proofChecksRunning = level.sync.proofs.verifying.count
-            sync.bodyWindow = bodyFetches.windows[path]?.distances.count ?? 0
-            sync.bodiesRequested = level.bodies.requested.count
-            sync.bodiesUnavailable = bodyFetches.unavailable(at: path)
-            sync.bodiesParked = level.bodies.parked.count
-            sync.awaitingParentFacts = level.bodies.awaitingParent.count
-            let parentWeighed = path.count > 1 ? core.levels[Array(path.dropLast())]?.headersSynced ?? true : true
-            sync.blockedOn = level.progress(parentWeighed: parentWeighed, next: bodyFetches.windows[path]?.next).rawValue
-            sync.headersSynced = level.headersSynced
-            sync.synced = level.synced
-            sync.jobsQueued = jobs.waiting(at: path)
-            // The fee projection walks the pool, so a busy pool is projected
-            // at most once a `projectionInterval`, and at once on a new tip.
-            // A change inside the interval is projected when it ends, input
-            // or not.
-            let now = NodeRuntime.uptime()
-            let reproject = view.projectedVersion != pool.version
-                && (view.actOnTip != tip.hash || now - view.projectedAt >= NodeRuntime.projectionInterval)
-            if view.projectedVersion != pool.version, !reproject, !reprojections.contains(path) {
-                reprojections.insert(path)
-                let inputs = inputs
-                Timers.deadline(
-                    after: .milliseconds(NodeRuntime.projectionInterval - (now - view.projectedAt)), generation: 0
-                ) { _ in
-                    inputs.yield(.reproject(path))
-                }
-            }
-            guard view.actOnTip != tip.hash || view.poolVersion != pool.version
-                    || view.templateDigest != digest || view.peers != peers
-                    || view.waiting != waiting || view.sync != sync || reproject else { return }
-            if view.actOnTip != tip.hash {
-                view.actOnTip = tip.hash
-                // The act-on chain is the tip's ancestry, on the best header
-                // chain or not: walk down to where the view already agrees.
-                var entered: [String] = []
-                var keep = tip.hash.isEmpty ? 0 : Int(tip.height) + 1
-                var cursor: String? = tip.hash
-                while keep > 0, let cid = cursor, !(keep <= view.heights.count && view.heights[keep - 1] == cid) {
-                    entered.append(cid)
-                    cursor = level.parent(of: cid)
-                    keep -= 1
-                }
-                view.heights.truncate(to: keep)
-                for cid in entered.reversed() { view.heights.append(cid) }
-            }
-            if view.poolVersion != pool.version || reproject {
-                // A pool holds nothing before its level has a spec, so a
-                // projection waits only on the pool.
-                let projected = !reproject ? view.mempool.projected : level.mining.spec.map {
-                    pool.projectedBlocks(count: ChainReads.projectedFeeBlocks, spec: $0)
-                } ?? []
-                if reproject {
-                    view.projectedVersion = pool.version
-                    view.projectedAt = now
-                }
-                view.mempool = ChainReads.MempoolListing(
-                    count: pool.count, bytes: pool.byteCount, cids: pool.items.prefix(200).map(\.cid),
-                    projected: projected, weight: level.mining.spec.map(FeeWeight.init)
-                )
-            }
-            view.poolVersion = pool.version
-            // The root's digest covers every hosted level: a child's tip or
-            // pool moving changes the template a miner should fetch.
-            let digestChanged = path == core.rootPath && view.templateDigest != digest
-            view.templateDigest = digest
-            view.peers = peers
-            view.waiting = waiting
-            view.sync = sync
-            views[path] = view
-            output.view.publish(view)
-            // After the view: a client told of a digest finds it in status.
-            if digestChanged { templateDigest.publish(digest) }
+            let waiting = bodyFetches.waiting(at: path, level: level, tip: snapshot.actOnTip)
+            let (window, unavailable) = (bodyFetches.windows[path], bodyFetches.unavailable(at: path))
+            let jobsQueued = jobs.waiting(at: path)
+            readModel.refresh(
+                path, level: level, snapshot: snapshot, core: core, output: output, peers: peers, waiting: waiting,
+                window: window, unavailable: unavailable, jobsQueued: jobsQueued
+            )
         }
 
         // MARK: - Network → events
