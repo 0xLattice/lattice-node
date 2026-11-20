@@ -501,7 +501,7 @@ extension NodeStorage {
         let broker = try stores.store(at: path)
         let lacked = Set(try await retainHeld(batch.map(\.rawCID), scope: scope, in: broker))
         return try await remote.withRootTracing(root, bundle: false, hosts: hosts) { session in
-            let fetcher = readersReads(through: session)
+            let fetcher = readersReads(through: session, at: path)
             let resolved = try await withThrowingTaskGroup(of: (any Header).self) { group in
                 for header in batch { group.addTask { try await header.resolve(fetcher: fetcher) } }
                 return try await group.reduce(into: [any Header]()) { $0.append($1) }

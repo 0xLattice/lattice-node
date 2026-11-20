@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Lattice
 import VolumeBroker
 import cashew
@@ -65,6 +66,16 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// build on blocks through this.
     nonisolated let workFetcher: CoalescingFetcher
     nonisolated let workSource: CompositeContentSource
+    /// One fetcher per chain, its own stores first (`workFetcher(at:)`,
+    /// `localFetcher(at:)`), so concurrent jobs of a chain share reads in
+    /// flight.
+    nonisolated let fetchers = Mutex<[FetcherKey: CoalescingFetcher]>([:])
+
+    struct FetcherKey: Hashable {
+        let path: [String]
+        let below: Bool
+        let work: Bool
+    }
     /// Verified content finished sessions took from peers, in memory.
     nonisolated let readCache: ReadCache
     let retentionScope: String

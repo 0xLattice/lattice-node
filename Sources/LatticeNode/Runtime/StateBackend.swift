@@ -141,7 +141,7 @@ struct StateBackend: Sendable {
             try await storage.retainHeld(rest, in: store)
             return
         }
-        let rules = rest.isEmpty ? [] : await storage.rules(ofBlock: blockCID, fetcher: storage.localFetcher)
+        let rules = rest.isEmpty ? [] : await storage.rules(ofBlock: blockCID, fetcher: storage.localFetcher(at: path))
         try await storage.retainHeld(rest.filter(rules.contains), scope: storage.scopes.rules(at: path), in: store)
         try await storage.retainHeld(rest.filter { !rules.contains($0) }, scope: storage.scopes.reads(blockCID, at: path), in: store)
     }

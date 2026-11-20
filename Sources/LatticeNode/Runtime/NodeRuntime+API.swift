@@ -390,7 +390,7 @@ extension NodeRuntime {
             }
             block = child
         }
-        let fetcher = storage.workFetcher
+        let fetcher = storage.workFetcher(at: path)
         let children = try await storage.storeMinedBlock(block, at: path)
         let spec = block.parent == nil ? try await block.spec.resolve(fetcher: fetcher).node?.toData() : nil
         guard let blockData = block.toData(), let childrenData = children.toData() else {
@@ -428,7 +428,7 @@ extension NodeRuntime {
     /// never guessed: a wrong `oldValue` makes a commit invalid, so a state
     /// not held here is an error.
     private func commitment(into path: ChainPath, at parentState: String) async throws -> String? {
-        let fetcher = storage.workFetcher
+        let fetcher = storage.workFetcher(at: Array(path.dropLast()))
         let key = CHILD_COMMITMENT_KEY_PREFIX + path[path.count - 1]
         guard let state = try await LatticeStateHeader(rawCID: parentState).resolve(fetcher: fetcher).node,
               let general = try await state.generalState.resolve(paths: [[key]: .targeted], fetcher: fetcher).node else {
@@ -719,7 +719,8 @@ extension NodeRuntime {
         levels: LiveLevels = .none,
         cache: ChildTemplateCache? = nil
     ) -> RuntimeJob {
-        let fetcher = storage.workFetcher
+        // A template carries the levels below: its work reads their stores.
+        let fetcher = storage.workFetcher(at: path, below: true)
         switch effect {
         case .preflight(let job):
             // An admission always runs: its verdict counts on any tip
@@ -771,7 +772,7 @@ extension NodeRuntime {
         case .buildTemplate(let job):
             // A build always runs: it is answered on any tip (`TemplateJob`).
             return RuntimeJob(path: path, tipCID: nil, kind: .answered) {
-                let (built, refused) = await reading(job.tipCID, at: path, storage: storage, remote: remote) { fetcher in
+                let (built, refused) = await reading(job.tipCID, at: path, below: true, storage: storage, remote: remote) { fetcher in
                     var refused: [PolicyRefusal] = []
                     let built = await buildTemplate(
                         job, difficultyAnchor: basis?.anchor, fetcher: fetcher, chainPath: path,
@@ -819,12 +820,12 @@ extension NodeRuntime {
     static func transactions(
         ofLeftBlock cid: String, at path: ChainPath, storage: NodeStorage, remote: IvyRootContentSource?
     ) async -> [Transaction] {
-        guard let remote, await !storage.stores.hasVolume(root: cid) else {
-            return await transactions(ofBlock: cid, fetcher: storage.localFetcher)
+        guard let remote, await !storage.stores.hasVolume(root: cid, at: path) else {
+            return await transactions(ofBlock: cid, fetcher: storage.localFetcher(at: path))
         }
         let hosts = ChainHosts.of(path, nexusGenesisCID: storage.configuration.nexusGenesisCID)
         return await remote.withRootTracing(cid, bundle: false, hosts: hosts) { session in
-            await transactions(ofBlock: cid, fetcher: CoalescingFetcher(CompositeContentSource([storage.stores, session])))
+            await transactions(ofBlock: cid, fetcher: CoalescingFetcher(CompositeContentSource([storage.stores.source(at: path), session])))
         }.value
     }
 
@@ -926,7 +927,7 @@ extension NodeRuntime {
 
     /// `ChainEffect.readTransactions`: each block's transaction IDs.
     static func readJob(_ blocks: [String], at path: ChainPath, storage: NodeStorage) -> RuntimeJob {
-        let fetcher = storage.localFetcher
+        let fetcher = storage.localFetcher(at: path)
         return RuntimeJob(path: path, tipCID: nil) {
             var read: [String: [String]] = [:]
             for cid in blocks { read[cid] = await transactionIDs(ofBlock: cid, fetcher: fetcher) }
@@ -944,11 +945,12 @@ extension NodeRuntime {
     static func reading<T: Sendable>(
         _ rootCID: String,
         at path: ChainPath,
+        below: Bool = false,
         storage: NodeStorage,
         remote: IvyRootContentSource?,
         _ work: @Sendable (any Fetcher) async -> T
     ) async -> T {
-        guard let remote else { return await work(storage.workFetcher(at: path)) }
+        guard let remote else { return await work(storage.workFetcher(at: path, below: below)) }
         // A child chain's content is asked first of the chain's own hosts,
         // as its bodies are; Nexus's of any peer.
         let hosts = ChainHosts.of(path, nexusGenesisCID: storage.configuration.nexusGenesisCID)
@@ -958,11 +960,11 @@ extension NodeRuntime {
             // is read from it, not asked of peers one entry at a time.
             // One this node derived fetching the block's body is read from
             // memory, as is all of that body.
-            if await !storage.stores.hasVolume(root: rootCID),
+            if await !storage.stores.hasVolume(root: rootCID, at: path, below: below),
                await storage.readCache.volume(rootCID) == nil {
                 _ = await session.volume(rootCID: rootCID)
             }
-            return await work(storage.ownReads(through: session, at: path))
+            return await work(storage.ownReads(through: session, at: path, below: below))
         }.value
     }
 

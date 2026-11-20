@@ -1410,7 +1410,7 @@ extension NodeRuntime {
                             return derived
                         }
                     }
-                    derived.append(.level(path, .derived(await job.run(held: held, upstream: upstream, fetcher: storage.workFetcher))))
+                    derived.append(.level(path, .derived(await job.run(held: held, upstream: upstream, fetcher: storage.workFetcher(at: path)))))
                 }
                 return derived
             }

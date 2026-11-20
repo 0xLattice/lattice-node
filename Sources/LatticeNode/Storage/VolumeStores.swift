@@ -15,8 +15,10 @@ import cashew
 /// Writes name their chain (`store(at:)`); reads compose. A chain's work
 /// reads its own store, then its ancestors' (a child's receipt proofs travel
 /// with its blocks, so a child's execution needs nothing of a sibling's),
-/// then the rest; a read by CID from the API or a peer, or one that names
-/// no chain, asks every store, root first.
+/// and what none of them holds is asked of peers; only a read by CID from
+/// the API or a peer, or one that names no chain, asks every store, root
+/// first. A chain's reads that asked every store probed each in turn and
+/// missed in all but one, which cost 17% more CPU with eight children.
 ///
 /// The set changes only when the operator hosts or drops a chain; the
 /// lock guards that set, not any store, and is held only to read or
@@ -33,11 +35,24 @@ final class VolumeStores: ContentSource, Sendable {
     private struct Open {
         var stores: [ChainPath: DiskBroker]
         var ordered: [(path: ChainPath, store: DiskBroker)]
+        /// Each open chain's reading order (`reading(at:below:)`), worked
+        /// out once per change of the set, not per read.
+        var lineage: [ChainPath: [DiskBroker]] = [:]
+        var subtree: [ChainPath: [DiskBroker]] = [:]
 
-        init(_ stores: [ChainPath: DiskBroker]) {
+        init(_ stores: [ChainPath: DiskBroker], root: ChainPath) {
             self.stores = stores
             ordered = stores.map { (path: $0.key, store: $0.value) }
                 .sorted { ($0.path.count, $0.path.joined(separator: "/")) < ($1.path.count, $1.path.joined(separator: "/")) }
+            for path in stores.keys {
+                let line = Open.lineage(of: path, root: root, in: stores)
+                lineage[path] = line
+                subtree[path] = line + ordered.filter { $0.path.count > path.count && $0.path.starts(with: path) }.map(\.store)
+            }
+        }
+
+        static func lineage(of path: ChainPath, root: ChainPath, in stores: [ChainPath: DiskBroker]) -> [DiskBroker] {
+            (root.count...max(root.count, path.count)).reversed().compactMap { stores[Array(path.prefix($0))] }
         }
     }
 
@@ -55,7 +70,7 @@ final class VolumeStores: ContentSource, Sendable {
         root = try Self.open(directory, rootPath)
         var stores = [rootPath: root]
         for path in hosted where path != rootPath { stores[path] = try Self.open(directory, path) }
-        opened = Mutex(Open(stores))
+        opened = Mutex(Open(stores, root: rootPath))
     }
 
     /// The store of the chain at `path`, opened if it is not yet: every
@@ -67,7 +82,7 @@ final class VolumeStores: ContentSource, Sendable {
             if let raced = open.stores[path] { return raced }
             var stores = open.stores
             stores[path] = made
-            open = Open(stores)
+            open = Open(stores, root: rootPath)
             return made
         }
     }
@@ -88,17 +103,19 @@ final class VolumeStores: ContentSource, Sendable {
     }
 
     /// The stores the work of the chain at `path` reads, in order: its own,
-    /// its ancestors' nearest first, then every other.
-    func reading(at path: ChainPath) -> [DiskBroker] {
-        let lineage = (rootPath.count...max(rootPath.count, path.count)).reversed().map { Array(path.prefix($0)) }
-        return opened.withLock { open in
-            lineage.compactMap { open.stores[$0] } + open.ordered.filter { !lineage.contains($0.path) }.map(\.store)
+    /// then its ancestors' nearest first; with `below`, then its
+    /// descendants' (a template built at a chain carries the levels below).
+    func reading(at path: ChainPath, below: Bool = false) -> [DiskBroker] {
+        opened.withLock { open in
+            (below ? open.subtree[path] : open.lineage[path])
+                ?? Open.lineage(of: path, root: rootPath, in: open.stores)
+                + (below ? open.ordered.filter { $0.path.count > path.count && $0.path.starts(with: path) }.map(\.store) : [])
         }
     }
 
-    /// A content source over `reading(at:)`.
-    func source(at path: ChainPath) -> any ContentSource {
-        Reading(stores: self, path: path)
+    /// A content source over `reading(at:below:)`.
+    func source(at path: ChainPath, below: Bool = false) -> any ContentSource {
+        Reading(stores: self, path: path, below: below)
     }
 
     /// The chain at `path` is no longer hosted: its store closes and its
@@ -109,7 +126,7 @@ final class VolumeStores: ContentSource, Sendable {
         opened.withLock { open in
             var stores = open.stores
             stores[path] = nil
-            open = Open(stores)
+            open = Open(stores, root: rootPath)
         }
         let file = directory.appendingPathComponent(Self.fileName(path))
         for suffix in ["", "-wal", "-shm"] {
@@ -146,6 +163,12 @@ final class VolumeStores: ContentSource, Sendable {
         return false
     }
 
+    /// Whether the stores the chain at `path` reads hold `cid`'s Volume.
+    func hasVolume(root cid: String, at path: ChainPath, below: Bool = false) async -> Bool {
+        for store in reading(at: path, below: below) where await store.hasVolume(root: cid) { return true }
+        return false
+    }
+
     /// What no scope names goes, store by store.
     func sweep() async throws {
         for store in all { _ = try await store.sweep() }
@@ -168,11 +191,12 @@ final class VolumeStores: ContentSource, Sendable {
     private struct Reading: ContentSource {
         let stores: VolumeStores
         let path: ChainPath
+        let below: Bool
 
         func fetch(_ cids: Set<String>) async -> [String: Data] {
             var found: [String: Data] = [:]
             var missing = cids
-            for store in stores.reading(at: path) {
+            for store in stores.reading(at: path, below: below) {
                 guard !missing.isEmpty else { break }
                 let held = await store.fetchDataLocal(cids: missing)
                 found.merge(held) { first, _ in first }
