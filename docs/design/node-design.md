@@ -15,8 +15,9 @@
 > document says so. Each target's reasoning is in "How the targets were
 chosen" below the table.
 >
-> Paths are under `Sources/`. `RT` is `LatticeNode/Runtime/NodeRuntime.swift`,
-> `API` is `NodeRuntime+API.swift`, `NSE` is `NodeStorage+RuntimeEffects.swift`.
+> Paths are under `Sources/`. `RT` is `LatticeNode/Runtime/NodeRuntime.swift`
+> with its `+Loop` and `+Effects` extensions, `API` is `NodeRuntime+API.swift`,
+> `NSE` is `NodeStorage+RuntimeEffects.swift`.
 
 ## Contents
 
@@ -103,7 +104,7 @@ from the sync benchmark (`Benchmarks/sync`).
 | 6 Change | Rules a caller must keep that the code does not enforce | code, review | Zero beyond the write order | Zero for writes |
 | 6 Change | Components with no conventional equivalent, each with its reason | this document | Each justified in writing | Two (§5) |
 | 6 Change | Review rounds per change; repeated holes of one kind | review | A second round of the same kind stops the change | The write-behind layer took four rounds of ordering holes |
-| 6 Change | The largest files, where unrelated changes meet | code | No file over 1,000 lines | The daemon's command file, 1,741 lines; the loop's file, 1,444 (start-up and boot included), after Phase 2 moved seven components out (§4.1) |
+| 6 Change | The largest files, where unrelated changes meet | code | No file over 1,000 lines | None over 1,000; the largest is the chain reads (`ChainReads.swift`), 921 lines, after the daemon's command, the loop, its API and the chain core were split by concern (§4.1) |
 | 7 Cost | CPU, peak memory, disk kept, disk written, bandwidth; root alone and per extra chain | benchmark, node | The root on one CPU at 5 ms a block and 256 MiB; a chain's writes per block do not grow with the chains hosted | About 4.4 ms CPU per block, 190 MiB, 90 MB kept, 2.9 GB written per benchmark sync; on macOS each added chain of 1,498 blocks costs about 5.8–7.1 s CPU, 18–26 MiB memory, 11–13 MiB kept, 12 MiB of bandwidth, and, with a Volume store per chain (schema epoch 50), 176–192 MiB written (120–131 KiB a block), flat with the chains already hosted, against 307–483 MiB rising before, at CPU within 3% and about thirteen open files a chain (§2, §4.9b) |
 | 8 Transfers | Time from deposit to withdrawal on a parent–child pair; share that complete | network, tests | Every transfer completes; in the time its two chains' confirmations take | Not measured |
 | 9 Availability | Content requests served; how long a body stays unavailable; hosts per chain | node, network | Two hosts per chain keep every body; none unavailable for an hour | Not measured |
@@ -1469,7 +1470,9 @@ each start, or remote with tokens; a separate public app serves reads.
 **How others do it.** Drop-in configuration and exit-code contracts with
 systemd; the cookie is bitcoind's `.cookie`.
 
-**Ease of change.** Easy; the daemon's command file is 1,741 lines.
+**Ease of change.** Easy; the daemon's command (`LatticeNodeCommand.swift`,
+617 lines) is apart from its operator and public HTTP applications
+(`OperatorApplication.swift`, 469; `PublicReadApplication.swift`, 677).
 
 ### 4.17 Bounds and backpressure
 
@@ -1529,7 +1532,7 @@ blocks may anchor to. Those deserve dedicated adversarial scenarios.
 | Identifiers | text CIDs in 32 files, the core included | all | others use fixed 32-byte hashes and convert at the edge | **hard but mechanical** |
 | Write order and persistence | the loop's persist effect, two store files and `VolumeStores` (a Volume store per hosted chain, routed by chain path) | two | Bitcoin's order; a store per chain, as a chain is hosted by those that opt in | **easy** |
 | State retention | `StateBackend` (the three settings, one type), the loop's `Retention` and `Counts`, the retention and state-pin store files (the mechanism), VolumeBroker's counted index | one for a setting's policy; three or more for the counted mechanism | the shape of triedb's or a `StateProvider`'s interface, over one mechanism; no established client counts references on disk | **medium** |
-| The shell's loop | `NodeRuntime.swift` (1,444, start-up and boot included) | one | receives input, steps the core, dispatches effects to the components below, takes results back; Bitcoin Core's `PeerManager` and validation-interface subscribers, geth's handler and fetchers | **easy** |
+| The shell's loop | `NodeRuntime.swift` (542: start-up and boot), `NodeRuntime+Loop.swift` (inputs, hosting, views) and `NodeRuntime+Effects.swift` (receive, step, effects), each under 500 | one | receives input, steps the core, dispatches effects to the components below, takes results back; Bitcoin Core's `PeerManager` and validation-interface subscribers, geth's handler and fetchers | **easy** |
 | Read model | `ReadModel.swift` (167) | one | a chain-head subscriber that rebuilds views; owns no authoritative state | **easy** |
 | Maintenance | `Maintenance.swift` (286) | one | peer search and provider announcement, off the loop | **easy** |
 | Body and transaction fetches | `BodyFetches.swift` (214), `TransactionFetches.swift` (93) | one | geth's block and transaction fetchers | **easy** |
@@ -1597,7 +1600,9 @@ and to change.
   cache's order), `JobPool.swift` (137: running and queued jobs),
   `TransactionFetches.swift` (93). `NodeRuntime.swift` went from 2,232
   lines to 1,444 (the 2,223 measured earlier was before Phase 1's last
-  changes), about 880 of them the loop. Sessions stay in the loop: their
+  changes), about 880 of them the loop. The loop has since moved to
+  `NodeRuntime+Loop.swift` and `NodeRuntime+Effects.swift`, leaving
+  start-up and boot (542). Sessions stay in the loop: their
   changes start maintenance and retry repairs, and every network input
   reads them.
 - ~~Put state retention behind one interface (load current state, apply a
