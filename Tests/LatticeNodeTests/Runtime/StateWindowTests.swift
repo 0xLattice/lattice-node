@@ -1063,13 +1063,14 @@ final class StateWindowTests: XCTestCase {
         try await storage.broker(at: Self.alpha).mergeRetainedRoots(
             scope: storage.scopes.staging(at: Self.alpha), roots: [alphaTip]
         )
+        let file = node.configuration.storagePath.appendingPathComponent("volumes")
+            .appendingPathComponent(VolumeStores.fileName(Self.alpha))
         try await runtime.host([])
-        let kept = try await windowHeights(storage, at: Self.alpha)
-        XCTAssertEqual(kept, [], "a chain no longer hosted keeps no state window")
-        let counts = try await storage.broker(at: Self.alpha).countedScopes(prefix: storage.scopes.counted(at: Self.alpha))
-        XCTAssertEqual(counts, [], "nor counts")
-        let staged = try await storage.broker(at: Self.alpha).retainedRoots(scope: storage.scopes.staging(at: Self.alpha))
-        XCTAssertEqual(staged, [], "nor staging")
+        // A chain no longer hosted keeps no store: no window, counts,
+        // staging or body, once none of its jobs runs.
+        try await eventually("Alpha's store goes") {
+            storage.stores.opened(at: Self.alpha) == nil && !FileManager.default.fileExists(atPath: file.path)
+        }
         await runtime.stop()
     }
 
@@ -1122,8 +1123,9 @@ final class StateWindowTests: XCTestCase {
         XCTAssertFalse(nexusRules.isEmpty, "Nexus keeps its spec too")
 
         try await runtime.host([])
-        let left = try await storage.broker(at: Self.alpha).retainedRoots(scope: storage.scopes.rules(at: Self.alpha))
-        XCTAssertEqual(left, [], "a chain no longer hosted keeps no rules")
+        try await eventually("a chain no longer hosted keeps no store, so no rules") {
+            storage.stores.opened(at: Self.alpha) == nil
+        }
         try await storage.stores.sweep()
         let kept = await storage.stores.hasVolume(root: moduleCID)
         XCTAssertFalse(kept, "its policy module goes")
