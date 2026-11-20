@@ -2082,6 +2082,41 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertTrue(host.disconnects.isEmpty)
     }
 
+    /// Alpha's blocks after its genesis are anchored at N1's state. While
+    /// Nexus is still syncing (N1's body failed once) that fact may be on
+    /// its way, and Alpha does not latch `synced`. Once N1's body is
+    /// unavailable everywhere (its backoff at the cap), Nexus has caught up
+    /// with what it can have and will not execute N1: the fact Alpha's next
+    /// block waits on is "not proven here" (spec §9.5), owed by no one.
+    /// Alpha has caught up with what it can execute: it latches `synced`
+    /// and takes peers' transactions, its tip waiting on its parent.
+    func testAChildWaitingOnAStateItsCaughtUpParentLacksLatchesSynced() async throws {
+        let fixture = try await gateWorld()
+        var host = try await withheldParentHost(fixture, unavailable: true)
+        let genesis = try XCTUnwrap(fixture.alpha.first?.cid)
+        XCTAssertEqual(host.core.levels[Self.alpha]?.snapshot.actOnTip, genesis)
+        XCTAssertEqual(host.core.levels[Self.alpha]?.headersSynced, true)
+        XCTAssertEqual(host.core.levels[Self.alpha]?.synced, false, "while Nexus syncs, the fact may be on its way")
+        // Work that runs the latch without the host, outside a step (an own
+        // block weighed, a parent's run applied), assumes the parent is
+        // still syncing, whatever it is.
+        func latchesOutsideAStep() throws -> Bool {
+            var level = try XCTUnwrap(host.core.levels[Self.alpha])
+            level.latchSynced()
+            return level.synced
+        }
+        XCTAssertFalse(try latchesOutsideAStep())
+        try await failToCap(&host, fixture.nexus[1].cid)
+        XCTAssertFalse(try latchesOutsideAStep(), "outside a step the parent is not known to have caught up")
+        XCTAssertEqual(host.core.levels[Self.nexus]?.synced, true)
+        await host.step(.tick)
+        let alpha = try XCTUnwrap(host.core.levels[Self.alpha])
+        XCTAssertEqual(alpha.snapshot.actOnTip, genesis, "Alpha executed nothing anchored at N1")
+        XCTAssertEqual(alpha.progress(parentWeighed: true), .parent, "its tip waits on its parent")
+        XCTAssertEqual(alpha.synced, true, "caught up with what it can execute")
+        XCTAssertTrue(host.disconnects.isEmpty)
+    }
+
     /// A peer whose log is replaced has not been read to its end, however
     /// far its old log was read. Nexus read its peer's first log to the end
     /// and waits for a header of it; the peer then pushes a new, empty log.

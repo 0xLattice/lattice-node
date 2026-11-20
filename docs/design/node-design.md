@@ -90,8 +90,8 @@ from the sync benchmark (`Benchmarks/sync`).
 | Outcome | Measure | Where from | Target | Today |
 |---|---|---|---|---|
 | 1 Agreement | Divergences when replaying a real chain, in mixed-version runs, in the simulator | tests | Zero | Zero in CI; no replay of a real chain |
-| 2 Liveness | Acted-on height against best header height, per chain path, over time | node | **Owner to set** (for example, at the best header 99% of the time) | Reported once `node/liveness-status` lands (see §4.4) |
-| 2 Liveness | Stalls: a chain behind its best header whose tip has not moved for longer than a threshold | node | Zero | A production node stopped at height 3,920, unexplained |
+| 2 Liveness | Acted-on height against best header height, per chain path, over time | node | **Owner to set** (for example, at the best header 99% of the time) | Reported per chain in `/status` and `/metrics` (#158, #161, #163); not yet tracked over time |
+| 2 Liveness | Stalls: a chain behind its best header whose tip has not moved for longer than a threshold | node | Zero; threshold **owner to set** | Testnet's child chains stopped at 3,920: a withdrawal whose receipt proofs no node held (§4.9a); repaired |
 | 2 Liveness | Time to tip from empty, and from a restart, per chain path | benchmark, node | **Owner to set** | 9,086 blocks over four chains in about 74 s, one worker, 4-CPU Linux runner |
 | 3 Security | Time for a block to reach most hosts, per chain | network | **Owner to set** | Not measured |
 | 3 Security | Share of blocks that go stale, per chain | network | **Owner to set** | Not measured |
@@ -181,7 +181,7 @@ costs; one sample window, one machine.
 
 ### Not measured, and should be
 
-Liveness per chain path in production (instrumented by #158, §4.4), propagation and stale rate, each child's share of parent hash rate,
+Liveness per chain path in production over time (reported since #158, §4.4), propagation and stale rate, each child's share of parent hash rate,
 per-chain hosting cost, cross-chain transfer time, template latency, and
 time to tip per chain as a latency, not only as total throughput.
 
@@ -330,9 +330,9 @@ that is behind opens it early.
 heaviest executed block; siblings are ordered by GHOST subtree weight
 (`ChainSelection.swift`). The node mines, preflights and answers reads on the
 act-on tip. Two one-way latches: `headersSynced` (a peer's log read to its
-end with no holes) opens child levels; `synced` (additionally the act-on tip
-is the best tip or the heaviest whose bodies can be had) gates peer
-transactions and relaying of peer-learned entries.
+end with no holes) opens child levels and the relay of peer-learned
+entries; `synced` (additionally the act-on tip is the best tip or the
+heaviest whose bodies can be had) gates peer transactions.
 
 **Why.** Acting only on executed state keeps the node from building on
 blocks it has not validated. The latch keeps a syncing node from admitting
@@ -347,43 +347,113 @@ this node uses GHOST, the heaviest subtree
 
 **Performance.** Inside core decisions. **Ease of change.** Easy, in the core.
 
-**Open, and a design question.** The latches have been patched three times
-(#125, #128, #141), and they encode several different questions in two
-booleans: has this peer's log been read to its end; has the node caught up
-with the network; can a child chain start reading its peers; may peer
-transactions be admitted and peer-learned entries relayed. Reading one
-peer's log to its end does not establish that the peer has the network's
-best chain, yet it opens child chains. The better shape is to keep facts as
-facts — what is weighed, what is executed, which bodies cannot be had — and
-derive each readiness question from them where it is asked, instead of
-storing latched answers. This is the first suspect for the production stall:
-a correctness and liveness investigation, not a speed one.
+**The latch review (Phase 1).** The latches have been patched three times
+(#125, #128, #141) and answer several questions with two booleans. Read
+against the outcomes (§1), none of their uses protects agreement: each saves
+cost, and each, if it never opened, would break an outcome ranked above
+cost.
 
-### 4.4 Liveness reporting (#158, in review)
+| Use | Serves | If it never opens |
+|---|---|---|
+| A child level reads its peers once its parent has weighed a peer's whole log | 7, cost: no weighing headers the parent cannot vouch for yet | 2: the child never syncs |
+| Peer transactions are ignored, and announced ones not fetched, until `synced` | 7 and 10: no checks against a tip about to move | 8 and 10: the chain takes no transactions |
+| Peer-learned headers are pushed to subscribers | 3 and 2: new blocks reach hosts fast, and a peer reading only from this node keeps following | 3 and 2: propagation through this node stops |
+
+Two principles follow. A gate that saves cost must fail open: if its
+condition can never hold, it is a wait with no wake, which §1 calls a bug.
+And each use asks its own question, of the facts that answer it.
+
+*Relay, decided.* The relay exists for propagation (outcomes 3 and 2); its
+gate (`f84c7f6b`) exists so that a node far behind does not push every
+historic header it weighs to each subscriber. That is a question of weight,
+not of execution: once this level has weighed a peer's whole log
+(`headersSynced`), what it appends is new. Gating the relay on `synced`, an
+execution fact, broke sync rule 1 (weight never waits on execution) and let
+an execution stall stop propagation. The relay pushes what is new to its
+peers: a block this node produced, which no peer has yet, or anything
+appended once this level has weighed a peer's whole log (`headersSynced`).
+One rule, two facts that establish newness; a node with no peers never
+weighs a peer's log, and still relays what it mines. `headersSynced` latches
+on any one peer's whole log, so a node that finished a short log while still
+reading a longer one pushes what it weighs from the longer one: a page per
+step to each subscriber until it catches up. A stricter fact, every peer's
+log read to its end, would let one peer that never finishes its log stop
+the relay and keep child levels closed: it fails closed, putting cost
+(outcome 7) above propagation (outcome 3). The latch, as Bitcoin's leaves
+initial download once and does not re-enter it for a lagging peer, accepts
+the bounded cost. As Bitcoin's BIP152
+high-bandwidth relay announces a block once its proof of work is checked,
+before it is validated.
+
+*The child gate, kept.* It came in (`cd2f4fa0`) in place of a per-header
+frontier (weighed-state sets, re-asks, a timed let-go): a child header is
+weighed only once its parent has weighed the block it anchors on
+(`a915b276`), so a child reading its peers beside a lagging parent reads
+headers it must drop and ask for again. Reading headers to the end before
+anything that hangs from them is Bitcoin's headers-first download. It fails
+open in the only sense that matters: it holds only while the parent has not
+weighed a peer's whole log, and while that is so the child could not weigh
+what it read anyway. Nothing changes.
+
+*The transaction gate, decided.* It asks a question of execution, rightly:
+a transaction is checked against the executed tip. `synced` latches when
+the act-on tip is the best tip or the heaviest whose bodies can be had; a
+body counts as unobtainable once its retries reach the cap (#125, #128). A
+child block whose connect waits on a parent fact its parent has not executed
+did not count, so a heavier branch through one held the gate shut for good,
+with the parent caught up and the fact coming from nowhere (§4.9a's spec
+references: "not proven here", retriable, owed by no one). Such a block now
+counts as unobtainable once the parent level has caught up, latched and now
+(`caughtUp`, passed into the child's step): while the parent is still
+syncing the fact is likely on its way, as a body is while its retries are
+below the cap. Outside a step, where an own block is weighed or a parent's
+run applied, a child level does not know its parent's state and assumes it
+is still syncing. The latch stays one-way, as Bitcoin's
+`IsInitialBlockDownload` is, and now its condition can always come to hold.
+
+The simulator checks both, at every level of every honest core after the
+quiet point: both latches set (`synced` once the level has a tip), and no tip `stalled`
+(`LevelInvariants.checkGatesOpen`).
+
+### 4.4 Liveness reporting
 
 **What.** `/status` reports, for each chain path, its acted-on height and
-best header height (already there) and now `tipAdvancedAt` (when the
-acted-on tip last moved, as this process saw it) and
-`secondsSinceTipAdvanced`. `/metrics` reports tip heights for every hosted
-chain, not only the root, and `lattice_chain_tip_advanced_timestamp_seconds`.
-Behind its best header and not moving is a stall.
+best header height, `tipAdvancedAt` (when the acted-on tip last moved, as
+this process saw it) and `secondsSinceTipAdvanced` (#158); `blockedOn`, what
+the tip waits on (`atTip`, `headers`, `proofs`, `parent`, `bodies`,
+`bodiesUnavailable`, `execution`, or `stalled`), derived in the core
+(`ChainProgress`), with the `headersSynced` and `synced` latches and the
+chain's queued jobs (#161); and in `waiting`, a block whose receipt proofs
+no peer served (#163). `/metrics` reports tip heights for every hosted chain
+and `lattice_chain_tip_advanced_timestamp_seconds`. Behind its best header
+and not moving is a stall.
 
 **Why.** Outcome 2 is the one failing, and it was not visible as a number.
 
-**What it does not yet say: why.** A stalled chain may be waiting for its
-parent, for a header proof, for a body, on a body nobody has, on a queued
-job, on parent state, on a latch, or be on a heavier branch of lower height.
-Some of this is already reported: `waiting` names why the next block cannot
-execute (body not fetched, or connect without a verdict), and `sync` counts
-pending headers, headers awaiting proof, proof checks running, the body
-window, bodies requested, unavailable and parked, and blocks awaiting parent
-facts. Missing, and worth adding as values derived from the core's state
-(not new state): the phase the chain is blocked in (headers, proofs, bodies,
-execution, at tip), the oldest wait and its age, jobs pending for the chain,
-and the parent chain's own status. With those, most stalls can be diagnosed
-from `/status` alone, and the same predicates can drive simulator
-assertions. Height alone also misses a heavier but shorter branch; comparing
-the acted-on tip with the best executable tip is the precise measure.
+`sync` also counts pending headers, headers awaiting proof, proof checks
+running, the body window, bodies requested, unavailable and parked, and
+blocks awaiting parent facts.
+
+**Not added, and why.** Phase 1 also listed the oldest wait and the parent's
+status beside the child's. Neither earns a field. How long a chain has been
+held is `secondsSinceTipAdvanced`: whatever it waits on, its tip has not
+moved since. The parent's status is the parent path's own `/status`, and
+`blockedOn: parent` says to read it; copying it into every child's answer
+would put one chain's state in another's. Bitcoin Core and geth answer one
+chain per call; this answers one chain path per call.
+
+**Simulator assertions.** The same predicates drive the simulator: after
+the quiet point, every level of every honest core has both latches set
+(`synced` once the level has a tip) and no tip `stalled`
+(`LevelInvariants.checkGatesOpen`), in every multi-level simulation
+(`LevelSimulator`): the body and proof withholders, the zero-work and
+schedule-lying peers, flooders, parent forks up to 0.6 and backward anchors
+(`ForwardAnchorSimulationTests`). The Phase 1 cases outside it keep their
+own tests and do not run this invariant: withheld bodies at one level
+(`WithheldBodiesLivenessTests`), a withheld parent state
+(`CrossLevelForkChoiceTests`), reorganisations within and beyond the state
+window (`StateWindowTests`), and worker starvation, which is the runtime's
+job order (`NodeRuntimeJobOrderTests`).
 
 **How others do it.** Bitcoin Core's `getblockchaininfo` returns blocks and
 headers; geth's `eth_syncing` returns current and highest block; both leave
@@ -865,18 +935,21 @@ says it is needed, not before.
 **Phase 1 — Prove liveness (highest priority).** Every hosted chain makes
 progress or reports exactly why it cannot.
 
-- Land per-chain liveness reporting (§4.4), deploy it, and diagnose the node
-  stopped at height 3,920.
-- Review what `synced` and `headersSynced` encode, and derive readiness from
-  facts (§4.3).
-- Report the blocking phase, the oldest wait, pending jobs and the parent's
-  status per chain (§4.4).
-- Simulator scenarios for starvation, missing bodies, delayed proofs,
-  parent–child stalls, and reorganisations at several depths (§4.19).
-- Receipt-proof sidecars travel with child blocks, as the code already does,
-  and testnet's block 3,921 is repaired once (§4.9a): the cause of the stall at
-  3,920. A block whose receipt proofs no peer served is reported as that
-  (#163); the operator guide has the repair.
+- ~~Land per-chain liveness reporting (§4.4), deploy it, and diagnose the node
+  stopped at height 3,920.~~ Done: #158, #161, #163; the cause is in §4.9a.
+- ~~Review what `synced` and `headersSynced` encode, and derive readiness
+  from facts (§4.3).~~ Done: the relay waits on weight; the transaction gate
+  counts a block not proven here as unobtainable; the child gate is kept.
+- ~~Report the blocking phase, the oldest wait, pending jobs and the parent's
+  status per chain (§4.4).~~ Done (#161); the oldest wait and the parent's
+  status are answered without new fields (§4.4).
+- ~~Simulator scenarios for starvation, missing bodies, delayed proofs,
+  parent–child stalls, and reorganisations at several depths (§4.19).~~ The
+  scenarios existed; every one now asserts liveness at its quiet point
+  (§4.4).
+- ~~Receipt-proof sidecars travel with child blocks, and testnet's block
+  3,921 is repaired once (§4.9a).~~ Done: the decision is #162, the report
+  and the operator's repair #163, and testnet was repaired.
 
 *Exit:* no unexplained stalled chain in production; every known blocking
 condition is observable and recoverable.
@@ -895,7 +968,7 @@ and to change.
 - Write the loop's contract (§4.1a) and the persistence order down, and test
   a crash at every boundary, retention releases and count repair included.
 - Bound the worker queues; make per-chain resource use visible (§4.17).
-- Correct the sync architecture's rule 4 to the queues that are built.
+- ~~Correct the sync architecture's rule 4 to the queues that are built.~~ Done (#160).
 
 *Exit:* a change to retention, API views or maintenance needs no change to
 the core or to how events are processed.

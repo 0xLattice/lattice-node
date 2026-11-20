@@ -100,33 +100,49 @@ extension ChainCore {
         guard !synced, sync.peers.contains(where: { peer, state in
             state.readToEnd && !state.more && state.holes.isEmpty && sync.cursors[peer.key]?.logID.isEmpty == false
         }) else { return }
-        let snapshot = snapshot
         guard !snapshot.bestHeaderTip.isEmpty else { return }
         headersSynced = true
-        guard !snapshot.actOnTip.isEmpty else { return }
-        if snapshot.actOnTip == snapshot.bestHeaderTip || snapshot.actOnTip == heaviestObtainableTip() { synced = true }
+        if caughtUp { synced = true }
     }
 
-    /// Whether `cid`'s body could not be obtained: it failed often enough
-    /// that its backoff reached `bodyRetryCap`, and it waits that out
-    /// (`bodies.parked`), not asked again, arrived or executed since. A
-    /// body in flight, a first ask or one asked again, is not, nor is one
-    /// whose backoff is still below the cap: a transient failure holds the
-    /// latch as a body in flight does.
+    /// Whether this level has caught up now: it has executed a block, and
+    /// its act-on tip is its best tip or the heaviest it can have
+    /// (`heaviestObtainableTip`). What `synced` latches on, once a peer's
+    /// whole log is weighed; and what a child level asks of its parent
+    /// (`parentCaughtUp`).
+    public var caughtUp: Bool {
+        let snapshot = snapshot
+        guard !snapshot.actOnTip.isEmpty else { return false }
+        return snapshot.actOnTip == snapshot.bestHeaderTip || snapshot.actOnTip == heaviestObtainableTip()
+    }
+
+    /// Whether `cid` cannot be executed here for now. Either its body could
+    /// not be obtained: it failed often enough that its backoff reached
+    /// `bodyRetryCap`, and it waits that out (`bodies.parked`), not asked
+    /// again, arrived or executed since; a body in flight, a first ask or
+    /// one asked again is not, nor is one whose backoff is still below the
+    /// cap: a transient failure holds the latch as a body in flight does.
+    /// Or its connect waits on a parent fact its parent level lacks once
+    /// that level has caught up (`parentCaughtUp`): "not proven here"
+    /// (spec §9.5), retriable and owed by no one, so not on its way. While
+    /// the parent is still syncing the fact likely is, and holds the latch
+    /// as a body in flight does.
     func unobtainable(_ cid: String) -> Bool {
+        if bodies.awaitingParent[cid] != nil, parentCaughtUp ?? isRoot, !tree.isExecuted(blockHash: cid) { return true }
         guard let parked = bodies.parked[cid] else { return false }
         return config.bodyRetryWait(afterAttempts: parked.attempts) >= config.bodyRetryCap
             && !bodies.requested.contains(cid) && !bodies.arrived.contains(cid) && !tree.isExecuted(blockHash: cid)
     }
 
-    /// Fork choice's tip with every block whose body could not be obtained,
+    /// Fork choice's tip with every block that cannot be executed here for
+    /// now (`unobtainable`),
     /// and all it leads to, left out, as are blocks proven invalid (fork
     /// choice's own exclusion). Up to the first such block on the
     /// best chain it is the best chain itself, so only the heaviest
     /// branches below that block are walked.
     func heaviestObtainableTip() -> String {
         let best = tree.canonicalTip
-        let lowest = bodies.parked.keys.filter(unobtainable)
+        let lowest = Set(bodies.parked.keys).union(bodies.awaitingParent.keys).filter(unobtainable)
             .compactMap { cid in tree.height(of: cid).flatMap { tree.canonicalBlockHash(atHeight: $0) == cid ? $0 : nil } }
             .min()
         guard let lowest else { return best }
