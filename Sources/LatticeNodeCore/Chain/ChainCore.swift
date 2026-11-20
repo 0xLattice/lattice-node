@@ -368,6 +368,11 @@ public struct ChainCore: Sendable {
     /// parent's latch opens it for good (`parentWeighed`), while the parent
     /// may still be executing. Never held past the step.
     var gated = false
+    /// A child level, within one step only: its parent level has caught up
+    /// (`synced`), so a parent fact it lacks is not on its way from the
+    /// parent's own progress (`unobtainable`). True at the root. Never held
+    /// past the step.
+    var parentCaughtUp = true
     /// A child level stepped while gated: its peers were held back, and are
     /// read once the parent has latched (`parentWeighed`).
     public internal(set) var heldBack = false
@@ -478,7 +483,8 @@ public struct ChainCore: Sendable {
     /// whether that level has weighed a peer's whole log (`headersSynced`),
     /// for the step alone (`parentTree`, `gated`).
     public mutating func step(
-        _ event: ChainEvent, now: Int64, parent: ChainTree? = nil, parentWeighed: Bool = true
+        _ event: ChainEvent, now: Int64, parent: ChainTree? = nil, parentWeighed: Bool = true,
+        parentCaughtUp: Bool = true
     ) -> [ChainEffect] {
         // A peer's transaction is ignored until the level has caught up
         // (`synced`), as Bitcoin Core ignores `tx` during initial block
@@ -487,10 +493,12 @@ public struct ChainCore: Sendable {
         if case .mining(.transactionReceived(_, origin: .peer)) = event, !synced { return [] }
         parentTree = parent
         gated = !parentWeighed
+        self.parentCaughtUp = parentCaughtUp
         if gated { heldBack = true }
         defer {
             parentTree = nil
             gated = false
+            self.parentCaughtUp = true
         }
         var turn = Turn(now: now)
         weighed = []
