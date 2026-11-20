@@ -284,7 +284,10 @@ final class StateWindowTests: XCTestCase {
     /// The heights a chain's state window scopes name, in order.
     private func windowHeights(_ storage: NodeStorage, at path: [String] = ["Nexus"]) async throws -> [UInt64] {
         let prefix = storage.scopes.windowPrefix(at: path)
-        return try await storage.broker(at: path).retainedScopes(prefix: prefix).compactMap { UInt64($0.dropFirst(prefix.count)) }.sorted()
+        // A chain not hosted has no store: what an earlier version kept
+        // for it was in the one store, the root's.
+        let broker = storage.stores.opened(at: path) ?? storage.stores.root
+        return try await broker.retainedScopes(prefix: prefix).compactMap { UInt64($0.dropFirst(prefix.count)) }.sorted()
     }
 
     /// A miner on `recent` with a window of 3 keeps what the executions of
@@ -1056,8 +1059,9 @@ final class StateWindowTests: XCTestCase {
             transaction: try transaction(payer, nonce: 0, moves: [(address(payer), -1)], chainPath: Self.alpha)
         ))
         XCTAssertEqual(response.mempoolCount, 1, "the Alpha transaction is checked against this store's state, and pooled")
+        // Something Alpha's store holds, staged.
         try await storage.broker(at: Self.alpha).mergeRetainedRoots(
-            scope: storage.scopes.staging(at: Self.alpha), roots: [node.configuration.nexusGenesisCID]
+            scope: storage.scopes.staging(at: Self.alpha), roots: [alphaTip]
         )
         try await runtime.host([])
         let kept = try await windowHeights(storage, at: Self.alpha)
