@@ -220,7 +220,7 @@ extension NodeRuntime {
     /// Throws when it is neither held nor provided, or when what is
     /// provided does not match its CIDs.
     public func pinVolume(_ root: String, entries: [String: Data]? = nil) async throws {
-        guard !maintenance.isCancelled else { throw NodeRuntimeError.stopped }
+        guard !maintenanceTimer.isCancelled else { throw NodeRuntimeError.stopped }
         try await storage.pin(root, entries: entries)
         guard configuration.announcePins else { return }
         await ivy.announceProvider(rootCID: root, expiresAt: configuration.announcementExpiry(at: NodeRuntime.now()))
@@ -240,7 +240,7 @@ extension NodeRuntime {
     public func fetchVolume(
         _ root: String, maximumArchiveBytes: Int, maximumEntries: Int
     ) async throws -> SerializedVolume? {
-        guard !maintenance.isCancelled else { throw NodeRuntimeError.stopped }
+        guard !maintenanceTimer.isCancelled else { throw NodeRuntimeError.stopped }
         let answer = await ivy.fetchVolume(
             rootCID: root, maximumArchiveBytes: maximumArchiveBytes, maximumEntries: maximumEntries
         )
@@ -250,7 +250,7 @@ extension NodeRuntime {
     }
 
     public func unpinVolume(_ root: String) async throws {
-        guard !maintenance.isCancelled else { throw NodeRuntimeError.stopped }
+        guard !maintenanceTimer.isCancelled else { throw NodeRuntimeError.stopped }
         try await storage.unpin(root)
         await ivy.stopProviding(rootCID: root)
     }
@@ -667,79 +667,6 @@ extension NodeRuntime {
     }
 
     // MARK: - Jobs
-
-    /// A worker job. One with a tip is skipped at dequeue when it is not its
-    /// level's mining tip: it runs nothing, posts nothing. `kind` decides its
-    /// queue (`JobQueues`).
-    struct RuntimeJob: Sendable {
-        /// Its queue (`JobQueues`).
-        enum Kind: Sendable {
-            /// What an RPC waits on: an awaited admission, a template build.
-            case answered
-            /// A level's next block to execute (`connectJob`).
-            case connect
-            case other
-        }
-
-        let path: ChainPath
-        let tipCID: String?
-        var kind = Kind.other
-        /// When it was queued, while tracing.
-        var queued = 0.0
-        let run: @Sendable () async -> [NodeEvent]
-
-        func isCurrent(in core: NodeCore) -> Bool {
-            tipCID.map { core.levels[path]?.mining.tipCID == $0 } ?? true
-        }
-    }
-
-    /// The worker's queues, each first in, first out, served in a fixed
-    /// order: (A) what an RPC waits on, a submit's admission and a template
-    /// build; then (B) each level's next block, so a level's connect never
-    /// waits behind the child proof checks queued before it, thousands
-    /// while a node syncs a tree of chains, and no level goes ahead of
-    /// another; then (C) everything else in arrival order: proof checks,
-    /// derivations, reads, rechecks, and a peer's or a returned
-    /// transaction's admission. A recheck whose tip is not the current one
-    /// is dropped at dequeue: it runs nothing, posts nothing.
-    struct JobQueues {
-        var answered: [RuntimeJob] = []
-        var connects: [RuntimeJob] = []
-        var rest: [RuntimeJob] = []
-
-        var isEmpty: Bool { answered.isEmpty && connects.isEmpty && rest.isEmpty }
-
-        /// The jobs waiting for a worker on `path`.
-        func count(at path: ChainPath) -> Int {
-            answered.count(where: { $0.path == path }) + connects.count(where: { $0.path == path })
-                + rest.count(where: { $0.path == path })
-        }
-
-        mutating func append(_ job: RuntimeJob) {
-            switch job.kind {
-            case .answered: answered.append(job)
-            case .connect: connects.append(job)
-            case .other: rest.append(job)
-            }
-        }
-
-        /// Drops the waiting jobs `dropped` names.
-        mutating func drop(where dropped: (RuntimeJob) -> Bool) {
-            answered.removeAll(where: dropped)
-            connects.removeAll(where: dropped)
-            rest.removeAll(where: dropped)
-        }
-
-        /// The next job a free worker runs.
-        mutating func next(in core: NodeCore) -> RuntimeJob? {
-            while !isEmpty {
-                let job = !answered.isEmpty ? answered.removeFirst()
-                    : !connects.isEmpty ? connects.removeFirst() : rest.removeFirst()
-                if job.isCurrent(in: core) { return job }
-            }
-            return nil
-        }
-    }
 
     /// A level's proof checks of one step, in one job: each check on its
     /// block, read from the header store when the batch carries none.

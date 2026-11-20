@@ -95,7 +95,7 @@ public final class NodeRuntime: Sendable {
     private let delegate: NodeRuntimeIvyDelegate
     private let gate: NodeRuntimeInputGate
     /// Cancelled first when the runtime stops.
-    let maintenance: Task<Void, Never>
+    let maintenanceTimer: Task<Void, Never>
     /// Read URLs other hosts declare, found through their provider records.
     let readEndpoints: ReadEndpointDirectory
     /// The peers remembered across restarts; nil for a node told to connect
@@ -198,7 +198,9 @@ public final class NodeRuntime: Sendable {
     typealias JobObserver = @Sendable (RuntimeJob.Kind, ChainPath, MiningEffect?) async -> Void
 
     /// `start`, with `observeJob` awaited on each job's worker before the
-    /// job runs (a test's view of the worker pool).
+    /// job runs (a test's view of the worker pool), and `stopRetention`
+    /// asked at each retention write (`StateBackend.Boundary`), where a test
+    /// crashes the node.
     static func start(
         storage: NodeStorage,
         configuration: NodeConfiguration,
@@ -206,7 +208,8 @@ public final class NodeRuntime: Sendable {
         coreConfig: ChainCoreConfig = ChainCoreConfig(),
         workers: Int = max(1, ProcessInfo.processInfo.activeProcessorCount - 1),
         failStop: @escaping @Sendable (any Error) -> Void = { fatalError("node runtime: persist failed: \($0)") },
-        observeJob: JobObserver?
+        observeJob: JobObserver?,
+        stopRetention: StateBackend.Stop? = nil
     ) async throws -> NodeRuntime {
         let started = ContinuousClock.now
         var coreConfig = coreConfig
@@ -234,7 +237,8 @@ public final class NodeRuntime: Sendable {
             helloTimeout: overlay.requestTimeout,
             workers: workers,
             failStop: failStop,
-            observeJob: observeJob
+            observeJob: observeJob,
+            stopRetention: stopRetention
         )
         await runtime.ivy.installNodeRuntime(
             delegate: runtime.punch,
@@ -354,7 +358,8 @@ public final class NodeRuntime: Sendable {
         helloTimeout: Duration,
         workers: Int,
         failStop: @escaping @Sendable (any Error) -> Void,
-        observeJob: JobObserver?
+        observeJob: JobObserver?,
+        stopRetention: StateBackend.Stop?
     ) {
         let (stream, continuation) = AsyncStream<Input>.makeStream()
         let inputs = Inputs(continuation: continuation)
@@ -430,7 +435,7 @@ public final class NodeRuntime: Sendable {
             forwardingTo: delegate, options: punchOptions)
         self.punch = punch
         let cadence = configuration.maintenanceCadence
-        maintenance = Task {
+        maintenanceTimer = Task {
             while !Task.isCancelled {
                 guard await Timers.sleep(nanoseconds: UInt64(cadence * 1_000_000_000)) else { return }
                 await servingLedger.save()
@@ -458,22 +463,12 @@ public final class NodeRuntime: Sendable {
             workers: max(1, workers),
             failStop: failStop,
             observeJob: observeJob,
+            stopRetention: stopRetention,
             peerMemory: peerMemory
         ))
         loop = Task {
             var state = initial.take()
-            await storage.letGoOfChains(except: state.configured, blocks: true)
-            // With no bodies kept beyond the working set, a start lets go
-            // of the ones a run that kept them left, before any step.
-            for (path, level) in state.core.levels { state.bodyTips[path] = level.snapshot.actOnTip }
-            await storage.letGoOfBodies(except: state.bodyTips)
-            await storage.letGoOfReads()
-            await storage.moveLegacyState(tips: state.core.levels.mapValues(\.snapshot.actOnHeight))
-            for (path, marker) in await storage.settleCountedScopes(hosted: Set(state.core.levels.keys)) {
-                state.counted[path] = CountedChain(marker: marker)
-                state.audit(path)
-            }
-            await state.settleState()
+            await state.retention.start(state.core.levels, counts: &state.counts)
             state.refreshView()
             // After the loop ends, inputs are only drained until the stream
             // finishes, so no RPC waits forever.
@@ -491,20 +486,14 @@ public final class NodeRuntime: Sendable {
                 }
             }
             state.cancelAll()
-            for job in state.jobs.values.map(\.task) {
-                job.cancel()
-                await job.value
-            }
-            for repair in state.counted.values.compactMap(\.repair) {
-                repair.task.cancel()
-                await repair.task.value
-            }
+            await state.jobs.stop()
+            await state.counts.stop()
         }
     }
 
     /// Stop the overlay, then the loop; joins both.
     public func stop() async {
-        maintenance.cancel()
+        maintenanceTimer.cancel()
         // Free the delegates waiting for room first: stopping Ivy waits for
         // its deliveries.
         await gate.close()
@@ -536,45 +525,29 @@ public final class NodeRuntime: Sendable {
 
     /// The most remembered peers one maintenance pass dials for a chain.
     static let rememberedPeerDials = 4
-}
 
-extension NodeRuntime.Loop {
-    /// Moves the body order (each window block's nearest distance in any
-    /// window) with the windows that moved, each from `old` to `new`, and
-    /// returns the blocks whose order changed. `windows` are every window
-    /// after the moves. A block is looked up across windows only where its
-    /// nearest distance may have grown or left; elsewhere the work is the
-    /// moved windows' entries.
-    static func reorder(
-        _ order: inout [String: Int], moved: [(old: [String: Int], new: [String: Int])], windows: [[String: Int]]
-    ) -> Set<String> {
-        var reordered: Set<String> = []
-        var lookUp: Set<String> = []
-        for (old, new) in moved {
-            for (cid, distance) in new where old[cid] != distance {
-                if order[cid].map({ distance < $0 }) ?? true {
-                    order[cid] = distance
-                    reordered.insert(cid)
-                } else if order[cid] == old[cid] {
-                    lookUp.insert(cid)
-                }
-            }
-            for (cid, distance) in old where new[cid] == nil && order[cid] == distance {
-                lookUp.insert(cid)
-            }
-        }
-        for cid in lookUp {
-            let nearest = windows.compactMap { $0[cid] }.min()
-            guard order[cid] != nearest else { continue }
-            order[cid] = nearest
-            reordered.insert(cid)
-        }
-        return reordered
+    /// ChainEffect work off the loop: it only posts events back, and a post
+    /// after the loop ended is dropped.
+    static func spawn(_ work: @escaping @Sendable () async -> Void) {
+        Task { await work() }
     }
 }
 
 extension NodeRuntime {
-    /// Everything the loop task owns. Only the loop touches it.
+    /// Everything the loop task owns. Only the loop touches it. It takes
+    /// each input, steps the core, and hands each effect, in order, to the
+    /// component that runs it (`JobPool`, `BodyFetches`, `Retention`,
+    /// `Counts`, `ReadModel`, `Maintenance`, `TransactionFetches`); a job's
+    /// or a task's result comes back as an input.
+    ///
+    /// Its contract (docs/design/sync-architecture.md, "The loop's
+    /// contract"): the core performs no I/O; the loop never waits for the
+    /// network or long computation (but for a dropped chain's count repair,
+    /// which it cancels and waits out so it writes nothing after), nor on
+    /// anything only the loop can finish; only the loop changes the core, by stepping it; a step's
+    /// writes complete before what they make true is published (persist,
+    /// then publish, then the rest); and every job and task has a rule for
+    /// when it is superseded, listed there.
     struct Loop: Sendable {
         var core: NodeCore
         let storage: NodeStorage
@@ -585,22 +558,16 @@ extension NodeRuntime {
         /// Whether this node's overlay relays, as its hello says.
         let relays: Bool
         var configuration: NodeConfiguration
-        /// The chains the operator's configuration hosts, a level that did
-        /// not start among them: none of their data is let go of.
-        var configured: Set<ChainPath>
         var outputs: [ChainPath: LevelOutput]
         /// What RPC and the overlay read of the hosted levels, republished
         /// when the operator changes them.
         let levelReads: PublishedValue<[ChainPath: ChainReads]>
         let hosted: PublishedValue<Set<ChainPath>>
-        let templateDigest: PublishedValue<String>
         let inputs: Inputs
         let gate: NodeRuntimeInputGate
         let helloTimeout: Duration
         let remote: IvyRootContentSource
-        let workers: Int
         let failStop: @Sendable (any Error) -> Void
-        let observeJob: JobObserver?
         let peerMemory: PeerMemory?
         /// Each hosted child level's last template block, reused while
         /// nothing it was built from changes (`ChildTemplateCache`).
@@ -614,125 +581,42 @@ extension NodeRuntime {
             didSet {
                 let ready = sessions.values.filter(\.ready)
                 remote.peerCapabilities.set(ready.sorted { $0.id < $1.id }.map { ($0.peer, $0.capabilities) })
-                // With every session gone, what was announced may have
-                // reached no one who still holds it: the pass the next
-                // session starts announces it again.
-                if ready.isEmpty { announcedRoots = announcedRoots.mapValues { _ in 0 } }
+                if ready.isEmpty { maintenance.sessionsClosed() }
                 if ready.count > oldValue.values.filter(\.ready).count {
                     startNetworkMaintenance()
-                    // A state sync or heal that failed, for want of a peer
-                    // most likely, runs again at the next step.
-                    for (path, chain) in counted where chain.waiting {
-                        counted[path]?.waiting = false
-                        stateTips[path] = nil
-                    }
+                    for path in counts.retryWaiting() { retention.resettle(path) }
                 }
             }
         }
         var nextSession: UInt64 = 1
-        var runningJobs = 0
-        /// The Volumes the operator pinned, as last read: announced with the
-        /// chains by each maintenance pass.
-        var operatorPins: [String] = []
-        /// What maintenance passes announced, with the expiry they sent.
-        var announcedRoots: [String: UInt64] = [:]
-        /// The running jobs, which the loop waits for before it lets the
-        /// store go: a job reading from peers can outlast a step.
-        var jobs: [UInt64: (path: ChainPath, task: Task<Void, Never>)] = [:]
-        /// The running jobs of levels that stopped, cancelled: what they
-        /// report is dropped.
-        var abandonedJobs: Set<UInt64> = []
-        /// Chains left the configuration: their data is let go of once no
-        /// running job is of a chain not configured.
-        var releasing = false
-        var nextJob: UInt64 = 0
-        /// The jobs waiting for a worker (`JobQueues`).
-        var queued = JobQueues()
+        /// The keys of the peers connected now hosting each chain.
+        var connectedHosts = ConnectedHosts()
         /// RPCs waiting on their answer, by reply ID.
         var replies: [UInt64: (path: ChainPath, reply: CheckedContinuation<NodeRuntimeReply, any Error>)] = [:]
         var nextReply: UInt64 = 1
-        /// Announced transactions being fetched, by CID.
-        var transactionFetches: Set<String> = []
-        /// Transactions recently fetched, not refetched until a hosted chain's
-        /// act-on tip moves (Bitcoin's recent rejects): a refused one is not fetched
-        /// again in a loop. Bounded, oldest out.
-        var recentlyFetched = RecentSet(capacity: 4_096)
-        var recentlyFetchedTips: [String] = []
-        var views: [ChainPath: NodeReadView] = [:]
-        /// Each view's template digest and the tips and pool versions it was
-        /// computed from: selection runs only when one of them moves.
-        var digests: [ChainPath: (key: String, digest: String)] = [:]
-        var peerSearch = PeerSearch()
-        var maintenanceInFlight = false
-        /// When a lost session last brought maintenance forward.
-        var lastUrgentMaintenanceAt: Int64 = .min / 2
-        /// Each hosted chain's current peers as the last maintenance pass
-        /// counted them: for a child, what its rendezvous adds to the
-        /// sessions whose hello named it.
-        var currentPeers: [ChainPath: Set<String>] = [:]
-        /// The keys of the peers connected now hosting each chain.
-        var connectedHosts = ConnectedHosts()
-        /// A maintenance pass asked for while one was running: run it next.
-        var maintenancePending = false
-
-
-        /// A bounded set, oldest out.
-        struct RecentSet {
-            let capacity: Int
-            private(set) var members: Set<String> = []
-            private var order: [String] = []
-
-            init(capacity: Int) { self.capacity = capacity }
-
-            mutating func insert(_ cid: String) {
-                guard members.insert(cid).inserted else { return }
-                order.append(cid)
-                if order.count > capacity { members.remove(order.removeFirst()) }
-            }
-
-            mutating func removeAll() {
-                members.removeAll()
-                order.removeAll()
-            }
-        }
         var wake: (time: Int64, task: Task<Void, Never>)?
-        /// Levels with a `reproject` timer pending.
-        var reprojections: Set<ChainPath> = []
-        var bodies: [BodyKey: Task<Void, Never>] = [:]
-        /// Why each body the window asks for has not arrived: its last
-        /// fetch's failure, until it arrives or the window leaves it. A body
-        /// with one is fetched again without a bundle.
-        var fetchWaits: [BodyKey: BodyWait] = [:]
-        /// Why each held block's connect ended without a verdict, until the
-        /// block leaves the body window.
-        var connectWaits: [BodyKey: BodyWait] = [:]
+        /// The step's derivations by level, until each level's are queued.
+        var derivations: [ChainPath: [ChildDeriveJob]] = [:]
 
-        /// Blocks whose execution this step journaled, and each level's
-        /// tip as of the last step: what the working set compares to let
-        /// go of a body when the operator keeps none beyond it.
-        var executedThisStep: [BodyKey] = []
-        var bodyTips: [ChainPath: String] = [:]
-        /// The window blocks' distances from their chains' next blocks to
-        /// connect, each its nearest in any window: the read cache's order.
-        var cachedBodyOrder: [String: Int] = [:]
-        /// Each level's next blocks to connect and window distances, as of
-        /// the last step that ran it (`NodeCore.touched`): a level no step
-        /// ran has the same tree, so the same window.
-        var windows: [ChainPath: (next: [String], distances: [String: Int])] = [:]
-        /// Each level's tip the kept state was last moved to, or held back
-        /// at (none: move it at the next settle), and the blocks executed or
-        /// found invalid this step, whose reads go after it.
-        var stateTips: [ChainPath: String] = [:]
-        var readsDone: [BodyKey] = []
-        /// On `recent`: each chain's counts as this loop last wrote or read
-        /// them, and the repair running for them.
-        var counted: [ChainPath: CountedChain] = [:]
-        var nextRepair: UInt64 = 0
+        // The components each effect and result is dispatched to. Each owns
+        // its own state, and none calls another: what one needs of another
+        // the loop reads and passes in.
 
-        struct BodyKey: Hashable {
-            let path: ChainPath
-            let cid: String
-        }
+        /// The worker pool and its queues.
+        var jobs: JobPool
+        /// The body fetches, their waits and the body windows.
+        var bodyFetches: BodyFetches
+        /// The loop's side of retention: bodies, reads and state.
+        var retention: Retention
+        /// The counts of each chain's current state, and their repairs.
+        var counts: Counts
+        /// The read views and template digests published for RPC.
+        var readModel: ReadModel
+        /// Peer search, provider announcements and each chain's current
+        /// peers.
+        var maintenance: Maintenance
+        /// Announced transactions being fetched and recently fetched.
+        var transactionFetches: TransactionFetches
 
         struct Session {
             let peer: AuthenticatedPeer
@@ -763,6 +647,7 @@ extension NodeRuntime {
             workers: Int,
             failStop: @escaping @Sendable (any Error) -> Void,
             observeJob: JobObserver?,
+            stopRetention: StateBackend.Stop?,
             peerMemory: PeerMemory?
         ) {
             self.peerMemory = peerMemory
@@ -775,16 +660,23 @@ extension NodeRuntime {
             self.outbox = SessionOutbox(ivy: ivy)
             self.relays = relays
             self.configuration = configuration
-            self.configured = Set([configuration.chainPath] + configuration.hostedChildren)
             self.outputs = outputs
             self.levelReads = levelReads
             self.hosted = hosted
-            self.templateDigest = templateDigest
             self.inputs = inputs
             self.remote = remote
-            self.workers = workers
+            self.bodyFetches = BodyFetches(storage: storage, remote: remote, inputs: inputs)
+            let state = StateBackend(storage: storage, stop: stopRetention)
+            self.retention = Retention(
+                storage: storage, state: state,
+                configured: Set([configuration.chainPath] + configuration.hostedChildren)
+            )
+            self.counts = Counts(state: state, remote: remote, inputs: inputs)
+            self.readModel = ReadModel(inputs: inputs, templateDigest: templateDigest)
+            self.transactionFetches = TransactionFetches(ivy: ivy, inputs: inputs)
+            self.maintenance = Maintenance(ivy: ivy, inputs: inputs, capabilities: remote.peerCapabilities, peerMemory: peerMemory)
+            self.jobs = JobPool(workers: workers, inputs: inputs, observeJob: observeJob)
             self.failStop = failStop
-            self.observeJob = observeJob
         }
 
         /// Returns false once the loop must end.
@@ -800,14 +692,10 @@ extension NodeRuntime {
                     chain: path,
                     "body \(cid) fetch \(SyncTrace.ms(asked, held)) loop \(SyncTrace.ms(held, SyncTrace.now())) ms"
                 )
-                let key = BodyKey(path: path, cid: cid)
-                bodies[key] = nil
-                fetchWaits[key] = nil
+                bodyFetches.stored(BodyKey(path: path, cid: cid))
                 return await step(.level(path, .bodyFetched(cid: cid)))
             case .bodyWaiting(let path, let cid, let reason, let detail):
-                let key = BodyKey(path: path, cid: cid)
-                guard bodies.removeValue(forKey: key) != nil else { return true }
-                wait(key, reason, detail: detail, in: \.fetchWaits)
+                guard bodyFetches.failed(BodyKey(path: path, cid: cid), reason, detail: detail) else { return true }
                 return await step(.level(path, .bodyUnavailable(cid: cid)))
             case .helloDeadline(let key, let id):
                 guard let session = sessions[key], session.id == id, !session.ready else { return true }
@@ -819,12 +707,11 @@ extension NodeRuntime {
                     let label = events.first?.traceLabel ?? "empty"
                     SyncTrace.log(chain: core.rootPath, "job \(label) \(times.line(taken: SyncTrace.now()))")
                 }
-                runningJobs -= 1
-                jobs[id] = nil
-                startJobs()
+                let abandoned = jobs.finished(id)
+                jobs.start(in: core)
                 // A stopped level's job: what it reports is for no level,
                 // or for one hosted again since, which starts over.
-                guard abandonedJobs.remove(id) == nil else {
+                guard !abandoned else {
                     await releaseWhenIdle()
                     return true
                 }
@@ -833,10 +720,7 @@ extension NodeRuntime {
                     if case .level(let path, .connected(let results)) = event {
                         for verdict in results.map(\.verdict) {
                             guard let failure = verdict.retryFailure else { continue }
-                            wait(
-                                BodyKey(path: path, cid: verdict.blockHash), .notConnected(failure),
-                                detail: "\(failure)", in: \.connectWaits
-                            )
+                            bodyFetches.connectFailed(BodyKey(path: path, cid: verdict.blockHash), failure)
                         }
                     }
                     guard await step(event) else { return false }
@@ -875,60 +759,28 @@ extension NodeRuntime {
                 answer(id, result)
                 return true
             case .transactionFetched(let cid, let event):
-                transactionFetches.remove(cid)
-                recentlyFetched.insert(cid)
+                transactionFetches.fetched(cid)
                 guard let event else { return true }
                 return await step(event)
             case .maintenance:
-                // Read here, on the loop: the pass runs off it and must not
-                // hold the store open past a stop. Pins not announced are
-                // not read.
-                operatorPins = configuration.announcePins ? await storage.operatorPins() : []
+                await maintenance.readPins(from: storage, configuration: configuration)
                 startNetworkMaintenance()
-                // Counts behind their tip (a tip less than a window above
-                // them, a store failure on a chain with no block since, or a
-                // repair that failed) are settled again.
-                if configuration.state == .recent {
-                    for (path, level) in core.levels {
-                        let chain = counted[path]
-                        guard chain?.waiting == true
-                            || chain?.marker.flatMap(CountedMarker.init)?.tip.cid != level.snapshot.actOnTip else { continue }
-                        counted[path]?.waiting = false
-                        stateTips[path] = nil
-                    }
-                    await settleState()
-                    // Counts that moved since they were last checked are
-                    // checked against the store again.
-                    for (path, chain) in counted
-                    where chain.marker != nil && chain.marker != chain.audited && chain.repair == nil && !chain.waiting {
-                        audit(path)
-                    }
-                }
+                await retention.maintain(core.levels, counts: &counts)
                 return true
             case .currentPeers(let current):
-                currentPeers = current
+                maintenance.counted(current)
                 let running = await meetHosts()
                 refreshView()
                 return running
             case .reproject(let path):
-                reprojections.remove(path)
+                readModel.reprojected(path)
                 refreshView(path)
                 return true
             case .counted(let path, let id, let repair):
-                guard var chain = counted[path], chain.repair?.id == id else { return true }
-                chain.repair = nil
-                switch repair {
-                case .synced(let block, let places): chain.synced = (block, places)
-                case .healed: break
-                case .audited(let marker, let known?): (chain.audited, chain.known) = (marker, known)
-                case .audited(_, nil):
-                    SyncTrace.log(chain: path, "counts do not match the store: resync")
-                    (chain.marker, chain.known, chain.audited) = (nil, nil, nil)
-                case .failed: chain.waiting = true
+                if counts.repaired(path, repair: id, repair) {
+                    retention.resettle(path)
+                    await retention.settleState(core.levels, counts: &counts)
                 }
-                counted[path] = chain
-                stateTips[path] = nil
-                await settleState()
                 return true
             case .read(let read):
                 read(core.levels)
@@ -944,11 +796,7 @@ extension NodeRuntime {
                 }
                 return true
             case .maintenanceFinished:
-                maintenanceInFlight = false
-                if maintenancePending {
-                    maintenancePending = false
-                    startNetworkMaintenance()
-                }
+                if maintenance.finished() { startNetworkMaintenance() }
                 return true
             }
         }
@@ -972,15 +820,13 @@ extension NodeRuntime {
         mutating func host(_ next: NodeConfiguration) async throws {
             try await storage.storePolicyModules(next.policyModules)
             let listed = Set(next.hostedChildren)
-            let wasConfigured = configured
-            configured = listed.union([core.rootPath])
+            retention.configure(listed.union([core.rootPath]))
             for path in core.ordered where path != core.rootPath && !listed.contains(path) {
                 guard await step(.unhost(path)) else { throw NodeRuntimeError.stopped }
-                stateTips[path] = nil
-                if let repair = counted.removeValue(forKey: path)?.repair {
-                    repair.task.cancel()
-                    await repair.task.value
-                }
+                // The count repair first: none writes after the chain's
+                // data is let go of.
+                await counts.unhost(path)
+                retention.unhost(path)
             }
             var failure: (any Error)?
             for path in next.hostedChildren where core.levels[path] == nil {
@@ -994,30 +840,20 @@ extension NodeRuntime {
             }
             for path in outputs.keys where core.levels[path] == nil {
                 outputs[path] = nil
-                views[path] = nil
-                digests[path] = nil
-                currentPeers[path] = nil
+                readModel.drop(path)
+                maintenance.drop(path)
                 connectedHosts.keys[path] = nil
             }
             // A stopped level's body fetches would run on though nobody
             // wants them: no `cancelBody` comes from a level that is gone. Its RPCs would
             // wait for good: no answer comes from it either.
-            for key in bodies.keys where core.levels[key.path] == nil {
-                bodies.removeValue(forKey: key)?.cancel()
-            }
+            bodyFetches.keep(only: Set(core.levels.keys))
             // A stopped level's jobs: a queued one never runs, and a running
             // one is cancelled, not awaited (it may wait on this loop), and
             // what it reports is dropped. Its chain is let go of once none
             // of them still runs: they store what they execute.
-            queued.drop { core.levels[$0.path] == nil }
-            for (id, job) in jobs where core.levels[job.path] == nil {
-                job.task.cancel()
-                abandonedJobs.insert(id)
-            }
-            releasing = releasing || !wasConfigured.isSubset(of: configured)
+            jobs.abandon { core.levels[$0] == nil }
             await releaseWhenIdle()
-            fetchWaits = fetchWaits.filter { core.levels[$0.key.path] != nil }
-            connectWaits = connectWaits.filter { core.levels[$0.key.path] != nil }
             for (id, entry) in replies where core.levels[entry.path] == nil {
                 replies[id] = nil
                 entry.reply.resume(throwing: NodeRuntimeError.unknownChain)
@@ -1058,11 +894,10 @@ extension NodeRuntime {
         }
 
         /// Lets go of the chains the configuration no longer hosts, once
-        /// no running job is one of theirs.
+        /// no running job is one of theirs (`Retention.release`).
         mutating func releaseWhenIdle() async {
-            guard releasing, !jobs.values.contains(where: { !configured.contains($0.path) }) else { return }
-            releasing = false
-            await storage.letGoOfChains(except: configured)
+            let configured = retention.configured
+            await retention.release(jobsRunning: jobs.runs { !configured.contains($0) })
         }
 
         /// One child level started over what it journaled, as boot does,
@@ -1093,218 +928,14 @@ extension NodeRuntime {
             }
         }
 
-        /// Snapshot the discovery plan on the serial loop, then perform its
-        /// potentially slow dials outside it. A dead bootstrap endpoint must
-        /// never pause consensus, RPC writes, or persistence while connect
-        /// timeouts expire.
+        /// A maintenance pass (`Maintenance`), unless one runs: then the
+        /// next.
         private mutating func startNetworkMaintenance() {
-            let now = NodeRuntime.now()
-            guard !maintenanceInFlight else {
-                maintenancePending = true
-                return
-            }
-            maintenanceInFlight = true
-
-            let expiry = configuration.announcementExpiry(at: now)
-            let nexus = configuration.nexusGenesisCID
-            // Conversion from an operator-supplied Double must not trap even
-            // for a finite but unreasonably large value.
-            let maximumSeconds = Double(Int64.max / 1_000)
-            let interval = Int64(min(configuration.peerSearchInterval, maximumSeconds) * 1_000)
-            let due = peerSearch.due(
-                heights: core.ordered.compactMap { path in
-                    core.levels[path].map { (path, $0.snapshot.actOnHeight) }
-                },
-                now: now, interval: interval,
-                connected: sessions.values.contains(where: \.ready)
-            )
-            // Only a child short of the target as the last pass counted it
-            // spends its turn: one that drops short just after is not kept
-            // waiting an interval by a turn it did not need.
-            let topUps = peerSearch.topUps(
-                paths: core.ordered.filter {
-                    $0 != core.rootPath && (currentPeers[$0]?.count ?? 0) < configuration.peerTarget
-                },
-                now: now, interval: interval, connected: sessions.values.contains(where: \.ready)
-            )
-            // Every hosted chain, Nexus down, with what its routine needs.
-            // The levels differ only in where discovery asks: a child has a
-            // rendezvous among its parent's peers and the seeds its operator
-            // gave it; Nexus, with no parent, has its seeds alone, by name
-            // and then at fixed addresses.
-            let root = core.rootPath
-            let chains = core.ordered.map { path in
-                (
-                    path: path,
-                    // The chain and its ancestors: a peer that hosts a chain
-                    // hosts every one of them.
-                    lineage: (root.count...path.count).map { Array(path.prefix($0)) },
-                    hosts: ChainHosts.of(path, nexusGenesisCID: nexus),
-                    stalled: due.contains(path),
-                    topUp: topUps.contains(path),
-                    seeds: path == root
-                        ? [configuration.seedPeers, configuration.fixedSeedPeers]
-                        : [configuration.childSeedPeers[path] ?? []]
-                )
-            }
-            // A declared read URL is findable from the parent of each hosted
-            // child level: announced under the level's read-endpoint key.
-            let announced = chains.compactMap(\.hosts?.key) + (configuration.publicReadURL == nil ? [] : core.ordered
-                .filter { $0 != core.rootPath }
-                .map { ReadEndpointKey.key(nexusGenesisCID: configuration.nexusGenesisCID, chainPath: $0) })
-            let (ivy, inputs, bootstrap, ownKey, capabilities) = (
-                ivy, inputs, configuration.bootstrapPeers, configuration.processPublicKey, remote.peerCapabilities
-            )
-            let (peerMemory, target, beforeSeeds) = (
-                peerMemory, configuration.peerTarget, configuration.peersBeforeSeeds
-            )
-            let retriesSeeds = !configuration.seedPeers.isEmpty
-            // What the operator pinned is announced with the chains; a key
-            // no longer wanted stops being provided.
-            let (announcing, withdrawn) = configuration.announcementRenewal(
-                wanted: Set(announced + operatorPins), announced: announcedRoots, at: now
-            )
-            for key in withdrawn { announcedRoots.removeValue(forKey: key) }
-            // With no session open, the walk has no one to tell: the pass
-            // the first session starts announces again.
-            if sessions.values.contains(where: \.ready) {
-                for key in announcing { announcedRoots[key] = expiry }
-            }
-            spawn {
-                for key in withdrawn {
-                    await ivy.stopProviding(rootCID: key)
-                }
-                for key in announcing {
-                    await ivy.announceProvider(rootCID: key, expiresAt: expiry)
-                }
-                var connected = Set((await ivy.connectedPeers).map(\.publicKey))
-                // An address is dialled at most once in a pass, whichever
-                // chains want it and however the dial ends. True when this dial
-                // reached it, false when it failed, nil when none was made:
-                // a session that is already open was not reached at this
-                // address, which is then not one to remember.
-                var attempted: Set<PeerEndpoint> = []
-                func dial(_ endpoint: PeerEndpoint) async -> Bool? {
-                    guard attempted.insert(endpoint).inserted else { return nil }
-                    guard !(await ivy.connectedPeers).contains(where: { $0.publicKey == endpoint.publicKey }) else {
-                        connected.insert(endpoint.publicKey)
-                        return nil
-                    }
-                    do {
-                        try await ivy.connect(to: endpoint)
-                        connected.insert(endpoint.publicKey)
-                        // A peer that could not be dialled may have been
-                        // reached through another: connected, but not at
-                        // this address.
-                        guard let peer = await ivy.connectedPeers.first(where: {
-                            $0.publicKey == endpoint.publicKey
-                        }) else { return true }
-                        return await ivy.session(with: peer)?.route == .direct
-                    } catch {
-                        return false
-                    }
-                }
-                // One routine, run for each hosted chain: keep the chain's
-                // own current peers up from the peers it remembers, then
-                // from discovery. Every dial is a random draw, so whoever
-                // orders a book or a lookup's answer does not pick them.
-                for chain in chains {
-                    var current = chain.hosts == nil ? connected
-                        : Set(await capabilities.sessions(hosting: chain.hosts, ivy: ivy).map(\.id.publicKey))
-                    // The operator's configured peers are Nexus's: redialled
-                    // when it stalls.
-                    for endpoint in bootstrap
-                    where chain.hosts == nil && chain.stalled && !connected.contains(endpoint.publicKey) {
-                        if await dial(endpoint) == true { current.insert(endpoint.publicKey) }
-                    }
-                    // The chain's network as this node last knew it. Short
-                    // of peers (always, just after a start) or stalled, it
-                    // dials some it remembers, so it rejoins without leaning
-                    // on its seeds or a lookup, or when neither answers. A
-                    // peer reached is a Nexus peer; whether it still hosts
-                    // this chain is for its session to say.
-                    if let peerMemory, current.count < target || chain.stalled {
-                        let remembered = await peerMemory.candidates(
-                            for: chain.path, excluding: connected, count: NodeRuntime.rememberedPeerDials
-                        )
-                        for endpoint in remembered {
-                            switch await dial(endpoint) {
-                            case true?:
-                                current.insert(endpoint.publicKey)
-                                await peerMemory.reached(endpoint, chains: [root], now: now)
-                            case false?: await peerMemory.failed(endpoint.publicKey)
-                            case nil: break
-                            }
-                        }
-                    }
-                    // A child's rendezvous names the peers that can sync it.
-                    // It is searched while the chain has no current peer,
-                    // when it stalled, and while it is short of the target
-                    // once an interval: a chain whose whole network is a few
-                    // nodes does not search on every pass.
-                    if let hosts = chain.hosts,
-                       current.isEmpty || chain.stalled || (chain.topUp && current.count < target) {
-                        let fresh = (await ivy.discoverProviders(rootCID: hosts.key))
-                            .filter { $0.publicKey != ownKey && !connected.contains($0.publicKey) && !attempted.contains($0) }
-                        for endpoint in fresh.shuffled().prefix(4) where await dial(endpoint) == true {
-                            current.insert(endpoint.publicKey)
-                            await peerMemory?.reached(endpoint, chains: chain.lineage, now: now)
-                        }
-                    }
-                    // Seeds last, and only on need: with too few peers still,
-                    // after the remembered ones had their turn. A fresh node
-                    // has nothing to remember and comes straight here. Each
-                    // layer is asked only if the one before left the chain
-                    // short.
-                    for layer in chain.seeds where SeedPolicy.needsSeeds(peers: current.count, below: beforeSeeds) {
-                        for endpoint in layer.shuffled()
-                        where !connected.contains(endpoint.publicKey) {
-                            guard await dial(endpoint) == true else { continue }
-                            current.insert(endpoint.publicKey)
-                            await peerMemory?.reached(endpoint, chains: chain.lineage, now: now)
-                        }
-                    }
-                }
-                // Each chain's current peers now: every open session for
-                // Nexus, the sessions that say they host it for a child.
-                var open: [ChainPath: Set<String>] = [:]
-                for chain in chains {
-                    open[chain.path] = chain.hosts == nil
-                        ? Set((await ivy.connectedPeers).map(\.publicKey))
-                        : Set(await capabilities.sessions(hosting: chain.hosts, ivy: ivy).map(\.id.publicKey))
-                }
-                await peerMemory?.stillOpen(byChain: open, now: now)
-                inputs.yield(.currentPeers(open))
-                // Nexus still short of peers (a seed that was down, no
-                // network yet): nothing else will look again before the next
-                // interval, so this pass asks for another soon. The overlay
-                // no longer redials the seeds itself.
-                if retriesSeeds, SeedPolicy.needsSeeds(peers: open[root]?.count ?? 0, below: beforeSeeds) {
-                    inputs.yield(.maintenanceFinished)
-                    guard await Timers.sleep(nanoseconds: UInt64(SeedPolicy.retryInterval) * 1_000_000) else { return }
-                    inputs.yield(.maintenance)
-                    return
-                }
-                inputs.yield(.maintenanceFinished)
-            }
+            maintenance.start(core, sessionReady: sessions.values.contains(where: \.ready), configuration: configuration)
         }
 
         private mutating func answer(_ id: UInt64, _ result: Result<NodeRuntimeReply, any Error>) {
             replies.removeValue(forKey: id)?.reply.resume(with: result)
-        }
-
-        /// Record why a block waits. A reason is logged when it changes,
-        /// never per retry, with the error behind it: `detail` goes to the
-        /// log and nowhere else.
-        private mutating func wait(
-            _ key: BodyKey, _ reason: BodyWait, detail: String,
-            in waits: WritableKeyPath<Loop, [BodyKey: BodyWait]>
-        ) {
-            guard self[keyPath: waits][key] != reason else { return }
-            self[keyPath: waits][key] = reason
-            let line = "waiting: body of \(key.cid): \(reason) (\(detail))"
-            SyncTrace.log(chain: key.path, line)
-            logLine("lattice-node [\(key.path.joined(separator: "/"))] \(line)")
         }
 
         /// Republish the read view when the act-on chain, the pool or the
@@ -1320,7 +951,7 @@ extension NodeRuntime {
             let hosting = ChainHandshake.hosting(path)
             return sessions.values.filter {
                 $0.ready && (path == core.rootPath || $0.capabilities.contains(hosting)
-                    || currentPeers[path]?.contains($0.peer.id.publicKey) == true)
+                    || maintenance.currentPeers[path]?.contains($0.peer.id.publicKey) == true)
             }
         }
 
@@ -1344,146 +975,20 @@ extension NodeRuntime {
             for path in paths.union([core.rootPath]) { refreshView(path) }
         }
 
-        /// One level's read view: its act-on chain by height, pool listing
-        /// and template digest.
+        /// One level's read view, from the core and what the other
+        /// components hold of it (`ReadModel`).
         mutating func refreshView(_ path: ChainPath) {
             guard let level = core.levels[path], let output = outputs[path] else { return }
-            var view = views[path] ?? NodeReadView()
-            view.children = level.executedChildren
             let snapshot = level.snapshot
-            let tip = (hash: snapshot.actOnTip, height: snapshot.actOnHeight)
             let peers = hosts(of: path).count
-            let pool = level.mining.mempool
-            // The digest names what a template would carry: a level with a
-            // backlog to execute names nothing, and it and every level below
-            // it are left out of the root's (`mined`).
-            let mined = !level.holdsBacklog
-            // A child is mined while neither it nor a level above it holds a
-            // backlog (`NodeRuntime.mined`): parents come first, so each
-            // level's backlog is read once.
-            var unmined: Set<ChainPath> = []
-            let children = path == core.rootPath && mined
-                ? core.ordered.dropFirst().filter { child in
-                    guard !unmined.contains(Array(child.dropLast())), core.levels[child]?.holdsBacklog != true else {
-                        unmined.insert(child)
-                        return false
-                    }
-                    return true
-                }.compactMap { child in
-                    core.levels[child].map { (path: child, level: $0, snapshot: $0.snapshot) }
-                }
-                : []
-            let key = ([("", tip.hash, "\(mined)", pool.version)] + children.map {
-                ($0.path.joined(separator: "/"), $0.snapshot.actOnTip, "\(!$0.snapshot.bestHeaderTip.isEmpty)",
-                 $0.level.mining.mempool.version)
-            }).map { "\($0.0):\($0.1)/\($0.2)/\($0.3)" }.joined(separator: "\n")
-            let digest: String
-            if let cached = digests[path], cached.key == key {
-                digest = cached.digest
-            } else {
-                digest = NodeRuntime.templateDigest(
-                    tip: mined ? tip.hash : "", carrying: mined ? level.mining.nextBlock : [],
-                    levels: children.map {
-                        ($0.path, $0.snapshot.actOnTip, !$0.snapshot.bestHeaderTip.isEmpty, $0.level.mining.nextBlock)
-                    }
-                )
-                digests[path] = (key, digest)
-            }
-            // Status names the wait of the block after the act-on tip, its
-            // heaviest child the window asks for. A block the window left
-            // (executed, excluded, or no longer asked for) waits no more.
-            var waiting: NodeReadView.Waiting?
-            if !fetchWaits.isEmpty || !connectWaits.isEmpty {
-                // The level's window as its last step left it: every window
-                // block has a distance, and one whose parent is the act-on
-                // tip is among those to connect next.
-                let window = windows[path] ?? level.connectOrder
-                connectWaits = connectWaits.filter { $0.key.path != path || window.distances[$0.key.cid] != nil }
-                fetchWaits = fetchWaits.filter { $0.key.path != path || window.distances[$0.key.cid] != nil }
-                waiting = window.next.first { (level.parent(of: $0) ?? "") == tip.hash }.flatMap { cid in
-                    let key = BodyKey(path: path, cid: cid)
-                    return (fetchWaits[key] ?? connectWaits[key]).map { NodeReadView.Waiting(cid: cid, reason: $0) }
-                }
-            }
-            var sync = NodeSyncStatus()
-            // A move of the act-on tip, as this step left it: the first
-            // tip a start publishes counts as one.
-            sync.tipAdvancedAt = view.actOnTip == tip.hash ? view.sync.tipAdvancedAt
-                : tip.hash.isEmpty ? nil : Date().timeIntervalSince1970
-            sync.pendingHeaders = level.sync.pending.entries.count
-            sync.headersAwaitingProof = level.sync.proofs.awaiting.count
-            sync.proofChecksRunning = level.sync.proofs.verifying.count
-            sync.bodyWindow = windows[path]?.distances.count ?? 0
-            sync.bodiesRequested = level.bodies.requested.count
-            sync.bodiesUnavailable = fetchWaits.keys.count(where: { $0.path == path })
-            sync.bodiesParked = level.bodies.parked.count
-            sync.awaitingParentFacts = level.bodies.awaitingParent.count
-            let parentWeighed = path.count > 1 ? core.levels[Array(path.dropLast())]?.headersSynced ?? true : true
-            sync.blockedOn = level.progress(parentWeighed: parentWeighed, next: windows[path]?.next).rawValue
-            sync.headersSynced = level.headersSynced
-            sync.synced = level.synced
-            sync.jobsQueued = queued.count(at: path)
-            // The fee projection walks the pool, so a busy pool is projected
-            // at most once a `projectionInterval`, and at once on a new tip.
-            // A change inside the interval is projected when it ends, input
-            // or not.
-            let now = NodeRuntime.uptime()
-            let reproject = view.projectedVersion != pool.version
-                && (view.actOnTip != tip.hash || now - view.projectedAt >= NodeRuntime.projectionInterval)
-            if view.projectedVersion != pool.version, !reproject, !reprojections.contains(path) {
-                reprojections.insert(path)
-                let inputs = inputs
-                Timers.deadline(
-                    after: .milliseconds(NodeRuntime.projectionInterval - (now - view.projectedAt)), generation: 0
-                ) { _ in
-                    inputs.yield(.reproject(path))
-                }
-            }
-            guard view.actOnTip != tip.hash || view.poolVersion != pool.version
-                    || view.templateDigest != digest || view.peers != peers
-                    || view.waiting != waiting || view.sync != sync || reproject else { return }
-            if view.actOnTip != tip.hash {
-                view.actOnTip = tip.hash
-                // The act-on chain is the tip's ancestry, on the best header
-                // chain or not: walk down to where the view already agrees.
-                var entered: [String] = []
-                var keep = tip.hash.isEmpty ? 0 : Int(tip.height) + 1
-                var cursor: String? = tip.hash
-                while keep > 0, let cid = cursor, !(keep <= view.heights.count && view.heights[keep - 1] == cid) {
-                    entered.append(cid)
-                    cursor = level.parent(of: cid)
-                    keep -= 1
-                }
-                view.heights.truncate(to: keep)
-                for cid in entered.reversed() { view.heights.append(cid) }
-            }
-            if view.poolVersion != pool.version || reproject {
-                // A pool holds nothing before its level has a spec, so a
-                // projection waits only on the pool.
-                let projected = !reproject ? view.mempool.projected : level.mining.spec.map {
-                    pool.projectedBlocks(count: ChainReads.projectedFeeBlocks, spec: $0)
-                } ?? []
-                if reproject {
-                    view.projectedVersion = pool.version
-                    view.projectedAt = now
-                }
-                view.mempool = ChainReads.MempoolListing(
-                    count: pool.count, bytes: pool.byteCount, cids: pool.items.prefix(200).map(\.cid),
-                    projected: projected, weight: level.mining.spec.map(FeeWeight.init)
-                )
-            }
-            view.poolVersion = pool.version
-            // The root's digest covers every hosted level: a child's tip or
-            // pool moving changes the template a miner should fetch.
-            let digestChanged = path == core.rootPath && view.templateDigest != digest
-            view.templateDigest = digest
-            view.peers = peers
-            view.waiting = waiting
-            view.sync = sync
-            views[path] = view
-            output.view.publish(view)
-            // After the view: a client told of a digest finds it in status.
-            if digestChanged { templateDigest.publish(digest) }
+            // Status names the wait of the block after the act-on tip.
+            let waiting = bodyFetches.waiting(at: path, level: level, tip: snapshot.actOnTip)
+            let (window, unavailable) = (bodyFetches.windows[path], bodyFetches.unavailable(at: path))
+            let jobsQueued = jobs.waiting(at: path)
+            readModel.refresh(
+                path, level: level, snapshot: snapshot, core: core, output: output, peers: peers, waiting: waiting,
+                window: window, unavailable: unavailable, jobsQueued: jobsQueued
+            )
         }
 
         // MARK: - Network → events
@@ -1525,18 +1030,7 @@ extension NodeRuntime {
                 guard let session = sessions[key],
                       !(await ivy.connectedPeers).contains(session.peer.id) else { return true }
                 sessions[key] = nil
-                // Nothing redials a seed or a remembered peer but a
-                // maintenance pass. Left with too few peers, the node looks
-                // again now, not at the next interval: at most once per
-                // `SeedPolicy.retryInterval`, so a peer that keeps dropping
-                // cannot make it spin.
-                let now = NodeRuntime.now()
-                if !configuration.seedPeers.isEmpty,
-                   SeedPolicy.needsSeeds(peers: sessions.count, below: configuration.peersBeforeSeeds),
-                   now - lastUrgentMaintenanceAt >= SeedPolicy.retryInterval {
-                    lastUrgentMaintenanceAt = now
-                    inputs.yield(.maintenance)
-                }
+                maintenance.sessionLost(peers: sessions.count, configuration: configuration)
                 if session.ready {
                     guard await step(.peerGone(session.coreID)) else { return false }
                     // Forget the host it was, so its reconnect wakes.
@@ -1603,47 +1097,9 @@ extension NodeRuntime {
                       session.ready else {
                     return true
                 }
-                fetchAnnounced(cid, from: session)
+                transactionFetches.fetch(cid, from: session.peer, as: session.coreID, levels: core.levels)
             }
             return true
-        }
-
-        /// A peer announced a transaction: fetch it from that peer, and hand
-        /// it, as the peer's, to the pool of the chain it names. An
-        /// announcement carries only the transaction's CID, so its chain is
-        /// known once it is fetched: every hosted level is asked whether it
-        /// already holds it, and one naming a chain this host does not run is
-        /// dropped. Only one not pooled, not awaiting its verdict, not being
-        /// fetched and not recently fetched, within the cap on concurrent
-        /// fetches; anything else is dropped, never blamed.
-        private mutating func fetchAnnounced(_ cid: String, from session: Session) {
-            // No hosted level would take it yet (`ChainCore.synced`).
-            guard core.levels.values.contains(where: \.synced) else { return }
-            let pools = core.levels.sorted { $0.key.lexicographicallyPrecedes($1.key) }.map(\.value.mining)
-            // A fetched transaction may be worth fetching again once any
-            // hosted chain moves: a child's tip moves without the root's.
-            let tips = pools.map(\.tipCID)
-            if recentlyFetchedTips != tips {
-                recentlyFetchedTips = tips
-                recentlyFetched.removeAll()
-            }
-            guard !pools.contains(where: { $0.mempool.contains(cid) || $0.isPending(cid) }),
-                  !transactionFetches.contains(cid), !recentlyFetched.members.contains(cid),
-                  transactionFetches.count < 64
-            else { return }
-            transactionFetches.insert(cid)
-            let (ivy, inputs, peer) = (ivy, inputs, session.coreID)
-            let hosted = Set(core.levels.keys)
-            spawn {
-                let response = await ivy.fetchVolume(rootCID: cid, from: session.peer)
-                let transaction = try? await VolumeImpl<Transaction>(rawCID: cid, node: nil, encryptionInfo: nil)
-                    .resolveRecursive(source: InMemoryContentSource(response.entries)).node
-                // A transaction names its chain: it goes to that level's pool.
-                let path = transaction?.body.node?.chainPath
-                inputs.yield(.transactionFetched(cid: cid, transaction.flatMap { transaction in
-                    path.flatMap { hosted.contains($0) ? .level($0, .mining(.transactionReceived(transaction, origin: .peer(peer)))) : nil }
-                }))
-            }
         }
 
         // MARK: - Step and effects
@@ -1654,17 +1110,7 @@ extension NodeRuntime {
             let stepped = SyncTrace.now()
             // Only the step moves a level: its window is read once, here,
             // before any effect refreshes a view.
-            var moved: [(old: [String: Int], new: [String: Int])] = []
-            for path in windows.keys where core.levels[path] == nil {
-                moved.append((windows.removeValue(forKey: path)?.distances ?? [:], [:]))
-            }
-            for (path, level) in core.levels where core.touched.contains(path) || windows[path] == nil {
-                let window = level.connectOrder
-                moved.append((windows.updateValue(window, forKey: path)?.distances ?? [:], window.distances))
-            }
-            let reordered = moved.isEmpty
-                ? []
-                : Self.reorder(&cachedBodyOrder, moved: moved, windows: windows.values.map(\.distances))
+            let reordered = bodyFetches.moveWindows(core)
             // Time in the step's facts transaction, for the trace.
             var persisting = 0.0
             defer {
@@ -1687,6 +1133,10 @@ extension NodeRuntime {
             let ordered = effects.enumerated()
                 .sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }
                 .map(\.element)
+            // A level's derivations of the step run as at most one job per
+            // worker, queued where its first one is (`deriveProofs`).
+            derivations = [:]
+            for case .level(let path, .deriveProof(let job)) in ordered { derivations[path, default: []].append(job) }
             for effect in ordered {
                 guard SyncTrace.enabled, case .persist = effect else {
                     guard await execute(effect) else { return false }
@@ -1696,28 +1146,10 @@ extension NodeRuntime {
                 guard await execute(effect) else { return false }
                 persisting += SyncTrace.now() - before
             }
-            await settleBodies()
-            await settleState()
-            // The blocks each chain can connect next wait for the content
-            // budget ahead of bodies fetched ahead of them. Refreshed only
-            // while someone waits: a waiter that arrives between steps is
-            // ordered by the last set, and moves up at the next step.
-            if remote.budget.waiting > 0 {
-                remote.budget.prioritize(Set(windows.values.flatMap(\.next)))
-            }
-            // Fetched bodies stay in memory in the order their connects
-            // need them: the furthest ahead go first when room is needed.
-            if !reordered.isEmpty {
-                await storage.readCache.order(
-                    bodies: reordered.reduce(into: [:]) { $0[$1] = cachedBodyOrder[$1] },
-                    leaving: reordered.filter { cachedBodyOrder[$0] == nil }
-                )
-            }
-            // What an executed block read goes once the kept state holds
-            // what of it the tip's state holds: its execution's window
-            // until the counts reach it.
-            for key in readsDone { await storage.releaseReads(key.cid, at: key.path) }
-            readsDone.removeAll()
+            await retention.settleBodies(core.levels, configuration: configuration)
+            await retention.settleState(core.levels, counts: &counts)
+            await bodyFetches.order(reordered)
+            await retention.releaseReads()
             refreshView(core.touched)
             return true
         }
@@ -1725,29 +1157,14 @@ extension NodeRuntime {
         private mutating func execute(_ effect: NodeEffect) async -> Bool {
             switch effect {
             case .persist(let batch):
-                var persistedBodyKeys: [BodyKey] = []
-                for (path, levelBatch) in batch.levels.sorted(by: { $0.path.count < $1.path.count }) {
-                    persistedBodyKeys += levelBatch.facts.flatMap(\.facts).compactMap { fact -> BodyKey? in
-                        guard case .validation(let validation) = fact else { return nil }
-                        return BodyKey(path: path, cid: validation.blockHash)
-                    }
-                }
                 do {
                     try await storage.persistNodeBatch(batch, logID: core.logID)
-                    if configuration.blockBodies == .none { executedThisStep.append(contentsOf: persistedBodyKeys) }
-                    readsDone.append(contentsOf: persistedBodyKeys)
-                    // A block found invalid is no block: its body goes.
-                    for (path, levelBatch) in batch.levels {
-                        for case .exclusion(let excluded) in levelBatch.facts.flatMap(\.facts) {
-                            await storage.releaseBody(excluded.blockHash, at: path)
-                            readsDone.append(BodyKey(path: path, cid: excluded.blockHash))
-                        }
-                    }
                 } catch {
                     // Fail-stop: no later effect of this step may run.
                     failStop(error)
                     return false
                 }
+                await retention.persisted(batch, configuration: configuration)
             case .level(let path, let effect):
                 return await execute(effect, at: path)
             case .disconnect(let peer, let reason):
@@ -1763,11 +1180,11 @@ extension NodeRuntime {
                     _ = await ivy.disconnectSession(ifCurrent: session.peer)
                 }
             case .connect(let path, let jobs):
-                enqueue(NodeRuntime.connectJob(
+                self.jobs.enqueue(NodeRuntime.connectJob(
                     jobs, at: path, levels: LiveLevels(inputs: inputs), storage: storage, remote: remote,
                     failStop: failStop
                 ))
-                startJobs()
+                self.jobs.start(in: core)
             case .wakeAt(let time):
                 if let wake, wake.time <= time { break }
                 wake?.task.cancel()
@@ -1795,7 +1212,7 @@ extension NodeRuntime {
             case .serveHeaders(let peer, let token, let requestID, let blockCIDs, let hasMore):
                 guard let session = session(peer) else { break }
                 let (storage, outbox, inputs, config, failStop) = (storage, outbox, inputs, core.config, failStop)
-                spawn {
+                NodeRuntime.spawn {
                     // Built up to a page, or for as long as the serving
                     // budget allows, and no further: the work is the
                     // page's, however many headers were asked, and the
@@ -1849,7 +1266,7 @@ extension NodeRuntime {
             case .fetchByCID(let peer, let cid):
                 guard let session = session(peer) else { break }
                 let (storage, ivy, inputs) = (storage, ivy, inputs)
-                spawn {
+                NodeRuntime.spawn {
                     let bytes: Data?
                     if let local = storage.store.childIndexBytes(cid) {
                         bytes = local
@@ -1861,65 +1278,31 @@ extension NodeRuntime {
                     inputs.yield(.event(.level(path, .childIndexFetched(peer, cid: cid, index))))
                 }
             case .fetchBody(let cid):
-                let key = BodyKey(path: path, cid: cid)
-                guard bodies[key] == nil else { break }
-                let (storage, remote, inputs) = (storage, remote, inputs)
-                // Every peer hosts Nexus; a child's body is asked of its
-                // hosts (its current peers), then of the root's known
-                // providers.
-                let rendezvous = ChainHosts.of(path, nexusGenesisCID: configuration.nexusGenesisCID)
-                let maxBlockSize = core.levels[path]?.maxBlockSize(of: cid)
-                // A bundle is an optimisation: a block whose fetch failed is
-                // fetched one Volume at a time, as from peers that speak no
-                // bundles, so a bad bundle cannot withhold it.
-                let bundle = fetchWaits[key] == nil
-                let asked = SyncTrace.now()
-                // One attempt: the core asks again after its backoff, or
-                // at once when the body may now be had.
-                bodies[key] = Task {
-                    do {
-                        _ = try await storage.fetchChainBody(
-                            cid, remote: remote, bundle: bundle, hosts: rendezvous, maxBlockSize: maxBlockSize
-                        )
-                        inputs.yield(.bodyStored(path, cid: cid, asked: asked, held: SyncTrace.now()))
-                    } catch {
-                        guard !Task.isCancelled else { return }
-                        inputs.yield(.bodyWaiting(path, cid: cid, BodyWait(fetchFailure: error), detail: "\(error)"))
-                    }
-                }
+                bodyFetches.fetch(
+                    cid, at: path, nexusGenesisCID: configuration.nexusGenesisCID,
+                    maxBlockSize: core.levels[path]?.maxBlockSize(of: cid)
+                )
             case .cancelBody(let cid):
-                bodies.removeValue(forKey: BodyKey(path: path, cid: cid))?.cancel()
-                fetchWaits[BodyKey(path: path, cid: cid)] = nil
-            case .deriveProof(let job):
-                // From this node's own content only, never peers: the block
-                // (read from this store when weighed), the carrier, its child
-                // index and its saved proofs, written by the step that
-                // weighed it, before this effect.
-                let held = job.block ?? storage.store.header(job.childCID)?.block
-                let parent = Array(path.dropLast())
-                let (storage, failStop) = (storage, failStop)
-                enqueue(RuntimeJob(path: path, tipCID: nil) {
-                    var upstream: [ChildBlockProof] = []
-                    if parent.count > 1 {
-                        do {
-                            upstream = try storage.store.savedProofs(at: parent, for: [job.carrier])[job.carrier] ?? []
-                        } catch {
-                            failStop(error)
-                            return []
-                        }
-                    }
-                    return [.level(path, .derived(await job.run(held: held, upstream: upstream, fetcher: storage.workFetcher)))]
-                })
-                startJobs()
+                bodyFetches.cancel(cid, at: path)
+            case .deriveProof:
+                // The level's first derivation of the step queues them all,
+                // in at most one job per worker, so a burst of carriers still
+                // runs side by side.
+                guard let batch = derivations.removeValue(forKey: path) else { break }
+                let size = (batch.count + jobs.workers - 1) / jobs.workers
+                for start in stride(from: 0, to: batch.count, by: size) {
+                    jobs.enqueue(deriveProofs(Array(batch[start..<min(start + size, batch.count)]), at: path))
+                }
+                jobs.start(in: core)
             case .verifyProofs(let batch):
                 // Off the loop: a check without its block reads it from the
                 // header store there; one whose block is gone answers nil,
                 // blaming no one.
-                enqueue(NodeRuntime.proofJob(batch, at: path, storage: storage))
-                startJobs()
+                jobs.enqueue(NodeRuntime.proofJob(batch, at: path, storage: storage))
+                jobs.start(in: core)
             case .readTransactions(let blocks):
-                enqueue(NodeRuntime.readJob(blocks, at: path, storage: storage))
-                startJobs()
+                jobs.enqueue(NodeRuntime.readJob(blocks, at: path, storage: storage))
+                jobs.start(in: core)
             case .mining(let effect):
                 return await execute(effect, at: path)
             case .workSubmitted(let replyID, let outcome):
@@ -1966,7 +1349,7 @@ extension NodeRuntime {
                 // grind meets.
                 let (storage, remote, inputs) = (storage, remote, inputs)
                 let hosted = Set(core.levels.keys)
-                spawn {
+                NodeRuntime.spawn {
                     do {
                         let children = try await storage.storeMinedBlock(block, remote: remote)
                         let carried = try await storage.carriedGrinds(of: block, hosted: hosted, remote: remote)
@@ -1983,23 +1366,53 @@ extension NodeRuntime {
                 guard let basis = core.levels[path].flatMap({
                     NodeRuntime.miningBasis(effect, tree: $0.tree, parent: core.levels[Array(path.dropLast())])
                 }) else { preconditionFailure("every hosted level's tree carries a context: a preflight has a basis") }
-                enqueue(NodeRuntime.miningJob(effect, at: path, basis: basis, storage: storage, remote: remote), effect)
-                startJobs()
+                jobs.enqueue(NodeRuntime.miningJob(effect, at: path, basis: basis, storage: storage, remote: remote), effect)
+                jobs.start(in: core)
             case .buildTemplate:
                 guard let basis = core.levels[path].flatMap({ NodeRuntime.miningBasis(effect, tree: $0.tree) }) else { break }
-                enqueue(NodeRuntime.miningJob(
+                jobs.enqueue(NodeRuntime.miningJob(
                     effect, at: path, basis: basis, storage: storage, remote: remote,
                     children: childTemplateInputs(below: path),
                     hosted: core.ordered.filter { $0.count > path.count && $0.starts(with: path) },
                     levels: LiveLevels(inputs: inputs),
                     cache: childTemplates
                 ), effect)
-                startJobs()
+                jobs.start(in: core)
             case .returnTransactions:
-                enqueue(NodeRuntime.miningJob(effect, at: path, basis: nil, storage: storage, remote: remote), effect)
-                startJobs()
+                jobs.enqueue(NodeRuntime.miningJob(effect, at: path, basis: nil, storage: storage, remote: remote), effect)
+                jobs.start(in: core)
             }
             return true
+        }
+
+        /// One job for derivations of one level and step, as its proof
+        /// checks are one: each derivation from this node's own content
+        /// only, never peers: the block (read from this store when weighed),
+        /// the carrier, its child index and its saved proofs, written by the
+        /// step that weighed it, before this effect. Each posts its own
+        /// `derived` event, as when each was a job.
+        private func deriveProofs(_ batch: [ChildDeriveJob], at path: ChainPath) -> RuntimeJob {
+            let (storage, failStop) = (storage, failStop)
+            let held = batch.map { $0.block ?? storage.store.header($0.childCID)?.block }
+            let parent = Array(path.dropLast())
+            return RuntimeJob(path: path, tipCID: nil) {
+                var derived: [NodeEvent] = []
+                for (job, held) in zip(batch, held) {
+                    // A stop does not wait for the rest of the batch.
+                    guard !Task.isCancelled else { return derived }
+                    var upstream: [ChildBlockProof] = []
+                    if parent.count > 1 {
+                        do {
+                            upstream = try storage.store.savedProofs(at: parent, for: [job.carrier])[job.carrier] ?? []
+                        } catch {
+                            failStop(error)
+                            return derived
+                        }
+                    }
+                    derived.append(.level(path, .derived(await job.run(held: held, upstream: upstream, fetcher: storage.workFetcher))))
+                }
+                return derived
+            }
         }
 
         func mined(_ path: ChainPath) -> Bool {
@@ -2036,190 +1449,11 @@ extension NodeRuntime {
             return session
         }
 
-        /// The worker pool: at most `workers` jobs run; each result posts
-        /// back as an event that frees its slot.
-        private mutating func startJobs() {
-            while runningJobs < workers, let job = queued.next(in: core) {
-                runningJobs += 1
-                nextJob += 1
-                let (inputs, id, started) = (inputs, nextJob, SyncTrace.now())
-                jobs[id] = (job.path, Task {
-                    let events = await job.run()
-                    let times = SyncTrace.enabled ? TraceTimes(queued: job.queued, started: started, done: SyncTrace.now()) : nil
-                    inputs.yield(.jobDone(id, events, times))
-                })
-            }
-        }
-
-        /// Queue `job`, behind `observeJob` when a test watches the pool.
-        private mutating func enqueue(_ job: RuntimeJob, _ effect: MiningEffect? = nil) {
-            guard let observeJob else {
-                var job = job
-                job.queued = SyncTrace.now()
-                return queued.append(job)
-            }
-            queued.append(RuntimeJob(path: job.path, tipCID: job.tipCID, kind: job.kind, queued: SyncTrace.now()) {
-                await observeJob(job.kind, job.path, effect)
-                return await job.run()
-            })
-        }
-
-        /// The working set, when the operator keeps no bodies beyond it:
-        /// a body stays while it is its chain's tip. One that executed this
-        /// step and is not, and the tip another block replaced, are let go.
-        private mutating func settleBodies() async {
-            guard configuration.blockBodies == .none else { return }
-            let executed = Dictionary(grouping: executedThisStep, by: \.path)
-            executedThisStep.removeAll()
-            for (path, level) in core.levels {
-                let tip = level.snapshot.actOnTip
-                var past = (executed[path] ?? []).map(\.cid)
-                if let last = bodyTips[path], last != tip { past.append(last) }
-                bodyTips[path] = tip
-                past.removeAll { $0 == tip }
-                if !past.isEmpty { await storage.letGo(ofBodies: past, at: path) }
-            }
-        }
-
-        /// With a state window: as each level's tip moves, its counts move
-        /// with it on `recent`, then what executions stored more than a
-        /// window below it goes; on `recent` only once the counts reached
-        /// the tip, so the windows hold what the blocks the counts have not
-        /// reached created. A tip that climbed from the counts' own by less
-        /// than a window holds them back, unless a settle was asked for
-        /// (`stateTips` lost the chain: a start, a repair that ended, a
-        /// maintenance pass): a commit of each per window of blocks, not per
-        /// block, with at most two windows of executions held while the
-        /// counts follow the tip.
-        mutating func settleState() async {
-            guard configuration.state != .all else { return }
-            for (path, level) in core.levels where stateTips[path] != level.snapshot.actOnTip {
-                let asked = stateTips[path] == nil
-                stateTips[path] = level.snapshot.actOnTip
-                if !asked, climbedLessThanAWindow(level, at: path) { continue }
-                guard !level.snapshot.actOnTip.isEmpty,
-                      await settleCounted(at: path, tip: level.snapshot.actOnTip) else { continue }
-                await storage.letGoOfState(at: path, below: level.snapshot.actOnHeight)
-            }
-        }
-
-        /// Whether the act-on tip of the chain at `path` descends from its
-        /// counts' tip, by less than a window: a tip on another branch, or
-        /// counts not kept, never holds a settle back.
-        private func climbedLessThanAWindow(_ level: ChainCore, at path: ChainPath) -> Bool {
-            guard let window = configuration.stateWindow(for: path),
-                  let counts = counted[path]?.marker.flatMap(CountedMarker.init)?.tip else { return false }
-            let height = level.snapshot.actOnHeight
-            guard height > counts.height, height - counts.height < window else { return false }
-            var cid = level.snapshot.actOnTip
-            for _ in 0..<(height - counts.height) {
-                guard let parent = level.parent(of: cid) else { return false }
-                cid = parent
-            }
-            return cid == counts.cid
-        }
-
-        /// On `recent`: the chain's counts move to its act-on tip, or a
-        /// state sync's counts are committed moved to it. Roots the store
-        /// lacks are healed first; counts that cannot follow, or that the
-        /// store refuses, are replaced by a state sync, the old ones serving
-        /// until it commits; a store failure is tried again at the next
-        /// settle or maintenance pass. A check, heal or state sync runs off
-        /// the loop, one at a time, and settles again when it ends; one that
-        /// failed waits for a new peer or the next maintenance pass. True
-        /// when the counts reached the tip, or the operator keeps no counts.
-        private mutating func settleCounted(at path: ChainPath, tip: String) async -> Bool {
-            guard configuration.state == .recent, let window = configuration.stateWindow(for: path) else { return true }
-            var chain = counted[path] ?? CountedChain()
-            defer { counted[path] = chain }
-            guard chain.repair == nil, !chain.waiting else { return false }
-            let outcome: CountedOutcome
-            if let synced = chain.synced {
-                outcome = await storage.commitCounted(
-                    at: path, block: synced.block, places: synced.places, tip: tip, window: window
-                )
-            } else if let marker = chain.marker {
-                outcome = await storage.settleCounted(at: path, tip: tip, window: window, marker: marker, known: chain.known)
-            } else {
-                stateSync(path, &chain, tip: tip, window: window)
-                return false
-            }
-            switch outcome {
-            case .settled(let marker, let known):
-                let moved = marker != chain.marker
-                // A state sync's counts are checked anew.
-                if chain.synced != nil { chain.audited = nil }
-                (chain.marker, chain.known, chain.synced) = (marker, known, nil)
-                // What a state sync or heal read is counted now.
-                if moved { await storage.releaseStaging(at: path) }
-                return true
-            case .missing(let roots):
-                SyncTrace.log(chain: path, "counts heal \(roots.count) roots this store lacks")
-                repair(path, &chain) { storage, remote in
-                    try await storage.healCounted(roots, at: path, remote: remote)
-                    return .healed
-                }
-            case .resync(let reason):
-                SyncTrace.log(chain: path, "counts resync: \(reason)")
-                // A state sync's commit refused: the next waits for a new
-                // peer or the next maintenance pass, not run back to back.
-                chain.waiting = chain.synced != nil
-                (chain.marker, chain.known, chain.synced) = (nil, nil, nil)
-                if !chain.waiting { stateSync(path, &chain, tip: tip, window: window) }
-            case .failed(let reason):
-                SyncTrace.log(chain: path, "counts not moved: \(reason)")
-            }
-            return false
-        }
-
-        private mutating func stateSync(_ path: ChainPath, _ chain: inout CountedChain, tip: String, window: UInt64) {
-            repair(path, &chain) { storage, remote in
-                let block = try await storage.countedSyncBlock(at: path, below: tip, window: window)
-                return .synced(block, try await storage.syncCountedState(at: path, block: block, remote: remote))
-            }
-        }
-
-        /// The counts of the chain at `path` are checked against the store
-        /// off the loop, as they are now: at a start, before they move, and
-        /// at a maintenance pass when they moved since the last check.
-        mutating func audit(_ path: ChainPath) {
-            guard var chain = counted[path], let marker = chain.marker else { return }
-            repair(path, &chain) { storage, _ in .audited(marker, await storage.auditCounted(at: path, marker: marker)) }
-            counted[path] = chain
-        }
-
-        /// Runs a check, heal or state sync of the chain's counts off the
-        /// loop; it posts how it ended.
-        private mutating func repair(
-            _ path: ChainPath, _ chain: inout CountedChain,
-            _ work: @escaping @Sendable (NodeStorage, IvyRootContentSource) async throws -> CountedRepair
-        ) {
-            nextRepair += 1
-            let (id, storage, remote, inputs) = (nextRepair, storage, remote, inputs)
-            chain.repair = (id, Task {
-                let ended: CountedRepair
-                do {
-                    ended = try await work(storage, remote)
-                } catch {
-                    SyncTrace.log(chain: path, "counts repair failed: \(error)")
-                    ended = .failed
-                }
-                inputs.yield(.counted(path, repair: id, ended))
-            })
-        }
-
-        /// ChainEffect work off the loop: it only posts events back, and a post
-        /// after the loop ended is dropped.
-        private func spawn(_ work: @escaping @Sendable () async -> Void) {
-            Task { await work() }
-        }
-
         mutating func cancelAll() {
             for entry in replies.values { entry.reply.resume(throwing: NodeRuntimeError.stopped) }
             replies.removeAll()
             wake?.task.cancel()
-            for task in bodies.values { task.cancel() }
-            bodies.removeAll()
+            bodyFetches.cancelAll()
         }
     }
 }
@@ -2236,34 +1470,4 @@ private final class Handoff<Value>: @unchecked Sendable {
     func take() -> Value {
         value.take()!
     }
-}
-
-/// The loop's view of one chain's counts on `recent`.
-struct CountedChain {
-    /// The counts' marker; nil before a state sync committed, or once they
-    /// are in doubt and a state sync is to replace them.
-    var marker: String?
-    /// The blocks from the cursor up to the counts' tip, as the last move
-    /// left them: the next move reads only the facts it needs.
-    var known: [String]?
-    /// The marker of the counts the last check found matching the store.
-    var audited: String?
-    /// The check, heal or state sync running off the loop.
-    var repair: (id: UInt64, task: Task<Void, Never>)?
-    /// A state sync's counts, until committed.
-    var synced: (block: CountedMarker.Block, places: [String: Int])?
-    /// The last repair failed: a new peer or the next maintenance pass
-    /// runs it again.
-    var waiting = false
-}
-
-/// How a check, heal or state sync of a chain's counts ended.
-enum CountedRepair: Sendable {
-    /// The state of `block`, every node with the places it holds there.
-    case synced(CountedMarker.Block, [String: Int])
-    case healed
-    /// A check of the counts with this marker: their chain when they match
-    /// the store.
-    case audited(String, [String]?)
-    case failed
 }

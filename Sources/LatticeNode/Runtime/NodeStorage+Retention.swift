@@ -85,32 +85,27 @@ struct RetentionScopes: Sendable {
     }
 }
 
-/// The retention rules: the only code that decides what this store keeps.
-/// Nothing here is needed for the node to be right: content a rule let go
-/// of is fetched again by whatever reads it next.
+/// The retention mechanism: pinning and releasing under the scopes above,
+/// and the counts' moves, checks, heals and state syncs. What state is kept
+/// under which scope, and when it goes, the state scheme decides
+/// (`StateBackend`); bodies and operator pins are decided here. Nothing
+/// here is needed for the node to be right: content let go of is fetched
+/// again by whatever reads it next.
 extension NodeStorage {
     nonisolated var scopes: RetentionScopes { RetentionScopes(chain: retentionScope) }
 
     /// Pins what storing a block wrote: its `body`, the block's own Volume
     /// and its transactions', under the block's name, and the rest, its
     /// spec and its policy modules (and for a genesis the empty state it
-    /// starts from), with the chain. When the operator does not keep all
-    /// state, the spec and policy modules are kept with the chain at `path`
-    /// while it is hosted, and any state with the block until it executes.
-    /// A body root this store lacks refuses the pin whole.
+    /// starts from), where the state scheme keeps them
+    /// (`StateBackend.keepStored`). A body root this store lacks refuses
+    /// the pin whole.
     nonisolated func retainStored(
         _ roots: [String], body: [String], ofBlock blockCID: String, at path: ChainPath = ["Nexus"]
     ) async throws {
         let named = Set(body)
         try await broker.mergeRetainedRoots(scope: scopes.body(blockCID, at: path), roots: named.sorted())
-        let rest = roots.filter { !named.contains($0) }
-        guard configuration.state != .all else {
-            try await retainHeld(rest)
-            return
-        }
-        let rules = rest.isEmpty ? [] : await rules(ofBlock: blockCID, fetcher: localFetcher)
-        try await retainHeld(rest.filter(rules.contains), scope: scopes.rules(at: path))
-        try await retainHeld(rest.filter { !rules.contains($0) }, scope: scopes.reads(blockCID, at: path))
+        try await stateBackend.keepStored(roots.filter { !named.contains($0) }, ofBlock: blockCID, at: path)
     }
 
     /// The spec a block names and the policy modules that spec names, as
@@ -127,27 +122,8 @@ extension NodeStorage {
     }
 
 
-    /// At a start: what a block read goes when the block has executed (a
-    /// stop came between), or when the operator keeps all state.
-    nonisolated func letGoOfReads() async {
-        do {
-            for scope in try await broker.retainedScopes(prefix: scopes.readsPrefix) {
-                guard let (path, cid) = scopes.block(named: scope, after: scopes.readsPrefix) else { continue }
-                if configuration.state == .all, let roots = try? await broker.retainedRoots(scope: scope) {
-                    try await broker.releaseRetainedRoots(scope: scope, roots: roots)
-                } else if try await store.hasExecutedBlock(cid, at: path) {
-                    await releaseReads(cid, at: path)
-                }
-            }
-        } catch {
-            syncTrace("reads not let go of at start: \(error)")
-        }
-    }
-
-    /// When the operator does not keep all state: what a block read goes
-    /// once it has executed, or was found invalid.
+    /// What a block read goes (`StateBackend.releaseReads`).
     nonisolated func releaseReads(_ blockCID: String, at path: ChainPath) async {
-        guard configuration.state != .all else { return }
         do {
             try await release(scope: scopes.reads(blockCID, at: path))
         } catch {
@@ -317,13 +293,12 @@ extension NodeStorage {
 
     // MARK: - State: recent
 
-    /// With a state window: what executions stored at heights more than a
-    /// window below `height`, the tip's, goes, in one commit however many
-    /// heights that is, and their state diffs. On `recent` what the counts
-    /// name stays; on `none` what a newer block still names is read from
-    /// peers when something reads it.
-    nonisolated func letGoOfState(at path: ChainPath, below height: UInt64) async {
-        guard let window = configuration.stateWindow(for: path) else { return }
+    /// With a state window of `window` blocks: what executions stored at
+    /// heights more than a window below `height`, the tip's, goes, in one
+    /// commit however many heights that is, and their state diffs. On
+    /// `recent` what the counts name stays; on `none` what a newer block
+    /// still names is read from peers when something reads it.
+    nonisolated func letGoOfState(at path: ChainPath, below height: UInt64, window: UInt64) async {
         guard height >= window else { return }
         let kept = scopes.window(at: path, height: height - window + 1)
         do {
@@ -336,7 +311,7 @@ extension NodeStorage {
         }
     }
 
-    private nonisolated func letGoOfWindow(_ scope: String) async {
+    nonisolated func letGoOfWindow(_ scope: String) async {
         do { try await release(scope: scope) } catch { syncTrace("\(scope) not released: \(error)") }
     }
 
@@ -591,91 +566,6 @@ extension NodeStorage {
         }
     }
 
-    /// At a start, with `hosted` the chains this node hosts: the markers of
-    /// the hosted chains' counts when the operator keeps recent state, and
-    /// the staging of each chain with one let go of (a chain without keeps
-    /// it for its state sync). Counts kept for a chain no longer hosted go,
-    /// as do every chain's when the operator keeps recent state no more:
-    /// on `all` what they counted is kept with the chain first.
-    nonisolated func settleCountedScopes(hosted: Set<ChainPath>) async -> [ChainPath: String] {
-        func path(_ scope: String, after prefix: String) -> ChainPath {
-            scope.dropFirst(prefix.count).split(separator: "/").map(String.init)
-        }
-        let recent = configuration.state == .recent
-        var markers: [ChainPath: String] = [:]
-        do {
-            for scope in try await broker.countedScopes(prefix: scopes.countedPrefix) {
-                let chain = path(scope, after: scopes.countedPrefix)
-                guard !recent || !hosted.contains(chain) else { continue }
-                if configuration.state == .all, hosted.contains(chain) {
-                    try await retainHeld(Array(try await broker.countedState(scope: scope).counts.keys))
-                }
-                try await broker.dropCountedScope(scope: scope)
-            }
-            if recent {
-                for chain in hosted {
-                    let marker = try await broker.countedState(scope: scopes.counted(at: chain)).marker
-                    if let marker, CountedMarker(marker) != nil { markers[chain] = marker }
-                }
-            }
-            for scope in try await broker.retainedScopes(prefix: scopes.stagingPrefix) {
-                let chain = path(scope, after: scopes.stagingPrefix)
-                if markers[chain] != nil || !recent || !hosted.contains(chain) { try await release(scope: scope) }
-            }
-        } catch {
-            syncTrace("counts not settled at start: \(error)")
-        }
-        return markers
-    }
-
-    /// At a start, with `tips` the hosted chains' tip heights: what an
-    /// earlier version kept a hosted chain's tip state under moves to the
-    /// chain's window at its tip's height, or to the chain on `all`, and
-    /// goes from there as any state does, a window later on `recent`; the
-    /// counts it kept are forgotten. The state windows of a run that kept
-    /// recent state stay: they go by height as the tips move, or are kept
-    /// with everything else on `all`. What either kept for a chain no
-    /// longer hosted goes, as do its spec and policy modules.
-    nonisolated func moveLegacyState(tips: [ChainPath: UInt64]) async {
-        func path(_ scope: String, after prefix: String) -> ChainPath {
-            scope.dropFirst(prefix.count).split(separator: "/").map(String.init)
-        }
-        // Each scope on its own: one that fails stays for the next start,
-        // and the rest move.
-        func each(_ prefix: String, _ move: (String) async throws -> Void) async {
-            guard let listed = try? await broker.retainedScopes(prefix: prefix) else { return }
-            for scope in listed {
-                do { try await move(scope) } catch { syncTrace("\(scope) not moved at start: \(error)") }
-            }
-        }
-        await each(scopes.windowsPrefix) { scope in
-            guard let colon = scope.lastIndex(of: ":") else { return }
-            if tips[path(String(scope[..<colon]), after: scopes.windowsPrefix)] == nil {
-                await letGoOfWindow(scope)
-            }
-        }
-        await each(scopes.rulesPrefix) { scope in
-            if tips[path(scope, after: scopes.rulesPrefix)] == nil { try await release(scope: scope) }
-        }
-        for prefix in scopes.legacyStatePrefixes {
-            await each(prefix) { scope in
-                let path = path(scope, after: prefix)
-                if let tip = tips[path] {
-                    // What this store no longer holds is not kept: it is
-                    // read again, as any state let go of is.
-                    var held: [String] = []
-                    for root in try await broker.retainedRoots(scope: scope) where await broker.hasVolume(root: root) {
-                        held.append(root)
-                    }
-                    let kept = configuration.stateWindow(for: path) == nil
-                        ? retentionScope : scopes.window(at: path, height: tip)
-                    if !held.isEmpty { try await broker.mergeRetainedRoots(scope: kept, roots: held) }
-                }
-                try await release(scope: scope)
-            }
-        }
-        do { try await store.forgetStateCounts() } catch { syncTrace("earlier counts not forgotten: \(error)") }
-    }
 }
 
 /// Where a settle of a chain's counts left them.

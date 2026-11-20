@@ -88,6 +88,65 @@ takes and would cost the single deterministic step order the simulator
 depends on. Because only two facts cross between chains, a chain's decisions
 can still move to a loop of their own later.
 
+### The loop's contract
+
+The loop (`NodeRuntime.Loop`) keeps these, and review holds every change to
+the runtime to them:
+
+1. **The core performs no I/O.** It returns effects; the loop runs them.
+2. **The loop never waits for the network or for long computation.** That
+   work runs as a job on the worker pool or as a task, and its result comes
+   back as an input. One exception: when a chain stops being hosted, and
+   when the node stops, the loop cancels that chain's count repair and
+   waits for it to end, so no repair writes after its chain's counts are
+   dropped; a state sync or heal deep in a network read keeps the loop until
+   its fetch notices the cancellation.
+3. **The loop never waits on something only the loop can finish.** A job or
+   an RPC handler that needs live state sends the loop an input
+   (`LiveLevels`) and waits; the loop never waits on a job.
+4. **Only the loop changes the core's state**, by stepping it with an input;
+   workers and tasks only post inputs.
+5. **Writes complete before what they make true is published.** Each step:
+   the step's state and facts in one transaction (`persist`, with the pool's
+   journal), then `publish`, then every other effect in order. This is the
+   loop's one deliberate wait. Content a job stored (a body, a mined block)
+   is stored before the effect that names it. After the effects the step's
+   retention runs, none of it needed to be right: the bodies of blocks found
+   invalid and the body working set's let-go, then each chain's state (the counts' move or commit, then the
+   window's let-go), the read cache's order, then the reads of the blocks
+   the step executed. A crash in it is repaired by the next start's sweep or
+   by later steps (`RetentionCrashTests`, which crashes at each of these
+   writes but an invalid block's body).
+6. **Every job and task has a rule for when it is superseded**, listed
+   below; a new kind adds its row. A result of a level no longer hosted is
+   dropped by the core.
+
+| Work | Runs on | Superseded |
+|---|---|---|
+| Connect (a level's next blocks) | the connect queue, one per level at a time | never: a verdict is a fact about a block and counts on any branch; a run is at most `connectBatch` blocks |
+| Proof checks | the rest queue, one job per level per step, a page under a byte budget | never: a verdict is a fact about a header |
+| Derivations | the rest queue, a level's of one step in at most one job per worker | never: a derived proof is a fact |
+| Transaction reads (`readTransactions`) | the rest queue | never: local reads, cheap |
+| Mining preflight (an RPC's, or a recheck) | the answered queue (awaited) or the rest | a recheck whose mining tip moved is dropped before it runs; an admission always runs, its submit is waiting |
+| Template build | the answered queue | never: it is answered on any tip, and the miner asks again on a new digest |
+| Returned transactions after a reorganisation | the rest queue | never: they go back to the pool, which judges them on its tip |
+| Body fetches | a task per body | cancelled when the body leaves its level's window (`cancelBody`), and when the level is no longer hosted |
+| Count repairs (check, heal, state sync) | a task, one per chain at a time | cancelled when the chain is no longer hosted; a result whose id is not the one running is dropped |
+| Maintenance passes | a task (`NodeRuntime.spawn`), one at a time | never: one asked for meanwhile runs next, once |
+| Maintenance cadence | one task for the runtime's life | cancelled first when the node stops |
+| Transaction fetches | a task per announcement (`spawn`), at most 64 | never: bounded by the cap and the fetch's timeout; a fetched one already pooled is refused by the pool |
+| Header pages served, child indexes fetched, mined blocks stored | a task each (`spawn`) | never: bounded by the serving budget, the request's deadline, the RPC |
+| The wake timer | one task | a `wakeAt` at or after the pending wake keeps it; an earlier one cancels it and takes its place; a `tick` clears it |
+| A session's hello deadline | a timer per session | does nothing when the session is no longer that one, or became ready |
+| A level's fee reprojection | a timer, at most one per level | never: when it fires the view is refreshed from the core as it is then |
+| Relay upgrade (a direct connection for a relayed peer) | a task per relayed session | never: the connector bounds its attempts, and a session that cannot be upgraded stays relayed |
+| Messages to a peer (`SessionOutbox`) | a task per message, in order per session | ends, sending nothing, when the session ends or the transport refuses it; bounded per session by message and byte caps |
+
+Work that runs to completion needs no rule beyond these: its result is a
+fact, or is judged again where it lands, and its cost is bounded. A problem
+that seems to need another actor, scheduler or background state manager is
+first solved through the loop's existing inputs and effects.
+
 ## Node roles
 
 | Role | Holds | Executes from |

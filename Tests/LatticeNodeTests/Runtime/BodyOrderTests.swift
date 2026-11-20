@@ -27,7 +27,7 @@ final class BodyOrderTests: XCTestCase {
                     windows[level] = window.isEmpty ? nil : window
                 }
                 let before = order
-                let reordered = NodeRuntime.Loop.reorder(&order, moved: moved, windows: Array(windows.values))
+                let reordered = NodeRuntime.BodyFetches.reorder(&order, moved: moved, windows: Array(windows.values))
                 let merged = windows.values.reduce(into: [String: Int]()) { $0.merge($1) { min($0, $1) } }
                 XCTAssertEqual(order, merged, "seed \(seed) step \(step)")
                 XCTAssertEqual(reordered, Set(blocks.filter { before[$0] != merged[$0] }), "seed \(seed) step \(step)")
