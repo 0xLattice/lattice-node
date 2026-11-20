@@ -522,8 +522,8 @@ runs it again. A change takes effect on restart.
 
 ### What a node keeps
 
-Facts and headers are kept for good, and so is each credited child proof
-unless it no longer reads back (an entry it names is gone, or a row is
+Facts and headers are kept for good while their chain is hosted, and so is
+each credited child proof unless it no longer reads back (an entry it names is gone, or a row is
 damaged): then it is deleted when read, the block is served without it,
 and a peer's copy is taken again while the block still waits for proof.
 They grow with the number of blocks weighed, as Bitcoin's block index
@@ -632,8 +632,23 @@ facts an older version wrote with an inexact diff may leave them) are replaced
 by a state sync.
 
 A chain no longer hosted (removed from a running node's hosted chains, or
-left out at a start) loses its counts, what its state sync held, and its
-spec and policy modules; hosting it again starts with a state sync.
+left out at a start) loses everything the node kept only for it, its
+descendants with it. Its facts go first, in one `state.db` transaction:
+its block facts and index, headers, child proofs, cursors and state diffs,
+with the header records, child indexes and proof entries no other chain's
+rows name; then its local transactions, and its Volume bundles. Then what
+its own scopes name goes from `volumes.db`: its blocks' bodies, what they
+read, its spec and policy modules, its state windows, its counts and what
+its state sync held. Content another scope also names stays: an operator
+pin, another chain's block, and on `state: all` the state its executions
+stored, which is kept with every chain's. Hosting it again syncs it from
+peers like any new chain. If its facts cannot be dropped, nothing else
+goes, and the next start tries again.
+
+Letting go frees space for the node's later writes, not for the system:
+`state.db`, `volumes.db` and `volume-bundles.db` are SQLite files without
+`auto_vacuum`, so deleted rows' pages go to each file's free list and are
+reused by later writes, and the files do not shrink.
 
 Kept state is a cache, not a promise: execution, a submitted transaction's
 check, and state reads all read the state this node does not hold from

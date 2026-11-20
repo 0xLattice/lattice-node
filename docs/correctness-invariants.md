@@ -120,6 +120,12 @@ set, GHOST, continuity) are the architecture doc's and are checked by
 - **NODE-STORAGE-002.j** — A Volume the operator pins is named by the
   operator scope until it is unpinned, whatever the other rules keep. Pinned
   by `OperatorPinTests` and `DaemonHTTPTests.testOperatorPinRoutes`.
+- **NODE-STORAGE-002.l** — A chain no longer hosted, unhosted or left out
+  of the configuration at a start, keeps nothing that only it named: its
+  facts go first, in one transaction, then what its own scopes name, so no
+  fact names content that is gone; what another scope names stays. Pinned
+  by `HostChainsRuntimeTests.testUnhostingAChainLetsGoOfItsDataAndHostingItAgainSyncsIt`
+  and `HostChainsRuntimeTests.testAStartWithoutAChainLetsGoOfItsData`.
 - **NODE-STORAGE-002.d** — Levels write parent before child; a crash
   between them restores with the child behind, never ahead. Pinned by
   `ChildLevelRestartTests.testACrashBetweenLevelWritesRestoresTheParentAhead`.

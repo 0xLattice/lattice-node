@@ -66,8 +66,8 @@ public enum ChainCreation {
             return false
         }
         // A chain already followed here takes no spec, running or not (in
-        // the hosted tree, listed or implied; failed to start; unhosted with
-        // its data kept).
+        // the hosted tree, listed or implied; failed to start; unhosted, its
+        // data not yet let go of).
         if let followed = try MergedConfig.load(root: layout.root).tree[chain.path] {
             throw Synced(path: chain.path, reason: followed.listedBy.isEmpty
                 ? "hosted for \(followed.impliedBy.joined(separator: ", "))"

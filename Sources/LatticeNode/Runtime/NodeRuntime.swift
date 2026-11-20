@@ -462,6 +462,7 @@ public final class NodeRuntime: Sendable {
         ))
         loop = Task {
             var state = initial.take()
+            await storage.letGoOfChains(except: Set([configuration.chainPath] + configuration.hostedChildren))
             // With no bodies kept beyond the working set, a start lets go
             // of the ones a run that kept them left, before any step.
             for (path, level) in state.core.levels { state.bodyTips[path] = level.snapshot.actOnTip }
@@ -956,13 +957,11 @@ extension NodeRuntime {
             for path in core.ordered where path != core.rootPath && !listed.contains(path) {
                 guard await step(.unhost(path)) else { throw NodeRuntimeError.stopped }
                 stateTips[path] = nil
-                await storage.letGoOfWindows(at: path)
-                await storage.letGoOfRules(at: path)
                 if let repair = counted.removeValue(forKey: path)?.repair {
                     repair.task.cancel()
                     await repair.task.value
                 }
-                await storage.dropCounted(at: path)
+                await storage.letGo(ofChain: path)
             }
             var failure: (any Error)?
             for path in next.hostedChildren where core.levels[path] == nil {

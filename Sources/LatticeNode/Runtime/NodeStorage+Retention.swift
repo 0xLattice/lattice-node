@@ -228,6 +228,54 @@ extension NodeStorage {
         try await broker.releaseRetainedRoots(scope: scopes.operatorPins, roots: [root])
     }
 
+    // MARK: - A chain no longer hosted
+
+    /// When the chain at `path` is no longer hosted: everything kept only
+    /// for it goes, and hosting it again syncs it from peers like any new
+    /// chain. Its facts go first, in one transaction, and its local
+    /// transactions, so no fact names content that is gone; then what its
+    /// own scopes name: its blocks' bodies and what they read, its spec and
+    /// policy modules, its state windows and its counts. What another scope
+    /// also names stays: another chain's blocks, the operator's pins, and
+    /// the chain scope on `all`. Facts that could not be dropped keep the
+    /// rest for the next start.
+    nonisolated func letGo(ofChain path: ChainPath) async {
+        do {
+            bundles.forget(try await store.forget(path))
+        } catch {
+            syncTrace("facts of \(path) not dropped: \(error)")
+            return
+        }
+        do {
+            for item in try await localTransactions() where item.transaction.body.node?.chainPath == path {
+                try await removeLocalTransaction(item.transactionCID)
+            }
+        } catch {
+            syncTrace("local transactions of \(path) not dropped: \(error)")
+        }
+        let chain = path.joined(separator: "/") + ":"
+        for prefix in [scopes.bodyPrefix, scopes.readsPrefix] {
+            do {
+                try await broker.releaseRetainedScopes(try await broker.retainedScopes(prefix: prefix + chain))
+            } catch {
+                syncTrace("\(prefix + chain) not released: \(error)")
+            }
+        }
+        await letGoOfWindows(at: path)
+        await letGoOfRules(at: path)
+        await dropCounted(at: path)
+    }
+
+    /// At a start: what is kept for a chain the configuration no longer
+    /// hosts goes, as when it was unhosted.
+    nonisolated func letGoOfChains(except hosted: Set<ChainPath>) async {
+        do {
+            for path in try await store.chainPaths().subtracting(hosted) { await letGo(ofChain: path) }
+        } catch {
+            syncTrace("chains no longer hosted not let go of at start: \(error)")
+        }
+    }
+
     /// Lets go of everything `scope` names.
     nonisolated func release(scope: String) async throws {
         let roots = try await broker.retainedRoots(scope: scope)

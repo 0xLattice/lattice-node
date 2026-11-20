@@ -228,6 +228,75 @@ extension NodeStore {
             childCommitments: fact.childCommitments
         )
     }
+
+    /// Every chain this store holds a fact, a cursor or a child proof of:
+    /// one index seek per chain, not a pass over the rows.
+    func chainPaths() throws -> Set<ChainPath> {
+        var paths: Set<ChainPath> = []
+        for (table, column) in [("admission_facts", "chain_path"), ("stream_cursors", "chain_path"), ("child_proofs", "chain")] {
+            var last = ""
+            while let chain = try database.row(
+                from: table,
+                "SELECT \(column) AS chain FROM \(table) WHERE \(column) > ?1 ORDER BY \(column) LIMIT 1",
+                params: [.text(last)]
+            )?.text("chain") {
+                paths.insert(chain.split(separator: "/").map(String.init))
+                last = chain
+            }
+        }
+        return paths
+    }
+
+    /// Drops what this store keeps for the chain at `path`, in one
+    /// transaction: its facts, block index, cursors, state diffs and child
+    /// proofs, and the header records, child indexes and proof entries no
+    /// other chain's rows name. Returns the blocks whose header records went.
+    func forget(_ path: ChainPath) throws -> [String] {
+        let chain = path.joined(separator: "/")
+        let others = try chainPaths().map { $0.joined(separator: "/") }.filter { $0 != chain }.sorted()
+        let params: [NodeSQLiteValue] = [.text(chain)] + others.map { .text($0) }
+        // The chain's own blocks: those no other chain holds too.
+        let own = """
+            SELECT block_cid FROM accepted_blocks a WHERE a.chain_path = ?1 AND NOT EXISTS (
+                SELECT 1 FROM accepted_blocks o
+                WHERE o.chain_path IN (\(others.indices.map { "?\($0 + 2)" }.joined(separator: ", ")))
+                  AND o.block_cid = a.block_cid
+            )
+            """
+        return try database.transaction {
+            let blocks = try database.rows(from: "accepted_blocks", own, params: params).map { try $0.text("block_cid") }
+            try database.execute("""
+                DELETE FROM child_indexes
+                WHERE cid IN (SELECT children_cid FROM headers WHERE cid IN (\(own)))
+                  AND cid NOT IN (SELECT children_cid FROM headers WHERE cid NOT IN (\(own)))
+                """, params: params)
+            try database.execute("DELETE FROM headers WHERE cid IN (\(own))", params: params)
+            var named: Set<String> = []
+            for row in try database.rows(
+                from: "child_proofs", "SELECT entries FROM child_proofs WHERE chain = ?1", params: [.text(chain)]
+            ) {
+                named.formUnion(try row.text("entries").split(separator: " ").map(String.init))
+            }
+            try database.execute("DELETE FROM child_proofs WHERE chain = ?1", params: [.text(chain)])
+            // A proof entry goes once no proof left names it.
+            let entries = try named.filter {
+                try !database.query("SELECT 1 FROM proof_entries WHERE cid = ?1", params: [.text($0)]).isEmpty
+            }
+            if !entries.isEmpty {
+                var kept: Set<String> = []
+                for row in try database.rows(from: "child_proofs", "SELECT entries FROM child_proofs") {
+                    kept.formUnion(try row.text("entries").split(separator: " ").map(String.init))
+                }
+                for cid in entries.subtracting(kept) {
+                    try database.execute("DELETE FROM proof_entries WHERE cid = ?1", params: [.text(cid)])
+                }
+            }
+            for table in ["admission_facts", "accepted_blocks", "stream_cursors", "state_diffs"] {
+                try database.execute("DELETE FROM \(table) WHERE chain_path = ?1", params: [.text(chain)])
+            }
+            return blocks
+        }
+    }
 }
 
 struct ChainFactMetadataRow: NodeStoreRecord {

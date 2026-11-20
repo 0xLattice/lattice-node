@@ -317,7 +317,9 @@ ancestors too: a chain stays hosted, implied, while a chain under it is
 listed, and `unhost` says so (`Nexus/Alpha: no longer listed; still hosted
 for Nexus/Alpha/Beta`); it stops once those are unhosted too. Its peers and
 windows, if any layer sets them, stay where they are, inert until it is
-hosted again. What it stored stays; hosting it again resumes it.
+hosted again. What the node stored only for it goes (see
+[What a node keeps](operations.md#what-a-node-keeps)); hosting it again
+syncs it from peers like any new chain.
 
 ### Committing a child block on its parent
 
