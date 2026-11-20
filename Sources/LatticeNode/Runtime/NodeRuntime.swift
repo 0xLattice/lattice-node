@@ -491,10 +491,7 @@ public final class NodeRuntime: Sendable {
                 }
             }
             state.cancelAll()
-            for job in state.jobs.values.map(\.task) {
-                job.cancel()
-                await job.value
-            }
+            await state.jobs.stop()
             for repair in state.counted.values.compactMap(\.repair) {
                 repair.task.cancel()
                 await repair.task.value
@@ -598,9 +595,7 @@ extension NodeRuntime {
         let gate: NodeRuntimeInputGate
         let helloTimeout: Duration
         let remote: IvyRootContentSource
-        let workers: Int
         let failStop: @Sendable (any Error) -> Void
-        let observeJob: JobObserver?
         let peerMemory: PeerMemory?
         /// Each hosted child level's last template block, reused while
         /// nothing it was built from changes (`ChildTemplateCache`).
@@ -630,24 +625,16 @@ extension NodeRuntime {
             }
         }
         var nextSession: UInt64 = 1
-        var runningJobs = 0
+        /// The worker pool and its queues.
+        var jobs: JobPool
         /// The Volumes the operator pinned, as last read: announced with the
         /// chains by each maintenance pass.
         var operatorPins: [String] = []
         /// What maintenance passes announced, with the expiry they sent.
         var announcedRoots: [String: UInt64] = [:]
-        /// The running jobs, which the loop waits for before it lets the
-        /// store go: a job reading from peers can outlast a step.
-        var jobs: [UInt64: (path: ChainPath, task: Task<Void, Never>)] = [:]
-        /// The running jobs of levels that stopped, cancelled: what they
-        /// report is dropped.
-        var abandonedJobs: Set<UInt64> = []
         /// Chains left the configuration: their data is let go of once no
         /// running job is of a chain not configured.
         var releasing = false
-        var nextJob: UInt64 = 0
-        /// The jobs waiting for a worker (`JobQueues`).
-        var queued = JobQueues()
         /// RPCs waiting on their answer, by reply ID.
         var replies: [UInt64: (path: ChainPath, reply: CheckedContinuation<NodeRuntimeReply, any Error>)] = [:]
         var nextReply: UInt64 = 1
@@ -782,9 +769,8 @@ extension NodeRuntime {
             self.templateDigest = templateDigest
             self.inputs = inputs
             self.remote = remote
-            self.workers = workers
+            self.jobs = JobPool(workers: workers, inputs: inputs, observeJob: observeJob)
             self.failStop = failStop
-            self.observeJob = observeJob
         }
 
         /// Returns false once the loop must end.
@@ -819,12 +805,11 @@ extension NodeRuntime {
                     let label = events.first?.traceLabel ?? "empty"
                     SyncTrace.log(chain: core.rootPath, "job \(label) \(times.line(taken: SyncTrace.now()))")
                 }
-                runningJobs -= 1
-                jobs[id] = nil
+                let abandoned = jobs.finished(id)
                 startJobs()
                 // A stopped level's job: what it reports is for no level,
                 // or for one hosted again since, which starts over.
-                guard abandonedJobs.remove(id) == nil else {
+                guard !abandoned else {
                     await releaseWhenIdle()
                     return true
                 }
@@ -1009,11 +994,7 @@ extension NodeRuntime {
             // one is cancelled, not awaited (it may wait on this loop), and
             // what it reports is dropped. Its chain is let go of once none
             // of them still runs: they store what they execute.
-            queued.drop { core.levels[$0.path] == nil }
-            for (id, job) in jobs where core.levels[job.path] == nil {
-                job.task.cancel()
-                abandonedJobs.insert(id)
-            }
+            jobs.abandon { core.levels[$0] == nil }
             releasing = releasing || !wasConfigured.isSubset(of: configured)
             await releaseWhenIdle()
             fetchWaits = fetchWaits.filter { core.levels[$0.key.path] != nil }
@@ -1060,7 +1041,7 @@ extension NodeRuntime {
         /// Lets go of the chains the configuration no longer hosts, once
         /// no running job is one of theirs.
         mutating func releaseWhenIdle() async {
-            guard releasing, !jobs.values.contains(where: { !configured.contains($0.path) }) else { return }
+            guard releasing, !jobs.runs(where: { !configured.contains($0) }) else { return }
             releasing = false
             await storage.letGoOfChains(except: configured)
         }
@@ -1422,7 +1403,7 @@ extension NodeRuntime {
             sync.blockedOn = level.progress(parentWeighed: parentWeighed, next: windows[path]?.next).rawValue
             sync.headersSynced = level.headersSynced
             sync.synced = level.synced
-            sync.jobsQueued = queued.count(at: path)
+            sync.jobsQueued = jobs.waiting(at: path)
             // The fee projection walks the pool, so a busy pool is projected
             // at most once a `projectionInterval`, and at once on a new tip.
             // A change inside the interval is projected when it ends, input
@@ -1763,7 +1744,7 @@ extension NodeRuntime {
                     _ = await ivy.disconnectSession(ifCurrent: session.peer)
                 }
             case .connect(let path, let jobs):
-                enqueue(NodeRuntime.connectJob(
+                self.jobs.enqueue(NodeRuntime.connectJob(
                     jobs, at: path, levels: LiveLevels(inputs: inputs), storage: storage, remote: remote,
                     failStop: failStop
                 ))
@@ -1898,7 +1879,7 @@ extension NodeRuntime {
                 let held = job.block ?? storage.store.header(job.childCID)?.block
                 let parent = Array(path.dropLast())
                 let (storage, failStop) = (storage, failStop)
-                enqueue(RuntimeJob(path: path, tipCID: nil) {
+                jobs.enqueue(RuntimeJob(path: path, tipCID: nil) {
                     var upstream: [ChildBlockProof] = []
                     if parent.count > 1 {
                         do {
@@ -1915,10 +1896,10 @@ extension NodeRuntime {
                 // Off the loop: a check without its block reads it from the
                 // header store there; one whose block is gone answers nil,
                 // blaming no one.
-                enqueue(NodeRuntime.proofJob(batch, at: path, storage: storage))
+                jobs.enqueue(NodeRuntime.proofJob(batch, at: path, storage: storage))
                 startJobs()
             case .readTransactions(let blocks):
-                enqueue(NodeRuntime.readJob(blocks, at: path, storage: storage))
+                jobs.enqueue(NodeRuntime.readJob(blocks, at: path, storage: storage))
                 startJobs()
             case .mining(let effect):
                 return await execute(effect, at: path)
@@ -1983,11 +1964,11 @@ extension NodeRuntime {
                 guard let basis = core.levels[path].flatMap({
                     NodeRuntime.miningBasis(effect, tree: $0.tree, parent: core.levels[Array(path.dropLast())])
                 }) else { preconditionFailure("every hosted level's tree carries a context: a preflight has a basis") }
-                enqueue(NodeRuntime.miningJob(effect, at: path, basis: basis, storage: storage, remote: remote), effect)
+                jobs.enqueue(NodeRuntime.miningJob(effect, at: path, basis: basis, storage: storage, remote: remote), effect)
                 startJobs()
             case .buildTemplate:
                 guard let basis = core.levels[path].flatMap({ NodeRuntime.miningBasis(effect, tree: $0.tree) }) else { break }
-                enqueue(NodeRuntime.miningJob(
+                jobs.enqueue(NodeRuntime.miningJob(
                     effect, at: path, basis: basis, storage: storage, remote: remote,
                     children: childTemplateInputs(below: path),
                     hosted: core.ordered.filter { $0.count > path.count && $0.starts(with: path) },
@@ -1996,7 +1977,7 @@ extension NodeRuntime {
                 ), effect)
                 startJobs()
             case .returnTransactions:
-                enqueue(NodeRuntime.miningJob(effect, at: path, basis: nil, storage: storage, remote: remote), effect)
+                jobs.enqueue(NodeRuntime.miningJob(effect, at: path, basis: nil, storage: storage, remote: remote), effect)
                 startJobs()
             }
             return true
@@ -2036,32 +2017,9 @@ extension NodeRuntime {
             return session
         }
 
-        /// The worker pool: at most `workers` jobs run; each result posts
-        /// back as an event that frees its slot.
+        /// Start what the worker pool has room for (`JobPool`).
         private mutating func startJobs() {
-            while runningJobs < workers, let job = queued.next(in: core) {
-                runningJobs += 1
-                nextJob += 1
-                let (inputs, id, started) = (inputs, nextJob, SyncTrace.now())
-                jobs[id] = (job.path, Task {
-                    let events = await job.run()
-                    let times = SyncTrace.enabled ? TraceTimes(queued: job.queued, started: started, done: SyncTrace.now()) : nil
-                    inputs.yield(.jobDone(id, events, times))
-                })
-            }
-        }
-
-        /// Queue `job`, behind `observeJob` when a test watches the pool.
-        private mutating func enqueue(_ job: RuntimeJob, _ effect: MiningEffect? = nil) {
-            guard let observeJob else {
-                var job = job
-                job.queued = SyncTrace.now()
-                return queued.append(job)
-            }
-            queued.append(RuntimeJob(path: job.path, tipCID: job.tipCID, kind: job.kind, queued: SyncTrace.now()) {
-                await observeJob(job.kind, job.path, effect)
-                return await job.run()
-            })
+            jobs.start(in: core)
         }
 
         /// The working set, when the operator keeps no bodies beyond it:
