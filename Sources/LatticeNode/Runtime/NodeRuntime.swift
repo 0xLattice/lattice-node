@@ -1398,13 +1398,15 @@ extension NodeRuntime {
             return RuntimeJob(path: path, tipCID: nil) {
                 var derived: [NodeEvent] = []
                 for (job, held) in zip(batch, held) {
+                    // A stop does not wait for the rest of the batch.
+                    guard !Task.isCancelled else { return derived }
                     var upstream: [ChildBlockProof] = []
                     if parent.count > 1 {
                         do {
                             upstream = try storage.store.savedProofs(at: parent, for: [job.carrier])[job.carrier] ?? []
                         } catch {
                             failStop(error)
-                            return []
+                            return derived
                         }
                     }
                     derived.append(.level(path, .derived(await job.run(held: held, upstream: upstream, fetcher: storage.workFetcher))))
