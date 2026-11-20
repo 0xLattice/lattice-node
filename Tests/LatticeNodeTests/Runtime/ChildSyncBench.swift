@@ -27,7 +27,10 @@ import XCTest
 ///   bodies BENCH_BODIES, default all; the follower's alone) in CHILD_BENCH_DIR syncs
 ///   from CHILD_BENCH_PEER (key@host:port) until every level in
 ///   CHILD_BENCH_MANIFEST reaches its recorded height. With CHILD_BENCH_VFS
-///   set it counts SQLite writes, commits and syncs and writes them there.
+///   set it counts SQLite writes, commits and syncs and writes them there;
+///   with CHILD_BENCH_PAGES (seconds) as well, the bytes written to each
+///   table and index, attributed that often. CHILD_BENCH_HOSTED=k hosts
+///   only the first k child levels of the manifest (0: Nexus alone).
 final class ChildSyncBench: XCTestCase {
     static let alpha = ["Nexus", "Alpha"]
     /// Blocks always come later than a 1 ms schedule, so Alpha's and the
@@ -230,13 +233,6 @@ final class ChildSyncBench: XCTestCase {
     func testFollow() async throws {
         let env = ProcessInfo.processInfo.environment
         try XCTSkipUnless(env["CHILD_BENCH"] == "follow")
-        let targets = try Self.manifest(env["CHILD_BENCH_MANIFEST"]!)
-        let peerSpec = env["CHILD_BENCH_PEER"]!.split(separator: "@")
-        let hostPort = peerSpec[1].split(separator: ":")
-        let peer = PeerEndpoint(publicKey: String(peerSpec[0]), host: String(hostPort[0]), port: UInt16(hostPort[1])!)
-        let dir = URL(fileURLWithPath: env["CHILD_BENCH_DIR"]!)
-        try? FileManager.default.removeItem(at: dir)
-        if env["CHILD_BENCH_VFS"] != nil { XCTAssertEqual(bench_vfs_install(), 0) }
         // What the follower keeps, from the environment (the recorder and
         // the server keep everything, whatever it says): BENCH_STATE (all,
         // recent, none; default recent) and BENCH_BODIES (all, none; default
@@ -250,6 +246,17 @@ final class ChildSyncBench: XCTestCase {
             }
             return read
         }
+        let recorded = try Self.manifest(env["CHILD_BENCH_MANIFEST"]!)
+        // The levels this follower hosts: Nexus, then the first k children
+        // in the manifest's order (Alpha before its leaves).
+        let children = recorded.filter { $0.0 != ["Nexus"] }
+        let hosted = try setting("CHILD_BENCH_HOSTED", default: children.count) { Int($0).flatMap { (0...children.count).contains($0) ? $0 : nil } }
+        let targets = recorded.filter { $0.0 == ["Nexus"] } + children.prefix(hosted)
+        let peerSpec = env["CHILD_BENCH_PEER"]!.split(separator: "@")
+        let hostPort = peerSpec[1].split(separator: ":")
+        let peer = PeerEndpoint(publicKey: String(peerSpec[0]), host: String(hostPort[0]), port: UInt16(hostPort[1])!)
+        let dir = URL(fileURLWithPath: env["CHILD_BENCH_DIR"]!)
+        try? FileManager.default.removeItem(at: dir)
         let state = try setting("BENCH_STATE", default: StateRetention.recent, StateRetention.init(rawValue:))
         let bodies = try setting("BENCH_BODIES", default: BlockBodies.all, BlockBodies.init(rawValue:))
         let (fc, fo) = try host(
@@ -261,7 +268,20 @@ final class ChildSyncBench: XCTestCase {
         // limited to N CPUs still sees the host's, so run.sh passes what a
         // host with N CPUs would use.
         let workers = env["CHILD_BENCH_WORKERS"].flatMap(Int.init) ?? max(1, ProcessInfo.processInfo.activeProcessorCount - 1)
-        say("CHILD_BENCH follower workers \(workers) processors \(ProcessInfo.processInfo.activeProcessorCount) state \(state.rawValue) bodies \(bodies.rawValue)")
+        if env["CHILD_BENCH_VFS"] != nil { XCTAssertEqual(bench_vfs_install(), 0) }
+        // Bytes written by table and index: the pages written, attributed
+        // to the b-tree each is in every few seconds (pages are reused).
+        let pages = env["CHILD_BENCH_VFS"] == nil ? nil : env["CHILD_BENCH_PAGES"].flatMap(Double.init)
+        if pages != nil { bench_vfs_pages() }
+        let attributing = pages.map { seconds in
+            Task.detached {
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: UInt64(seconds * 1e9))
+                    bench_vfs_attribute()
+                }
+            }
+        }
+        say("CHILD_BENCH follower workers \(workers) processors \(ProcessInfo.processInfo.activeProcessorCount) state \(state.rawValue) bodies \(bodies.rawValue) hosted \(hosted)")
         SyncTrace.log(chain: ["bench"], "follower start")
         let io0 = Self.bytesWritten()
         let cpu0 = Self.cpuSeconds()
@@ -271,11 +291,20 @@ final class ChildSyncBench: XCTestCase {
             storage: try await NodeStorage.open(configuration: fc), configuration: fc, overlay: fo, workers: workers
         )
         var pending = targets
+        // When each level's act-on tip first moved, and first reached half
+        // its recorded height: with the time it reached it, how its progress
+        // went, not only when it ended.
+        var moved: [[String]: Double] = [:], half: [[String]: Double] = [:]
         try await eventually("synced", within: .seconds(7_200), poll: .milliseconds(50)) {
             var left: [([String], UInt64, String)] = []
             for (path, target, tip) in pending {
-                if await Self.height(follower, path) >= target {
-                    say("CHILD_BENCH level \(path.joined(separator: "/")) height \(target) wall \(String(format: "%.3f", seconds(wall0.duration(to: .now)))) cpu \(String(format: "%.3f", Self.cpuSeconds() - cpu0))")
+                let height = await Self.height(follower, path)
+                let now = seconds(wall0.duration(to: .now))
+                if height > 0, moved[path] == nil { moved[path] = now }
+                if height * 2 >= target, half[path] == nil { half[path] = now }
+                if height >= target {
+                    say("CHILD_BENCH level \(path.joined(separator: "/")) height \(target) wall \(String(format: "%.3f", now)) cpu \(String(format: "%.3f", Self.cpuSeconds() - cpu0))"
+                        + " moved \(String(format: "%.3f", moved[path] ?? now)) half \(String(format: "%.3f", half[path] ?? now))")
                     // The same blocks the recording ends on.
                     let synced = await Self.tip(follower, path)
                     XCTAssertEqual(synced, tip, "\(path) tip")
@@ -290,7 +319,12 @@ final class ChildSyncBench: XCTestCase {
         let cpu = Self.cpuSeconds() - cpu0
         let written = (Self.bytesWritten() ?? 0) &- (io0 ?? 0)
         SyncTrace.log(chain: ["bench"], "follower done")
-        if let out = env["CHILD_BENCH_VFS"] { bench_vfs_dump(out) }
+        attributing?.cancel()
+        if let out = env["CHILD_BENCH_VFS"] {
+            bench_vfs_attribute()
+            bench_vfs_dump(out)
+        }
+        for line in ReadTally.summary() where ReadTally.enabled { say("CHILD_BENCH \(line)") }
         await follower.stop()
         let blocks = targets.reduce(0) { $0 + $1.1 }
         // Peak resident memory (KiB on Linux, bytes on Darwin) and what the

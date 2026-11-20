@@ -91,10 +91,19 @@ extension NodeStorage {
                 keepsStateDiffs: backend.keepsStateDiffs
             ))
         }
-        try await broker.storeVolumesLocal(
-            await storage.takeVolumes(), retaining: retaining.filter { !$0.value.isEmpty }
-        )
+        let volumes = await storage.takeVolumes()
+        let kept = retaining.filter { !$0.value.isEmpty }
+        syncTrace("stored state \(Self.storedLine(volumes, kept))")
+        try await broker.storeVolumesLocal(volumes, retaining: kept)
         try await store.stageNodeFacts(durable, logID: logID)
+    }
+
+    /// A trace line's account of one store: its Volumes, their entries, the
+    /// entries' bytes and their CIDs' text, and the roots it retains.
+    static func storedLine(_ volumes: [ValidatedVolume], _ retaining: [String: [String]]) -> String {
+        let entries = volumes.flatMap(\.volume.entries)
+        return "volumes \(volumes.count) entries \(entries.count) bytes \(entries.reduce(0) { $0 + $1.value.count })"
+            + " cidBytes \(entries.reduce(0) { $0 + $1.key.utf8.count }) retained \(retaining.values.reduce(0) { $0 + $1.count })"
     }
 
     /// Retains the roots this store holds, and returns the ones it lacks.
@@ -131,14 +140,16 @@ extension NodeStorage {
     /// let go of, as a reorganization past its kept windows needs. A
     /// block's body is fetched without its state (`fetchChainBody`).
     nonisolated func ownReads(through peers: any ContentSource) -> CoalescingFetcher {
-        CoalescingFetcher(CompositeContentSource([workSource, readCache, readCache.remembering(peers)]))
+        CoalescingFetcher(CompositeContentSource([
+            workSource, ReadTally.wrap("memory", readCache), ReadTally.wrap("peers", readCache.remembering(peers)),
+        ]))
     }
 
     /// How a reader's state read reads: this store, a block's header
     /// record, what is in memory, then peers, whose answers are not kept
     /// for later reads.
     nonisolated func readersReads(through peers: any ContentSource) -> CoalescingFetcher {
-        CoalescingFetcher(CompositeContentSource([workSource, readCache, peers]))
+        CoalescingFetcher(CompositeContentSource([workSource, ReadTally.wrap("memory", readCache), ReadTally.wrap("peers", peers)]))
     }
 
     /// Stores a block and pins what was stored: its body is what `fetcher`,
@@ -262,6 +273,7 @@ extension NodeStorage {
             }
         }
         let volumes = try stored.keys.sorted().compactMap { try stored[$0].map(ValidatedVolume.init(trusting:)) }
+        syncTrace("stored body \(Self.storedLine(volumes, retaining))")
         try await broker.storeVolumesLocal(volumes, retaining: retaining.filter { !$0.value.isEmpty })
         bundles.record(bundled)
         return carried
@@ -335,7 +347,7 @@ extension NodeStorage {
             ) { session in
                 // Read into memory, never into the store: what a peer sent is
                 // stored once the block's execution has found it valid.
-                let fetcher = CoalescingFetcher(CompositeContentSource([broker, session]))
+                let fetcher = CoalescingFetcher(CompositeContentSource([ReadTally.wrap("store", broker), ReadTally.wrap("peers", session)]))
                 let walked = NodeImportStorage(storage: nil, keepsVolumes: true)
                 do {
                     // With its receipt witness, which the bundle carries,

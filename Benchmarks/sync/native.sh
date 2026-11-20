@@ -9,6 +9,19 @@
 # macOS an fsync is not forced to the device, so disk timings understate
 # Linux; counts (commits, fsyncs, bytes, jobs) and the per-level split hold.
 # Compare runs from the same machine only.
+#
+# Optional, from the environment:
+#   DATA=<dir>   the recorded chain (default <work-dir>/data/chain), recorded
+#                there with BLOCKS and LEAVES when it has no manifest.txt
+#   TAG=<name>   run directories are <work-dir>/runs/<name>-<n> (default w<workers>)
+#   HOSTED=<k>   the follower hosts Nexus and the first k child levels only
+#   PAGES=<s>    bytes written by table and index, attributed every s seconds
+#   TALLY=1      count the reads of each CID by the node's work (repeated decodes)
+#   PROFILE=1    a CPU profile of the follower (macOS: sample) into sample.txt
+#   TRACE=0      no sync trace
+# Each run also records the loopback interface's bytes before and after the
+# follower's sync (net.txt): the server is on 127.0.0.1, so that is the
+# traffic between them, plus whatever else this host sends over loopback.
 set -e
 REPO=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 mkdir -p "$1"; W=$(cd "$1" && pwd); N=$2; REPEATS=${3:-1}; REF=${4:-HEAD}
@@ -40,9 +53,15 @@ bench() {
   else "$B" "LatticeNodeTests.ChildSyncBench/$1"; fi
 }
 
-D=$W/data/chain
+# Bytes the loopback interface carried so far: received, sent.
+net() {
+  if [ "$(uname)" = Darwin ]; then netstat -ib -I lo0 | awk 'NR == 2 { print $6, $9 }'
+  else echo "$(cat /sys/class/net/lo/statistics/rx_bytes) $(cat /sys/class/net/lo/statistics/tx_bytes)"; fi
+}
+
+D=${DATA:-$W/data/chain}
 if [ ! -f "$D/manifest.txt" ]; then
-  rm -rf "$D"; mkdir -p "$W/data"
+  rm -rf "$D"; mkdir -p "$D"; D=$(cd "$D" && pwd); mkdir -p "$W/data"
   (export CHILD_BENCH=record CHILD_BENCH_DIR=$D CHILD_BENCH_BLOCKS=${BLOCKS:-3000} CHILD_BENCH_LEAVES=${LEAVES:-2}
    bench testRecord) > "$W/data/record.log" 2>&1 || { tail -20 "$W/data/record.log"; exit 1; }
 fi
@@ -50,7 +69,7 @@ cat "$D/manifest.txt"
 
 n=1
 while [ "$n" -le "$REPEATS" ]; do
-  O=$W/runs/w$N-$n; rm -rf "$O" "$W/follower"; mkdir -p "$O"; cp "$W/ref" "$O/ref"
+  O=$W/runs/${TAG:-w$N}-$n; rm -rf "$O" "$W/follower"; mkdir -p "$O"; cp "$W/ref" "$O/ref"
   (export CHILD_BENCH=serve CHILD_BENCH_DIR=$D CHILD_BENCH_SERVE=7200 CPUS=$SERVER_CPUS; exec 2>&1; bench testServe) > "$O/serve.log" &
   SERVE=$!
   PEER=
@@ -62,13 +81,31 @@ while [ "$n" -le "$REPEATS" ]; do
   done
   [ -n "$PEER" ] || { tail -20 "$O/serve.log"; echo "server did not start"; exit 1; }
   status=0
+  net > "$O/net.txt"
   (
     export CHILD_BENCH=follow CHILD_BENCH_WORKERS=$N CHILD_BENCH_DIR=$W/follower CPUS=$FOLLOWER_CPUS
     export CHILD_BENCH_MANIFEST=$D/manifest.txt CHILD_BENCH_PEER=$PEER CHILD_BENCH_VFS=$O/vfs.txt
     # TRACE=0 skips the sync trace: no W/B/E/P split, no trace cost.
     [ "${TRACE:-1}" = 0 ] || export LATTICE_SYNC_TRACE=$O/trace LATTICE_SYNC_TRACE_MAX_BYTES=0
+    [ -z "$HOSTED" ] || export CHILD_BENCH_HOSTED=$HOSTED
+    [ -z "$PAGES" ] || export CHILD_BENCH_PAGES=$PAGES
+    [ "${TALLY:-0}" = 0 ] || export LATTICE_READ_TALLY=1
     bench testFollow
-  ) > "$O/out" 2>&1 || status=$?
+  ) > "$O/out" 2>&1 &
+  FOLLOW=$!; SAMPLE=
+  if [ "${PROFILE:-0}" = 1 ]; then
+    # The xctest the follow subshell started, once the follower is set up.
+    for i in $(seq 100); do
+      F=$(pgrep -P $FOLLOW | head -1)
+      grep -q 'CHILD_BENCH follower' "$O/out" 2>/dev/null && break
+      sleep 0.1
+    done
+    if [ "$(uname)" = Darwin ]; then sample "$F" 7200 1 -mayDie -file "$O/sample.txt" > /dev/null 2>&1 & SAMPLE=$!
+    else echo "PROFILE=1 is macOS only (sample); use perf record -p on Linux" > "$O/sample.txt"; fi
+  fi
+  wait $FOLLOW || status=$?
+  net >> "$O/net.txt"
+  [ -z "$SAMPLE" ] || wait $SAMPLE
   pkill -P $SERVE 2>/dev/null || true; kill $SERVE 2>/dev/null || true; wait $SERVE 2>/dev/null || true
   grep '^CHILD_BENCH follow' "$O/out" || { tail -20 "$O/out"; echo "run $n did not finish"; exit 1; }
   [ "$status" = 0 ] || { echo "run $n failed (see $O/out)"; exit 1; }

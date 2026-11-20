@@ -97,7 +97,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         self.bundles = bundles
         self.broker = broker
         self.localFetcher = localFetcher
-        self.workSource = CompositeContentSource([broker, HeaderRecords(store: store)])
+        self.workSource = CompositeContentSource([ReadTally.wrap("store", broker), ReadTally.wrap("headers", HeaderRecords(store: store))])
         self.workFetcher = CoalescingFetcher(workSource)
         self.readCache = ReadCache(maximumBytes: configuration.resourcePolicy.maximumCachedContentBytes)
         self.retentionScope = retentionScope
