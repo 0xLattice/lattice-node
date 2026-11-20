@@ -40,8 +40,9 @@ extension NodeStorage {
     /// in one transaction of its own chain's store, retained in the same
     /// one, store by store, shallowest level first — then the complete node step's
     /// headers, proofs, facts and cursors in one state.db transaction. A
-    /// crash between stores leaves content no fact names, which the next
-    /// start sweeps.
+    /// crash between stores leaves content no fact names, retained under its
+    /// window's scope like any execution's: it goes when the tip is a window
+    /// past it, or with its chain.
     nonisolated func persistNodeBatch(_ batch: NodeBatch, logID: String) async throws {
         var durable: [NodeFactBatch] = []
         // Each level's content, for its own store, and where what its

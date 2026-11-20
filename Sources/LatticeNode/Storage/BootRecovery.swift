@@ -83,6 +83,12 @@ enum BootRecovery {
     private static func openStores(
         configuration: NodeConfiguration
     ) throws -> Stores {
+        // state.db first: a store of another epoch or Nexus genesis is
+        // refused before anything is opened, let alone removed.
+        let store = try NodeStore(
+            databasePath: NodeStore.databasePath(storage: configuration.storagePath),
+            nexusGenesisCID: configuration.nexusGenesisCID
+        )
         let volumes = try VolumeStores(
             directory: configuration.storagePath, root: configuration.chainPath, hosted: configuration.hostedChildren
         )
@@ -93,10 +99,6 @@ enum BootRecovery {
         ].joined(separator: ":")
         let durableMempoolOwner = retentionScope + ":durable-mempool"
         let liveMempoolOwner = retentionScope + ":live-mempool"
-        let store = try NodeStore(
-            databasePath: NodeStore.databasePath(storage: configuration.storagePath),
-            nexusGenesisCID: configuration.nexusGenesisCID
-        )
         return Stores(
             stores: volumes,
             localFetcher: localFetcher,

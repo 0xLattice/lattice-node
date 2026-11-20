@@ -223,6 +223,9 @@ extension NodeStorage {
         for path in held.subtracting(hosted).sorted(by: { $0.count > $1.count }) where await !letGo(ofChain: path) {
             failed.append(path)
         }
+        // A store no fact names (a chain that never journaled, or one whose
+        // facts went after its store did): removed too.
+        stores.removeFiles(except: hosted.union(failed))
         return failed
     }
 

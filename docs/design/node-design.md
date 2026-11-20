@@ -1246,8 +1246,8 @@ a chain's executions read its own store and its ancestors' (a child's
 receipt proofs travel with its blocks, §4.9a); a read by CID from the API or
 a peer asks every store. Content is written before the facts that name it,
 store by store, then the facts in one `state.db` transaction, as now: a crash
-between stores leaves content no fact names, which the start-up sweep
-removes. The cost is one more commit per chain a step touches; a step
+between stores leaves content no fact names, kept under its window's scope
+until the tip is a window past it. The cost is one more commit per chain a step touches; a step
 usually touches one or two. geth's path scheme stays the next step if one
 chain's own growth over time ever misses a target.
 
@@ -1263,7 +1263,8 @@ node's: the protocol constants, the Nexus genesis, policy modules and child
 genesis specs, the operator's pins and the mempool's journal pins. A step's persist writes the store of each level whose executions
 it journals, and the root's for a child genesis's spec it weighs; a
 connect step executes one level, so most write one store, and a crash
-between two leaves content no fact names, which the next start sweeps.
+between two leaves content no fact names, kept under its window's scope
+until the tip is a window past it.
 Unhosting a chain lets its windows, rules and counts go as before and keeps
 its store, bodies included, until the next start removes it: a job of the
 chain still running writes to a store that is there, and a chain hosted

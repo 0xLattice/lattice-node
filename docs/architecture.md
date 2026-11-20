@@ -134,7 +134,8 @@ then retained. The complete `NodeBatch` then commits in one SQLite transaction
 across every affected chain path, including each path's headers, child
 proofs, and sync cursors. A crash cannot leave part of a block's content or a
 parent-level half of a multi-level grind; one between two chains' stores
-leaves content no fact names, which the next start sweeps.
+leaves content no fact names, retained under its window's scope: it goes
+when the tip is a window past it, or with its chain.
 
 Content stays in its chain's Volume store because a retention scope names it, and each
 scope says why. A block's body (its own Volume and its transactions') is

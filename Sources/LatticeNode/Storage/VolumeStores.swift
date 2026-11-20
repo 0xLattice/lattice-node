@@ -59,18 +59,14 @@ final class VolumeStores: ContentSource, Sendable {
         }
     }
 
-    /// Opens the root's store and each of `hosted`'s, and removes every
-    /// other file under `volumes/`: the store of a chain no longer hosted,
-    /// with its log and shared memory, so a stale log never pairs with a
-    /// new file.
+    /// Opens the root's store and each of `hosted`'s. Nothing is removed
+    /// here: a chain not hosted is let go of at the start, after state.db
+    /// is validated, content first (`NodeStorage.letGoOfChains`, then
+    /// `removeFiles(except:)`).
     init(directory storage: URL, root rootPath: ChainPath, hosted: [ChainPath]) throws {
         directory = storage.appendingPathComponent("volumes", isDirectory: true)
         self.rootPath = rootPath
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let wanted = Set(([rootPath] + hosted).flatMap { path in ["", "-wal", "-shm"].map { Self.fileName(path) + $0 } })
-        for name in (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [] where !wanted.contains(name) {
-            try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
-        }
         root = try Self.open(directory, rootPath)
         var stores = [rootPath: root]
         for path in hosted where path != rootPath { stores[path] = try Self.open(directory, path) }
@@ -151,6 +147,17 @@ final class VolumeStores: ContentSource, Sendable {
         let file = directory.appendingPathComponent(Self.fileName(path))
         for suffix in ["", "-wal", "-shm"] {
             try? FileManager.default.removeItem(atPath: file.path + suffix)
+        }
+    }
+
+    /// Removes every file under `volumes/` that is not the store of a chain
+    /// in `chains`, logs and shared memory included: what a chain no longer
+    /// hosted left with no facts to name it. A stale log never pairs with a
+    /// new file.
+    func removeFiles(except chains: Set<ChainPath>) {
+        let wanted = Set(chains.flatMap { path in ["", "-wal", "-shm"].map { Self.fileName(path) + $0 } })
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [] where !wanted.contains(name) {
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
         }
     }
 
