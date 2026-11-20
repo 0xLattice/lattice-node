@@ -257,6 +257,20 @@ final class HostChainsRuntimeTests: XCTestCase {
         try await eventually("Alpha's data is let go of once the execution ends") {
             (try? await app.test(.router) { client in try await Self.volumeStatus(client, dropped) }) == .notFound
         }
+        // The held execution has had time to store its block: none of
+        // Alpha's blocks is served, that one included.
+        try await Task.sleep(for: .seconds(1))
+        let blocks = await LiveLevels(inputs: host.runtime.inputs).read { levels -> [String] in
+            guard let alpha = levels[Self.alpha] else { return [] }
+            return (1...max(1, alpha.snapshot.bestHeaderHeight)).compactMap { alpha.tree.canonicalBlockHash(atHeight: $0) }
+        } ?? []
+        XCTAssertFalse(blocks.isEmpty)
+        try await app.test(.router) { client in
+            for cid in blocks {
+                let served = try await Self.volumeStatus(client, cid)
+                XCTAssertEqual(served, .notFound, "Alpha's block \(cid) is not served")
+            }
+        }
         let status = await follower.runtime.status()
         XCTAssertEqual(status.chainPath, ["Nexus"], "the node still answers")
     }

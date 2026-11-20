@@ -642,9 +642,9 @@ extension NodeRuntime {
         /// The running jobs of levels that stopped, cancelled: what they
         /// report is dropped.
         var abandonedJobs: Set<UInt64> = []
-        /// The chains no longer configured whose data is let go of once no
-        /// running job is theirs.
-        var releasing: Set<ChainPath> = []
+        /// Chains left the configuration: their data is let go of once no
+        /// running job is of a chain not configured.
+        var releasing = false
         var nextJob: UInt64 = 0
         /// The jobs waiting for a worker (`JobQueues`).
         var queued = JobQueues()
@@ -1014,8 +1014,7 @@ extension NodeRuntime {
                 job.task.cancel()
                 abandonedJobs.insert(id)
             }
-            releasing.formUnion(wasConfigured.subtracting(configured))
-            releasing.subtract(configured)
+            releasing = releasing || !wasConfigured.isSubset(of: configured)
             await releaseWhenIdle()
             fetchWaits = fetchWaits.filter { core.levels[$0.key.path] != nil }
             connectWaits = connectWaits.filter { core.levels[$0.key.path] != nil }
@@ -1061,8 +1060,8 @@ extension NodeRuntime {
         /// Lets go of the chains the configuration no longer hosts, once
         /// no running job is one of theirs.
         mutating func releaseWhenIdle() async {
-            guard !releasing.isEmpty, !jobs.values.contains(where: { releasing.contains($0.path) }) else { return }
-            releasing = []
+            guard releasing, !jobs.values.contains(where: { !configured.contains($0.path) }) else { return }
+            releasing = false
             await storage.letGoOfChains(except: configured)
         }
 
