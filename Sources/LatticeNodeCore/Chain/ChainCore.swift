@@ -368,11 +368,14 @@ public struct ChainCore: Sendable {
     /// parent's latch opens it for good (`parentWeighed`), while the parent
     /// may still be executing. Never held past the step.
     var gated = false
-    /// A child level, within one step only: its parent level has caught up
-    /// (`synced`), so a parent fact it lacks is not on its way from the
-    /// parent's own progress (`unobtainable`). True at the root. Never held
-    /// past the step.
-    var parentCaughtUp = true
+    /// A child level, within one step only: whether its parent level has
+    /// caught up now (`caughtUp`, and latched `synced`), so that a parent
+    /// fact it lacks is not on its way from the parent's own progress
+    /// (`unobtainable`). Nil outside a step: work that runs this level's
+    /// `finish` without the host (an own block weighed, a parent's run
+    /// applied) assumes a child's parent is still syncing, and a root's
+    /// has none.
+    var parentCaughtUp: Bool?
     /// A child level stepped while gated: its peers were held back, and are
     /// read once the parent has latched (`parentWeighed`).
     public internal(set) var heldBack = false
@@ -498,7 +501,7 @@ public struct ChainCore: Sendable {
         defer {
             parentTree = nil
             gated = false
-            self.parentCaughtUp = true
+            self.parentCaughtUp = nil
         }
         var turn = Turn(now: now)
         weighed = []

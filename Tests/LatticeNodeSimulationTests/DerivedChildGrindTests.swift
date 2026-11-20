@@ -2097,7 +2097,17 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertEqual(host.core.levels[Self.alpha]?.snapshot.actOnTip, genesis)
         XCTAssertEqual(host.core.levels[Self.alpha]?.headersSynced, true)
         XCTAssertEqual(host.core.levels[Self.alpha]?.synced, false, "while Nexus syncs, the fact may be on its way")
+        // Work that runs the latch without the host, outside a step (an own
+        // block weighed, a parent's run applied), assumes the parent is
+        // still syncing, whatever it is.
+        func latchesOutsideAStep() throws -> Bool {
+            var level = try XCTUnwrap(host.core.levels[Self.alpha])
+            level.latchSynced()
+            return level.synced
+        }
+        XCTAssertFalse(try latchesOutsideAStep())
         try await failToCap(&host, fixture.nexus[1].cid)
+        XCTAssertFalse(try latchesOutsideAStep(), "outside a step the parent is not known to have caught up")
         XCTAssertEqual(host.core.levels[Self.nexus]?.synced, true)
         await host.step(.tick)
         let alpha = try XCTUnwrap(host.core.levels[Self.alpha])

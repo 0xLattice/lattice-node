@@ -373,7 +373,15 @@ an execution stall stop propagation. The relay pushes what is new to its
 peers: a block this node produced, which no peer has yet, or anything
 appended once this level has weighed a peer's whole log (`headersSynced`).
 One rule, two facts that establish newness; a node with no peers never
-weighs a peer's log, and still relays what it mines. As Bitcoin's BIP152
+weighs a peer's log, and still relays what it mines. `headersSynced` latches
+on any one peer's whole log, so a node that finished a short log while still
+reading a longer one pushes what it weighs from the longer one: a page per
+step to each subscriber until it catches up. A stricter fact, every peer's
+log read to its end, would let one peer that never finishes its log stop
+the relay and keep child levels closed: it fails closed, putting cost
+(outcome 7) above propagation (outcome 3). The latch, as Bitcoin's leaves
+initial download once and does not re-enter it for a lagging peer, accepts
+the bounded cost. As Bitcoin's BIP152
 high-bandwidth relay announces a block once its proof of work is checked,
 before it is validated.
 
@@ -395,9 +403,12 @@ child block whose connect waits on a parent fact its parent has not executed
 did not count, so a heavier branch through one held the gate shut for good,
 with the parent caught up and the fact coming from nowhere (§4.9a's spec
 references: "not proven here", retriable, owed by no one). Such a block now
-counts as unobtainable once the parent level is itself caught up: while the
-parent is still syncing the fact is likely on its way, as a body is while
-its retries are below the cap. The latch stays one-way, as Bitcoin's
+counts as unobtainable once the parent level has caught up, latched and now
+(`caughtUp`, passed into the child's step): while the parent is still
+syncing the fact is likely on its way, as a body is while its retries are
+below the cap. Outside a step, where an own block is weighed or a parent's
+run applied, a child level does not know its parent's state and assumes it
+is still syncing. The latch stays one-way, as Bitcoin's
 `IsInitialBlockDownload` is, and now its condition can always come to hold.
 
 The simulator checks both, at every level of every honest core after the
@@ -432,15 +443,17 @@ would put one chain's state in another's. Bitcoin Core and geth answer one
 chain per call; this answers one chain path per call.
 
 **Simulator assertions.** The same predicates drive the simulator: after
-the quiet point, every level of every honest core has both latches set and
-no tip `stalled` (`LevelInvariants.checkGatesOpen`), across the scenarios
-that cover each Phase 1 case: missing bodies (the body withholder,
-`WithheldBodiesLivenessTests`), delayed proofs (the proof withholder, the
-zero-work peer), parent–child stalls (`ForwardAnchorSimulationTests`,
-`CrossLevelForkChoiceTests`) and reorganisations at several depths (fork
-probabilities up to 0.6; `StateWindowTests` within and beyond the window).
-Worker starvation is the runtime's job order, outside the simulator, and is
-covered by `NodeRuntimeJobOrderTests`.
+the quiet point, every level of every honest core has both latches set
+(`synced` once the level has a tip) and no tip `stalled`
+(`LevelInvariants.checkGatesOpen`), in every multi-level simulation
+(`LevelSimulator`): the body and proof withholders, the zero-work and
+schedule-lying peers, flooders, parent forks up to 0.6 and backward anchors
+(`ForwardAnchorSimulationTests`). The Phase 1 cases outside it keep their
+own tests and do not run this invariant: withheld bodies at one level
+(`WithheldBodiesLivenessTests`), a withheld parent state
+(`CrossLevelForkChoiceTests`), reorganisations within and beyond the state
+window (`StateWindowTests`), and worker starvation, which is the runtime's
+job order (`NodeRuntimeJobOrderTests`).
 
 **How others do it.** Bitcoin Core's `getblockchaininfo` returns blocks and
 headers; geth's `eth_syncing` returns current and highest block; both leave

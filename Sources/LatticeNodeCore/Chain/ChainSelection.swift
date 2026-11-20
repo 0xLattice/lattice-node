@@ -100,11 +100,20 @@ extension ChainCore {
         guard !synced, sync.peers.contains(where: { peer, state in
             state.readToEnd && !state.more && state.holes.isEmpty && sync.cursors[peer.key]?.logID.isEmpty == false
         }) else { return }
-        let snapshot = snapshot
         guard !snapshot.bestHeaderTip.isEmpty else { return }
         headersSynced = true
-        guard !snapshot.actOnTip.isEmpty else { return }
-        if snapshot.actOnTip == snapshot.bestHeaderTip || snapshot.actOnTip == heaviestObtainableTip() { synced = true }
+        if caughtUp { synced = true }
+    }
+
+    /// Whether this level has caught up now: it has executed a block, and
+    /// its act-on tip is its best tip or the heaviest it can have
+    /// (`heaviestObtainableTip`). What `synced` latches on, once a peer's
+    /// whole log is weighed; and what a child level asks of its parent
+    /// (`parentCaughtUp`).
+    public var caughtUp: Bool {
+        let snapshot = snapshot
+        guard !snapshot.actOnTip.isEmpty else { return false }
+        return snapshot.actOnTip == snapshot.bestHeaderTip || snapshot.actOnTip == heaviestObtainableTip()
     }
 
     /// Whether `cid` cannot be executed here for now. Either its body could
@@ -119,7 +128,7 @@ extension ChainCore {
     /// the parent is still syncing the fact likely is, and holds the latch
     /// as a body in flight does.
     func unobtainable(_ cid: String) -> Bool {
-        if bodies.awaitingParent[cid] != nil, parentCaughtUp, !tree.isExecuted(blockHash: cid) { return true }
+        if bodies.awaitingParent[cid] != nil, parentCaughtUp ?? isRoot, !tree.isExecuted(blockHash: cid) { return true }
         guard let parked = bodies.parked[cid] else { return false }
         return config.bodyRetryWait(afterAttempts: parked.attempts) >= config.bodyRetryCap
             && !bodies.requested.contains(cid) && !bodies.arrived.contains(cid) && !tree.isExecuted(blockHash: cid)

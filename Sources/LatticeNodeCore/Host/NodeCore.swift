@@ -537,7 +537,7 @@ public struct NodeCore: Sendable {
         let effects = core.step(
             event, now: turn.now,
             parent: parent.flatMap { levels[$0]?.tree }, parentWeighed: parent.flatMap { levels[$0]?.headersSynced } ?? true,
-            parentCaughtUp: parent.flatMap { levels[$0]?.synced } ?? true
+            parentCaughtUp: parent.flatMap { levels[$0].map { $0.synced && $0.caughtUp } } ?? true
         )
         turn.weighed[path, default: []].formUnion(core.weighed)
         turn.arrived[path, default: []].formUnion(core.arrived)
