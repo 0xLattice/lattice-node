@@ -1295,7 +1295,9 @@ and its ancestors' before going to peers (store reads 12.9% of busy against
 9.8%, offset by writes), peak memory 6–9% higher (each store has its own
 page caches), and open files 74 to 126 and 178, about thirteen a store (its
 file, log and shared memory, and four read connections, which VolumeBroker
-does not let a caller reduce). Disk kept reads 20–30% higher while the node
+does not let a caller reduce). The node raises its soft open-file limit to
+the hard limit at start, as Bitcoin Core and geth do (on this Mac, 256 to
+184,320), so a shell's default does not bound the chains hosted. Disk kept reads 20–30% higher while the node
 runs (138 against 108 MiB with eight): each store holds its log up to 4 MiB
 (`journal_size_limit`), nine logs here. Closed, the stores are the size of
 the one store (101 against 100 MiB), with under 1 MiB of free pages.

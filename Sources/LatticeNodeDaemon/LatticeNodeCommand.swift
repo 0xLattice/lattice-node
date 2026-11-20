@@ -201,6 +201,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     /// Runs the node with these flags; `owner` is the host root and the
     /// configuration it was started from, when it runs under `--root`.
     mutating func start(owner: NodeOwner?) async throws {
+        if let openFiles = OpenFileLimit.raise() { logLine("lattice-node: open files allowed: \(openFiles)") }
         let processStartTime = Date()
         let address = ChainAddress([ChainAddress.nexus])!
         // A fault in lattice.json (`--root`) is the configuration's: 78. One

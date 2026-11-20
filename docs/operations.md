@@ -31,8 +31,11 @@ Before exposing a node:
    set `blockBodies` and `state` (see "What a node keeps").
 10. Allow open files for the chains hosted: each chain's Volume store holds
     about thirteen (its file, log and shared memory, and four read
-    connections), beside the overlay's sockets. The shipped systemd unit sets
-    `LimitNOFILE=65536`; macOS shells default to 256, about fifteen chains.
+    connections), beside the overlay's sockets. The node raises its own soft
+    limit to the hard limit at start (on macOS, to the kernel's per-process
+    maximum, usually 10,240 or more) and logs the result as `open files
+    allowed`; the shipped systemd unit sets `LimitNOFILE=65536`. Only a hard
+    limit set low by the host bounds the chains a node can host.
     Each store also keeps up to 64 MiB of write cache and 16 MiB of read cache
     in memory, filled as its chain is used.
 11. Test a clean shutdown, restart, and recovery before accepting traffic.
