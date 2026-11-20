@@ -491,7 +491,7 @@ public final class NodeRuntime: Sendable {
                 }
             }
             state.cancelAll()
-            for job in state.jobs.values {
+            for job in state.jobs.values.map(\.task) {
                 job.cancel()
                 await job.value
             }
@@ -638,7 +638,7 @@ extension NodeRuntime {
         var announcedRoots: [String: UInt64] = [:]
         /// The running jobs, which the loop waits for before it lets the
         /// store go: a job reading from peers can outlast a step.
-        var jobs: [UInt64: Task<Void, Never>] = [:]
+        var jobs: [UInt64: (path: ChainPath, task: Task<Void, Never>)] = [:]
         var nextJob: UInt64 = 0
         /// The jobs waiting for a worker (`JobQueues`).
         var queued = JobQueues()
@@ -987,12 +987,16 @@ extension NodeRuntime {
             }
             // A stopped level's body fetches would run on though nobody
             // wants them: no `cancelBody` comes from a level that is gone. Its RPCs would
-            // wait for good: no answer comes from it either. Each is awaited,
-            // so none pins a body after a release of its chain.
+            // wait for good: no answer comes from it either.
             for key in bodies.keys where core.levels[key.path] == nil {
-                guard let fetch = bodies.removeValue(forKey: key) else { continue }
-                fetch.cancel()
-                await fetch.value
+                bodies.removeValue(forKey: key)?.cancel()
+            }
+            // A stopped level's running jobs store what they execute
+            // (bodies, rules, bundles): each ends before its chain is let go
+            // of, and what it reports finds no level.
+            for (_, job) in jobs where core.levels[job.path] == nil {
+                job.task.cancel()
+                await job.task.value
             }
             // A chain the configuration no longer hosts has its data let go
             // of; one that did not start is still configured, and keeps it.
@@ -2016,11 +2020,11 @@ extension NodeRuntime {
                 runningJobs += 1
                 nextJob += 1
                 let (inputs, id, started) = (inputs, nextJob, SyncTrace.now())
-                jobs[id] = Task {
+                jobs[id] = (job.path, Task {
                     let events = await job.run()
                     let times = SyncTrace.enabled ? TraceTimes(queued: job.queued, started: started, done: SyncTrace.now()) : nil
                     inputs.yield(.jobDone(id, events, times))
-                }
+                })
             }
         }
 

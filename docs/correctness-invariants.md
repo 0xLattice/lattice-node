@@ -131,12 +131,16 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   before facts, as a fact naming absent content is no fault (002.f): a
   release a stop or a failure cuts short leaves the chain's facts, which
   name it for the next start. What another scope names stays. A chain the
-  configuration lists that did not start keeps its data. Not covered: a
-  block a mined grind or a built child block stores for the chain while it
-  is let go of stays until the next start. Pinned by
+  configuration lists that did not start keeps its data. A running node
+  lets go once the chain's level has stopped and the jobs executing its
+  blocks have ended. Not covered, and gone at the next start: the body a
+  mined grind that began before the chain stopped stores for a block the
+  chain carried, and a child block a template build at its parent that
+  began before stores. Pinned by
   `HostChainsRuntimeTests.testAChainRemovedFromTheConfigurationHasItsDataLetGoOf`,
   `HostChainsRuntimeTests.testAChainAStartDoesNotHostHasItsDataLetGoOf`,
-  `HostChainsRuntimeTests.testAReleaseCutShortIsFinishedAtTheNextStart`
+  `HostChainsRuntimeTests.testAReleaseCutShortIsFinishedAtTheNextStart`,
+  `OperatorConfigTests.testAChainThatDidNotStartIsDroppedWhenNoLongerListed`
   and `LatticeCtlE2ETests.testAChildChainIsCreatedMergeMinedTransactedAndResumedThroughTheCLI`.
 
 ## NODE-MEMPOOL-001 — the mempool is tip-relative, not consensus

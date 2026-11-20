@@ -208,7 +208,7 @@ final class HostChainsRuntimeTests: XCTestCase {
     /// The same for a chain a start's configuration does not host.
     func testAChainAStartDoesNotHostHasItsDataLetGoOf() async throws {
         let host = try await mining(keyByte: 0x87, [Self.alpha, Self.beta])
-        let directory = temporaryDirectory()
+        let (layout, directory) = try Self.layout()
         let (pinned, dropped, sibling): (String, String, String)
         do {
             let follower = try await start(
@@ -226,7 +226,7 @@ final class HostChainsRuntimeTests: XCTestCase {
         let follower = try await start(keyByte: 0x88, hosted: [Self.beta], peers: [host.endpoint], storagePath: directory)
         let app = makeApplication(service: follower.runtime, host: "127.0.0.1", port: 0)
         try await eventually("the start lets go of Alpha") {
-            (try? NodeStore.holdsBlocks(of: "Nexus/Alpha", storage: directory)) == false
+            !Self.holdsAlpha(layout)
         }
         try await assertLetGo(app, dropped: dropped, pinned: pinned, sibling: sibling)
         try await assertSyncs(follower.runtime, Self.beta)
@@ -241,7 +241,7 @@ final class HostChainsRuntimeTests: XCTestCase {
     /// and before its facts did, is finished at the next start.
     func testAReleaseCutShortIsFinishedAtTheNextStart() async throws {
         let host = try await mining(keyByte: 0x89, [Self.alpha])
-        let directory = temporaryDirectory()
+        let (layout, directory) = try Self.layout()
         do {
             let follower = try await start(
                 keyByte: 0x8a, hosted: [Self.alpha], peers: [host.endpoint], storagePath: directory, stopAtTeardown: false
@@ -256,11 +256,11 @@ final class HostChainsRuntimeTests: XCTestCase {
             let bodies = try await storage.broker.retainedScopes(prefix: storage.scopes.bodyPrefix + "Nexus/Alpha:")
             try await storage.broker.releaseRetainedScopes(bodies)
         }
-        XCTAssertTrue(try NodeStore.holdsBlocks(of: "Nexus/Alpha", storage: directory))
+        XCTAssertTrue(Self.holdsAlpha(layout), "a create of Alpha is refused: this node holds it")
 
         _ = try await start(keyByte: 0x8a, hosted: [], storagePath: directory)
         try await eventually("the start finishes the release") {
-            (try? NodeStore.holdsBlocks(of: "Nexus/Alpha", storage: directory)) == false
+            !Self.holdsAlpha(layout)
         }
     }
 
@@ -282,6 +282,28 @@ final class HostChainsRuntimeTests: XCTestCase {
         let height = await chain.readSnapshot().height ?? 0
         try await eventually("\(path) keeps syncing", within: .seconds(20)) {
             (await chain.readSnapshot().height ?? 0) > height
+        }
+    }
+
+    /// A host root (`lattice init`'s layout) and its node's storage.
+    private static func layout() throws -> (HostLayout, URL) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("host-chains-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data(#"{"listen":4001,"rpc":4003,"peers":[]}"#.utf8).write(to: root.appendingPathComponent(Topology.fileName))
+        let layout = HostLayout(root: root.path)
+        return (layout, layout.chainDirectory(for: ChainAddress.nexus))
+    }
+
+    /// Whether creating Alpha (`POST /chains`, `lattice child create`) is
+    /// refused because this node holds it.
+    private static func holdsAlpha(_ layout: HostLayout) -> Bool {
+        do {
+            try ChainCreation.create(HostedChain(path: "Nexus/Alpha", spec: spec), layout: layout)
+            return false
+        } catch is ChainCreation.Synced {
+            return true
+        } catch {
+            return false
         }
     }
 

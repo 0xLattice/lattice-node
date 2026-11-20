@@ -27,6 +27,9 @@ final class OperatorConfigTests: XCTestCase {
 
         var hostedChildren: [[String]] { lock.withLock { hosted } }
         var running: Set<String> { Set(hostedChildren.map { $0.joined(separator: "/") }) }
+        /// The child chains it was last told to host, started or not.
+        var told: [[String]] { lock.withLock { lastTold } }
+        private var lastTold: [[String]] = []
         /// The child chains' peers it was last given.
         var seedPeers: [[String]: [PeerEndpoint]] { lock.withLock { peers } }
 
@@ -40,6 +43,7 @@ final class OperatorConfigTests: XCTestCase {
             let started = next.children.filter { !failing.contains($0.joined(separator: "/")) }
             lock.withLock {
                 hosted = started
+                lastTold = next.children
                 peers = next.seedPeers
                 inFlight -= 1
             }
@@ -99,6 +103,19 @@ final class OperatorConfigTests: XCTestCase {
         XCTAssertEqual(response.status.chains.first { $0.path == "Nexus/A" }?.actual, "hosted")
         let file = try ConfigFragments.object(at: ConfigFragments.file(root: layout.root, name: "operator"))
         XCTAssertEqual(file["hostedChains"] as? [String], ["Nexus/A", "Nexus/B"], "the fragment is kept as sent")
+    }
+
+    /// A chain that did not start and is then no longer listed changes no
+    /// running chain, but the node is still told: it lets go of the
+    /// chain's data.
+    func testAChainThatDidNotStartIsDroppedWhenNoLongerListed() async throws {
+        let runtime = FakeRuntime(failing: ["Nexus/B"])
+        let (config, _) = try make(runtime: runtime)
+        _ = try await put(config, "operator", #"{"hostedChains":["Nexus/A","Nexus/B"]}"#)
+        XCTAssertEqual(runtime.told, [["Nexus", "A"], ["Nexus", "B"]])
+        let response = try await put(config, "operator", #"{"hostedChains":["Nexus/A"]}"#)
+        XCTAssertEqual(runtime.told, [["Nexus", "A"]], "the node is told B is no longer hosted")
+        XCTAssertNil(response.status.chains.first { $0.path == "Nexus/B" })
     }
 
     func testAnInvalidFragmentWritesNothing() async throws {
