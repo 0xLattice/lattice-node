@@ -95,7 +95,7 @@ public final class NodeRuntime: Sendable {
     private let delegate: NodeRuntimeIvyDelegate
     private let gate: NodeRuntimeInputGate
     /// Cancelled first when the runtime stops.
-    let maintenance: Task<Void, Never>
+    let maintenanceTimer: Task<Void, Never>
     /// Read URLs other hosts declare, found through their provider records.
     let readEndpoints: ReadEndpointDirectory
     /// The peers remembered across restarts; nil for a node told to connect
@@ -430,7 +430,7 @@ public final class NodeRuntime: Sendable {
             forwardingTo: delegate, options: punchOptions)
         self.punch = punch
         let cadence = configuration.maintenanceCadence
-        maintenance = Task {
+        maintenanceTimer = Task {
             while !Task.isCancelled {
                 guard await Timers.sleep(nanoseconds: UInt64(cadence * 1_000_000_000)) else { return }
                 await servingLedger.save()
@@ -487,7 +487,7 @@ public final class NodeRuntime: Sendable {
 
     /// Stop the overlay, then the loop; joins both.
     public func stop() async {
-        maintenance.cancel()
+        maintenanceTimer.cancel()
         // Free the delegates waiting for room first: stopping Ivy waits for
         // its deliveries.
         await gate.close()
@@ -651,7 +651,7 @@ extension NodeRuntime {
             )
             self.readModel = ReadModel(inputs: inputs, templateDigest: templateDigest)
             self.transactionFetches = TransactionFetches(ivy: ivy, inputs: inputs)
-            self.maintenance = Maintenance(ivy: ivy, inputs: inputs, remote: remote, peerMemory: peerMemory)
+            self.maintenance = Maintenance(ivy: ivy, inputs: inputs, capabilities: remote.peerCapabilities, peerMemory: peerMemory)
             self.jobs = JobPool(workers: workers, inputs: inputs, observeJob: observeJob)
             self.failStop = failStop
         }
@@ -685,7 +685,7 @@ extension NodeRuntime {
                     SyncTrace.log(chain: core.rootPath, "job \(label) \(times.line(taken: SyncTrace.now()))")
                 }
                 let abandoned = jobs.finished(id)
-                startJobs()
+                jobs.start(in: core)
                 // A stopped level's job: what it reports is for no level,
                 // or for one hosted again since, which starts over.
                 guard !abandoned else {
@@ -1153,7 +1153,7 @@ extension NodeRuntime {
                     jobs, at: path, levels: LiveLevels(inputs: inputs), storage: storage, remote: remote,
                     failStop: failStop
                 ))
-                startJobs()
+                self.jobs.start(in: core)
             case .wakeAt(let time):
                 if let wake, wake.time <= time { break }
                 wake?.task.cancel()
@@ -1273,16 +1273,16 @@ extension NodeRuntime {
                     }
                     return [.level(path, .derived(await job.run(held: held, upstream: upstream, fetcher: storage.workFetcher)))]
                 })
-                startJobs()
+                jobs.start(in: core)
             case .verifyProofs(let batch):
                 // Off the loop: a check without its block reads it from the
                 // header store there; one whose block is gone answers nil,
                 // blaming no one.
                 jobs.enqueue(NodeRuntime.proofJob(batch, at: path, storage: storage))
-                startJobs()
+                jobs.start(in: core)
             case .readTransactions(let blocks):
                 jobs.enqueue(NodeRuntime.readJob(blocks, at: path, storage: storage))
-                startJobs()
+                jobs.start(in: core)
             case .mining(let effect):
                 return await execute(effect, at: path)
             case .workSubmitted(let replyID, let outcome):
@@ -1347,7 +1347,7 @@ extension NodeRuntime {
                     NodeRuntime.miningBasis(effect, tree: $0.tree, parent: core.levels[Array(path.dropLast())])
                 }) else { preconditionFailure("every hosted level's tree carries a context: a preflight has a basis") }
                 jobs.enqueue(NodeRuntime.miningJob(effect, at: path, basis: basis, storage: storage, remote: remote), effect)
-                startJobs()
+                jobs.start(in: core)
             case .buildTemplate:
                 guard let basis = core.levels[path].flatMap({ NodeRuntime.miningBasis(effect, tree: $0.tree) }) else { break }
                 jobs.enqueue(NodeRuntime.miningJob(
@@ -1357,10 +1357,10 @@ extension NodeRuntime {
                     levels: LiveLevels(inputs: inputs),
                     cache: childTemplates
                 ), effect)
-                startJobs()
+                jobs.start(in: core)
             case .returnTransactions:
                 jobs.enqueue(NodeRuntime.miningJob(effect, at: path, basis: nil, storage: storage, remote: remote), effect)
-                startJobs()
+                jobs.start(in: core)
             }
             return true
         }
@@ -1397,11 +1397,6 @@ extension NodeRuntime {
         private func session(_ peer: LatticeNodeCore.PeerID) -> Session? {
             guard let session = sessions[peer.key], session.id == peer.session, session.ready else { return nil }
             return session
-        }
-
-        /// Start what the worker pool has room for (`JobPool`).
-        private mutating func startJobs() {
-            jobs.start(in: core)
         }
 
         mutating func cancelAll() {

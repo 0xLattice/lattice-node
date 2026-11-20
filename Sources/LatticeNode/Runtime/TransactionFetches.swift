@@ -58,7 +58,7 @@ extension NodeRuntime {
         /// fetched and not recently fetched, within the cap on concurrent
         /// fetches; anything else is dropped, never blamed.
         mutating func fetch(
-            _ cid: String, from session: AuthenticatedPeer, as peer: LatticeNodeCore.PeerID,
+            _ cid: String, from peer: AuthenticatedPeer, as id: LatticeNodeCore.PeerID,
             levels: [ChainPath: ChainCore]
         ) {
             // No hosted level would take it yet (`ChainCore.synced`).
@@ -79,13 +79,13 @@ extension NodeRuntime {
             let (ivy, inputs) = (ivy, inputs)
             let hosted = Set(levels.keys)
             NodeRuntime.spawn {
-                let response = await ivy.fetchVolume(rootCID: cid, from: session)
+                let response = await ivy.fetchVolume(rootCID: cid, from: peer)
                 let transaction = try? await VolumeImpl<Transaction>(rawCID: cid, node: nil, encryptionInfo: nil)
                     .resolveRecursive(source: InMemoryContentSource(response.entries)).node
                 // A transaction names its chain: it goes to that level's pool.
                 let path = transaction?.body.node?.chainPath
                 inputs.yield(.transactionFetched(cid: cid, transaction.flatMap { transaction in
-                    path.flatMap { hosted.contains($0) ? .level($0, .mining(.transactionReceived(transaction, origin: .peer(peer)))) : nil }
+                    path.flatMap { hosted.contains($0) ? .level($0, .mining(.transactionReceived(transaction, origin: .peer(id)))) : nil }
                 }))
             }
         }

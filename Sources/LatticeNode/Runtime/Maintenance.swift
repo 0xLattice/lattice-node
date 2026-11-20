@@ -10,7 +10,8 @@ extension NodeRuntime {
     struct Maintenance: Sendable {
         let ivy: Ivy
         let inputs: Inputs
-        let remote: IvyRootContentSource
+        /// What the open sessions' hellos advertised.
+        let capabilities: PeerCapabilities
         let peerMemory: PeerMemory?
         /// The Volumes the operator pinned, as last read: announced with the
         /// chains by each maintenance pass.
@@ -28,10 +29,10 @@ extension NodeRuntime {
         /// A maintenance pass asked for while one was running: run it next.
         var maintenancePending = false
 
-        init(ivy: Ivy, inputs: Inputs, remote: IvyRootContentSource, peerMemory: PeerMemory?) {
+        init(ivy: Ivy, inputs: Inputs, capabilities: PeerCapabilities, peerMemory: PeerMemory?) {
             self.ivy = ivy
             self.inputs = inputs
-            self.remote = remote
+            self.capabilities = capabilities
             self.peerMemory = peerMemory
         }
 
@@ -146,7 +147,7 @@ extension NodeRuntime {
                 .filter { $0 != core.rootPath }
                 .map { ReadEndpointKey.key(nexusGenesisCID: configuration.nexusGenesisCID, chainPath: $0) })
             let (ivy, inputs, bootstrap, ownKey, capabilities) = (
-                ivy, inputs, configuration.bootstrapPeers, configuration.processPublicKey, remote.peerCapabilities
+                ivy, inputs, configuration.bootstrapPeers, configuration.processPublicKey, self.capabilities
             )
             let (peerMemory, target, beforeSeeds) = (
                 peerMemory, configuration.peerTarget, configuration.peersBeforeSeeds

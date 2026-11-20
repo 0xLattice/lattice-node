@@ -220,7 +220,7 @@ extension NodeRuntime {
     /// Throws when it is neither held nor provided, or when what is
     /// provided does not match its CIDs.
     public func pinVolume(_ root: String, entries: [String: Data]? = nil) async throws {
-        guard !maintenance.isCancelled else { throw NodeRuntimeError.stopped }
+        guard !maintenanceTimer.isCancelled else { throw NodeRuntimeError.stopped }
         try await storage.pin(root, entries: entries)
         guard configuration.announcePins else { return }
         await ivy.announceProvider(rootCID: root, expiresAt: configuration.announcementExpiry(at: NodeRuntime.now()))
@@ -240,7 +240,7 @@ extension NodeRuntime {
     public func fetchVolume(
         _ root: String, maximumArchiveBytes: Int, maximumEntries: Int
     ) async throws -> SerializedVolume? {
-        guard !maintenance.isCancelled else { throw NodeRuntimeError.stopped }
+        guard !maintenanceTimer.isCancelled else { throw NodeRuntimeError.stopped }
         let answer = await ivy.fetchVolume(
             rootCID: root, maximumArchiveBytes: maximumArchiveBytes, maximumEntries: maximumEntries
         )
@@ -250,7 +250,7 @@ extension NodeRuntime {
     }
 
     public func unpinVolume(_ root: String) async throws {
-        guard !maintenance.isCancelled else { throw NodeRuntimeError.stopped }
+        guard !maintenanceTimer.isCancelled else { throw NodeRuntimeError.stopped }
         try await storage.unpin(root)
         await ivy.stopProviding(rootCID: root)
     }
