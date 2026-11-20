@@ -96,24 +96,25 @@ extension ChainCore {
     /// that is itself behind has a short one. A child opened on a parent
     /// that has weighed little weighs what proofs let it, and the rest as
     /// its parent weighs on (`ChildProofs`).
-    mutating func latchSynced() {
+    mutating func latchSynced(parentCaughtUp: Bool) {
         guard !synced, sync.peers.contains(where: { peer, state in
             state.readToEnd && !state.more && state.holes.isEmpty && sync.cursors[peer.key]?.logID.isEmpty == false
         }) else { return }
         guard !snapshot.bestHeaderTip.isEmpty else { return }
         headersSynced = true
-        if caughtUp { synced = true }
+        if caughtUp(parentCaughtUp: parentCaughtUp) { synced = true }
     }
 
     /// Whether this level has caught up now: it has executed a block, and
     /// its act-on tip is its best tip or the heaviest it can have
     /// (`heaviestObtainableTip`). What `synced` latches on, once a peer's
-    /// whole log is weighed; and what a child level asks of its parent
-    /// (`parentCaughtUp`).
-    public var caughtUp: Bool {
+    /// whole log is weighed; and what a child level asks of its parent.
+    /// `parentCaughtUp`: whether this level's own parent has (`unobtainable`).
+    public func caughtUp(parentCaughtUp: Bool) -> Bool {
         let snapshot = snapshot
         guard !snapshot.actOnTip.isEmpty else { return false }
-        return snapshot.actOnTip == snapshot.bestHeaderTip || snapshot.actOnTip == heaviestObtainableTip()
+        return snapshot.actOnTip == snapshot.bestHeaderTip
+            || snapshot.actOnTip == heaviestObtainableTip(parentCaughtUp: parentCaughtUp)
     }
 
     /// Whether `cid` cannot be executed here for now. Either its body could
@@ -123,12 +124,12 @@ extension ChainCore {
     /// one asked again is not, nor is one whose backoff is still below the
     /// cap: a transient failure holds the latch as a body in flight does.
     /// Or its connect waits on a parent fact its parent level lacks once
-    /// that level has caught up (`parentCaughtUp`): "not proven here"
+    /// that level has caught up (`parentCaughtUp`; always for a root): "not proven here"
     /// (spec §9.5), retriable and owed by no one, so not on its way. While
     /// the parent is still syncing the fact likely is, and holds the latch
     /// as a body in flight does.
-    func unobtainable(_ cid: String) -> Bool {
-        if bodies.awaitingParent[cid] != nil, parentCaughtUp ?? isRoot, !tree.isExecuted(blockHash: cid) { return true }
+    func unobtainable(_ cid: String, parentCaughtUp: Bool) -> Bool {
+        if bodies.awaitingParent[cid] != nil, parentCaughtUp, !tree.isExecuted(blockHash: cid) { return true }
         guard let parked = bodies.parked[cid] else { return false }
         return config.bodyRetryWait(afterAttempts: parked.attempts) >= config.bodyRetryCap
             && !bodies.requested.contains(cid) && !bodies.arrived.contains(cid) && !tree.isExecuted(blockHash: cid)
@@ -140,15 +141,16 @@ extension ChainCore {
     /// choice's own exclusion). Up to the first such block on the
     /// best chain it is the best chain itself, so only the heaviest
     /// branches below that block are walked.
-    func heaviestObtainableTip() -> String {
+    func heaviestObtainableTip(parentCaughtUp: Bool) -> String {
         let best = tree.canonicalTip
-        let lowest = Set(bodies.parked.keys).union(bodies.awaitingParent.keys).filter(unobtainable)
+        let lowest = Set(bodies.parked.keys).union(bodies.awaitingParent.keys)
+            .filter { unobtainable($0, parentCaughtUp: parentCaughtUp) }
             .compactMap { cid in tree.height(of: cid).flatMap { tree.canonicalBlockHash(atHeight: $0) == cid ? $0 : nil } }
             .min()
         guard let lowest else { return best }
         func preferred(_ blocks: [String]) -> String? {
             Self.byWeight(blocks.filter {
-                !unobtainable($0) && (tree.isExecuted(blockHash: $0) || !tree.isExcludedRoot($0))
+                !unobtainable($0, parentCaughtUp: parentCaughtUp) && (tree.isExecuted(blockHash: $0) || !tree.isExcludedRoot($0))
             }, in: tree).first
         }
         let start = lowest == 0 ? nil : tree.canonicalBlockHash(atHeight: lowest - 1)

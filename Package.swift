@@ -41,7 +41,7 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/0xLattice/VolumeBroker.git",
-            exact: "10.1.3"
+            exact: "10.3.1"
         ),
         // Lattice's own UInt256, declared for the core's and simulator's direct imports.
         .package(url: "https://github.com/0xLattice/UInt256.git", from: "2.0.0"),
@@ -171,7 +171,8 @@ let package = Package(
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]),
-        // Sync benchmark only: counts SQLite writes, commits and syncs.
+        // The sync benchmark counts SQLite writes, commits and syncs with it;
+        // the crash tests stop every write at a point with it.
         .target(name: "BenchVFS", path: "Tests/BenchVFS", linkerSettings: [.linkedLibrary("sqlite3")]),
         .testTarget(
             name: "LatticeNodeTests",

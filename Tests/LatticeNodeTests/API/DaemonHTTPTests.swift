@@ -407,7 +407,7 @@ final class DaemonHTTPTests: XCTestCase {
         ))
         let service = try await startRuntime(storage)
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
-        let genesis = try await NexusGenesis.buildGenesisBlock(fetcher: storage.workFetcher)
+        let genesis = try await NexusGenesis.buildGenesisBlock(fetcher: storage.workFetcher(.anyChain))
         let block = try XCTUnwrap(Block(data: try XCTUnwrap(genesis.toData()))?.toData())
         let children = try XCTUnwrap(FlatDictionary<BlockHeader>().toData())
         let cases: [(SubmitChildBlockRequest, HTTPResponse.Status)] = [

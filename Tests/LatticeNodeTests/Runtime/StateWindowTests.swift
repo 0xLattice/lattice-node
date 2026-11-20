@@ -95,7 +95,7 @@ final class StateWindowTests: XCTestCase {
     private func stateNodes(of block: String, in storage: NodeStorage) async throws -> [String: Int]? {
         let fact = try await storage.store.blockFact(block, at: ["Nexus"])
         let root = try XCTUnwrap(fact?.postStateCID)
-        guard let state = try? await LatticeStateHeader(rawCID: root).resolveRecursive(fetcher: storage.localFetcher) else {
+        guard let state = try? await LatticeStateHeader(rawCID: root).resolveRecursive(fetcher: storage.localFetcher(.anyChain)) else {
             return nil
         }
         var counts: [String: Int] = [:]
@@ -258,14 +258,14 @@ final class StateWindowTests: XCTestCase {
             await runtime.stop()
             let fact = try await storage.store.blockFact(tip, at: ["Nexus"])
             let state = try await LatticeStateHeader(rawCID: try XCTUnwrap(fact?.postStateCID))
-                .resolve(fetcher: storage.localFetcher)
+                .resolve(fetcher: storage.localFetcher(.anyChain))
             let accounts = try XCTUnwrap(state.node).accountState.rawCID
             for scope in try await storage.broker.retainedScopes(prefix: storage.scopes.chain) {
                 guard try await storage.broker.retainedRoots(scope: scope).contains(accounts) else { continue }
                 _ = try await storage.broker.releaseRetainedRoots(scope: scope, roots: [accounts])
             }
             try await storage.broker.dropCountedScope(scope: storage.scopes.counted(at: ["Nexus"]))
-            _ = try await storage.broker.sweep()
+            try await storage.stores.sweep()
             let held = await storage.broker.hasVolume(root: accounts)
             XCTAssertFalse(held, "the store lost the account tree's root")
         }
@@ -284,7 +284,10 @@ final class StateWindowTests: XCTestCase {
     /// The heights a chain's state window scopes name, in order.
     private func windowHeights(_ storage: NodeStorage, at path: [String] = ["Nexus"]) async throws -> [UInt64] {
         let prefix = storage.scopes.windowPrefix(at: path)
-        return try await storage.broker.retainedScopes(prefix: prefix).compactMap { UInt64($0.dropFirst(prefix.count)) }.sorted()
+        // A chain not hosted has no store: what an earlier version kept
+        // for it was in the one store, the root's.
+        let broker = storage.stores.opened(at: path) ?? storage.stores.root
+        return try await broker.retainedScopes(prefix: prefix).compactMap { UInt64($0.dropFirst(prefix.count)) }.sorted()
     }
 
     /// A miner on `recent` with a window of 3 keeps what the executions of
@@ -347,7 +350,7 @@ final class StateWindowTests: XCTestCase {
     private func places(of block: String, in storage: NodeStorage, at path: [String] = ["Nexus"]) async throws -> [String: Int] {
         let fact = try await storage.store.blockFact(block, at: path)
         let state = try await LatticeStateHeader(rawCID: try XCTUnwrap(fact?.postStateCID))
-            .resolveRecursive(fetcher: storage.localFetcher)
+            .resolveRecursive(fetcher: storage.localFetcher(.anyChain))
         var places: [String: Int] = [:]
         func count(_ header: any Header) {
             places[header.rawCID, default: 0] += 1
@@ -376,7 +379,7 @@ final class StateWindowTests: XCTestCase {
 
     /// The chain's counts and their marker.
     private func counted(_ storage: NodeStorage, at path: [String] = ["Nexus"]) async throws -> (marker: CountedMarker?, counts: [String: Int]) {
-        let state = try await storage.broker.countedState(scope: storage.scopes.counted(at: path))
+        let state = try await storage.broker(at: path).countedState(scope: storage.scopes.counted(at: path))
         return (state.marker.flatMap(CountedMarker.init), state.counts)
     }
 
@@ -458,7 +461,7 @@ final class StateWindowTests: XCTestCase {
             try await eventuallyWithPasses(runtime, "the window is the last 2 blocks") { try await self.windowHeights(storage) == [8, 9] }
             try await eventuallyWithPasses(runtime, "the counts reach the tip") { try await self.settled(storage, at: tip) }
             await runtime.stop()
-            _ = try await storage.broker.sweep()
+            try await storage.stores.sweep()
             try await assertCountsHold(storage)
             let cursor = try await counted(storage).marker?.cursor.height
             XCTAssertEqual(cursor, 7, "the cursor is a window below the tip")
@@ -490,7 +493,7 @@ final class StateWindowTests: XCTestCase {
         var blocks: [String] = []
         for _ in 0..<4 { blocks.append(try BlockHeader(node: try await runtime.mineBlock(paid)).rawCID) }
         let fact = try await storage.store.blockFact(blocks[1], at: ["Nexus"])
-        let state = try await LatticeStateHeader(rawCID: try XCTUnwrap(fact?.postStateCID)).resolve(fetcher: storage.localFetcher)
+        let state = try await LatticeStateHeader(rawCID: try XCTUnwrap(fact?.postStateCID)).resolve(fetcher: storage.localFetcher(.anyChain))
         let replaced = try XCTUnwrap(state.node).accountState.rawCID
         let tipState = try await places(of: blocks[3], in: storage)
         XCTAssertNil(tipState[replaced], "the tip's state does not hold block 2's account tree")
@@ -567,7 +570,7 @@ final class StateWindowTests: XCTestCase {
             try await eventuallyWithPasses(runtime, "the counts reach the tip") { try await self.settled(storage, at: tip) }
             await runtime.stop()
             try await storage.broker.dropCountedScope(scope: storage.scopes.counted(at: ["Nexus"]))
-            _ = try await storage.broker.sweep()
+            try await storage.stores.sweep()
             let whole = try await stateNodes(of: tip, in: storage)
             XCTAssertNil(whole, "the store lacks the payer's account, which no block of the window touched")
         }
@@ -577,7 +580,7 @@ final class StateWindowTests: XCTestCase {
                 try await self.settled(storage, at: tip)
             }
             await runtime.stop()
-            _ = try await storage.broker.sweep()
+            try await storage.stores.sweep()
             try await assertCountsHold(storage, "after a state sync read from a peer")
             let staged = try await storage.broker.retainedRoots(scope: storage.scopes.staging(at: ["Nexus"]))
             XCTAssertEqual(staged, [], "what the sync read is let go of from staging once counted")
@@ -609,9 +612,9 @@ final class StateWindowTests: XCTestCase {
                 marker: CountedMarker(cursor: cursor, tip: cursor).text, expectedMarker: marker?.text
             )
             for scope in try await storage.broker.retainedScopes(prefix: storage.scopes.windowPrefix(at: ["Nexus"])) {
-                try await storage.release(scope: scope)
+                try await storage.release(scope: scope, in: storage.broker)
             }
-            _ = try await storage.broker.sweep()
+            try await storage.stores.sweep()
             let whole = try await stateNodes(of: tip, in: storage)
             XCTAssertNil(whole, "the store lacks what blocks 8 and 9 created")
         }
@@ -653,7 +656,7 @@ final class StateWindowTests: XCTestCase {
             try await eventually("the counts reach its tip") { try await self.settled(storage, at: abandoned[3]) }
             await runtime.stop()
             let fact = try await storage.store.blockFact(abandoned[3], at: ["Nexus"])
-            let state = try await LatticeStateHeader(rawCID: try XCTUnwrap(fact?.postStateCID)).resolve(fetcher: storage.localFetcher)
+            let state = try await LatticeStateHeader(rawCID: try XCTUnwrap(fact?.postStateCID)).resolve(fetcher: storage.localFetcher(.anyChain))
             counted = try XCTUnwrap(state.node).accountState.rawCID
         }
         await shorterRuntime.stop()
@@ -666,7 +669,7 @@ final class StateWindowTests: XCTestCase {
         try await eventually("the counts reach its tip") { try await self.settled(storage, at: adopted[6]) }
         await runtime.stop()
         await longerRuntime.stop()
-        _ = try await storage.broker.sweep()
+        try await storage.stores.sweep()
         try await assertCountsHold(storage, "after a reorg deeper than the window")
         let held = await storage.broker.hasVolume(root: counted)
         XCTAssertFalse(held, "the shorter chain's state the old counts described went")
@@ -1040,7 +1043,7 @@ final class StateWindowTests: XCTestCase {
             }
             try await eventually("Alpha's counts reach its tip") { try await self.settled(storage, at: alphaTip, path: Self.alpha) }
             await runtime.stop()
-            _ = try await storage.broker.sweep()
+            try await storage.stores.sweep()
             try await assertCountsHold(storage, at: Self.alpha)
         }
         await producerRuntime.stop()
@@ -1056,16 +1059,18 @@ final class StateWindowTests: XCTestCase {
             transaction: try transaction(payer, nonce: 0, moves: [(address(payer), -1)], chainPath: Self.alpha)
         ))
         XCTAssertEqual(response.mempoolCount, 1, "the Alpha transaction is checked against this store's state, and pooled")
-        try await storage.broker.mergeRetainedRoots(
-            scope: storage.scopes.staging(at: Self.alpha), roots: [node.configuration.nexusGenesisCID]
+        // Something Alpha's store holds, staged.
+        try await storage.broker(at: Self.alpha).mergeRetainedRoots(
+            scope: storage.scopes.staging(at: Self.alpha), roots: [alphaTip]
         )
+        let file = node.configuration.storagePath.appendingPathComponent("volumes")
+            .appendingPathComponent(VolumeStores.fileName(Self.alpha))
         try await runtime.host([])
-        let kept = try await windowHeights(storage, at: Self.alpha)
-        XCTAssertEqual(kept, [], "a chain no longer hosted keeps no state window")
-        let counts = try await storage.broker.countedScopes(prefix: storage.scopes.counted(at: Self.alpha))
-        XCTAssertEqual(counts, [], "nor counts")
-        let staged = try await storage.broker.retainedRoots(scope: storage.scopes.staging(at: Self.alpha))
-        XCTAssertEqual(staged, [], "nor staging")
+        // A chain no longer hosted keeps no store: no window, counts,
+        // staging or body, once none of its jobs runs.
+        try await eventually("Alpha's store goes") {
+            storage.stores.opened(at: Self.alpha) == nil && !FileManager.default.fileExists(atPath: file.path)
+        }
         await runtime.stop()
     }
 
@@ -1108,20 +1113,21 @@ final class StateWindowTests: XCTestCase {
             (try? await storage.broker.retainedScopes(prefix: storage.scopes.readsPrefix))?.isEmpty == true
         }
         await producerRuntime.stop()
-        _ = try await storage.broker.sweep()
-        let rules = try await storage.broker.retainedRoots(scope: storage.scopes.rules(at: Self.alpha))
+        try await storage.stores.sweep()
+        let rules = try await storage.broker(at: Self.alpha).retainedRoots(scope: storage.scopes.rules(at: Self.alpha))
         XCTAssertTrue(rules.contains(moduleCID), "the policy module is kept with the chain")
         XCTAssertTrue(rules.contains(specCID), "and its spec")
-        let held = await storage.broker.hasVolume(root: moduleCID)
+        let held = await (try storage.broker(at: Self.alpha)).hasVolume(root: moduleCID)
         XCTAssertTrue(held, "the module is held with no peer")
         let nexusRules = try await storage.broker.retainedRoots(scope: storage.scopes.rules(at: ["Nexus"]))
         XCTAssertFalse(nexusRules.isEmpty, "Nexus keeps its spec too")
 
         try await runtime.host([])
-        let left = try await storage.broker.retainedRoots(scope: storage.scopes.rules(at: Self.alpha))
-        XCTAssertEqual(left, [], "a chain no longer hosted keeps no rules")
-        _ = try await storage.broker.sweep()
-        let kept = await storage.broker.hasVolume(root: moduleCID)
+        try await eventually("a chain no longer hosted keeps no store, so no rules") {
+            storage.stores.opened(at: Self.alpha) == nil
+        }
+        try await storage.stores.sweep()
+        let kept = await storage.stores.anyChain.hasVolume(root: moduleCID)
         XCTAssertFalse(kept, "its policy module goes")
         await runtime.stop()
     }
@@ -1145,45 +1151,7 @@ final class StateWindowTests: XCTestCase {
         return Data(module)
     }
 
-    /// A start moves what an earlier version kept a hosted chain's tip
-    /// state under into the chain's window at its tip's height, and forgets
-    /// that version's counts. What either kept for a chain no longer hosted
-    /// goes.
-    func testAStartMovesWhatEarlierVersionsKeptIntoTheWindow() async throws {
-        let node = try host(keyByte: 0xd3, state: .recent)
-        do {
-            let storage = try await NodeStorage.open(configuration: node.configuration)
-            let genesis = node.configuration.nexusGenesisCID
-            for prefix in storage.scopes.legacyStatePrefixes {
-                try await storage.broker.mergeRetainedRoots(scope: prefix + "Nexus", roots: [genesis])
-                try await storage.broker.mergeRetainedRoots(scope: prefix + "Nexus/Gone", roots: [genesis])
-            }
-            try await storage.broker.mergeRetainedRoots(
-                scope: storage.scopes.window(at: ["Nexus", "Gone"], height: 5), roots: [genesis]
-            )
-            try await storage.store.writeLegacyStateCount()
-        }
-        let (runtime, storage) = try await start(node)
-        try await eventually("the earlier scopes are moved") {
-            var left: [String] = []
-            for prefix in storage.scopes.legacyStatePrefixes {
-                left += try await storage.broker.retainedScopes(prefix: prefix)
-            }
-            return left.isEmpty
-        }
-        let window = try await storage.broker.retainedRoots(scope: storage.scopes.window(at: ["Nexus"], height: 0))
-        XCTAssertEqual(window, [node.configuration.nexusGenesisCID], "what they named is in the window at the tip's height")
-        let gone = try await windowHeights(storage, at: ["Nexus", "Gone"])
-        XCTAssertEqual(gone, [], "nothing is kept for a chain no longer hosted")
-        // Forgotten after the last of those scopes is let go of.
-        try await eventually("the counts are forgotten") {
-            try await storage.store.legacyStateCountRows() == 0
-        }
-        await runtime.stop()
-    }
-
-    /// A start on `recent` lets go of the counts of a chain no longer
-    /// hosted with its staging, and of the staging of a chain whose counts
+    /// A start on `recent` lets go of the staging of a chain whose counts
     /// have a marker, and hands the loop that marker.
     func testAStartLetsGoOfCountsNoLongerNeeded() async throws {
         let node = try host(keyByte: 0xf6, state: .recent)
@@ -1191,10 +1159,6 @@ final class StateWindowTests: XCTestCase {
         let storage = try await NodeStorage.open(configuration: node.configuration)
         do {
             let scopes = storage.scopes
-            try await storage.broker.adjustCountedRoots(
-                scope: scopes.counted(at: ["Nexus", "Gone"]), deltas: [genesis: 1], marker: "0 x 0 x", expectedMarker: nil
-            )
-            try await storage.broker.mergeRetainedRoots(scope: scopes.staging(at: ["Nexus", "Gone"]), roots: [genesis])
             // Counts of Nexus at its genesis, which hold nothing of its
             // state, but have a marker.
             try await storage.broker.adjustCountedRoots(
@@ -1206,9 +1170,9 @@ final class StateWindowTests: XCTestCase {
         let markers = await storage.stateBackend.settleCountedScopes(hosted: [["Nexus"]])
         XCTAssertEqual(markers, [["Nexus"]: "0 \(genesis) 0 \(genesis)"])
         let counts = try await storage.broker.countedScopes(prefix: storage.scopes.countedPrefix)
-        XCTAssertEqual(counts, [storage.scopes.counted(at: ["Nexus"])], "the counts of a chain no longer hosted go")
+        XCTAssertEqual(counts, [storage.scopes.counted(at: ["Nexus"])], "the counts stay")
         let staging = try await storage.broker.retainedScopes(prefix: storage.scopes.stagingPrefix)
-        XCTAssertEqual(staging, [], "with its staging, and the staging of counts with a marker")
+        XCTAssertEqual(staging, [], "and the staging of counts with a marker goes")
     }
 
     /// Counts kept on `recent` are kept with the chain on `all`, then
@@ -1233,7 +1197,7 @@ final class StateWindowTests: XCTestCase {
             let counts = try await storage.broker.countedScopes(prefix: storage.scopes.countedPrefix)
             XCTAssertEqual(counts, [], "no counts on \(state)")
             if state == .all {
-                _ = try await storage.broker.sweep()
+                try await storage.stores.sweep()
                 let whole = try await stateNodes(of: tip, in: storage)
                 XCTAssertNotNil(whole, "what the counts kept is kept with the chain")
             }
@@ -1279,12 +1243,6 @@ final class StateWindowTests: XCTestCase {
 }
 
 extension NodeStore {
-    /// A count as an earlier version kept of a tip's state.
-    func writeLegacyStateCount() throws {
-        _ = try database.execute("INSERT INTO core_meta (key, value) VALUES ('state_pin:Nexus:x', '1')")
-        _ = try database.execute("INSERT INTO core_meta (key, value) VALUES ('state_tip:Nexus', 'x')")
-    }
-
     /// Rewrites the kept state diff of `block` to `diff`, as an older
     /// binary wrote an inexact one.
     func rewriteStateDiff(of block: String, at chainPath: [String], to diff: StateDiff) throws {
@@ -1293,13 +1251,6 @@ extension NodeStore {
             params: [.text(chainPath.joined(separator: "/")), .text(block), .blob(try Self.encode(diff))]
         )
         XCTAssertEqual(changed, 1)
-    }
-
-    func legacyStateCountRows() throws -> Int {
-        try database.rows(
-            ChainFactMetadataRow.self,
-            "SELECT value FROM core_meta WHERE substr(key, 1, 10) IN ('state_pin:', 'state_tip:')"
-        ).count
     }
 }
 

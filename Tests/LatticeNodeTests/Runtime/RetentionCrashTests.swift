@@ -3,42 +3,45 @@ import Ivy
 import Lattice
 import LatticeNodeAPI
 import LatticeNodeCore
-import Synchronization
+import BenchVFS
 import cashew
 import XCTest
 @testable import LatticeNode
 
-/// A node keeping recent state and no bodies beyond its working set,
-/// stopped by a crash at each retention write after a step, in the
-/// start-up sweep and while it lets a chain go, starts again over the same
-/// store: it follows its peer to the tip, its counts match the store, it
-/// answers a read of the tip's state, the transaction it acknowledged before
-/// the crash is pooled or on the chain, and what the crash left kept is let
-/// go of: no executed block's reads, no body but the tip's, no state below
-/// the window, nothing staged, nothing of a chain no longer hosted. Not
-/// covered: an excluded block's body and a heal, which a follower of an
-/// honest producer does not reach.
+/// A node keeping recent state and no bodies beyond its working set is
+/// crashed below the storage interface: after a number of writes to its
+/// files every write, sync and truncate fails (`BenchVFS`, SQLite's own
+/// fault-injection shape), as in a process that died there. Swept over the
+/// writes of its start, its first sync of the counts, the blocks it follows
+/// and a chain it lets go of, the crash lands in a persist, between it and
+/// the retention after it, in the start's sweep and in a release. It starts
+/// again over the same store: it follows its peer to the tip, its counts
+/// match the store, it answers a read of the tip's state, the transaction
+/// it acknowledged before the crash is pooled or on the chain, and what the
+/// crash left kept is let go of: no executed block's reads, no body but the
+/// tip's, no state below the window, nothing staged, nothing of a chain no
+/// longer hosted.
 final class RetentionCrashTests: XCTestCase {
-    /// Stops every retention write from the first at `boundary` once armed,
-    /// as a process that died there would.
-    private final class Crash: Sendable {
-        let boundary: StateBackend.Boundary
-        let state = Mutex<(armed: Bool, fired: Bool)>((false, false))
+    override class func setUp() {
+        super.setUp()
+        XCTAssertEqual(bench_vfs_install(), 0)
+    }
 
-        init(at boundary: StateBackend.Boundary, armed: Bool) {
-            self.boundary = boundary
-            state.withLock { $0.armed = armed }
+    /// The crash, for files under `directory`: after `writes` more writes.
+    private enum Crash {
+        static func after(_ writes: Int64, under directory: URL) {
+            // SQLite opens the files by their real path, links resolved
+            // (on macOS the temporary directory is under /private).
+            let real = realpath(directory.path, nil).map { pointer in
+                defer { free(pointer) }
+                return String(cString: pointer)
+            } ?? directory.path
+            bench_vfs_fail_after(real, writes)
         }
 
-        func arm() { state.withLock { $0.armed = true } }
-        var fired: Bool { state.withLock { $0.fired } }
+        static var came: Bool { bench_vfs_failed() != 0 }
 
-        func stops(_ boundary: StateBackend.Boundary) -> Bool {
-            state.withLock { state in
-                if !state.fired, state.armed, boundary == self.boundary { state.fired = true }
-                return state.fired
-            }
-        }
+        static func off() { bench_vfs_fail_off() }
     }
 
     private typealias Key = (privateKey: String, publicKey: String)
@@ -91,19 +94,14 @@ final class RetentionCrashTests: XCTestCase {
         )
     }
 
-    func testACrashAtEachRetentionWriteRecoversOnTheNextStart() async throws {
-        // These happen as the node first starts and syncs its counts; the
-        // rest as it follows blocks after that.
-        let early: Set<StateBackend.Boundary> = [
-            .syncCounts, .commitCounts, .releaseStaging, .startBodies, .startReads, .startLegacyState, .startCounts,
-        ]
-        // A crash at a block's reads leaks nothing these nodes reach: only a
-        // block stored by `storingAndRetaining` (a mined block and the child
-        // blocks it carries) keeps reads, and only a child genesis's empty
-        // state among them.
-        let after: [StateBackend.Boundary] = [.letGoOfBodies, .releaseReads, .letGo, .moveCounts]
-        for boundary in after + early.sorted(by: { "\($0)" < "\($1)" }) {
-            try await crashAndRecover(at: boundary, armedAtStart: early.contains(boundary))
+    func testACrashAtAnyWriteRecoversOnTheNextStart() async throws {
+        // While the node starts and first syncs its counts.
+        for writes: Int64 in [0, 2, 8, 30, 100] {
+            try await crashAndRecover(afterWrites: writes, armedAtStart: true)
+        }
+        // While it follows blocks.
+        for writes: Int64 in [0, 1, 2, 3, 5, 8, 13, 21, 34] {
+            try await crashAndRecover(afterWrites: writes, armedAtStart: false)
         }
     }
 
@@ -132,12 +130,16 @@ final class RetentionCrashTests: XCTestCase {
 
     /// Waits until the storage a stopped runtime opened is released.
     private func closed(_ storage: inout NodeStorage?) async throws {
-        weak let released = storage
+        // Assigned after its declaration: Linux's compiler refuses a weak
+        // `let`, and macOS's warns of a weak `var` never assigned.
+        weak var released: NodeStorage?
+        released = storage
         storage = nil
         try await eventually("the first storage is closed") { released == nil }
     }
 
-    private func crashAndRecover(at boundary: StateBackend.Boundary, armedAtStart: Bool) async throws {
+    private func crashAndRecover(afterWrites writes: Int64, armedAtStart: Bool) async throws {
+        let at = "\(armedAtStart ? "start" : "following"), \(writes) writes"
         let (payer, payee): (Key, Key) = (CryptoUtils.generateKeyPair(), CryptoUtils.generateKeyPair())
         let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(payer))])
         let producer = try node(keyByte: 0xc1, directory: directory(), peers: [], state: .all, bodies: .all)
@@ -155,29 +157,29 @@ final class RetentionCrashTests: XCTestCase {
         let follower = try node(
             keyByte: 0xc2, directory: followerDirectory, peers: [producer.2], state: .recent, bodies: .none
         )
-        let crash = Crash(at: boundary, armed: armedAtStart)
         var acknowledged: String?
         var first: NodeStorage? = try await NodeStorage.open(configuration: follower.0)
+        defer { Crash.off() }
         do {
             let storage = try XCTUnwrap(first)
+            if armedAtStart { Crash.after(writes, under: followerDirectory) }
+            // A crash fail-stops the persist it lands in; the loop ends there.
             let runtime = try await NodeRuntime.start(
-                storage: storage, configuration: follower.0, overlay: follower.1,
-                failStop: { XCTFail("fail-stop: \($0)") }, observeJob: nil,
-                stopRetention: { crash.stops($0) }
+                storage: storage, configuration: follower.0, overlay: follower.1, failStop: { _ in }, observeJob: nil
             )
             if !armedAtStart {
-                try await eventually("\(boundary): the follower reaches the tip") {
+                try await eventually("\(at): the follower reaches the tip") {
                     runtime.published.value?.actOnTip == tip
                 }
                 let submitted = try await runtime.submitTransaction(SubmitTransactionRequest(
                     transaction: try transaction(payer, nonce: 0, paying: address(payee))
                 ))
                 acknowledged = submitted.transactionCID
-                crash.arm()
+                Crash.after(writes, under: followerDirectory)
             }
             var polls = 0
-            try await eventually("\(boundary): the crash comes", within: .seconds(60)) {
-                if crash.fired { return true }
+            try await eventually("\(at): the crash comes", within: .seconds(60)) {
+                if Crash.came { return true }
                 polls += 1
                 if polls % 20 == 0 {
                     if !armedAtStart { try await mine(1) }
@@ -187,13 +189,14 @@ final class RetentionCrashTests: XCTestCase {
             }
             await runtime.stop()
         }
+        Crash.off()
         try await closed(&first)
 
         try await mine(2)
         let storage = try await NodeStorage.open(configuration: follower.0)
         let runtime = try await NodeRuntime.start(storage: storage, configuration: follower.0, overlay: follower.1)
         var polls = 0
-        try await eventually("\(boundary): after the restart the follower reaches the tip and its counts it", within: .seconds(60)) {
+        try await eventually("\(at): after the restart the follower reaches the tip and its counts it", within: .seconds(60)) {
             polls += 1
             if polls % 50 == 0 { runtime.inputs.yield(.maintenance) }
             guard runtime.published.value?.actOnTip == tip else { return false }
@@ -203,9 +206,9 @@ final class RetentionCrashTests: XCTestCase {
             return try await self.keepsOnlyWhatItShould(storage, tip: tip)
         }
         let account = await runtime.reads.account(owner: address(payer), blockCID: tip)
-        XCTAssertNotNil(account, "\(boundary): the tip's state answers a read")
+        XCTAssertNotNil(account, "\(at): the tip's state answers a read")
         if let acknowledged {
-            try await eventually("\(boundary): the acknowledged transaction is pooled or on the chain") {
+            try await eventually("\(at): the acknowledged transaction is pooled or on the chain") {
                 let pooled = try await storage.localTransactions().contains { item in
                     (try? Mempool.cid(of: item.transaction)) == acknowledged
                 }
@@ -217,14 +220,18 @@ final class RetentionCrashTests: XCTestCase {
         await producerRuntime.stop()
     }
 
-    /// A crash while a chain is let go, at its windows, its rules or its
-    /// counts: the next start, hosting Nexus alone, lets go of what the
-    /// chain kept, and Nexus's counts still match the store.
+    /// A crash while a chain is let go: after its store went, before or
+    /// while its facts go (its local and pooled transactions, its bundles,
+    /// then its facts in one transaction). The next start, hosting Nexus
+    /// alone, finishes it, and Nexus's counts still match the store.
     func testACrashWhileAChainIsLetGoRecoversOnTheNextStart() async throws {
-        try await crashWhileUnhosting(at: .letGoOfChain)
+        for writes: Int64 in [0, 1, 2] {
+            try await crashWhileUnhosting(afterWrites: writes)
+        }
     }
 
-    private func crashWhileUnhosting(at boundary: StateBackend.Boundary) async throws {
+    private func crashWhileUnhosting(afterWrites writes: Int64) async throws {
+        let boundary = "letting Alpha go, \(writes) writes"
         let producer = try node(keyByte: 0xc3, directory: directory(), peers: [], state: .all, bodies: .all, hosted: true)
         let producerStorage = try await NodeStorage.open(configuration: producer.0)
         let producerRuntime = try await NodeRuntime.start(
@@ -251,45 +258,55 @@ final class RetentionCrashTests: XCTestCase {
         let follower = try node(
             keyByte: 0xc4, directory: followerDirectory, peers: [producer.2], state: .recent, bodies: .none, hosted: true
         )
-        let crash = Crash(at: boundary, armed: false)
         var first: NodeStorage? = try await NodeStorage.open(configuration: follower.0)
+        defer { Crash.off() }
         do {
             let storage = try XCTUnwrap(first)
             let runtime = try await NodeRuntime.start(
-                storage: storage, configuration: follower.0, overlay: follower.1,
-                failStop: { XCTFail("fail-stop: \($0)") }, observeJob: nil,
-                stopRetention: { crash.stops($0) }
+                storage: storage, configuration: follower.0, overlay: follower.1, failStop: { _ in }, observeJob: nil
             )
+            // Counts less than a window below a tip that stopped wait for
+            // a maintenance pass (`Retention.settleState`), as on a node.
+            var polls = 0
             try await eventually("\(boundary): Alpha's counts reach its tip", within: .seconds(60)) {
-                let counted = try await storage.broker.countedState(scope: storage.scopes.counted(at: Self.alpha))
+                polls += 1
+                if polls % 50 == 0 { runtime.inputs.yield(.maintenance) }
+                let counted = try await storage.broker(at: Self.alpha).countedState(scope: storage.scopes.counted(at: Self.alpha))
                 return counted.marker.flatMap(CountedMarker.init)?.tip.cid == alphaTip
             }
-            crash.arm()
+            Crash.after(writes, under: followerDirectory)
             try await runtime.host([])
-            XCTAssertTrue(crash.fired, "\(boundary): the crash came while Alpha was let go")
+            let file = followerDirectory.appendingPathComponent("volumes")
+                .appendingPathComponent(VolumeStores.fileName(Self.alpha))
+            // Its store goes first, then the crash stops the rest.
+            try await eventually("\(boundary): the crash comes while Alpha is let go") { Crash.came }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: file.path), "\(boundary): its store went first")
+            let facts = try await storage.store.chainPaths()
+            XCTAssertTrue(facts.contains(Self.alpha), "\(boundary): its facts outlived the crash")
             await runtime.stop()
         }
+        Crash.off()
         try await closed(&first)
 
         let alone = try node(keyByte: 0xc4, directory: followerDirectory, peers: [producer.2], state: .recent, bodies: .none)
         let storage = try await NodeStorage.open(configuration: alone.0)
         let runtime = try await NodeRuntime.start(storage: storage, configuration: alone.0, overlay: alone.1)
+        var polls = 0
         try await eventually("\(boundary): after the restart Nexus is at its tip and its counts match", within: .seconds(60)) {
+            polls += 1
+            if polls % 50 == 0 { runtime.inputs.yield(.maintenance) }
             guard runtime.published.value?.actOnTip == nexusTip else { return false }
             let counted = try await storage.broker.countedState(scope: storage.scopes.counted(at: ["Nexus"]))
             guard let marker = counted.marker, CountedMarker(marker)?.tip.cid == nexusTip else { return false }
-            return await storage.auditCounted(at: ["Nexus"], marker: marker) != nil
+            guard await storage.auditCounted(at: ["Nexus"], marker: marker) != nil else { return false }
+            return try await !storage.store.chainPaths().contains(Self.alpha)
         }
-        // The start's sweep runs before the loop's first step, behind the
-        // published tip.
-        let scopes = storage.scopes
-        try await eventually("\(boundary): the start lets go of what Alpha kept: windows, rules, counts, staging") {
-            let windows = try await storage.broker.retainedScopes(prefix: scopes.windowPrefix(at: Self.alpha))
-            let rules = try await storage.broker.retainedRoots(scope: scopes.rules(at: Self.alpha))
-            let counts = try await storage.broker.countedScopes(prefix: scopes.counted(at: Self.alpha))
-            let staged = try await storage.broker.retainedRoots(scope: scopes.staging(at: Self.alpha))
-            return windows.isEmpty && rules.isEmpty && counts.isEmpty && staged.isEmpty
-        }
+        // A chain's store holds all it kept: its windows, rules, counts,
+        // staging and bodies; its facts went after it.
+        let file = followerDirectory.appendingPathComponent("volumes")
+            .appendingPathComponent(VolumeStores.fileName(Self.alpha))
+        XCTAssertNil(storage.stores.opened(at: Self.alpha), "\(boundary): Alpha has no store open")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path), "\(boundary): nor a file")
         await runtime.stop()
         await producerRuntime.stop()
     }

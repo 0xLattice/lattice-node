@@ -174,14 +174,16 @@ final class DerivedChildGrindTests: XCTestCase {
                         let headers = store.levels[path]?.headers ?? [:]
                         let answer = NodeEvent.level(path, .proofsVerified(batch.run { headers[$0]?.block }))
                         if deferChecks { deferred.append(answer) } else { queue.append(answer) }
-                    case .level(let path, .deriveProof(let job)):
+                    case .level(let path, .deriveProofs(let jobs)):
                         // From this host's own content only.
-                        derived.append(Derived(path: path, cid: job.childCID, carrier: job.carrier))
-                        guard !lostDerivations.contains(job.carrier) else {
-                            queue.append(.level(path, .derived(ChildDerivation(job: job, checks: []))))
-                            break
+                        for job in jobs {
+                            derived.append(Derived(path: path, cid: job.childCID, carrier: job.carrier))
+                            guard !lostDerivations.contains(job.carrier) else {
+                                queue.append(.level(path, .derived(ChildDerivation(job: job, checks: []))))
+                                continue
+                            }
+                            if holdDerivations { heldDerivations.append((path, job)) } else { queue.append(await derive(job, at: path)) }
                         }
-                        if holdDerivations { heldDerivations.append((path, job)) } else { queue.append(await derive(job, at: path)) }
                     case .connect(let path, let jobs):
                         queue.append(.level(path, await ConnectRun.connected(
                             jobs, fetcher: world.cas, parentFacts: core.parentFacts(for: path), now: DerivedChildGrindTests.now
@@ -2278,7 +2280,7 @@ final class DerivedChildGrindTests: XCTestCase {
         // still syncing, whatever it is.
         func latchesOutsideAStep() throws -> Bool {
             var level = try XCTUnwrap(host.core.levels[Self.alpha])
-            level.latchSynced()
+            _ = level.finish(ChainCore.Turn(now: 0))
             return level.synced
         }
         XCTAssertFalse(try latchesOutsideAStep())

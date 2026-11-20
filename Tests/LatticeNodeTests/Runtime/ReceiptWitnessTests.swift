@@ -148,7 +148,7 @@ final class ReceiptWitnessTests: XCTestCase {
         // chain has grown past it. A block mined before Alpha executed the
         // one before it is that one's sibling and carries the withdrawal
         // too, and the chain keeps only one of them.
-        let local = await storage.localFetcher
+        let local = storage.localFetcher(.anyChain)
         let alphaHead = await alphaReads.readSnapshot()
         var walk = alphaHead.tipCID
         var placed: String?
@@ -170,7 +170,7 @@ final class ReceiptWitnessTests: XCTestCase {
         try await eventually("the producer lets go of the rest of the state the withdrawal names") {
             (try? await block.parentState.resolveRecursive(fetcher: local)) == nil
         }
-        let pinned = try await storage.broker.retainedRoots(scope: storage.scopes.body(withdrawalBlock, at: Self.alpha))
+        let pinned = try await storage.broker(at: Self.alpha).retainedRoots(scope: storage.scopes.body(withdrawalBlock, at: Self.alpha))
         let witness = await storage.receiptWitness(of: BlockHeader(rawCID: withdrawalBlock), fetcher: local).map(\.root)
         XCTAssertFalse(witness.isEmpty)
         XCTAssertTrue(Set(witness).isSubset(of: Set(pinned)), "the witness is pinned with the body")
@@ -216,7 +216,7 @@ final class ReceiptWitnessTests: XCTestCase {
             // On `recent` a window is let go of once the chain's counts reach
             // the tip, which a maintenance pass may be what settles: it can
             // still be held when the tip is published.
-            let followerLocal = await nexusStorage.localFetcher
+            let followerLocal = nexusStorage.localFetcher(.anyChain)
             var polls = 0
             try await eventually("the follower let go of the state the withdrawal names") {
                 if polls % 50 == 0 { nexusRuntime.inputs.yield(.maintenance) }
@@ -239,7 +239,7 @@ final class ReceiptWitnessTests: XCTestCase {
         let row = followerStorage.bundles.bundle(root: withdrawalBlock)
         let missing = Set(witness).subtracting(row ?? [])
         var held: [String: Bool] = [:]
-        for root in missing { held[root] = await followerStorage.broker.hasVolume(root: root) }
+        for root in missing { held[root] = await followerStorage.stores.anyChain.hasVolume(root: root) }
         XCTAssertTrue(
             missing.isEmpty,
             "the follower stored the witness with the body: bundle row \(row.map { "of \($0.count) roots" } ?? "absent"), "

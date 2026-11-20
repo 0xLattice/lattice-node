@@ -7,6 +7,7 @@ import Glibc
 import Lattice
 import UInt256
 import cashew
+import VolumeBroker
 @testable import LatticeNode
 import LatticeNodeAPI
 
@@ -96,4 +97,15 @@ enum NetworkTransportTestPorts {
         }
         return bound == 0
     }
+}
+
+extension NodeStorage {
+    /// The root chain's Volume store (`VolumeStores.root`): Nexus's content,
+    /// scopes and counts, the constants, pins and the mempool's.
+    var broker: DiskBroker { stores.root }
+}
+
+extension NodeStorage {
+    /// The Volume store of the chain at `path`.
+    nonisolated func broker(at path: [String]) throws -> DiskBroker { try stores.store(at: path) }
 }

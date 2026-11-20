@@ -11,19 +11,22 @@ enum BootRecovery {
     /// What `NodeStorage.open` builds the storage from.
     struct Result {
         let store: NodeStore
-        let broker: DiskBroker
-        let localFetcher: CoalescingFetcher
+        let stores: VolumeStores
         let retentionScope: String
         let durableMempoolOwner: String
         let liveMempoolOwner: String
         let directoryLock: StorageDirectoryLock
     }
 
-    /// The two stores, and the retention scopes derived from the tree's
+    /// The Volume stores and state.db, and the retention scopes derived from the tree's
     /// identity.
     private struct Stores {
-        let broker: DiskBroker
-        let localFetcher: CoalescingFetcher
+        let stores: VolumeStores
+        /// The root chain's Volume store: constants, the Nexus genesis and
+        /// the mempool's pins.
+        var broker: DiskBroker { stores.root }
+        /// Boot reads every store: it names no chain.
+        var localFetcher: CoalescingFetcher { stores.readers(.anyChain).local }
         let retentionScope: String
         let durableMempoolOwner: String
         let liveMempoolOwner: String
@@ -41,12 +44,11 @@ enum BootRecovery {
         // Content stays only because a scope names it. What none does (a
         // write a crash cut short, a pool entry of the last run) goes now,
         // while nothing is being stored.
-        try await stores.broker.sweep()
+        try await stores.stores.sweep()
         logLine("lattice-node: boot recovery done in \(seconds(started.duration(to: .now)))")
         return Result(
             store: stores.store,
-            broker: stores.broker,
-            localFetcher: stores.localFetcher,
+            stores: stores.stores,
             retentionScope: stores.retentionScope,
             durableMempoolOwner: stores.durableMempoolOwner,
             liveMempoolOwner: stores.liveMempoolOwner,
@@ -75,31 +77,29 @@ enum BootRecovery {
         return directoryLock
     }
 
-    /// Stage 2: volumes.db, state.db, and the scopes and owners they use.
+    /// Stage 2: a Volume store per hosted chain (`VolumeStores`), state.db,
+    /// and the scopes and owners they use.
     private static func openStores(
         configuration: NodeConfiguration
     ) throws -> Stores {
-        let broker: DiskBroker
-        do {
-            broker = try DiskBroker(path: configuration.storagePath.appendingPathComponent("volumes.db").path)
-        } catch BrokerError.migrationRequired(let found, let required) {
-            // A Volume store another version wrote is not converted.
-            throw NodeStoreError.wipeRequired("volumes.db has schema \(found), this version reads \(required)")
-        }
-        let localFetcher = CoalescingFetcher(ReadTally.wrap("store", broker))
+        // state.db first: a store of another epoch or Nexus genesis is
+        // refused before anything is opened, let alone removed.
+        let store = try NodeStore(
+            databasePath: NodeStore.databasePath(storage: configuration.storagePath),
+            nexusGenesisCID: configuration.nexusGenesisCID
+        )
+        let volumes = try VolumeStores(
+            directory: configuration.storagePath, root: configuration.chainPath, hosted: configuration.hostedChildren,
+            headers: HeaderRecords(store: store)
+        )
         let retentionScope = [
             configuration.nexusGenesisCID,
             configuration.address.key,
         ].joined(separator: ":")
         let durableMempoolOwner = retentionScope + ":durable-mempool"
         let liveMempoolOwner = retentionScope + ":live-mempool"
-        let store = try NodeStore(
-            databasePath: NodeStore.databasePath(storage: configuration.storagePath),
-            nexusGenesisCID: configuration.nexusGenesisCID
-        )
         return Stores(
-            broker: broker,
-            localFetcher: localFetcher,
+            stores: volumes,
             retentionScope: retentionScope,
             durableMempoolOwner: durableMempoolOwner,
             liveMempoolOwner: liveMempoolOwner,

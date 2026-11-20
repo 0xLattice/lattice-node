@@ -604,7 +604,7 @@ extension ChainCore {
         for child in arrived {
             for carrier in parent.committers(of: child, directory: directory) { pairs.insert([carrier, child]) }
         }
-        var effects: [ChainEffect] = []
+        var jobs: [ChildDeriveJob] = []
         for pair in pairs.sorted(by: { $0.lexicographicallyPrecedes($1) }) {
             let (carrier, child) = (pair[0], pair[1])
             guard tree.contains(blockHash: child) || sync.proofs.awaiting[child] != nil || sync.pending.entries[child] != nil,
@@ -613,13 +613,14 @@ extension ChainCore {
             let owed = Set(grinds.filter { !credits($0, at: child) })
             guard !owed.isEmpty else { continue }
             sync.proofs.startDeriving(child)
-            effects.append(.deriveProof(ChildDeriveJob(
+            jobs.append(ChildDeriveJob(
                 childCID: child,
                 block: sync.proofs.awaiting[child]?.block ?? sync.pending.entries[child]?.block,
                 carrier: carrier, grinds: owed, chainPath: chainPath
-            )))
+            ))
         }
-        return effects
+        // One effect for the step's derivations, as for its proof checks.
+        return jobs.isEmpty ? [] : [.deriveProofs(jobs)]
     }
 
     /// A derivation's checks: each judged as a derived proof.

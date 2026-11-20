@@ -110,6 +110,107 @@ final class MetricsTests: XCTestCase {
         }
     }
 
+    func testMetricsCountTemplatesSubmissionsAndStaleWork() async throws {
+        let service = try await openService(chainPath: ["Nexus"])
+        let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
+        let headers: HTTPFields = [.authorization: testOperatorAuthorization, .contentType: "application/json"]
+        let templates = "lattice_template_build_seconds"
+        let submissions = "lattice_work_submission_seconds"
+        let stale = #"lattice_work_submissions_stale_total{chain="Nexus"}"#
+
+        try await app.test(.router) { client in
+            func template(_ request: MiningTemplateRequest) async throws -> MiningTemplateResponse {
+                let response = try await client.execute(
+                    uri: "/mining/templates", method: .post, headers: headers,
+                    body: ByteBuffer(bytes: try JSONEncoder().encode(request))
+                )
+                XCTAssertEqual(response.status, .ok)
+                return try JSONDecoder().decode(MiningTemplateResponse.self, from: Data(response.body.readableBytesView))
+            }
+            func submit(_ workID: String) async throws -> SubmitWorkResponse {
+                let response = try await client.execute(
+                    uri: "/mining/work", method: .post, headers: headers,
+                    body: ByteBuffer(bytes: try JSONEncoder().encode(SubmitWorkRequest(workID: workID, nonce: 0)))
+                )
+                XCTAssertEqual(response.status, .ok)
+                return try JSONDecoder().decode(SubmitWorkResponse.self, from: Data(response.body.readableBytesView))
+            }
+
+            let ok = #"chain="Nexus",outcome="ok""#
+            var samples = try await scrape(client)
+            XCTAssertEqual(samples["\(templates)_count{\(ok)}"], "0")
+            XCTAssertEqual(samples[stale], "0")
+            XCTAssertNil(samples.keys.first { $0.hasPrefix(submissions) })
+
+            // A transaction joins the pool after the template: what a new
+            // template would carry changes, but the work's tip does not, so
+            // its work is not stale.
+            let pooled = try await template(MiningTemplateRequest())
+            let key = CryptoUtils.generateKeyPair()
+            let bodyHeader = try HeaderImpl(node: TransactionBody(
+                accountActions: [], actions: [], depositActions: [], receiptActions: [], withdrawalActions: [],
+                signers: [CryptoUtils.createAddress(from: key.publicKey)], nonce: 0, chainPath: ["Nexus"]
+            ))
+            let transaction = Transaction(
+                signatures: [key.publicKey: try XCTUnwrap(TransactionSigning.sign(
+                    bodyHeader: bodyHeader, privateKeyHex: key.privateKey
+                ))],
+                body: bodyHeader
+            )
+            let submitted = try await client.execute(
+                uri: "/transactions", method: .post, headers: headers,
+                body: ByteBuffer(bytes: try JSONEncoder().encode(SubmitTransactionRequest(transaction: transaction)))
+            )
+            XCTAssertEqual(submitted.status, .ok)
+            let changed = try await template(MiningTemplateRequest())
+            XCTAssertNotEqual(changed.templateDigest, pooled.templateDigest)
+            let current = try await submit(pooled.workID).disposition
+            XCTAssertEqual(current, .canonicalized)
+            samples = try await scrape(client)
+            XCTAssertEqual(samples["\(templates)_count{\(ok)}"], "2")
+            XCTAssertEqual(samples["\(templates)_bucket{\(ok),le=\"+Inf\"}"], "2")
+            XCTAssertNotNil(samples["\(templates)_bucket{\(ok),le=\"0.1\"}"])
+            XCTAssertNotNil(samples["\(templates)_sum{\(ok)}"])
+            XCTAssertEqual(samples[#"\#(submissions)_count{chain="Nexus",outcome="canonicalized"}"#], "1")
+            XCTAssertEqual(samples[#"\#(submissions)_bucket{chain="Nexus",outcome="canonicalized",le="+Inf"}"#], "1")
+            XCTAssertEqual(samples[stale], "0")
+
+            // Two templates on one tip, then the first's block moves the tip:
+            // the second's work is on a tip that is no longer the act-on tip.
+            let first = try await template(MiningTemplateRequest())
+            let second = try await template(MiningTemplateRequest(recipients: [
+                MiningRecipient(chainPath: ["Nexus"], address: CryptoUtils.createAddress(
+                    from: CryptoUtils.generateKeyPair().publicKey
+                )),
+            ]))
+            XCTAssertNotEqual(first.workID, second.workID)
+            let accepted = try await submit(first.workID).disposition
+            XCTAssertEqual(accepted, .canonicalized)
+            samples = try await scrape(client)
+            XCTAssertEqual(samples[stale], "0")
+
+            // Its block is a sibling of the first: kept aside, or the tip
+            // when it wins the tie. Either way it was stale when it came.
+            let late = try await submit(second.workID)
+            XCTAssertTrue(late.accepted)
+            samples = try await scrape(client)
+            XCTAssertEqual(samples.filter { $0.key.hasPrefix("\(submissions)_count{") }
+                .compactMap { UInt64($0.value) }.reduce(0, +), 3)
+            XCTAssertEqual(samples[stale], "1")
+
+            // Work the node does not know is answered and counted, and cannot
+            // be told stale.
+            let unknown = try await client.execute(
+                uri: "/mining/work", method: .post, headers: headers,
+                body: ByteBuffer(bytes: try JSONEncoder().encode(SubmitWorkRequest(workID: "unknown", nonce: 0)))
+            )
+            XCTAssertNotEqual(unknown.status, .ok)
+            samples = try await scrape(client)
+            XCTAssertEqual(samples[#"\#(submissions)_count{chain="Nexus",outcome="unknownWork"}"#], "1")
+            XCTAssertEqual(samples[stale], "1")
+        }
+    }
+
     func testMetricsEscapeOperatorSuppliedChainPath() async throws {
         // Renderer: every escape the format defines, plus a CRLF, whose line
         // feed must not survive as a raw newline inside a label value.
@@ -189,6 +290,7 @@ private func parseExposition(_ text: String) throws -> [String: String] {
     }
     var helped: Set<String> = []
     var typed: Set<String> = []
+    var histograms: Set<String> = []
     var samples: [String: String] = [:]
     for line in text.dropLast().split(separator: "\n", omittingEmptySubsequences: false) {
         let line = String(line)
@@ -209,13 +311,20 @@ private func parseExposition(_ text: String) throws -> [String: String] {
                 guard typed.insert(group(match, 2)).inserted else {
                     throw ExpositionError(description: "duplicate TYPE: \(line)")
                 }
+                if group(match, 3) == "histogram" { histograms.insert(group(match, 2)) }
             }
         } else if let match = sample.firstMatch(in: line, range: range), match.range == range {
-            let family = group(match, 1)
+            // A histogram's samples are its family's name with a suffix.
+            let name = group(match, 1)
+            let family = ["_bucket", "_sum", "_count"].lazy.compactMap { suffix -> String? in
+                guard name.hasSuffix(suffix) else { return nil }
+                let base = String(name.dropLast(suffix.count))
+                return histograms.contains(base) ? base : nil
+            }.first ?? name
             guard helped.contains(family), typed.contains(family) else {
                 throw ExpositionError(description: "sample before HELP/TYPE: \(line)")
             }
-            guard samples.updateValue(group(match, 3), forKey: family + group(match, 2)) == nil else {
+            guard samples.updateValue(group(match, 3), forKey: name + group(match, 2)) == nil else {
                 throw ExpositionError(description: "duplicate series: \(line)")
             }
         } else {

@@ -12,9 +12,14 @@
 #
 # Optional, from the environment:
 #   DATA=<dir>   the recorded chain (default <work-dir>/data/chain), recorded
-#                there with BLOCKS and LEAVES when it has no manifest.txt
+#                there with BLOCKS, LEAVES and RATIO when it has no manifest.txt
+#   RATIO=<r>    one Nexus block every r shares when recording (default 34;
+#                1 makes every share a Nexus block: a Nexus-heavy chain of
+#                about BLOCKS blocks, for HOSTED=0)
 #   TAG=<name>   run directories are <work-dir>/runs/<name>-<n> (default w<workers>)
 #   HOSTED=<k>   the follower hosts Nexus and the first k child levels only
+#                (it is given a manifest of those levels alone, so a ref
+#                whose benchmark predates CHILD_BENCH_HOSTED does the same)
 #   PAGES=<s>    bytes written by table and index, attributed every s seconds
 #   TALLY=1      count the reads of each CID by the node's work (repeated decodes)
 #   PROFILE=1    a CPU profile of the follower (macOS: sample) into sample.txt
@@ -79,7 +84,7 @@ if [ ! -f "$D/manifest.txt" ]; then
     *) echo "DATA=$D holds no manifest.txt and is outside $W: not recording there"; exit 1 ;;
   esac
   rm -rf "$D"; mkdir -p "$D"; D=$(cd "$D" && pwd); mkdir -p "$W/data"
-  (export CHILD_BENCH=record CHILD_BENCH_DIR=$D CHILD_BENCH_BLOCKS=${BLOCKS:-3000} CHILD_BENCH_LEAVES=${LEAVES:-2}
+  (export CHILD_BENCH=record CHILD_BENCH_DIR=$D CHILD_BENCH_BLOCKS=${BLOCKS:-3000} CHILD_BENCH_LEAVES=${LEAVES:-2} CHILD_BENCH_RATIO=${RATIO:-34}
    bench testRecord) > "$W/data/record.log" 2>&1 || { tail -20 "$W/data/record.log"; exit 1; }
 fi
 cat "$D/manifest.txt"
@@ -97,11 +102,17 @@ while [ "$n" -le "$REPEATS" ]; do
     sleep 1
   done
   [ -n "$PEER" ] || { tail -20 "$O/serve.log"; echo "server did not start"; exit 1; }  # stop() ends it
+  M=$D/manifest.txt
+  if [ -n "$HOSTED" ]; then
+    # Nexus and the first HOSTED child levels, in the manifest's order.
+    M=$O/manifest.txt
+    awk -v k="$HOSTED" '/^level Nexus /{print; next} /^level /{if (n++ < k) print; next} {print}' "$D/manifest.txt" > "$M"
+  fi
   status=0
   net > "$O/net.txt"
   (
     export CHILD_BENCH=follow CHILD_BENCH_WORKERS=$N CHILD_BENCH_DIR=$W/follower CPUS=$FOLLOWER_CPUS
-    export CHILD_BENCH_MANIFEST=$D/manifest.txt CHILD_BENCH_PEER=$PEER CHILD_BENCH_VFS=$O/vfs.txt
+    export CHILD_BENCH_MANIFEST=$M CHILD_BENCH_PEER=$PEER CHILD_BENCH_VFS=$O/vfs.txt
     # TRACE=0 skips the sync trace: no W/B/E/P split, no trace cost.
     [ "${TRACE:-1}" = 0 ] || export LATTICE_SYNC_TRACE=$O/trace LATTICE_SYNC_TRACE_MAX_BYTES=0
     [ -z "$HOSTED" ] || export CHILD_BENCH_HOSTED=$HOSTED

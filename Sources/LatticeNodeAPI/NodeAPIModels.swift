@@ -332,7 +332,7 @@ public struct SubmitWorkRequest: Codable, Sendable, Equatable {
     }
 }
 
-public enum WorkDisposition: String, Codable, Sendable {
+public enum WorkDisposition: String, Codable, Sendable, CaseIterable {
     case canonicalized
     case acceptedSide
     /// The grind cleared only child targets, not Nexus's own: the children

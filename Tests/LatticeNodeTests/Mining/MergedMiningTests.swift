@@ -550,7 +550,7 @@ final class MergedMiningTests: XCTestCase {
 
         let (followerConfiguration, followerOverlay, _) = try policyHost("6b", module: nil, peers: [minerEndpoint])
         let followerStorage = try await NodeStorage.open(configuration: followerConfiguration)
-        let before = await followerStorage.broker.fetchVolumeLocal(root: moduleCID)
+        let before = await followerStorage.stores.anyChain.fetchVolumeLocal(root: moduleCID)
         XCTAssertNil(before, "the follower starts without the module")
         let follower = try await NodeRuntime.start(
             storage: followerStorage, configuration: followerConfiguration, overlay: followerOverlay
@@ -563,7 +563,7 @@ final class MergedMiningTests: XCTestCase {
         }
         let followed = await followerAlpha.explorerTransaction(cid: transferCID)?.blockHeight
         XCTAssertNotNil(followed, "the follower executed the block carrying the transfer")
-        let after = await followerStorage.broker.fetchVolumeLocal(root: moduleCID)
+        let after = await followerStorage.stores.anyChain.fetchVolumeLocal(root: moduleCID)
         XCTAssertNotNil(after, "the follower holds the module it fetched with the chain")
     }
 

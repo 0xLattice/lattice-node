@@ -313,9 +313,11 @@ final class LevelSimulationTests: XCTestCase {
                     }
                 case .level(let path, .verifyProofs(let batch)):
                     queue.append(.level(path, .proofsVerified(batch.run { world.blocks[path]?[$0]?.block })))
-                case .level(let path, .deriveProof(let job)):
-                    let held = job.block ?? world.blocks[path]?[job.childCID]?.block
-                    queue.append(.level(path, .derived(await job.run(held: held, upstream: [], fetcher: world.cas))))
+                case .level(let path, .deriveProofs(let jobs)):
+                    for job in jobs {
+                        let held = job.block ?? world.blocks[path]?[job.childCID]?.block
+                        queue.append(.level(path, .derived(await job.run(held: held, upstream: [], fetcher: world.cas))))
+                    }
                 case .level(let path, .fetchByCID(_, let cid)):
                     queue.append(.level(path, .childIndexFetched(
                         peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
@@ -384,9 +386,11 @@ final class LevelSimulationTests: XCTestCase {
                     }
                 case .level(let path, .verifyProofs(let batch)):
                     queue.append(.level(path, .proofsVerified(batch.run { world.blocks[path]?[$0]?.block })))
-                case .level(let path, .deriveProof(let job)):
-                    let held = job.block ?? world.blocks[path]?[job.childCID]?.block
-                    queue.append(.level(path, .derived(await job.run(held: held, upstream: [], fetcher: world.cas))))
+                case .level(let path, .deriveProofs(let jobs)):
+                    for job in jobs {
+                        let held = job.block ?? world.blocks[path]?[job.childCID]?.block
+                        queue.append(.level(path, .derived(await job.run(held: held, upstream: [], fetcher: world.cas))))
+                    }
                 case .level(let path, .fetchByCID(_, let cid)):
                     queue.append(.level(path, .childIndexFetched(
                         peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
@@ -456,9 +460,11 @@ final class LevelSimulationTests: XCTestCase {
                         XCTAssertTrue(asked.contains(job.childCID), "a check spent on a header not asked for")
                     }
                     queue.append(.level(path, .proofsVerified(batch.run { world.blocks[path]?[$0]?.block })))
-                case .level(let path, .deriveProof(let job)):
-                    let held = job.block ?? world.blocks[path]?[job.childCID]?.block
-                    queue.append(.level(path, .derived(await job.run(held: held, upstream: [], fetcher: world.cas))))
+                case .level(let path, .deriveProofs(let jobs)):
+                    for job in jobs {
+                        let held = job.block ?? world.blocks[path]?[job.childCID]?.block
+                        queue.append(.level(path, .derived(await job.run(held: held, upstream: [], fetcher: world.cas))))
+                    }
                 case .level(let path, .fetchByCID(_, let cid)):
                     queue.append(.level(path, .childIndexFetched(
                         peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
@@ -529,9 +535,11 @@ final class LevelSimulationTests: XCTestCase {
                         }
                     case .level(let path, .verifyProofs(let batch)):
                         queue.append(.level(path, .proofsVerified(batch.run { world.blocks[path]?[$0]?.block })))
-                    case .level(let path, .deriveProof(let job)):
-                        let held = job.block ?? world.blocks[path]?[job.childCID]?.block
-                        queue.append(.level(path, .derived(await job.run(held: held, upstream: [], fetcher: world.cas))))
+                    case .level(let path, .deriveProofs(let jobs)):
+                        for job in jobs {
+                            let held = job.block ?? world.blocks[path]?[job.childCID]?.block
+                            queue.append(.level(path, .derived(await job.run(held: held, upstream: [], fetcher: world.cas))))
+                        }
                     case .level(let path, .fetchByCID(_, let cid)):
                         queue.append(.level(path, .childIndexFetched(
                             peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)
@@ -594,9 +602,11 @@ final class LevelSimulationTests: XCTestCase {
                         }
                     case .level(let path, .verifyProofs(let batch)):
                         queue.append(.level(path, .proofsVerified(batch.run { world.blocks[path]?[$0]?.block })))
-                    case .level(let path, .deriveProof(let job)):
-                        let held = job.block ?? world.blocks[path]?[job.childCID]?.block
-                        queue.append(.level(path, .derived(await job.run(held: held, upstream: [], fetcher: world.cas))))
+                    case .level(let path, .deriveProofs(let jobs)):
+                        for job in jobs {
+                            let held = job.block ?? world.blocks[path]?[job.childCID]?.block
+                            queue.append(.level(path, .derived(await job.run(held: held, upstream: [], fetcher: world.cas))))
+                        }
                     case .level(let path, .fetchByCID(_, let cid)):
                         queue.append(.level(path, .childIndexFetched(
                             peer, cid: cid, source.fetch(cid, at: path, now: now, world: world)

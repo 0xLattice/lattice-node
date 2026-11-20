@@ -46,7 +46,7 @@ extension NodeRuntime {
         /// Lets go of the chains the configuration no longer hosts, unless
         /// a job of theirs still runs: they store what they execute.
         mutating func release(jobsRunning: Bool) async {
-            guard releasing, !jobsRunning, !state.stops(at: .letGoOfChain) else { return }
+            guard releasing, !jobsRunning else { return }
             releasing = false
             await storage.letGoOfChains(except: configured)
         }
@@ -55,11 +55,11 @@ extension NodeRuntime {
         /// the counts found are checked, and the state settled.
         mutating func start(_ levels: [ChainPath: ChainCore], counts: inout Counts) async {
             // What a chain the configuration does not host left goes first.
-            await storage.letGoOfChains(except: configured, blocks: true)
+            await storage.letGoOfChains(except: configured)
             // With no bodies kept beyond the working set, a start lets go
             // of the ones a run that kept them left, before any step.
             for (path, level) in levels { bodyTips[path] = level.snapshot.actOnTip }
-            if !state.stops(at: .startBodies) { await storage.letGoOfBodies(except: bodyTips) }
+            await storage.letGoOfBodies(except: bodyTips)
             counts.start(await state.start(tips: levels.mapValues(\.snapshot.actOnHeight)))
             await settleState(levels, counts: &counts)
         }
@@ -119,7 +119,7 @@ extension NodeRuntime {
         /// stays while it is its chain's tip. One that executed this step
         /// and is not, and the tip another block replaced, are let go.
         mutating func settleBodies(_ levels: [ChainPath: ChainCore], configuration: NodeConfiguration) async {
-            for key in excludedThisStep where !state.stops(at: .releaseExcludedBody) {
+            for key in excludedThisStep {
                 await storage.releaseBody(key.cid, at: key.path)
             }
             excludedThisStep.removeAll()
@@ -132,7 +132,7 @@ extension NodeRuntime {
                 if let last = bodyTips[path], last != tip { past.append(last) }
                 bodyTips[path] = tip
                 past.removeAll { $0 == tip }
-                if !past.isEmpty, !state.stops(at: .letGoOfBodies) { await storage.letGo(ofBodies: past, at: path) }
+                if !past.isEmpty { await storage.letGo(ofBodies: past, at: path) }
             }
         }
 

@@ -9,7 +9,7 @@ process owns:
 - one Ivy overlay listener;
 - one loopback operator RPC;
 - optionally one public-read listener (GET-only unless public submit is on);
-- one `state.db` and `volumes.db` recovery unit.
+- one `state.db` and `volumes/` recovery unit (a Volume store per hosted chain).
 
 Run mining outside the node with `lattice-mining-coordinator` and one or more
 workers. Use a supervisor for both processes.
@@ -29,7 +29,16 @@ Before exposing a node:
 8. Configure a mining recipient for every chain that should pay rewards.
 9. Reserve enough disk for unbounded fact history and retained content, or
    set `blockBodies` and `state` (see "What a node keeps").
-10. Test a clean shutdown, restart, and recovery before accepting traffic.
+10. Allow open files for the chains hosted: each chain's Volume store holds
+    about thirteen (its file, log and shared memory, and four read
+    connections), beside the overlay's sockets. The node raises its own soft
+    limit to the hard limit at start (on macOS, to the kernel's per-process
+    maximum, usually 10,240 or more) and logs the result as `open files
+    allowed`; the shipped systemd unit sets `LimitNOFILE=65536`. Only a hard
+    limit set low by the host bounds the chains a node can host.
+    Each store also keeps up to 64 MiB of write cache and 16 MiB of read cache
+    in memory, filled as its chain is used.
+11. Test a clean shutdown, restart, and recovery before accepting traffic.
 
 ## How a node finds the network
 
@@ -471,22 +480,23 @@ The tree storage directory contains:
 
 ```text
 state.db
-volumes.db
+volumes/            one Volume store per hosted chain, <hash>.db (below)
 volume-bundles.db
 storage.lock
 ```
 
 `state.db` holds path-keyed facts, weighed headers, saved child proofs,
 indexes, durable sync cursors, the state diffs of the state window, and the
-local mempool journal. `volumes.db`
-holds content and retained roots. Those two are the recovery unit.
+local mempool journal. `volumes/` holds each hosted chain's content and
+retained roots, one file per chain; the root chain's file also holds the
+constants, the operator's pins and the mempool's. Those two are the recovery unit.
 `volume-bundles.db` is a cache of which Volume roots are served together for a
 block: it may be lost or deleted while the node is stopped, and is rebuilt
 from local content.
 
 Persistence order is:
 
-1. store the content in one `volumes.db` transaction (a block's Volumes
+1. store the content in one transaction of its chain's Volume store (a block's Volumes
    together, once its execution found it valid or it was mined here; a
    step's post-states together), then retain it. A body fetched from peers
    is read into memory until then (and read again from peers if memory
@@ -507,7 +517,7 @@ state is not executed yet is not run; it waits, and no other block waits on
 it. A batch is a run of consecutive blocks on one chain, the heavier branch
 first at a fork; each block reads the state the one before it produced from
 memory. Its valid blocks are stored and committed together, by the order
-above: one `volumes.db` transaction for their bodies, then one step's
+above: one transaction of the chain's Volume store for their bodies, then one step's
 post-states and facts. The batch ends at its first block without a valid
 verdict. Bitcoin Core connects up to 32 blocks per `ActivateBestChainStep`,
 and geth's `insertChain` writes a batch at once.
@@ -594,7 +604,7 @@ of the chain reads them, so they are not state that a window lets go of.
 On `recent` a node counts, for each chain, the places each node holds in the
 state of the chain's tip, plus the places the blocks above a cursor replaced,
 and keeps every node it counts, and the state diff of each block it executed
-within the window (in `state.db`): the counts are kept in `volumes.db`, written
+within the window (in `state.db`): the counts are kept in the chain's Volume store, written
 with the cursor and the tip they were moved to in one transaction, so a stop
 never leaves them half moved. As the tip moves, the counts follow it in one
 write once it has climbed a window above them, at once when it is on another
@@ -636,46 +646,45 @@ merged configuration does not host has its data let go of, however it left
 (`lattice child unhost`, a fragment edited or deleted, a SIGHUP re-read, a
 start without it). A running node does so once the chain's level has
 stopped and its running jobs have ended (its queued ones never run); the
-change does not wait for the chain's running jobs. Every start does so
-for any chain it holds data of and does not host, found by its facts, its
-per-chain scopes and the names of its blocks' bodies and reads (one name
-per kept block, held in memory while the start lists them: 30,000 list in
-about 16 ms). One that the configuration lists and that did not start keeps
-its data.
+change does not wait for the chain's running jobs. Every start does so,
+after `state.db` is opened and its epoch and Nexus genesis checked, for any
+chain it holds data of and does not host, found by its facts and its
+Volume store. One that the configuration lists and that did not start
+keeps its data.
 
-Its content goes first: from `volumes.db` its blocks' bodies and what they
-read, its state windows, spec and policy modules, counts and what its state
-sync held, and its pooled transactions; its local transactions (their rows
-in `state.db` and what they pinned); and its Volume bundles from
-`volume-bundles.db`. Then, in one `state.db` transaction, its facts and
-block index, cursors, state diffs and child proofs go, with the header
+Its content goes first: its Volume store under `volumes/`, with its log and
+shared memory, which holds everything the chain kept (its blocks' bodies
+and what they read, its state windows, spec and policy modules, counts and
+what its state sync held); its pooled and local transactions (their pins in
+the root chain's store, their rows in `state.db`); and its Volume bundles
+from `volume-bundles.db`. Then, in one `state.db` transaction, its facts
+and block index, cursors, state diffs and child proofs go, with the header
 records and proof entries no other chain's rows name. A fact whose content
 is gone is no fault (it is read again from peers), so content goes first: a
 stop or a failure in between leaves the chain's facts, a store the node
-runs on, and the next start finishes the release. Each chain let go of, or
-not, is a line in the node's log, naming it. Content another scope also
-names stays: an operator pin, another chain's block, and on `state: all`
-the state its executions stored, which is kept with every chain's. Child
-indexes stay too: a leaf chain's blocks all share one, with every other
-block that carries no child; a parent chain's may be its own. Hosting the
-chain again syncs it from peers like any new chain.
+runs on, and the next start finishes the release; a file under `volumes/`
+that no hosted chain's name and no fact explains is removed then too. Each
+chain let go of, or not, is a line in the node's log, naming it. What
+another chain needs is in that chain's own store, and the operator's pins
+are in the root chain's. Child indexes stay: a leaf chain's blocks all
+share one, with every other block that carries no child; a parent chain's
+may be its own. Hosting the chain again syncs it from peers like any new
+chain.
 
-Two writes can land after a running node let go of a chain, and go at the
-next start: the chain's block body that a mined block's storing step,
-begun before the chain stopped, stores under the chain's own body scope;
-and a child block that the build-child-block RPC stores after passing its
-hosted check before the chain stopped.
+A write that comes for a chain after its store went (a mined block's
+storing step, or a block the build-child-block RPC built, begun before the
+chain stopped) finds no store and writes nothing.
 
-Letting go holds the node's loop while it runs: about 45 µs per block kept
-with its bodies (a 10,000-block chain takes about 0.45 s, a 100,000-block
-one about 4.5 s), plus a pass over every child proof the node keeps when the
-chain's proofs named entries of their own (about 0.7 s with 100,000 proofs
-of other chains). Its pooled transactions cost one read each of the
-transactions in the pool.
+Letting go holds the node's loop while it runs: the store's removal is one
+file operation; its facts cost about 45 µs per block kept (a 10,000-block
+chain about 0.45 s, a 100,000-block one about 4.5 s), plus a pass over every
+child proof the node keeps when the chain's proofs named entries of their
+own (about 0.7 s with 100,000 proofs of other chains). Its pooled
+transactions cost one read each of the transactions in the pool.
 
-Letting go frees space for the node's later writes, not for the system:
-`state.db`, `volumes.db` and `volume-bundles.db` are SQLite files without
-`auto_vacuum`, so deleted rows' pages go to each file's free list and are
+A chain's store, removed, frees its space for the system. `state.db`,
+the other stores and `volume-bundles.db` are SQLite files without
+`auto_vacuum`: rows deleted from them free pages to each file's free list,
 reused by later writes, and the files do not shrink. Nor does
 `state.db-wal`: a checkpoint reuses it from its start, and it is not
 truncated.
@@ -710,7 +719,7 @@ executed body but the tips' and the genesis blocks' before the node answers
 anything: the time that takes grows with the number of bodies it held.
 Bodies stored by a version before this setting are not let go of: sync the
 node again to drop them. Switching back to `all` keeps every body from then
-on and brings none back. `volumes.db` does not shrink: the
+on and brings none back. A Volume store does not shrink: the
 space is reused.
 
 Content outside the chain, such as a file an application names by CID, is
@@ -737,9 +746,9 @@ Startup fails closed when:
 
 - the schema epoch or Nexus genesis does not match;
 - a stored fact does not decode, or a hosted level's facts do not restore;
-- a hosted child chain's genesis spec is in neither `volumes.db` nor the
+- a hosted child chain's genesis spec is in neither the Volume stores nor the
   node's own `specs`, or one of the node's own pending transactions is
-  missing from `volumes.db`;
+  missing from the root chain's Volume store;
 - another process owns the storage lock.
 
 Do not repair or combine database files by hand. Restore one matched snapshot
@@ -810,14 +819,55 @@ reacquired or re-mined according to their specs and network availability.
 
 ## Observability
 
-`/metrics` is operator-only Prometheus text. Monitor at least:
+`/metrics` is operator-only Prometheus text. Per hosted chain path (label
+`chain`) it reports:
 
-- process restarts and clean-shutdown failures;
-- connected peer count;
-- Nexus and child act-on heights;
-- time since the last accepted Nexus block;
-- mempool size and template errors;
-- storage growth, free space, and backup age.
+- `lattice_chain_tip_height{tier="validated"|"weighed"}`: the acted-on tip
+  and the best header;
+- `lattice_chain_tip_advanced_timestamp_seconds`: when the acted-on tip
+  last moved;
+- `lattice_chain_blocked_on{on=...}`: what the tip waits on, one series per
+  reason, 1 for the current one (`/status`'s `sync.blockedOn`) and 0 for the
+  rest, so a reason that ends reads 0 rather than vanishing;
+- `lattice_chain_synced`, `lattice_chain_headers_synced`: its latches;
+- `lattice_chain_jobs_queued`: its jobs waiting for a worker;
+
+and node-wide `lattice_overlay_peers`, `lattice_mempool_transactions` and
+`process_start_time_seconds`.
+
+For mining, under the root's `chain` label:
+
+- `lattice_template_build_seconds{outcome=...}`: a histogram of the time to
+  answer a template request, from the request reaching the node (queueing,
+  the build job, and the answer), by outcome: `ok` for a template, or the
+  refusal (`busy`, `executing`, `buildFailed`), which appears once seen;
+- `lattice_work_submission_seconds{outcome=...}`: a histogram of the time to
+  answer a work submission, by the disposition answered (`canonicalized`,
+  `acceptedSide`, `childOnly`, `duplicate`, `invalid`), the refusal
+  (`unknownWork`, `missesSearchTarget`), or `error` (a malformed work ID, or a
+  submission the node could not finish); an outcome appears once seen;
+- `lattice_work_submissions_stale_total`: stale work as a pool counts it:
+  submissions whose nonce cleared the work's search target while the tip
+  the work's block builds on was no longer the act-on tip, so the block can
+  only be a side block (a child's block it carries may still count). A
+  change to what a new template would carry (a transaction, a child's tip)
+  changes the template digest but leaves the work current. A nonce that
+  misses its target, and work the node no longer holds (`unknownWork`), are
+  not counted.
+
+Outcome 10's measures (node-design §1) read from these: the 99th
+percentile, e.g.
+`histogram_quantile(0.99, rate(lattice_template_build_seconds_bucket{outcome="ok"}[1h]))`,
+and the stale share of submissions whose nonce cleared their target,
+`rate(lattice_work_submissions_stale_total[1h]) / sum without (outcome) (rate(lattice_work_submission_seconds_count{outcome=~"canonicalized|acceptedSide|childOnly|duplicate|invalid"}[1h]))`.
+Each submission is one share at the template's search target, so the stale
+share of submissions is the stale share of work at a steady search target.
+
+`deploy/prometheus/lattice-alerts.yml` has alert rules on these: a chain
+behind and still, a chain stalled with no reason, content no peer serves,
+a chain not caught up an hour after start, no peers, and a restart loop.
+Their thresholds are starting points. Monitor also storage growth, free
+space and backup age, which the host's own exporter reports.
 
 Set `LATTICE_SYNC_TRACE=1` for temporary stderr tracing, or set it to a file
 prefix. The trace includes absolute chain paths and can grow without bound;
@@ -827,7 +877,7 @@ enable it only for diagnosis and rotate or remove it afterwards.
 
 ### `wipe required`
 
-The store belongs to another schema epoch or Nexus genesis, or `volumes.db`
+The store belongs to another schema epoch or Nexus genesis, or a Volume store
 was written by a version with another Volume store schema. Stop the complete
 tree and use `lattice wipe`; there is no migration path.
 
@@ -837,16 +887,31 @@ must be wiped before it runs this version: its store may hold facts whose
 state it never wrote, and a `stateBufferBytes` key left in `lattice.json` or
 `config.d` is refused at start.
 
+Schema epoch 49 moves `volumes.db` to the Volume store's schema v3, which
+drops a redundant index (about 14% of what a sync writes). Every node is
+wiped once to run it; an older store reports `wipe required`.
+
+Schema epoch 50 gives each hosted chain a Volume store of its own under
+`volumes/` beside `state.db`, in place of the one `volumes.db`, so a chain's
+writes no longer grow with the chains hosted beside it. Every node is wiped
+once to run it. A chain's file is named by the SHA-256 of its path, so
+names never collide on a case-insensitive disk and stay short however deep
+the chain; `printf %s Nexus/Alpha | shasum -a 256` gives Nexus/Alpha's
+(`volumes/<that>.db`). A chain the node stops hosting keeps its store until
+the next start, which removes it with its log; the root chain's store also
+holds the operator's pins, the protocol constants and the mempool's
+journal. Back up the whole storage directory, `volumes/` included.
+
 ### `missingMaterializedVolume`
 
-A hosted child chain's genesis spec is in neither `volumes.db` nor this
+A hosted child chain's genesis spec is in neither the Volume stores nor this
 node's own `specs`, or a transaction in the node's own pending journal is
-absent from `volumes.db`. Restore the whole backup set or wipe.
+absent from the root chain's Volume store. Restore the whole backup set or wipe.
 
 Other content a fact names may be absent without stopping the node. It
 starts on its facts, stores the Nexus genesis block again, and reads what it
 needs to execute a block or build a template from its peers, each entry
-checked against its CID. A `state.db` copied without its `volumes.db`
+checked against its CID. A `state.db` copied without its `volumes/`
 therefore runs, but it holds only what the blocks it has executed and mined
 since have stored:
 the public read routes and the check of a submitted transaction answer from
@@ -858,9 +923,9 @@ such a transaction pooled. Resync it to hold the rest.
 Startup refuses to serve child headers without their recorded proof evidence.
 Restore the matched backup or wipe the tree.
 
-### Damaged `volumes.db` content
+### Damaged Volume store content
 
-For its own use the node does not hash what it reads back from `volumes.db`:
+For its own use the node does not hash what it reads back from a Volume store:
 every entry was checked against its CID on its way in. Bytes damaged on disk
 since are caught wherever they are read against their CID. A block whose
 content they are never connects: its fetch and connect wait, again and
@@ -908,4 +973,3 @@ If the repair node stops at the same block, the cause is something else.
 
 Determine whether the code listener or nginx produced the response. The node's
 limits are listener-wide (`--public-read-max-rate`, `--public-submit-rate`); a
-429 from the node means the listener as a whole is over its ceiling.

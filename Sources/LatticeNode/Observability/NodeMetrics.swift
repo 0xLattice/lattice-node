@@ -1,4 +1,5 @@
 import Foundation
+import LatticeNodeCore
 
 /// Prometheus text exposition format 0.0.4.
 public let nodeMetricsContentType = "text/plain; version=0.0.4"
@@ -15,12 +16,22 @@ struct NodeMetricsSample: Sendable {
     /// Every hosted chain, the root first: its tip heights, and when its
     /// acted-on tip last moved (nil before it has a tip).
     let chains: [Chain]
+    /// Template and submission answer times, and submissions on stale
+    /// templates (`MiningMetrics`); nil renders none.
+    let mining: MiningMetrics.Snapshot?
 
     struct Chain: Sendable {
         let path: [String]
         let validatedTipHeight: UInt64?
         let weighedTipHeight: UInt64?
         let tipAdvancedAt: Double?
+        /// What its tip waits on (`ChainProgress`), its latches, and its jobs
+        /// waiting for a worker, as `/status` reports them; nil before the
+        /// chain's first step.
+        var blockedOn: String? = nil
+        var synced: Bool? = nil
+        var headersSynced: Bool? = nil
+        var jobsQueued: Int? = nil
     }
 
     init(
@@ -30,7 +41,8 @@ struct NodeMetricsSample: Sendable {
         overlayPeers: Int,
         mempoolTransactions: Int,
         processStartTime: Date,
-        chains: [Chain] = []
+        chains: [Chain] = [],
+        mining: MiningMetrics.Snapshot? = nil
     ) {
         self.chainPath = chainPath
         self.validatedTipHeight = validatedTipHeight
@@ -39,6 +51,7 @@ struct NodeMetricsSample: Sendable {
         self.mempoolTransactions = mempoolTransactions
         self.processStartTime = processStartTime
         self.chains = chains
+        self.mining = mining
     }
 }
 
@@ -80,6 +93,61 @@ func renderNodeMetrics(_ sample: NodeMetricsSample) -> String {
         "When each hosted chain's acted-on tip last moved, in unix seconds; with tip heights below the weighed tip, an old one is a stall.",
         sample.chains.compactMap { chain in chain.tipAdvancedAt.map { (label(chain.path), String($0)) } }
     )
+    family(
+        "lattice_chain_blocked_on",
+        "What each hosted chain's acted-on tip waits on: every reason (atTip, headers, proofs, parent, bodies, bodiesUnavailable, execution, stalled), 1 for the current one and 0 for the rest.",
+        sample.chains.flatMap { chain in
+            chain.blockedOn.map { current in
+                ChainProgress.allCases.map { reason in
+                    ("\(label(chain.path)),on=\"\(escapeMetricLabelValue(reason.rawValue))\"", reason.rawValue == current ? "1" : "0")
+                }
+            } ?? []
+        }
+    )
+    family(
+        "lattice_chain_synced",
+        "Whether each hosted chain has caught up since the process started (1) and so takes peer transactions.",
+        sample.chains.compactMap { chain in chain.synced.map { (label(chain.path), $0 ? "1" : "0") } }
+    )
+    family(
+        "lattice_chain_headers_synced",
+        "Whether each hosted chain has weighed a peer's whole log since the process started (1): its children read their peers, and it relays.",
+        sample.chains.compactMap { chain in chain.headersSynced.map { (label(chain.path), $0 ? "1" : "0") } }
+    )
+    family(
+        "lattice_chain_jobs_queued",
+        "Each hosted chain's jobs waiting for a worker.",
+        sample.chains.compactMap { chain in chain.jobsQueued.map { (label(chain.path), String($0)) } }
+    )
+    if let mining = sample.mining {
+        func histogram(_ name: String, _ help: String, _ series: [(String, MiningMetrics.Histogram.Snapshot)]) {
+            output += "# HELP \(name) \(help)\n# TYPE \(name) histogram\n"
+            let bounds = MiningMetrics.bounds.map { "\($0)" } + ["+Inf"]
+            for (labels, histogram) in series {
+                for (bound, count) in zip(bounds, histogram.cumulative) {
+                    output += "\(name)_bucket{\(labels),le=\"\(bound)\"} \(count)\n"
+                }
+                output += "\(name)_sum{\(labels)} \(histogram.seconds)\n"
+                output += "\(name)_count{\(labels)} \(histogram.count)\n"
+            }
+        }
+        histogram(
+            "lattice_template_build_seconds",
+            "Time to answer a mining template request, by outcome: ok (a template), or the refusal (busy, executing, buildFailed).",
+            mining.templates.map { ("\(chain),outcome=\"\($0.outcome)\"", $0.1) }
+        )
+        histogram(
+            "lattice_work_submission_seconds",
+            "Time to answer a work submission, by outcome: the disposition answered (canonicalized, acceptedSide, childOnly, duplicate, invalid), unknownWork, missesSearchTarget, or error.",
+            mining.submissions.map { ("\(chain),outcome=\"\($0.outcome)\"", $0.1) }
+        )
+        family(
+            "lattice_work_submissions_stale_total",
+            "Work submissions whose nonce cleared the search target on work whose tip was no longer the act-on tip.",
+            [(chain, String(mining.staleSubmissions))],
+            type: "counter"
+        )
+    }
     family(
         "process_start_time_seconds",
         "Start time of the process since unix epoch in seconds.",

@@ -12,7 +12,8 @@ workers.
 2. Keep the operator RPC on loopback. Publish only the GET-only read listener
    or a proxy allowing no more than it.
 3. Expose one overlay port for the tree, not one port per hosted chain.
-4. Treat `state.db` and `volumes.db` as one recovery unit.
+4. Treat `state.db` and `volumes/` (a Volume store per hosted chain) as one
+   recovery unit.
    `volume-bundles.db` is a cache and may be lost.
 5. Use one reviewed revision for the node, coordinator, workers, CLI, and
    deployment image.
@@ -68,12 +69,13 @@ The persistent layout is:
   specs/
   chains/Nexus/
     state.db
-    volumes.db
+    volumes/          a Volume store per hosted chain, named by its path's SHA-256
     volume-bundles.db
 ```
 
-The single `chains/Nexus` directory contains facts for every hosted path.
-There are no per-child databases or identity keys.
+The single `chains/Nexus` directory contains facts for every hosted path, in
+`state.db`, and a Volume store per hosted path under `volumes/`. There are no
+per-child identity keys.
 
 ## Containers and Fly
 

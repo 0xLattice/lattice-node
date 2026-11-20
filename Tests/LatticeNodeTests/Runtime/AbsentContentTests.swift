@@ -77,9 +77,7 @@ final class AbsentContentTests: XCTestCase {
     }
 
     private func empty(_ host: Host) {
-        for file in ["volumes.db", "volumes.db-wal", "volumes.db-shm"] {
-            try? FileManager.default.removeItem(at: host.configuration.storagePath.appendingPathComponent(file))
-        }
+        try? FileManager.default.removeItem(at: host.configuration.storagePath.appendingPathComponent("volumes"))
     }
 
     /// A node whose Volume store was emptied starts on its facts, builds on
@@ -347,7 +345,7 @@ final class AbsentContentTests: XCTestCase {
         let unheld = await storage.volume(absent)
         XCTAssertNil(unheld)
 
-        try await storage.retainHeld([genesis, absent])
+        try await storage.retainHeld([genesis, absent], in: storage.broker)
 
         let retained = try await storage.broker.retainedRoots(scope: storage.retentionScope)
         XCTAssertTrue(retained.contains(genesis))

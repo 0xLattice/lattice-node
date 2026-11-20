@@ -24,6 +24,15 @@ on:
       workers:
         description: "Worker counts to run, space separated"
         default: "1"
+      hosted:
+        description: "Child levels the follower hosts (0: Nexus alone); empty for all"
+        default: ""
+      ratio:
+        description: "One Nexus block every this many shares when recording (1: a Nexus-heavy chain); empty for the default"
+        default: ""
+      blocks:
+        description: "Blocks to record (Alpha's height; with ratio 1, about Nexus's); empty for the default"
+        default: ""
 
 env:
   LATTICE_FORBID_DEFAULT_PEERS: "1"
@@ -36,6 +45,12 @@ env:
   FOLLOWER_CPUS: ${{ inputs.follower_cpus || '0' }}
   SERVER_CPUS: ${{ inputs.server_cpus || '1-3' }}
   WORKER_COUNTS: ${{ inputs.workers || '1' }}
+  # Optional: a follower hosting fewer levels, on a chain recorded with its
+  # own ratio and length (its own dataset and run names, so a default run is
+  # never mixed with it).
+  HOSTED: ${{ inputs.hosted }}
+  RATIO: ${{ inputs.ratio }}
+  BLOCKS: ${{ inputs.blocks }}
 
 jobs:
   benchmark:
@@ -58,7 +73,13 @@ jobs:
           for ref in $REFS; do
             sha=$(git rev-parse "$ref")
             for workers in $WORKER_COUNTS; do
-              Benchmarks/sync/native.sh "$RUNNER_TEMP/bench-$sha" "$workers" "$REPEATS" "$sha"
+              if [ -n "$HOSTED$RATIO$BLOCKS" ]; then
+                label="h${HOSTED:-all}-r${RATIO:-34}-b${BLOCKS:-3000}"
+                DATA="$RUNNER_TEMP/bench-$sha/data/$label" TAG="$label-w$workers" \
+                  Benchmarks/sync/native.sh "$RUNNER_TEMP/bench-$sha" "$workers" "$REPEATS" "$sha"
+              else
+                Benchmarks/sync/native.sh "$RUNNER_TEMP/bench-$sha" "$workers" "$REPEATS" "$sha"
+              fi
             done
           done
 

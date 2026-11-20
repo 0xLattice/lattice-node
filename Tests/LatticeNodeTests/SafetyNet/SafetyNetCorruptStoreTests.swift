@@ -24,7 +24,7 @@ import cashew
 /// - A row boot does not read: opened. The derived rows (accepted_blocks)
 ///   are written in their facts' own transaction, so boot does not
 ///   re-derive them; the read that reads a damaged row refuses it then.
-/// - A Volume a fact names gone from volumes.db: opened. Content is fetched
+/// - A Volume a fact names gone from the root chain's Volume store: opened. Content is fetched
 ///   when read; its absence is no damage.
 ///
 /// No damage crashes the storage.
@@ -129,13 +129,13 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         try await assertBoot(Self.refusedAsWipeRequired, observes: .wipeRequired)
     }
 
-    /// A fact whose content is gone from `volumes.db` does not stop boot:
+    /// A fact whose content is gone from the root chain's Volume store does not stop boot:
     /// the store retains what it holds, and what it lacks is fetched when
     /// something reads it.
     func testBootOpensAStoreWhoseVolumesAreGone() async throws {
         let fixture = try await buildFixture()
         let root = try damagedCopy(
-            of: fixture, database: "volumes.db",
+            of: fixture, database: "volumes/" + VolumeStores.fileName(["Nexus"]),
             // Members before manifests, so the store stays self-consistent
             // and only the facts' references dangle.
             applying: ["DELETE FROM volume_entries", "DELETE FROM volume_metadata"]
@@ -144,7 +144,7 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         XCTAssertEqual(observed, .opened)
     }
 
-    /// A Volume's bytes damaged in volumes.db. The store serves this node's
+    /// A Volume's bytes damaged in the root chain's Volume store. The store serves this node's
     /// own reads what it holds without hashing it again, as its bytes were
     /// checked on their way in, so the damage is caught where a read checks bytes against
     /// their CID: the block does not resolve, and the damaged bytes are
@@ -154,7 +154,7 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         let fixture = try await buildFixture()
         let genesis = try configuration(fixture).nexusGenesisCID
         let root = try damagedCopy(
-            of: fixture, database: "volumes.db",
+            of: fixture, database: "volumes/" + VolumeStores.fileName(["Nexus"]),
             applying: ["UPDATE cas_data SET data = X'00' WHERE cid = '\(genesis)'"]
         )
         let storage = try await NodeStorage.open(configuration: try configuration(root))
@@ -201,10 +201,10 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
 
     // MARK: - Harness
 
-    /// A copy of `fixture` whose `cid` bytes in volumes.db are damaged, opened.
+    /// A copy of `fixture` whose `cid` bytes in the root chain's Volume store are damaged, opened.
     private func openDamaged(_ fixture: URL, cid: String) async throws -> NodeStorage {
         let root = try damagedCopy(
-            of: fixture, database: "volumes.db",
+            of: fixture, database: "volumes/" + VolumeStores.fileName(["Nexus"]),
             applying: ["UPDATE cas_data SET data = X'00' WHERE cid = '\(cid)'"]
         )
         return try await NodeStorage.open(configuration: try configuration(root))

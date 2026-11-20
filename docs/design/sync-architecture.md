@@ -107,16 +107,18 @@ the runtime to them:
 4. **Only the loop changes the core's state**, by stepping it with an input;
    workers and tasks only post inputs.
 5. **Writes complete before what they make true is published.** Each step:
-   the step's state and facts in one transaction (`persist`, with the pool's
-   journal), then `publish`, then every other effect in order. This is the
+   its content, one transaction per chain's Volume store it touches, the
+   shallowest level first, then its facts in one `state.db` transaction
+   (`persist`, with the pool's journal), then `publish`, then every other
+   effect in order. This is the
    loop's one deliberate wait. Content a job stored (a body, a mined block)
    is stored before the effect that names it. After the effects the step's
    retention runs, none of it needed to be right: the bodies of blocks found
    invalid and the body working set's let-go, then each chain's state (the counts' move or commit, then the
    window's let-go), the read cache's order, then the reads of the blocks
    the step executed. A crash in it is repaired by the next start's sweep or
-   by later steps (`RetentionCrashTests`, which crashes at each of these
-   writes but an invalid block's body).
+   by later steps (`RetentionCrashTests`, which stops every write at a
+   sweep of points below the storage interface).
 6. **Every job and task has a rule for when it is superseded**, listed
    below; a new kind adds its row. A result of a level no longer hosted is
    dropped by the core.
