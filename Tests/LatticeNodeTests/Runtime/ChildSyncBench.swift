@@ -269,6 +269,8 @@ final class ChildSyncBench: XCTestCase {
         // host with N CPUs would use.
         let workers = env["CHILD_BENCH_WORKERS"].flatMap(Int.init) ?? max(1, ProcessInfo.processInfo.activeProcessorCount - 1)
         if env["CHILD_BENCH_VFS"] != nil { XCTAssertEqual(bench_vfs_install(), 0) }
+        // Reads by CID (`ReadTally`), with LATTICE_READ_TALLY=1.
+        if env["LATTICE_READ_TALLY"] == "1" { ReadTally.enable() }
         // Bytes written by table and index: the pages written, attributed
         // to the b-tree each is in every few seconds (pages are reused).
         let pages = env["CHILD_BENCH_VFS"] == nil ? nil : env["CHILD_BENCH_PAGES"].flatMap(Double.init)

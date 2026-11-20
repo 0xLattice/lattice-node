@@ -8,14 +8,22 @@ import Synchronization
 /// it, so a CID read more than once is decoded more than once: what a cache
 /// of decoded content could save.
 ///
-/// `LATTICE_READ_TALLY=1` turns it on. Off, `wrap` returns the source it is
-/// given, `reading` runs its work as it is, and nothing is counted. It
-/// keeps every CID it saw until the process ends, so it is for benchmarks,
-/// not for a node that runs on.
+/// For the sync benchmark only: `ChildSyncBench` turns it on (`enable`)
+/// before its follower starts, and nothing else does, so a node never
+/// counts. Off, `wrap` returns the source it is given, `reading` runs its
+/// work as it is, and nothing is counted. On, it keeps every CID it saw
+/// until the process ends.
 enum ReadTally {
-    static let enabled = ProcessInfo.processInfo.environment["LATTICE_READ_TALLY"] == "1"
+    private static let on = Atomic<Bool>(false)
 
-    /// The work reading, for the reads it makes (a job's kind).
+    static var enabled: Bool { on.load(ordering: .relaxed) }
+
+    /// Count from now on: before the node whose reads are counted starts.
+    static func enable() { on.store(true, ordering: .relaxed) }
+
+    /// The work reading, for the reads it makes (a job's kind). Approximate:
+    /// reads that cashew's `CoalescingFetcher` batches together are counted
+    /// under the job that started the batch.
     @TaskLocal static var reader = "other"
 
     /// `work`, its reads counted under `label`.

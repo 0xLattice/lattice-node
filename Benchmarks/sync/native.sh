@@ -59,8 +59,25 @@ net() {
   else echo "$(cat /sys/class/net/lo/statistics/rx_bytes) $(cat /sys/class/net/lo/statistics/tx_bytes)"; fi
 }
 
+# The server, the follower and the profiler of the run in progress, stopped
+# however the script ends.
+SERVE= FOLLOW= SAMPLE=
+stop() {
+  for p in $SAMPLE $FOLLOW $SERVE; do pkill -P "$p" 2>/dev/null || true; kill "$p" 2>/dev/null || true; done
+}
+trap stop EXIT
+trap 'stop; exit 130' INT TERM
+
 D=${DATA:-$W/data/chain}
 if [ ! -f "$D/manifest.txt" ]; then
+  # A chain is recorded only inside the work directory: DATA elsewhere must
+  # already hold one, since recording starts by removing the directory.
+  case $D in /*) A=$D ;; *) A=$PWD/$D ;; esac
+  case $A in
+    */../*|*/..) echo "DATA=$D: no '..' please"; exit 1 ;;
+    "$W"/*) ;;
+    *) echo "DATA=$D holds no manifest.txt and is outside $W: not recording there"; exit 1 ;;
+  esac
   rm -rf "$D"; mkdir -p "$D"; D=$(cd "$D" && pwd); mkdir -p "$W/data"
   (export CHILD_BENCH=record CHILD_BENCH_DIR=$D CHILD_BENCH_BLOCKS=${BLOCKS:-3000} CHILD_BENCH_LEAVES=${LEAVES:-2}
    bench testRecord) > "$W/data/record.log" 2>&1 || { tail -20 "$W/data/record.log"; exit 1; }
@@ -79,7 +96,7 @@ while [ "$n" -le "$REPEATS" ]; do
     kill -0 $SERVE 2>/dev/null || break
     sleep 1
   done
-  [ -n "$PEER" ] || { tail -20 "$O/serve.log"; echo "server did not start"; exit 1; }
+  [ -n "$PEER" ] || { tail -20 "$O/serve.log"; echo "server did not start"; exit 1; }  # stop() ends it
   status=0
   net > "$O/net.txt"
   (
@@ -95,18 +112,21 @@ while [ "$n" -le "$REPEATS" ]; do
   FOLLOW=$!; SAMPLE=
   if [ "${PROFILE:-0}" = 1 ]; then
     # The xctest the follow subshell started, once the follower is set up.
+    F=
     for i in $(seq 100); do
       F=$(pgrep -P $FOLLOW | head -1)
       grep -q 'CHILD_BENCH follower' "$O/out" 2>/dev/null && break
       sleep 0.1
     done
-    if [ "$(uname)" = Darwin ]; then sample "$F" 7200 1 -mayDie -file "$O/sample.txt" > /dev/null 2>&1 & SAMPLE=$!
+    if [ -z "$F" ]; then echo "PROFILE=1: no follower process to sample" > "$O/sample.txt"
+    elif [ "$(uname)" = Darwin ]; then sample "$F" 7200 1 -mayDie -file "$O/sample.txt" > /dev/null 2>&1 & SAMPLE=$!
     else echo "PROFILE=1 is macOS only (sample); use perf record -p on Linux" > "$O/sample.txt"; fi
   fi
   wait $FOLLOW || status=$?
   net >> "$O/net.txt"
   [ -z "$SAMPLE" ] || wait $SAMPLE
   pkill -P $SERVE 2>/dev/null || true; kill $SERVE 2>/dev/null || true; wait $SERVE 2>/dev/null || true
+  SERVE= FOLLOW= SAMPLE=
   grep '^CHILD_BENCH follow' "$O/out" || { tail -20 "$O/out"; echo "run $n did not finish"; exit 1; }
   [ "$status" = 0 ] || { echo "run $n failed (see $O/out)"; exit 1; }
   n=$((n + 1))
