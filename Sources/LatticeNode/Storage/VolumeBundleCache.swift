@@ -79,18 +79,14 @@ final class VolumeBundleCache: @unchecked Sendable {
     }
 
     /// The bundles of `roots` go, in one transaction.
-    func forget(_ roots: [String]) {
+    func forget(_ roots: [String]) throws {
         guard let database, !roots.isEmpty else { return }
-        do {
-            try writes.withLock {
-                try database.transaction {
-                    for root in roots {
-                        try database.execute("DELETE FROM volume_bundles WHERE root = ?1", params: [.text(root)])
-                    }
+        try writes.withLock {
+            try database.transaction {
+                for root in roots {
+                    try database.execute("DELETE FROM volume_bundles WHERE root = ?1", params: [.text(root)])
                 }
             }
-        } catch {
-            report("recorded Volume bundles were not dropped: \(error)")
         }
     }
 

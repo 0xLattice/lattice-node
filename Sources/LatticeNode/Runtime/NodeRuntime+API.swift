@@ -286,20 +286,6 @@ extension NodeRuntime {
         }
     }
 
-    /// The operator unhosted the child chain at `path` (`lattice child
-    /// unhost`): what this node kept only for it, and for the chains under
-    /// it, goes. A chain left out of the hosted list keeps its data until
-    /// then. Throws `NodeRuntimeError.hosted` while it or a chain under it
-    /// is hosted.
-    public func release(_ path: ChainPath) async throws {
-        guard path.count > 1, ChainAddress(path) != nil else { throw NodeConfigurationError.invalidChainPath }
-        try await withCheckedThrowingContinuation { continuation in
-            if case .terminated = inputs.yield(.release(path, continuation)) {
-                continuation.resume(throwing: NodeRuntimeError.stopped)
-            }
-        }
-    }
-
     /// The directory this node stores in.
     public var storagePath: URL { configuration.storagePath }
 

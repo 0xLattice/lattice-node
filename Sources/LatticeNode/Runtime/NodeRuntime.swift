@@ -16,8 +16,6 @@ public enum NodeRuntimeError: Error, Equatable, Sendable {
     case unknownChain
     /// This node's content budget is full for now; asking again may work.
     case busy
-    /// The chain, or one under it, is hosted: its data is not let go of.
-    case hosted
 }
 
 /// The production shell around the sans-IO `LatticeNodeCore.NodeCore`.
@@ -142,8 +140,6 @@ public final class NodeRuntime: Sendable {
         /// The operator changed the chains this node hosts: the hosted
         /// children of this configuration, and what goes with them.
         case host(NodeConfiguration, CheckedContinuation<Void, any Error>)
-        /// The operator unhosted this chain: what this node kept for it goes.
-        case release(ChainPath, CheckedContinuation<Void, any Error>)
         /// A level's throttled fee projection is due.
         case reproject(ChainPath)
         /// A state sync or a heal of a chain's counts (`repair` names it)
@@ -466,7 +462,7 @@ public final class NodeRuntime: Sendable {
         ))
         loop = Task {
             var state = initial.take()
-            await storage.finishReleases(hosted: Set([configuration.chainPath] + configuration.hostedChildren))
+            await storage.letGoOfChains(except: state.configured, blocks: true)
             // With no bodies kept beyond the working set, a start lets go
             // of the ones a run that kept them left, before any step.
             for (path, level) in state.core.levels { state.bodyTips[path] = level.snapshot.actOnTip }
@@ -489,8 +485,6 @@ public final class NodeRuntime: Sendable {
                 } else if case .request(_, _, let reply) = input {
                     reply.resume(throwing: NodeRuntimeError.stopped)
                 } else if case .host(_, let reply) = input {
-                    reply.resume(throwing: NodeRuntimeError.stopped)
-                } else if case .release(_, let reply) = input {
                     reply.resume(throwing: NodeRuntimeError.stopped)
                 } else if case .read(let read) = input {
                     read(nil)
@@ -591,6 +585,9 @@ extension NodeRuntime {
         /// Whether this node's overlay relays, as its hello says.
         let relays: Bool
         var configuration: NodeConfiguration
+        /// The chains the operator's configuration hosts, a level that did
+        /// not start among them: none of their data is let go of.
+        var configured: Set<ChainPath>
         var outputs: [ChainPath: LevelOutput]
         /// What RPC and the overlay read of the hosted levels, republished
         /// when the operator changes them.
@@ -772,6 +769,7 @@ extension NodeRuntime {
             self.outbox = SessionOutbox(ivy: ivy)
             self.relays = relays
             self.configuration = configuration
+            self.configured = Set([configuration.chainPath] + configuration.hostedChildren)
             self.outputs = outputs
             self.levelReads = levelReads
             self.hosted = hosted
@@ -933,20 +931,6 @@ extension NodeRuntime {
                     if case NodeRuntimeError.stopped = error { return false }
                 }
                 return true
-            case .release(let path, let reply):
-                // A chain this node hosts, or one under it, stays.
-                let hosted = Set(core.levels.keys)
-                guard !hosted.contains(where: { $0.starts(with: path) }) else {
-                    reply.resume(throwing: NodeRuntimeError.hosted)
-                    return true
-                }
-                do {
-                    try await storage.release(path, hosted: hosted)
-                    reply.resume()
-                } catch {
-                    reply.resume(throwing: error)
-                }
-                return true
             case .maintenanceFinished:
                 maintenanceInFlight = false
                 if maintenancePending {
@@ -969,12 +953,13 @@ extension NodeRuntime {
         /// Host the children `next` lists, and only those: a level no longer
         /// listed stops with every level below it, and a newly listed one
         /// starts, parent first, as it would at boot. What a stopped level
-        /// stored stays, so listing it again resumes it: only the operator's
-        /// unhost (`release`) lets go of it. A level that cannot start is
-        /// left out, and the error says why.
+        /// stored is let go of once its body fetches end; listing it again
+        /// syncs it from peers. A level that cannot start is left out, and
+        /// the error says why; its data stays, as it is still configured.
         mutating func host(_ next: NodeConfiguration) async throws {
             try await storage.storePolicyModules(next.policyModules)
             let listed = Set(next.hostedChildren)
+            configured = listed.union([core.rootPath])
             for path in core.ordered where path != core.rootPath && !listed.contains(path) {
                 guard await step(.unhost(path)) else { throw NodeRuntimeError.stopped }
                 stateTips[path] = nil
@@ -1009,6 +994,9 @@ extension NodeRuntime {
                 fetch.cancel()
                 await fetch.value
             }
+            // A chain the configuration no longer hosts has its data let go
+            // of; one that did not start is still configured, and keeps it.
+            await storage.letGoOfChains(except: configured)
             fetchWaits = fetchWaits.filter { core.levels[$0.key.path] != nil }
             connectWaits = connectWaits.filter { core.levels[$0.key.path] != nil }
             for (id, entry) in replies where core.levels[entry.path] == nil {

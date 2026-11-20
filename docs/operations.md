@@ -522,10 +522,9 @@ runs it again. A change takes effect on restart.
 
 ### What a node keeps
 
-Facts and headers are kept for good, until the operator unhosts their
-chain, and so is
-each credited child proof unless it no longer reads back (an entry it names is gone, or a row is
-damaged): then it is deleted when read, the block is served without it,
+Facts and headers are kept while their chain is hosted, and so is each
+credited child proof unless it no longer reads back (an entry it names is
+gone, or a row is damaged): then it is deleted when read, the block is served without it,
 and a peer's copy is taken again while the block still waits for proof.
 They grow with the number of blocks weighed, as Bitcoin's block index
 does. Content is kept because a rule says so.
@@ -632,28 +631,31 @@ walking the tip's state from the store alone; counts that do not match it (as
 facts an older version wrote with an inexact diff may leave them) are replaced
 by a state sync.
 
-A chain left out of the hosted chains (a fragment edited or deleted, a
-start without it, an older `lattice.json` restored) stops and keeps
-everything it stored, inert: hosting it again resumes it. Only an unhost
-(`lattice child unhost`, or `DELETE /chain-data` on the operator API) lets
-go of what the node kept only for the chain and the chains under it it does
-not host. The release is recorded in `state.db` first. Then its content goes
-from `volumes.db`: its blocks' bodies, what they read, its state windows,
-spec and policy modules, counts and what its state sync held, and its local
-and pooled transactions. Last, in one `state.db` transaction, its facts go
-with the record: its block facts and index, headers, child proofs, cursors
-and state diffs, with the header records and proof entries no other chain's
-rows name; then its Volume bundles. A fact whose content is gone is no
-fault (it is read again from peers), so content goes first: a stop or a
-failure in between leaves a store the node runs on, and the next start
-finishes the recorded release (or forgets it, when the chain is hosted
-again). Each chain let go of, or not, is a line in the node's log. Content
-another scope also names stays: an operator pin, another chain's block, and
-on `state: all` the state its executions stored, which is kept with every
-chain's. Child indexes stay too: most are shared. Hosting the chain again
-syncs it from peers like any new chain. A block that a mined grind or a
-built child block stored for the chain while the unhost ran may stay
-pinned until the chain is hosted and unhosted again.
+The configuration is what the node hosts, and what it keeps: a chain the
+merged configuration does not host has its data let go of, however it
+left (`lattice child unhost`, a fragment edited or deleted, a SIGHUP
+re-read, a start without it). A running node does so once the chain's
+level has stopped and its block fetches have ended; every start does so
+for any chain it holds data of and does not host. One that the
+configuration lists and that did not start keeps its data. Its content
+goes first: from `volumes.db` its blocks' bodies and what they read, its
+state windows, spec and policy modules, counts and what its state sync
+held, and its pooled transactions; its local transactions (their rows in
+`state.db` and what they pinned); and its Volume bundles from
+`volume-bundles.db`. Then, in one `state.db` transaction, its facts and
+block index, cursors, state diffs and child proofs go, with the header
+records and proof entries no other chain's rows name. A fact whose content is gone is no fault (it is read again
+from peers), so content goes first: a stop or a failure in between leaves
+the chain's facts, a store the node runs on, and the next start finishes
+the release. Each chain let go of, or not, is a line in the node's log,
+naming it. Content another scope also names stays: an operator pin,
+another chain's block, and on `state: all` the state its executions
+stored, which is kept with every chain's. Child indexes stay too: a leaf
+chain's blocks all share one, with every other block that carries no
+child; a parent chain's may be its own. Hosting the chain again syncs it
+from peers like any new chain. A block that a mined grind or a built
+child block stores for the chain while it is let go of goes at the next
+start.
 
 Letting go frees space for the node's later writes, not for the system:
 `state.db`, `volumes.db` and `volume-bundles.db` are SQLite files without

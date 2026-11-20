@@ -813,10 +813,10 @@ read none.
 Removes the fragment, answering as `GET /config`; `400` when what is left
 does not check, `404` when there is none, `412` as for `PUT` with an
 `If-Match` that is not its version. A chain no layer lists any more stops,
-unless a chain listed under it keeps it, implied; what it stored stays, and
-hosting it again resumes it. Only an unhost
-([`DELETE /chain-data`](#delete-chain-datapath), which `lattice child
-unhost` sends) lets go of it.
+unless a chain listed under it keeps it, implied. A chain the configuration
+does not host has its data let go of; hosting it again syncs it again from
+its peers (see [What a node keeps](operations.md#what-a-node-keeps)). The
+same holds for a `PUT` that leaves a chain out.
 
 ### `POST /chains`
 
@@ -857,18 +857,6 @@ A peer that connects afterwards is told the new list in the hello. A peer
 already connected learns a newly hosted chain from its provider record, and a
 peer that asks for a stopped one is answered as by any node that does not
 host it.
-
-### `DELETE /chain-data?path=`
-
-The operator unhosted the child chain `path` (`lattice child unhost` sends
-it once the chain's fragment no longer lists it): the node lets go of what it
-kept only for the chain and the chains under it, and answers
-`{"released": "Nexus/Alpha"}`. Hosting it again syncs it from its peers. A
-chain only left out of the configuration (a fragment edited or deleted, a
-start without it) keeps its data until this is sent. `409` (`hosted`) while
-the chain, or a chain under it, is hosted; `400` (`invalidChainPath`) for a
-path that is not a child chain's. See
-[What a node keeps](operations.md#what-a-node-keeps).
 
 ### `GET /logs?tail=N`
 

@@ -213,21 +213,6 @@ struct NodeTarget: ParsableArguments {
         return try ChainCreation.create(chain, layout: layout)
     }
 
-    /// The node lets go of what it kept for the unhosted chain `path`:
-    /// a running (or remote) node at once; a stopped local one at its next
-    /// start.
-    func releaseChain(_ path: String) async throws {
-        if let rpc = try await running() {
-            var query = URLComponents()
-            query.queryItems = [URLQueryItem(name: "path", value: path)]
-            _ = try await send(rpc: rpc, "DELETE", "chain-data?" + (query.percentEncodedQuery ?? ""))
-            return
-        }
-        guard case .stopped(let lock) = localNode(layout) else { throw CtlError("the storage lock is held: the node started meanwhile, or another lattice command holds it; try again") }
-        defer { _ = lock }
-        try ChainCreation.recordRelease(path, layout: layout)
-    }
-
     /// Replaces fragment `name` with `object`: through a running (or
     /// remote) node's API, which applies it; on a stopped local node, in its
     /// file, once the configuration it makes checks (its next start reads it).

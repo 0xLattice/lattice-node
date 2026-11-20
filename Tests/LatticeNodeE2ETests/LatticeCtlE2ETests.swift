@@ -666,6 +666,18 @@ final class LatticeCtlE2ETests: XCTestCase {
         try await waitFor("Alpha advances after the restart", seconds: 180) {
             await self.height(host.nexusRPC, chain: alpha) > before
         }
+        // Unhosted, its data is let go of: hosted again, it starts over
+        // from its genesis, without the transfer.
+        _ = try await runCtl(["mine", "stop"], root: host.root)
+        let unhosted = try await runCtl(["child", "unhost", alpha], root: host.root)
+        XCTAssertTrue(unhosted.contains("no longer hosted"), unhosted)
+        _ = try await runCtl(["child", "host", alpha], root: host.root)
+        _ = try await runCtl(["mine", "start"], root: host.root)
+        try await waitFor("Alpha is mined again from its genesis", seconds: 180) {
+            await self.height(host.nexusRPC, chain: alpha) >= 1
+        }
+        let restarted = await self.balance(host, recipient.address, chain: alpha)
+        XCTAssertEqual(restarted, 0, "the unhosted chain's state was let go of")
     }
 
     /// A WASM policy module that accepts everything: the memory, allocator

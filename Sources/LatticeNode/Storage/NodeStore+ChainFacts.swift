@@ -247,65 +247,16 @@ extension NodeStore {
         return paths
     }
 
-    /// The `core_meta` key that records the operator unhosted the chain at
-    /// `path` and its release has not finished.
-    static func releaseKey(_ path: String) -> String { "released:" + path }
-
-    /// Records, in one transaction, that the operator unhosted these chains:
-    /// written before anything of theirs is let go of, and deleted with
-    /// each one's facts, so a release a stop or a failure cut short is
-    /// finished at the next start.
-    func recordReleases(_ paths: [ChainPath]) throws {
-        try database.transaction {
-            for path in paths {
-                try database.execute(
-                    "INSERT OR IGNORE INTO core_meta (key, value) VALUES (?1, '')",
-                    params: [.text(Self.releaseKey(path.joined(separator: "/")))]
-                )
-            }
-        }
+    /// The blocks of the chain at `path` no other chain holds too: those
+    /// whose header records `forget` drops.
+    func ownBlocks(_ path: ChainPath) throws -> [String] {
+        let (own, params) = try ownBlocksQuery(path)
+        return try database.rows(from: "accepted_blocks", own, params: params).map { try $0.text("block_cid") }
     }
 
-    /// `recordReleases` on a stopped node's store, by a CLI holding its
-    /// storage lock: nothing when there is no store yet.
-    static func recordRelease(of chainPath: String, storage: URL) throws {
-        let path = databasePath(storage: storage)
-        guard FileManager.default.fileExists(atPath: path.path) else { return }
-        let database = try NodeSQLite(path: path.path, create: false)
-        try database.execute(
-            "INSERT OR IGNORE INTO core_meta (key, value) VALUES (?1, '')", params: [.text(releaseKey(chainPath))]
-        )
-    }
-
-    /// The chains whose release is recorded and not finished.
-    func pendingReleases() throws -> [ChainPath] {
-        let prefix = Self.releaseKey("")
-        return try database.rows(
-            from: "core_meta", "SELECT key FROM core_meta WHERE substr(key, 1, ?2) = ?1",
-            params: [.text(prefix), .int(Int64(prefix.utf8.count))]
-        ).map { try $0.text("key").dropFirst(prefix.count).split(separator: "/").map(String.init) }
-    }
-
-    /// The record of an unfinished release goes, and the release with it:
-    /// the chain is hosted again.
-    func cancelRelease(_ path: ChainPath) throws {
-        try database.execute(
-            "DELETE FROM core_meta WHERE key = ?1", params: [.text(Self.releaseKey(path.joined(separator: "/")))]
-        )
-    }
-
-    /// Drops what this store keeps for the chain at `path`, with the record
-    /// of its release, in one transaction: its facts, block index, cursors,
-    /// state diffs and child proofs, and the header records and proof
-    /// entries no other chain's rows name. Child indexes stay: one is
-    /// shared by every block that carries no child, on any chain, and
-    /// telling which one another header still names takes a pass over
-    /// every header. Returns the blocks whose header records went.
-    func forget(_ path: ChainPath) throws -> [String] {
+    private func ownBlocksQuery(_ path: ChainPath) throws -> (String, [NodeSQLiteValue]) {
         let chain = path.joined(separator: "/")
         let others = try chainPaths().map { $0.joined(separator: "/") }.filter { $0 != chain }.sorted()
-        let params: [NodeSQLiteValue] = [.text(chain)] + others.map { .text($0) }
-        // The chain's own blocks: those no other chain holds too.
         let own = """
             SELECT block_cid FROM accepted_blocks a WHERE a.chain_path = ?1 AND NOT EXISTS (
                 SELECT 1 FROM accepted_blocks o
@@ -313,9 +264,22 @@ extension NodeStore {
                   AND o.block_cid = a.block_cid
             )
             """
+        return (own, [.text(chain)] + others.map { .text($0) })
+    }
+
+    /// Drops what this store keeps for the chain at `path`, in one
+    /// transaction: its facts, block index, cursors,
+    /// state diffs and child proofs, and the header records (`ownBlocks`)
+    /// and proof entries no other chain's rows name. Child indexes stay: a
+    /// leaf chain's blocks carry no child, and all such blocks, on any
+    /// chain, share one child index; telling which of a parent chain's
+    /// another header still names takes a pass over every header. Returns
+    /// how many blocks' header records went.
+    func forget(_ path: ChainPath) throws -> Int {
+        let chain = path.joined(separator: "/")
+        let (own, params) = try ownBlocksQuery(path)
         return try database.transaction {
-            let blocks = try database.rows(from: "accepted_blocks", own, params: params).map { try $0.text("block_cid") }
-            try database.execute("DELETE FROM headers WHERE cid IN (\(own))", params: params)
+            let blocks = try database.execute("DELETE FROM headers WHERE cid IN (\(own))", params: params)
             var named: Set<String> = []
             for row in try database.rows(
                 from: "child_proofs", "SELECT entries FROM child_proofs WHERE chain = ?1", params: [.text(chain)]
@@ -339,7 +303,6 @@ extension NodeStore {
             for table in ["admission_facts", "accepted_blocks", "stream_cursors", "state_diffs"] {
                 try database.execute("DELETE FROM \(table) WHERE chain_path = ?1", params: [.text(chain)])
             }
-            try database.execute("DELETE FROM core_meta WHERE key = ?1", params: [.text(Self.releaseKey(chain))])
             return blocks
         }
     }

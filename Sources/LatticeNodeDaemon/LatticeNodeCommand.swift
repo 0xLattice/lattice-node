@@ -590,7 +590,6 @@ protocol OperatorWrites: Sendable {
     func fetchVolume(_ root: String) async throws -> SerializedVolume?
     func unpinVolume(_ root: String) async throws
     func pinnedVolumes() async -> [String]
-    func release(_ path: [String]) async throws
     var hostedChildren: [[String]] { get }
     var servingLedger: ServingLedger { get }
 }
@@ -1417,20 +1416,6 @@ private func addOperatorWriteRoutes(
             return PinsResponse(pins: await service.pinnedVolumes())
         }
     }
-    // The operator unhosted a child chain (`lattice child unhost`, after
-    // its fragment no longer lists it): what the node kept for it goes.
-    // A chain only left out of the configuration keeps its data. 409 while
-    // it, or a chain under it, is hosted.
-    router.delete("chain-data") { request, context in
-        if !remote { try requireLoopbackHost(request) }
-        guard let path = request.uri.queryParameters["path"].map(String.init) else {
-            throw HTTPError(.badRequest, message: "invalidChainPath")
-        }
-        return try await serviceCall(request: request, context: context) {
-            try await service.release(path.split(separator: "/", omittingEmptySubsequences: false).map(String.init))
-            return ["released": path]
-        }
-    }
 }
 
 private func decode<Value: Decodable>(
@@ -1532,8 +1517,6 @@ func serviceCall<Value: Encodable, Context: RequestContext>(
         throw HTTPError(.notFound, message: "unknownChain")
     } catch NodeRuntimeError.busy {
         throw HTTPError(.serviceUnavailable, headers: [.retryAfter: "1"], message: "busy")
-    } catch NodeRuntimeError.hosted {
-        throw HTTPError(.conflict, message: "hosted")
     } catch NodeStorageError.missingMaterializedVolume, BrokerError.missingRetainedRoot {
         throw HTTPError(.notFound, message: "notHeld")
     } catch let error as ValidationError {

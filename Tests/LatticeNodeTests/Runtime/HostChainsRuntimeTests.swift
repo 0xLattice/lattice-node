@@ -90,14 +90,6 @@ final class HostChainsRuntimeTests: XCTestCase {
         return (try XCTUnwrap(lower.tipCID), try XCTUnwrap(upper))
     }
 
-    /// The operator unhosts the chain at `path` (`lattice child unhost`).
-    private static func releaseStatus(_ client: some TestClientProtocol, _ path: ChainPath) async throws -> HTTPResponse.Status {
-        try await client.execute(
-            uri: "/chain-data?path=\(path.joined(separator: "/"))", method: .delete,
-            headers: [.authorization: testOperatorAuthorization]
-        ) { $0.status }
-    }
-
     private static func volumeStatus(_ client: some TestClientProtocol, _ cid: String) async throws -> HTTPResponse.Status {
         try await client.execute(
             uri: "/volumes/\(cid)", method: .get, headers: [.authorization: testOperatorAuthorization]
@@ -191,136 +183,105 @@ final class HostChainsRuntimeTests: XCTestCase {
         }
     }
 
-    /// An operator unhosts a chain: the node lets go of what it kept for
-    /// it, and no longer serves its blocks; a block the operator pinned
-    /// stays. Hosting it again syncs it again from peers.
-    func testUnhostingAChainLetsGoOfItsDataAndHostingItAgainSyncsIt() async throws {
-        let host = try await mining(keyByte: 0x85, [Self.alpha])
-        let follower = try await start(keyByte: 0x86, hosted: [Self.alpha], peers: [host.endpoint])
+    /// A chain the configuration no longer hosts has its data let go of:
+    /// its blocks are not served, a block the operator pinned is, and a
+    /// sibling still hosted is served and keeps syncing. Hosting it again
+    /// syncs it again from peers.
+    func testAChainRemovedFromTheConfigurationHasItsDataLetGoOf() async throws {
+        let host = try await mining(keyByte: 0x85, [Self.alpha, Self.beta])
+        let follower = try await start(keyByte: 0x86, hosted: [Self.alpha, Self.beta], peers: [host.endpoint])
         let (pinned, dropped) = try await twoBlocks(follower.runtime, Self.alpha)
+        let (_, sibling) = try await twoBlocks(follower.runtime, Self.beta)
         let app = makeApplication(service: follower.runtime, host: "127.0.0.1", port: 0)
-        try await app.test(.router) { client in
-            try await Self.pin(client, pinned)
-            let served = try await Self.volumeStatus(client, dropped)
-            XCTAssertEqual(served, .ok)
-        }
-        try await app.test(.router) { client in
-            let refused = try await Self.releaseStatus(client, Self.alpha)
-            XCTAssertEqual(refused, .conflict, "a hosted chain's data is not let go of")
-        }
+        try await app.test(.router) { client in try await Self.pin(client, pinned) }
 
-        try await follower.runtime.host([])
-        try await app.test(.router) { client in
-            let kept = try await Self.volumeStatus(client, dropped)
-            XCTAssertEqual(kept, .ok, "a chain left out of the hosted list keeps its data")
-            let released = try await Self.releaseStatus(client, Self.alpha)
-            XCTAssertEqual(released, .ok)
-            let gone = try await Self.volumeStatus(client, dropped)
-            XCTAssertEqual(gone, .notFound, "a block of an unhosted chain is not served")
-            let stays = try await Self.volumeStatus(client, pinned)
-            XCTAssertEqual(stays, .ok, "a block the operator pinned is")
-        }
+        try await follower.runtime.host([Self.beta])
+        try await assertLetGo(app, dropped: dropped, pinned: pinned, sibling: sibling)
+        try await assertSyncs(follower.runtime, Self.beta)
 
-        try await follower.runtime.host([Self.alpha])
+        try await follower.runtime.host([Self.alpha, Self.beta])
         try await eventually("the follower syncs Alpha again", within: .seconds(20)) {
             await self.servesAgain(app, dropped)
         }
     }
 
-    /// Unhosting Alpha leaves its sibling Beta served, and syncing.
-    func testUnhostingAChainLeavesASiblingServedAndSyncing() async throws {
+    /// The same for a chain a start's configuration does not host.
+    func testAChainAStartDoesNotHostHasItsDataLetGoOf() async throws {
         let host = try await mining(keyByte: 0x87, [Self.alpha, Self.beta])
-        let follower = try await start(keyByte: 0x88, hosted: [Self.alpha, Self.beta], peers: [host.endpoint])
-        let (_, alphaBlock) = try await twoBlocks(follower.runtime, Self.alpha)
-        let (_, betaBlock) = try await twoBlocks(follower.runtime, Self.beta)
-        let app = makeApplication(service: follower.runtime, host: "127.0.0.1", port: 0)
-
-        try await follower.runtime.host([Self.beta])
-        try await app.test(.router) { client in
-            let released = try await Self.releaseStatus(client, Self.alpha)
-            XCTAssertEqual(released, .ok)
-            let gone = try await Self.volumeStatus(client, alphaBlock)
-            XCTAssertEqual(gone, .notFound)
-            let sibling = try await Self.volumeStatus(client, betaBlock)
-            XCTAssertEqual(sibling, .ok, "the sibling's blocks are served")
+        let directory = temporaryDirectory()
+        let (pinned, dropped, sibling): (String, String, String)
+        do {
+            let follower = try await start(
+                keyByte: 0x88, hosted: [Self.alpha, Self.beta], peers: [host.endpoint], storagePath: directory,
+                stopAtTeardown: false
+            )
+            (pinned, dropped) = try await twoBlocks(follower.runtime, Self.alpha)
+            (_, sibling) = try await twoBlocks(follower.runtime, Self.beta)
+            try await makeApplication(service: follower.runtime, host: "127.0.0.1", port: 0).test(.router) { client in
+                try await Self.pin(client, pinned)
+            }
+            await follower.runtime.stop()
         }
-        let beta = try XCTUnwrap(follower.runtime.levelReads[Self.beta])
-        let height = await beta.readSnapshot().height ?? 0
-        try await eventually("the sibling keeps syncing", within: .seconds(20)) {
-            (await beta.readSnapshot().height ?? 0) > height
+
+        let follower = try await start(keyByte: 0x88, hosted: [Self.beta], peers: [host.endpoint], storagePath: directory)
+        let app = makeApplication(service: follower.runtime, host: "127.0.0.1", port: 0)
+        try await eventually("the start lets go of Alpha") {
+            (try? NodeStore.holdsBlocks(of: "Nexus/Alpha", storage: directory)) == false
+        }
+        try await assertLetGo(app, dropped: dropped, pinned: pinned, sibling: sibling)
+        try await assertSyncs(follower.runtime, Self.beta)
+
+        try await follower.runtime.host([Self.alpha, Self.beta])
+        try await eventually("the follower syncs Alpha again", within: .seconds(20)) {
+            await self.servesAgain(app, dropped)
         }
     }
 
-    /// A chain only left out of the configuration, live or at a start,
-    /// keeps its data: hosting it again, with no peer, serves it at once.
-    func testAChainLeftOutOfTheConfigurationKeepsItsData() async throws {
+    /// A release a stop cut short, after the chain's blocks' bodies went
+    /// and before its facts did, is finished at the next start.
+    func testAReleaseCutShortIsFinishedAtTheNextStart() async throws {
         let host = try await mining(keyByte: 0x89, [Self.alpha])
         let directory = temporaryDirectory()
-        let (lower, upper): (String, String)
-        let height: UInt64
         do {
             let follower = try await start(
                 keyByte: 0x8a, hosted: [Self.alpha], peers: [host.endpoint], storagePath: directory, stopAtTeardown: false
             )
-            (lower, upper) = try await twoBlocks(follower.runtime, Self.alpha)
-            height = await follower.runtime.levelReads[Self.alpha]?.readSnapshot().height ?? 0
-            try await follower.runtime.host([])
+            _ = try await twoBlocks(follower.runtime, Self.alpha)
             await follower.runtime.stop()
         }
+        do {
+            let storage = try await NodeStorage.open(configuration: try NodeConfiguration(
+                chainPath: ["Nexus"], storagePath: directory, privateKeyHex: String(repeating: "8a", count: 32)
+            ))
+            let bodies = try await storage.broker.retainedScopes(prefix: storage.scopes.bodyPrefix + "Nexus/Alpha:")
+            try await storage.broker.releaseRetainedScopes(bodies)
+        }
+        XCTAssertTrue(try NodeStore.holdsBlocks(of: "Nexus/Alpha", storage: directory))
 
-        let follower = try await start(keyByte: 0x8a, hosted: [], storagePath: directory)
-        let app = makeApplication(service: follower.runtime, host: "127.0.0.1", port: 0)
-        try await follower.runtime.host([Self.alpha])
-        XCTAssertEqual(follower.runtime.peerCount, 0)
-        let alpha = try XCTUnwrap(follower.runtime.levelReads[Self.alpha])
-        let restored = await alpha.readSnapshot().height ?? 0
-        XCTAssertGreaterThanOrEqual(restored, height, "it resumes where it was, with no peer")
-        try await app.test(.router) { client in
-            for cid in [lower, upper] {
-                let served = try await Self.volumeStatus(client, cid)
-                XCTAssertEqual(served, .ok, "its blocks are served, with no peer")
-            }
+        _ = try await start(keyByte: 0x8a, hosted: [], storagePath: directory)
+        try await eventually("the start finishes the release") {
+            (try? NodeStore.holdsBlocks(of: "Nexus/Alpha", storage: directory)) == false
         }
     }
 
-    /// An unhost recorded and cut short before anything went is finished
-    /// at the next start; hosting the chain again then syncs it.
-    func testAReleaseCutShortIsFinishedAtTheNextStart() async throws {
-        let host = try await mining(keyByte: 0x8b, [Self.alpha])
-        let directory = temporaryDirectory()
-        let (pinned, dropped): (String, String)
-        do {
-            let follower = try await start(
-                keyByte: 0x8c, hosted: [Self.alpha], peers: [host.endpoint], storagePath: directory, stopAtTeardown: false
-            )
-            (pinned, dropped) = try await twoBlocks(follower.runtime, Self.alpha)
-            try await makeApplication(service: follower.runtime, host: "127.0.0.1", port: 0).test(.router) { client in
-                try await Self.pin(client, pinned)
-            }
-            try await follower.runtime.host([])
-            await follower.runtime.stop()
-        }
-        // The unhost's record is written, and the node stops before it
-        // lets go of anything.
-        do {
-            let storage = try await NodeStorage.open(configuration: try NodeConfiguration(
-                chainPath: ["Nexus"], storagePath: directory, privateKeyHex: String(repeating: "8c", count: 32)
-            ))
-            try await storage.store.recordReleases([Self.alpha])
-        }
-
-        let follower = try await start(keyByte: 0x8c, hosted: [], peers: [host.endpoint], storagePath: directory)
-        let app = makeApplication(service: follower.runtime, host: "127.0.0.1", port: 0)
-        try await eventually("the start finishes the release") {
-            (try? await app.test(.router) { client in try await Self.volumeStatus(client, dropped) }) == .notFound
-        }
+    private func assertLetGo(
+        _ app: some ApplicationProtocol, dropped: String, pinned: String, sibling: String
+    ) async throws {
         try await app.test(.router) { client in
+            let gone = try await Self.volumeStatus(client, dropped)
+            XCTAssertEqual(gone, .notFound, "a block of a chain not hosted is not served")
             let stays = try await Self.volumeStatus(client, pinned)
-            XCTAssertEqual(stays, .ok, "a block the operator pinned is served")
+            XCTAssertEqual(stays, .ok, "a block the operator pinned is")
+            let kept = try await Self.volumeStatus(client, sibling)
+            XCTAssertEqual(kept, .ok, "and a block of a sibling still hosted")
         }
-        try await follower.runtime.host([Self.alpha])
-        try await eventually("the follower syncs Alpha again", within: .seconds(20)) {
-            await self.servesAgain(app, dropped)
+    }
+
+    private func assertSyncs(_ runtime: NodeRuntime, _ path: ChainPath) async throws {
+        let chain = try XCTUnwrap(runtime.levelReads[path])
+        let height = await chain.readSnapshot().height ?? 0
+        try await eventually("\(path) keeps syncing", within: .seconds(20)) {
+            (await chain.readSnapshot().height ?? 0) > height
         }
     }
 
