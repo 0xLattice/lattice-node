@@ -697,10 +697,7 @@ extension NodeRuntime {
                     if case .level(let path, .connected(let results)) = event {
                         for verdict in results.map(\.verdict) {
                             guard let failure = verdict.retryFailure else { continue }
-                            bodyFetches.wait(
-                                BodyKey(path: path, cid: verdict.blockHash), .notConnected(failure),
-                                detail: "\(failure)", in: \.connectWaits
-                            )
+                            bodyFetches.connectFailed(BodyKey(path: path, cid: verdict.blockHash), failure)
                         }
                     }
                     guard await step(event) else { return false }

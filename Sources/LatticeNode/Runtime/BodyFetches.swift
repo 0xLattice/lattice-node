@@ -1,3 +1,4 @@
+import Lattice
 import LatticeNodeCore
 
 extension NodeRuntime {
@@ -120,10 +121,15 @@ extension NodeRuntime {
             return true
         }
 
+        /// A held block's connect ended without a verdict.
+        mutating func connectFailed(_ key: BodyKey, _ failure: BlockImportError) {
+            wait(key, .notConnected(failure), detail: "\(failure)", in: \.connectWaits)
+        }
+
         /// Record why a block waits. A reason is logged when it changes,
         /// never per retry, with the error behind it: `detail` goes to the
         /// log and nowhere else.
-        mutating func wait(
+        private mutating func wait(
             _ key: BodyKey, _ reason: BodyWait, detail: String,
             in waits: WritableKeyPath<BodyFetches, [BodyKey: BodyWait]>
         ) {
