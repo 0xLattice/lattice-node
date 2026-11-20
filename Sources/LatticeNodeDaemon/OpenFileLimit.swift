@@ -34,14 +34,12 @@ enum OpenFileLimit {
             target = min(target, rlim_t(perProcess))
         }
         #else
-        // An unlimited hard limit is not a soft limit Linux takes: the
-        // kernel's per-process maximum (`fs.nr_open`) is, or failing that
-        // its default, 1,048,576.
-        if target == RLIM_INFINITY {
-            let read = (try? String(contentsOfFile: "/proc/sys/fs/nr_open", encoding: .utf8))
-                .flatMap { rlim_t($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
-            target = read ?? 1_048_576
-        }
+        // Linux takes no soft limit above the kernel's per-process maximum
+        // (`fs.nr_open`, 1,048,576 by default), however high the hard limit
+        // reads: an unlimited one included.
+        let perProcess = (try? String(contentsOfFile: "/proc/sys/fs/nr_open", encoding: .utf8))
+            .flatMap { rlim_t($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        target = min(target, perProcess ?? 1_048_576)
         #endif
         guard target > limit.rlim_cur else { return UInt64(limit.rlim_cur) }
         var raised = limit
