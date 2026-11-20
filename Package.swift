@@ -171,7 +171,8 @@ let package = Package(
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]),
-        // Sync benchmark only: counts SQLite writes, commits and syncs.
+        // The sync benchmark counts SQLite writes, commits and syncs with it;
+        // the crash tests stop every write at a point with it.
         .target(name: "BenchVFS", path: "Tests/BenchVFS", linkerSettings: [.linkedLibrary("sqlite3")]),
         .testTarget(
             name: "LatticeNodeTests",

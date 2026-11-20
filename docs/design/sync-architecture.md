@@ -115,8 +115,8 @@ the runtime to them:
    invalid and the body working set's let-go, then each chain's state (the counts' move or commit, then the
    window's let-go), the read cache's order, then the reads of the blocks
    the step executed. A crash in it is repaired by the next start's sweep or
-   by later steps (`RetentionCrashTests`, which crashes at each of these
-   writes but an invalid block's body).
+   by later steps (`RetentionCrashTests`, which stops every write at a
+   sweep of points below the storage interface).
 6. **Every job and task has a rule for when it is superseded**, listed
    below; a new kind adds its row. A result of a level no longer hosted is
    dropped by the core.

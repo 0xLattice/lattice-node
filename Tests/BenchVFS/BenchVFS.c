@@ -24,8 +24,54 @@ static pthread_mutex_t slotLock = PTHREAD_MUTEX_INITIALIZER;
 static sqlite3_vfs *orig;
 static sqlite3_vfs shim;
 
-typedef struct { sqlite3_file base; int slot; int isWal; int pageSize; int dbSlot; sqlite3_file *real; } ShimFile;
+// `name` is SQLite's, valid until the file closes.
+typedef struct { sqlite3_file base; int slot; int isWal; int pageSize; int dbSlot; const char *name; sqlite3_file *real; } ShimFile;
 static _Atomic int pagesOn = 0;
+// A crash, for tests: once armed with a count, that many more writes go
+// through, then every write, sync and truncate fails, as a process that
+// died there would write nothing more (SQLite's own I/O-error fault
+// injection has this shape).
+static _Atomic long long failCountdown = -1;
+static _Atomic int failing = 0;
+// Only files under this path crash: the node under test's, not its peer's
+// in the same process.
+static char failPrefix[1024];
+
+void bench_vfs_fail_after(const char *prefix, long long writes) {
+    atomic_store(&failCountdown, -1);
+    strncpy(failPrefix, prefix, sizeof(failPrefix) - 1);
+    failPrefix[sizeof(failPrefix) - 1] = 0;
+    atomic_store(&failing, 0);
+    atomic_store(&failCountdown, writes);
+}
+
+void bench_vfs_fail_off(void) {
+    atomic_store(&failCountdown, -1);
+    atomic_store(&failing, 0);
+    failPrefix[0] = 0;
+}
+
+int bench_vfs_failed(void) { return atomic_load(&failing); }
+
+/// Whether `f` is under the crash's path: by its own name, as files past
+/// the last slot share one.
+static int underCrash(sqlite3_file *f) {
+    const char *name = ((ShimFile *)f)->name;
+    return failPrefix[0] && name && strncmp(name, failPrefix, strlen(failPrefix)) == 0;
+}
+
+/// Whether this write is past the crash.
+static int crashed(sqlite3_file *f) {
+    if (!underCrash(f)) return 0;
+    if (atomic_load(&failing)) return 1;
+    long long left = atomic_load(&failCountdown);
+    if (left < 0) return 0;
+    if (atomic_fetch_sub(&failCountdown, 1) <= 0) {
+        atomic_store(&failing, 1);
+        return 1;
+    }
+    return 0;
+}
 
 static int slotFor(const char *name) {
     if (!name) name = "(temp)";
@@ -71,6 +117,7 @@ static long long nanos(void) {
 static int xClose(sqlite3_file *f) { return R(f)->pMethods->xClose(R(f)); }
 static int xRead(sqlite3_file *f, void *b, int n, sqlite3_int64 o) { return R(f)->pMethods->xRead(R(f), b, n, o); }
 static int xWrite(sqlite3_file *f, const void *b, int n, sqlite3_int64 o) {
+    if (crashed(f)) return SQLITE_IOERR_WRITE;
     ShimFile *p = (ShimFile *)f; Slot *s = &slots[p->slot];
     atomic_fetch_add(&s->writes, 1); atomic_fetch_add(&s->bytes, n);
     const unsigned char *u = b;
@@ -96,8 +143,12 @@ static int xWrite(sqlite3_file *f, const void *b, int n, sqlite3_int64 o) {
     }
     return R(f)->pMethods->xWrite(R(f), b, n, o);
 }
-static int xTruncate(sqlite3_file *f, sqlite3_int64 s) { return R(f)->pMethods->xTruncate(R(f), s); }
+static int xTruncate(sqlite3_file *f, sqlite3_int64 s) {
+    if (atomic_load(&failing) && underCrash(f)) return SQLITE_IOERR_TRUNCATE;
+    return R(f)->pMethods->xTruncate(R(f), s);
+}
 static int xSync(sqlite3_file *f, int flags) {
+    if (atomic_load(&failing) && underCrash(f)) return SQLITE_IOERR_FSYNC;
     Slot *s = &slots[((ShimFile *)f)->slot];
     long long start = nanos();
     int rc = R(f)->pMethods->xSync(R(f), flags);
@@ -128,6 +179,7 @@ static int xOpen(sqlite3_vfs *v, const char *name, sqlite3_file *f, int flags, i
     ShimFile *p = (ShimFile *)f;
     p->real = (sqlite3_file *)&p[1];
     p->slot = slotFor(name);
+    p->name = name;
     p->isWal = (flags & SQLITE_OPEN_WAL) != 0;
     p->pageSize = 0;
     p->dbSlot = -1;

@@ -1593,16 +1593,16 @@ and to change.
   a crash at every boundary, retention releases and count repair included.~~
   Done: the contract and the order are in the [sync
   architecture](sync-architecture.md#the-loops-contract) and the PR
-  checklist; `RetentionCrashTests` crashes a node at retention writes after
-  a step (body let-go, reads, window, the counts' move, commit, staging,
-  sync), in the start-up sweep (bodies, reads, earlier and unhosted state,
-  counted scopes) and while a chain is let go (windows, rules, counts),
-  restarts it over the same store, and checks it follows on and keeps only
-  what it should. The persist boundary itself was covered
-  (`BatchedConnectRuntimeTests`, the simulator's crash modes). Not covered:
-  an invalid block's body and a heal, which a follower of an honest producer
-  does not reach; and the start's reads sweep is not mutation-checked, since
-  only a child genesis's empty state is ever kept as reads.
+  checklist; `RetentionCrashTests` crashes a node below the storage
+  interface (`BenchVFS`: after a number of writes to its files every write
+  fails, SQLite's own fault-injection shape), swept over the writes of its
+  start, its first sync of the counts, the blocks it follows and a chain it
+  lets go of, restarts it over the same store, and checks it follows on and
+  keeps only what it should. No crash hook is in the production code. The
+  tests fail without the start's body sweep or its release of chains not
+  hosted; the start's reads sweep and its counted-scope settle are not
+  caught (only a child genesis's empty state is ever kept as reads, and
+  counts without a marker are synced again).
 - ~~Bound the worker queues~~ (derivations batched per level and step;
   §4.17); make per-chain resource use visible (§4.17).
 - ~~Correct the sync architecture's rule 4 to the queues that are built.~~ Done (#160).
