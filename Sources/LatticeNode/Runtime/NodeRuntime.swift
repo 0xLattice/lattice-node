@@ -528,7 +528,11 @@ public final class NodeRuntime: Sendable {
 }
 
 extension NodeRuntime {
-    /// Everything the loop task owns. Only the loop touches it.
+    /// Everything the loop task owns. Only the loop touches it. It takes
+    /// each input, steps the core, and hands each effect, in order, to the
+    /// component that runs it (`JobPool`, `BodyFetches`, `Retention`,
+    /// `ReadModel`, `Maintenance`, `TransactionFetches`); a job's or a
+    /// task's result comes back as an input.
     struct Loop: Sendable {
         var core: NodeCore
         let storage: NodeStorage
@@ -570,28 +574,29 @@ extension NodeRuntime {
             }
         }
         var nextSession: UInt64 = 1
-        /// The worker pool and its queues.
-        var jobs: JobPool
+        /// The keys of the peers connected now hosting each chain.
+        var connectedHosts = ConnectedHosts()
         /// RPCs waiting on their answer, by reply ID.
         var replies: [UInt64: (path: ChainPath, reply: CheckedContinuation<NodeRuntimeReply, any Error>)] = [:]
         var nextReply: UInt64 = 1
-        /// Announced transactions being fetched and recently fetched.
-        var transactionFetches: TransactionFetches
+        var wake: (time: Int64, task: Task<Void, Never>)?
+
+        // The components each effect and result is dispatched to. Each owns
+        // its own state; what one needs of another the loop passes in.
+
+        /// The worker pool and its queues.
+        var jobs: JobPool
+        /// The body fetches, their waits and the body windows.
+        var bodyFetches: BodyFetches
+        /// The loop's side of retention: bodies, reads, state and counts.
+        var retention: Retention
         /// The read views and template digests published for RPC.
         var readModel: ReadModel
         /// Peer search, provider announcements and each chain's current
         /// peers.
         var maintenance: Maintenance
-        /// The keys of the peers connected now hosting each chain.
-        var connectedHosts = ConnectedHosts()
-
-
-        var wake: (time: Int64, task: Task<Void, Never>)?
-        /// The body fetches, their waits and the body windows.
-        var bodyFetches: BodyFetches
-        /// The loop's side of retention: bodies, reads, state and counts.
-        var retention: Retention
-
+        /// Announced transactions being fetched and recently fetched.
+        var transactionFetches: TransactionFetches
 
         struct Session {
             let peer: AuthenticatedPeer
