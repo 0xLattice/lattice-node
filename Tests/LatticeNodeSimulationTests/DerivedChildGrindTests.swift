@@ -2278,7 +2278,7 @@ final class DerivedChildGrindTests: XCTestCase {
         // still syncing, whatever it is.
         func latchesOutsideAStep() throws -> Bool {
             var level = try XCTUnwrap(host.core.levels[Self.alpha])
-            level.latchSynced()
+            _ = level.finish(ChainCore.Turn(now: 0))
             return level.synced
         }
         XCTAssertFalse(try latchesOutsideAStep())

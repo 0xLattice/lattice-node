@@ -368,14 +368,6 @@ public struct ChainCore: Sendable {
     /// parent's latch opens it for good (`parentWeighed`), while the parent
     /// may still be executing. Never held past the step.
     var gated = false
-    /// A child level, within one step only: whether its parent level has
-    /// caught up now (`caughtUp`, and latched `synced`), so that a parent
-    /// fact it lacks is not on its way from the parent's own progress
-    /// (`unobtainable`). Nil outside a step: work that runs this level's
-    /// `finish` without the host (an own block weighed, a parent's run
-    /// applied) assumes a child's parent is still syncing, and a root's
-    /// has none.
-    var parentCaughtUp: Bool?
     /// A child level stepped while gated: its peers were held back, and are
     /// read once the parent has latched (`parentWeighed`).
     public internal(set) var heldBack = false
@@ -496,14 +488,12 @@ public struct ChainCore: Sendable {
         if case .mining(.transactionReceived(_, origin: .peer)) = event, !synced { return [] }
         parentTree = parent
         gated = !parentWeighed
-        self.parentCaughtUp = parentCaughtUp
         if gated { heldBack = true }
         defer {
             parentTree = nil
             gated = false
-            self.parentCaughtUp = nil
         }
-        var turn = Turn(now: now)
+        var turn = Turn(now: now, parentCaughtUp: parentCaughtUp)
         weighed = []
         arrived = []
         switch event {
@@ -579,6 +569,18 @@ public struct ChainCore: Sendable {
     /// What one step produced, in order.
     struct Turn {
         let now: Int64
+        /// A child level's step: whether its parent level has caught up now
+        /// (`caughtUp`, and latched `synced`), so that a parent fact it
+        /// lacks is not on its way from the parent's own progress
+        /// (`unobtainable`). Nil for work that runs this level's `finish`
+        /// without the host (an own block weighed, a parent's run applied),
+        /// which assumes a child's parent is still syncing; a root has none.
+        var parentCaughtUp: Bool?
+
+        init(now: Int64, parentCaughtUp: Bool? = nil) {
+            self.now = now
+            self.parentCaughtUp = parentCaughtUp
+        }
         var headers: [StoredHeader] = []
         var states: [LatticeState] = []
         var facts: [BlockImportBatch] = []
@@ -623,7 +625,7 @@ public struct ChainCore: Sendable {
             )))
         }
         let wasWeighed = headersSynced
-        latchSynced()
+        latchSynced(parentCaughtUp: turn.parentCaughtUp ?? isRoot)
         // The step that latches pushes at least the log's last entry: a
         // subscriber from before the latch pulls the gap from its position.
         let tail = appended.entries.isEmpty && !wasWeighed && headersSynced && sync.log.count > 0

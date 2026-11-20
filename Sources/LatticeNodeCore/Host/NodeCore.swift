@@ -530,6 +530,15 @@ public struct NodeCore: Sendable {
     /// references to every collection the level holds, so each one the step
     /// writes would first be copied whole (copy-on-write): a step would cost
     /// in proportion to the chain, not to its event.
+    /// Whether the level at `path` has caught up now (latched `synced`, and
+    /// `ChainCore.caughtUp`): the question a child level's step asks of its
+    /// parent. The parent's own parent is taken as caught up only for the
+    /// root, as outside its own step.
+    func caughtUp(_ path: ChainPath) -> Bool {
+        guard let level = levels[path] else { return true }
+        return level.synced && level.caughtUp(parentCaughtUp: level.isRoot)
+    }
+
     mutating func run(_ path: ChainPath, _ event: ChainEvent, _ turn: inout Turn) {
         guard var core = levels.removeValue(forKey: path) else { return }
         turn.touched.insert(path)
@@ -537,7 +546,7 @@ public struct NodeCore: Sendable {
         let effects = core.step(
             event, now: turn.now,
             parent: parent.flatMap { levels[$0]?.tree }, parentWeighed: parent.flatMap { levels[$0]?.headersSynced } ?? true,
-            parentCaughtUp: parent.flatMap { levels[$0].map { $0.synced && $0.caughtUp } } ?? true
+            parentCaughtUp: parent.map(caughtUp) ?? true
         )
         turn.weighed[path, default: []].formUnion(core.weighed)
         turn.arrived[path, default: []].formUnion(core.arrived)
