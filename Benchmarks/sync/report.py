@@ -63,6 +63,7 @@ def run(d):
     jobs = collections.defaultdict(lambda: [0, 0.0]); bodies = collections.defaultdict(lambda: [0, 0.0])
     stored = collections.defaultdict(lambda: [0, 0, 0, 0, 0, 0]); r['stored'] = stored
     received = collections.defaultdict(lambda: [0, 0, 0]); r['received'] = received
+    fields = collections.defaultdict(lambda: collections.Counter()); r['fields'] = fields
     steps = [0, 0.0, 0.0, 0.0]; inside = None
     for line in open(os.path.join(d, 'trace'), errors='replace'):
         if '[bench] follower start' in line: inside = True; continue
@@ -79,6 +80,11 @@ def run(d):
             continue
         m = re.search(r'\] message received (\S+) bytes (\d+)', line)
         if m: x = received['message ' + m[1]]; x[0] += 1; x[1] += int(m[2]); continue
+        m = re.search(r'\[(\S+)\] headers received entries (\d+) block (\d+) children (\d+) proofs (\d+) proofBytes (\d+) spec (\d+) payload (\d+)', line)
+        if m:
+            x = fields[m[1]]
+            for k, v in zip(('entries', 'block', 'children', 'proofs', 'proofBytes', 'spec', 'payload'), m.groups()[1:]): x[k] += int(v)
+            continue
         m = re.search(r'\] content received entries (\d+) bytes (\d+) cidBytes (\d+)', line)
         if m: x = received['volume entries']; x[0] += int(m[1]); x[1] += int(m[2]); x[2] += int(m[3]); continue
         m = re.search(r'node-runtime step .* core ([\d.]+) ms total ([\d.]+) ms persist ([\d.]+) ms', line)
@@ -147,6 +153,17 @@ for r in runs:
     print('|---|---|---|---|')
     for what, x in sorted(r['received'].items(), key=lambda kv: -kv[1][1]):
         print('| %s | %d | %.1f | %s |' % (what, x[0], x[1] / MiB, '%.1f' % (x[2] / MiB) if x[2] else '-'))
+for r in runs:
+    if not r.get('fields'): continue
+    print()
+    print('Headers responses by field, %s (raw bytes; the JSON payload carries them as base64)' % r['name'])
+    print()
+    print('| level | entries | block KiB | child index KiB | proofs | proof KiB | spec KiB | payload KiB | payload KB/entry |')
+    print('|---|---|---|---|---|---|---|---|---|')
+    for path, x in sorted(r['fields'].items()):
+        print('| %s | %d | %.0f | %.0f | %d | %.0f | %.0f | %.0f | %.1f |' % (
+            path, x['entries'], x['block'] / 1024, x['children'] / 1024, x['proofs'], x['proofBytes'] / 1024,
+            x['spec'] / 1024, x['payload'] / 1024, x['payload'] / 1000 / max(x['entries'], 1)))
 for r in runs:
     if not r['reads']: continue
     print()
