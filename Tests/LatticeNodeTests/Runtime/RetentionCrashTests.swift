@@ -177,12 +177,15 @@ final class RetentionCrashTests: XCTestCase {
                 acknowledged = submitted.transactionCID
                 Crash.after(writes, under: followerDirectory)
             }
+            // A new block every 20 polls keeps the node writing: a start
+            // that ends in fewer writes than armed, as one whose blocks
+            // came in fewer batches does, crashes in what follows it.
             var polls = 0
             try await eventually("\(at): the crash comes", within: .seconds(60)) {
                 if Crash.came { return true }
                 polls += 1
                 if polls % 20 == 0 {
-                    if !armedAtStart { try await mine(1) }
+                    try await mine(1)
                     runtime.inputs.yield(.maintenance)
                 }
                 return false
@@ -195,10 +198,9 @@ final class RetentionCrashTests: XCTestCase {
         try await mine(2)
         let storage = try await NodeStorage.open(configuration: follower.0)
         let runtime = try await NodeRuntime.start(storage: storage, configuration: follower.0, overlay: follower.1)
-        var polls = 0
-        try await eventually("\(at): after the restart the follower reaches the tip and its counts it", within: .seconds(60)) {
-            polls += 1
-            if polls % 50 == 0 { runtime.inputs.yield(.maintenance) }
+        try await eventually(
+            "\(at): after the restart the follower reaches the tip and its counts it", passes: runtime, within: .seconds(60)
+        ) {
             guard runtime.published.value?.actOnTip == tip else { return false }
             let counted = try await storage.broker.countedState(scope: storage.scopes.counted(at: ["Nexus"]))
             guard let marker = counted.marker, CountedMarker(marker)?.tip.cid == tip else { return false }
@@ -265,12 +267,9 @@ final class RetentionCrashTests: XCTestCase {
             let runtime = try await NodeRuntime.start(
                 storage: storage, configuration: follower.0, overlay: follower.1, failStop: { _ in }, observeJob: nil
             )
-            // Counts less than a window below a tip that stopped wait for
-            // a maintenance pass (`Retention.settleState`), as on a node.
-            var polls = 0
-            try await eventually("\(boundary): Alpha's counts reach its tip", within: .seconds(60)) {
-                polls += 1
-                if polls % 50 == 0 { runtime.inputs.yield(.maintenance) }
+            // Maintenance lets no chain go: the start's let-go is still
+            // what this checks.
+            try await eventually("\(boundary): Alpha's counts reach its tip", passes: runtime, within: .seconds(60)) {
                 let counted = try await storage.broker(at: Self.alpha).countedState(scope: storage.scopes.counted(at: Self.alpha))
                 return counted.marker.flatMap(CountedMarker.init)?.tip.cid == alphaTip
             }
@@ -291,10 +290,9 @@ final class RetentionCrashTests: XCTestCase {
         let alone = try node(keyByte: 0xc4, directory: followerDirectory, peers: [producer.2], state: .recent, bodies: .none)
         let storage = try await NodeStorage.open(configuration: alone.0)
         let runtime = try await NodeRuntime.start(storage: storage, configuration: alone.0, overlay: alone.1)
-        var polls = 0
-        try await eventually("\(boundary): after the restart Nexus is at its tip and its counts match", within: .seconds(60)) {
-            polls += 1
-            if polls % 50 == 0 { runtime.inputs.yield(.maintenance) }
+        try await eventually(
+            "\(boundary): after the restart Nexus is at its tip and its counts match", passes: runtime, within: .seconds(60)
+        ) {
             guard runtime.published.value?.actOnTip == nexusTip else { return false }
             let counted = try await storage.broker.countedState(scope: storage.scopes.counted(at: ["Nexus"]))
             guard let marker = counted.marker, CountedMarker(marker)?.tip.cid == nexusTip else { return false }
