@@ -246,6 +246,13 @@ public final class NodeRuntime: Sendable {
                 storage.store.childIndexBytes(root).map { SerializedVolume(root: root, entries: [root: $0]) }
             }
         )
+        // Where browsers reach this node, told every session from the
+        // first: the declared URL, or else relays among its peers.
+        if let url = configuration.webSocketURL {
+            await runtime.ivy.setWebAddresses([WebAddress(url: url)])
+        } else {
+            await runtime.ivy.setAutoRelay(true)
+        }
         // Boot replay of the local journal, each row with its arrival time,
         // into the pool of the chain it names.
         for item in try await storage.localTransactions() {

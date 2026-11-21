@@ -1,5 +1,5 @@
 {
-  "originHash" : "d2b6865ed2cdb42eb78990bff55ea1d7ae0f004aec29005f424430dbf3c25088",
+  "originHash" : "72466c7dd236ab736c586af292fb32a7336b21f00d96263ecf8ff7d169d4878f",
   "pins" : [
     {
       "identity" : "arraytrie",
@@ -24,8 +24,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/0xLattice/cashew.git",
       "state" : {
-        "revision" : "61341d51fa59adcf59c7e103827eeb068b7961f5",
-        "version" : "5.0.6"
+        "revision" : "a10d201d671a82a797ec46b156cbba76c30adadb",
+        "version" : "5.0.7"
       }
     },
     {
@@ -60,8 +60,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/0xLattice/Ivy2.git",
       "state" : {
-        "revision" : "2a217778e5175405b326be8e3bd5f073e9f0a8a7",
-        "version" : "3.2.1"
+        "revision" : "3b7f806de61e46f3b8bf3bb8ae438058cc725b33",
+        "version" : "3.3.0"
       }
     },
     {
@@ -69,8 +69,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/0xLattice/Lattice.git",
       "state" : {
-        "revision" : "dff514f53738d2cbcde4ef25fdddfb570848bd79",
-        "version" : "57.5.0"
+        "revision" : "9c78f77fdfb775d5bb78eab993e03d8ae0cb0fe4",
+        "version" : "57.5.1"
       }
     },
     {
@@ -375,8 +375,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/0xLattice/VolumeBroker.git",
       "state" : {
-        "revision" : "5da8b32864d4562e0bc79e03203b2728a684424c",
-        "version" : "10.3.1"
+        "revision" : "d015b1d2e333d8bb6532aab70a4ec60207323919",
+        "version" : "10.3.2"
       }
     },
     {
