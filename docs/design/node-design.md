@@ -443,6 +443,29 @@ and filled after the decode, keyed by CID and node type, bounded by bytes,
 with no invalidation (content-addressed). Not implemented; the design is in
 the report that accompanies this section.
 
+**What the node removes on its own (decided; no cache).** Traced by call
+site (four-chain sync, `TALLY=1`, schema epoch 50): the "empty maps" are
+the empty child index (`{}`) of the 5,996 leaf blocks, and nearly all of the
+`children`,`count` reads are the empty transaction index,
+one CID each; specs are read three times a block, by `connect` and
+`fetchBody` inside Lattice and by the node's own `rules(of:)` when it stores
+the block; blocks, child directories and the rest by Lattice's walks
+(`connect` three block reads a block, `fetchBody` one) and by derivations
+(`ChildBlockProof.generate` reads the carrier, its index and directory for
+each child). Two changes, no buffer: the two empty indexes are answered by
+`StoreReads` from their fixed bytes without asking a store (about 48,300
+of 79,200 store reads), and storing a
+connect job's blocks reads the spec's rules once for the job, since every
+block of a chain names its genesis's spec (reads by CID 131,137 → 122,346;
+spec reads 27,268 → 18,473). Volume store reads fell from 12.8–13.9% of
+busy CPU to 9.4–9.8%, SQLite from 21.2–22.5% to 18.4–19.1%, busy samples
+by about 7% (PROFILE, three quiet runs before, four after; runs under
+contention on the shared host are left out). Everything else needs
+Lattice or cashew: the walks resolve from a CID, so the node cannot hand
+them a decoded spec, block or index (a `ChainTree.connect` and
+`storeBlockContent` that take the chain's spec, or the cashew decode hook
+above).
+
 **What it says, item by item.**
 
 - **Decode cache: keep, first among the three, as a hook in cashew.** 90% of

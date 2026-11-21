@@ -240,6 +240,12 @@ same port over UDP. No other server is involved.
   `wss`. Terminate it in a proxy in front. STUN does not pass through that
   proxy: a browser asks at the host and port it dialled, so UDP on that port
   has to be forwarded to the node's.
+- Declare the URL browsers dial with `--websocket-url` (topology:
+  `webSocketURL`), e.g. `wss://node.example.org/ivy`. The node tells its peers,
+  and its provider records carry it, so a browser that finds this node under
+  a chain's rendezvous can dial it; the listener is then required. Without
+  one, the node advertises up to four connected peers that relay and declare a
+  URL of their own, to be reached by relaying through them.
 
 ### Nodes behind NATs
 
