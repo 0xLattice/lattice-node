@@ -38,15 +38,6 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
         cid("safety-net-wire-\(generator.next())")
     }
 
-    /// `count` distinct canonical CIDs, sorted.
-    private func randomCIDs(
-        _ generator: inout SplitMix64, count: Int
-    ) -> [String] {
-        var set = Set<String>()
-        while set.count < count { set.insert(randomCID(&generator)) }
-        return set.sorted()
-    }
-
     private func randomInt(
         _ generator: inout SplitMix64, _ range: ClosedRange<Int>
     ) -> Int {
@@ -138,6 +129,15 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
                 own: self.randomCID(&g)
             )
         }
+    }
+
+    /// A tail request as a peer outside Swift spells it (`after` is
+    /// `UInt64.max`, written out in full) decodes, to the request it names.
+    func testATailStreamRequestDecodes() throws {
+        let bytes = Data(#"{"after":18446744073709551615,"chainPath":["Nexus","moniker"],"own":"","requestID":1}"#.utf8)
+        guard case .getStream(1, nil, .max, "") = try ChainSyncWire.decode(
+            topic: ChainSyncTopic.streamRequest, payload: bytes
+        )?.message else { return XCTFail("not a tail request") }
     }
 
     func testCoreStreamPageIsCanonical() throws {

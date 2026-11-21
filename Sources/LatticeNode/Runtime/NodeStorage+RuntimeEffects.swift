@@ -261,6 +261,9 @@ extension NodeStorage {
         var retaining: [String: [String]] = [:]
         var carried: [String: [String]] = [:]
         var bundled: [(root: String, roots: [String])] = []
+        // A chain's blocks all name its genesis's spec (spec continuity):
+        // its rules are read once for the job, not once a block.
+        var rulesBySpec: [String: Set<String>] = [:]
         let backend = stateBackend
         for (cid, decoded) in blocks {
             do {
@@ -287,7 +290,13 @@ extension NodeStorage {
                 // rules (spec and policy modules) is its receipt witness (for
                 // a genesis, the empty state it starts from): body too.
                 let roots = Set(volumes.map(\.root))
-                let rules = await rules(of: block, fetcher: fetcher)
+                let rules: Set<String>
+                if let held = rulesBySpec[block.spec.rawCID] {
+                    rules = held
+                } else {
+                    rules = await self.rules(of: block, fetcher: fetcher)
+                    if !rules.isEmpty { rulesBySpec[block.spec.rawCID] = rules }
+                }
                 let body = roots.subtracting(rules).union([cid] + transactions)
                 let (rulesScope, rest) = backend.keepWithValidBlock(roots.subtracting(body), rules: rules, at: path)
                 for volume in volumes where body.contains(volume.root) || rest.contains(volume.root) {
@@ -562,8 +571,6 @@ extension NodeStorage {
         }
     }
 
-    /// A header's content for serving: the runtime's header store, or a full
-    /// block boundary already held by the Volume store.
     /// The spec a stored genesis header names, from local content.
     /// A child genesis header lives in the header store (its body may not be
     /// fetched yet); its spec Volume was stored with it.

@@ -46,7 +46,6 @@ struct AcceptedBlockRow: NodeStoreRecord {
 
     var chainPath: String { get throws { try row.nonEmptyText("chain_path") } }
     var blockCID: String { get throws { try row.nonEmptyText("block_cid") } }
-    var canonicalBlockCID: String { get throws { try row.cid("block_cid") } }
     var parentCID: String? {
         get throws {
             guard let parent = try row.optionalText("parent_cid") else { return nil }

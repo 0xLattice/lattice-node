@@ -102,6 +102,7 @@ node's machine.
   "publicRead": 8081,
   "publicReadMaxRate": 200,
   "publicReadURL": "https://reads.example.org",
+  "webSocketURL": "wss://node.example.org/ivy",
   "publicSubmit": false,
   "operatorListen": "10.0.0.5:8090",
   "operatorTokens": "operator-tokens.json",
@@ -142,6 +143,10 @@ This is intentionally one schema:
   a host and no credentials, query or fragment; it is passed as
   `--public-read-url` and declared for every hosted level (see
   [Listing a chain on an explorer](operations.md#listing-a-chain-on-an-explorer));
+- `webSocketURL`, when set, is a `ws://` or `wss://` URL of at most 256
+  printable ASCII bytes, and requires `webSocket` set to the listener's port; it is passed as `--websocket-url` and advertised to
+  peers as where browsers reach the node (see "Network surfaces" in
+  `operations.md`);
 - `publicReadFetches`, when set, is nonnegative and is passed as
   `--public-read-fetches`: how many Volumes the public listener reads from
   peers at once for readers when the node does not hold them (see
@@ -567,7 +572,7 @@ rewards.
   specs/Nexus%2FAlpha.json
   chains/Nexus/
     state.db
-    volumes.db
+    volumes/             (a Volume store per hosted chain)
     volume-bundles.db
     storage.lock
   operator-tokens.json   (operatorTokens, when set)

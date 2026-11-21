@@ -46,20 +46,6 @@ func firstNonce(
     return start
 }
 
-/// `block` carrying the first nonce at or above `start` whose proof-of-work
-/// hash meets `target`.
-func solveNonce(
-    for block: Block,
-    target: UInt256,
-    startingAt start: UInt64 = 0,
-    file: StaticString = #filePath,
-    line: UInt = #line
-) -> Block {
-    block.replacingNonce(
-        firstNonce(of: block, from: start, file: file, line: line) { $0 <= target }
-    )
-}
-
 /// The first nonce at or above `start` that mines an issued template's own
 /// block: its hash meets both the search target and the block's committed
 /// target. With child candidates and no binding filter the search target is

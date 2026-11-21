@@ -36,7 +36,7 @@ verified header -> fork choice -> bounded body window
                                     (one job, up to connectBatch, heaviest first
                                     at a fork, each reading the state the one
                                     before it produced from memory)
-                                 -> store their bodies in one volumes.db transaction,
+                                 -> store their bodies in one transaction in the chain's Volume store,
                                     then their states and facts in one step's persist
                                  -> publish the new read snapshot
 ```

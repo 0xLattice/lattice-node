@@ -26,6 +26,7 @@ extension Topology {
         if let rate = publicReadMaxRate { arguments += ["--public-read-max-rate", String(rate)] }
         if let fetches = publicReadFetches { arguments += ["--public-read-fetches", String(fetches)] }
         if let url = publicReadURL { arguments += ["--public-read-url", url] }
+        if let url = webSocketURL { arguments += ["--websocket-url", url] }
         arguments += publicSubmissionArguments
         arguments += contentServingArguments
         for origin in rpcAllowedOrigins ?? [] { arguments += ["--rpc-allowed-origin", origin] }
@@ -307,7 +308,7 @@ public struct HostedChainsResponse: Codable, Sendable {
 }
 
 /// `GET /disk`: bytes on disk of each entry in the node's storage
-/// directory (the state database, the Volume store, ...), and the free space
+/// directory (the state database, the Volume stores, ...), and the free space
 /// of its file system.
 public struct DiskResponse: Codable, Sendable {
     public struct Store: Codable, Sendable {

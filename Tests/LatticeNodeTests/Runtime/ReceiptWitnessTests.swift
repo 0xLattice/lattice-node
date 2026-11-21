@@ -217,10 +217,7 @@ final class ReceiptWitnessTests: XCTestCase {
             // the tip, which a maintenance pass may be what settles: it can
             // still be held when the tip is published.
             let followerLocal = nexusStorage.localFetcher(.anyChain)
-            var polls = 0
-            try await eventually("the follower let go of the state the withdrawal names") {
-                if polls % 50 == 0 { nexusRuntime.inputs.yield(.maintenance) }
-                polls += 1
+            try await eventually("the follower let go of the state the withdrawal names", passes: nexusRuntime) {
                 return (try? await block.parentState.resolveRecursive(fetcher: followerLocal)) == nil
             }
             await nexusRuntime.stop()

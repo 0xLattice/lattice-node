@@ -13,8 +13,6 @@ final class PeerMemoryTests: XCTestCase {
         PeerEndpoint(publicKey: key(byte), host: host ?? "198.51.\(byte).7", port: port)
     }
 
-    private let day: Int64 = 24 * 60 * 60 * 1_000
-
     func testItRemembersThePeersItHoldsSessionsWithAndNotItsOwnOrConfiguredOnes() {
         var book = PeerBook()
         book.reached([endpoint(1), endpoint(2), endpoint(3)], excluding: [key(3)], now: 1_000)
