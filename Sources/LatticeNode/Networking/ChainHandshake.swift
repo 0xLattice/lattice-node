@@ -36,6 +36,11 @@ public struct ChainHandshake: Codable, Equatable, Sendable {
     /// claims for the session, as before.
     public static let helloUpdates = "hello-updates"
 
+    /// The peer answers a stream request whose `after` is `UInt64.max` with
+    /// its log's last entry and subscribes the asker, so a peer that wants
+    /// only what is new (a browser) need not page the history first.
+    public static let streamTail = "stream-tail"
+
     /// The peer hosts the child chain at `chainPath`: one name per hosted
     /// child. Its own claim, a hint for whom to dial and whom to ask, never
     /// a reason to accept data. Nexus is not named: every node hosts it.
