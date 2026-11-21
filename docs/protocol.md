@@ -129,7 +129,8 @@ The transaction is the durability boundary. Success means the complete tree
 batch is durable; failure publishes none of it and stops the runtime. Live
 execution and recovery consume the same immutable facts. Path-keyed facts,
 indexes, cursors, incomplete header boundaries, and child proofs share
-`state.db`; content lives in `volumes.db`.
+`state.db`; content lives in each hosted chain's Volume store under
+`volumes/`.
 
 ## Network plane
 

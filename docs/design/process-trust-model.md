@@ -80,7 +80,7 @@ different answer to different child nodes.
 
 One `state.db` transaction records every level touched by a `NodeBatch`, along
 with their stream cursors, incomplete header boundaries, and child proofs.
-`volumes.db` retains content.
+Each hosted chain's Volume store under `volumes/` retains its content.
 Recovery replays path-keyed immutable facts and recomputes fork choice; it does
 not restore remote certificates.
 

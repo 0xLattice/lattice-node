@@ -1,11 +1,13 @@
 # Lattice node: what it is for, how it is built, and where it goes next
 
-> **Status: proposed.** What the node is for, how it is built, how that
-> compares with other clients, and what to do next, in one document. It
-> describes `main` after the write-behind persistence layer (#135–#147) was
-> reverted (#156, #157), verified against the code by four independent
-> reads with the load-bearing claims checked by hand, and revised after an
-> external architecture review. Where the code and this document disagree,
+> **Status: in effect; Phases 1, 2 and 4 done, 3 and 5 in part (§6).** What
+> the node is for, how it is built, how that compares with other clients,
+> and what to do next, in one document. It was first written against `main`
+> after the write-behind persistence layer (#135–#147) was reverted (#156,
+> #157), verified against the code by four independent reads with the
+> load-bearing claims checked by hand, and revised after an external
+> architecture review; it now describes `main` after the redesign's five
+> phases (#167–#170). Where the code and this document disagree,
 > the code is right. The rules a change is reviewed against stay in
 > [sync architecture](sync-architecture.md) and the
 > [PR checklist](../pr-checklist.md).
@@ -94,7 +96,7 @@ from the sync benchmark (`Benchmarks/sync`).
 | 1 Agreement | Divergences when replaying a real chain, in mixed-version runs, in the simulator | tests | Zero | Zero in CI; no replay of a real chain |
 | 2 Liveness | Acted-on height against best header height, per chain path, over time | node | At its best header 99% of the time after its first catch-up | Reported per chain in `/status` and `/metrics` (#158, #161, #163); not yet tracked over time |
 | 2 Liveness | Stalls: a chain behind its best header whose tip has not moved for longer than a threshold | node | Zero. Stalled: behind its best header and still for 10 target block times, at least 10 minutes | Testnet's child chains stopped at 3,920: a withdrawal whose receipt proofs no node held (§4.9a); repaired |
-| 2 Liveness | Time to tip from empty, and from a restart, per chain path | benchmark, node | From empty, 50 blocks a second per chain path on one CPU; from a restart, its tip within a minute, then the same | 9,086 blocks over four chains in about 74 s, one worker, 4-CPU Linux runner; per chain on macOS, a leaf reaches its tip only near the end of the whole sync (§2) |
+| 2 Liveness | Time to tip from empty, and from a restart, per chain path | benchmark, node | From empty, 50 blocks a second per chain path on one CPU; from a restart, its tip within a minute, then the same | From empty, met on Linux, follower pinned to one CPU: each leaf of the four-chain benchmark reaches its tip in about 54 s, about 55 blocks a second (about 76 s and 39 before the redesign); a leaf still reaches its tip only near the end of the whole sync (§2). From a restart: not measured |
 | 3 Security | Time for a block to reach most hosts, per chain | network | 90% of its hosts within 5% of its target block time | Not measured |
 | 3 Security | Share of blocks that go stale, per chain | network | At most 1% | Not measured |
 | 3 Security | For each child, the share of parent hash rate whose templates commit it | network | Every template of a node hosting the child commits it | Not measured |
@@ -104,8 +106,8 @@ from the sync benchmark (`Benchmarks/sync`).
 | 6 Change | Rules a caller must keep that the code does not enforce | code, review | Zero beyond the write order | Zero for writes |
 | 6 Change | Components with no conventional equivalent, each with its reason | this document | Each justified in writing | Two (§5) |
 | 6 Change | Review rounds per change; repeated holes of one kind | review | A second round of the same kind stops the change | The write-behind layer took four rounds of ordering holes |
-| 6 Change | The largest files, where unrelated changes meet | code | No file over 1,000 lines | None over 1,000; the largest is the chain reads (`ChainReads.swift`), 921 lines, after the daemon's command, the loop, its API and the chain core were split by concern (§4.1) |
-| 7 Cost | CPU, peak memory, disk kept, disk written, bandwidth; root alone and per extra chain | benchmark, node | The root on one CPU at 5 ms a block and 256 MiB; a chain's writes per block do not grow with the chains hosted | About 4.4 ms CPU per block, 190 MiB, 90 MB kept, 2.9 GB written per benchmark sync; on macOS each added chain of 1,498 blocks costs about 5.8–7.1 s CPU, 18–26 MiB memory, 11–13 MiB kept, 12 MiB of bandwidth, and, with a Volume store per chain (schema epoch 50), 176–192 MiB written (120–131 KiB a block), flat with the chains already hosted, against 307–483 MiB rising before, at CPU within 3% and about thirteen open files a chain (§2, §4.9b) |
+| 6 Change | The largest files, where unrelated changes meet | code | No source file over 1,000 lines | None under `Sources/` over 1,000 (test files are not counted); the largest is the chain reads (`ChainReads.swift`), 921 lines, after the daemon's command, the loop, its API and the chain core were split by concern (§4.1) |
+| 7 Cost | CPU, peak memory, disk kept, disk written, bandwidth; root alone and per extra chain | benchmark, node | The root on one CPU at 5 ms a block and 256 MiB; a chain's writes per block do not grow with the chains hosted | Pinned to one Linux CPU, the four-chain sync after the redesign: 6.0 ms CPU a block (8.5 before), 166 MiB peak (171), 1.54 GB written (2.87); peak memory within its target; CPU not yet within it on four chains. Root alone, pinned Linux (2,001 blocks, main 7c15c86d, three runs): 4.35–4.39 ms a block and 92 MiB, within target. On macOS each added chain of 1,498 blocks costs about 5.8–7.1 s CPU, 18–26 MiB memory, 11–13 MiB kept, 12 MiB of bandwidth, and, with a Volume store per chain (schema epoch 50), 176–192 MiB written (120–131 KiB a block), flat with the chains already hosted, against 307–483 MiB (210–330 KiB a block) rising before, at CPU within 3% and about thirteen open files a chain (§2, §4.9b) |
 | 8 Transfers | Time from deposit to withdrawal on a parent–child pair; share that complete | network, tests | Every transfer completes; in the time its two chains' confirmations take | Not measured |
 | 9 Availability | Content requests served; how long a body stays unavailable; hosts per chain | node, network | Two hosts per chain keep every body; none unavailable for an hour | Not measured |
 | 10 Mining | Time to answer a template request and a submission; share of work on stale templates | node | A template in 100 ms and a submission in 50 ms at the 99th percentile; at most 1% of work on stale templates | Measurable, not yet read from a running node: `/metrics` reports both answer times as histograms and the submissions on work whose tip was no longer the act-on tip (operator guide, Observability) |
@@ -116,8 +118,8 @@ from the sync benchmark (`Benchmarks/sync`).
 - *Liveness* is scaled to each chain's own target block time, so one rule
   fits a fast root and a slow child: a chain still for ten of its blocks is
   past any honest gap, and ten minutes covers short block times' noise.
-  Time to tip keeps the throughput target the node already meets on one CPU
-  (§2), now per chain path.
+  Time to tip keeps the old throughput target, 50 blocks a second on one
+  CPU, now per chain path; pinned on Linux, each leaf now meets it (§2).
 - *Security* takes Bitcoin's order of magnitude: a stale rate around 1% or
   below, and propagation a small fraction of the block time, since the stale
   rate grows with the share of the block time a block spends in flight. A
@@ -125,10 +127,13 @@ from the sync benchmark (`Benchmarks/sync`).
   host builds must carry it.
 - *Change*: a file over 1,000 lines is where unrelated changes meet; the
   loop file was twice that.
-- *Cost*: the root runs today at 4.4–4.6 ms a block and 190 MiB (§2); the
-  target keeps it there. A chain's writes per block must not grow with the
-  number of chains hosted, or hosting is not "pay for what you opt into"
-  (outcome 7). Measured, they do grow (§4.9b), so this target is missed now.
+- *Cost*: the CPU and memory target was set from macOS runs of the root at
+  4.4–4.6 ms a block and 190 MiB (§2), to keep it there. Pinned to one Linux
+  CPU, the four-chain sync takes 6.0 ms a block after the redesign (8.5
+  before), so the CPU target is not yet met there. A chain's writes per
+  block must not grow with the number of chains hosted, or hosting is not
+  "pay for what you opt into" (outcome 7). They grew until each chain had
+  its own Volume store; now they are flat (§4.9b, macOS).
 - *Transfers*, *availability* and *mining* follow from their outcomes: no
   transfer stranded; content survives one host going away; a miner waits on
   the node no longer than a round trip.
@@ -144,28 +149,36 @@ it is still the node's: it decides how fast it relays and what it builds.
 
 | Measure | Value | Where |
 |---|---|---|
+| Sync, one CPU, before and after the redesign | 76.9 s → 54.5 s for 9,086 blocks; each leaf at its tip in about 76 s → 54 s, about 39 → 55 blocks/s | Linux, the `Sync benchmark (Linux)` workflow on GitHub Actions, follower pinned to one CPU; a2e7c310 (main before the redesign) against e602a842 (the tree of main at 7c15c86d); three runs each, within about 1% |
+| CPU per block, same runs | 8.46 → 5.99 ms (−29%) | same |
+| Written per sync, same runs | 2.87 → 1.54 GB (−46%) | same |
+| Peak memory, same runs | 171 → 166 MiB | same |
 | Sync, one worker | about 123 blocks/s (73.6–73.9 s for 9,086 blocks) | Linux, GitHub runner, 4 CPUs; code before #137 (main is that code again since #156) |
 | Sync, three workers | about 155 blocks/s | same |
 | Sync, one CPU | about 84–87 blocks/s (104.1–108.2 s) | Linux, follower pinned to one CPU, server on the other three; code before #137 |
-| Sync, one worker, this branch | 25–26 s for 9,086 blocks | macOS, 14 cores (an fsync there does not reach the device) |
-| CPU per block | about 4.4 ms | macOS, one worker |
-| Written per sync | about 2.9 GB to keep about 90 MB | Linux |
-| Peak memory | about 190 MiB | both |
+| Sync, one worker, main before the redesign | 25–26 s for 9,086 blocks | macOS, 14 cores (an fsync there does not reach the device) |
+| CPU per block, before the redesign | about 4.4 ms | macOS, one worker |
+| Written per sync, before the redesign | about 2.9 GB to keep about 90 MB | Linux |
+| Peak memory, before the redesign | about 190 MiB | both |
 
 **Is the old throughput target met?** Yes, pinned to one CPU: about 84–87
 blocks/s against a target of 50–100 — inside the range, not far above it.
 Unpinned runs used more than one core (104 s of CPU in 74 s), which is why
 they read higher. Pinned to one CPU, the removed write-behind layer was
 about 2% faster (103.2–105.1 s against 104.1–108.2 s); its 16–30% gains in
-unpinned runs came from overlapping writes on spare cores.
+unpinned runs came from overlapping writes on spare cores. After the
+redesign the target holds per chain path: pinned to one CPU, each leaf
+reaches its tip at about 55 blocks a second. The before-and-after pinned
+runs (76.9 s before) and the earlier pinned runs (104.1–108.2 s) are
+separate sets; compare within a set only.
 
 The macOS and Linux numbers are not comparable with each other: different
 machines, and an fsync on macOS does not reach the device.
 
 ### Where the disk writes go
 
-From the per-file counters of a one-worker sync on this branch (macOS), about
-2.9 GB in all:
+From the per-file counters of a one-worker sync before the redesign (macOS,
+one `volumes.db` for every chain), about 2.9 GB in all:
 
 | File | Written | Of which |
 |---|---|---|
@@ -561,7 +574,10 @@ reads were made to name their chain (§4.9b):
 | 4 | 1,310 MiB | 754 MiB | 187 MiB (128 KiB) | 23.3 s | 23.9 s | 15.0 s | 14.3 s | 163 → 172 MiB | 64 → 78 MiB | 74 → 126 |
 | 8 | 3,240 MiB | 1,520 MiB | 192 MiB (131 KiB) | 48.3 s | 49.2 s | 33.3 s | 30.1 s | 234 → 255 MiB | 108 → 138 MiB | 74 → 178 |
 
-Writes per added leaf are flat; each chain's own store writes the same
+"Before" here is the same comparison's own baseline, on the tree its build
+recorded, so it differs a little from the schema v3 table above. Writes per
+added leaf are flat (against 210, 270 and 330 KiB a block before); each
+chain's own store writes the same
 whatever else is hosted (§4.9b). CPU is within 2–3%, wall time 4–10%
 lower; memory, disk kept while running and open files rise with the number
 of stores.
@@ -599,9 +615,10 @@ produced state).
 
 Liveness per chain path in production over time (reported since #158, §4.4),
 propagation and stale rate, each child's share of parent hash rate,
-cross-chain transfer time, template latency, and time to tip from a restart.
-Per-chain hosting cost and time to tip per chain are measured above on
-macOS only; the pinned Linux run of them is still to do.
+cross-chain transfer time, template latency from a running node, and time
+to tip from a restart. Time to tip per chain is measured pinned on Linux
+for the four-chain tree (above); hosting cost by number of chains is
+measured on macOS only.
 
 **Scale is not measured at all.** The benchmark is 9,086 blocks over four
 chains. How the node behaves with a hundred hosted chains, large state, many
@@ -645,12 +662,12 @@ published.
 
 | Module | Lines | Role |
 |---|---|---|
-| `LatticeNodeCore` | 5,770 | deterministic decisions per chain |
-| `LatticeNodeSim` | 5,496 | the simulator that drives the core and checks invariants every step |
-| `LatticeNode` | 15,013 | the shell: loop, stores, networking, jobs, reads |
-| `LatticeNodeAPI` | 1,441 | request and response models |
-| `LatticeNodeDaemon` | 3,361 | HTTP servers and process entry |
-| `LatticeCtl`, `LatticeCtlCore` | 2,947 | the `lattice` CLI |
+| `LatticeNodeCore` | 5,918 | deterministic decisions per chain |
+| `LatticeNodeSim` | 5,526 | the simulator that drives the core and checks invariants every step |
+| `LatticeNode` | 16,669 | the shell: loop, stores, networking, jobs, reads |
+| `LatticeNodeAPI` | 1,472 | request and response models |
+| `LatticeNodeDaemon` | 3,442 | HTTP servers and process entry |
+| `LatticeCtl`, `LatticeCtlCore` | 2,948 | the `lattice` CLI |
 | `LatticeMiner*`, `LatticeMiningCoordinator*` | 1,624 | mining, as separate processes |
 
 ---
@@ -703,7 +720,7 @@ liveness rules testable.
 | Order agreed without executing; execution a few blocks behind | Monad ([asynchronous execution](https://docs.monad.xyz/monad-arch/consensus/asynchronous-execution)) | a node behind in execution drops out of consensus until it catches up (own docs) | execution gets the whole block time |
 | Deterministic core, effects run by a shell | this node | a layer between decision and I/O | every liveness rule testable by simulation |
 
-**Performance.** Core decisions are about 7% of CPU.
+**Performance.** Core decisions are about 7% of CPU (macOS profile, §2).
 **Ease of change.** Easy: a rule change is tested by the simulator before the
 shell sees it. **Judgment.** Keep. Its closest relative is Monad's
 separation: this node also weighs headers before executing them, and acts
@@ -757,7 +774,7 @@ for a quarter of the benchmark).
 | Work facts derived from the parent graph; peer proofs checked otherwise | this node | weighs a child without trusting peers' proofs | the gate's timing (open) |
 
 **Performance.** Decoding the wire frames that carry headers was 13.5–14.5%
-of CPU, more than executing blocks, because a child header whose proof
+of CPU on macOS, more than executing blocks, because a child header whose proof
 verified before its parent's asked for the parent and a page of ancestors
 it held: each header arrived 7–13 times. Asked once (§2), it is 1.6–1.8%. **Ease of change.** Easy, in the core.
 **Open.** The child gate opens on whichever peer's log ends first; a peer
@@ -919,8 +936,8 @@ bodies no peer had.
 | Bitcoin Core, new blocks ([BIP152](https://raw.githubusercontent.com/bitcoin/bips/master/bip-0152.mediawiki)) | — | — | — | short transaction ids; a 1 MB block in about 15 KB when mempools agree (third-party figure) |
 | this node | 64 blocks | — | backoff, never blames | waits; a provider or the parent wakes it |
 
-**Performance.** About 7% of CPU. Whether 64 limits this node has not been
-measured on this branch. **Ease of change.** Easy. **Judgment.** Keep;
+**Performance.** About 7% of CPU (macOS profile before the header fix).
+Whether 64 limits this node has not been measured. **Ease of change.** Easy. **Judgment.** Keep;
 consider compact relay once blocks carry many transactions.
 
 ### 4.6 Execute
@@ -944,8 +961,9 @@ connect only once its body is stored.
 | Skip old signature checks | Bitcoin Core (`-assumevalid`) | 0.14's sync went from about 36 h to about 6 h with this and other changes ([release](https://bitcoincore.org/en/2017/03/08/release-0.14.0/)) | a trust assumption |
 | Optimistic parallel transactions | Aptos Block-STM ([paper](https://arxiv.org/abs/2203.06871)) | about 17–20× sequential on 32 threads (paper) | conflicts re-execute; complexity |
 
-**Performance.** Executing blocks is about 8% of CPU, and chains already run
-side by side. **Ease of change.** Easy. **Judgment.** Keep sequential
+**Performance.** Executing blocks is about 8% of CPU before the header fix
+and 12.4–12.6% after it (macOS profiles, §2), and chains already run side
+by side. **Ease of change.** Easy. **Judgment.** Keep sequential
 execution. **Open.** Execution reads state it lacks from peers; a full node
 should not need to.
 
@@ -966,7 +984,7 @@ posted, state fetched by count-repair tasks, and a detached task that drops
 proofs that failed. Retention releases run on the loop after publish; their
 failures are logged, not fatal.
 
-**Why.** One order in one place is what this branch restores. The removed
+**Why.** One order in one place is what #156 restored. The removed
 layer wrote behind the loop to save fsync waits; every write then needed an
 ordering rule between two stores, and review after review found a new hole.
 
@@ -1018,9 +1036,10 @@ Swift's shared thread pool).
 | SSD-page-packed trie | NOMT ([repo](https://github.com/thrumdev/nomt)) | binary trie in 4 KB pages | authors' benchmark only |
 | Append-only log | QMDB ([paper](https://arxiv.org/abs/2501.05262)) | state and Merkle tree in one log | claims about 6× RocksDB (own paper) |
 
-**Performance.** SQLite reads and writes are about 22% of CPU; a sync writes
-about 2.9 GB to keep 90 MB — mostly from how state is stored (§4.9), not the
-engine. The newer engines target states of hundreds of gigabytes on fast
+**Performance.** SQLite reads and writes are about 22% of CPU (macOS
+profile); the four-chain sync wrote about 2.9 GB to keep 90 MB before the
+redesign and 1.54 GB after it (pinned Linux, §2) — mostly from how state is
+stored (§4.9), not the engine. The newer engines target states of hundreds of gigabytes on fast
 SSDs; this node's whole state is under 100 MB. **Ease of change.** Easy for
 the stores themselves. **Judgment.** Keep SQLite.
 
@@ -1070,8 +1089,8 @@ content the node serves or promised to keep, whatever state it keeps.
 
 On `recent` the counts move with the tip once per window, are checked at
 start and maintenance, healed when roots are missing, and replaced by a state
-sync when they cannot follow. (`state: none` is still on this branch; #152
-removes it.)
+sync when they cannot follow. (`state: none` remains a supported setting; #152, which
+would have removed it, was closed.)
 
 **Why.** #94 batched the counts to once per window: they had been four synced
 commits per block, a quarter of each step.
@@ -1087,14 +1106,15 @@ commits per block, a quarter of each step.
 | Versioned tree | Aptos (Jellyfish Merkle tree on RocksDB) | nodes keyed by version | old versions queryable | stale nodes pruned later; criticised for write amplification (third-party) |
 | Content-addressed, counted | this node | every version's nodes by hash | windows; per-block diffs | counts moved per window, audited, healed, resynced |
 
-**Performance.** This is where the disk goes: about 2.9 GB written to keep
-90 MB. Retention's CPU is small (about 1.5%), but every content read is
+**Performance.** This is where the disk goes: the four-chain sync wrote
+about 2.9 GB to keep 90 MB before the redesign, 1.54 GB with a store per
+chain (pinned Linux, §2). Retention's CPU is small (about 1.5%), but every content read is
 decoded and hash-checked, a large share of CPU, because state is stored as
 hash-addressed encoded nodes. **Ease of change.** Medium: a change to a
 setting's policy is in `StateBackend`; a change to the counted mechanism
 crosses `StateBackend`, the loop's `Counts` and `Retention`, the store
-(`NodeStorage+Retention.swift`, 521 lines; `NodeStore+StatePins.swift`,
-181) and VolumeBroker's counted index. **Judgment.** The largest remaining
+(`NodeStorage+Retention.swift`, 568 lines; `NodeStore+StatePins.swift`,
+173) and VolumeBroker's counted index. **Judgment.** The largest remaining
 machinery and the biggest disk cost. No established client counts references
 to retain trie nodes on disk; geth moved away from hash-keyed state. Phase 4
 gives each hosted chain its own Volume store, which removes the measured
@@ -1217,9 +1237,9 @@ operation: the Volume store's membership tables 54%, facts 15%, retention
 13%, content and its CID index 13% (the content itself 2%), bundles 3%,
 counts 1%. One index, `idx_ve_root` in `VolumeBroker`, repeats the index of
 its table's own primary key and is 14% of all writes. Writes per added
-chain grow with the chains already hosted (245, 320, 396 KB per block for
-the second, third and fourth), so disk written grows faster than the
-number of chains.
+leaf grew with the leaves already hosted (251, 328 and 397 KiB a block for
+the first leaf, the second and third, and the fourth to seventh), so disk
+written grew faster than the number of chains.
 
 **Options.**
 
@@ -1237,14 +1257,14 @@ path's retention map (§4.9). Neither changes consensus bytes, which hash
 the trie, not its storage.
 
 **Decision.** The per-chain cost target (§1: a chain's writes per block do
-not grow with the chains hosted) is missed, so Phase 4 starts. First drop
-the redundant index: it is measured and changes no design, and the Volume
+not grow with the chains hosted) was missed, so Phase 4 started. First the
+redundant index went: it is measured and changes no design, and the Volume
 store's own schema v3 (VolumeBroker 10.3) already drops it, so it is a
 dependency bump and one wipe (schema epoch 49).
 
 Measured again on schema v3: total writes fall 15–18%, and a chain's writes
-per block still grow with the chains hosted (212, 275, 339 KiB per block
-for the second, third and fourth leaf). The cause is measured too: commits
+per block still grew with the chains hosted (212, 275 and 339 KiB a block
+for the first leaf, the second and third, and the fourth to seventh). The cause is measured too: commits
 per chain do not grow, bytes per commit do. Every chain's rows share the
 same hash-keyed tables, so as they grow, fewer of a commit's inserts share
 a page, and each insert costs nearer a whole page in the log and again at
@@ -1305,14 +1325,15 @@ one `state.db` transaction, then the step is published. *Conventional
 equivalent:* Bitcoin Core's block files then chainstate, flushed in that
 order by one routine, and geth's ancient store then key-value store; both
 order content before what names it, as here, across more than one file.
-*Measured gain:* a chain's writes per added leaf flat at 120–131 KiB a
-block, 53% less written with eight children (§2). *Cost:* a commit per
+*Measured gain* (macOS): a chain's writes per added leaf flat at 120–131
+KiB a block against 210–330 before, 53% less written with eight children
+(§2). *Cost:* a commit per
 store a step touches (most touch one), about thirteen open files a chain,
 and a crash between stores leaving content no fact names, which its
 window's scope holds until the tip passes it: no new recovery mechanism.
 
-The target is met: a chain's writes per block no longer grow with the
-chains hosted. Each leaf's own store writes the same 118–120 MiB whether
+The target is met (macOS): a chain's writes per block no longer grow with
+the chains hosted. Each leaf's own store writes the same 118–120 MiB whether
 two, four or eight children are hosted, and Alpha's 133–134 MiB whether
 one or eight; per added leaf the follower wrote 176, 187 and 192 MiB in all
 (120, 128 and 131 KiB a block, against 210, 270 and 330 before), the rest
@@ -1337,8 +1358,10 @@ and its ancestors' before going to peers (store reads 12.9% of busy against
 page caches), and open files 74 to 126 and 178, about thirteen a store (its
 file, log and shared memory, and four read connections, which VolumeBroker
 does not let a caller reduce). The node raises its soft open-file limit to
-the hard limit at start, as Bitcoin Core and geth do (on this Mac, 256 to
-184,320), so a shell's default does not bound the chains hosted. Disk kept reads 20–30% higher while the node
+the hard limit at start, as Bitcoin Core and geth do, capped by the
+kernel's per-process maximum (`kern.maxfilesperproc` on macOS, `fs.nr_open`
+on Linux; on this Mac, 256 to 184,320), so a shell's default does not bound
+the chains hosted. Disk kept reads 20–30% higher while the node
 runs (138 against 108 MiB with eight): each store holds its log up to 4 MiB
 (`journal_size_limit`), nine logs here. Closed, the stores are the size of
 the one store (101 against 100 MiB), with under 1 MiB of free pages.
@@ -1495,7 +1518,7 @@ systemd; the cookie is bitcoind's `.cookie`.
 
 **Ease of change.** Easy; the daemon's command (`LatticeNodeCommand.swift`,
 617 lines) is apart from its operator and public HTTP applications
-(`OperatorApplication.swift`, 469; `PublicReadApplication.swift`, 677).
+(`OperatorApplication.swift`, 449; `PublicReadApplication.swift`, 699).
 
 ### 4.17 Bounds and backpressure
 
@@ -1510,7 +1533,7 @@ not be able to take what others need. What is bounded today, by reading:
 | Messages queued to a peer | per-session message and byte limits (`SessionOutbox`) |
 | Content served to peers | concurrent and in-flight byte limits (`servingMaxConcurrent`, `servingMaxInFlightVolumeBytes`) |
 | Mempool | per-chain limits |
-| Worker queues | per step, not in total: a level's proof checks of a step are one job, a page under a byte budget; its derivations at most one per worker; its connects one at a time; a mining recheck whose tip moved is dropped. On the child-sync benchmark the peak queued fell from 1,993 jobs (one per derivation) to 23, with 7–9% less CPU and the same wall time. Steps can still queue faster than workers drain them; no total bound |
+| Worker queues | per step, not in total: a level's proof checks of a step are one job, a page under a byte budget; its derivations at most one per worker; its connects one at a time; a mining recheck whose tip moved is dropped. On the child-sync benchmark (macOS) the peak queued fell from 1,993 jobs (one per derivation) to 23, with 7–9% less CPU and the same wall time. Steps can still queue faster than workers drain them; no total bound |
 | Bodies fetched but not yet executed | bounded by the window and the byte budget; not reported |
 
 Not yet measured: how these behave with many hosted chains, and whether one
@@ -1555,11 +1578,11 @@ blocks may anchor to. Those deserve dedicated adversarial scenarios.
 | Identifiers | text CIDs in 32 files, the core included | all | others use fixed 32-byte hashes and convert at the edge | **hard but mechanical** |
 | Write order and persistence | the loop's persist effect, two store files and `VolumeStores` (a Volume store per hosted chain, routed by chain path) | two | Bitcoin's order; a store per chain, as a chain is hosted by those that opt in | **easy** |
 | State retention | `StateBackend` (the three settings, one type), the loop's `Retention` and `Counts`, the retention and state-pin store files (the mechanism), VolumeBroker's counted index | one for a setting's policy; three or more for the counted mechanism | the shape of triedb's or a `StateProvider`'s interface, over one mechanism; no established client counts references on disk | **medium** |
-| The shell's loop | `NodeRuntime.swift` (542: start-up and boot), `NodeRuntime+Loop.swift` (inputs, hosting, views) and `NodeRuntime+Effects.swift` (receive, step, effects), each under 500 | one | receives input, steps the core, dispatches effects to the components below, takes results back; Bitcoin Core's `PeerManager` and validation-interface subscribers, geth's handler and fetchers | **easy** |
+| The shell's loop | `NodeRuntime.swift` (546: start-up and boot), `NodeRuntime+Loop.swift` (inputs, hosting, views) and `NodeRuntime+Effects.swift` (receive, step, effects), each under 500 | one | receives input, steps the core, dispatches effects to the components below, takes results back; Bitcoin Core's `PeerManager` and validation-interface subscribers, geth's handler and fetchers | **easy** |
 | Read model | `ReadModel.swift` (167) | one | a chain-head subscriber that rebuilds views; owns no authoritative state | **easy** |
 | Maintenance | `Maintenance.swift` (286) | one | peer search and provider announcement, off the loop | **easy** |
 | Body and transaction fetches | `BodyFetches.swift` (214), `TransactionFetches.swift` (93) | one | geth's block and transaction fetchers | **easy** |
-| Work queues | `JobPool.swift` (137) | one | one pool with queues | **easy** |
+| Work queues | `JobPool.swift` (165) | one | one pool with queues | **easy** |
 | Mining | separate processes behind HTTP | one | `getblocktemplate` | **easy** |
 | Operator surface | `LatticeCtl`, `LatticeNodeDaemon` | one | systemd, drop-in configuration | **easy** |
 
@@ -1616,16 +1639,16 @@ and to change.
   effect order, and hands each effect to one component under
   `LatticeNode/Runtime/`, passing in what it reads of the others —
   `ReadModel.swift` (167 lines: views, digests, fee reprojections),
-  `Retention.swift` (129: the body working set, reads to release, state
+  `Retention.swift` (162: the body working set, reads to release, state
   tips), `Counts.swift` (238: counts and their repair), `Maintenance.swift`
   (286: peer search, passes, announcements, current peers, pins),
   `BodyFetches.swift` (214: fetches, waits, body windows and the read
-  cache's order), `JobPool.swift` (137: running and queued jobs),
+  cache's order), `JobPool.swift` (165: running and queued jobs),
   `TransactionFetches.swift` (93). `NodeRuntime.swift` went from 2,232
   lines to 1,444 (the 2,223 measured earlier was before Phase 1's last
   changes), about 880 of them the loop. The loop has since moved to
   `NodeRuntime+Loop.swift` and `NodeRuntime+Effects.swift`, leaving
-  start-up and boot (542). Sessions stay in the loop: their
+  start-up and boot (546). Sessions stay in the loop: their
   changes start maintenance and retry repairs, and every network input
   reads them.
 - ~~Put state retention behind one interface (load current state, apply a
@@ -1658,10 +1681,11 @@ the core or to how events are processed.
 consensus unchanged.
 
 - The Linux benchmark pinned to one CPU is in place (`Benchmarks/sync`,
-  `FOLLOWER_CPUS`); add time to tip per chain as well as throughput (the
-  report has it now; measured on macOS in §2).
+  `FOLLOWER_CPUS`), with time to tip per chain as well as throughput
+  (measured pinned on Linux and on macOS, §2).
 - Each header received once (done: a child header no longer asks for a
-  parent whose check is running; loopback 85% less, CPU 13–19% less).
+  parent whose check is running; on macOS, loopback 85% less, CPU 13–19%
+  less).
 - The binary wire format: deferred (§4.12); its JSON is 0.6% of CPU now.
 - The decode cache as a cashew hook (§4.12), when cashew releases it: up to
   about 16% of CPU.
@@ -1673,7 +1697,7 @@ consensus unchanged.
 - Break down the write amplification by operation (done on macOS, §2:
   content 2%, its bookkeeping keyed by text CIDs the rest).
 - Measure memory, bandwidth and CPU as the number of hosted chains grows
-  (done on macOS, §2; writes grow faster than linearly).
+  (done on macOS, §2; writes grew faster than linearly until Phase 4).
 
 *Exit:* a measured improvement against the baseline, with no regression in
 compatibility or correctness.
@@ -1690,9 +1714,9 @@ compatibility or correctness.
   49, one wipe. Measured after it, a chain's writes per block still grow
   with the chains hosted (§2), so:
 - ~~Give each hosted chain its own Volume store (§4.9b).~~ Done: schema
-  epoch 50, one wipe. A chain's writes per block no longer grow with the
-  chains hosted (120–131 KiB a block per added leaf, flat; 53% less written
-  with eight children), CPU within 2–3% once reads name their chain, wall
+  epoch 50, one wipe. On macOS, a chain's writes per block no longer grow
+  with the chains hosted (120–131 KiB a block per added leaf, flat, against
+  210–330 before; 53% less written with eight children), CPU within 2–3% once reads name their chain, wall
   time 4–10% lower; it costs 6–9% more memory, each store's log while
   running, and about thirteen open files a chain (§2, §4.9b).
 
@@ -1704,8 +1728,9 @@ contract.
 - Per-chain resource budgets (CPU, memory, disk growth per million blocks,
   bandwidth, outstanding work, restart time). Measured per added chain by the
   benchmark (§2); outstanding work per chain is reported
-  (`lattice_chain_jobs_queued`). Disk and memory cannot be attributed per
-  chain inside shared stores; the targets are §1's.
+  (`lattice_chain_jobs_queued`). Disk kept per chain is its store's file
+  under `volumes/`, not yet in `/metrics`; memory cannot be attributed per
+  chain. The targets are §1's.
 - Propagation, stale-block and child hash-share measurements on the network.
   Not done: they need observations of the live network.
 - Cross-chain transfer completion. Not done.
