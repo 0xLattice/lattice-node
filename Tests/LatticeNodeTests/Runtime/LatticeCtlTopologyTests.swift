@@ -57,6 +57,25 @@ final class LatticeCtlTopologyTests: XCTestCase {
         browsers.webSocket = browsers.rpc
         XCTAssertThrowsError(try browsers.validated())
 
+        var declared = configured
+        declared.webSocket = 4002
+        declared.webSocketURL = "wss://node.example.org/ivy"
+        let parsed = try JSONDecoder().decode(Topology.self, from: JSONEncoder().encode(declared))
+        XCTAssertEqual(parsed.webSocketURL, "wss://node.example.org/ivy")
+        XCTAssertNoThrow(try parsed.validated())
+        let arguments = parsed.nodeArguments(layout: HostLayout(root: "/tmp/lattice-topology-test"))
+        let flag = try XCTUnwrap(arguments.firstIndex(of: "--websocket-url"))
+        XCTAssertEqual(arguments[flag + 1], "wss://node.example.org/ivy")
+        for bad in ["https://node.example.org/ivy", "wss://", "wss://node example/ivy"] {
+            declared.webSocketURL = bad
+            XCTAssertThrowsError(try declared.validated(), bad)
+        }
+        declared.webSocketURL = "wss://node.example.org/ivy"
+        for off: UInt16? in [0, nil] {
+            declared.webSocket = off
+            XCTAssertThrowsError(try declared.validated(), "a URL with no listener required")
+        }
+
         let legacy = Data(#"{"chains":{"Nexus":{"listen":4001,"rpc":4003}}}"#.utf8)
         XCTAssertThrowsError(try JSONDecoder().decode(Topology.self, from: legacy))
     }
