@@ -308,7 +308,7 @@ public struct HostedChainsResponse: Codable, Sendable {
 }
 
 /// `GET /disk`: bytes on disk of each entry in the node's storage
-/// directory (the state database, the Volume store, ...), and the free space
+/// directory (the state database, the Volume stores, ...), and the free space
 /// of its file system.
 public struct DiskResponse: Codable, Sendable {
     public struct Store: Codable, Sendable {

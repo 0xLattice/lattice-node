@@ -7,11 +7,6 @@ import XCTest
 let testTimeScale: Int = ProcessInfo.processInfo
     .environment["E2E_TIME_SCALE"].flatMap(Int.init).map { max(1, $0) } ?? 1
 
-/// `duration` scaled by `testTimeScale`, as nanoseconds for `Task.sleep`.
-func scaledNanoseconds(_ duration: Duration) -> UInt64 {
-    nanoseconds(duration * testTimeScale)
-}
-
 private func nanoseconds(_ duration: Duration) -> UInt64 {
     let (seconds, attoseconds) = duration.components
     return UInt64(seconds) * 1_000_000_000 + UInt64(attoseconds / 1_000_000_000)
