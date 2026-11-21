@@ -1,5 +1,5 @@
 {
-  "originHash" : "d2b6865ed2cdb42eb78990bff55ea1d7ae0f004aec29005f424430dbf3c25088",
+  "originHash" : "02e82daba1b61dbc5a48b97c292f5d09e44df9f2ed37c2c98d357f9fafd44f03",
   "pins" : [
     {
       "identity" : "arraytrie",
@@ -60,8 +60,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/0xLattice/Ivy2.git",
       "state" : {
-        "revision" : "2a217778e5175405b326be8e3bd5f073e9f0a8a7",
-        "version" : "3.2.1"
+        "revision" : "3b7f806de61e46f3b8bf3bb8ae438058cc725b33",
+        "version" : "3.3.0"
       }
     },
     {
