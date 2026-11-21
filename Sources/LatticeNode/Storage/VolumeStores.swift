@@ -1,5 +1,6 @@
 import Crypto
 import Foundation
+import Lattice
 import LatticeNodeCore
 import VolumeBroker
 import cashew
@@ -241,9 +242,24 @@ final class VolumeStores: Sendable {
 struct StoreReads: ContentSource {
     let stores: [DiskBroker]
 
+    /// Content whose CID fixes its bytes and that nearly every block names,
+    /// answered without asking a store: the empty child index (a block with
+    /// no child blocks) and the empty Merkle dictionary (a block with no
+    /// transactions, an empty state trie). Node design §2, "What the
+    /// repeated reads are".
+    static let empty: [String: Data] = {
+        let childIndex = FlatDictionary<BlockHeader>()
+        let dictionary = MerkleDictionaryImpl<VolumeImpl<Transaction>>(children: [:], count: 0)
+        let entries: [(String, Data)?] = [
+            (try? HeaderImpl(node: childIndex).rawCID).flatMap { cid in childIndex.toData().map { (cid, $0) } },
+            (try? HeaderImpl(node: dictionary).rawCID).flatMap { cid in dictionary.toData().map { (cid, $0) } },
+        ]
+        return Dictionary(entries.compactMap { $0 }) { first, _ in first }
+    }()
+
     func fetch(_ cids: Set<String>) async -> [String: Data] {
-        var found: [String: Data] = [:]
-        var missing = cids
+        var found = Self.empty.filter { cids.contains($0.key) }
+        var missing = cids.subtracting(found.keys)
         for store in stores {
             guard !missing.isEmpty else { break }
             let held = await store.fetchDataLocal(cids: missing)
@@ -254,6 +270,7 @@ struct StoreReads: ContentSource {
     }
 
     func fetchDataLocal(cid: String) async -> Data? {
+        if let held = Self.empty[cid] { return held }
         for store in stores { if let held = await store.fetchDataLocal(cid: cid) { return held } }
         return nil
     }

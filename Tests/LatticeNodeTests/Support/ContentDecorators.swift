@@ -43,62 +43,6 @@ actor RecordingContentSource: ContentSource {
     }
 }
 
-/// Serves a map but parks any request naming `blockedCID` until released;
-/// `waitForBlockedFetch` resumes once that request has arrived.
-actor BlockingContentSource: ContentSource {
-    private struct Waiter {
-        let entries: [String: Data]
-        let continuation: CheckedContinuation<[String: Data], Never>
-    }
-
-    private let blockedCID: String
-    private var entries: [String: Data] = [:]
-    private var blockedFetchStarted = false
-    private var released = false
-    private var startWaiters: [CheckedContinuation<Void, Never>] = []
-    private var blockedFetchWaiters: [Waiter] = []
-
-    init(blockedCID: String) {
-        self.blockedCID = blockedCID
-    }
-
-    func setEntries(_ entries: [String: Data]) {
-        self.entries = entries
-    }
-
-    func fetch(_ cids: Set<String>) async -> [String: Data] {
-        let found = entries.filter { cids.contains($0.key) }
-        guard cids.contains(blockedCID) else { return found }
-
-        blockedFetchStarted = true
-        let pendingStarts = startWaiters
-        startWaiters.removeAll()
-        for waiter in pendingStarts { waiter.resume() }
-        guard !released else { return found }
-
-        return await withCheckedContinuation { continuation in
-            blockedFetchWaiters.append(Waiter(
-                entries: found,
-                continuation: continuation
-            ))
-        }
-    }
-
-    func waitForBlockedFetch() async {
-        guard !blockedFetchStarted else { return }
-        await withCheckedContinuation { startWaiters.append($0) }
-    }
-
-    func releaseBlockedFetch() {
-        released = true
-        let pending = blockedFetchWaiters
-        blockedFetchWaiters.removeAll()
-        for waiter in pending {
-            waiter.continuation.resume(returning: waiter.entries)
-        }
-    }
-}
-
 /// An Ivy content source holding exactly one serialized volume.
 struct VolumeSource: IvyContentSource, Sendable {
     let value: SerializedVolume
@@ -143,39 +87,3 @@ actor RecordingVolumesSource: IvyContentSource {
 
     func requests() -> [String] { requestedRoots }
 }
-
-/// Serves one volume, but parks the request for it until released.
-actor BlockingVolumeSource: IvyContentSource {
-    let value: SerializedVolume
-    private var started = false
-    private var released = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    init(value: SerializedVolume) {
-        self.value = value
-    }
-
-    func volume(rootCID: String, maxDataBytes: Int) async -> [ContentEntry] {
-        guard rootCID == value.root else { return [] }
-        started = true
-        if !released {
-            await withCheckedContinuation { waiters.append($0) }
-        }
-        guard value.entries.values.reduce(0, { $0 + $1.count }) <= maxDataBytes else {
-            return []
-        }
-        return value.entries.sorted { $0.key < $1.key }.map {
-            ContentEntry(cid: $0.key, data: $0.value)
-        }
-    }
-
-    func didStart() -> Bool { started }
-
-    func release() {
-        released = true
-        let current = waiters
-        waiters.removeAll()
-        for waiter in current { waiter.resume() }
-    }
-}
-

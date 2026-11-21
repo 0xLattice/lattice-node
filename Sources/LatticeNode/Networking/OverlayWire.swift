@@ -64,7 +64,3 @@ struct TransactionAvailableMessage: CanonicalJSONMessage, Equatable, Sendable {
         }
     }
 }
-
-private func _isCanonicalWireCID(_ value: String) -> Bool {
-    _isBoundedWireAtom(value) && CIDIdentity.isCanonical(value)
-}

@@ -304,7 +304,7 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
     }
 
     /// A recheck queued on one tip is discarded at the runtime's dequeue
-    /// (`JobQueues.next`, what `startJobs` takes from) once the mining tip is
+    /// (`JobQueues.next`, what `JobPool.start` takes from) once the mining tip is
     /// another: it is never handed to a worker, and the current job behind
     /// it is. A template build is never discarded: it is answered on any tip.
     func testARecheckWhoseTipIsNotTheMiningTipIsDiscarded() async throws {

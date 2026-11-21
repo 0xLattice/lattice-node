@@ -1325,12 +1325,6 @@ private func mineOneBlock(client: some TestClientProtocol) async throws -> Strin
     return try XCTUnwrap(tipCID)
 }
 
-private actor CompletionFlag {
-    private(set) var isDone = false
-
-    func markDone() { isDone = true }
-}
-
 /// A response body writer that records what it is given. With
 /// `holdFirstWrite`, its first write does not return until released, like a
 /// client that stopped reading.

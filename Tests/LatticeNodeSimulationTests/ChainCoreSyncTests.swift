@@ -268,6 +268,20 @@ final class ChainCoreSyncTests: XCTestCase {
         XCTAssertEqual(core.sync.peers[other]?.subscribed, true, "at the end: what we append is pushed")
     }
 
+    func testATailRequestIsAnsweredWithTheLastEntryAndSubscribes() async throws {
+        var core = weighed(Array(chain[0..<6]))
+        let log = core.sync.log.entries
+        _ = core.step(.peerReady(other), now: Self.now)
+        let effects = core.step(.received(other, .getStream(requestID: 9, logID: nil, after: .max, own: "")), now: Self.now)
+        guard case .send(other, .stream(let tail)) = effects.first else { return XCTFail("\(effects)") }
+        XCTAssertEqual(tail.requestID, 9)
+        XCTAssertEqual(tail.logID, core.sync.log.id)
+        XCTAssertEqual(tail.entries.map(\.position), [UInt64(log.count)])
+        XCTAssertEqual(tail.entries.map(\.entry), [log.last!])
+        XCTAssertFalse(tail.hasMore)
+        XCTAssertEqual(core.sync.peers[other]?.subscribed, true, "what we append next is pushed")
+    }
+
     func testOnlyOneServedPagePerPeerIsOutstandingAndTheNextWaitsForIt() throws {
         var core = weighed(Array(chain[0..<3]))
         ready(&core, other)
@@ -980,7 +994,9 @@ final class ChainCoreSyncTests: XCTestCase {
         for after: UInt64 in [.max, .max - 1, 1 << 62, 4, 3] {
             let effects = core.step(.received(other, .getStream(requestID: 2, logID: core.sync.log.id, after: after, own: "")), now: Self.now)
             guard case .send(_, .stream(let page)) = effects.first else { return XCTFail("\(effects)") }
-            XCTAssertEqual(page.entries.first?.position, after == 3 ? nil : 1, "past the log is a reset: from 0")
+            // The maximum asks for the tail (the last entry); any other
+            // position past the log is a reset: from 0.
+            XCTAssertEqual(page.entries.first?.position, after == 3 ? nil : after == .max ? 3 : 1)
         }
         let effects = core.step(.received(other, .getData(requestID: 3, cids: ["bafyunknown", world.genesis.cid])), now: Self.now)
         XCTAssertEqual(served(effects).first?.1, [])

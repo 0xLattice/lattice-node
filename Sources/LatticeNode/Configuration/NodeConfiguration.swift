@@ -37,6 +37,8 @@ public enum NodeConfigurationError: Error, Equatable, CustomStringConvertible {
     case invalidPrivateKey
     case invalidPorts
     case invalidPublicReadURL
+    case invalidWebSocketURL
+    case webSocketURLWithoutListener
     case invalidAnnounceLifetime
     case invalidConnectBatch
 
@@ -48,6 +50,10 @@ public enum NodeConfigurationError: Error, Equatable, CustomStringConvertible {
         case .invalidPorts: "overlay, RPC and WebSocket ports must be nonzero and distinct"
         case .invalidPublicReadURL:
             "public read URL must be an absolute http(s) URL with a host and no credentials, query or fragment"
+        case .invalidWebSocketURL:
+            "WebSocket URL must be a ws:// or wss:// URL of at most \(WebAddress.maxURLBytes) printable ASCII bytes"
+        case .webSocketURLWithoutListener:
+            "a WebSocket URL needs the WebSocket listener: it names where browsers reach it"
         case .invalidAnnounceLifetime:
             "announce lifetime must be 1 to \(NodeConfiguration.maximumAnnounceLifetime) seconds: peers drop announcements that last longer"
         case .invalidConnectBatch:
@@ -220,6 +226,12 @@ public struct NodeConfiguration: Sendable {
     /// read-endpoint request for a hosted level is answered with it, and each
     /// hosted child level is announced under its read-endpoint key.
     public let publicReadURL: String?
+    /// The URL at which browsers reach this node's WebSocket listener, as
+    /// they dial it (operator declaration, e.g. through a proxy that ends
+    /// TLS): advertised to peers as this node's web address. Absent, the
+    /// node advertises relays among its peers (`Ivy.setAutoRelay`). Makes
+    /// the listener required.
+    public let webSocketURL: String?
     /// The public read listener also accepts `POST /transactions` (operator
     /// choice, default off). Declared beside `publicReadURL` to peers.
     public let publicSubmit: Bool
@@ -292,6 +304,7 @@ public struct NodeConfiguration: Sendable {
         childGenesisTransactions: [[String]: [Transaction]] = [:],
         policyModules: [Data] = [],
         publicReadURL: String? = nil,
+        webSocketURL: String? = nil,
         publicSubmit: Bool = false,
         minRelayFee: UInt64 = 0,
         finality: FinalityWindows = FinalityWindows(),
@@ -314,6 +327,9 @@ public struct NodeConfiguration: Sendable {
         if let publicReadURL, !Self.isValidPublicReadURL(publicReadURL) {
             throw NodeConfigurationError.invalidPublicReadURL
         }
+        if let webSocketURL, !Self.isValidWebSocketURL(webSocketURL) {
+            throw NodeConfigurationError.invalidWebSocketURL
+        }
         guard (1...Self.maximumAnnounceLifetime).contains(announceLifetime) else {
             throw NodeConfigurationError.invalidAnnounceLifetime
         }
@@ -327,18 +343,25 @@ public struct NodeConfiguration: Sendable {
         ).hex
         self.listenPort = listenPort
         self.rpcPort = rpcPort
+        var listener = webSocket
         switch webSocket {
         case .required(let port):
             guard port != 0, port != listenPort, port != rpcPort else {
                 throw NodeConfigurationError.invalidPorts
             }
-            self.webSocket = webSocket
         case .ifAvailable(let port):
             // A port given to something else is not available.
-            self.webSocket = port == 0 || port == listenPort || port == rpcPort ? .off : webSocket
+            if port == 0 || port == listenPort || port == rpcPort { listener = .off }
         case .off:
-            self.webSocket = .off
+            break
         }
+        // A declared URL is advertised: a listener that could not bind
+        // must not leave it naming nothing.
+        if webSocketURL != nil {
+            guard let port = listener.port else { throw NodeConfigurationError.webSocketURLWithoutListener }
+            listener = .required(port)
+        }
+        self.webSocket = listener
         self.bootstrapPeers = bootstrapPeers
         self.seedPeers = seedPeers
         self.fixedSeedPeers = fixedSeedPeers
@@ -364,6 +387,7 @@ public struct NodeConfiguration: Sendable {
         self.hostedChildren = hostedChildren
         self.policyModules = policyModules
         self.publicReadURL = publicReadURL
+        self.webSocketURL = webSocketURL
         self.publicSubmit = publicSubmit
         self.minRelayFee = minRelayFee
         self.finality = finality
@@ -458,7 +482,7 @@ public struct NodeConfiguration: Sendable {
     }
 
     private static func helloCapabilities(hostedChildren: [[String]], relays: Bool) -> Set<String> {
-        Set([ChainHandshake.volumeBundle, ChainHandshake.helloUpdates] + (relays ? [ChainHandshake.relay] : [])
+        Set([ChainHandshake.volumeBundle, ChainHandshake.helloUpdates, ChainHandshake.streamTail] + (relays ? [ChainHandshake.relay] : [])
             + hostedChildren.map(ChainHandshake.hosting))
     }
 
@@ -473,6 +497,11 @@ public struct NodeConfiguration: Sendable {
               components.user == nil, components.password == nil,
               components.query == nil, components.fragment == nil else { return false }
         return true
+    }
+
+    /// A `ws://` or `wss://` URL a peer may advertise (`WebAddress`).
+    public static func isValidWebSocketURL(_ value: String) -> Bool {
+        WebAddress(url: value).isValid
     }
 
     public var chainPath: [String] { address.components }

@@ -24,7 +24,7 @@ public enum NodeRuntimeError: Error, Equatable, Sendable {
 /// effects in order — persist, then publish, then everything else. Every
 /// decision remains in the core.
 ///
-/// - `persist` (one `NodeBatch`) → the opened `NodeStorage`'s Volume store and state.db
+/// - `persist` (one `NodeBatch`) → the opened `NodeStorage`'s Volume stores and state.db
 ///   (content fsynced first, then the facts in one transaction). A failure
 ///   stops the storage: restart replays the journal.
 /// - `publish` → `published`, read by RPC without touching the loop.
@@ -246,6 +246,13 @@ public final class NodeRuntime: Sendable {
                 storage.store.childIndexBytes(root).map { SerializedVolume(root: root, entries: [root: $0]) }
             }
         )
+        // Where browsers reach this node, told every session from the
+        // first: the declared URL, or else relays among its peers.
+        if let url = configuration.webSocketURL {
+            await runtime.ivy.setWebAddresses([WebAddress(url: url)])
+        } else {
+            await runtime.ivy.setAutoRelay(true)
+        }
         // Boot replay of the local journal, each row with its arrival time,
         // into the pool of the chain it names.
         for item in try await storage.localTransactions() {
