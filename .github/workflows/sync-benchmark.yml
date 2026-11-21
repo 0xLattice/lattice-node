@@ -31,7 +31,7 @@ on:
         description: "One Nexus block every this many shares when recording (1: a Nexus-heavy chain); empty for the default"
         default: ""
       blocks:
-        description: "Blocks to record (Alpha's height; with ratio 1, about Nexus's); empty for the default"
+        description: "Blocks to record (Alpha's height; with ratio 1, about Nexus's, at most 2160); empty for the default"
         default: ""
 
 env:

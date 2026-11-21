@@ -219,7 +219,11 @@ environment (its header lists them):
   benchmark predates `HOSTED` hosts them too.
 - `RATIO=r`: when recording, one Nexus block every r shares (default 34).
   `RATIO=1 HOSTED=0` measures the root alone over a real length: every share
-  is a Nexus block, so `BLOCKS=3000` records about 3,000 of them.
+  is a Nexus block, so `BLOCKS=2000` records about 2,000 of them. Recording
+  refuses more than 2,160 Nexus blocks: Nexus's difficulty doubles every 120
+  blocks mined ahead of its one-hour schedule, so 3,000 would take hours.
+- `STALL=s`: the recording or a follower that writes nothing for s seconds
+  (default 600) is stopped and the run fails, instead of hanging.
 - `PAGES=1`: the bytes written to each table and index, through the log and
   the checkpoint, attributed every second (costs CPU; not for timing).
 - `TALLY=1`: how many times the node's work read each CID (repeated decodes).
@@ -234,7 +238,7 @@ TRACE=0 TAG=base Benchmarks/sync/native.sh /tmp/bench 1 3
 PAGES=1 TALLY=1 TAG=writes Benchmarks/sync/native.sh /tmp/bench 1 1
 TRACE=0 PROFILE=1 TAG=profile Benchmarks/sync/native.sh /tmp/bench 1 1
 Benchmarks/sync/profile.py /tmp/bench/runs/profile-1/sample.txt
-DATA=/tmp/bench/data/root RATIO=1 BLOCKS=3000 HOSTED=0 TRACE=0 TAG=root \
+DATA=/tmp/bench/data/root RATIO=1 BLOCKS=2000 HOSTED=0 TRACE=0 TAG=root \
   Benchmarks/sync/native.sh /tmp/bench 1 2
 for k in 0 1 2 4 8; do
   DATA=/tmp/bench/data/wide LEAVES=7 BLOCKS=1500 TRACE=0 HOSTED=$k TAG=hosted$k \
@@ -251,7 +255,7 @@ alone, `main` against another commit:
 
 ```bash
 gh workflow run sync-benchmark.yml --ref <branch with this workflow> \
-  -f refs="main <commit>" -f hosted=0 -f ratio=1 -f blocks=3000
+  -f refs="main <commit>" -f hosted=0 -f ratio=1 -f blocks=2000
 ```
 
 Record the dataset once and sync every build from it, so every build syncs the

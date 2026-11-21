@@ -15,7 +15,8 @@
 #                there with BLOCKS, LEAVES and RATIO when it has no manifest.txt
 #   RATIO=<r>    one Nexus block every r shares when recording (default 34;
 #                1 makes every share a Nexus block: a Nexus-heavy chain of
-#                about BLOCKS blocks, for HOSTED=0)
+#                about BLOCKS blocks, for HOSTED=0; at most 2,160 Nexus blocks,
+#                as Nexus's difficulty doubles every 120 mined ahead of schedule)
 #   TAG=<name>   run directories are <work-dir>/runs/<name>-<n> (default w<workers>)
 #   HOSTED=<k>   the follower hosts Nexus and the first k child levels only
 #                (it is given a manifest of those levels alone, so a ref
@@ -24,6 +25,8 @@
 #   TALLY=1      count the reads of each CID by the node's work (repeated decodes)
 #   PROFILE=1    a CPU profile of the follower (macOS: sample) into sample.txt
 #   TRACE=0      no sync trace
+#   STALL=<s>    fail when the recording or a follower writes nothing for s
+#                seconds (default 600), instead of waiting forever
 # Each run also records the loopback interface's bytes before and after the
 # follower's sync (net.txt): the server is on 127.0.0.1, so that is the
 # traffic between them, plus whatever else this host sends over loopback.
@@ -64,14 +67,30 @@ net() {
   else echo "$(cat /sys/class/net/lo/statistics/rx_bytes) $(cat /sys/class/net/lo/statistics/tx_bytes)"; fi
 }
 
-# The server, the follower and the profiler of the run in progress, stopped
-# however the script ends.
-SERVE= FOLLOW= SAMPLE=
+# The recorder, the server, the follower and the profiler of the run in
+# progress, stopped however the script ends.
+RECORD= SERVE= FOLLOW= SAMPLE=
 stop() {
-  for p in $SAMPLE $FOLLOW $SERVE; do pkill -P "$p" 2>/dev/null || true; kill "$p" 2>/dev/null || true; done
+  for p in $SAMPLE $FOLLOW $SERVE $RECORD; do pkill -P "$p" 2>/dev/null || true; kill "$p" 2>/dev/null || true; done
 }
 trap stop EXIT
 trap 'stop; exit 130' INT TERM
+
+# watch <pid> <path>...: waits while <pid> runs, and ends it (failing) when
+# nothing under the paths, its output, has grown for STALL seconds.
+watch() {
+  p=$1; shift; last= quiet=0
+  while kill -0 "$p" 2>/dev/null; do
+    size=$(find "$@" -type f -exec ls -ln {} + 2>/dev/null | awk '{ s += $5 } END { print s + 0 }')
+    if [ "$size" != "$last" ]; then last=$size quiet=0; else quiet=$((quiet + 1)); fi
+    if [ "$quiet" -ge "${STALL:-600}" ]; then
+      echo "no progress in ${STALL:-600} s: stopping"
+      pkill -KILL -P "$p" 2>/dev/null || true; kill -KILL "$p" 2>/dev/null || true
+      return 1
+    fi
+    sleep 1
+  done
+}
 
 D=${DATA:-$W/data/chain}
 if [ ! -f "$D/manifest.txt" ]; then
@@ -84,8 +103,13 @@ if [ ! -f "$D/manifest.txt" ]; then
     *) echo "DATA=$D holds no manifest.txt and is outside $W: not recording there"; exit 1 ;;
   esac
   rm -rf "$D"; mkdir -p "$D"; D=$(cd "$D" && pwd); mkdir -p "$W/data"
+  echo "recording into $D (progress in $W/data/record.log)"
   (export CHILD_BENCH=record CHILD_BENCH_DIR=$D CHILD_BENCH_BLOCKS=${BLOCKS:-3000} CHILD_BENCH_LEAVES=${LEAVES:-2} CHILD_BENCH_RATIO=${RATIO:-34}
-   bench testRecord) > "$W/data/record.log" 2>&1 || { tail -20 "$W/data/record.log"; exit 1; }
+   bench testRecord) > "$W/data/record.log" 2>&1 &
+  RECORD=$!
+  watch $RECORD "$W/data/record.log" || true
+  wait $RECORD && [ -f "$D/manifest.txt" ] || { tail -20 "$W/data/record.log"; echo "recording failed"; exit 1; }
+  RECORD=
 fi
 cat "$D/manifest.txt"
 
@@ -133,6 +157,7 @@ while [ "$n" -le "$REPEATS" ]; do
     elif [ "$(uname)" = Darwin ]; then sample "$F" 7200 1 -mayDie -file "$O/sample.txt" > /dev/null 2>&1 & SAMPLE=$!
     else echo "PROFILE=1 is macOS only (sample); use perf record -p on Linux" > "$O/sample.txt"; fi
   fi
+  watch $FOLLOW "$O/out" "$O/trace" || true
   wait $FOLLOW || status=$?
   net >> "$O/net.txt"
   [ -z "$SAMPLE" ] || wait $SAMPLE
