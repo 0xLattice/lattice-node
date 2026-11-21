@@ -33,7 +33,7 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/0xLattice/Ivy2.git",
-            exact: "3.2.1"
+            revision: "9ddd49e9998630ed80583a8dfc0bcc32813aa4b1"
         ),
         .package(
             url: "https://github.com/0xLattice/Tally.git",

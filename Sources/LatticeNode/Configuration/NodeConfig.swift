@@ -26,6 +26,7 @@ extension Topology {
         if let rate = publicReadMaxRate { arguments += ["--public-read-max-rate", String(rate)] }
         if let fetches = publicReadFetches { arguments += ["--public-read-fetches", String(fetches)] }
         if let url = publicReadURL { arguments += ["--public-read-url", url] }
+        if let url = webSocketURL { arguments += ["--websocket-url", url] }
         arguments += publicSubmissionArguments
         arguments += contentServingArguments
         for origin in rpcAllowedOrigins ?? [] { arguments += ["--rpc-allowed-origin", origin] }

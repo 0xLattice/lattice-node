@@ -49,6 +49,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
     @Option(name: .customLong("websocket-port"), help: "Port for peers that cannot open a TCP connection (browsers): overlay sessions over WebSocket at ws://<host>:<port>/ivy on TCP, and STUN on UDP, which is where a browser learns its own address before it connects to another browser. While it listens the node relays between its peers. Open both TCP and UDP. There is no TLS: terminate wss in a proxy in front, and pass UDP on the port browsers dial through to this one. Left out, the node listens on \(WebSocketListener.defaultPort) if it can bind it and starts without if it cannot; given, failing to bind is an error. 0 turns it off.")
     var webSocketPort: UInt16?
 
+    @Option(name: .customLong("websocket-url"), help: "The ws:// or wss:// URL browsers dial for the WebSocket listener, e.g. wss://node.example.org/ivy through a proxy that ends TLS: advertised to peers, and in provider records, as where browsers reach this node. Unset: the node advertises a connected peer's own URL, to be reached by relaying through that peer.")
+    var webSocketUrl: String?
+
     @Option(help: "HTTP bind address; only loopback addresses are accepted")
     var rpcBind = "127.0.0.1"
 
@@ -274,6 +277,7 @@ struct LatticeNodeCommand: AsyncParsableCommand {
                 childGenesisTransactions: hosted.genesisTransactions,
                 policyModules: hosted.policyModules,
                 publicReadURL: publicReadUrl,
+                webSocketURL: webSocketUrl,
                 publicSubmit: publicSubmit,
                 minRelayFee: minRelayFee,
                 finality: plan.finality,

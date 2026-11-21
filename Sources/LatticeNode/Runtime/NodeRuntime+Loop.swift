@@ -65,6 +65,9 @@ extension NodeRuntime {
             }
         }
         var nextSession: UInt64 = 1
+        /// What this node last advertised as where browsers reach it
+        /// (`refreshWebAddresses`).
+        var webAddresses: [WebAddress] = []
         /// The keys of the peers connected now hosting each chain.
         var connectedHosts = ConnectedHosts()
         /// RPCs waiting on their answer, by reply ID.
@@ -256,6 +259,7 @@ extension NodeRuntime {
             case .maintenance:
                 await maintenance.readPins(from: storage, configuration: configuration)
                 startNetworkMaintenance()
+                await refreshWebAddresses()
                 await retention.maintain(core.levels, counts: &counts)
                 return true
             case .currentPeers(let current):

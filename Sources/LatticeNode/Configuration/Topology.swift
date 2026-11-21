@@ -40,7 +40,7 @@ public struct Topology: Codable, Sendable {
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case listen, rpc, webSocket, peers, publicRead, externalAddress
         case publicReadRate, publicReadExpensiveRate, publicReadMaxRate, publicReadFetches
-        case publicReadURL, publicSubmit, publicSubmitRate, minRelayFee
+        case publicReadURL, webSocketURL, publicSubmit, publicSubmitRate, minRelayFee
         case servingMaxConcurrent, servingMaxInFlightVolumeBytes, maxAcquisitionBytes, blockBodies, state, stateWindow, stateWindows, finalityWindow, finalityWindows, announceLifetime, connectBatch
         case hostedChains, rpcAllowedOrigins, operatorListen, operatorTokens, operatorAllowedOrigins
     }
@@ -78,6 +78,10 @@ public struct Topology: Codable, Sendable {
     /// This host's public read URL (the node's `--public-read-url`), declared
     /// for every level it hosts. Absent = none declared.
     public var publicReadURL: String?
+    /// The URL browsers dial for this node's WebSocket listener (the node's
+    /// `--websocket-url`), e.g. `wss://node.example.org/ivy` through a proxy
+    /// that ends TLS. Absent = the node advertises a peer to relay through.
+    public var webSocketURL: String?
     /// Accept `POST /transactions` on the public read port too (the node's
     /// `--public-submit`). Absent or false = off; requires `publicRead`.
     public var publicSubmit: Bool?
@@ -308,6 +312,9 @@ public struct Topology: Codable, Sendable {
         }
         if let publicReadURL, !NodeConfiguration.isValidPublicReadURL(publicReadURL) {
             throw CtlError("publicReadURL must be an absolute http(s) URL with a host and no credentials, query or fragment")
+        }
+        if let webSocketURL, !NodeConfiguration.isValidWebSocketURL(webSocketURL) {
+            throw CtlError(NodeConfigurationError.invalidWebSocketURL.description)
         }
         let sessionBytes = NodeResourcePolicy.default.maximumAcquisitionStorageBytes
         if let maxAcquisitionBytes, maxAcquisitionBytes < sessionBytes {
