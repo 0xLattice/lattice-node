@@ -244,8 +244,8 @@ same port over UDP. No other server is involved.
   `webSocketURL`), e.g. `wss://node.example.org/ivy`. The node tells its peers,
   and its provider records carry it, so a browser that finds this node under
   a chain's rendezvous can dial it; the listener is then required. Without
-  one, the node advertises up to four connected peers that relay and listen
-  themselves, to be reached by relaying through them.
+  one, the node advertises up to four connected peers that relay and declare a
+  URL of their own, to be reached by relaying through them.
 
 ### Nodes behind NATs
 

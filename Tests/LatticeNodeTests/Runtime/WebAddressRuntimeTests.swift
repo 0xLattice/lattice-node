@@ -85,9 +85,9 @@ final class WebAddressRuntimeTests: XCTestCase {
         try await eventually("the node is a ready session of the peer that does not relay") {
             await self.advertised(by: node, to: silent) != nil && node.runtime.peerCount == 1
         }
-        try await Task.sleep(for: .milliseconds(300))
-        let seenBySilent = await advertised(by: node, to: silent)
-        XCTAssertEqual(seenBySilent, [])
+        try await alwaysDuring("the node does not advertise the peer that does not relay", .milliseconds(500)) {
+            await self.advertised(by: node, to: silent) == []
+        }
 
         try await node.runtime.ivy.connect(to: relay.endpoint)
         try await eventually("the node advertises the peer that relays") {
