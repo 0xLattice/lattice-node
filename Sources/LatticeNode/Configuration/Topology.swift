@@ -80,7 +80,8 @@ public struct Topology: Codable, Sendable {
     public var publicReadURL: String?
     /// The URL browsers dial for this node's WebSocket listener (the node's
     /// `--websocket-url`), e.g. `wss://node.example.org/ivy` through a proxy
-    /// that ends TLS. Absent = the node advertises a peer to relay through.
+    /// that ends TLS; requires `webSocket`. Absent = the node advertises
+    /// relays among its peers.
     public var webSocketURL: String?
     /// Accept `POST /transactions` on the public read port too (the node's
     /// `--public-submit`). Absent or false = off; requires `publicRead`.
@@ -316,8 +317,8 @@ public struct Topology: Codable, Sendable {
         if let webSocketURL, !NodeConfiguration.isValidWebSocketURL(webSocketURL) {
             throw CtlError(NodeConfigurationError.invalidWebSocketURL.description)
         }
-        if webSocketURL != nil, webSocket == 0 {
-            throw CtlError("webSocketURL needs the WebSocket listener: webSocket is 0")
+        if webSocketURL != nil, webSocket == nil || webSocket == 0 {
+            throw CtlError("webSocketURL needs the WebSocket listener: set webSocket to its port")
         }
         let sessionBytes = NodeResourcePolicy.default.maximumAcquisitionStorageBytes
         if let maxAcquisitionBytes, maxAcquisitionBytes < sessionBytes {

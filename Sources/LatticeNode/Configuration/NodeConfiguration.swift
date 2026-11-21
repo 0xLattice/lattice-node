@@ -38,6 +38,7 @@ public enum NodeConfigurationError: Error, Equatable, CustomStringConvertible {
     case invalidPorts
     case invalidPublicReadURL
     case invalidWebSocketURL
+    case webSocketURLWithoutListener
     case invalidAnnounceLifetime
     case invalidConnectBatch
 
@@ -51,6 +52,8 @@ public enum NodeConfigurationError: Error, Equatable, CustomStringConvertible {
             "public read URL must be an absolute http(s) URL with a host and no credentials, query or fragment"
         case .invalidWebSocketURL:
             "WebSocket URL must be a ws:// or wss:// URL of at most \(WebAddress.maxURLBytes) printable ASCII bytes"
+        case .webSocketURLWithoutListener:
+            "a WebSocket URL needs the WebSocket listener: it names where browsers reach it"
         case .invalidAnnounceLifetime:
             "announce lifetime must be 1 to \(NodeConfiguration.maximumAnnounceLifetime) seconds: peers drop announcements that last longer"
         case .invalidConnectBatch:
@@ -226,7 +229,8 @@ public struct NodeConfiguration: Sendable {
     /// The URL at which browsers reach this node's WebSocket listener, as
     /// they dial it (operator declaration, e.g. through a proxy that ends
     /// TLS): advertised to peers as this node's web address. Absent, the
-    /// node advertises a connected peer's own as a relay to reach it through.
+    /// node advertises relays among its peers (`Ivy.setAutoRelay`). Makes
+    /// the listener required.
     public let webSocketURL: String?
     /// The public read listener also accepts `POST /transactions` (operator
     /// choice, default off). Declared beside `publicReadURL` to peers.
@@ -339,18 +343,25 @@ public struct NodeConfiguration: Sendable {
         ).hex
         self.listenPort = listenPort
         self.rpcPort = rpcPort
+        var listener = webSocket
         switch webSocket {
         case .required(let port):
             guard port != 0, port != listenPort, port != rpcPort else {
                 throw NodeConfigurationError.invalidPorts
             }
-            self.webSocket = webSocket
         case .ifAvailable(let port):
             // A port given to something else is not available.
-            self.webSocket = port == 0 || port == listenPort || port == rpcPort ? .off : webSocket
+            if port == 0 || port == listenPort || port == rpcPort { listener = .off }
         case .off:
-            self.webSocket = .off
+            break
         }
+        // A declared URL is advertised: a listener that could not bind
+        // must not leave it naming nothing.
+        if webSocketURL != nil {
+            guard let port = listener.port else { throw NodeConfigurationError.webSocketURLWithoutListener }
+            listener = .required(port)
+        }
+        self.webSocket = listener
         self.bootstrapPeers = bootstrapPeers
         self.seedPeers = seedPeers
         self.fixedSeedPeers = fixedSeedPeers

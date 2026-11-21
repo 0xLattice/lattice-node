@@ -58,6 +58,7 @@ final class LatticeCtlTopologyTests: XCTestCase {
         XCTAssertThrowsError(try browsers.validated())
 
         var declared = configured
+        declared.webSocket = 4002
         declared.webSocketURL = "wss://node.example.org/ivy"
         let parsed = try JSONDecoder().decode(Topology.self, from: JSONEncoder().encode(declared))
         XCTAssertEqual(parsed.webSocketURL, "wss://node.example.org/ivy")
@@ -70,8 +71,10 @@ final class LatticeCtlTopologyTests: XCTestCase {
             XCTAssertThrowsError(try declared.validated(), bad)
         }
         declared.webSocketURL = "wss://node.example.org/ivy"
-        declared.webSocket = 0
-        XCTAssertThrowsError(try declared.validated(), "a URL nothing listens on")
+        for off: UInt16? in [0, nil] {
+            declared.webSocket = off
+            XCTAssertThrowsError(try declared.validated(), "a URL with no listener required")
+        }
 
         let legacy = Data(#"{"chains":{"Nexus":{"listen":4001,"rpc":4003}}}"#.utf8)
         XCTAssertThrowsError(try JSONDecoder().decode(Topology.self, from: legacy))

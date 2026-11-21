@@ -49,7 +49,6 @@ extension NodeRuntime.Loop {
             sessions[key] = nil
             maintenance.sessionLost(peers: sessions.count, configuration: configuration)
             if session.ready {
-                await refreshWebAddresses()
                 guard await step(.peerGone(session.coreID)) else { return false }
                 // Forget the host it was, so its reconnect wakes.
                 return await meetHosts()
@@ -102,7 +101,6 @@ extension NodeRuntime.Loop {
                 if hosting(before) != hosting(session.capabilities) { startNetworkMaintenance() }
                 return await meetHosts()
             }
-            await refreshWebAddresses()
             guard await step(.peerReady(session.coreID)) else { return false }
             return await meetHosts()
         case .sync(let peer, let chainPath, let message):
