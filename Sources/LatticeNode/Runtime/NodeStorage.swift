@@ -48,8 +48,8 @@ struct DurableLocalTransaction: Sendable {
     let transaction: Transaction
 }
 
-/// The node runtime's storage gateway: one hosted-tree fact journal, the
-/// Volume store and local mempool journal, opened and reconciled
+/// The node runtime's storage gateway: one hosted-tree fact journal, a
+/// Volume store per hosted chain and the local mempool journal, opened and reconciled
 /// at boot. It decides nothing; the core does.
 public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     public nonisolated let configuration: NodeConfiguration

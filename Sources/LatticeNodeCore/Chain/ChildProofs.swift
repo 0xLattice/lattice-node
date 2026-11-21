@@ -237,7 +237,7 @@ public struct ChildProofSync: Sendable {
 }
 
 /// A child level's header is its block and a `ChildBlockProof` per root that
-/// carries it. It waits in `awaitingProof` until one proof verifies and
+/// carries it. It waits in `proofs.awaiting` until one proof verifies and
 /// weighs, then enters the pending queue (prioritised by that root's hash)
 /// and is weighed by `insertChildHeader`; every other root is credited with
 /// `addWork`. Blame only when proof-of-work fails: a proof a peer sent that

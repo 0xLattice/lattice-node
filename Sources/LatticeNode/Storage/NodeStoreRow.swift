@@ -49,28 +49,11 @@ struct Row: Sendable {
         return value
     }
 
-    /// Text that parses as a UUID.
-    func uuid(_ column: String) throws -> String {
-        let value = try text(column)
-        guard UUID(uuidString: value) != nil else { throw malformed(column) }
-        return value
-    }
-
     func int(_ column: String) throws -> Int64 {
         guard let value = values[column]?.intValue else {
             throw malformed(column)
         }
         return value
-    }
-
-    /// NULL reads as nil; an integer reads as its value; anything else is
-    /// malformed.
-    func optionalInt(_ column: String) throws -> Int64? {
-        switch values[column] {
-        case .null?: return nil
-        case .int(let value)?: return value
-        default: throw malformed(column)
-        }
     }
 
     func positiveInt(_ column: String) throws -> Int64 {
@@ -90,15 +73,6 @@ struct Row: Sendable {
             throw malformed(column)
         }
         return value
-    }
-
-    /// An integer in {0, 1}.
-    func bool(_ column: String) throws -> Bool {
-        switch try int(column) {
-        case 0: return false
-        case 1: return true
-        default: throw malformed(column)
-        }
     }
 
     func blob(_ column: String) throws -> Data {

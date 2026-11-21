@@ -73,12 +73,16 @@ final class LoopbackRPCAuthTests: XCTestCase {
     func testStatusNamesAChainAndCountsItsSync() async throws {
         let app = try await loopback()
         try await app.test(.router) { client in
+            // What a sync holds is there once the node publishes its first
+            // view, which a start does not wait for.
             for uri in ["/status", "/status?chainPath=Nexus"] {
-                try await client.execute(uri: uri, method: .get, headers: [.authorization: "Bearer test-cookie"]) { response in
-                    XCTAssertEqual(response.status, .ok, uri)
-                    let status = try JSONDecoder().decode(NodeStatusResponse.self, from: Data(response.body.readableBytesView))
-                    XCTAssertEqual(status.chainPath, ["Nexus"], uri)
-                    XCTAssertNotNil(status.sync, uri)
+                try await eventually("\(uri) counts its sync") {
+                    try await client.execute(uri: uri, method: .get, headers: [.authorization: "Bearer test-cookie"]) { response in
+                        XCTAssertEqual(response.status, .ok, uri)
+                        let status = try JSONDecoder().decode(NodeStatusResponse.self, from: Data(response.body.readableBytesView))
+                        XCTAssertEqual(status.chainPath, ["Nexus"], uri)
+                        return status.sync != nil
+                    }
                 }
             }
             try await client.execute(
