@@ -123,6 +123,16 @@ final class ChildSyncBench: XCTestCase {
         let blocks = env["CHILD_BENCH_BLOCKS"].flatMap(UInt64.init) ?? 3_000
         let ratio = env["CHILD_BENCH_RATIO"].flatMap(Int.init) ?? 34
         let leaves = Self.leaves(env["CHILD_BENCH_LEAVES"].flatMap(Int.init) ?? 2)
+        // Nexus's difficulty doubles every half-life (120 blocks) it runs
+        // ahead of its one-hour schedule, and a recording runs hours ahead
+        // from its first block: Nexus block n takes about 2^(n/120) hashes.
+        // Past 18 half-lives (2,160 Nexus blocks, a quarter million hashes
+        // each) every 120 more double the time, so 3,000 take hours: refuse.
+        let nexusBlocks = blocks / UInt64(max(ratio, 1)), nexusLimit = NexusGenesis.spec.halfLife * 18
+        guard nexusBlocks <= nexusLimit else {
+            XCTFail("BLOCKS \(blocks) RATIO \(ratio) records about \(nexusBlocks) Nexus blocks; past \(nexusLimit) Nexus's difficulty schedule makes recording take hours")
+            return
+        }
         let dir = URL(fileURLWithPath: env["CHILD_BENCH_DIR"]!)
         let port = env["CHILD_BENCH_PORT"].flatMap(UInt16.init) ?? 24_611
         let (pc, po) = try host(Self.producerKey, dir, port: port, levels: [Self.alpha] + leaves, specs: true, peers: [], state: .all)
@@ -297,10 +307,15 @@ final class ChildSyncBench: XCTestCase {
         // its recorded height: with the time it reached it, how its progress
         // went, not only when it ended.
         var moved: [[String]: Double] = [:], half: [[String]: Double] = [:]
+        // A line a minute while some level moves, so a watcher can tell a
+        // long sync from a stuck one (which writes nothing).
+        var reported: [[String]: UInt64] = [:], reportedAt = 0.0
         try await eventually("synced", within: .seconds(7_200), poll: .milliseconds(50)) {
             var left: [([String], UInt64, String)] = []
+            var heights: [[String]: UInt64] = [:]
             for (path, target, tip) in pending {
                 let height = await Self.height(follower, path)
+                heights[path] = height
                 let now = seconds(wall0.duration(to: .now))
                 if height > 0, moved[path] == nil { moved[path] = now }
                 if height * 2 >= target, half[path] == nil { half[path] = now }
@@ -315,6 +330,12 @@ final class ChildSyncBench: XCTestCase {
                 }
             }
             pending = left
+            let now = seconds(wall0.duration(to: .now))
+            if now - reportedAt >= 60, heights.contains(where: { reported[$0.key] != $0.value }) {
+                say("CHILD_BENCH progress wall \(String(format: "%.0f", now)) " + heights.sorted { $0.key.count < $1.key.count }
+                    .map { "\($0.key.joined(separator: "/")) \($0.value)" }.joined(separator: " "))
+                reported = heights; reportedAt = now
+            }
             return pending.isEmpty
         }
         let wall = seconds(wall0.duration(to: .now))

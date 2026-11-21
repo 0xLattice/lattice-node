@@ -91,7 +91,9 @@ def run(d):
         if m: steps[0] += 1; steps[1] += float(m[1]); steps[2] += float(m[2]); steps[3] += float(m[3])
     if inside is None: fail(d, 'no follower start marker in the trace')
     if not steps[0]: fail(d, 'no step lines with persist time in the trace')
-    for label in ('proofsVerified', 'connected'):
+    # Grind proofs come with child-only shares: a follower of Nexus alone
+    # verifies none.
+    for label in ('connected',) if r['hosted'] == '0' else ('proofsVerified', 'connected'):
         if not any(k[0] == label for k in jobs): fail(d, 'no %s jobs in the trace' % label)
     r['jobs'], r['bodies'], r['steps'] = jobs, bodies, steps
     return r
