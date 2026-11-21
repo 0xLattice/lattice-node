@@ -446,7 +446,7 @@ public struct NodeConfiguration: Sendable {
     }
 
     private static func helloCapabilities(hostedChildren: [[String]], relays: Bool) -> Set<String> {
-        Set([ChainHandshake.volumeBundle, ChainHandshake.helloUpdates] + (relays ? [ChainHandshake.relay] : [])
+        Set([ChainHandshake.volumeBundle, ChainHandshake.helloUpdates, ChainHandshake.streamTail] + (relays ? [ChainHandshake.relay] : [])
             + hostedChildren.map(ChainHandshake.hosting))
     }
 

@@ -665,8 +665,12 @@ public struct ChainCore: Sendable {
             // Our log after `after`, IDs only, at most a page (by count and
             // bytes); from 0 if the peer's log id is not ours or its position
             // is past our log (a reset). A page that reaches the end
-            // subscribes the peer.
-            let from = logID == sync.log.id && after <= sync.log.count ? after : 0
+            // subscribes the peer. `after` at its maximum asks for the tail:
+            // the last entry alone, for a peer that wants what is new and
+            // not the history (`ChainHandshake.streamTail`).
+            let from = after == .max
+                ? max(sync.log.count, 1) - 1
+                : logID == sync.log.id && after <= sync.log.count ? after : 0
             let page = sync.log.page(after: from, limit: config.maxHeadersPerPage, bytes: config.maxPageBytes)
             sync.peers[peer]?.subscribed = !page.hasMore
             turn.effects.append(.send(peer, .stream(StreamPage(
