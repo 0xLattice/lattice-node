@@ -6,8 +6,8 @@ import LatticeNodeCore
 /// connected peer that listens for browsers itself, to be dialled at that
 /// peer's URL and relayed through it.
 enum WebAddresses {
-    /// A connected peer that advertised a URL of its own: one this node can
-    /// be reached through. `preferred` when it hosts the parent of the
+    /// A connected peer that relays and advertised a URL of its own: one
+    /// this node can be reached through. `preferred` when it hosts the parent of the
     /// deepest chain this node hosts.
     struct Candidate {
         let key: PeerKey
@@ -38,8 +38,10 @@ extension NodeRuntime.Loop {
         if configuration.webSocketURL == nil {
             let deepest = core.ordered.max { $0.count < $1.count } ?? core.rootPath
             let parent = Array(deepest.dropLast())
-            // A relay reaches this node only over a session of its own to it.
-            for session in sessions.values where session.ready && session.peer.route == .direct {
+            // A relay reaches this node only over a session of its own to
+            // it, and only a peer whose hello says it relays will.
+            for session in sessions.values where session.ready && session.peer.route == .direct
+                && session.capabilities.contains(ChainHandshake.relay) {
                 guard let url = await ivy.webAddresses(of: session.peer.id)?.first(where: { $0.via == nil })?.url
                 else { continue }
                 candidates.append(.init(

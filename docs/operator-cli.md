@@ -144,7 +144,8 @@ This is intentionally one schema:
   `--public-read-url` and declared for every hosted level (see
   [Listing a chain on an explorer](operations.md#listing-a-chain-on-an-explorer));
 - `webSocketURL`, when set, is a `ws://` or `wss://` URL of at most 256
-  printable ASCII bytes; it is passed as `--websocket-url` and advertised to
+  printable ASCII bytes, and requires the WebSocket listener (`webSocket` not
+  0); it is passed as `--websocket-url` and advertised to
   peers as where browsers reach the node (see "Network surfaces" in
   `operations.md`);
 - `publicReadFetches`, when set, is nonnegative and is passed as

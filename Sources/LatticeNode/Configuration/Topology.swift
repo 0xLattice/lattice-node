@@ -316,6 +316,9 @@ public struct Topology: Codable, Sendable {
         if let webSocketURL, !NodeConfiguration.isValidWebSocketURL(webSocketURL) {
             throw CtlError(NodeConfigurationError.invalidWebSocketURL.description)
         }
+        if webSocketURL != nil, webSocket == 0 {
+            throw CtlError("webSocketURL needs the WebSocket listener: webSocket is 0")
+        }
         let sessionBytes = NodeResourcePolicy.default.maximumAcquisitionStorageBytes
         if let maxAcquisitionBytes, maxAcquisitionBytes < sessionBytes {
             throw CtlError("maxAcquisitionBytes must be at least \(sessionBytes), the bytes one block's fetch may hold")

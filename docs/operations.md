@@ -244,7 +244,7 @@ same port over UDP. No other server is involved.
   `webSocketURL`), e.g. `wss://node.example.org/ivy`. The node tells its peers,
   and its provider records carry it, so a browser that finds this node under
   a chain's rendezvous can dial it. Without one, the node advertises a
-  connected peer that declared its own, to be reached by relaying through
+  connected peer that relays and declared its own, to be reached by relaying through
   it: one hosting the parent of its deepest chain first, by smallest key,
   kept while it stays connected.
 

@@ -336,6 +336,9 @@ struct LatticeNodeCommand: AsyncParsableCommand {
             webSocket = publicReadPort == WebSocketListener.defaultPort
                 ? .off : .ifAvailable(WebSocketListener.defaultPort)
         }
+        guard webSocketUrl == nil || webSocket != .off else {
+            throw ValidationError("--websocket-url needs the WebSocket listener: it names where browsers reach it")
+        }
         guard (operatorListen == nil) == (operatorTokens == nil) else {
             throw ValidationError("--operator-listen and --operator-tokens go together")
         }

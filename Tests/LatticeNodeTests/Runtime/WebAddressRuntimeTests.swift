@@ -15,7 +15,10 @@ final class WebAddressRuntimeTests: XCTestCase {
         var id: PeerID { PeerID(publicKey: endpoint.publicKey) }
     }
 
-    private func start(keyByte: UInt8, url: String? = nil, peers: [PeerEndpoint] = []) async throws -> Node {
+    /// `relays`: the node listens for browsers, and so relays.
+    private func start(
+        keyByte: UInt8, url: String? = nil, relays: Bool = true, peers: [PeerEndpoint] = []
+    ) async throws -> Node {
         let port = NetworkTransportTestPorts.allocate()
         let configuration = try NodeConfiguration(
             chainPath: ["Nexus"],
@@ -23,7 +26,7 @@ final class WebAddressRuntimeTests: XCTestCase {
             privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
             listenPort: port,
             rpcPort: NetworkTransportTestPorts.allocate(),
-            webSocket: .off,
+            webSocket: relays ? .required(NetworkTransportTestPorts.allocate()) : .off,
             bootstrapPeers: peers,
             externalAddress: "127.0.0.1",
             peerSearchInterval: 3_600,
@@ -38,6 +41,7 @@ final class WebAddressRuntimeTests: XCTestCase {
             healthConfig: PeerHealthConfig(enabled: false),
             routingRefreshInterval: .seconds(3_600),
             externalAddress: ("127.0.0.1", port),
+            relayEnabled: relays,
             mode: .overlay
         )
         let storage = try await NodeStorage.open(configuration: configuration)
@@ -102,6 +106,26 @@ final class WebAddressRuntimeTests: XCTestCase {
         await earlier.runtime.stop()
         try await eventually("the node moves to the peer still connected") {
             await self.advertised(by: node, to: later) == [WebAddress(url: laterURL, via: later.key)]
+        }
+    }
+
+    /// Only a peer that relays can carry a browser to this node: one that
+    /// declared a URL but does not relay is not chosen.
+    func testAPeerThatDoesNotRelayIsNotChosen() async throws {
+        let silent = try await start(keyByte: 0x78, url: "wss://silent.example.org/ivy", relays: false)
+        let relay = try await start(keyByte: 0x79, url: "wss://relay.example.org/ivy")
+        let node = try await start(keyByte: 0x7A, peers: [silent.endpoint])
+        try await eventually("the node is a ready session of the peer that does not relay") {
+            await self.advertised(by: node, to: silent) != nil && node.runtime.peerCount == 1
+        }
+        try await Task.sleep(for: .seconds(1))
+        let seenBySilent = await advertised(by: node, to: silent)
+        XCTAssertEqual(seenBySilent, [])
+
+        try await node.runtime.ivy.connect(to: relay.endpoint)
+        try await eventually("the node advertises the peer that relays") {
+            await self.advertised(by: node, to: silent)
+                == [WebAddress(url: "wss://relay.example.org/ivy", via: relay.key)]
         }
     }
 }
