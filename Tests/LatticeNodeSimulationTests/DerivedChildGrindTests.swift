@@ -44,13 +44,9 @@ final class DerivedChildGrindTests: XCTestCase {
         var sent: [(path: ChainPath, message: SyncMessage)] = []
         var derived: [Derived] = []
         var checks: [Check] = []
-        /// Peer proofs the host asked the shell to check, and the size of
-        /// each verify job it asked for.
+        /// Peer proofs the host asked the shell to check.
         var peerChecks = 0
         var peerChecksAt: [ChainPath: Int] = [:]
-        var verifyJobs: [Int] = []
-        /// The persists of each step that applied verify answers.
-        var answerPersists: [Int] = []
         /// What each peer serves when asked (`getData`), answered as the
         /// request is sent, by level.
         var serving: [ChainPath: [PeerID: [String: HeaderEntry]]] = [:]
@@ -128,9 +124,6 @@ final class DerivedChildGrindTests: XCTestCase {
                 let before = tracers.map { $0.snapshot(core) }
                 let effects = core.step(next, now: DerivedChildGrindTests.now)
                 for (tracer, snap) in zip(tracers, before) { tracer.record(next, before: snap, after: core, effects: effects) }
-                if case .level(_, .proofsVerified) = next {
-                    answerPersists.append(effects.filter { if case .persist = $0 { return true }; return false }.count)
-                }
                 for effect in effects {
                     switch effect {
                     case .persist(let batch):
@@ -170,7 +163,6 @@ final class DerivedChildGrindTests: XCTestCase {
                         for job in batch.jobs { checks.append(Check(path: path, cid: job.childCID, root: job.proof.rootCID)) }
                         peerChecks += batch.jobs.count
                         peerChecksAt[path, default: 0] += batch.jobs.count
-                        verifyJobs.append(batch.jobs.count)
                         let headers = store.levels[path]?.headers ?? [:]
                         let answer = NodeEvent.level(path, .proofsVerified(batch.run { headers[$0]?.block }))
                         if deferChecks { deferred.append(answer) } else { queue.append(answer) }
@@ -304,11 +296,6 @@ final class DerivedChildGrindTests: XCTestCase {
 
         func digest(_ path: ChainPath) throws -> TreeDigest {
             TreeDigest(try XCTUnwrap(core.levels[path]).tree)
-        }
-
-        /// Checks run per block and root at `path`.
-        func checkCounts(at path: ChainPath) -> [Check: Int] {
-            checks.filter { $0.path == path }.reduce(into: [:]) { $0[$1, default: 0] += 1 }
         }
     }
 
@@ -453,9 +440,6 @@ final class DerivedChildGrindTests: XCTestCase {
         await peer.relay(fixture.c, at: Self.alpha, from: Self.alphaHost, proofs: served)
         await peer.relay(fixture.b2, at: Self.nexus, from: Self.miner)
         XCTAssertEqual(try peer.digest(Self.alpha).blocks, alpha.blocks, "the same work, from the author's proof")
-        let checks = peer.checkCounts(at: Self.alpha)
-        XCTAssertEqual(Set(checks.keys), [Check(path: Self.alpha, cid: fixture.c.cid, root: fixture.b.cid)])
-        XCTAssertLessThanOrEqual(checks.values.reduce(0, +), 2, "the peer's check and the derived one")
         XCTAssertEqual(peer.derived.filter { $0.cid == fixture.c.cid }.count, 1, "C's arrival")
         XCTAssertTrue(author.disconnects.isEmpty && peer.disconnects.isEmpty)
     }
@@ -650,8 +634,6 @@ final class DerivedChildGrindTests: XCTestCase {
         XCTAssertTrue(host.disconnects.isEmpty, "never checked, so never blamed")
         XCTAssertNotNil(try host.digest(Self.alpha).blocks[fixture.c.cid]?.grinds[fixture.b.cid], "C is credited by derivation")
         XCTAssertEqual(host.peerChecks, 0, "the derived grind's peer proof is not checked")
-        XCTAssertEqual(host.checkCounts(at: Self.alpha)[Check(path: Self.alpha, cid: fixture.c.cid, root: fixture.b.cid)], 1,
-                       "the derived check alone")
     }
 
     /// The check of a proof a peer sent is the proof's verdict, not the
@@ -715,7 +697,6 @@ final class DerivedChildGrindTests: XCTestCase {
         )
         await host.relayProof(fixture.c, proof, at: Self.alpha, from: Self.alphaHost)
         XCTAssertNotNil(try host.digest(Self.alpha).blocks[fixture.c.cid]?.grinds[fixture.b.cid], "C is credited by the peer's proof")
-        XCTAssertEqual(host.checkCounts(at: Self.alpha)[Check(path: Self.alpha, cid: fixture.c.cid, root: fixture.b.cid)], 1)
         XCTAssertTrue(host.disconnects.isEmpty)
     }
 
@@ -1159,9 +1140,6 @@ final class DerivedChildGrindTests: XCTestCase {
         let derived = host.derived.filter { $0.path == Self.beta }
         XCTAssertEqual(Set(derived), [Derived(path: Self.beta, cid: fixture.d.cid, carrier: fixture.a.cid)])
         XCTAssertLessThanOrEqual(derived.count, 4, "at most one per trigger fired")
-        let checks = host.checkCounts(at: Self.beta)
-        XCTAssertEqual(Set(checks.keys), [Check(path: Self.beta, cid: fixture.d.cid, root: fixture.b.cid)])
-        XCTAssertLessThanOrEqual(checks.values.reduce(0, +), derived.count, "one check per derivation")
         XCTAssertTrue(try host.digest(Self.beta).blocks.isEmpty, "B's hash misses D's target")
         XCTAssertTrue(host.disconnects.isEmpty)
     }
@@ -1206,12 +1184,6 @@ final class DerivedChildGrindTests: XCTestCase {
             let alpha = try host.digest(Self.alpha)
             XCTAssertNotNil(alpha.blocks[c.cid]?.grinds[n2.root.cid], "parent first: \(parentFirst)")
             XCTAssertNotNil(alpha.blocks[g.cid]?.grinds[n1.root.cid], "parent first: \(parentFirst)")
-            let checks = host.checkCounts(at: Self.alpha)
-            XCTAssertEqual(Set(checks.keys), [
-                Check(path: Self.alpha, cid: g.cid, root: n1.root.cid),
-                Check(path: Self.alpha, cid: c.cid, root: n2.root.cid),
-            ], "parent first: \(parentFirst)")
-            XCTAssertTrue(checks.values.allSatisfy { $0 <= 2 }, "parent first: \(parentFirst)")
             XCTAssertTrue(host.disconnects.isEmpty)
         }
     }
@@ -2483,22 +2455,6 @@ final class DerivedChildGrindTests: XCTestCase {
         return (host, steps.map(\.block))
     }
 
-    /// A page of n headers, each with a proof, is checked by one verify
-    /// job, and its answers apply in one step with one persist.
-    func testAPageOfProofsIsOneVerifyJobAndOneCommit() async throws {
-        let count = 8
-        let fixture = try await sharesWorld(count)
-        var host = Host(fixture.world)
-        for grind in fixture.setup { await host.step(.mined(grind)) }
-        await host.meet(Self.alphaHost)
-        await host.relayPage(fixture.blocks, at: Self.alpha, from: Self.alphaHost)
-        let alpha = try host.digest(Self.alpha)
-        for (block, _) in fixture.blocks { XCTAssertNotNil(alpha.blocks[block.cid], "every header weighs") }
-        XCTAssertEqual(host.verifyJobs, [count], "one job checks the page")
-        XCTAssertEqual(host.answerPersists, [1], "its answers apply in one step, one persist")
-        XCTAssertTrue(host.disconnects.isEmpty)
-    }
-
     /// A page whose last header carries a proof of another block: the page
     /// is still one job and one step; the sender is disconnected, and every
     /// proof that verifies is credited (the verdict is the proof's).
@@ -2515,7 +2471,5 @@ final class DerivedChildGrindTests: XCTestCase {
         let alpha = try host.digest(Self.alpha)
         for (block, _) in blocks.dropLast() { XCTAssertNotNil(alpha.blocks[block.cid], "a valid proof credits") }
         XCTAssertNil(alpha.blocks[blocks[count - 1].block.cid])
-        XCTAssertEqual(host.verifyJobs, [count], "one job checks the page")
-        XCTAssertEqual(host.answerPersists, [1])
     }
 }

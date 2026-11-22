@@ -326,12 +326,6 @@ public struct HeaderSync: Sendable {
         }
     }
 
-    /// Entries in the lazy heaps and announcement sets: O(pending).
-    public var bookkeeping: Int {
-        pending.leaves.count + held.count + wants.values.reduce(0) { $0 + $1.count }
-            + announced.values.reduce(0) { $0 + $1.count }
-    }
-
     /// The earliest time after `now` the core must wake for.
     func nextDeadline(after now: Int64) -> Int64? {
         let requests = peers.values.flatMap(\.deadlines)

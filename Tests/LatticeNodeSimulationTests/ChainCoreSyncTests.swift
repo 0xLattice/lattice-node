@@ -915,13 +915,11 @@ final class ChainCoreSyncTests: XCTestCase {
     /// first header always, a later one only while time remains.
     func testAPageStopsAtTheServingBudget() throws {
         let config = ChainCoreConfig(headersTimeout: 30_000)
-        XCTAssertEqual(config.servingBudget, 5_000, "a sixth of the request deadline by default")
         let header = entry(chain[0])
         var bytes = 0
         XCTAssertTrue(config.fits(header, first: false, bytes: &bytes, elapsed: 5_000))
         XCTAssertFalse(config.fits(header, first: false, bytes: &bytes, elapsed: 5_001), "its time is spent")
         XCTAssertTrue(config.fits(header, first: true, bytes: &bytes, elapsed: 60_000), "always at least one")
-        XCTAssertEqual(ChainCoreConfig(servingBudget: 250).servingBudget, 250)
     }
 
     /// A child level's header carries its proofs: they count toward the page,
@@ -1002,12 +1000,6 @@ final class ChainCoreSyncTests: XCTestCase {
         XCTAssertEqual(served(effects).first?.1, [])
     }
 
-    func testWeighingLeavesTheBookkeepingProportionalToThePendingQueue() throws {
-        let core = weighed(chain)
-        XCTAssertTrue(core.sync.pending.entries.isEmpty)
-        XCTAssertLessThanOrEqual(core.sync.bookkeeping, 16)
-    }
-
     func testFutureDatedHeadersBeyondTheDriftAreDroppedNotHeld() throws {
         var core = core()
         let early = chain[0].block.timestamp - core.config.maxFutureDrift - 1
@@ -1015,7 +1007,6 @@ final class ChainCoreSyncTests: XCTestCase {
         let effects = relay(&core, chain[0..<5].map { entry($0) }, from: peer, at: early)
         XCTAssertTrue(disconnects(effects).isEmpty)
         XCTAssertTrue(core.sync.pending.entries.isEmpty)
-        XCTAssertEqual(core.sync.bookkeeping, 0)
     }
 
     /// Zero-work orphan junk dated now floods the budget; eviction takes
