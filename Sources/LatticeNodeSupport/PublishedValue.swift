@@ -21,7 +21,7 @@ public final class PublishedValue<Value: Sendable>: Sendable {
         current.withLock { $0.value }
     }
 
-    func publish(_ value: Value) {
+    package func publish(_ value: Value) {
         // Yielded under the lock, so a watcher registering meanwhile never
         // gets an older value after this one. A yield never runs a
         // termination handler, which takes the lock.
@@ -63,7 +63,7 @@ public final class PublishedValue<Value: Sendable>: Sendable {
     }
 
     /// End every watcher's stream, and any later one's at once.
-    func finish() {
+    package func finish() {
         let watchers = current.withLock { state in
             state.finished = true
             defer { state.watchers = [:] }

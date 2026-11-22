@@ -1,27 +1,26 @@
 import Foundation
-import Ivy
 import Lattice
 import UInt256
 import VolumeBroker
 import cashew
 
-struct LocalMempoolTransactionRecord: Sendable, Equatable {
-    let transactionCID: String
-    let addedAt: Int64
+package struct LocalMempoolTransactionRecord: Sendable, Equatable {
+    package let transactionCID: String
+    package let addedAt: Int64
 }
 
 /// `local_mempool_transactions`: one locally submitted transaction reference.
 extension LocalMempoolTransactionRecord: NodeStoreRecord {
-    static let table = "local_mempool_transactions"
+    package static let table = "local_mempool_transactions"
 
-    init(_ row: Row) throws {
+    package init(_ row: Row) throws {
         transactionCID = try row.cid("transaction_cid")
         addedAt = try row.nonNegativeInt("added_at")
     }
 }
 
 extension NodeStore {
-    func persistLocalMempoolTransaction(
+    package func persistLocalMempoolTransaction(
         transactionCID: String,
         addedAt: Int64
     ) throws {
@@ -36,7 +35,7 @@ extension NodeStore {
         )
     }
 
-    func removeLocalMempoolTransaction(transactionCID: String) throws {
+    package func removeLocalMempoolTransaction(transactionCID: String) throws {
         guard CIDIdentity.isCanonical(transactionCID) else {
             throw NodeStoreError.invalidConfiguration(
                 "local mempool transaction CID is malformed"
@@ -48,7 +47,7 @@ extension NodeStore {
         )
     }
 
-    func localMempoolTransactions() throws -> [LocalMempoolTransactionRecord] {
+    package func localMempoolTransactions() throws -> [LocalMempoolTransactionRecord] {
         try database.rows(
             LocalMempoolTransactionRecord.self,
             "SELECT transaction_cid, added_at FROM local_mempool_transactions ORDER BY added_at, transaction_cid"

@@ -10,7 +10,7 @@ import Foundation
 /// line one `write`, tagged with its pid and chain). It is bounded: once it
 /// passes `LATTICE_SYNC_TRACE_MAX_BYTES` (default 64 MiB) it is truncated
 /// and starts over. No renames, deletes or locks, so writers never fight.
-enum SyncTrace {
+package enum SyncTrace {
     private struct Sink: Sendable {
         let fd: Int32
         let cap: Int64
@@ -37,20 +37,20 @@ enum SyncTrace {
         return fd >= 0 ? Sink(fd: fd, cap: cap) : Sink(fd: STDERR_FILENO, cap: 0)
     }()
 
-    static var enabled: Bool { destination != nil }
+    package static var enabled: Bool { destination != nil }
 
     /// The time a line is stamped with, read only while tracing (0
     /// otherwise), so durations between lines' stamps and these agree.
-    static func now() -> Double {
+    package static func now() -> Double {
         enabled ? Date().timeIntervalSince1970 : 0
     }
 
     /// Milliseconds from `start` to `end`, for a line.
-    static func ms(_ start: Double, _ end: Double) -> String {
+    package static func ms(_ start: Double, _ end: Double) -> String {
         String(format: "%.1f", (end - start) * 1_000)
     }
 
-    static func log(chain: [String], _ message: @autoclosure () -> String) {
+    package static func log(chain: [String], _ message: @autoclosure () -> String) {
         guard let destination else { return }
         destination.append(
             "sync-trace \(Date().timeIntervalSince1970) \(ProcessInfo.processInfo.processIdentifier) [\(chain.joined(separator: "/"))] \(message())\n"
@@ -60,20 +60,20 @@ enum SyncTrace {
 
 /// When one piece of work was queued, started and done, stamped while
 /// tracing only.
-struct TraceTimes: Sendable {
-    var queued: Double
-    var started: Double
-    var done: Double
+package struct TraceTimes: Sendable {
+    package var queued: Double
+    package var started: Double
+    package var done: Double
+
+    package init(queued: Double, started: Double, done: Double) {
+        self.queued = queued
+        self.started = started
+        self.done = done
+    }
 
     /// The line's part for this work's life once the loop takes it at
     /// `taken`: waiting to start, running, then waiting for the loop.
-    func line(taken: Double) -> String {
+    package func line(taken: Double) -> String {
         "queued \(SyncTrace.ms(queued, started)) run \(SyncTrace.ms(started, done)) loop \(SyncTrace.ms(done, taken)) ms"
-    }
-}
-
-extension NodeStorage {
-    nonisolated func syncTrace(_ message: @autoclosure () -> String) {
-        SyncTrace.log(chain: configuration.chainPath, message())
     }
 }

@@ -72,7 +72,7 @@ public func logLine(_ line: String) {
 }
 
 /// `duration` in seconds, for a log line.
-func seconds(_ duration: Duration) -> String {
+package func seconds(_ duration: Duration) -> String {
     let (whole, fraction) = duration.components
     return String(format: "%.3f s", Double(whole) + Double(fraction) / 1e18)
 }

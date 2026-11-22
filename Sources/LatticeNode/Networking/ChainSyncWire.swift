@@ -3,6 +3,7 @@ import Foundation
 import Lattice
 import LatticeNodeCore
 import cashew
+import LatticeNodeSupport
 
 /// The overlay topics for a chain core's weigh-log stream, content-by-CID
 /// requests, and ancestor requests.

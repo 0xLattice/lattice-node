@@ -2,18 +2,20 @@ import Foundation
 import Lattice
 import LatticeNodeCore
 import cashew
+import LatticeNodeConfig
+import LatticeNodeSupport
 
 /// Weighed header material and credited child proofs. A header can arrive
 /// before its complete boundary Volume, so its node, child index, and proofs
 /// cannot be represented as a complete content Volume yet. They are written in
 /// the transaction of the facts that reference them.
 extension NodeStore {
-    struct PreparedEvidence {
-        var headers: [(cid: String, block: Data, childrenCID: String, children: Data)] = []
-        var proofs: [(child: String, root: String, entries: [(cid: String, data: Data)])] = []
+    package struct PreparedEvidence {
+        package var headers: [(cid: String, block: Data, childrenCID: String, children: Data)] = []
+        package var proofs: [(child: String, root: String, entries: [(cid: String, data: Data)])] = []
     }
 
-    static func prepareEvidence(
+    package static func prepareEvidence(
         headers: [StoredHeader], proofs: [StoredProof], at path: ChainPath
     ) throws -> PreparedEvidence {
         var prepared = PreparedEvidence()
@@ -43,7 +45,7 @@ extension NodeStore {
     }
 
     /// Owner: `stageNodeFacts` — runs inside its transaction.
-    static func writeEvidence(_ evidence: PreparedEvidence, at path: String, in database: NodeSQLite) throws {
+    package static func writeEvidence(_ evidence: PreparedEvidence, at path: String, in database: NodeSQLite) throws {
         for row in evidence.headers {
             try database.execute(
                 "INSERT OR IGNORE INTO headers (cid, block, children_cid) VALUES (?1, ?2, ?3)",
@@ -86,7 +88,7 @@ extension NodeStore {
     /// left out and deleted: this node serves the block without it, and
     /// takes a good copy again only if a peer re-sends it while the block
     /// still waits for proof (a block already credited is not re-written).
-    nonisolated func savedProofs(at path: ChainPath, for children: [String]) throws -> [String: [ChildBlockProof]] {
+    package nonisolated func savedProofs(at path: ChainPath, for children: [String]) throws -> [String: [ChildBlockProof]] {
         var proofs: [String: [ChildBlockProof]] = [:]
         guard path.count > 1, ChainAddress(path) != nil else { return proofs }
         var bad: [Int64] = []
@@ -153,7 +155,7 @@ extension NodeStore {
         }
     }
 
-    nonisolated func header(_ cid: String) -> (block: Block, children: FlatDictionary<BlockHeader>)? {
+    package nonisolated func header(_ cid: String) -> (block: Block, children: FlatDictionary<BlockHeader>)? {
         guard let row = try? reads.row(
             HeaderEvidenceRow.self,
             "SELECT h.block AS block, c.bytes AS children FROM headers h JOIN child_indexes c ON c.cid = h.children_cid WHERE h.cid = ?1",
@@ -166,34 +168,36 @@ extension NodeStore {
     }
 
     /// A weighed block's own node, as it was weighed.
-    nonisolated func headerBlockBytes(_ cid: String) -> Data? {
+    package nonisolated func headerBlockBytes(_ cid: String) -> Data? {
         try? reads.row(
             HeaderBlockRow.self, "SELECT block FROM headers WHERE cid = ?1", params: [.text(cid)]
         )?.block
     }
 
-    nonisolated func childIndexBytes(_ cid: String) -> Data? {
+    package nonisolated func childIndexBytes(_ cid: String) -> Data? {
         try? reads.row(
             ChildIndexEvidenceRow.self, "SELECT bytes FROM child_indexes WHERE cid = ?1", params: [.text(cid)]
         )?.bytes
     }
 }
 
-struct HeaderBlockRow: NodeStoreRecord {
-    static let table = "headers"
+package struct HeaderBlockRow: NodeStoreRecord {
+    package static let table = "headers"
     private let row: Row
 
-    init(_ row: Row) { self.row = row }
+    package init(_ row: Row) { self.row = row }
 
-    var block: Data { get throws { try row.blob("block") } }
+    package var block: Data { get throws { try row.blob("block") } }
 }
 
 /// Every weighed block's node and child index, by CID: what execution and
 /// mining read of a block whose body this store does not hold.
-struct HeaderRecords: ContentSource {
-    let store: NodeStore
+package struct HeaderRecords: ContentSource {
+    package let store: NodeStore
 
-    func fetch(_ cids: Set<String>) async -> [String: Data] {
+    package init(store: NodeStore) { self.store = store }
+
+    package func fetch(_ cids: Set<String>) async -> [String: Data] {
         var found: [String: Data] = [:]
         for cid in cids {
             if let bytes = store.headerBlockBytes(cid) ?? store.childIndexBytes(cid) { found[cid] = bytes }
@@ -202,41 +206,41 @@ struct HeaderRecords: ContentSource {
     }
 }
 
-struct HeaderEvidenceRow: NodeStoreRecord {
-    static let table = "headers"
+package struct HeaderEvidenceRow: NodeStoreRecord {
+    package static let table = "headers"
     private let row: Row
 
-    init(_ row: Row) { self.row = row }
+    package init(_ row: Row) { self.row = row }
 
-    var block: Data { get throws { try row.blob("block") } }
-    var children: Data { get throws { try row.blob("children") } }
+    package var block: Data { get throws { try row.blob("block") } }
+    package var children: Data { get throws { try row.blob("children") } }
 }
 
-struct ChildIndexEvidenceRow: NodeStoreRecord {
-    static let table = "child_indexes"
+package struct ChildIndexEvidenceRow: NodeStoreRecord {
+    package static let table = "child_indexes"
     private let row: Row
 
-    init(_ row: Row) { self.row = row }
+    package init(_ row: Row) { self.row = row }
 
-    var bytes: Data { get throws { try row.blob("bytes") } }
+    package var bytes: Data { get throws { try row.blob("bytes") } }
 }
 
 /// A served page's saved proofs, read just ahead of the page in chunks that
 /// grow from 16 to 256 blocks, so a page cut short by its budget reads little
 /// past its cut. A root chain's blocks carry none and read nothing.
-struct SavedProofPage {
-    let store: NodeStore
-    let path: ChainPath
-    let cids: [String]
+package struct SavedProofPage {
+    package let store: NodeStore
+    package let path: ChainPath
+    package let cids: [String]
     private var (readTo, chunk) = (0, 16)
     private var proofs: [String: [ChildBlockProof]] = [:]
 
-    init(store: NodeStore, path: ChainPath, cids: [String]) {
+    package init(store: NodeStore, path: ChainPath, cids: [String]) {
         (self.store, self.path, self.cids) = (store, path, cids)
     }
 
     /// The saved proofs of the block at `offset`, asked in page order.
-    mutating func proofs(at offset: Int) throws -> [ChildBlockProof] {
+    package mutating func proofs(at offset: Int) throws -> [ChildBlockProof] {
         guard path.count > 1 else { return [] }
         if offset >= readTo {
             readTo = min(offset + chunk, cids.count)

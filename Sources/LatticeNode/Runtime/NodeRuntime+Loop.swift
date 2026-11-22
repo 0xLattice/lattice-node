@@ -6,6 +6,7 @@ import LatticeNodeAPI
 import LatticeNodeCore
 import Synchronization
 import cashew
+import LatticeNodeSupport
 
 extension NodeRuntime {
     /// Everything the loop task owns. Only the loop touches it. It takes

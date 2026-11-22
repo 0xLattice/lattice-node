@@ -1,27 +1,46 @@
 import Foundation
 import Lattice
 import LatticeNodeCore
+import LatticeNodeConfig
 
 /// One level's durable part of a node step. `NodeStore` commits every item in
 /// the enclosing array in one SQLite transaction.
-struct NodeFactBatch: Sendable {
-    let path: ChainPath
-    let facts: [BlockImportBatch]
+package struct NodeFactBatch: Sendable {
+    package let path: ChainPath
+    package let facts: [BlockImportBatch]
     /// The state diff of each block these facts executed, by block hash
     /// (`ChainTreeUpdate.stateDiff`): a block fact never carries one.
-    var stateDiffs: [String: StateDiff] = [:]
-    var headers: [StoredHeader] = []
-    var proofs: [StoredProof] = []
-    let cursors: [String: StreamCursor]
+    package var stateDiffs: [String: StateDiff] = [:]
+    package var headers: [StoredHeader] = []
+    package var proofs: [StoredProof] = []
+    package let cursors: [String: StreamCursor]
     /// Keep `stateDiffs`, for the state window (`state: recent`).
-    var keepsStateDiffs = false
+    package var keepsStateDiffs = false
+
+    package init(
+        path: ChainPath,
+        facts: [BlockImportBatch],
+        stateDiffs: [String: StateDiff] = [:],
+        headers: [StoredHeader] = [],
+        proofs: [StoredProof] = [],
+        cursors: [String: StreamCursor],
+        keepsStateDiffs: Bool = false
+    ) {
+        self.path = path
+        self.facts = facts
+        self.stateDiffs = stateDiffs
+        self.headers = headers
+        self.proofs = proofs
+        self.cursors = cursors
+        self.keepsStateDiffs = keepsStateDiffs
+    }
 }
 
 extension NodeStore {
     /// Commit one whole node step across all affected levels. Content is
     /// durable before this runs; every header, proof, fact, normalized index
     /// row, and cursor for the step becomes visible atomically.
-    func stageNodeFacts(_ levels: [NodeFactBatch], logID: String) throws {
+    package func stageNodeFacts(_ levels: [NodeFactBatch], logID: String) throws {
         struct PreparedRow {
             let facts: [(id: Data, payload: Data)]
             let blocks: [AcceptedBlockRecord]
@@ -166,7 +185,7 @@ extension NodeStore {
     }
 
     /// Convenience for seeding and focused store tests.
-    func stageChainFacts(
+    package func stageChainFacts(
         _ batches: [BlockImportBatch],
         logID: String,
         cursors: [String: StreamCursor] = [:],
@@ -182,7 +201,7 @@ extension NodeStore {
     }
 
     /// The level's newest seq, 0 when it holds no fact.
-    static func lastSeq(at path: String, in database: NodeSQLite) throws -> Int64 {
+    package static func lastSeq(at path: String, in database: NodeSQLite) throws -> Int64 {
         try database.row(
             from: "admission_facts",
             "SELECT COALESCE(MAX(seq), 0) AS seq FROM admission_facts WHERE chain_path = ?1",
@@ -191,14 +210,14 @@ extension NodeStore {
     }
 
     /// The host weigh-log id recorded with the first fact, if any.
-    func chainLogID() throws -> String? {
+    package func chainLogID() throws -> String? {
         try database.row(
             ChainFactMetadataRow.self,
             "SELECT value FROM core_meta WHERE key = 'log_id'"
         )?.value
     }
 
-    func chainCursors(at path: ChainPath = ["Nexus"]) throws -> [String: StreamCursor] {
+    package func chainCursors(at path: ChainPath = ["Nexus"]) throws -> [String: StreamCursor] {
         Dictionary(uniqueKeysWithValues: try database.rows(
             StreamCursorRow.self,
             "SELECT chain_path, peer_key, log_id, position FROM stream_cursors WHERE chain_path = ?1 ORDER BY peer_key",
@@ -213,7 +232,7 @@ extension NodeStore {
 
     /// Every chain this store holds a fact, a cursor or a child proof of:
     /// one index seek per chain, not a pass over the rows.
-    func chainPaths() throws -> Set<ChainPath> {
+    package func chainPaths() throws -> Set<ChainPath> {
         var paths: Set<ChainPath> = []
         for (table, column) in [("admission_facts", "chain_path"), ("stream_cursors", "chain_path"), ("child_proofs", "chain")] {
             var last = ""
@@ -231,7 +250,7 @@ extension NodeStore {
 
     /// The blocks of the chain at `path` no other chain holds too: those
     /// whose header records `forget` drops.
-    func ownBlocks(_ path: ChainPath) throws -> [String] {
+    package func ownBlocks(_ path: ChainPath) throws -> [String] {
         let (own, params) = try ownBlocksQuery(path)
         return try database.rows(from: "accepted_blocks", own, params: params).map { try $0.text("block_cid") }
     }
@@ -257,7 +276,7 @@ extension NodeStore {
     /// chain, share one child index; telling which of a parent chain's
     /// another header still names takes a pass over every header. Returns
     /// how many blocks' header records went.
-    func forget(_ path: ChainPath) throws -> Int {
+    package func forget(_ path: ChainPath) throws -> Int {
         let chain = path.joined(separator: "/")
         let (own, params) = try ownBlocksQuery(path)
         return try database.transaction {
@@ -290,20 +309,20 @@ extension NodeStore {
     }
 }
 
-struct ChainFactMetadataRow: NodeStoreRecord {
-    static let table = "core_meta"
+package struct ChainFactMetadataRow: NodeStoreRecord {
+    package static let table = "core_meta"
     private let row: Row
 
-    init(_ row: Row) { self.row = row }
-    var value: String { get throws { try row.text("value") } }
+    package init(_ row: Row) { self.row = row }
+    package var value: String { get throws { try row.text("value") } }
 }
 
-struct StreamCursorRow: NodeStoreRecord {
-    static let table = "stream_cursors"
+package struct StreamCursorRow: NodeStoreRecord {
+    package static let table = "stream_cursors"
     private let row: Row
 
-    init(_ row: Row) { self.row = row }
-    var peerKey: String { get throws { try row.nonEmptyText("peer_key") } }
-    var logID: String { get throws { try row.text("log_id") } }
-    var position: UInt64 { get throws { try row.uint64("position") } }
+    package init(_ row: Row) { self.row = row }
+    package var peerKey: String { get throws { try row.nonEmptyText("peer_key") } }
+    package var logID: String { get throws { try row.text("log_id") } }
+    package var position: UInt64 { get throws { try row.uint64("position") } }
 }

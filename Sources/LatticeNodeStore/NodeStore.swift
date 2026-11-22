@@ -1,11 +1,10 @@
 import Foundation
-import Ivy
 import Lattice
 import UInt256
 import VolumeBroker
 import cashew
 
-enum NodeStoreError: Error, Equatable, LocalizedError {
+package enum NodeStoreError: Error, Equatable, LocalizedError {
     case invalidConfiguration(String)
     case wipeRequired(String)
     case conflictingImportFact
@@ -17,7 +16,7 @@ enum NodeStoreError: Error, Equatable, LocalizedError {
     /// `corrupt`.
     case malformedRow(table: String, column: String)
 
-    var errorDescription: String? {
+    package var errorDescription: String? {
         switch self {
         case .invalidConfiguration(let reason):
             "Invalid node store configuration: \(reason)"
@@ -37,14 +36,14 @@ enum NodeStoreError: Error, Equatable, LocalizedError {
 /// (`DispatchSerialQueue` is this, but not on Linux). The queue names no
 /// QoS: on Darwin each job runs at the QoS of the thread that enqueued it,
 /// and a task's later priority escalation does not reach the queue.
-final class SerialQueueExecutor: SerialExecutor {
+package final class SerialQueueExecutor: SerialExecutor {
     private let queue: DispatchQueue
 
-    init(label: String) {
+    package init(label: String) {
         queue = DispatchQueue(label: label)
     }
 
-    func enqueue(_ job: consuming ExecutorJob) {
+    package func enqueue(_ job: consuming ExecutorJob) {
         let job = UnownedJob(job)
         queue.async { job.runSynchronously(on: self.asUnownedSerialExecutor()) }
     }
@@ -59,20 +58,20 @@ final class SerialQueueExecutor: SerialExecutor {
 /// pool thread the node's other tasks need. VolumeBroker keeps its writes on
 /// a queue, and its reads on another connection one at a time, for the same
 /// reason.
-actor NodeStore {
-    let database: NodeSQLite
+package actor NodeStore {
+    package let database: NodeSQLite
     /// The connection the `nonisolated` reads use: in WAL mode, each read
     /// (one at a time, `NodeSQLite`) sees what was committed when it began,
     /// and never waits on a commit.
-    let reads: NodeSQLite
-    let nexusGenesisCID: String
+    package let reads: NodeSQLite
+    package let nexusGenesisCID: String
     private let executor = SerialQueueExecutor(label: "LatticeNode.NodeStore")
 
-    nonisolated var unownedExecutor: UnownedSerialExecutor {
+    package nonisolated var unownedExecutor: UnownedSerialExecutor {
         executor.asUnownedSerialExecutor()
     }
 
-    init(
+    package init(
         databasePath: URL,
         nexusGenesisCID: String
     ) throws {
@@ -111,13 +110,13 @@ actor NodeStore {
     }
 
 
-    static func encode<T: Encodable>(_ value: T) throws -> Data {
+    package static func encode<T: Encodable>(_ value: T) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         return try encoder.encode(value)
     }
 
-    static func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
+    package static func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
         do {
             return try JSONDecoder().decode(type, from: data)
         } catch {
@@ -132,13 +131,13 @@ actor NodeStore {
 /// publishes them all in one transaction: all of an admission's content is
 /// durable, or none of it. Without a broker the walk keeps only the roots,
 /// and the Volumes too when `keepsVolumes` (`takeVolumes`).
-actor NodeImportStorage: VolumeStorer {
+package actor NodeImportStorage: VolumeStorer {
     private let storage: (any VolumeBroker)?
     private let keepsVolumes: Bool
     private var pending: [ValidatedVolume] = []
     private var roots = Set<String>()
 
-    init(storage: (any VolumeBroker)?, keepsVolumes: Bool = false) {
+    package init(storage: (any VolumeBroker)?, keepsVolumes: Bool = false) {
         self.storage = storage
         self.keepsVolumes = keepsVolumes
     }
@@ -146,25 +145,25 @@ actor NodeImportStorage: VolumeStorer {
     /// Cashew's hook: it hands over each Volume with every entry serialized
     /// from its node and hashed against its CID, so the broker does not hash
     /// it again. Only Volumes a Cashew walk produced come here.
-    func store(volume: SerializedVolume) throws {
+    package func store(volume: SerializedVolume) throws {
         if storage != nil || keepsVolumes { pending.append(try ValidatedVolume(trusting: volume)) }
         roots.insert(volume.root)
     }
 
     /// The Volumes the walk derived and nothing committed: without a
     /// broker, or for a caller that commits them itself.
-    func takeVolumes() -> [ValidatedVolume] {
+    package func takeVolumes() -> [ValidatedVolume] {
         defer { pending.removeAll() }
         return pending
     }
 
-    func commit() async throws {
+    package func commit() async throws {
         let volumes = pending
         pending.removeAll()
         try await storage?.storeVolumesLocal(volumes)
     }
 
-    func takeStoredVolumeRoots() -> [String] {
+    package func takeStoredVolumeRoots() -> [String] {
         defer { roots.removeAll(keepingCapacity: true) }
         return roots.sorted()
     }
@@ -176,12 +175,12 @@ actor NodeImportStorage: VolumeStorer {
 /// (the process mutation gate, or boot's storage-directory lock). Sets, not
 /// counts: a root retained twice under one owner is released by one release.
 extension RetainedRootMergeBroker {
-    func retain(_ roots: [String], owner: String) async throws {
+    package func retain(_ roots: [String], owner: String) async throws {
         guard !roots.isEmpty else { return }
         try await mergeRetainedRoots(scope: owner, roots: roots)
     }
 
-    func release(_ roots: Set<String>, owner: String) async throws {
+    package func release(_ roots: Set<String>, owner: String) async throws {
         let kept = try await retainedRoots(scope: owner).filter { !roots.contains($0) }
         try await advanceRetainedRoots(scope: owner, roots: kept)
     }

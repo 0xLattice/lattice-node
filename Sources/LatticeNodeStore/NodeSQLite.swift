@@ -5,29 +5,29 @@ import SQLite3
 import CSQLite
 #endif
 
-enum NodeSQLiteError: Error {
+package enum NodeSQLiteError: Error {
     case open(String)
     case prepare(String)
     case execute(String)
 }
 
-enum NodeSQLiteValue {
+package enum NodeSQLiteValue {
     case text(String)
     case int(Int64)
     case blob(Data)
     case null
 
-    var textValue: String? {
+    package var textValue: String? {
         if case .text(let value) = self { return value }
         return nil
     }
 
-    var intValue: Int64? {
+    package var intValue: Int64? {
         if case .int(let value) = self { return value }
         return nil
     }
 
-    var blobValue: Data? {
+    package var blobValue: Data? {
         if case .blob(let value) = self { return value }
         return nil
     }
@@ -40,13 +40,13 @@ enum NodeSQLiteValue {
 /// while another thread's is still stepping joins that one's read snapshot,
 /// so it would not see a commit made since. A statement inside another's on
 /// the same thread (a `forEach` body) is the caller's own, and joins it.
-final class NodeSQLite: @unchecked Sendable {
+package final class NodeSQLite: @unchecked Sendable {
     private let handle: OpaquePointer
     private let statementLock = NSRecursiveLock()
 
     /// `create`: created when there is none (otherwise opening one that is
     /// not there fails).
-    init(path: String, create: Bool = true) throws {
+    package init(path: String, create: Bool = true) throws {
         var database: OpaquePointer?
         let result = sqlite3_open_v2(
             path,
@@ -67,13 +67,13 @@ final class NodeSQLite: @unchecked Sendable {
         sqlite3_close(handle)
     }
 
-    func configureDurability() throws {
+    package func configureDurability() throws {
         try execute("PRAGMA journal_mode=WAL")
         try execute("PRAGMA synchronous=FULL")
     }
 
     @discardableResult
-    func execute(_ sql: String, params: [NodeSQLiteValue] = []) throws -> Int {
+    package func execute(_ sql: String, params: [NodeSQLiteValue] = []) throws -> Int {
         statementLock.lock()
         defer { statementLock.unlock() }
         let statement = try prepare(sql, params: params)
@@ -85,7 +85,7 @@ final class NodeSQLite: @unchecked Sendable {
         return Int(sqlite3_changes(handle))
     }
 
-    func query(
+    package func query(
         _ sql: String,
         params: [NodeSQLiteValue] = []
     ) throws -> [[String: NodeSQLiteValue]] {
@@ -127,7 +127,7 @@ final class NodeSQLite: @unchecked Sendable {
 
     /// Steps `sql`, handing each row to `body` as it is read: no row is
     /// collected, so a large result costs one row at a time.
-    func forEach(
+    package func forEach(
         _ sql: String,
         params: [NodeSQLiteValue] = [],
         _ body: (NodeSQLiteStep) throws -> Void
@@ -148,7 +148,7 @@ final class NodeSQLite: @unchecked Sendable {
         }
     }
 
-    func transaction<T>(_ body: () throws -> T) throws -> T {
+    package func transaction<T>(_ body: () throws -> T) throws -> T {
         try execute("BEGIN IMMEDIATE")
         do {
             let value = try body()
@@ -211,11 +211,11 @@ final class NodeSQLite: @unchecked Sendable {
 
 /// The row `NodeSQLite.forEach` is on, read by column index. Valid only
 /// inside the `forEach` body.
-struct NodeSQLiteStep {
+package struct NodeSQLiteStep {
     fileprivate let statement: OpaquePointer
 
     /// The column's bytes, or nil when it is not a blob.
-    func blob(_ index: Int32) -> Data? {
+    package func blob(_ index: Int32) -> Data? {
         guard sqlite3_column_type(statement, index) == SQLITE_BLOB else { return nil }
         let count = Int(sqlite3_column_bytes(statement, index))
         guard let bytes = sqlite3_column_blob(statement, index) else { return Data() }
@@ -223,7 +223,7 @@ struct NodeSQLiteStep {
     }
 
     /// The column as an integer, or nil when it is not one.
-    func int(_ index: Int32) -> Int64? {
+    package func int(_ index: Int32) -> Int64? {
         guard sqlite3_column_type(statement, index) == SQLITE_INTEGER else { return nil }
         return sqlite3_column_int64(statement, index)
     }

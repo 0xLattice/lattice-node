@@ -1,6 +1,7 @@
 import Foundation
 import Ivy
 import Tally
+import LatticeNodeSupport
 
 /// What the overlay tells the run loop, as plain values. The delegate only
 /// forwards and decodes: sessions, hello and every decision are the loop's.

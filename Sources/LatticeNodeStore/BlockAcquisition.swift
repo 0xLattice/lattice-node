@@ -17,7 +17,7 @@ extension VolumeImpl where NodeType == Block {
     /// `BlockContentSizeError.exceedsLimit`, requests nothing further, and
     /// stores nothing. That error is a reason to execute the block, not a
     /// verdict on it: execution applies the rule itself.
-    func storeBlock(fetcher: any Fetcher, storer: any VolumeStorer) async throws {
+    package func storeBlock(fetcher: any Fetcher, storer: any VolumeStorer) async throws {
         let (content, spec) = try await resolveBoundedContent(fetcher: fetcher)
         guard let block = content.node, block.transactions.node != nil else {
             throw DataErrors.nodeNotAvailable
@@ -43,7 +43,7 @@ extension VolumeImpl where NodeType == Block {
     /// parent-receipt witness (`storeParentReceiptWitness`) from the content
     /// it resolved, without resolving it again: a block with no withdrawal
     /// reads and stores nothing more.
-    func storeBlockContent(
+    package func storeBlockContent(
         fetcher: any Fetcher, storer: any VolumeStorer, parentReceiptWitness: Bool = false
     ) async throws {
         let (content, spec) = try await resolveBoundedContent(fetcher: fetcher)
@@ -65,7 +65,7 @@ extension VolumeImpl where NodeType == Block {
     /// block reads but its pre-state: a node that let go of the parent
     /// chain's state can still execute a withdrawal it fetched with its
     /// witness.
-    func storeParentReceiptWitness(fetcher: any Fetcher, storer: any VolumeStorer) async throws {
+    package func storeParentReceiptWitness(fetcher: any Fetcher, storer: any VolumeStorer) async throws {
         let (content, _) = try await resolveBoundedContent(fetcher: fetcher)
         try await Self.storeParentReceiptWitness(of: content, fetcher: fetcher, storer: storer)
     }

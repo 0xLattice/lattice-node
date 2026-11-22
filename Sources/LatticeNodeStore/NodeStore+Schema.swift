@@ -1,19 +1,18 @@
 import Foundation
-import Ivy
 import Lattice
 import UInt256
 import VolumeBroker
 import cashew
 
 /// `node_metadata`: the store's identity singleton.
-struct NodeMetadataRow: NodeStoreRecord {
-    static let table = "node_metadata"
+package struct NodeMetadataRow: NodeStoreRecord {
+    package static let table = "node_metadata"
     private let row: Row
 
-    init(_ row: Row) { self.row = row }
+    package init(_ row: Row) { self.row = row }
 
-    var schemaEpoch: Int64 { get throws { try row.int("schema_epoch") } }
-    var nexusGenesisCID: String { get throws { try row.text("nexus_genesis_cid") } }
+    package var schemaEpoch: Int64 { get throws { try row.int("schema_epoch") } }
+    package var nexusGenesisCID: String { get throws { try row.text("nexus_genesis_cid") } }
 }
 
 extension NodeStore {
@@ -33,9 +32,9 @@ extension NodeStore {
     /// Epoch 46: weighed header material and credited child proofs live in
     /// this store, written with their facts. Older stores must be wiped; Nexus
     /// deterministically recreates the configured exact genesis.
-    static let currentSchemaEpoch: Int64 = 50
+    package static let currentSchemaEpoch: Int64 = 50
 
-    static func validateMetadata(
+    package static func validateMetadata(
         in database: NodeSQLite,
         tableNames: Set<String>,
         schemaEpoch: Int64,
@@ -69,7 +68,7 @@ extension NodeStore {
         }
     }
 
-    static let expectedTables: Set<String> = [
+    package static let expectedTables: Set<String> = [
         "node_metadata",
         "admission_facts",
         "accepted_blocks",
@@ -84,7 +83,7 @@ extension NodeStore {
     ]
 
     /// Owner: NodeStore.init — runs before the store exists, on an empty database.
-    static func createSchema(
+    package static func createSchema(
         in database: NodeSQLite,
         schemaEpoch: Int64,
         nexusGenesisCID: String

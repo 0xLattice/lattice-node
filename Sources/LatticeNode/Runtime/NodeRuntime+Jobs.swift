@@ -7,6 +7,7 @@ import cashew
 import UInt256
 import VolumeBroker
 import LatticeNodeAPI
+import LatticeNodeStore
 
 extension NodeRuntime {
     // MARK: - Jobs

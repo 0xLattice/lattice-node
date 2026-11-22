@@ -12,10 +12,10 @@ import Lattice
 /// staged again would no longer match its own row and be refused as a
 /// conflict. Such a store is migrated once, when it opens.
 extension NodeStore {
-    static let currentFactFormat = "2"
+    package static let currentFactFormat = "2"
 
     /// Owner: `createSchema` — a fresh store is in the current format.
-    static func recordFactFormat(in database: NodeSQLite) throws {
+    package static func recordFactFormat(in database: NodeSQLite) throws {
         try database.execute(
             "INSERT OR REPLACE INTO core_meta (key, value) VALUES ('fact_format', ?1)",
             params: [.text(currentFactFormat)]
@@ -26,7 +26,7 @@ extension NodeStore {
     /// block fact with the current type, in one transaction with the format
     /// it records: a crash leaves the store as it was, and the next open
     /// runs it again. A format this node does not know is refused.
-    static func migrateFactFormat(in database: NodeSQLite) throws {
+    package static func migrateFactFormat(in database: NodeSQLite) throws {
         let recorded = try database.row(
             ChainFactMetadataRow.self,
             "SELECT value FROM core_meta WHERE key = 'fact_format'"

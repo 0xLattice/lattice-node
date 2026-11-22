@@ -7,7 +7,7 @@ import Lattice
 /// (its state diff, kept for the state window).
 extension NodeStore {
     /// The executed block's fact, which names the state it produced.
-    func blockFact(_ blockCID: String, at chainPath: [String]) throws -> ChainBlockFact? {
+    package func blockFact(_ blockCID: String, at chainPath: [String]) throws -> ChainBlockFact? {
         guard let row = try database.row(
             ImportFactRow.self,
             "SELECT payload FROM admission_facts WHERE chain_path = ?1 AND fact_id = ?2",
@@ -18,7 +18,7 @@ extension NodeStore {
 
     /// The state diff of an executed block, while the state window keeps
     /// it: nil once it is let go of, or never kept.
-    func stateDiff(_ blockCID: String, at chainPath: [String]) throws -> StateDiff? {
+    package func stateDiff(_ blockCID: String, at chainPath: [String]) throws -> StateDiff? {
         guard let row = try database.row(
             from: "state_diffs",
             "SELECT diff FROM state_diffs WHERE chain_path = ?1 AND block_cid = ?2",
@@ -28,7 +28,7 @@ extension NodeStore {
     }
 
     /// Lets go of the state diffs of the chain's blocks below `height`.
-    func dropStateDiffs(at chainPath: [String], below height: UInt64) throws {
+    package func dropStateDiffs(at chainPath: [String], below height: UInt64) throws {
         try database.execute(
             "DELETE FROM state_diffs WHERE chain_path = ?1 AND height < ?2",
             params: [.text(chainPath.joined(separator: "/")), .int(Int64(clamping: height))]
@@ -46,7 +46,7 @@ extension NodeStore {
     /// Nil when the counts cannot follow: a fact or diff is missing, or the
     /// cursor's block is not on the tip's chain (the tip is below it, or
     /// forked from below it).
-    func countedChange(
+    package func countedChange(
         at chainPath: [String], from marker: CountedMarker, to tip: String, window: UInt64, known: [String]? = nil
     ) throws -> CountedChange? {
         let base = marker.cursor.height
@@ -101,7 +101,7 @@ extension NodeStore {
 
     /// The blocks from `bottom` up to `top` on `top`'s chain, lowest first:
     /// nil when a fact is missing or `bottom` is not below `top`.
-    func chain(from top: CountedMarker.Block, down bottom: CountedMarker.Block, at chainPath: [String]) throws -> [String]? {
+    package func chain(from top: CountedMarker.Block, down bottom: CountedMarker.Block, at chainPath: [String]) throws -> [String]? {
         guard top.height >= bottom.height else { return nil }
         var chain = [top.cid]
         while UInt64(chain.count) <= top.height - bottom.height {
@@ -117,7 +117,7 @@ extension NodeStore {
     /// A block's diff netted per node: a block's diff sums its
     /// transitions', so a node one transition created and a later one
     /// replaced is on both sides, and is no change.
-    static func net(_ diff: StateDiff) -> (created: [String: Int], replaced: [String: Int]) {
+    package static func net(_ diff: StateDiff) -> (created: [String: Int], replaced: [String: Int]) {
         var net = diff.created
         for (cid, count) in diff.replaced { net[cid, default: 0] -= count }
         return (net.filter { $0.value > 0 }, net.filter { $0.value < 0 }.mapValues { -$0 })
@@ -125,7 +125,7 @@ extension NodeStore {
 
     /// The block `depth` blocks below `tip` on its chain, or the lowest one
     /// reached when a fact is missing first.
-    func ancestor(of tip: String, depth: UInt64, at chainPath: [String]) throws -> CountedMarker.Block? {
+    package func ancestor(of tip: String, depth: UInt64, at chainPath: [String]) throws -> CountedMarker.Block? {
         guard var fact = try blockFact(tip, at: chainPath) else { return nil }
         for _ in 0..<depth {
             guard let parent = fact.parentBlockHash, let next = try blockFact(parent, at: chainPath) else { break }
@@ -138,34 +138,34 @@ extension NodeStore {
 /// Where a chain's counts stand, written with them as their marker: the
 /// block whose state they count with what each block after it replaced
 /// (the cursor), and the act-on tip they were last moved to.
-struct CountedMarker: Equatable, Sendable {
-    struct Block: Equatable, Sendable {
-        let height: UInt64
-        let cid: String
+package struct CountedMarker: Equatable, Sendable {
+    package struct Block: Equatable, Sendable {
+        package let height: UInt64
+        package let cid: String
     }
 
-    let cursor: Block
-    let tip: Block
+    package let cursor: Block
+    package let tip: Block
 
-    init(cursor: Block, tip: Block) {
+    package init(cursor: Block, tip: Block) {
         self.cursor = cursor
         self.tip = tip
     }
 
-    init?(_ text: String) {
+    package init?(_ text: String) {
         let parts = text.split(separator: " ").map(String.init)
         guard parts.count == 4, let cursor = UInt64(parts[0]), let tip = UInt64(parts[2]), cursor <= tip else { return nil }
         self.init(cursor: Block(height: cursor, cid: parts[1]), tip: Block(height: tip, cid: parts[3]))
     }
 
-    var text: String { "\(cursor.height) \(cursor.cid) \(tip.height) \(tip.cid)" }
+    package var text: String { "\(cursor.height) \(cursor.cid) \(tip.height) \(tip.cid)" }
 }
 
 /// A move of a chain's counts: the deltas, the marker they are written
 /// with, and the blocks from the new cursor up to the tip, which the next
 /// move starts from.
-struct CountedChange: Sendable {
-    let deltas: [String: Int]
-    let marker: CountedMarker
-    let known: [String]
+package struct CountedChange: Sendable {
+    package let deltas: [String: Int]
+    package let marker: CountedMarker
+    package let known: [String]
 }

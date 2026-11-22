@@ -1,4 +1,5 @@
 import Foundation
+import LatticeNodeSupport
 
 /// The node's one suspension primitive and the timer shapes built on it.
 ///

@@ -6,6 +6,7 @@ import LatticeNodeAPI
 import LatticeNodeCore
 import Synchronization
 import cashew
+import LatticeNodeSupport
 
 public enum NodeRuntimeError: Error, Equatable, Sendable {
     /// The configured root is not Nexus.

@@ -1,4 +1,6 @@
 import LatticeNodeCore
+import LatticeNodeSupport
+import LatticeNodeStore
 
 extension NodeRuntime {
     /// On `recent`: each chain's counts as this loop last wrote or read

@@ -13,21 +13,21 @@ import Synchronization
 /// counts. Off, `wrap` returns the source it is given, `reading` runs its
 /// work as it is, and nothing is counted. On, it keeps every CID it saw
 /// until the process ends.
-enum ReadTally {
+package enum ReadTally {
     private static let on = Atomic<Bool>(false)
 
-    static var enabled: Bool { on.load(ordering: .relaxed) }
+    package static var enabled: Bool { on.load(ordering: .relaxed) }
 
     /// Count from now on: before the node whose reads are counted starts.
-    static func enable() { on.store(true, ordering: .relaxed) }
+    package static func enable() { on.store(true, ordering: .relaxed) }
 
     /// The work reading, for the reads it makes (a job's kind). Approximate:
     /// reads that cashew's `CoalescingFetcher` batches together are counted
     /// under the job that started the batch.
-    @TaskLocal static var reader = "other"
+    @TaskLocal package static var reader = "other"
 
     /// `work`, its reads counted under `label`.
-    static func reading<T>(_ label: String, _ work: () async throws -> T) async rethrows -> T {
+    package static func reading<T>(_ label: String, _ work: () async throws -> T) async rethrows -> T {
         guard enabled else { return try await work() }
         return try await $reader.withValue(label) { try await work() }
     }
@@ -54,7 +54,7 @@ enum ReadTally {
     private static let counts = Mutex(Counts())
 
     /// `source`, counted under `name` while the tally is on.
-    static func wrap(_ name: String, _ source: any ContentSource) -> any ContentSource {
+    package static func wrap(_ name: String, _ source: any ContentSource) -> any ContentSource {
         enabled ? Tallied(name: name, source: source) : source
     }
 
@@ -147,7 +147,7 @@ enum ReadTally {
     /// the distinct CIDs read, and how many reads (and bytes) were of a CID
     /// already read, with how many CIDs were read once, twice, 3-4, 5-8 and
     /// 9 or more times.
-    static func summary() -> [String] {
+    package static func summary() -> [String] {
         counts.withLock { counts in
             var lines = counts.bySource.sorted { $0.key < $1.key }.map {
                 "reads source \($0.key) reads \($0.value.reads) bytes \($0.value.bytes)"
@@ -178,17 +178,6 @@ enum ReadTally {
                     + " once \(buckets[0]) twice \(buckets[1]) upTo4 \(buckets[2]) upTo8 \(buckets[3]) more \(buckets[4])"
             )
             return lines
-        }
-    }
-}
-
-extension NodeRuntime.RuntimeJob {
-    /// This job, its reads counted under `label` while the tally is on.
-    func reading(_ label: String) -> Self {
-        guard ReadTally.enabled else { return self }
-        let run = self.run
-        return Self(path: path, tipCID: tipCID, kind: kind, queued: queued) {
-            await ReadTally.reading(label) { await run() }
         }
     }
 }

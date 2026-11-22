@@ -2,6 +2,8 @@ import Foundation
 import Lattice
 import VolumeBroker
 import cashew
+import LatticeNodeSupport
+import LatticeNodeStore
 
 /// Boot recovery for one hosted tree's storage: everything `NodeStorage.open`
 /// does before the runtime starts. Content stays because a scope names it,

@@ -4,6 +4,7 @@ import Lattice
 import Tally
 import VolumeBroker
 import cashew
+import LatticeNodeSupport
 
 /// A cashew source whose network request is always bound to the candidate root
 /// selected by the caller. The root is never guessed from a frontier of CIDs.

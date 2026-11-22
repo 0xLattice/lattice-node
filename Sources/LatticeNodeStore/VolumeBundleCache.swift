@@ -1,4 +1,5 @@
 import Foundation
+import LatticeNodeSupport
 
 /// For a block root, the Volume roots that make up its bundle.
 ///
@@ -13,8 +14,8 @@ import Foundation
 /// A cache is never an authority: nothing here throws. A file that cannot be
 /// opened, read or written costs recorded bundles and nothing else, and the
 /// first such failure is said on stderr.
-final class VolumeBundleCache: @unchecked Sendable {
-    static let fileName = "volume-bundles.db"
+package final class VolumeBundleCache: @unchecked Sendable {
+    package static let fileName = "volume-bundles.db"
 
     private let database: NodeSQLite?
     private let lock = NSLock()
@@ -22,7 +23,7 @@ final class VolumeBundleCache: @unchecked Sendable {
     private let writes = NSLock()
     private var reported = false
 
-    init(directory: URL) {
+    package init(directory: URL) {
         let path = directory.appendingPathComponent(Self.fileName).path
         do {
             let database = try NodeSQLite(path: path)
@@ -40,13 +41,13 @@ final class VolumeBundleCache: @unchecked Sendable {
     }
 
     /// `roots` are served in order after `root`'s own Volume.
-    func record(root: String, roots: [String]) {
+    package func record(root: String, roots: [String]) {
         record([(root: root, roots: roots)])
     }
 
     /// Several blocks' bundles (one connect job's) in one transaction: a
     /// commit per block is a WAL frame and a page write per block.
-    func record(_ bundles: [(root: String, roots: [String])]) {
+    package func record(_ bundles: [(root: String, roots: [String])]) {
         guard let database, !bundles.isEmpty else { return }
         do {
             try writes.withLock {
@@ -65,7 +66,7 @@ final class VolumeBundleCache: @unchecked Sendable {
     }
 
     /// The bundle recorded for `root`, its own Volume first, or nil.
-    func bundle(root: String) -> [String]? {
+    package func bundle(root: String) -> [String]? {
         do {
             return try database?.rows(
                 from: "volume_bundles",
@@ -79,7 +80,7 @@ final class VolumeBundleCache: @unchecked Sendable {
     }
 
     /// The bundles of `roots` go, in one transaction.
-    func forget(_ roots: [String]) throws {
+    package func forget(_ roots: [String]) throws {
         guard let database, !roots.isEmpty else { return }
         try writes.withLock {
             try database.transaction {

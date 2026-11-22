@@ -1,6 +1,7 @@
 import Foundation
 import Ivy
 import Tally
+import LatticeNodeSupport
 
 /// What the hello of each session now open said the peer speaks beyond the
 /// base protocol, for readers off the runtime loop. A message added to the

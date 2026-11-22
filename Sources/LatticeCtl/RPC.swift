@@ -4,7 +4,7 @@ import FoundationNetworking
 #endif
 import ArgumentParser
 import LatticeMiningCoordinator
-import LatticeNode
+import LatticeNodeStore
 import LatticeNodeConfig
 import LatticeNodeAPI
 
@@ -211,8 +211,7 @@ struct NodeTarget: ParsableArguments {
         // Under the node's storage lock, so no node starts meanwhile.
         guard case .stopped(let lock) = localNode(layout) else { throw CtlError("the storage lock is held: the node started meanwhile, or another lattice command holds it; try again") }
         defer { _ = lock }
-        // The one runtime read the CLI makes: whether the store holds the
-        // chain (through `LatticeNode` until the store is its own module).
+        // The one store read the CLI makes: whether the store holds the chain.
         return try ChainCreation.create(chain, layout: layout)
     }
 

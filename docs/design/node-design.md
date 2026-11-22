@@ -664,11 +664,13 @@ published.
 |---|---|---|
 | `LatticeNodeCore` | 6,342 | deterministic decisions per chain, and the genesis rules a child chain is checked against |
 | `LatticeNodeSim` | 5,530 | the simulator that drives the core and checks invariants every step (`Tools/`, not shipped) |
-| `LatticeNode` | 15,039 | the shell: loop, stores, networking, jobs, reads |
+| `LatticeNode` | 12,326 | the shell: loop, networking, jobs, reads, boot recovery, and the storage gateway that wires the store to the loop |
+| `LatticeNodeStore` | 2,369 | what is on disk: the SQLite store (schema, facts, block index, header evidence, state pins, journals, migrations) and the Volume stores; it never imports the shell |
 | `LatticeNodeConfig` | 1,753 | the operator's configuration: topology and fragments, the host layout on disk, chain creation, Nexus's genesis, the setting limits |
+| `LatticeNodeSupport` | 414 | what every part of the process shares: the node log, sync tracing, the read tally, published values |
 | `LatticeNodeAPI` | 1,447 | request and response models |
 | `LatticeNodeDaemon` | 3,449 | HTTP servers and process entry |
-| `LatticeCtl`, `LatticeCtlCore` | 3,002 | the `lattice` CLI: it depends on the API, the configuration and the core, and on `LatticeNode` only to ask the store whether it holds a chain |
+| `LatticeCtl`, `LatticeCtlCore` | 3,001 | the `lattice` CLI: it depends on the API, the configuration, the core and the store, never on `LatticeNode` |
 | `LatticeMiner*`, `LatticeMiningCoordinator*` | 1,558 | mining, as separate processes |
 
 ---

@@ -1,13 +1,17 @@
 import Foundation
-import Ivy
 import Lattice
 import UInt256
 import VolumeBroker
 import cashew
 
-struct AcceptedBlockRecord: Hashable {
-    let blockCID: String
-    let parentCID: String?
+package struct AcceptedBlockRecord: Hashable {
+    package let blockCID: String
+    package let parentCID: String?
+
+    package init(blockCID: String, parentCID: String?) {
+        self.blockCID = blockCID
+        self.parentCID = parentCID
+    }
 }
 
 private struct PersistedAcceptedBlock: Hashable {
@@ -37,15 +41,15 @@ private struct PersistedAcceptedBlock: Hashable {
 /// non-empty text (tests stage blocks whose hashes are plain labels).
 /// `parent_cid` is NULL for a root and otherwise non-empty text; an empty
 /// string is malformed.
-struct AcceptedBlockRow: NodeStoreRecord {
-    static let table = "accepted_blocks"
+package struct AcceptedBlockRow: NodeStoreRecord {
+    package static let table = "accepted_blocks"
     private let row: Row
 
-    init(_ row: Row) { self.row = row }
+    package init(_ row: Row) { self.row = row }
 
-    var chainPath: String { get throws { try row.nonEmptyText("chain_path") } }
-    var blockCID: String { get throws { try row.nonEmptyText("block_cid") } }
-    var parentCID: String? {
+    package var chainPath: String { get throws { try row.nonEmptyText("chain_path") } }
+    package var blockCID: String { get throws { try row.nonEmptyText("block_cid") } }
+    package var parentCID: String? {
         get throws {
             guard let parent = try row.optionalText("parent_cid") else { return nil }
             guard !parent.isEmpty else {
@@ -54,12 +58,12 @@ struct AcceptedBlockRow: NodeStoreRecord {
             return parent
         }
     }
-    var admissionSequence: Int64 { get throws { try row.positiveInt("admission_seq") } }
+    package var admissionSequence: Int64 { get throws { try row.positiveInt("admission_seq") } }
 }
 
 extension NodeStore {
     /// The store's database in a node's storage directory.
-    static func databasePath(storage: URL) -> URL {
+    package static func databasePath(storage: URL) -> URL {
         storage.appendingPathComponent("state.db")
     }
 
@@ -69,7 +73,7 @@ extension NodeStore {
     /// database stopped cleanly has no -wal/-shm files, and SQLite opens it
     /// read-only only with them. Its callers are the node itself, or a CLI
     /// holding the storage lock.
-    static func holdsBlocks(of chainPath: String, storage: URL) throws -> Bool {
+    package static func holdsBlocks(of chainPath: String, storage: URL) throws -> Bool {
         let path = databasePath(storage: storage)
         guard FileManager.default.fileExists(atPath: path.path) else { return false }
         let database = try NodeSQLite(path: path.path, create: false)
@@ -78,7 +82,7 @@ extension NodeStore {
         )).isEmpty
     }
 
-    func hasAcceptedBlock(
+    package func hasAcceptedBlock(
         _ blockCID: String,
         at chainPath: [String] = ["Nexus"]
     ) throws -> Bool {
@@ -92,7 +96,7 @@ extension NodeStore {
     }
 
     /// Whether `blockCID` is the genesis block of the chain at `chainPath`.
-    func isGenesis(_ blockCID: String, at chainPath: [String]) throws -> Bool {
+    package func isGenesis(_ blockCID: String, at chainPath: [String]) throws -> Bool {
         try !database.query(
             "SELECT 1 FROM accepted_blocks WHERE chain_path = ?1 AND block_cid = ?2 AND parent_cid IS NULL LIMIT 1",
             params: [.text(chainPath.joined(separator: "/")), .text(blockCID)]
@@ -101,7 +105,7 @@ extension NodeStore {
 
     /// Whether this chain executed `blockCID`: its post-state is the state
     /// of a block this node validated, not one it has only weighed.
-    func hasExecutedBlock(_ blockCID: String, at chainPath: [String]) throws -> Bool {
+    package func hasExecutedBlock(_ blockCID: String, at chainPath: [String]) throws -> Bool {
         guard CIDIdentity.isCanonical(blockCID) else {
             throw NodeStoreError.corrupt("invalid executed block lookup")
         }
@@ -111,7 +115,7 @@ extension NodeStore {
         ).isEmpty
     }
 
-    static func acceptedBlocks(
+    package static func acceptedBlocks(
         in batch: BlockImportBatch
     ) throws -> [AcceptedBlockRecord] {
         var blocks: [String: AcceptedBlockRecord] = [:]
@@ -130,7 +134,7 @@ extension NodeStore {
     }
 
     /// Owner: ImportJournal.stage — caller holds the transaction.
-    func persistAcceptedBlockRows(
+    package func persistAcceptedBlockRows(
         _ blocks: [AcceptedBlockRecord],
         at chainPath: String,
         admissionSequence: Int64,

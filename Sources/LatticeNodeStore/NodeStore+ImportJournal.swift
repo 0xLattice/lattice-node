@@ -4,18 +4,18 @@ import LatticeNodeCore
 
 /// `admission_facts`: one fact, kept once by id, with the staged batch that
 /// first held it.
-struct ImportFactRow: NodeStoreRecord {
-    static let table = "admission_facts"
+package struct ImportFactRow: NodeStoreRecord {
+    package static let table = "admission_facts"
     private let row: Row
 
-    init(_ row: Row) { self.row = row }
+    package init(_ row: Row) { self.row = row }
 
-    var payload: Data { get throws { try row.blob("payload") } }
+    package var payload: Data { get throws { try row.blob("payload") } }
 }
 
 extension NodeStore {
     /// Whether any fact is stored: one row read, not the facts.
-    func hasStagedImports() throws -> Bool {
+    package func hasStagedImports() throws -> Bool {
         try !database.query("SELECT 1 FROM admission_facts LIMIT 1").isEmpty
     }
 
@@ -23,10 +23,10 @@ extension NodeStore {
     /// place in the batch, one primary-key range read with no sort. Each is
     /// decoded as its row is read: no other level's rows are read, and the
     /// rows are never held.
-    static let levelFactsSQL =
+    package static let levelFactsSQL =
         "SELECT seq, payload FROM admission_facts WHERE chain_path = ?1 ORDER BY seq, ord"
 
-    func storedFacts(at chainPath: [String]) throws -> StoredFacts {
+    package func storedFacts(at chainPath: [String]) throws -> StoredFacts {
         var facts: [ChainFact] = []
         var (batches, last): (UInt64, Int64) = (0, 0)
         try database.forEach(

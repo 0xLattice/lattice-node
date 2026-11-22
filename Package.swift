@@ -98,10 +98,30 @@ let package = Package(
                 .product(name: "UInt256", package: "UInt256"),
             ]),
         .target(
+            name: "LatticeNodeSupport",
+            dependencies: [
+                .product(name: "cashew", package: "cashew"),
+            ]),
+        .target(
+            name: "LatticeNodeStore",
+            dependencies: [
+                "LatticeNodeAPI",
+                "LatticeNodeSupport",
+                "LatticeNodeCore",
+                "LatticeNodeConfig",
+                "CSQLite",
+                .product(name: "Lattice", package: "lattice"),
+                .product(name: "VolumeBroker", package: "VolumeBroker"),
+                .product(name: "cashew", package: "cashew"),
+                .product(name: "UInt256", package: "UInt256"),
+            ]),
+        .target(
             name: "LatticeNode",
             dependencies: [
                 "LatticeNodeAPI",
                 "LatticeNodeConfig",
+                "LatticeNodeStore",
+                "LatticeNodeSupport",
                 "CSQLite",
                 "LatticeLightClient",
                 "LatticeNodeCore",
@@ -164,7 +184,7 @@ let package = Package(
                 "LatticeNodeAPI",
                 "LatticeNodeConfig",
                 "LatticeNodeCore",
-                "LatticeNode",
+                "LatticeNodeStore",
                 "LatticeCtlCore",
                 "LatticeProcessWait",
                 "LatticeMinerCore",

@@ -1,6 +1,7 @@
 import Foundation
 import Ivy
 import Tally
+import LatticeNodeSupport
 
 /// Operator-declared public read URLs, discovered over the overlay. One rule
 /// at every level: a node answers "your read URL for chain P" only for a
