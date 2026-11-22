@@ -272,6 +272,14 @@ final class ChildBlockBuildTests: XCTestCase {
             }
             func value(_ block: BuildChildBlockResponse) -> String { block.blockCID + "@" + block.parentState }
 
+            // Each scenario starts from a builder in step with the miner: a
+            // block of the last one still arriving would move P under the
+            // first build, and the loop would rightly build again.
+            try await eventually("\(label): the builder follows the miner") {
+                let tip = await miner.reads.readSnapshot().tipCID
+                let followed = await builder.reads.readSnapshot().tipCID
+                return tip != nil && followed == tip
+            }
             try await eventually("\(label): the first round's commit is taken") {
                 _ = try await round()
                 return taken != nil
