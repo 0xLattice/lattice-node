@@ -374,10 +374,11 @@ public struct TxWorkload {
             disconnected.append(block)
             forkPoint = parent
         }
-        guard !disconnected.isEmpty, let parent = blocks[forkPoint] else { return }
+        guard !disconnected.isEmpty, let parent = blocks[forkPoint],
+              let timestamp = nextBlockTimestamp(after: parent.sim.block.timestamp, notBefore: now) else { return }
         let built = try await BlockBuilder.buildBlock(
             previous: parent.sim.block,
-            timestamp: max(parent.sim.block.timestamp + 1, now),
+            timestamp: timestamp,
             difficultyAnchor: parent.sim.anchor,
             fetcher: cas
         )
@@ -601,7 +602,7 @@ public struct TxWorkload {
     mutating func assemble(_ job: TemplateJob) async throws -> TemplateBuild? {
         guard let tipBlock = blocks[job.tipCID] else { return nil }
         let previous = tipBlock.sim.block
-        let timestamp = max(previous.timestamp + 1, now)
+        guard let timestamp = nextBlockTimestamp(after: previous.timestamp, notBefore: now) else { return nil }
         func build(_ transactions: [Transaction]) async throws -> Block {
             let built = try await BlockBuilder.buildBlock(
                 previous: previous,

@@ -153,7 +153,7 @@ extension NodeRuntime {
         guard job.request.parentCarrier == nil,
               let previous = try? await BlockHeader(rawCID: job.tipCID).resolve(fetcher: fetcher).node,
               let spec = try? await previous.spec.resolve(fetcher: fetcher).node,
-              let timestamp = try? MiningPlan.nextTimestamp(after: previous.timestamp, parentCarrier: nil)
+              let timestamp = try? MiningPlan.nextTimestamp(after: previous.timestamp, parentCarrier: nil, now: Self.now())
         else { return nil }
         let (pooled, refusedHere) = await MiningPlan.policyAcceptedTransactions(
             job.transactions,
@@ -362,7 +362,7 @@ extension NodeRuntime {
                 ),
                       let previous = try? await BlockHeader(rawCID: tip).resolve(fetcher: fetcher).node,
                       let spec = try? await previous.spec.resolve(fetcher: fetcher).node,
-                      let time = try? MiningPlan.nextTimestamp(after: previous.timestamp, parentCarrier: carrier)
+                      let time = try? MiningPlan.nextTimestamp(after: previous.timestamp, parentCarrier: carrier, now: Self.now())
                 else { continue }
                 let below = tip != tipCID
                 let grandchildren = below ? [] : await childCandidates(

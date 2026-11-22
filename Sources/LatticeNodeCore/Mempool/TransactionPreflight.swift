@@ -108,9 +108,10 @@ public enum TransactionPreflight {
             // than now.
             func judged(_ disposition: TransactionPreflightDisposition) async throws -> TransactionPreflightResult {
                 guard checksPolicies else { return result(disposition, tipCID: tip.cid) }
-                let (afterTip, overflow) = snapshot.timestamp.addingReportingOverflow(1)
-                guard !overflow else { return result(.unavailable, tipCID: tip.cid) }
-                let nextTimestamp = max(afterTip, validationContext.nowMilliseconds)
+                guard let nextTimestamp = nextBlockTimestamp(
+                    after: snapshot.timestamp,
+                    notBefore: validationContext.nowMilliseconds
+                ) else { return result(.unavailable, tipCID: tip.cid) }
                 guard try await TransactionBody.batchVerifyPolicies(
                     bodies: [body],
                     spec: spec,

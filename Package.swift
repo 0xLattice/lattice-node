@@ -76,7 +76,8 @@ let package = Package(
                 .product(name: "cashew", package: "cashew"),
                 .product(name: "UInt256", package: "UInt256"),
                 .product(name: "Crypto", package: "swift-crypto"),
-            ]),
+            ],
+            path: "Tools/LatticeNodeSim"),
         .target(
             name: "LatticeNodeAPI",
             dependencies: [

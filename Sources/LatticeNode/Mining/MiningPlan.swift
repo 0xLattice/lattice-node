@@ -178,13 +178,14 @@ enum MiningPlan {
 
     static func nextTimestamp(
         after previous: Int64,
-        parentCarrier: Block?
+        parentCarrier: Block?,
+        now: Int64
     ) throws -> Int64 {
-        let (minimum, overflow) = previous.addingReportingOverflow(1)
-        guard !overflow else { throw NodeAPIError.timestampOverflow }
-        if let parentCarrier { return max(minimum, parentCarrier.timestamp) }
-        let now = Int64(Date().timeIntervalSince1970 * 1_000)
-        return max(minimum, now)
+        guard let timestamp = nextBlockTimestamp(
+            after: previous,
+            notBefore: parentCarrier?.timestamp ?? now
+        ) else { throw NodeAPIError.timestampOverflow }
+        return timestamp
     }
 
 }

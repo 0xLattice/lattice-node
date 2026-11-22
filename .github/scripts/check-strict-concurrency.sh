@@ -49,7 +49,7 @@ if ! command -v rg >/dev/null 2>&1; then
 fi
 
 occurrences="$tmp_dir/unsafe-sites.txt"
-rg -n --no-heading '@unchecked Sendable|nonisolated\(unsafe\)' Sources Tests > "$occurrences" || true
+rg -n --no-heading '@unchecked Sendable|nonisolated\(unsafe\)' Sources Tools Tests > "$occurrences" || true
 
 missing=0
 while IFS=: read -r path _line source; do

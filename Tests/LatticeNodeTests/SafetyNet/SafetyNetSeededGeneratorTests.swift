@@ -2,7 +2,7 @@ import LatticeNodeSim
 import XCTest
 
 /// The generator and seed convention every seeded test replays through
-/// (`Sources/LatticeNodeSim/SeededGenerator.swift`). A drifted constant would silently
+/// (`Tools/LatticeNodeSim/SeededGenerator.swift`). A drifted constant would silently
 /// change every fuzz corpus and seeded sequence, so the output is pinned to
 /// SplitMix64's published values rather than to itself.
 /// Plain `XCTAssert` only (`XCTContext` is unavailable on corelibs XCTest).

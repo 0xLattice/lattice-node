@@ -1,7 +1,7 @@
 # Correctness invariants
 
 The node-level claims that still hold on the node runtime. Each entry names
-the check that enforces it after every simulated step (`Sources/LatticeNodeSim`)
+the check that enforces it after every simulated step (`Tools/LatticeNodeSim`)
 or the test that pins it. The consensus invariants (weighed graph, executed
 set, GHOST, continuity) are the architecture doc's and are checked by
 `Invariants.checkTree` and `LevelInvariants.checkLevel`.

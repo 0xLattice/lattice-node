@@ -662,13 +662,13 @@ published.
 
 | Module | Lines | Role |
 |---|---|---|
-| `LatticeNodeCore` | 5,918 | deterministic decisions per chain |
-| `LatticeNodeSim` | 5,526 | the simulator that drives the core and checks invariants every step |
-| `LatticeNode` | 16,669 | the shell: loop, stores, networking, jobs, reads |
-| `LatticeNodeAPI` | 1,472 | request and response models |
-| `LatticeNodeDaemon` | 3,442 | HTTP servers and process entry |
+| `LatticeNodeCore` | 6,255 | deterministic decisions per chain |
+| `LatticeNodeSim` | 5,530 | the simulator that drives the core and checks invariants every step (`Tools/`, not shipped) |
+| `LatticeNode` | 16,825 | the shell: loop, stores, networking, jobs, reads |
+| `LatticeNodeAPI` | 1,493 | request and response models |
+| `LatticeNodeDaemon` | 3,449 | HTTP servers and process entry |
 | `LatticeCtl`, `LatticeCtlCore` | 2,948 | the `lattice` CLI |
-| `LatticeMiner*`, `LatticeMiningCoordinator*` | 1,624 | mining, as separate processes |
+| `LatticeMiner*`, `LatticeMiningCoordinator*` | 1,558 | mining, as separate processes |
 
 ---
 
