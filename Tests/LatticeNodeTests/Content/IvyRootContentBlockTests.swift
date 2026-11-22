@@ -8,14 +8,17 @@ import cashew
 
 /// A peer that sends a Volume failing its check (an entry not matching its
 /// CID, or another root) is reported when the check fails, and the Volume
-/// is requested again; a failure this node caused blames no one.
+/// is requested again; a failure this node caused blames no one. Only the
+/// peer that served a requested Volume that verified is credited, once,
+/// with that Volume's bytes.
 final class IvyRootContentBlockTests: XCTestCase {
     private actor Log {
         private(set) var reported: [(root: String, peer: PeerID)] = []
-        private(set) var credited: [PeerID] = []
+        private(set) var credits: [(peer: PeerID, bytes: Int)] = []
+        var credited: [PeerID] { credits.map(\.peer) }
         private(set) var asked = 0
         func report(_ root: String, _ peer: PeerID) { reported.append((root, peer)) }
-        func credit(_ peer: PeerID) { credited.append(peer) }
+        func credit(_ peer: PeerID, _ bytes: Int) { credits.append((peer, bytes)) }
         func ask() -> Int {
             asked += 1
             return asked
@@ -47,7 +50,7 @@ final class IvyRootContentBlockTests: XCTestCase {
                 let n = await log.ask()
                 return n <= answers.count ? answers[n - 1] : .empty
             },
-            credit: { peer, _ in await log.credit(peer) },
+            credit: { peer, bytes in await log.credit(peer, bytes) },
             report: { root, peer in await log.report(root, peer) }
         )
     }
@@ -82,6 +85,8 @@ final class IvyRootContentBlockTests: XCTestCase {
         XCTAssertEqual(fetched, [wanted.cid: wanted.data])
         let reported = await log.reported
         XCTAssertEqual(reported.map(\.peer), [bad])
+        let credited = await log.credited
+        XCTAssertEqual(credited, [honest], "another root earns no credit")
     }
 
     func testAnHonestPeerIsNotReported() async throws {
@@ -96,6 +101,34 @@ final class IvyRootContentBlockTests: XCTestCase {
         XCTAssertTrue(reported.isEmpty)
         let asked = await log.asked
         XCTAssertEqual(asked, 1)
+        let credits = await log.credits
+        XCTAssertEqual(credits.map(\.peer), [honest])
+        XCTAssertEqual(credits.map(\.bytes), [item.data.count], "credited with the Volume's bytes")
+    }
+
+    func testContentWithNoServingPeerCreditsNobody() async throws {
+        let item = try content(8)
+        let log = Log()
+        let source = source([
+            AttributedVolumeResponse(rootCID: item.cid, entries: [item.cid: item.data], servedBy: nil),
+        ], log: log)
+        let fetched = await source.withRoot(item.cid) { session in await session.fetch([item.cid]) }
+        XCTAssertEqual(fetched, [item.cid: item.data])
+        let credited = await log.credited
+        XCTAssertTrue(credited.isEmpty)
+    }
+
+    func testAVerifiedInitialResponseIsCreditedOnce() async throws {
+        let item = try content(9)
+        let log = Log()
+        let source = source([], log: log)
+        let initial = AttributedVolumeResponse(rootCID: item.cid, entries: [item.cid: item.data], servedBy: honest)
+        _ = await source.withRootTracing(item.cid, initialResponse: initial) { session in
+            await session.fetch([item.cid])
+        }
+        let credits = await log.credits
+        XCTAssertEqual(credits.map(\.peer), [honest])
+        XCTAssertEqual(credits.map(\.bytes), [item.data.count])
     }
 
     /// A peer already reported in this fetch is not reported again, and its
@@ -155,5 +188,7 @@ final class IvyRootContentBlockTests: XCTestCase {
         XCTAssertEqual(result.value, [item.cid: item.data])
         let reported = await log.reported
         XCTAssertEqual(reported.map(\.peer), [bad])
+        let credited = await log.credited
+        XCTAssertEqual(credited, [honest], "a Volume failing its check earns no credit")
     }
 }
