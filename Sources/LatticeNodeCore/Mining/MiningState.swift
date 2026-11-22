@@ -253,7 +253,7 @@ public struct MiningConfig: Sendable {
     public var maxPendingPerPeer: Int
     /// Transactions a tip move returned, waiting on a verdict. The excess of
     /// a deep reorg is spilled. The default is the pool's own capacity, so an
-    /// ordinary reorg returns every transaction, as the actor did.
+    /// ordinary reorg returns every transaction.
     public var maxPendingReturned: Int
     /// Public-listener submits waiting on a verdict. Over it a submit is
     /// answered `.full` rather than dropped silently.

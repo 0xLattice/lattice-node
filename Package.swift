@@ -60,7 +60,6 @@ let package = Package(
             dependencies: [
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "cashew", package: "cashew"),
-                .product(name: "VolumeBroker", package: "VolumeBroker"),
             ]),
         .target(
             name: "LatticeNodeCore",
@@ -135,7 +134,6 @@ let package = Package(
         .executableTarget(
             name: "LatticeMiningCoordinatorTool",
             dependencies: [
-                "LatticeMinerCore",
                 "LatticeMiningCoordinator",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]),
@@ -158,7 +156,6 @@ let package = Package(
                 "LatticeMiningCoordinator",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "Ivy", package: "Ivy2"),
-                .product(name: "VolumeBroker", package: "VolumeBroker"),
                 .product(name: "cashew", package: "cashew"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
@@ -205,6 +202,8 @@ let package = Package(
                 "LatticeNodeCore",
                 "LatticeNodeSim",
                 .product(name: "Lattice", package: "lattice"),
+                .product(name: "LatticeBlockTree", package: "lattice"),
+                .product(name: "LatticeProofs", package: "lattice"),
                 .product(name: "cashew", package: "cashew"),
                 .product(name: "UInt256", package: "UInt256"),
             ]),

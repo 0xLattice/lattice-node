@@ -679,7 +679,8 @@ public final class HTTPMiningCoordinatorNodeClient: MiningCoordinatorNodeClient 
             throw MiningCoordinatorNodeClientError.invalidSubmissionResponse(statusCode: http.statusCode)
         }
         // The digest covers every input of a template (tip, mempool, child
-        // candidates); a node predating it serves only the tip.
+        // candidates). Without one (a node that has built no template yet, or
+        // one predating the digest) the tip alone stands in.
         if let digest = decoded.templateDigest, !digest.isEmpty { return digest }
         guard let tip = decoded.tipCID, !tip.isEmpty else { return nil }
         return tip

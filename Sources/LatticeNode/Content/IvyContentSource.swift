@@ -27,10 +27,6 @@ public struct IvyRootContentSource: Sendable {
         /// served. Never a size a peer only declared.
         public let byteBudgetExceeded: Bool
         public let contentUnavailable: Bool
-
-        public var soleRemoteSupplierPublicKey: String? {
-            servedByPublicKeys.count == 1 ? servedByPublicKeys.first : nil
-        }
     }
 
     public final class AttributionCapture: @unchecked Sendable {

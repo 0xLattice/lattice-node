@@ -9,6 +9,7 @@ import UInt256
 import cashew
 import VolumeBroker
 @testable import LatticeNode
+import LatticeNodeCore
 import LatticeNodeAPI
 
 /// Strictly increasing, slightly-past block timestamps (admission is

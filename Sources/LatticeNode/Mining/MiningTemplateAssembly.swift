@@ -132,8 +132,6 @@ public struct MiningTemplate: Sendable {
 public enum MiningTemplateError: Error, Equatable {
     case invalidChildDirectory
     case duplicateChildDirectory
-    case unknownWork
-    case missesSearchTarget
 }
 
 struct FittingMiningTemplate {
@@ -648,13 +646,14 @@ enum MiningTemplateAssembly {
         }
     }
 
+    /// Whether `block` is within its spec's size limit, by Lattice's own
+    /// rule (`validateBlockSize`), which stops counting at the limit.
     static func blockFits(
         _ block: Block,
         spec: ChainSpec,
         fetcher: any Fetcher
     ) async throws -> Bool {
-        try await block.logicalContentByteSize(fetcher: fetcher)
-            <= spec.maxBlockSize
+        try await block.validateBlockSize(spec: spec, fetcher: fetcher)
     }
 
     static func requireSameTemplateContext(
@@ -709,26 +708,5 @@ enum MiningTemplateAssembly {
             transactions.append(transaction)
         }
         return transactions
-    }
-}
-
-private extension Block {
-    func replacingNonce(_ nonce: UInt64) -> Block {
-        Block(
-            version: version,
-            parent: parent,
-            transactions: transactions,
-            target: target,
-            nextTarget: nextTarget,
-            spec: spec,
-            parentState: parentState,
-            prevState: prevState,
-            postState: postState,
-            children: children,
-            height: height,
-            timestamp: timestamp,
-            rewardRecipient: rewardRecipient,
-            nonce: nonce
-        )
     }
 }

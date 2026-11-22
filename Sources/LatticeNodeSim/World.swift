@@ -559,10 +559,6 @@ extension SimBlock {
 }
 
 extension Block {
-    func replacingNonce(_ nonce: UInt64) -> Block {
-        replacing(parent: parent, nonce: nonce)
-    }
-
     func replacing(
         parent: BlockHeader? = nil,
         nonce: UInt64? = nil,

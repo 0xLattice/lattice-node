@@ -85,7 +85,7 @@ final class TransactionPreflightTests: XCTestCase {
         func classify(_ transaction: Transaction, checksSignatures: Bool) async -> TransactionPreflightDisposition {
             await TransactionPreflight.classify(
                 transaction, tipCID: tip.cid, snapshot: tip.snapshot,
-                chainPath: [DEFAULT_ROOT_DIRECTORY], fetcher: cas,
+                chainPath: [DEFAULT_ROOT_DIRECTORY], fetcher: cas, validationContext: .current,
                 checksPolicies: false, checksSignatures: checksSignatures
             ).disposition
         }
@@ -312,7 +312,8 @@ final class TransactionPreflightTests: XCTestCase {
                 tipCID: basis.cid,
                 snapshot: basis.snapshot,
                 chainPath: tree.context!.path,
-                fetcher: cas
+                fetcher: cas,
+                validationContext: .current
             )
             XCTAssertEqual(classified.disposition, expected)
         }
@@ -422,6 +423,7 @@ final class TransactionPreflightTests: XCTestCase {
                 snapshot: basis.snapshot,
                 chainPath: chain.context!.path,
                 fetcher: cas,
+                validationContext: .current,
                 checksPolicies: false
             )
             XCTAssertEqual(result.disposition, expected, "unjudged: \(label)")

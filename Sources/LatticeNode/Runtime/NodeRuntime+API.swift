@@ -111,10 +111,6 @@ struct HeightIndex: Sendable {
     }
 }
 
-/// One hosted child level as a template job reads it: its executed tip (nil
-/// when it executed no root), its pool, its difficulty anchor, and the spec a
-/// genesis is built from when it has no root yet, with the account that
-/// genesis pays the spec's premine to.
 /// Pooled transactions a template's policy check refused on `tipCID` of
 /// `path`, for that level's pool to drop.
 struct PolicyRefusal: Sendable, Equatable {
@@ -123,6 +119,10 @@ struct PolicyRefusal: Sendable, Equatable {
     let cids: [String]
 }
 
+/// One hosted child level as a template job reads it: its executed tip (nil
+/// when it executed no root), its pool, its difficulty anchor, and the spec a
+/// genesis is built from when it has no root yet, with the account that
+/// genesis pays the spec's premine to.
 struct ChildTemplateInput: Sendable {
     let path: ChainPath
     let tipCID: String?

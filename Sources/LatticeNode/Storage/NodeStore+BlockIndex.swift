@@ -34,8 +34,7 @@ private struct PersistedAcceptedBlock: Hashable {
 }
 
 /// `accepted_blocks`: one accepted block's index row. `block_cid` is any
-/// non-empty text (tests stage blocks whose hashes are plain labels), so
-/// only the readers that need a canonical CID ask for `canonicalBlockCID`.
+/// non-empty text (tests stage blocks whose hashes are plain labels).
 /// `parent_cid` is NULL for a root and otherwise non-empty text; an empty
 /// string is malformed.
 struct AcceptedBlockRow: NodeStoreRecord {
@@ -56,15 +55,6 @@ struct AcceptedBlockRow: NodeStoreRecord {
         }
     }
     var admissionSequence: Int64 { get throws { try row.positiveInt("admission_seq") } }
-    /// The execution tier; an integer outside `BlockStatus` is malformed.
-    var status: BlockStatus {
-        get throws {
-            guard let status = BlockStatus(rawValue: try row.int("validated")) else {
-                throw NodeStoreError.malformedRow(table: Self.table, column: "validated")
-            }
-            return status
-        }
-    }
 }
 
 extension NodeStore {
