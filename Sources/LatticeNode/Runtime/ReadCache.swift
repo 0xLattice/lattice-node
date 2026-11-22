@@ -83,12 +83,6 @@ actor ReadCache: ContentSource {
     /// The bytes held now.
     var heldBytes: Int { bytes }
 
-    /// The CIDs held now, read or not.
-    var heldCIDs: Set<String> { Set(held.values.flatMap(\.entries.keys)) }
-
-    /// How many times room was made by looking through the held bodies.
-    private(set) var bodyScans = 0
-
     /// The window blocks whose distance from their chain's next block to
     /// connect (0 for that block) changed, each by its distance, and the
     /// blocks that left every window: the order their bodies are needed in.
@@ -204,7 +198,6 @@ actor ReadCache: ContentSource {
         guard charge <= maximumBytes else { return false }
         while bytes + charge > maximumBytes {
             if victims == nil, rank.0 == 0 || outsideWindow > 0 {
-                bodyScans += 1
                 victims = bodies.compactMap { block, body in
                     let candidate = self.rank(body: block, read: body.read)
                     return candidate > rank ? (candidate, block) : nil
