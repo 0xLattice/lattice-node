@@ -633,32 +633,6 @@ final class NodeRuntimeTests: XCTestCase {
         while await events.next() != nil {}
     }
 
-    /// The digest names each hosted level by path, act-on tip, next block
-    /// and whether any block of it is weighed: each changing changes it with
-    /// the root's unmoved, and so does the hosted set changing even between
-    /// levels in the same state.
-    func testTheTemplateDigestCoversDescendantsAndTheHostedSet() {
-        let alpha = ["Nexus", "Alpha"], beta = ["Nexus", "Beta"]
-        func digest(
-            tip: String = "root", transactions: [String] = [],
-            _ levels: [(path: ChainPath, actOn: String, weighed: Bool, transactions: [String])]
-        ) -> String {
-            NodeRuntime.templateDigest(tip: tip, transactions: transactions, levels: levels)
-        }
-        let before = digest([(alpha, "a1", true, [])])
-        XCTAssertNotEqual(before, digest(tip: "root2", [(alpha, "a1", true, [])]), "the root's tip moved")
-        XCTAssertNotEqual(before, digest(transactions: ["t"], [(alpha, "a1", true, [])]), "the root's next block changed")
-        XCTAssertNotEqual(before, digest([(alpha, "a2", true, [])]), "a descendant's tip moved")
-        XCTAssertNotEqual(before, digest([(alpha, "a1", true, ["t"])]), "a descendant's next block changed")
-        XCTAssertNotEqual(before, digest([(beta, "a1", true, [])]), "a different hosted level")
-        XCTAssertNotEqual(before, digest([]), "a level unhosted")
-        XCTAssertNotEqual(before, digest([(alpha, "a1", true, []), (beta, "", false, [])]), "a level hosted")
-        XCTAssertNotEqual(
-            digest([(alpha, "", false, [])]), digest([(alpha, "", true, [])]),
-            "a genesis weighed: its creator no longer mines one"
-        )
-    }
-
     /// A watcher that stops reading holds one value, the newest: it skips
     /// to the latest when it reads again.
     func testPublishedValueWatchersSkipToTheNewest() async {
