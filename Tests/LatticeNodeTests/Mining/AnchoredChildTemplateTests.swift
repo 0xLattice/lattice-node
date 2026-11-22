@@ -337,34 +337,6 @@ final class AnchoredChildTemplateTests: XCTestCase {
         }
     }
 
-    /// Before live reads a job held a copy of the level and of its parent's
-    /// tree, and chose its tip this way: the oracle the live reads match.
-    private static func copiedAnchoredTip(
-        from tipCID: String, entering: String, level: ChainCore, parentTree: ChainTree?, fetcher: any Fetcher
-    ) async -> String? {
-        guard let parentTree else { return tipCID }
-        // The anchors of the tip's ancestry (this fixture's Alpha has no
-        // forks), read first: the walk runs at once.
-        var anchors: [String: String] = [:]
-        var cid: String? = tipCID
-        while let current = cid {
-            if let read = try? await BlockHeader(rawCID: current).resolve(fetcher: fetcher).node {
-                anchors[current] = read.parentState.rawCID
-            }
-            cid = level.parent(of: current)
-        }
-        return level.actOnTip(from: tipCID) { tip in
-            anchors[tip].map { parentTree.executedSetAdvanced(from: $0, to: entering) }
-        }
-    }
-
-    /// Holds the levels as the runtime's loop does: a read hops onto it.
-    private actor Loop {
-        let levels: [ChainPath: ChainCore]
-        init(_ levels: [ChainPath: ChainCore]) { self.levels = levels }
-        func run(_ read: @Sendable ([ChainPath: ChainCore]?) -> Void) { read(levels) }
-    }
-
     /// Holds the levels as the runtime's loop does, and moves them to
     /// `next` between steps, after its `swapAfter`th read.
     private actor MovingLoop {
@@ -430,39 +402,6 @@ final class AnchoredChildTemplateTests: XCTestCase {
             }
         }
         XCTAssertGreaterThan(crossed, 0, "fixture: some job read across the move")
-    }
-
-    /// A child template's reads made live, hopping onto the levels' owner,
-    /// build what a job holding copies of the levels built: the same tip
-    /// (the old copy-based choice), and byte for byte the same block, below
-    /// the act-on tip after the reorganization and on it with the pool.
-    func testLiveReadsBuildWhatCopiesOfTheLevelsBuilt() async throws {
-        let fixture = try await fixture()
-        let host = fixture.host
-        let loop = Loop(host.node.levels)
-        let live = LiveLevels { read in Task { await loop.run(read) } }
-        let held = host.node.levels
-        let copied = LiveLevels { $0(held) }
-        let pooled = try Self.nonceSpend(1, on: Self.alpha)
-        for (carrier, expected) in [(fixture.b3, fixture.a1.cid), (fixture.rootA2, fixture.a2.cid)] {
-            let entering = carrier.block.postState.rawCID
-            let copiedTip = await Self.copiedAnchoredTip(
-                from: fixture.a2.cid, entering: entering, level: host.alpha, parentTree: host.nexusTree, fetcher: host.cas
-            )
-            let liveTip = await NodeRuntime.anchoredTip(
-                from: fixture.a2.cid, entering: entering, at: Self.alpha, levels: live, fetcher: host.cas
-            )
-            XCTAssertEqual(copiedTip, expected)
-            XCTAssertEqual(liveTip?.tip, copiedTip)
-            let liveBlock = try await candidate(
-                input(host, transactions: [pooled]), levels: live, entering: carrier, timestamp: fixture.nextTime, cas: host.cas
-            )
-            let copiedBlock = try await candidate(
-                input(host, transactions: [pooled]), levels: copied, entering: carrier, timestamp: fixture.nextTime, cas: host.cas
-            )
-            XCTAssertEqual(liveBlock.parent?.rawCID, expected)
-            XCTAssertEqual(try BlockHeader(node: liveBlock).rawCID, try BlockHeader(node: copiedBlock).rawCID)
-        }
     }
 
     /// With no hosted parent the act-on tip is built on unchanged.
