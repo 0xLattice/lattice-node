@@ -243,19 +243,25 @@ enum PolicyWasm {
     /// A transaction policy accepting iff the big-endian 64-bit context field
     /// at `offset` is at least `minimum` (signed compare).
     static func contextField(at offset: Int32, atLeast minimum: Int64) -> Data {
-        let validate: [UInt8] = [
+        var validate: [UInt8] = [
             0x02, 0x01, i32Type, 0x01, i64Type,         // (local $i i32) (local $v i64)
             0x03, 0x40,                                 // loop $read
             0x20, 0x03, 0x42, 0x08, 0x86,               //   local.get $v  i64.const 8  i64.shl
-            0x20, 0x00] + i32(Int64(offset)) + [0x6a,   //   local.get $ptr  i32.const offset  i32.add
+            0x20, 0x00,                                 //   local.get $ptr
+        ]
+        validate += i32(Int64(offset))                  //   i32.const offset
+        validate += [0x6a,                              //   i32.add
             0x20, 0x02, 0x6a,                           //   local.get $i  i32.add
             0x31, 0x00, 0x00, 0x84, 0x21, 0x03,         //   i64.load8_u  i64.or  local.set $v
-            0x20, 0x02] + i32(1) + [0x6a, 0x22, 0x02,   //   local.get $i  i32.const 1  i32.add  local.tee $i
-        ] + i32(8) + [0x49, 0x0d, 0x00,                 //   i32.const 8  i32.lt_u  br_if $read
+            0x20, 0x02]                                 //   local.get $i
+        validate += i32(1)                              //   i32.const 1
+        validate += [0x6a, 0x22, 0x02]                  //   i32.add  local.tee $i
+        validate += i32(8)                              //   i32.const 8
+        validate += [0x49, 0x0d, 0x00,                  //   i32.lt_u  br_if $read
             0x0b,                                       // end
-            0x20, 0x03, 0x42] + sleb(minimum) + [0x59,  // local.get $v  i64.const minimum  i64.ge_s
-            0x0b,
-        ]
+            0x20, 0x03, 0x42]                           // local.get $v  i64.const
+        validate += sleb(minimum)                       //   minimum
+        validate += [0x59, 0x0b]                        // i64.ge_s  end
         let alloc: [UInt8] = [0x00] + i32(1024) + [0x0b]
         func export(_ text: String, kind: UInt8, index: Int) -> [UInt8] { name(text) + [kind] + uleb(index) }
         var bytes: [UInt8] = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]
