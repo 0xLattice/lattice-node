@@ -55,14 +55,16 @@ and the batch is retried.
 
 ## Merged work
 
-One template can clear several chains' targets: the Nexus root and its direct
-children. When the node can list all of them (no direct child carries children
-of its own), the coordinator first searches the easiest. A hit that clears only
-some of them is `childOnly`: the coordinator submits it, the node keeps the
-work open, and the coordinator invokes the worker again over the rest of its
-range (`--start-nonce` just past the hit) with `--target` set to the easiest
-target still uncleared. That repeats until the hardest target is hit, the range
-is exhausted, or the work goes stale (the Nexus tip moved).
+One template can clear several chains' targets: the Nexus root and every
+hosted chain it carries, at any depth. The template's `searchTarget` is the
+easiest of them; `targets` lists all of them when the node built every carried
+subtree itself, and only `searchTarget` otherwise. The coordinator first
+searches the easiest. A hit that clears only some of them is `childOnly`: the
+coordinator submits it, the node keeps the work open, and the coordinator
+invokes the worker again over the rest of its range (`--start-nonce` just past
+the hit) with `--target` set to the easiest target still uncleared. That
+repeats until the hardest target is hit, the range is exhausted, or the work
+goes stale (the Nexus tip moved).
 
 Each invocation is still one immutable prefix, target, and range, but merged
 work adds two requirements:
@@ -73,6 +75,17 @@ work adds two requirements:
   targets.
 - A worker must not assume one invocation per assigned range, or one target per
   `--work-id`.
+
+A template request's `exclude` (see `rpc-api.md`) leaves named chains out of
+the work: they get no block from any nonce, and their targets set neither
+`searchTarget` nor `targets`. Use it, not `minimumWork`, to keep a chain that
+is not due from advancing: a filter on a chain the work still carries stops the
+whole search at that filter, since any hash for another chain could make the
+declined block. Excluding a chain never holds back its ancestors: a block
+for a due chain is carried by one on each ancestor, and the same hash makes
+any ancestor whose target is easier advance. A node that predates `exclude`
+ignores it; check the response's `chains`, and treat its absence as no
+support.
 
 ## Reference vector
 
