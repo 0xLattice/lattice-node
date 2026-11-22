@@ -153,11 +153,11 @@ final class SafetyNetSourceScanTests: XCTestCase {
     }
 
     func testWalkerReadsNestedFilesSortedAndRelative() throws {
-        let files = try SourceTree.swiftFiles(under: "Sources/LatticeNode")
+        let files = try SourceTree.swiftFiles(under: "Sources")
         let paths = files.map(\.path)
         XCTAssertEqual(paths, paths.sorted())
-        XCTAssertTrue(paths.contains("Runtime/Timers.swift"), "walked \(paths.count) files")
-        XCTAssertTrue(paths.contains("Storage/NodeStoreRow.swift"), "subdirectories are walked")
+        XCTAssertTrue(paths.contains("LatticeNode/Runtime/Timers.swift"), "walked \(paths.count) files")
+        XCTAssertTrue(paths.contains("LatticeNodeStore/NodeStoreRow.swift"), "subdirectories are walked")
     }
 
     func testWalkerRefusesAnEmptyOrMissingDirectory() {
