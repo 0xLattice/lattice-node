@@ -451,7 +451,8 @@ extension NodeRuntime {
             ).works,
             childRecipients: Dictionary(
                 recipients.descendants.map { ($0.chainPath, $0.address) }, uniquingKeysWith: { first, _ in first }
-            )
+            ),
+            exclude: try MiningPlan.validatedExclusions(request.exclude, chainPath: chainPath, hosted: hostedChildren)
         )
         let answer: NodeRuntimeReply
         do {

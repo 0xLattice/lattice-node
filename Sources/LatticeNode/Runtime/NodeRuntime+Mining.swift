@@ -337,7 +337,9 @@ extension NodeRuntime {
     ) async -> [DirectChildCandidate] {
         let paths = hosted ?? inputs.map(\.path)
         var candidates: [DirectChildCandidate] = []
-        for input in inputs where input.path.dropLast().elementsEqual(parent) {
+        // An excluded chain gets no candidate: its subtree, all excluded too
+        // (`MiningPlan.validatedExclusions`), is never built.
+        for input in inputs where input.path.dropLast().elementsEqual(parent) && !request.exclude.contains(input.path) {
             let carrier = Block(
                 version: Block.currentVersion, parent: nil,
                 transactions: HeaderImpl(rawCID: entering.rawCID), target: .max, nextTarget: .max,

@@ -522,6 +522,9 @@ submit is on.
   ],
   "minimumWork": [
     {"chainPath": ["Nexus"], "work": "0x100000000"}
+  ],
+  "exclude": [
+    ["Nexus", "Beta"]
   ]
 }
 ```
@@ -533,13 +536,35 @@ proof-of-work preimage.
 `minimumWork` is a miner-local search filter. It can demand harder hashes than
 the scheduled target but cannot make consensus easier and is not committed as
 the chain's target.
+A filter binds only chains the template builds: a chain a block carries only
+by a pool transaction's `child/X` commitment (by CID, not hosted here) does not
+limit the search.
+
+`exclude` names hosted chains, by absolute path below the template's own,
+whose next block this template leaves out. No nonce for the work makes a
+block on an excluded chain, and its threshold is in neither `searchTarget` nor
+`targets`. A block carries its descendants, so excluding a chain while a hosted
+chain below it is left in is refused (`excludedAncestor`); exclude the whole
+subtree instead. An entry that is not below the template's chain, or repeats
+one, is refused (`invalidExclusion`). Excluding a chain this node does not
+host changes nothing. `excludedAncestor` is judged against the chains hosted
+when the request arrives: a child newly hosted under an excluded chain makes
+the same request a 400 until the miner adds it to `exclude`. A carried chain's
+ancestors are carried too, and a hash that clears a due chain also makes a
+block on any ancestor whose target is easier; the hash is shared, so only the
+ancestors' difficulty schedule corrects that. The field is optional: without
+it every hosted chain is carried, as before. A node that predates it ignores
+it. A miner relying on it checks that no excluded path is in `chains`, and
+treats a response without `chains` (from an older node) as not supporting
+`exclude`.
 
 The response contains:
 
 - `workID` — opaque issued-work identifier;
 - `block` — complete nonce-zero Nexus candidate carrying child candidates;
 - `searchTarget` — the easiest threshold that can advance at least one carried
-  level, constrained by the request's minimum-work plan;
+  level, constrained by the request's minimum-work plan; excluded chains are
+  not carried;
 - `targets` — thresholds useful to the worker;
 - `chainPath` — `['Nexus']`;
 - `expiresInMilliseconds` — always 30000, kept for clients that require the
