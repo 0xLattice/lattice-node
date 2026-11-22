@@ -48,17 +48,21 @@ if [ "$(cat "$W/ref" 2>/dev/null)" != "$WANT" ]; then
   echo "$WANT" > "$W/ref"
 fi
 
+# The benchmark is its own test target (ChildSyncBench); a ref from before
+# that has it in LatticeNodeTests.
+MODULE=LatticeNodeTests
+[ -d "$W/src/Benchmarks/ChildSyncBench" ] && MODULE=ChildSyncBench
 # SwiftPM names the bundle per target on macOS and per package on Linux.
-B=$(ls -d "$W"/src/.build/release/LatticeNodeTests.xctest "$W"/src/.build/release/LatticeNodePackageTests.xctest 2>/dev/null | head -1)
+B=$(ls -d "$W/src/.build/release/$MODULE.xctest" "$W"/src/.build/release/LatticeNodePackageTests.xctest 2>/dev/null | head -1)
 [ -n "$B" ] || { echo "no test bundle under $W/src/.build/release"; exit 1; }
 # Found once: xcrun's lookup can fail while another xcrun is running.
 [ "$(uname)" = Darwin ] && XCTEST=$(xcrun --find xctest)
 # On Linux, CPUS pins the process it runs to those CPUs (taskset): the
 # follower to FOLLOWER_CPUS, the server to SERVER_CPUS, when set.
 bench() {
-  if [ "$(uname)" = Darwin ]; then "$XCTEST" -XCTest "LatticeNodeTests.ChildSyncBench/$1" "$B"
-  elif [ -n "$CPUS" ]; then taskset -c "$CPUS" "$B" "LatticeNodeTests.ChildSyncBench/$1"
-  else "$B" "LatticeNodeTests.ChildSyncBench/$1"; fi
+  if [ "$(uname)" = Darwin ]; then "$XCTEST" -XCTest "$MODULE.ChildSyncBench/$1" "$B"
+  elif [ -n "$CPUS" ]; then taskset -c "$CPUS" "$B" "$MODULE.ChildSyncBench/$1"
+  else "$B" "$MODULE.ChildSyncBench/$1"; fi
 }
 
 # Bytes the loopback interface carried so far: received, sent.
