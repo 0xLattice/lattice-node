@@ -35,7 +35,7 @@ final class RestoredLevelMemoryBench: XCTestCase {
         return .block(ChainBlockFact(
             blockHash: hash, parentBlockHash: parent, blockHeight: UInt64(height),
             postStateCID: cid("s", state), prevStateCID: cid("s", state - 1), specCID: cid("spec", 0),
-            target: max, nextTarget: max, timestamp: Int64(height), stateDiff: .empty
+            target: max, nextTarget: max, timestamp: Int64(height)
         ))
     }
 

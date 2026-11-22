@@ -105,6 +105,7 @@ extension NodeStore {
                 ]
             )
             try createDataTables(in: database)
+            try recordFactFormat(in: database)
         }
     }
 

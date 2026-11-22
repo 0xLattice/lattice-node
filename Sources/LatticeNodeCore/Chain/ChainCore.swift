@@ -96,6 +96,10 @@ public struct ChainBatch: Sendable {
     /// references it.
     public let states: [LatticeState]
     public let facts: [BlockImportBatch]
+    /// The state diff of each block this step executed, by block hash: an
+    /// execution output (`ChainTreeUpdate.stateDiff`) the store keeps for
+    /// the state window, never part of a fact.
+    public let stateDiffs: [String: StateDiff]
     /// A child level: the proofs this step credited, written with the work
     /// facts they produced, so this node serves them.
     public let proofs: [StoredProof]
@@ -107,12 +111,14 @@ public struct ChainBatch: Sendable {
         headers: [StoredHeader],
         states: [LatticeState] = [],
         facts: [BlockImportBatch],
+        stateDiffs: [String: StateDiff] = [:],
         proofs: [StoredProof] = [],
         cursors: [String: StreamCursor] = [:]
     ) {
         self.headers = headers
         self.states = states
         self.facts = facts
+        self.stateDiffs = stateDiffs
         self.proofs = proofs
         self.cursors = cursors
     }
@@ -296,17 +302,6 @@ public struct ChainCore: Sendable {
     /// name (the tree binds each to its root). A level with no facts yet is
     /// an empty tree. A child level passes its restored `parent`, serving
     /// its directory, so its attributed runs are derived.
-    ///
-    /// The revision floor is the number of staged batches that added a
-    /// fact. On a root level each batch that took a revision added at least
-    /// one new fact, so no revision exposed before the restart exceeds it.
-    /// Replay alone can count fewer: its sort can apply a batch that
-    /// re-states a grind's final quantity before the work batches that
-    /// raised it, which then replay as duplicates (§12.5.11). A child level
-    /// also takes a revision for each raised attributed run
-    /// (`applyParentRun`), which no durable row records and restore
-    /// re-derives once, so there the floor can still fall short. The node
-    /// exposes no revision to clients.
     public static func restore(
         _ stored: StoredFacts,
         context: ChainRuntimeContext,
@@ -320,7 +315,6 @@ public struct ChainCore: Sendable {
             ? ChainTree.empty(context: context)
             : try ChainTree.restore(
                 facts: stored.facts,
-                revisionFloor: stored.batches,
                 context: context,
                 specs: specs,
                 parent: parent
@@ -448,6 +442,7 @@ public struct ChainCore: Sendable {
         var headers: [StoredHeader] = []
         var states: [LatticeState] = []
         var facts: [BlockImportBatch] = []
+        var stateDiffs: [String: StateDiff] = [:]
         var effects: [ChainEffect] = []
         /// Child proofs this step credited, to index.
         var indexed: [StoredProof] = []
@@ -485,7 +480,7 @@ public struct ChainCore: Sendable {
         if !turn.facts.isEmpty || !turn.indexed.isEmpty || !turn.cursors.isEmpty {
             effects.append(.persist(ChainBatch(
                 headers: turn.headers, states: turn.states, facts: turn.facts,
-                proofs: turn.indexed, cursors: turn.cursors
+                stateDiffs: turn.stateDiffs, proofs: turn.indexed, cursors: turn.cursors
             )))
         }
         let wasWeighed = headersSynced

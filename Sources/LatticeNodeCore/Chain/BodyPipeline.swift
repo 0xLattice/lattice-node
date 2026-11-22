@@ -269,6 +269,7 @@ extension ChainCore {
         switch tree.applyConnect(verdict) {
         case .applied(let update):
             if let state = update.materializedPostState { turn.states.append(state) }
+            if let diff = update.stateDiff { turn.stateDiffs[update.blockHash] = diff }
             turn.facts += update.batches
             weighed += update.weighed
             if !update.excluded {

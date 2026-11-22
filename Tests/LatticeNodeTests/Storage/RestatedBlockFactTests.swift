@@ -5,20 +5,20 @@ import XCTest
 @testable import LatticeBlockTree
 @testable import LatticeNode
 
-/// Execution re-states a weighed block fact with its state diff, and only
-/// that. The store keeps the fact without the diff, so the executed copy is
-/// the weighed one; the diff is kept apart for the state window. Every
-/// header field, the child block's `parentState` included, must be carried
-/// over unchanged.
+/// Execution re-states a weighed block fact, and only that: the executed
+/// copy is the weighed one. Its state diff is an execution output, staged
+/// beside the facts and kept apart for the state window. Every header
+/// field, the child block's `parentState` included, must be carried over
+/// unchanged.
 final class RestatedBlockFactTests: XCTestCase {
     private let alpha: ChainPath = ["Nexus", "Alpha"]
 
-    private func fact(parentState: String?, diff: StateDiff) -> ChainFact {
+    private func fact(parentState: String?) -> ChainFact {
         .block(ChainBlockFact(
             blockHash: "block", parentBlockHash: "parent", blockHeight: 1,
             postStateCID: "post", prevStateCID: "prev", parentStateCID: parentState,
             specCID: "spec", target: "target", nextTarget: "next-target",
-            timestamp: 0, stateDiff: diff
+            timestamp: 0
         ))
     }
 
@@ -31,10 +31,13 @@ final class RestatedBlockFactTests: XCTestCase {
         }
     }
 
-    private func stage(_ facts: [ChainFact], in store: NodeStore, keepsStateDiffs: Bool = true) async throws {
+    private func stage(
+        _ facts: [ChainFact], diffs: [String: StateDiff] = [:], in store: NodeStore, keepsStateDiffs: Bool = true
+    ) async throws {
         try await store.stageNodeFacts([
             NodeFactBatch(
-                path: alpha, facts: [BlockImportBatch(facts: facts)], cursors: [:], keepsStateDiffs: keepsStateDiffs
+                path: alpha, facts: [BlockImportBatch(facts: facts)], stateDiffs: diffs, cursors: [:],
+                keepsStateDiffs: keepsStateDiffs
             ),
         ], logID: "log")
     }
@@ -47,13 +50,13 @@ final class RestatedBlockFactTests: XCTestCase {
 
     func testChildBlockExecutionRestatesItsWeighedFact() async throws {
         let store = try store()
-        try await stage([fact(parentState: "anchor", diff: .empty)], in: store)
+        try await stage([fact(parentState: "anchor")], in: store)
         try await stage(
-            [fact(parentState: "anchor", diff: try executedDiff), .validation(ChainValidationFact(blockHash: "block"))],
-            in: store
+            [fact(parentState: "anchor"), .validation(ChainValidationFact(blockHash: "block"))],
+            diffs: ["block": try executedDiff], in: store
         )
         let stored = try await store.storedFacts(at: alpha).facts
-        XCTAssertEqual(stored.first, fact(parentState: "anchor", diff: .empty), "the fact keeps no diff")
+        XCTAssertEqual(stored.first, fact(parentState: "anchor"))
         XCTAssertEqual(stored.count, 2)
         let kept = try await store.stateDiff("block", at: alpha)
         XCTAssertEqual(kept, try executedDiff)
@@ -61,9 +64,9 @@ final class RestatedBlockFactTests: XCTestCase {
 
     func testRestatementCannotChangeParentState() async throws {
         let store = try store()
-        try await stage([fact(parentState: "anchor", diff: .empty)], in: store)
+        try await stage([fact(parentState: "anchor")], in: store)
         do {
-            try await stage([fact(parentState: "elsewhere", diff: try executedDiff)], in: store)
+            try await stage([fact(parentState: "elsewhere")], diffs: ["block": try executedDiff], in: store)
             XCTFail("a re-statement changed the block's parent state")
         } catch NodeStoreError.conflictingImportFact {}
     }
@@ -72,14 +75,14 @@ final class RestatedBlockFactTests: XCTestCase {
     /// a store whose node keeps all state, or none, reads no diff.
     func testADiffIsKeptOnlyForAnExecutionAndOnlyWhenAsked() async throws {
         let unexecuted = try store()
-        try await stage([fact(parentState: nil, diff: try executedDiff)], in: unexecuted)
+        try await stage([fact(parentState: nil)], diffs: ["block": try executedDiff], in: unexecuted)
         let none = try await unexecuted.stateDiff("block", at: alpha)
         XCTAssertNil(none)
 
         let notAsked = try store()
         try await stage(
-            [fact(parentState: nil, diff: try executedDiff), .validation(ChainValidationFact(blockHash: "block"))],
-            in: notAsked, keepsStateDiffs: false
+            [fact(parentState: nil), .validation(ChainValidationFact(blockHash: "block"))],
+            diffs: ["block": try executedDiff], in: notAsked, keepsStateDiffs: false
         )
         let unkept = try await notAsked.stateDiff("block", at: alpha)
         XCTAssertNil(unkept)

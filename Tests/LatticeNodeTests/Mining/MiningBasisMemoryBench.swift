@@ -36,7 +36,7 @@ final class MiningBasisMemoryBench: XCTestCase {
             .block(ChainBlockFact(
                 blockHash: hash, parentBlockHash: index == 0 ? nil : cid("b", index - 1),
                 blockHeight: UInt64(index), postStateCID: cid("s", index), prevStateCID: cid("s", index - 1),
-                specCID: cid("spec", 0), target: max, nextTarget: max, timestamp: Int64(index), stateDiff: .empty
+                specCID: cid("spec", 0), target: max, nextTarget: max, timestamp: Int64(index)
             )),
             .work(ChainWorkFact(blockHash: hash, contribution: contribution)),
             .validation(ChainValidationFact(blockHash: hash)),

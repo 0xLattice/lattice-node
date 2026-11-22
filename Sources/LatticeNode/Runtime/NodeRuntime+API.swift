@@ -75,7 +75,6 @@ enum BodyWait: Sendable, Equatable, CustomStringConvertible {
             case .localVerificationFailure: "localVerificationFailure"
             case .notYetValid: "notYetValid"
             case .notAcceptedAtCurrentChain: "notAcceptedAtCurrentChain"
-            case .revisionExhausted: "revisionExhausted"
             case .executedVerdictContradiction: "executedVerdictContradiction"
             case .proofOfWorkInvalid: "proofOfWorkInvalid"
             }

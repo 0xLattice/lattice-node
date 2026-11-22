@@ -82,8 +82,7 @@ func preflightChain(
                 blockHash: blockHash, parentBlockHash: nil, blockHeight: 0,
                 postStateCID: genesis.postState.rawCID, prevStateCID: genesis.prevState.rawCID,
                 specCID: genesis.spec.rawCID, target: genesis.target.toHexString(),
-                nextTarget: genesis.nextTarget.toHexString(), timestamp: genesis.timestamp,
-                stateDiff: .empty
+                nextTarget: genesis.nextTarget.toHexString(), timestamp: genesis.timestamp
             )),
             .work(ChainWorkFact(blockHash: blockHash, contribution: work)),
             .validation(ChainValidationFact(blockHash: blockHash)),

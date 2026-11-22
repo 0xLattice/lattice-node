@@ -60,9 +60,6 @@ final class FactStoreRestoreTests: XCTestCase {
                 let rebuilt = try XCTUnwrap(restored.levels[level])
                 XCTAssertEqual(rebuilt.sync.log.entries, live.sync.log.entries, "seed \(seed) \(level): log positions")
                 XCTAssertEqual(TreeDigest(rebuilt.tree), TreeDigest(live.tree), "seed \(seed) \(level): tree")
-                XCTAssertGreaterThanOrEqual(
-                    rebuilt.tree.currentRevision(), live.tree.currentRevision(), "seed \(seed) \(level): the revision never moves back"
-                )
                 let facts = try XCTUnwrap(stored[level])
                 XCTAssertEqual(Set(facts.facts.map(\.id)).count, facts.facts.count, "seed \(seed) \(level): each fact once")
                 // Fixture guard: executions re-stated facts, which the store
