@@ -97,10 +97,11 @@ final class LivenessStatusTests: XCTestCase {
         }
         XCTAssertLessThan(seen?.height ?? 0, height, "behind the headers it cannot execute")
         let before = try XCTUnwrap(seen?.sync?.secondsSinceTipAdvanced)
-        try await Task.sleep(for: .seconds(1))
+        try await alwaysDuring("its tip has not moved", .seconds(1), poll: .milliseconds(50)) {
+            let now = await follower.status(chainPath: ["Nexus"])
+            return (now?.height ?? 0) < height && now?.sync?.tipAdvancedAt == seen?.sync?.tipAdvancedAt
+        }
         let later = await follower.status(chainPath: ["Nexus"])
-        XCTAssertLessThan(later?.height ?? 0, height)
-        XCTAssertEqual(later?.sync?.tipAdvancedAt, seen?.sync?.tipAdvancedAt, "its tip has not moved")
         XCTAssertGreaterThan(try XCTUnwrap(later?.sync?.secondsSinceTipAdvanced), before, "and has been still for longer")
         // Why: the next block's body can be had from no one.
         try await eventually("the follower says what its tip waits on") {

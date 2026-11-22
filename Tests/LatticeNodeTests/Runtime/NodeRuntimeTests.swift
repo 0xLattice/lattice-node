@@ -217,8 +217,9 @@ final class NodeRuntimeTests: XCTestCase {
                 await joinerRuntime.status().waiting?.hasPrefix("body of \(cid)") == true
             }
             try await BlockHeader(rawCID: cid).storeBlock(fetcher: producerStorage.localFetcher(.anyChain), storer: joinerStorage)
-            try await Task.sleep(for: .milliseconds(500 * testTimeScale))
-            XCTAssertNotEqual(joinerRuntime.published.value?.actOnTip, cid, "nothing asks before the wait ends")
+            try await alwaysDuring("nothing asks before the wait ends", .milliseconds(500)) {
+                joinerRuntime.published.value?.actOnTip != cid
+            }
             return cid
         }
         func connectHost() async throws -> NodeRuntime {

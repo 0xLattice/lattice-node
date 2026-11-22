@@ -185,11 +185,10 @@ final class SessionOutboxDeliveryTests: XCTestCase {
         let transport = ScriptedTransport()
         let outbox = outbox(transport)
         let deliveries = await (0..<3).asyncMap { await outbox.send(to: self.peer, topic: "reply-\($0)", payload: Data()) }
-        try await Task.sleep(for: .milliseconds(100))
-        let sentWhileFull = await transport.sent
-        XCTAssertTrue(sentWhileFull.isEmpty, "nothing is sent while the session is full")
-        let waits = await transport.waits
-        XCTAssertGreaterThanOrEqual(waits, 1)
+        try await eventually("the sends wait on the full session") { await transport.waits >= 1 }
+        try await alwaysDuring("nothing is sent while the session is full", .milliseconds(100)) {
+            await transport.sent.isEmpty
+        }
 
         await transport.drain()
         for delivery in deliveries {
@@ -204,7 +203,7 @@ final class SessionOutboxDeliveryTests: XCTestCase {
         let transport = ScriptedTransport()
         let outbox = outbox(transport)
         let deliveries = await (0..<3).asyncMap { await outbox.send(to: self.peer, topic: "m\($0)", payload: Data()) }
-        try await Task.sleep(for: .milliseconds(50))
+        try await eventually("the sends wait on the full session") { await transport.waits >= 1 }
         await transport.end()
         for delivery in deliveries {
             let delivered = await delivery.value
