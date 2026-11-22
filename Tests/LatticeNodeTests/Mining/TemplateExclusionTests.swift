@@ -27,12 +27,12 @@ final class TemplateExclusionTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
         let port = NetworkTransportTestPorts.allocate()
         // `b`'s blocks always come later than its 1 ms schedule, so its target
-        // stays the maximum while `a` hardens.
+        // stays the maximum while `a`, on a 60 s schedule, hardens fast.
         let configuration = try NodeConfiguration(
             chainPath: ["Nexus"], storagePath: storageDirectory, privateKeyHex: String(repeating: key, count: 32),
             listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
             hostedChildren: [Self.testnet, Self.a, Self.b],
-            childSpecs: [Self.testnet: Self.spec(blockTime: 1_000), Self.a: Self.spec(blockTime: 1_000), Self.b: Self.spec(blockTime: 1)]
+            childSpecs: [Self.testnet: Self.spec(blockTime: 1_000), Self.a: Self.spec(blockTime: 60_000), Self.b: Self.spec(blockTime: 1)]
         )
         let overlay = IvyConfig(
             signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: [],
@@ -49,6 +49,9 @@ final class TemplateExclusionTests: XCTestCase {
         return (testnet, entries?["a"]?.node, entries?["b"]?.node)
     }
 
+    /// The easiest threshold a minimum work can ask for below the maximum.
+    static let halfTarget = minimumWorkTarget(UInt256(2))
+
     func testAnExcludedSiblingLeavesTheSearchAndGetsNoBlock() async throws {
         let runtime = try await start("5a")
         let aReads = try XCTUnwrap(runtime.levelReads[Self.a])
@@ -62,7 +65,7 @@ final class TemplateExclusionTests: XCTestCase {
         var mined = 0
         while mined < 128 {
             if let carried = Self.carried(template), let a = carried.a, let b = carried.b,
-               a.target < .max, b.target == .max,
+               a.target < Self.halfTarget, b.target == .max,
                (await aReads.readSnapshot().height ?? 0) >= 1,
                (await bReads.readSnapshot().height ?? 0) >= 1 { break }
             _ = try await runtime.mineBlock(plain)
@@ -73,11 +76,23 @@ final class TemplateExclusionTests: XCTestCase {
         let carried = try XCTUnwrap(Self.carried(template))
         let a = try XCTUnwrap(carried.a, "the template carries a")
         let b = try XCTUnwrap(carried.b, "the template carries b")
-        XCTAssertLessThan(a.target, .max, "a mines at a hard scheduled target")
+        XCTAssertLessThan(a.target, Self.halfTarget, "a mines at a hard scheduled target")
         XCTAssertEqual(b.target, .max)
 
         // No `exclude`: unchanged, b's easy target sets the search.
         XCTAssertEqual(template.searchTarget, b.target)
+
+        // A filter on b between a's and b's targets binds: the search stops
+        // at it, never at b's easier target.
+        let between = try await runtime.miningTemplate(MiningTemplateRequest(
+            recipients: plain.recipients,
+            minimumWork: [MiningMinimumWork(chainPath: Self.b, work: UInt256(2))]
+        ))
+        let betweenB = try XCTUnwrap(Self.carried(between)?.b)
+        let betweenA = try XCTUnwrap(Self.carried(between)?.a)
+        XCTAssertLessThan(betweenA.target, Self.halfTarget)
+        XCTAssertLessThan(Self.halfTarget, betweenB.target)
+        XCTAssertEqual(between.searchTarget, Self.halfTarget)
 
         // A filter on b while b is carried stops the whole search at it: a
         // hash for a would also make the b block the miner declined.

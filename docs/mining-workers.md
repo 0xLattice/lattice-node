@@ -81,7 +81,11 @@ the work: they get no block from any nonce, and their targets set neither
 `searchTarget` nor `targets`. Use it, not `minimumWork`, to keep a chain that
 is not due from advancing: a filter on a chain the work still carries stops the
 whole search at that filter, since any hash for another chain could make the
-declined block.
+declined block. Excluding a chain never holds back its ancestors: a block
+for a due chain is carried by one on each ancestor, and the same hash makes
+any ancestor whose target is easier advance. A node that predates `exclude`
+ignores it; check the response's `chains`, and treat its absence as no
+support.
 
 ## Reference vector
 
