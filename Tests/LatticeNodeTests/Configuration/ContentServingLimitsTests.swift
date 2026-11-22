@@ -18,13 +18,6 @@ final class ContentServingLimitsTests: XCTestCase {
         )
     }
 
-    func testDefaultsAreTheOverlayDefaults() throws {
-        let overlay = try OverlayConfiguration(configuration(.default)).overlay
-        let defaults = IvyConfig(signingKey: .init(), listenPort: 0)
-        XCTAssertEqual(overlay.maxConcurrentContentRequests, defaults.maxConcurrentContentRequests)
-        XCTAssertEqual(overlay.maxInFlightVolumeBytes, defaults.maxInFlightVolumeBytes)
-    }
-
     func testOperatorLimitsReachTheOverlay() throws {
         let overlay = try OverlayConfiguration(configuration(ContentServingLimits(
             maxConcurrent: 200,

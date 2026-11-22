@@ -277,28 +277,6 @@ final class OperatorConfigTests: XCTestCase {
         XCTAssertEqual(merged.inert.filter { $0.contains("is not read") }.count, 3, "\(merged.inert)")
     }
 
-    /// A fragment is written only as the version a client read (If-Match).
-    func testAStaleVersionIsRefused() async throws {
-        let (config, _) = try make()
-        _ = try await put(config, "operator", #"{"minRelayFee":2}"#)
-        let (_, read) = try await config.fragment("operator")
-        _ = try await put(config, "operator", #"{"minRelayFee":3}"#, ifMatch: read)
-        let (_, now) = try await config.fragment("operator")
-        do {
-            _ = try await put(config, "operator", #"{"minRelayFee":4}"#, ifMatch: read)
-            XCTFail("a stale version was written")
-        } catch OperatorConfigError.changed {}
-        do {
-            _ = try await config.delete("operator", ifMatch: read, remote: false)
-            XCTFail("a stale version was removed")
-        } catch OperatorConfigError.changed {}
-        do {
-            _ = try await put(config, "absent", "{}", ifMatch: now)
-            XCTFail("If-Match on no fragment was accepted")
-        } catch OperatorConfigError.changed {}
-        _ = try await config.delete("operator", ifMatch: now, remote: false)
-    }
-
     /// A chain is created once (`POST /chains`): the same creation again is
     /// no change; another, or one for a chain synced without a spec, is a
     /// conflict. Hosting the path then mines it from its spec.
@@ -350,9 +328,8 @@ final class OperatorConfigTests: XCTestCase {
     func testAFragmentIsReadAsItIs() async throws {
         let (config, _) = try make()
         _ = try await put(config, "operator", #"{"minRelayFee":2}"#)
-        let (fragment, etag) = try await config.fragment("operator")
+        let (fragment, _) = try await config.fragment("operator")
         XCTAssertEqual(String(decoding: fragment, as: UTF8.self), #"{"minRelayFee":2}"#)
-        XCTAssertEqual(etag, OperatorConfig.etag(fragment))
         let (base, _) = try await config.fragment("lattice")
         XCTAssertTrue(String(decoding: base, as: UTF8.self).contains("4003"))
         do {

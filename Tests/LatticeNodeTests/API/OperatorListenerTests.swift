@@ -299,7 +299,8 @@ final class OperatorListenerTests: XCTestCase {
     }
 
     /// GET answers a fragment's version (ETag); a PUT or DELETE sent with
-    /// another (If-Match) is refused, 412.
+    /// another (If-Match) is refused, 412, and so is a PUT naming a version
+    /// of a fragment that does not exist.
     func testAFragmentIsWrittenOnlyAsTheVersionRead() async throws {
         let app = try await node(root: try rootLayout()).app
         let json: HTTPFields = [.authorization: "Bearer \(Self.admin)", .contentType: "application/json"]
@@ -322,6 +323,9 @@ final class OperatorListenerTests: XCTestCase {
             try await client.execute(uri: "/config/fragments/operator", method: .delete, headers: matching) {
                 XCTAssertEqual($0.status, .preconditionFailed)
             }
+            try await client.execute(
+                uri: "/config/fragments/absent", method: .put, headers: matching, body: ByteBuffer(string: "{}")
+            ) { XCTAssertEqual($0.status, .preconditionFailed, "If-Match on no fragment") }
         }
     }
 
