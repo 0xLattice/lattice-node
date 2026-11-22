@@ -41,27 +41,6 @@ public func encodeCompleteVolumeArchive(_ volume: SerializedVolume) -> Data? {
     return archive
 }
 
-extension ChainReads {
-    /// One complete Volume already held by this node; never read from
-    /// peers. The public read port reads a miss from peers separately,
-    /// within the operator's `--public-read-fetches`.
-    public func completeVolumeArchive(rootCID: String) async -> Data? {
-        guard let volume = await storage.volume(rootCID), volume.root == rootCID else {
-            return nil
-        }
-        return encodeCompleteVolumeArchive(volume)
-    }
-
-    /// Many complete Volumes already held by this node, as
-    /// `encodeCompleteVolumeRecords` frames them; never read from peers.
-    public func completeVolumeRecords(rootCIDs: [String]) async -> CompleteVolumeRecords {
-        await encodeCompleteVolumeRecords(rootCIDs) { root in
-            guard let volume = await storage.volume(root), volume.root == root else { return .notHeld }
-            return encodeCompleteVolumeArchive(volume).map(HeldVolume.archive) ?? .unencodable
-        }
-    }
-}
-
 /// At most this many roots in one many-Volume read.
 public let maximumCompleteVolumeRecordsRoots = 32
 /// A many-Volume body stays within one protocol frame, like the node's other
@@ -125,7 +104,7 @@ public func encodeCompleteVolumeRecords(
 }
 
 private extension Data {
-    mutating func appendBigEndian<T: FixedWidthInteger>(_ value: T) {
+    package mutating func appendBigEndian<T: FixedWidthInteger>(_ value: T) {
         Swift.withUnsafeBytes(of: value.bigEndian) { append(contentsOf: $0) }
     }
 }

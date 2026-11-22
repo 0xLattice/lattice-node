@@ -1,0 +1,706 @@
+import Foundation
+import Ivy
+import Lattice
+import LatticeLightClient
+import LatticeNodeCore
+import cashew
+import LatticeNodeAPI
+
+extension ChainReads {
+    // MARK: - Explorer read API
+    //
+    // Public reads for the browser explorer. Each mirrors the bounded,
+    // content-verified by-CID path above and never enters the runtime loop.
+
+    /// The absolute chain path served by this read surface. Used by the daemon
+    /// to answer the explorer's optional `?chainPath=` filter.
+    public func explorerChainPath() -> [String] {
+        chainPath
+    }
+
+    /// Main-chain block CID at `height` (ungated height-index lookup), so the
+    /// daemon can resolve a numeric `:id` to a CID before reading.
+    public func explorerCanonicalBlockCID(atHeight height: UInt64) async -> String? {
+        await canonicalCID(height)
+    }
+
+    /// The tip block's summary: one bounded block fetch plus its
+    /// transactions-dictionary header (for the count); no transaction body is
+    /// fetched.
+    public func explorerLatestBlock() async -> ExplorerLatestBlock? {
+        guard let cid = await tip().tipCID,
+              let data = await storage.content([cid])[cid],
+              data.count <= Self.maximumReadResponseBytes,
+              let block = _contentBoundBlock(cid: cid, data: data) else {
+            return nil
+        }
+        let transactionCount = (try? await block.transactions.resolve(
+            fetcher: storage
+        ))?.node?.count ?? 0
+        return ExplorerLatestBlock(
+            height: block.height,
+            hash: cid,
+            transactionCount: transactionCount,
+            timestamp: block.timestamp,
+            previousBlock: block.parent?.rawCID,
+            rewardRecipient: block.rewardRecipient,
+            rewardCredited: await rewardCredited(by: block)
+        )
+    }
+
+    /// A page of canonical block summaries below height `before` (default:
+    /// past the tip), newest first. Reads each block and its transactions
+    /// dictionary root (for the count) — never a transaction body.
+    public func explorerBlocks(before: UInt64?, limit: Int) async -> ExplorerBlocksPage {
+        let boundedLimit = min(max(limit, 0), Self.maximumExplorerBlocksPage)
+        guard let tipHeight = await tip().height else {
+            return ExplorerBlocksPage(blocks: [], nextBefore: nil)
+        }
+        // `before` is caller-controlled: clamp before any arithmetic.
+        var height = min(before ?? tipHeight + 1, tipHeight + 1)
+        var blocks: [ExplorerBlockSummary] = []
+        // At most `limit` heights are visited: a height whose block is not
+        // held here is skipped, not replaced by an older one.
+        for _ in 0..<boundedLimit where height > 0 {
+            height -= 1
+            guard let cid = await canonicalCID(height),
+                  let block = await block(cid: cid) else { continue }
+            let transactionCount = (try? await block.transactions.resolve(
+                fetcher: storage
+            ))?.node?.count ?? 0
+            blocks.append(ExplorerBlockSummary(
+                height: block.height,
+                hash: cid,
+                previousBlock: block.parent?.rawCID,
+                timestamp: block.timestamp,
+                transactionCount: transactionCount,
+                rewardRecipient: block.rewardRecipient
+            ))
+        }
+        return ExplorerBlocksPage(blocks: blocks, nextBefore: height > 0 ? height : nil)
+    }
+
+    public func explorerBlock(cid: String) async -> ExplorerBlock? {
+        guard let block = await block(cid: cid) else { return nil }
+        let transactionCount = (try? await block.transactions.resolve(
+            fetcher: storage
+        ))?.node?.count ?? 0
+        let childBlockCount = (try? await block.children.resolve(
+            fetcher: storage
+        ))?.node?.count ?? 0
+        return ExplorerBlock(
+            height: block.height,
+            hash: cid,
+            timestamp: block.timestamp,
+            previousBlock: block.parent?.rawCID,
+            transactionCount: transactionCount,
+            childBlockCount: childBlockCount,
+            nonce: block.nonce,
+            version: block.version,
+            target: block.target,
+            nextTarget: block.nextTarget,
+            transactionsCID: block.transactions.rawCID,
+            postStateCID: block.postState.rawCID,
+            chain: chainPath,
+            rewardRecipient: block.rewardRecipient,
+            rewardCredited: await rewardCredited(by: block)
+        )
+    }
+
+    /// What `block` credited its recipient: the block reward plus fees, by
+    /// the rule consensus applies (`Block.coinbaseAmount`). 0 when there is
+    /// no recipient (burned); nil when the block's content is not held here.
+    private func rewardCredited(by block: Block) async -> UInt64? {
+        guard block.rewardRecipient != nil else { return 0 }
+        guard let spec = try? await block.spec.resolve(fetcher: storage).node,
+              let transactions = try? await block.orderedTransactions(fetcher: storage)
+        else { return nil }
+        var bodies: [TransactionBody] = []
+        for transaction in transactions {
+            guard let body = try? await transaction.body.resolve(
+                fetcher: storage
+            ).node else { return nil }
+            bodies.append(body)
+        }
+        guard case .success(let amount) = Block.coinbaseAmount(
+            spec: spec,
+            height: block.height,
+            accountActions: bodies.flatMap(\.accountActions),
+            depositActions: bodies.flatMap(\.depositActions),
+            withdrawalActions: bodies.flatMap(\.withdrawalActions)
+        ) else { return nil }
+        return amount.uint64Value
+    }
+
+    /// Page over an accepted block's transaction dictionary by numeric index
+    /// [offset, offset+limit). Each index is a *targeted* resolution of just
+    /// that key — never a full `boundedKeysAndValues(limit: count)` fan-out —
+    /// so an untrusted request cannot force materializing the whole dictionary.
+    public func explorerBlockTransactions(
+        cid: String,
+        offset: Int,
+        limit: Int
+    ) async -> ExplorerBlockTransactions? {
+        guard offset >= 0 else { return nil }
+        guard let block = await block(cid: cid) else { return nil }
+        guard let dictionary = (try? await block.transactions.resolve(
+            fetcher: storage
+        ))?.node else { return nil }
+        let total = dictionary.count
+        let boundedLimit = Self.boundedExplorerLimit(limit)
+        // Short-circuit before the addition: a public caller controls `offset`,
+        // and `offset + boundedLimit` would be a checked-arithmetic TRAP (an
+        // uncatchable crash, not a throwable) for an offset near Int.max. With
+        // offset < total (a small, consensus-bounded count) the add is safe.
+        guard offset < total else {
+            return ExplorerBlockTransactions(transactions: [], nextOffset: nil)
+        }
+        let end = min(offset + boundedLimit, total)
+        var summaries: [ExplorerTransactionSummary] = []
+        if offset < end {
+            for index in offset..<end {
+                let key = String(index)
+                guard let node = (try? await block.transactions.resolve(
+                        paths: [[key]: .targeted],
+                        fetcher: storage
+                      ))?.node,
+                      let volume = (try? node.get(key: key)) ?? nil else {
+                    continue
+                }
+                guard let transaction = try? await volume.resolve(
+                        fetcher: storage
+                      ).node,
+                      let body = try? await transaction.body.resolve(
+                        fetcher: storage
+                      ).node else {
+                    continue
+                }
+                summaries.append(ExplorerTransactionSummary(
+                    txCID: volume.rawCID,
+                    signers: body.signers,
+                    accountActionCount: body.accountActions.count,
+                    depositActionCount: body.depositActions.count,
+                    receiptActionCount: body.receiptActions.count,
+                    withdrawalActionCount: body.withdrawalActions.count
+                ))
+            }
+        }
+        return ExplorerBlockTransactions(
+            transactions: summaries,
+            nextOffset: end < total ? end : nil
+        )
+    }
+
+    public func explorerBlockChildren(
+        cid: String,
+        limit: Int
+    ) async -> ExplorerBlockChildren? {
+        guard let block = await block(cid: cid) else { return nil }
+        guard let index = (try? await block.children.resolve(
+            fetcher: storage
+        ))?.node else { return nil }
+        let boundedLimit = Self.boundedExplorerLimit(limit)
+        guard boundedLimit > 0 else { return ExplorerBlockChildren(children: []) }
+        // The index is one node: the first `limit` directories in order.
+        let entries = index.entries.keys.sorted().prefix(boundedLimit).map {
+            ($0, index.entries[$0]!)
+        }
+        var children: [ExplorerChildBlock] = []
+        for (directory, volume) in entries {
+            // A child chain this node does not host has its commitment here
+            // but not its block: listed by CID, without the block's details.
+            let child = try? await volume.resolve(fetcher: storage).node
+            var transactionCount: Int?
+            if let child {
+                transactionCount = (try? await child.transactions.resolve(fetcher: storage))?.node?.count ?? 0
+            }
+            children.append(ExplorerChildBlock(
+                directory: directory,
+                blockHash: volume.rawCID,
+                height: child?.height,
+                transactionCount: transactionCount
+            ))
+        }
+        return ExplorerBlockChildren(children: children)
+    }
+
+    /// The newest child block this chain's canonical blocks commit under
+    /// `directory`, looking back at most `committedChildDepth` blocks from
+    /// the tip. A public read names any directory, so the walk is not per
+    /// name: one walk per tip records every directory the window commits,
+    /// and a name it lacks, made up or not, costs a lookup in that record.
+    public func committedChild(directory: String) async -> String? {
+        let status = await tip()
+        guard let tipCID = status.tipCID, let top = status.height else { return nil }
+        return await committedChildren.at(tipCID) { [self] in
+            var newest: [String: String] = [:]
+            var height = top
+            while top - height < Self.committedChildDepth {
+                if let cid = await canonicalCID(height), let block = await block(cid: cid),
+                   let index = (try? await block.children.resolve(fetcher: storage))?.node {
+                    for (name, child) in index.entries where newest[name] == nil {
+                        newest[name] = child.rawCID
+                    }
+                }
+                guard height > 0 else { break }
+                height -= 1
+            }
+            return newest
+        }[directory]
+    }
+
+    static let committedChildDepth: UInt64 = 64
+
+    /// Up to `limit` of the child directories this chain's executed blocks
+    /// have committed, after `after`, in order.
+    public func explorerChainChildren(after: String? = nil, limit: Int) async -> ExplorerChainChildren {
+        let page = await childDirectories()?.page(after: after, limit: limit) ?? (names: [], more: false)
+        return ExplorerChainChildren(
+            chainPath: chainPath,
+            directories: page.names,
+            next: page.more ? page.names.last : nil
+        )
+    }
+
+    public func explorerTransaction(cid: String) async -> ExplorerTransaction? {
+        guard let transaction = await transaction(cid: cid) else { return nil }
+        guard let body = try? await transaction.body.resolve(fetcher: storage).node else {
+            return nil
+        }
+        let inclusion = await readingState(cid) { fetcher in await canonicalInclusion(cid: cid, body: body, fetcher: fetcher) }
+        return ExplorerTransaction(
+            txCID: cid,
+            blockHeight: inclusion?.height,
+            blockHash: inclusion?.hash,
+            timestamp: inclusion?.timestamp,
+            nonce: body.nonce,
+            signers: body.signers,
+            chainPath: body.chainPath,
+            chain: body.chainPath,
+            accountActions: body.accountActions.map {
+                ExplorerAccountAction(owner: $0.owner, delta: $0.delta)
+            },
+            depositActions: body.depositActions.map {
+                ExplorerDepositAction(
+                    nonce: String($0.nonce),
+                    demander: $0.demander,
+                    amountDemanded: $0.amountDemanded,
+                    amountDeposited: $0.amountDeposited
+                )
+            },
+            receiptActions: body.receiptActions.map {
+                ExplorerReceiptAction(
+                    withdrawer: $0.withdrawer,
+                    nonce: String($0.nonce),
+                    demander: $0.demander,
+                    amountDemanded: $0.amountDemanded,
+                    directory: $0.directory
+                )
+            },
+            withdrawalActions: body.withdrawalActions.map {
+                ExplorerWithdrawalAction(
+                    withdrawer: $0.withdrawer,
+                    nonce: String($0.nonce),
+                    demander: $0.demander,
+                    amountDemanded: $0.amountDemanded,
+                    amountWithdrawn: $0.amountWithdrawn
+                )
+            }
+        )
+    }
+
+    /// The canonical block that executed transaction `cid`, derived at read
+    /// time, with no index: every signer's next-expected nonce only ever rises
+    /// along the canonical chain, and executing this transaction is what moves
+    /// its first signer's past `body.nonce`. So the block is the lowest height
+    /// whose post-state nonce exceeds it (a binary search: at most ~64 account
+    /// reads), and the transaction is included only if that block's
+    /// transaction list holds its CID — a rival at the same nonce moves the
+    /// nonce too. Nil when it is not in this chain's canonical executed
+    /// chain, or the content needed to tell is not held here. Reorg-correct by
+    /// construction: only the current canonical chain is read.
+    func canonicalInclusion(
+        cid: String,
+        body: TransactionBody,
+        fetcher: any Fetcher
+    ) async -> (height: UInt64, hash: String, timestamp: Int64)? {
+        guard body.chainPath == chainPath, let signer = body.signers.first,
+              let tipCID = await tip().tipCID, let tipBlock = await blockNode(cid: tipCID),
+              let tipNonce = await Self.nextNonce(of: signer, in: tipBlock, fetcher: fetcher),
+              tipNonce > body.nonce else {
+            return nil
+        }
+        // Invariant: nonce(high) > body.nonce; nonce(low - 1) <= body.nonce.
+        var low: UInt64 = 0
+        var high = tipBlock.height
+        while low < high {
+            let middle = low + (high - low) / 2
+            guard let middleCID = await canonicalCID(middle),
+                  let middleBlock = await blockNode(cid: middleCID),
+                  let nonce = await Self.nextNonce(of: signer, in: middleBlock, fetcher: fetcher) else {
+                return nil
+            }
+            if nonce > body.nonce { high = middle } else { low = middle + 1 }
+        }
+        guard let blockCID = await canonicalCID(high),
+              let block = await block(cid: blockCID),
+              await carries(block, transaction: cid),
+              await canonicalCID(high) == blockCID else {
+            return nil
+        }
+        return (height: high, hash: blockCID, timestamp: block.timestamp)
+    }
+
+    /// `signer`'s next-expected nonce in `block`'s post-state.
+    private static func nextNonce(of signer: String, in block: Block, fetcher: any Fetcher) async -> UInt64? {
+        guard let state = try? await block.postState.resolve(fetcher: fetcher).node else {
+            return nil
+        }
+        return try? await state.accountState.nextExpectedNonce(for: signer, fetcher: fetcher)
+    }
+
+    /// Whether `block`'s transaction list holds `cid`. Reads the list's
+    /// entries (transaction CIDs), never a transaction body; the list is
+    /// bounded by the chain's own per-block transaction limit.
+    private func carries(_ block: Block, transaction cid: String) async -> Bool {
+        guard let dictionary = (try? await block.transactions.resolve(fetcher: storage))?.node,
+              let entries = try? await dictionary.boundedKeysAndValues(
+                limit: dictionary.count, fetcher: storage
+              ) else { return false }
+        return entries.contains { $0.1.rawCID == cid }
+    }
+
+    public func explorerAccount(owner: String) async -> ExplorerAccount? {
+        guard let tip = await tip().tipCID else { return nil }
+        guard let account = await account(owner: owner, blockCID: tip) else { return nil }
+        return ExplorerAccount(
+            owner: owner,
+            balance: account.balance,
+            nonce: account.nonce
+        )
+    }
+
+    /// Active deposits in the canonical tip state. The page is bounded before
+    /// resolving trie values so this remains safe on the public read surface.
+    public func explorerDeposits(limit: Int, after: String?) async throws -> ExplorerDepositsPage? {
+        guard let tipCID = await tip().tipCID else { return nil }
+        return try await readingState(tipCID) { fetcher in
+            guard let block = await blockNode(cid: tipCID),
+                  let resolvedState = try? await block.postState.resolve(fetcher: fetcher),
+                  let state = resolvedState.node,
+                  let deposits = try? await state.depositState.resolve(fetcher: fetcher).node else {
+                return nil
+            }
+            let boundedLimit = Self.boundedExplorerLimit(limit)
+            guard let scanned = try? await deposits.boundedKeysAndValues(
+                after: after,
+                limit: boundedLimit + 1,
+                fetcher: fetcher
+            ) else { return nil }
+            let entries = Array(scanned.prefix(boundedLimit))
+            let next = scanned.count > boundedLimit ? entries.last?.key : nil
+            let listed = entries.filter { $0.value > 0 && DepositKey($0.key) != nil }
+            let created = await canonicalDepositInclusions(
+                keys: listed.map(\.key), tipCID: tipCID, tipBlock: block, tipRoot: state.depositState.rawCID,
+                fetcher: fetcher
+            )
+            var active: [ExplorerDeposit] = []
+            for entry in listed {
+                guard let key = DepositKey(entry.key) else { continue }
+                active.append(ExplorerDeposit(
+                    key: entry.key,
+                    demander: key.demander,
+                    amountDemanded: key.amountDemanded,
+                    nonce: String(key.nonce),
+                    amountDeposited: entry.value,
+                    blockHeight: created[entry.key]?.height,
+                    blockHash: created[entry.key]?.hash
+                ))
+            }
+            let proofPaths = Swift.Dictionary(uniqueKeysWithValues: entries.map { ([$0.key], SparseMerkleProof.existence) })
+            let proven = entries.isEmpty
+                ? try DepositStateHeader(node: deposits)
+                : try await state.depositState.proof(paths: proofPaths, fetcher: fetcher)
+            let proof = try await stateProof(
+                blockCID: tipCID, block: block, state: resolvedState,
+                dictionary: .deposits, dictionaryHeader: proven,
+                claims: entries.map { .init(key: $0.key, value: String($0.value)) }
+            )
+            return ExplorerDepositsPage(
+                deposits: active,
+                chain: chainPath.joined(separator: "/"),
+                next: next,
+                proof: proof
+            )
+        }
+    }
+
+    /// The canonical block that created each of `keys`, derived at read time
+    /// with no index, as `canonicalInclusion` does for a transaction: a
+    /// deposit key is absent until the block that inserts it and never
+    /// removed afterwards (a withdrawal leaves a zero marker), so presence
+    /// only ever turns on along the canonical chain. A key's creating block is
+    /// the lowest height whose post-state holds it.
+    ///
+    /// One search serves the whole page. A probed height is loaded once and
+    /// asked about every key still undecided in its range, which then splits
+    /// into the keys already present (search below) and not yet (search
+    /// above). The deposit dictionary is content-addressed, so a height whose
+    /// dictionary root was already read answers with no trie read at all;
+    /// most blocks carry no deposit or withdrawal and repeat their parent's.
+    ///
+    /// `tipBlock` must hold every key, under dictionary root `tipRoot`. A key
+    /// is left out when a state needed to place it is not held here; nothing
+    /// is returned if the canonical chain moved during the search.
+    func canonicalDepositInclusions(
+        keys: [String], tipCID: String, tipBlock: Block, tipRoot: String, fetcher: any Fetcher
+    ) async -> [String: (height: UInt64, hash: String)] {
+        guard !keys.isEmpty else { return [:] }
+        // Keys present under a dictionary root, for every key ever asked of it.
+        var known: [String: [String: Bool]] = [tipRoot: Dictionary(uniqueKeysWithValues: keys.map { ($0, true) })]
+        var heights: [String: UInt64] = [:]
+        // Invariant per range: every key present(high); absent(low - 1).
+        var ranges: [(low: UInt64, high: UInt64, keys: [String])] = [(0, tipBlock.height, keys)]
+        while let range = ranges.popLast() {
+            if range.low == range.high {
+                for key in range.keys { heights[key] = range.high }
+                continue
+            }
+            let middle = range.low + (range.high - range.low) / 2
+            guard let middleCID = await canonicalCID(middle),
+                  let middleBlock = await blockNode(cid: middleCID),
+                  let state = try? await middleBlock.postState.resolve(fetcher: fetcher).node else {
+                continue // not held here: these keys go unplaced
+            }
+            let root = state.depositState.rawCID
+            let unread = range.keys.filter { known[root]?[$0] == nil }
+            if !unread.isEmpty {
+                let paths = Swift.Dictionary(uniqueKeysWithValues: unread.map { ([$0], ResolutionStrategy.targeted) })
+                guard let deposits = try? await state.depositState.resolve(paths: paths, fetcher: fetcher).node else {
+                    continue
+                }
+                for key in unread { known[root, default: [:]][key] = (try? deposits.get(key: key)) != nil }
+            }
+            let present = range.keys.filter { known[root]?[$0] == true }
+            let absent = range.keys.filter { known[root]?[$0] != true }
+            if !present.isEmpty { ranges.append((range.low, middle, present)) }
+            if !absent.isEmpty { ranges.append((middle + 1, range.high, absent)) }
+        }
+        var hashes: [UInt64: String] = [:]
+        for height in Set(heights.values) {
+            if let cid = await canonicalCID(height) { hashes[height] = cid }
+        }
+        // The heights read name one chain only if the tip still names it.
+        guard await canonicalCID(tipBlock.height) == tipCID else { return [:] }
+        var created: [String: (height: UInt64, hash: String)] = [:]
+        for (key, height) in heights {
+            if let hash = hashes[height] { created[key] = (height: height, hash: hash) }
+        }
+        return created
+    }
+
+    /// One deposit key in the canonical tip state: its locked amount, `0`
+    /// once withdrawn (a withdrawal leaves a zero marker), or nothing if the
+    /// key was never deposited. Proven either way, without scanning the
+    /// listing: a wallet settles a purchase on the exact keys it bought.
+    public func explorerDepositState(key: String) async throws -> ExplorerDepositState? {
+        guard let tipCID = await tip().tipCID else { return nil }
+        return try await readingState(tipCID) { fetcher in
+            guard let block = await blockNode(cid: tipCID),
+                  let resolvedState = try? await block.postState.resolve(fetcher: fetcher),
+                  let state = resolvedState.node else {
+                return nil
+            }
+            let targeted = try? await state.depositState.resolve(
+                paths: [[key]: .targeted],
+                fetcher: fetcher
+            ).node
+            let amount = targeted.flatMap { try? $0.get(key: key) }
+            let value = amount.map { String($0) }
+            let proofKind: SparseMerkleProof = amount == nil ? .insertion : .existence
+            let proven = try await state.depositState.proof(paths: [[key]: proofKind], fetcher: fetcher)
+            let proof = try await stateProof(
+                blockCID: tipCID, block: block, state: resolvedState,
+                dictionary: .deposits, dictionaryHeader: proven,
+                claims: [.init(key: key, value: value)]
+            )
+            return ExplorerDepositState(
+                key: key,
+                value: value,
+                chain: chainPath.joined(separator: "/"),
+                proof: proof
+            )
+        }
+    }
+
+    /// The withdrawer recorded by a receipt on this (parent) chain.
+    public func explorerReceiptState(
+        demander: String,
+        amountDemanded: UInt64,
+        nonce: UInt128,
+        destinationPath: [String]
+    ) async throws -> ExplorerReceiptState? {
+        // The key is built before the read's closure, which captures only
+        // its strings: this function's arguments (a `UInt128` among them)
+        // captured by the closure arrived corrupted, a miscompile.
+        guard let directory = destinationPath.last,
+              let tipCID = await tip().tipCID else { return nil }
+        let logicalKey = ReceiptKey(receiptAction: ReceiptAction(
+            withdrawer: "",
+            nonce: nonce,
+            demander: demander,
+            amountDemanded: amountDemanded,
+            directory: directory
+        ))
+        let storageKey = logicalKey.storageKey, keyName = logicalKey.description
+        return try await readingState(tipCID) { fetcher in
+            guard let block = await blockNode(cid: tipCID),
+                  let resolvedState = try? await block.postState.resolve(fetcher: fetcher),
+                  let state = resolvedState.node else {
+                return nil
+            }
+            let targeted = try? await state.receiptState.resolve(
+                paths: [[storageKey]: .targeted],
+                fetcher: fetcher
+            ).node
+            let withdrawer = targeted.flatMap { try? $0.get(key: storageKey) }
+            let proofKind: SparseMerkleProof = withdrawer == nil ? .insertion : .existence
+            let proven = try await state.receiptState.proof(
+                paths: [[storageKey]: proofKind], fetcher: fetcher
+            )
+            let proof = try await stateProof(
+                blockCID: tipCID, block: block, state: resolvedState,
+                dictionary: .receipts, dictionaryHeader: proven,
+                claims: [.init(key: storageKey, value: withdrawer)]
+            )
+            return ExplorerReceiptState(
+                withdrawer: withdrawer,
+                directory: directory,
+                chainPath: destinationPath,
+                key: keyName,
+                proof: proof
+            )
+        }
+    }
+
+    private func stateProof<NodeType>(
+        blockCID: String, block: Block, state: LatticeStateHeader,
+        dictionary: StateDictionaryProof.StateKind,
+        dictionaryHeader: VolumeImpl<NodeType>,
+        claims: [StateDictionaryProof.Claim]
+    ) async throws -> StateDictionaryProof where NodeType: Node {
+        let collector = ProofVolumeCollector()
+        let storagePaths = Swift.Dictionary(uniqueKeysWithValues: claims.map { ([$0.key], StorageStrategy.targeted) })
+        try await dictionaryHeader.store(paths: storagePaths, storer: collector)
+        try await state.store(storer: collector)
+        guard let blockData = await storage.blockNodeBytes(blockCID) else { throw DataErrors.nodeNotAvailable }
+        return StateDictionaryProof(
+            blockHash: blockCID, blockHeight: block.height,
+            block: .init(cid: blockCID, data: blockData), stateRoot: state.rawCID,
+            dictionary: dictionary, dictionaryRoot: dictionaryHeader.rawCID,
+            claims: claims, witness: await collector.witness()
+        )
+    }
+
+    /// Ungated mempool snapshot: the pool's live CIDs, hard-capped at 200.
+    public func explorerMempool() async -> ExplorerMempool {
+        let pool = await mempool(true)
+        let cids = pool.cids
+        return ExplorerMempool(
+            count: pool.count,
+            transactions: Array(cids.prefix(Self.maximumExplorerMempoolListing))
+        )
+    }
+
+    /// How many blocks `explorerFees` projects: enough to price a wait of
+    /// about twelve blocks, the longest a projection says much about.
+    public static let projectedFeeBlocks = 12
+
+    /// What fee gets a transaction into each of the pool's next blocks, and
+    /// this node's relay floor. Read from this node's pool alone.
+    public func explorerFees() async -> ExplorerFees {
+        let pool = await mempool(false)
+        return ExplorerFees(
+            minRelayFee: storage.configuration.minRelayFee,
+            blocks: pool.projected.map(ExplorerProjectedBlock.init),
+            weight: pool.weight.map(ExplorerWeight.init)
+        )
+    }
+
+    public func explorerChainInfo() async -> ExplorerChainInfo {
+        let snapshot = await tip()
+        return ExplorerChainInfo(
+            genesisHash: await canonicalCID(0),
+            height: snapshot.height,
+            tipCID: snapshot.tipCID,
+            chain: chainPath,
+            minRelayFee: storage.configuration.minRelayFee,
+            finalityWindow: storage.configuration.finality.window(for: chainPath)
+        )
+    }
+
+    public func explorerChainSpec() async -> ExplorerChainSpec? {
+        guard let tip = await tip().tipCID,
+              let block = await blockNode(cid: tip),
+              let spec = try? await block.spec.resolve(fetcher: storage).node else {
+            return nil
+        }
+        return ExplorerChainSpec(
+            targetBlockTime: spec.targetBlockTime,
+            initialReward: spec.initialReward,
+            halvingInterval: spec.halvingInterval,
+            maxBlockSize: spec.maxBlockSize,
+            maxNumberOfTransactionsPerBlock: spec.maxNumberOfTransactionsPerBlock,
+            premine: spec.premine,
+            halfLife: spec.halfLife
+        )
+    }
+
+    public func explorerChainGenesis() async -> ExplorerChainGenesis {
+        ExplorerChainGenesis(
+            genesisHash: await tip().nexusGenesisCID
+        )
+    }
+}
+
+private actor ProofVolumeCollector: VolumeStorer {
+    private var volumes: [String: SerializedVolume] = [:]
+
+    func store(volume: SerializedVolume) async throws {
+        volumes[volume.root] = volume
+    }
+
+    func witness() -> [LightClientProof.WitnessNode] {
+        let unique = volumes.values.reduce(into: [String: Data]()) { result, volume in
+            result.merge(volume.entries) { existing, _ in existing }
+        }
+        return unique.sorted { $0.key < $1.key }.map {
+            LightClientProof.WitnessNode(cid: $0.key, data: $0.value)
+        }
+    }
+}
+
+extension ExplorerWeight {
+    init(_ weight: FeeWeight) {
+        self.init(
+            blockRoom: weight.blockRoom, growthRoom: weight.growthRoom,
+            maxTransactions: weight.maxTransactions, transactionAllowance: weight.transactionAllowance
+        )
+    }
+}
+
+extension ExplorerProjectedBlock {
+    /// A selected package's fee is funded, so it fits a balance.
+    init(_ block: ProjectedBlock) {
+        self.init(
+            transactionCount: block.transactionCount, bytes: block.bytes,
+            lowestFee: block.lowestFee.uint64Value ?? .max, lowestFeeBytes: block.lowestFeeBytes,
+            lowestFeeWeight: block.lowestFeeWeight, full: block.full
+        )
+    }
+}
+
+/// The directories the blocks below one tip commit, each with its newest
+/// child block: built once for the newest tip asked about, concurrent askers
+/// sharing the build. One tip is held; any other tip replaces it (fork
+/// choice is by work, so a lower tip can be the newer one).

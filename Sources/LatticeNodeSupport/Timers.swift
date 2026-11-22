@@ -1,5 +1,4 @@
 import Foundation
-import LatticeNodeSupport
 
 /// The node's one suspension primitive and the timer shapes built on it.
 ///
@@ -13,9 +12,9 @@ import LatticeNodeSupport
 ///
 /// Timers does no generation gating. `deadline` passes `generation` through
 /// to its fire closure and every fire target does its own check.
-enum Timers {
+package enum Timers {
     /// Sleeps `nanoseconds`. Returns `false` iff the task was cancelled.
-    static func sleep(nanoseconds: UInt64) async -> Bool {
+    package static func sleep(nanoseconds: UInt64) async -> Bool {
         do {
             try await Task.sleep(nanoseconds: nanoseconds)
         } catch {
@@ -26,7 +25,7 @@ enum Timers {
 
     /// `duration` in nanoseconds, zero for a negative duration, saturating at
     /// `UInt64.max`.
-    static func nanoseconds(_ duration: Duration) -> UInt64 {
+    package static func nanoseconds(_ duration: Duration) -> UInt64 {
         // Keep Duration out of optimized async task frames: the generic Clock
         // sleep overload can trip Swift's task allocator during teardown.
         let components = duration.components
@@ -44,7 +43,7 @@ enum Timers {
     /// must still inherit. Callers capture `[weak self]` in `fire` so a
     /// sleeping timer does not retain its owner.
     @discardableResult
-    static func deadline(
+    package static func deadline(
         after delay: Duration,
         generation: UInt64,
         _ fire: @escaping @Sendable (UInt64) async -> Void
@@ -56,13 +55,13 @@ enum Timers {
         }
     }
 
-    enum Retry<T: Sendable>: Sendable {
+    package enum Retry<T: Sendable>: Sendable {
         case value(T)
         case cancelled
         case stale
     }
 
-    enum Step<T: Sendable>: Sendable {
+    package enum Step<T: Sendable>: Sendable {
         case again
         case done(T)
     }
@@ -70,7 +69,7 @@ enum Timers {
     /// `step`; while it answers `.again`, sleep `every` and step again.
     /// Returns `onCancel` when a sleep is cancelled. The step runs on the
     /// caller's actor.
-    static func poll<T: Sendable>(
+    package static func poll<T: Sendable>(
         every interval: Duration,
         onCancel: T,
         isolation: isolated (any Actor)? = #isolation,
@@ -87,7 +86,7 @@ enum Timers {
 
     /// While `while` holds: `body`, then sleep `every`. Acts first, then
     /// sleeps; returns when a sleep is cancelled. Runs on the caller's actor.
-    static func repeating(
+    package static func repeating(
         every interval: Duration,
         isolation: isolated (any Actor)? = #isolation,
         while condition: () -> Bool,

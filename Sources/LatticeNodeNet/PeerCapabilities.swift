@@ -12,14 +12,14 @@ import LatticeNodeSupport
 ///
 /// A session keeps a capability only while it honours it: `revoke` takes one
 /// from the session that broke it, for as long as that session lasts.
-final class PeerCapabilities: @unchecked Sendable {
+package final class PeerCapabilities: @unchecked Sendable {
     private let lock = NSLock()
     private var sessions: [(peer: AuthenticatedPeer, capabilities: Set<String>)] = []
     /// By session ID: what an open session advertised and no longer has.
     private var revoked: [Data: Set<String>] = [:]
 
     /// Replaces the whole view with the sessions now open.
-    func set(_ sessions: [(peer: AuthenticatedPeer, capabilities: Set<String>)]) {
+    package func set(_ sessions: [(peer: AuthenticatedPeer, capabilities: Set<String>)]) {
         lock.withLock {
             self.sessions = sessions
             let open = Set(sessions.map(\.peer.sessionID))
@@ -27,7 +27,7 @@ final class PeerCapabilities: @unchecked Sendable {
         }
     }
 
-    func revoke(_ capability: String, from session: AuthenticatedPeer) {
+    package func revoke(_ capability: String, from session: AuthenticatedPeer) {
         let taken = lock.withLock {
             guard sessions.contains(where: { $0.peer.sessionID == session.sessionID }) else { return false }
             return revoked[session.sessionID, default: []].insert(capability).inserted
@@ -43,7 +43,7 @@ final class PeerCapabilities: @unchecked Sendable {
     /// a child by the sessions whose hello named it, and by those its
     /// rendezvous names, so a peer whose build predates the hello's claim
     /// still counts. A hint for whom to ask, never for what to accept.
-    func sessions(hosting child: ChainHosts?, ivy: Ivy) async -> [AuthenticatedPeer] {
+    package func sessions(hosting child: ChainHosts?, ivy: Ivy) async -> [AuthenticatedPeer] {
         guard let child else { return lock.withLock { sessions.map(\.peer) } }
         let named = Set(await ivy.providers(for: child.key))
         let capability = ChainHandshake.hosting(child.path)
@@ -52,7 +52,7 @@ final class PeerCapabilities: @unchecked Sendable {
         }
     }
 
-    func sessions(speaking capability: String) -> [AuthenticatedPeer] {
+    package func sessions(speaking capability: String) -> [AuthenticatedPeer] {
         lock.withLock {
             sessions.filter {
                 $0.capabilities.contains(capability)

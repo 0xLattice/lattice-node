@@ -4,6 +4,7 @@ import UInt256
 import LatticeNodeSim
 import XCTest
 @testable import LatticeNode
+@testable import LatticeNodeNet
 
 /// Fuzzing the one surface an attacker controls completely: the bytes on the
 /// wire, before anything has been authenticated.

@@ -4,12 +4,12 @@ import Lattice
 import UInt256
 import cashew
 
-enum OverlayTopic {
-    static let overlayHello = "lattice.overlay.hello.v1"
-    static let transactionAvailable = "lattice.overlay.transaction.available.v1"
+package enum OverlayTopic {
+    package static let overlayHello = "lattice.overlay.hello.v1"
+    package static let transactionAvailable = "lattice.overlay.transaction.available.v1"
 }
 
-enum OverlayWireError: Error, Equatable, Sendable {
+package enum OverlayWireError: Error, Equatable, Sendable {
     case oversized
     case malformed
     case nonCanonical
@@ -17,18 +17,18 @@ enum OverlayWireError: Error, Equatable, Sendable {
 
 private let _maximumNodeMessageSize = Int(IvyConfig.defaultProtocolMaxFrameSize) - 256
 
-protocol CanonicalJSONMessage: Codable {
+package protocol CanonicalJSONMessage: Codable {
     func validate() throws
     /// The message's one canonical spelling: `_canonicalJSONEncode`'s bytes.
     func canonicalJSON() throws -> Data
 }
 
 extension CanonicalJSONMessage {
-    func canonicalJSON() throws -> Data {
+    package func canonicalJSON() throws -> Data {
         try _canonicalJSONEncode(self)
     }
 
-    func encoded() throws -> Data {
+    package func encoded() throws -> Data {
         try validate()
         let data = try canonicalJSON()
         guard data.count <= _maximumNodeMessageSize else {
@@ -37,7 +37,7 @@ extension CanonicalJSONMessage {
         return data
     }
 
-    static func decoded(_ data: Data) throws -> Self {
+    package static func decoded(_ data: Data) throws -> Self {
         guard data.count <= _maximumNodeMessageSize else {
             throw OverlayWireError.oversized
         }
@@ -55,10 +55,14 @@ extension CanonicalJSONMessage {
 /// Announces one complete transaction Volume. The exact authenticated
 /// advertiser is the first retrieval target; validity still comes from
 /// content addressing and Lattice preflight.
-struct TransactionAvailableMessage: CanonicalJSONMessage, Equatable, Sendable {
-    let volumeRootCID: String
+package struct TransactionAvailableMessage: CanonicalJSONMessage, Equatable, Sendable {
+    package let volumeRootCID: String
 
-    func validate() throws {
+    package init(volumeRootCID: String) {
+        self.volumeRootCID = volumeRootCID
+    }
+
+    package func validate() throws {
         guard _isBoundedWireAtom(volumeRootCID) else {
             throw OverlayWireError.malformed
         }

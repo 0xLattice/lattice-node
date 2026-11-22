@@ -532,10 +532,7 @@ enum MiningTemplateAssembly {
                 continue
             }
 
-            let selectedTransactions = try await blockTransactions(
-                in: provisional.block,
-                fetcher: fetcher
-            )
+            let selectedTransactions = try await provisional.block.orderedTransactions(fetcher: fetcher)
             var optionalChildren = provided
             if !optionalChildren.isEmpty {
                 let offset = Int(
@@ -675,38 +672,5 @@ enum MiningTemplateAssembly {
               provisional.nonce == final.nonce else {
             throw NodeAPIError.templateContextChanged
         }
-    }
-
-    /// A block's transactions in index order, resolved through `fetcher`.
-    static func blockTransactions(
-        in block: Block,
-        fetcher: any Fetcher
-    ) async throws -> [Transaction] {
-        let transactionsHeader = try await block.transactions.resolve(
-            fetcher: fetcher
-        )
-        guard let dictionary = transactionsHeader.node else {
-            throw NodeAPIError.unresolvedTransactionContent
-        }
-        let entries = try await dictionary.boundedKeysAndValues(
-            limit: dictionary.count,
-            fetcher: fetcher
-        )
-        guard entries.count == dictionary.count else {
-            throw NodeAPIError.unresolvedTransactionContent
-        }
-        let headers = Dictionary(uniqueKeysWithValues: entries)
-        var transactions: [Transaction] = []
-        for index in 0..<headers.count {
-            guard let transactionHeader = headers[String(index)] else {
-                throw NodeAPIError.unresolvedTransactionContent
-            }
-            let resolved = try await transactionHeader.resolve(fetcher: fetcher)
-            guard let transaction = resolved.node else {
-                throw NodeAPIError.unresolvedTransactionContent
-            }
-            transactions.append(transaction)
-        }
-        return transactions
     }
 }

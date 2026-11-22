@@ -1,3 +1,4 @@
+import LatticeNodeConfig
 import Foundation
 import Ivy
 import Lattice
@@ -17,7 +18,7 @@ public struct IvyRootContentSource: Sendable {
     /// (1,000 to 300,000 entries of 1 to 113 bytes, arm64 macOS) and rounded
     /// up, so the byte budget bounds memory however small a peer makes the
     /// entries it sends.
-    static let retainedEntryOverhead = 512
+    package static let retainedEntryOverhead = 512
 
     public struct Attribution: Sendable, Equatable {
         public let servedByPublicKeys: Set<String>
@@ -53,7 +54,7 @@ public struct IvyRootContentSource: Sendable {
         private var overBudget = false
         private var unavailable = false
 
-        func record(_ response: AttributedVolumeResponse, complete: Bool) {
+        package func record(_ response: AttributedVolumeResponse, complete: Bool) {
             lock.lock()
             if let peer = response.servedBy {
                 peerPublicKeys.insert(peer.publicKey)
@@ -65,7 +66,7 @@ public struct IvyRootContentSource: Sendable {
             lock.unlock()
         }
 
-        func snapshot() -> Attribution {
+        package func snapshot() -> Attribution {
             lock.lock()
             defer { lock.unlock() }
             return Attribution(
@@ -77,18 +78,18 @@ public struct IvyRootContentSource: Sendable {
             )
         }
 
-        func markIncomplete() {
+        package func markIncomplete() {
             lock.withLock { complete = false }
         }
 
-        func markOverBudget() {
+        package func markOverBudget() {
             lock.withLock { overBudget = true }
         }
     }
 
     private final class Context: @unchecked Sendable {
-        let rootCID: String
-        let trace = Trace()
+        package let rootCID: String
+        package let trace = Trace()
         private let budget: AcquisitionBudget
         private let reservingBytes: Int
         private let priority: AcquisitionBudget.Priority
@@ -110,7 +111,7 @@ public struct IvyRootContentSource: Sendable {
         private var accountedMembers = Set<String>()
         private var storageByteCount = 0
 
-        init(
+        package init(
             rootCID: String, budget: AcquisitionBudget, reserving bytes: Int,
             priority: AcquisitionBudget.Priority
         ) {
@@ -120,11 +121,11 @@ public struct IvyRootContentSource: Sendable {
             self.priority = priority
         }
 
-        func cached(_ cids: Set<String>) async -> [String: Data] {
+        package func cached(_ cids: Set<String>) async -> [String: Data] {
             await broker.fetch(cids)
         }
 
-        var accountedBytes: Int { lock.withLock { storageByteCount } }
+        package var accountedBytes: Int { lock.withLock { storageByteCount } }
 
         /// Reserves the session's bytes from the budget, once, before its
         /// first request to a peer: a session that reads only what this
@@ -136,7 +137,7 @@ public struct IvyRootContentSource: Sendable {
         /// only the session's cancellation cancels it: its readers call from
         /// tasks of their own (a `CoalescingFetcher`'s flush), which that
         /// cancellation never reaches.
-        func reserveBudget() async -> Bool {
+        package func reserveBudget() async -> Bool {
             let task: Task<Int?, Never>? = lock.withLock {
                 if let reservation { return reservation }
                 guard !cancelled else { return nil }
@@ -162,7 +163,7 @@ public struct IvyRootContentSource: Sendable {
         /// leaves the line holding nothing, none is made after, and a
         /// bundle on its way is not waited for. One already granted is
         /// released when the session ends.
-        func cancel() {
+        package func cancel() {
             let tasks: (Task<Int?, Never>?, Task<AuthenticatedPeer?, Never>?) = lock.withLock {
                 cancelled = true
                 return (reservation, bundle)
@@ -172,7 +173,7 @@ public struct IvyRootContentSource: Sendable {
         }
 
         /// What the session reserved goes back to the budget.
-        func releaseBudget() async {
+        package func releaseBudget() async {
             guard let task = lock.withLock({ reservation }) else { return }
             // Still waiting only when a reader the session no longer waits
             // for (one whose operation ended or threw first) is waiting.
@@ -185,7 +186,7 @@ public struct IvyRootContentSource: Sendable {
             }
         }
 
-        func reserve(rootCID: String) -> Bool {
+        package func reserve(rootCID: String) -> Bool {
             lock.withLock { attemptedRoots.insert(rootCID).inserted }
         }
 
@@ -194,7 +195,7 @@ public struct IvyRootContentSource: Sendable {
         /// once, on the session's first miss. A Volume from it is unverified
         /// and uncredited until it is taken as the answer to a request for
         /// its root.
-        func bundled(
+        package func bundled(
             _ rootCID: String,
             fetch: @escaping BundleFetch
         ) async -> (volume: AttributedVolumeResponse, session: AuthenticatedPeer?)? {
@@ -242,11 +243,11 @@ public struct IvyRootContentSource: Sendable {
         }
 
         /// The session is over: a bundle still on its way is not waited for.
-        func cancelBundle() {
+        package func cancelBundle() {
             lock.withLock { bundle }?.cancel()
         }
 
-        func store(_ validated: ValidatedVolume) async -> Bool {
+        package func store(_ validated: ValidatedVolume) async -> Bool {
             let volume = validated.volume
             let fits = lock.withLock {
                 var addedStorageBytes = 0
@@ -292,7 +293,7 @@ public struct IvyRootContentSource: Sendable {
             }
         }
 
-        func volume(rootCID: String) async -> SerializedVolume? {
+        package func volume(rootCID: String) async -> SerializedVolume? {
             guard rootCID == self.rootCID else { return nil }
             return await broker.fetchVolume(root: rootCID)
         }
@@ -327,12 +328,12 @@ public struct IvyRootContentSource: Sendable {
     /// the bytes it sent are not what their CIDs name.
     private let report: @Sendable (String, PeerID) async -> Void
     /// What the connected peers' hellos said they speak: who a bundle is asked of.
-    let peerCapabilities = PeerCapabilities()
+    package let peerCapabilities = PeerCapabilities()
     /// The most bytes one session may hold: what a session reserves when
     /// nothing smaller bounds its content.
-    let maximumStorageBytes: Int
+    package let maximumStorageBytes: Int
     /// The node's one budget every session reserves from.
-    let budget: AcquisitionBudget
+    package let budget: AcquisitionBudget
 
     public final class Session: ContentSource {
         private let canAsk: @Sendable () async -> Bool
@@ -384,7 +385,7 @@ public struct IvyRootContentSource: Sendable {
 
         /// A trace line's account of a Volume a peer sent: its entries,
         /// their bytes and their CIDs' text.
-        static func receivedLine(_ volume: SerializedVolume) -> String {
+        package static func receivedLine(_ volume: SerializedVolume) -> String {
             "received entries \(volume.entries.count) bytes \(volume.entries.values.reduce(0) { $0 + $1.count })"
                 + " cidBytes \(volume.entries.keys.reduce(0) { $0 + $1.utf8.count })"
         }
@@ -455,7 +456,7 @@ public struct IvyRootContentSource: Sendable {
         }
 
         /// What the entries this session holds are charged against its budget.
-        var accountedBytes: Int { context.accountedBytes }
+        package var accountedBytes: Int { context.accountedBytes }
 
         /// A Volume this session requested passed CID validation: credit the
         /// peer that served it with its bytes.
@@ -465,7 +466,7 @@ public struct IvyRootContentSource: Sendable {
             await credit(peer, bytes)
         }
 
-        func volume(rootCID: String) async -> SerializedVolume? {
+        package func volume(rootCID: String) async -> SerializedVolume? {
             guard context.rootCID == rootCID else { return nil }
             if await context.volume(rootCID: rootCID) == nil {
                 _ = await fetch([rootCID])
@@ -566,7 +567,7 @@ public struct IvyRootContentSource: Sendable {
         { _, peer in await ivy.tally.recordProtocolViolation(peer: peer) }
     }
 
-    init(
+    package init(
         maximumStorageBytes: Int = Self.defaultPolicy.maximumAcquisitionStorageBytes,
         budget: AcquisitionBudget? = nil,
         fetch: @escaping @Sendable (String) async -> AttributedVolumeResponse,
@@ -655,46 +656,6 @@ public struct IvyRootContentSource: Sendable {
             capture?.record(session.attribution)
             await session.end()
             throw error
-        }
-    }
-}
-
-/// Serves complete local Volume boundaries from the recovered chain storage.
-struct NodeStorageIvyContentSource: IvyContentSource {
-    let storage: NodeStorage
-    let transientRootVolume: (@Sendable (String) async -> SerializedVolume?)?
-
-    init(
-        storage: NodeStorage,
-        transientRootVolume: (@Sendable (String) async -> SerializedVolume?)? = nil
-    ) {
-        self.storage = storage
-        self.transientRootVolume = transientRootVolume
-    }
-
-    func volumeBundle(rootCID: String) async -> [String] {
-        await storage.volumeBundle(rootCID)
-    }
-
-    func volume(rootCID: String, maxDataBytes: Int) async -> [ContentEntry] {
-        let volume: SerializedVolume
-        if let transient = await transientRootVolume?(rootCID) {
-            // Sent to a peer, so checked first, as `NodeStorage.volume`
-            // checks the Volumes it reads.
-            guard (try? transient.validate()) != nil else { return [] }
-            volume = transient
-        } else if let stored = await storage.volume(rootCID) {
-            volume = stored
-        } else {
-            return []
-        }
-        var remaining = maxDataBytes
-        for data in volume.entries.values {
-            guard data.count <= remaining else { return [] }
-            remaining -= data.count
-        }
-        return volume.entries.sorted { $0.key < $1.key }.map {
-            ContentEntry(cid: $0.key, data: $0.value)
         }
     }
 }

@@ -4,6 +4,7 @@ import UInt256
 import XCTest
 import cashew
 @testable import LatticeNode
+@testable import LatticeNodeNet
 
 /// Safety net: what boot does with one damaged row in each table it reads.
 ///

@@ -28,7 +28,7 @@ public final class AcquisitionBudget: @unchecked Sendable {
         /// (`prioritize`).
         case body(String, depth: Int = 0)
 
-        var traceLabel: String {
+        package var traceLabel: String {
             switch self {
             case .ownWork: "ownWork"
             case .body(_, let depth): "body depth \(depth)"
@@ -38,20 +38,20 @@ public final class AcquisitionBudget: @unchecked Sendable {
 
     /// Read and written under `lock` only.
     private final class Waiter: @unchecked Sendable {
-        let bytes: Int
-        let priority: Priority
-        let sequence: UInt64
-        var continuation: CheckedContinuation<Bool, Never>?
-        var cancelled = false
+        package let bytes: Int
+        package let priority: Priority
+        package let sequence: UInt64
+        package var continuation: CheckedContinuation<Bool, Never>?
+        package var cancelled = false
 
-        init(bytes: Int, priority: Priority, sequence: UInt64) {
+        package init(bytes: Int, priority: Priority, sequence: UInt64) {
             self.bytes = bytes
             self.priority = priority
             self.sequence = sequence
         }
     }
 
-    let capacity: Int
+    package let capacity: Int
     private let lock = NSLock()
     private var used = 0
     private var peak = 0
@@ -59,28 +59,28 @@ public final class AcquisitionBudget: @unchecked Sendable {
     private var next: Set<String> = []
     private var waiters: [Waiter] = []
 
-    init(capacity: Int) {
+    package init(capacity: Int) {
         precondition(capacity > 0)
         self.capacity = capacity
     }
 
     /// The bytes reserved now.
-    var reserved: Int { lock.withLock { used } }
+    package var reserved: Int { lock.withLock { used } }
 
     /// The most bytes ever reserved at once.
-    var peakReserved: Int { lock.withLock { peak } }
+    package var peakReserved: Int { lock.withLock { peak } }
 
     /// The sessions waiting now.
-    var waiting: Int { lock.withLock { waiters.count } }
+    package var waiting: Int { lock.withLock { waiters.count } }
 
     /// Reserved of capacity and the sessions waiting, for a trace line.
-    var occupancy: String {
+    package var occupancy: String {
         lock.withLock { "used \(used >> 20)/\(capacity >> 20) MiB waiting \(waiters.count)" }
     }
 
     /// The blocks each chain can connect next: their body fetches wait
     /// ahead of look-ahead.
-    func prioritize(_ blocks: Set<String>) {
+    package func prioritize(_ blocks: Set<String>) {
         resume(lock.withLock {
             guard blocks != next else { return [] }
             next = blocks
@@ -91,7 +91,7 @@ public final class AcquisitionBudget: @unchecked Sendable {
     /// Reserves `bytes` (at most the capacity), waiting while they do not
     /// fit or others wait ahead. The bytes reserved, or nil when the task
     /// was cancelled first: then nothing is reserved.
-    func reserve(_ bytes: Int, priority: Priority) async -> Int? {
+    package func reserve(_ bytes: Int, priority: Priority) async -> Int? {
         let bytes = min(max(bytes, 0), capacity)
         let waiter = lock.withLock {
             sequence += 1
@@ -122,7 +122,7 @@ public final class AcquisitionBudget: @unchecked Sendable {
         return granted ? bytes : nil
     }
 
-    func release(_ bytes: Int) {
+    package func release(_ bytes: Int) {
         guard bytes != 0 else { return }
         resume(lock.withLock {
             used -= bytes

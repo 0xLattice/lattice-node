@@ -12,16 +12,16 @@ import Tally
 /// since the last write, never an operator credit: a credit is written before
 /// it is applied.
 public actor ServingLedger {
-    static let fileName = "serving.json"
+    package static let fileName = "serving.json"
 
     /// Fields it does not name (an older file's credited payments) are
     /// ignored.
     private struct File: Codable {
-        var version: Int
+        package var version: Int
         /// Peer key (raw hex) to bytes of standing.
-        var standings: [String: Int]
+        package var standings: [String: Int]
 
-        enum CodingKeys: String, CodingKey {
+        package enum CodingKeys: String, CodingKey {
             case version
             case standings = "balances"
         }
@@ -34,7 +34,7 @@ public actor ServingLedger {
     /// Restores the standings on file into `tally`. A file that is there but
     /// cannot be read fails the start: starting without it would lose the
     /// standings it holds.
-    init(directory: URL, tally: Tally) throws {
+    package init(directory: URL, tally: Tally) throws {
         file = directory.appendingPathComponent(Self.fileName)
         self.tally = tally
         guard FileManager.default.fileExists(atPath: file.path) else {
@@ -57,7 +57,7 @@ public actor ServingLedger {
 
     /// A peer as Ivy and the node print it: its Ed25519 public key, 64
     /// lowercase hex characters. Any other spelling is nil.
-    static func peer(_ key: String) -> PeerID? {
+    package static func peer(_ key: String) -> PeerID? {
         guard isPeer(key) else { return nil }
         return PeerID(publicKey: key)
     }

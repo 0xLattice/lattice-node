@@ -1,3 +1,4 @@
+import LatticeNodeConfig
 import Foundation
 import Ivy
 import Tally
@@ -9,78 +10,83 @@ import LatticeNodeSupport
 /// the provider records they announce under P's read-endpoint key: P's
 /// rendezvous. Answers are UNVERIFIED claims: a reader checks what a URL
 /// serves before it uses it.
-enum ReadEndpointTopic {
-    static let request = "lattice.overlay.read-endpoint.request.v1"
-    static let response = "lattice.overlay.read-endpoint.response.v1"
+package enum ReadEndpointTopic {
+    package static let request = "lattice.overlay.read-endpoint.request.v1"
+    package static let response = "lattice.overlay.read-endpoint.response.v1"
     /// The same answer with the host's public-submit declaration. A host that
     /// accepts submits sends it BEFORE the v1 answer, so a reader that knows
     /// it records the flag and one that does not (an unknown topic is dropped)
     /// still gets the URL from v1. A v1 answer alone means no submit.
-    static let responseV2 = "lattice.overlay.read-endpoint.response.v2"
+    package static let responseV2 = "lattice.overlay.read-endpoint.response.v2"
 }
 
 /// One declared endpoint: its URL and whether its host says it accepts
 /// `POST /transactions` there. Both unverified.
-struct DeclaredReadEndpoint: Equatable, Sendable {
-    let url: String
-    let acceptsSubmit: Bool
+package struct DeclaredReadEndpoint: Equatable, Sendable {
+    package let url: String
+    package let acceptsSubmit: Bool
+
+    package init(url: String, acceptsSubmit: Bool) {
+        self.url = url
+        self.acceptsSubmit = acceptsSubmit
+    }
 }
 
 /// "Your declared read URL for `chainPath`?"
-struct ReadEndpointRequestMessage: CanonicalJSONMessage, Equatable, Sendable {
-    let chainPath: [String]
-    let requestID: UInt64
+package struct ReadEndpointRequestMessage: CanonicalJSONMessage, Equatable, Sendable {
+    package let chainPath: [String]
+    package let requestID: UInt64
 
-    func validate() throws {
+    package func validate() throws {
         guard _isAbsoluteChainPath(chainPath) else { throw OverlayWireError.malformed }
     }
 }
 
 /// The answer: sent only by a host of `chainPath` that declared a URL; no
 /// answer means no.
-struct ReadEndpointResponseMessage: CanonicalJSONMessage, Equatable, Sendable {
-    static let maximumURLBytes = SettingLimits.maximumPublicReadURLBytes
+package struct ReadEndpointResponseMessage: CanonicalJSONMessage, Equatable, Sendable {
+    package static let maximumURLBytes = SettingLimits.maximumPublicReadURLBytes
 
-    let chainPath: [String]
-    let requestID: UInt64
-    let url: String
+    package let chainPath: [String]
+    package let requestID: UInt64
+    package let url: String
 
-    func validate() throws {
-        guard _isAbsoluteChainPath(chainPath), NodeConfiguration.isValidPublicReadURL(url) else {
+    package func validate() throws {
+        guard _isAbsoluteChainPath(chainPath), SettingLimits.isValidPublicReadURL(url) else {
             throw OverlayWireError.malformed
         }
     }
 }
 
-enum ReadEndpointKey {
+package enum ReadEndpointKey {
     /// The provider-record key a host of `chainPath` with a declared read URL
     /// announces: scoped to the Nexus it runs under, so two networks sharing
     /// a DHT never mix.
-    static func key(nexusGenesisCID: String, chainPath: [String]) -> String {
+    package static func key(nexusGenesisCID: String, chainPath: [String]) -> String {
         "lattice.read-endpoint.v1:\(nexusGenesisCID):\(chainPath.joined(separator: "/"))"
     }
 }
 
 /// What the directory needs from the overlay.
-struct ReadEndpointTransport: Sendable {
+package struct ReadEndpointTransport: Sendable {
     /// Providers of a key this node already has a session with, from the
     /// records it holds: asked at once, without a search.
-    var connectedProviders: @Sendable (String) async -> [PeerEndpoint] = { _ in [] }
+    package var connectedProviders: @Sendable (String) async -> [PeerEndpoint] = { _ in [] }
     /// Provider endpoints announced under a key.
-    let providers: @Sendable (String) async -> [PeerEndpoint]
+    package let providers: @Sendable (String) async -> [PeerEndpoint]
     /// Connect when needed, then send the request: whether the request was
     /// sent (a request never sent is never answered, so it is not waited
     /// for) and whether a session was dialed for it (closed when its lookup
     /// ends, sent or not).
-    let ask: @Sendable (PeerEndpoint, ReadEndpointRequestMessage) async -> (sent: Bool, dialed: Bool)
+    package let ask: @Sendable (PeerEndpoint, ReadEndpointRequestMessage) async -> (sent: Bool, dialed: Bool)
     /// Close a session `ask` dialed, once its lookup is over.
-    let release: @Sendable (PeerEndpoint) async -> Void
+    package let release: @Sendable (PeerEndpoint) async -> Void
 
     /// The node's overlay: providers from the DHT, a dial when no session.
     /// The DHT search leaves out providers this node is connected to (it
     /// looks for peers it has no session with), so those come from the
     /// records it holds.
-    static func overlay(_ ivy: Ivy, keep: Set<String> = []) -> ReadEndpointTransport {
+    package static func overlay(_ ivy: Ivy, keep: Set<String> = []) -> ReadEndpointTransport {
         ReadEndpointTransport(
             connectedProviders: { key in
                 let providers = Set(await ivy.providers(for: key).map(\.publicKey))
@@ -110,14 +116,14 @@ struct ReadEndpointTransport: Sendable {
 }
 
 /// The v2 answer: the v1 fields and the host's submit declaration.
-struct ReadEndpointResponseV2Message: CanonicalJSONMessage, Equatable, Sendable {
-    let chainPath: [String]
-    let requestID: UInt64
-    let url: String
-    let acceptsSubmit: Bool
+package struct ReadEndpointResponseV2Message: CanonicalJSONMessage, Equatable, Sendable {
+    package let chainPath: [String]
+    package let requestID: UInt64
+    package let url: String
+    package let acceptsSubmit: Bool
 
-    func validate() throws {
-        guard _isAbsoluteChainPath(chainPath), NodeConfiguration.isValidPublicReadURL(url) else {
+    package func validate() throws {
+        guard _isAbsoluteChainPath(chainPath), SettingLimits.isValidPublicReadURL(url) else {
             throw OverlayWireError.malformed
         }
     }
@@ -145,22 +151,22 @@ struct ReadEndpointResponseV2Message: CanonicalJSONMessage, Equatable, Sendable 
 /// Only URLs found are kept, at most `maximumKept` per path (the newest), so
 /// what made-up names cost stays bounded as before; the answers are
 /// unverified claims either way, which a reader checks before it uses one.
-actor ReadEndpointDirectory {
-    static let maximumAsked = 8
-    static let perResponderCap = 2
-    static let emptyCacheSeconds = 5.0
-    static let lastFoundSeconds = 600.0
-    static let maximumConcurrentLookups = 16
+package actor ReadEndpointDirectory {
+    package static let maximumAsked = 8
+    package static let perResponderCap = 2
+    package static let emptyCacheSeconds = 5.0
+    package static let lastFoundSeconds = 600.0
+    package static let maximumConcurrentLookups = 16
     /// What one lookup can find: the most kept per path.
-    static let maximumKept = maximumAsked * perResponderCap
+    package static let maximumKept = maximumAsked * perResponderCap
     /// At most this many of the asked are connected providers: their
     /// records can be referred by any peer, so the rest is kept for the
     /// providers the search finds.
-    static let maximumConnectedAsked = maximumAsked / 2
+    package static let maximumConnectedAsked = maximumAsked / 2
     /// Once one URL is in, the others asked (and the search, if still out)
     /// have this long more: a provider that does not host the chain never
     /// answers, so waiting for every answer is waiting for the deadline.
-    static let searchGrace: Duration = .milliseconds(500)
+    package static let searchGrace: Duration = .milliseconds(500)
 
     private let transport: ReadEndpointTransport
     private let nexusGenesisCID: String
@@ -184,29 +190,29 @@ actor ReadEndpointDirectory {
     private var dialHolds: [PeerEndpoint: Int] = [:]
 
     private struct Lookup {
-        let chainPath: [String]
+        package let chainPath: [String]
         /// Requests sent and not yet answered.
-        var unanswered: Set<UInt64> = []
+        package var unanswered: Set<UInt64> = []
         /// Peers asked, this node's own key among them so it never is.
-        var asked: Set<String>
+        package var asked: Set<String>
         /// Until the DHT search returns, more providers may come.
-        var searching = true
-        var graceStarted = false
-        var graceOver = false
+        package var searching = true
+        package var graceStarted = false
+        package var graceOver = false
         /// The waiter has its answer; what comes in now goes to the cache.
-        var answered = false
-        var urls: [DeclaredReadEndpoint] = []
-        var perResponder: [String: Int] = [:]
-        var asks: [Task<Void, Never>] = []
+        package var answered = false
+        package var urls: [DeclaredReadEndpoint] = []
+        package var perResponder: [String: Int] = [:]
+        package var asks: [Task<Void, Never>] = []
         /// The search and the deadline: stopped when the lookup closes.
-        var discovery: Task<Void, Never>?
-        var timer: Task<Void, Never>?
+        package var discovery: Task<Void, Never>?
+        package var timer: Task<Void, Never>?
         /// Sessions dialed only for this lookup: closed when it ends.
-        var dialed: [PeerEndpoint] = []
-        var waiter: CheckedContinuation<[DeclaredReadEndpoint], Never>?
+        package var dialed: [PeerEndpoint] = []
+        package var waiter: CheckedContinuation<[DeclaredReadEndpoint], Never>?
     }
 
-    init(
+    package init(
         transport: ReadEndpointTransport,
         nexusGenesisCID: String,
         ownKey: String,
@@ -225,7 +231,7 @@ actor ReadEndpointDirectory {
     }
 
     /// The URLs other hosts declared for `chainPath`, unverified.
-    func lookup(_ chainPath: [String]) async -> [DeclaredReadEndpoint] {
+    package func lookup(_ chainPath: [String]) async -> [DeclaredReadEndpoint] {
         if let cached = cache[chainPath], clock() < cached.until { return cached.urls }
         if let running = inFlight[chainPath] { return await running.value }
         // Under pressure: the hosts kept, or nothing; nothing cached. A
@@ -264,11 +270,11 @@ actor ReadEndpointDirectory {
 
     /// A response from an authenticated peer: counted only as the answer to
     /// a request this directory sent that peer, for the path it asked.
-    func receive(_ response: ReadEndpointResponseMessage, from peerKey: String) {
+    package func receive(_ response: ReadEndpointResponseMessage, from peerKey: String) {
         receive(response.chainPath, response.requestID, response.url, acceptsSubmit: false, from: peerKey)
     }
 
-    func receive(_ response: ReadEndpointResponseV2Message, from peerKey: String) {
+    package func receive(_ response: ReadEndpointResponseV2Message, from peerKey: String) {
         receive(response.chainPath, response.requestID, response.url,
                 acceptsSubmit: response.acceptsSubmit, from: peerKey)
     }
@@ -410,7 +416,7 @@ actor ReadEndpointDirectory {
     }
 
     /// Answer a peer's request: a URL only for a level this node hosts.
-    static func answer(
+    package static func answer(
         _ request: ReadEndpointRequestMessage, hosted: Set<[String]>, url: String?
     ) -> ReadEndpointResponseMessage? {
         guard let url, hosted.contains(request.chainPath) else { return nil }
@@ -419,7 +425,7 @@ actor ReadEndpointDirectory {
 
     /// The v2 answer sent before `answer`'s, only when this host accepts
     /// public submits: a host without it answers exactly as before.
-    static func answerV2(
+    package static func answerV2(
         _ request: ReadEndpointRequestMessage, hosted: Set<[String]>, url: String?, acceptsSubmit: Bool
     ) -> ReadEndpointResponseV2Message? {
         guard acceptsSubmit, let v1 = answer(request, hosted: hosted, url: url) else { return nil }

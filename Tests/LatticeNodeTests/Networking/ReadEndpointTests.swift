@@ -4,6 +4,7 @@ import Ivy
 import Synchronization
 import XCTest
 @testable import LatticeNode
+@testable import LatticeNodeNet
 
 /// The read-endpoint directory's bounds, over a scripted transport: who is
 /// asked, what is counted, when a lookup ends, and what is reused.

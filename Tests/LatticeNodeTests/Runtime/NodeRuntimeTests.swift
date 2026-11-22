@@ -725,9 +725,7 @@ final class NodeRuntimeTests: XCTestCase {
             let template = try await runtime.miningTemplate(MiningTemplateRequest())
             var nonce: UInt64 = 0
             while Self.block(template.block, nonce: nonce).proofOfWorkHash() > template.searchTarget { nonce += 1 }
-            carried += try await MiningTemplateAssembly.blockTransactions(
-                in: Self.block(template.block, nonce: nonce), fetcher: storage
-            ).count
+            carried += try await Self.block(template.block, nonce: nonce).orderedTransactions(fetcher: storage).count
             _ = try await runtime.submitWork(SubmitWorkRequest(workID: template.workID, nonce: nonce))
         }
         XCTAssertEqual(carried, 2, "both are mined: neither is stuck at the head of the template")
@@ -803,9 +801,7 @@ final class NodeRuntimeTests: XCTestCase {
         while Self.block(template.block, nonce: nonce).proofOfWorkHash() > template.searchTarget { nonce += 1 }
         let mined = try await runtime.submitWork(SubmitWorkRequest(workID: template.workID, nonce: nonce))
         XCTAssertEqual(mined.disposition, .canonicalized)
-        let carried = try await MiningTemplateAssembly.blockTransactions(
-            in: Self.block(template.block, nonce: nonce), fetcher: storage
-        )
+        let carried = try await Self.block(template.block, nonce: nonce).orderedTransactions(fetcher: storage)
         XCTAssertEqual(try carried.map { try Mempool.cid(of: $0) }, [admitted.transactionCID])
         await runtime.stop()
 

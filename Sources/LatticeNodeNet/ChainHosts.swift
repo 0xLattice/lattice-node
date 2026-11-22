@@ -7,8 +7,8 @@ import LatticeNodeCore
 /// choice to settle. Scoped to the Nexus it runs under, so two networks
 /// sharing a DHT never mix. Nexus has none: every node hosts it, so every
 /// peer is one of its peers.
-enum ChainPeersKey {
-    static func key(nexusGenesisCID: String, chainPath: [String]) -> String {
+package enum ChainPeersKey {
+    package static func key(nexusGenesisCID: String, chainPath: [String]) -> String {
         "lattice.chain-peers.v1:\(nexusGenesisCID):\(chainPath.joined(separator: "/"))"
     }
 }
@@ -16,8 +16,8 @@ enum ChainPeersKey {
 /// How a hosted child level's peers are recognised: by the claim in their
 /// hello, and by the level's rendezvous. Nexus has none.
 public struct ChainHosts: Hashable, Sendable {
-    let path: ChainPath
-    let key: String
+    package let path: ChainPath
+    package let key: String
 
     public init(nexusGenesisCID: String, chainPath: ChainPath) {
         path = chainPath
@@ -26,7 +26,7 @@ public struct ChainHosts: Hashable, Sendable {
 
     /// The hosts a read of the chain at `path` asks first: a child chain's
     /// own; none for Nexus, whose peers all host it.
-    static func of(_ path: ChainPath, nexusGenesisCID: String) -> ChainHosts? {
+    package static func of(_ path: ChainPath, nexusGenesisCID: String) -> ChainHosts? {
         path.count > 1 ? ChainHosts(nexusGenesisCID: nexusGenesisCID, chainPath: path) : nil
     }
 }

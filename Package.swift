@@ -116,9 +116,24 @@ let package = Package(
                 .product(name: "UInt256", package: "UInt256"),
             ]),
         .target(
+            name: "LatticeNodeNet",
+            dependencies: [
+                "LatticeNodeAPI",
+                "LatticeNodeSupport",
+                "LatticeNodeCore",
+                "LatticeNodeConfig",
+                .product(name: "Lattice", package: "lattice"),
+                .product(name: "Ivy", package: "Ivy2"),
+                .product(name: "Tally", package: "Tally"),
+                .product(name: "VolumeBroker", package: "VolumeBroker"),
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "cashew", package: "cashew"),
+            ]),
+        .target(
             name: "LatticeNode",
             dependencies: [
                 "LatticeNodeAPI",
+                "LatticeNodeNet",
                 "LatticeNodeConfig",
                 "LatticeNodeStore",
                 "LatticeNodeSupport",
@@ -209,6 +224,7 @@ let package = Package(
         .testTarget(
             name: "LatticeNodeTests",
             dependencies: [
+                "LatticeNodeNet",
                 "BenchVFS",
                 "LatticeNodeAPI",
                 "LatticeNode",

@@ -197,13 +197,13 @@ final class ChildBlockBuildTests: XCTestCase {
         XCTAssertEqual(pooled, 1, "the hosting node pools the commit")
         let template = try await pair.builder.miningTemplate(pair.mining)
         let fetcher = pair.builderStorage.workFetcher(.anyChain)
-        let carried = try await MiningTemplateAssembly.blockTransactions(in: template.block, fetcher: fetcher)
+        let carried = try await template.block.orderedTransactions(fetcher: fetcher)
         XCTAssertTrue(carried.isEmpty, "the hosting node's template leaves the commit out")
         let own = template.block.children.node?[Self.alpha[1]]?.rawCID
         XCTAssertNotNil(own)
         XCTAssertNotEqual(own, built.blockCID)
         let mined = try await pair.builder.mine(template)
-        let minedCarried = try await MiningTemplateAssembly.blockTransactions(in: mined, fetcher: fetcher)
+        let minedCarried = try await mined.orderedTransactions(fetcher: fetcher)
         XCTAssertTrue(minedCarried.isEmpty, "and so does the block it mines")
     }
 
