@@ -476,7 +476,7 @@ by about 7% (PROFILE, three quiet runs before, four after; runs under
 contention on the shared host are left out). Everything else needs
 Lattice or cashew: the walks resolve from a CID, so the node cannot hand
 them a decoded spec, block or index (a `ChainTree.connect` and
-`storeBlockContent` that take the chain's spec, or the cashew decode hook
+`resolveBoundedContent` that take the chain's spec, or the cashew decode hook
 above).
 
 **What it says, item by item.**

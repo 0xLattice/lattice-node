@@ -275,7 +275,7 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
         try await harness.step(.level(root, .mining(.templateRequested(replyID: 9, TemplateRequest(rewardRecipient: nil)))))
 
         let tree = harness.host.levels[root]!.tree
-        let copy = try XCTUnwrap(ChainLevel(tree: tree))
+        let copy = tree.detached()
         let fetcher = harness.storage.workFetcher(.anyChain)
         var dispositions: [TransactionPreflightDisposition] = []
         var anchors = 0
@@ -286,12 +286,15 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
                 let read = await TransactionPreflight.classify(
                     job.transaction, tipCID: job.tipCID, snapshot: basis.snapshot, chainPath: root, fetcher: fetcher
                 )
-                let copied = await copy.preflightTransaction(job.transaction, at: job.tipCID, fetcher: fetcher)
+                let tip = copy.transactionPreflightTip(at: job.tipCID)
+                let copied = await TransactionPreflight.classify(
+                    job.transaction, tipCID: tip.cid, snapshot: tip.snapshot, chainPath: root, fetcher: fetcher
+                )
                 XCTAssertEqual(read, copied)
                 dispositions.append(read.disposition)
             case .buildTemplate(let job):
                 let basis = try XCTUnwrap(NodeRuntime.miningBasis(effect, tree: tree))
-                let copied = await copy.chain.difficultyAnchor(forBlockHash: job.tipCID)
+                let copied = copy.difficultyAnchor(forBlockHash: job.tipCID)
                 XCTAssertNotNil(copied)
                 XCTAssertEqual(basis.anchor, copied)
                 anchors += 1

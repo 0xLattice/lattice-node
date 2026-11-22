@@ -229,12 +229,13 @@ may request a Volume, including a same-key replacement connection. Entry CIDs,
 bounded framing, and atomic publication are transport/storage details; node
 protocol messages never request arbitrary CID selections.
 
-A block's bundle is the content the protocol's `storeBlockContent` defines
-for it: the block's own Volume, its transactions', its spec and policy
-modules, never the state it reads or writes, its parent or its child blocks,
-with one exception: a child block's parent-receipt witness
-(`storeParentReceiptWitness`), the parent state's nodes on the path to each
-of its withdrawals' receipts. That state is another chain's, which the node
+A block's bundle is the content the protocol says a block carries
+(`Block.carriedContentPaths`, which the node's `storeBlockContent` stores):
+the block's own Volume, its transactions', its spec and policy modules, never
+the state it reads or writes, its parent or its child blocks, with one
+exception: a child block's parent-receipt witness
+(`Block.parentReceiptWitnessPaths`, stored by `storeParentReceiptWitness`),
+the parent state's nodes on the path to each of its withdrawals' receipts. That state is another chain's, which the node
 does not derive by executing the block's parent, so the witness travels with
 the body, as the protocol's validation witness data (§3.5).
 A node derives a block's pre-state by executing its parent, as Bitcoin's

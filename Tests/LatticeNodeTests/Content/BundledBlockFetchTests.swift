@@ -388,7 +388,7 @@ final class BundledBlockFetchTests: XCTestCase {
         // Stored raw, its boundary and its transaction: storing it as a block
         // would refuse it, as the joiner must.
         try await VolumeImpl<Transaction>(node: oversized).storeRecursively(storer: producer)
-        try await BlockHeader(node: built.block).storeBlockBoundary(fetcher: producer, storer: producer)
+        try await BlockHeader(node: built.block).store(storer: producer)
         let cid = try BlockHeader(node: built.block).rawCID
 
         let stored = try await joiner.fetchChainBody(cid, remote: remote(producer, requests: Requests()))

@@ -2,8 +2,8 @@ import Foundation
 
 /// For a block root, the Volume roots that make up its bundle.
 ///
-/// A block's bundle is the content the protocol's `storeBlockContent`
-/// defines for it: the block's own Volume, its transactions', its spec and
+/// A block's bundle is the content `storeBlockContent` stores for it
+/// (`Block.carriedContentPaths`): the block's own Volume, its transactions', its spec and
 /// policy modules. Never the state it reads or writes, its parent or its
 /// child blocks. This is a cache of those roots, so a peer
 /// can be sent them together: recorded when a block is stored, recomputed
