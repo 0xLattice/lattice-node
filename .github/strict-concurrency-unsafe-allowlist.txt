@@ -32,3 +32,4 @@ Sources/LatticeNode/Observability/NodeLog.swift|public final class NodeLog: @unc
 Tests/LatticeNodeE2ETests/LatticeCtlE2ETests.swift|private final class NodeSupervisor: @unchecked Sendable {|Test-only process manager; its process, stopping flag and exit list are read and written only under its NSLock.
 Sources/LatticeNodeDaemon/LatticeNodeCommand.swift|final class Hangups: @unchecked Sendable {|The signal source, the action and the missed flag are read and written only under Hangups's NSLock.
 Tests/LatticeNodeTests/Storage/NodeSQLiteReadTests.swift|nonisolated(unsafe) var count: Int64?|Test-only result slot; the reader thread writes it before counted.signal() and the test reads it only after counted.wait(), so the semaphore orders the two.
+Tests/LatticeNodeTests/Runtime/ReceiptWitnessTests.swift|private final class ReadCounting: Fetcher, @unchecked Sendable {|Test-only fetch wrapper; its read counts are guarded by ReadCounting's NSLock.

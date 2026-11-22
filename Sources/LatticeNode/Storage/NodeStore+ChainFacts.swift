@@ -7,11 +7,13 @@ import LatticeNodeCore
 struct NodeFactBatch: Sendable {
     let path: ChainPath
     let facts: [BlockImportBatch]
+    /// The state diff of each block these facts executed, by block hash
+    /// (`ChainTreeUpdate.stateDiff`): a block fact never carries one.
+    var stateDiffs: [String: StateDiff] = [:]
     var headers: [StoredHeader] = []
     var proofs: [StoredProof] = []
     let cursors: [String: StreamCursor]
-    /// Keep the state diffs of the blocks these facts executed, for the
-    /// state window (`state: recent`). A block fact never carries one.
+    /// Keep `stateDiffs`, for the state window (`state: recent`).
     var keepsStateDiffs = false
 }
 
@@ -55,12 +57,13 @@ extension NodeStore {
                     guard case .block(let block) = fact else {
                         return (try Self.encode(fact.id), try Self.encode(fact))
                     }
-                    // An executed block's diff is in the batch that
+                    // An executed block's diff is kept with the batch that
                     // validates it.
-                    if level.keepsStateDiffs, validated.contains(block.blockHash) {
-                        diffs.append((block.blockHash, block.blockHeight, try Self.encode(block.stateDiff)))
+                    if level.keepsStateDiffs, validated.contains(block.blockHash),
+                       let diff = level.stateDiffs[block.blockHash] {
+                        diffs.append((block.blockHash, block.blockHeight, try Self.encode(diff)))
                     }
-                    return (try Self.encode(fact.id), try Self.encode(ChainFact.block(Self.withoutStateDiff(block))))
+                    return (try Self.encode(fact.id), try Self.encode(fact))
                 }
                 rows.append(PreparedRow(
                     facts: facts,
@@ -206,27 +209,6 @@ extension NodeStore {
                 position: try row.position
             ))
         })
-    }
-
-    /// The block fact as stored: its execution's state diff is undo data,
-    /// kept apart for the state window, so the fact a block's execution
-    /// re-states is the one its weighing staged.
-    static func withoutStateDiff(_ fact: ChainBlockFact) -> ChainBlockFact {
-        guard !fact.stateDiff.isEmpty else { return fact }
-        return ChainBlockFact(
-            blockHash: fact.blockHash,
-            parentBlockHash: fact.parentBlockHash,
-            blockHeight: fact.blockHeight,
-            postStateCID: fact.postStateCID,
-            prevStateCID: fact.prevStateCID,
-            parentStateCID: fact.parentStateCID,
-            specCID: fact.specCID,
-            target: fact.target,
-            nextTarget: fact.nextTarget,
-            timestamp: fact.timestamp,
-            stateDiff: .empty,
-            childCommitments: fact.childCommitments
-        )
     }
 
     /// Every chain this store holds a fact, a cursor or a child proof of:

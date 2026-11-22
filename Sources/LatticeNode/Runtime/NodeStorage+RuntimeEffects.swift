@@ -98,6 +98,7 @@ extension NodeStorage {
             durable.append(NodeFactBatch(
                 path: path,
                 facts: level.facts,
+                stateDiffs: level.stateDiffs,
                 headers: level.headers,
                 proofs: level.proofs,
                 cursors: level.cursors,

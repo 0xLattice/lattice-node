@@ -9,8 +9,7 @@ import cashew
 @testable import LatticeNode
 
 /// What in-flight mining jobs cost while the live tree moves on: a job that
-/// held a copy of its level's tree (`ChainLevel(tree:)`, as the per-epoch
-/// copy did) makes the live tree's next insert duplicate its storage, so N
+/// held a copy of its level's tree (as the per-epoch copy did) makes the live tree's next insert duplicate its storage, so N
 /// jobs on N tips hold up to N more trees. A job holding a `MiningBasis`
 /// holds a few hundred bytes. Run with `MINING_BASIS_BENCH=1` (blocks:
 /// `MINING_BASIS_BENCH_BLOCKS`, default 50,000); it prints heap in use.
@@ -37,7 +36,7 @@ final class MiningBasisMemoryBench: XCTestCase {
             .block(ChainBlockFact(
                 blockHash: hash, parentBlockHash: index == 0 ? nil : cid("b", index - 1),
                 blockHeight: UInt64(index), postStateCID: cid("s", index), prevStateCID: cid("s", index - 1),
-                specCID: cid("spec", 0), target: max, nextTarget: max, timestamp: Int64(index), stateDiff: .empty
+                specCID: cid("spec", 0), target: max, nextTarget: max, timestamp: Int64(index)
             )),
             .work(ChainWorkFact(blockHash: hash, contribution: contribution)),
             .validation(ChainValidationFact(blockHash: hash)),
@@ -65,7 +64,7 @@ final class MiningBasisMemoryBench: XCTestCase {
             let tip = Self.cid("b", blocks - 1 + job)
             if copying {
                 // What a job holding the tree held: its own copy of it.
-                held.append(try XCTUnwrap(ChainLevel(tree: live.detached())))
+                held.append(live.detached())
             } else {
                 held.append(MiningBasis(
                     snapshot: live.transactionPreflightTip(at: tip).snapshot, anchor: NodeRuntime.anchor(live, tip)

@@ -182,6 +182,32 @@ final class ReceiptWitnessTests: XCTestCase {
         let content = NodeImportStorage(storage: nil, keepsVolumes: true)
         try await BlockHeader(rawCID: withdrawalBlock).storeBlockContent(fetcher: local, storer: content)
         let contentVolumes = await content.takeVolumes().map(\.volume)
+        // Its content reads none of the state the block names; storing the
+        // block whole (`storeBlock`) reads its pre-state. Its content with its
+        // witness stores both and reads the content's nodes no more often than
+        // the content alone does: beyond them, only the witness.
+        let contentReads = ReadCounting(local)
+        try await BlockHeader(rawCID: withdrawalBlock).storeBlockContent(
+            fetcher: contentReads, storer: NodeImportStorage(storage: nil, keepsVolumes: true)
+        )
+        for state in [block.prevState.rawCID, block.parentState.rawCID, block.postState.rawCID] {
+            XCTAssertNil(contentReads.counts[state], "content read state \(state)")
+        }
+        let wholeReads = ReadCounting(local)
+        _ = try? await BlockHeader(rawCID: withdrawalBlock).storeBlock(
+            fetcher: wholeReads, storer: NodeImportStorage(storage: nil, keepsVolumes: true)
+        )
+        XCTAssertNotNil(wholeReads.counts[block.prevState.rawCID], "storeBlock reads the pre-state")
+        let together = NodeImportStorage(storage: nil, keepsVolumes: true)
+        let togetherReads = ReadCounting(local)
+        try await BlockHeader(rawCID: withdrawalBlock).storeBlockContent(
+            fetcher: togetherReads, storer: together, parentReceiptWitness: true
+        )
+        let togetherRoots = Set(await together.takeVolumes().map(\.volume.root))
+        XCTAssertEqual(togetherRoots, Set(contentVolumes.map(\.root)).union(witness))
+        for (cid, times) in contentReads.counts {
+            XCTAssertEqual(togetherReads.counts[cid], times, "content node \(cid) read again")
+        }
         let unreadable = Set(witness).subtracting(contentVolumes.map(\.root))
         XCTAssertFalse(unreadable.isEmpty)
         // Stored by a node holding nothing of it, so storing reads it.
@@ -253,6 +279,20 @@ final class ReceiptWitnessTests: XCTestCase {
 
     /// A fetch that ended with nothing served.
     private struct Unanswered: Error {}
+
+    /// Counts every read it passes to `fetcher`.
+    private final class ReadCounting: Fetcher, @unchecked Sendable {
+        private let fetcher: any Fetcher
+        private let lock = NSLock()
+        private var reads: [String: Int] = [:]
+        init(_ fetcher: any Fetcher) { self.fetcher = fetcher }
+        var counts: [String: Int] { lock.withLock { reads } }
+
+        func fetch(rawCid: String) async throws -> Data {
+            lock.withLock { reads[rawCid, default: 0] += 1 }
+            return try await fetcher.fetch(rawCid: rawCid)
+        }
+    }
 
     /// Reads through `fetcher` except `cids`, which fail.
     private struct Unreadable: Fetcher {

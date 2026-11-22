@@ -101,6 +101,7 @@ actor NodeStore {
             guard tableNames == Self.expectedTables else {
                 throw NodeStoreError.wipeRequired("schema tables are missing or unexpected")
             }
+            try Self.migrateFactFormat(in: database)
         }
         try database.configureDurability()
 

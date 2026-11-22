@@ -547,7 +547,7 @@ public struct Simulator {
     mutating func step(_ name: String, _ event: ChainEvent) async throws {
         // The step mutates the one copy: the node is taken out and put back.
         guard var node = cores.removeValue(forKey: name) else { return }
-        let revision = node.core.tree.currentRevision()
+        let tipBefore = node.core.tree.canonicalTip
         var effects = node.core.step(event, now: now)
         if faults.publishBeforePersist {
             effects = effects.filter { if case .publish = $0 { true } else { false } }
@@ -571,7 +571,8 @@ public struct Simulator {
                     batch = ChainBatch(
                         headers: batch.headers,
                         states: batch.states,
-                        facts: batch.facts.filter { $0 != dropped }
+                        facts: batch.facts.filter { $0 != dropped },
+                        stateDiffs: batch.stateDiffs
                     )
                 }
                 // Content first: the post-states are stored before the facts
@@ -677,14 +678,17 @@ public struct Simulator {
                 throw Invariants.fail(name, "a root level emitted a child-level effect")
             }
         }
-        // Every weight mutation advances the revision, and an execution
-        // persists: otherwise the tree is unchanged, and its tree invariants
-        // already hold. An execution that moved no weight, head or
-        // exclusion skips the GHOST reference.
-        let revisionChanged = node.core.tree.currentRevision() != revision
-        let treeChanged = revisionChanged || persisted
+        // Every tree mutation stages its facts, so it persists: otherwise
+        // the tree is unchanged, and its tree invariants already hold. A
+        // weight mutation adds a block or a grind, or excludes a block: the
+        // digest's blocks or exclusions move. An execution that moved no
+        // weight, head or exclusion skips the GHOST reference.
+        let treeChanged = persisted || node.core.tree.canonicalTip != tipBefore
         let digest = treeChanged ? TreeDigest(node.core.tree) : node.digest
-        let weightsChanged = revisionChanged
+        let mutated = digest.blocks != node.digest.blocks
+            || digest.roots != node.digest.roots
+            || digest.excluded != node.digest.excluded
+        let weightsChanged = mutated
             || digest.canonicalPath != node.digest.canonicalPath
             || digest.excluded != node.digest.excluded
         try Invariants.check(
@@ -703,7 +707,7 @@ public struct Simulator {
         // Replay costs the whole log, so it runs every `replayInterval`
         // persists that moved weight, and once more at the end of the run
         // (an execution's validation replays with the next one).
-        if persisted && revisionChanged {
+        if persisted && mutated {
             node.persists += 1
             if node.persists % config.replayInterval == 0 {
                 try checkReplay(name, node, digest)

@@ -19,7 +19,7 @@ final class NodeStoreBootTests: XCTestCase {
             .block(ChainBlockFact(
                 blockHash: hash, parentBlockHash: nil, blockHeight: 0, postStateCID: "state",
                 prevStateCID: "previous-state", specCID: "spec", target: "target", nextTarget: "next-target",
-                timestamp: 0, stateDiff: .empty
+                timestamp: 0
             )),
         ])
     }

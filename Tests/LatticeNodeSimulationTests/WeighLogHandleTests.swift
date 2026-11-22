@@ -37,7 +37,7 @@ final class WeighLogHandleTests: XCTestCase {
         let block = ChainFact.block(ChainBlockFact(
             blockHash: genesis, parentBlockHash: nil, blockHeight: 0,
             postStateCID: state, prevStateCID: state, specCID: cid("spec"),
-            target: max, nextTarget: max, timestamp: 0, stateDiff: .empty
+            target: max, nextTarget: max, timestamp: 0
         ))
         let batches = try works.enumerated().map { index, work in
             BlockImportBatch(facts: (index == 0 ? [block] : []) + [try Self.work(work, at: genesis)])

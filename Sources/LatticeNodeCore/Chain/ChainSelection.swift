@@ -303,3 +303,37 @@ extension ChainCore {
         tree.height(of: cid).map(pastFinality(height:)) ?? false
     }
 }
+
+extension ChainTree {
+    /// The act-on descent with `avoided` blocks, and all they lead to, left
+    /// out: the heaviest executed tip, re-descended from the parent of the
+    /// lowest avoided block on its path (or from the heaviest executed root
+    /// not avoided), stepping only into executed children not avoided. The
+    /// node's retry descent, over public API; the tip itself when nothing
+    /// avoided is on its path.
+    func heaviestExecutedTip(avoiding avoided: Set<String>) -> String {
+        let tip = heaviestExecutedTip()
+        guard !tip.isEmpty, let floor = avoided.compactMap(height(of:)).min() else { return tip }
+        var lowest: String?
+        var cursor: String? = tip
+        while let block = cursor, let blockHeight = height(of: block), blockHeight >= floor {
+            if avoided.contains(block) { lowest = block }
+            cursor = parent(of: block)
+        }
+        guard let lowest else { return tip }
+        func preferred(_ blocks: [String]) -> String? {
+            blocks.compactMap { hash in forkChoiceWeight(of: hash).map { (hash: hash, work: $0) } }
+                .min { $0.work != $1.work ? $0.work > $1.work : forkChoicePrefersBlock($0.hash, over: $1.hash) }?
+                .hash
+        }
+        guard var current = parent(of: lowest) ?? preferred(genesisRoots.filter {
+            hasExecutedAncestry(blockHash: $0) && !avoided.contains($0)
+        }) else { return tip }
+        while let next = preferred(children(of: current).filter {
+            isExecuted(blockHash: $0) && !avoided.contains($0)
+        }) {
+            current = next
+        }
+        return current
+    }
+}
