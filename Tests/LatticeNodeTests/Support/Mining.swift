@@ -12,8 +12,8 @@ import LatticeNodeAPI
 // whose target is the maximum (block 1, and block 2 -- the anchor's own
 // `nextTarget` is its target). Everything deeper searches.
 //
-// `BlockBuilder.mine` restarts at nonce 0 and drops the block's own nonce, so
-// callers that need "the first solution at or above N" scan here instead.
+// A scan from nonce 0 drops the block's own nonce, so callers that need "the
+// first solution at or above N" scan here instead.
 
 /// Nonce scan over the consensus PoW preimage midstate: the first nonce at or
 /// above `start` whose hash the predicate accepts. Same inputs, same nonce.
