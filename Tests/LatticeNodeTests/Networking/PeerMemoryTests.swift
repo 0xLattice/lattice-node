@@ -300,7 +300,6 @@ final class PeerMemoryTests: XCTestCase {
     /// bootstrap peer is gone, and a node told to connect to no one neither
     /// remembers nor redials anyone.
     func testANodeRejoinsThroughAPeerItRemembersWhenItsBootstrapPeerIsGone() async throws {
-
         let (seedConfiguration, seedOverlay, seedEndpoint) = try loopbackHost("71", peers: [])
         let seed = try await startLoopbackHost(seedConfiguration, seedOverlay)
         let (otherConfiguration, otherOverlay, otherEndpoint) = try loopbackHost("72", peers: [seedEndpoint])
