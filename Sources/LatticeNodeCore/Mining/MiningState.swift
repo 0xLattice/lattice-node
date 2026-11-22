@@ -116,14 +116,18 @@ public struct TemplateRequest: Sendable, Equatable {
     public let parentCarrier: ParentCarrier?
     /// Each hosted child chain's reward recipient, by path.
     public let childRecipients: [[String]: String]
+    /// Hosted descendant chains this template carries no block for.
+    public let exclude: Set<[String]>
 
     public init(
         rewardRecipient: String?,
         minimumWork: [[String]: UInt256] = [:],
         parentCarrier: ParentCarrier? = nil,
-        childRecipients: [[String]: String] = [:]
+        childRecipients: [[String]: String] = [:],
+        exclude: Set<[String]> = []
     ) {
         self.childRecipients = childRecipients
+        self.exclude = exclude
         self.rewardRecipient = rewardRecipient
         self.minimumWork = minimumWork
         self.parentCarrier = parentCarrier

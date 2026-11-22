@@ -209,18 +209,26 @@ public struct MiningTemplateRequest: Codable, Sendable {
     /// A chain with no entry mines to no one: its block reward and fees burn.
     public let recipients: [MiningRecipient]
     public let minimumWork: [MiningMinimumWork]
+    /// Hosted chains, by absolute path below the template's own, whose next
+    /// block this template leaves out: no nonce for it makes a block there,
+    /// and its threshold is in neither `searchTarget` nor `targets`. A chain
+    /// that carries a hosted chain left in cannot be excluded.
+    public let exclude: [[String]]
 
     public init(
         recipients: [MiningRecipient] = [],
-        minimumWork: [MiningMinimumWork] = []
+        minimumWork: [MiningMinimumWork] = [],
+        exclude: [[String]] = []
     ) {
         self.recipients = recipients
         self.minimumWork = minimumWork
+        self.exclude = exclude
     }
 
     private enum CodingKeys: String, CodingKey {
         case recipients
         case minimumWork
+        case exclude
         case rewards
         case mode
     }
@@ -251,6 +259,10 @@ public struct MiningTemplateRequest: Codable, Sendable {
             [MiningMinimumWork].self,
             forKey: .minimumWork
         ) ?? []
+        exclude = try container.decodeIfPresent(
+            [[String]].self,
+            forKey: .exclude
+        ) ?? []
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -258,6 +270,9 @@ public struct MiningTemplateRequest: Codable, Sendable {
         try container.encode(recipients, forKey: .recipients)
         if !minimumWork.isEmpty {
             try container.encode(minimumWork, forKey: .minimumWork)
+        }
+        if !exclude.isEmpty {
+            try container.encode(exclude, forKey: .exclude)
         }
     }
 }
@@ -512,6 +527,12 @@ public enum NodeAPIError: Error, Equatable, Sendable {
     case invalidRecipientPlan
     case invalidMinimumWork
     case minimumWorkPlanTooLarge
+    /// An `exclude` entry that is not a chain below the template's, or
+    /// names one twice.
+    case invalidExclusion
+    /// An `exclude` entry carries a hosted chain the request leaves in: a
+    /// block on it is needed to carry that chain's.
+    case excludedAncestor
     case requestTooLarge
     case unresolvedTransactionContent
     case templateContextChanged

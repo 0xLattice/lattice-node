@@ -100,6 +100,34 @@ enum MiningPlan {
         )
     }
 
+    /// A miner's excluded chains: each a distinct chain below this one. A
+    /// block carries its descendants, so excluding a chain while a hosted
+    /// chain below it is left in is refused rather than silently dropping
+    /// that chain too. A chain not hosted here is carried by no template;
+    /// excluding it changes nothing.
+    static func validatedExclusions(
+        _ paths: [[String]],
+        chainPath currentPath: [String],
+        hosted: [[String]]
+    ) throws -> Set<[String]> {
+        var excluded: Set<[String]> = []
+        for path in paths {
+            guard ChainAddress(path) != nil,
+                  path.count > currentPath.count,
+                  Array(path.prefix(currentPath.count)) == currentPath,
+                  excluded.insert(path).inserted else {
+                throw NodeAPIError.invalidExclusion
+            }
+        }
+        for chain in hosted where !excluded.contains(chain) {
+            for depth in currentPath.count..<chain.count
+            where excluded.contains(Array(chain.prefix(depth))) {
+                throw NodeAPIError.excludedAncestor
+            }
+        }
+        return excluded
+    }
+
     /// Policies may read the carrying block's height and timestamp, which a
     /// pool verdict (taken against the tip, at its own time) did not see. Offer
     /// only transactions the policies accept for THIS template. Root and child

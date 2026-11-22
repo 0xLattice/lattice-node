@@ -522,6 +522,9 @@ submit is on.
   ],
   "minimumWork": [
     {"chainPath": ["Nexus"], "work": "0x100000000"}
+  ],
+  "exclude": [
+    ["Nexus", "Beta"]
   ]
 }
 ```
@@ -534,12 +537,24 @@ proof-of-work preimage.
 the scheduled target but cannot make consensus easier and is not committed as
 the chain's target.
 
+`exclude` names hosted chains, by absolute path below the template's own,
+whose next block this template leaves out. No nonce for the work makes a
+block on an excluded chain, and its threshold is in neither `searchTarget` nor
+`targets`. A block carries its descendants, so excluding a chain while a hosted
+chain below it is left in is refused (`excludedAncestor`); exclude the whole
+subtree instead. An entry that is not below the template's chain, or repeats
+one, is refused (`invalidExclusion`). Excluding a chain this node does not
+host changes nothing. The field is optional: without it every hosted chain is
+carried, as before. A node that predates it ignores it, so a miner relying on
+it checks that no excluded path is in `chains`.
+
 The response contains:
 
 - `workID` — opaque issued-work identifier;
 - `block` — complete nonce-zero Nexus candidate carrying child candidates;
 - `searchTarget` — the easiest threshold that can advance at least one carried
-  level, constrained by the request's minimum-work plan;
+  level, constrained by the request's minimum-work plan; excluded chains are
+  not carried;
 - `targets` — thresholds useful to the worker;
 - `chainPath` — `['Nexus']`;
 - `expiresInMilliseconds` — always 30000, kept for clients that require the

@@ -401,9 +401,13 @@ enum MiningTemplateAssembly {
             // below this child that its witness does not resolve caps the
             // search outright — over-strict when that chain's committed target
             // is already harder than its filter or the chain is absent, but
-            // never hiding a declined block.
+            // never hiding a declined block. A subtree known here needs no
+            // cap: this node built it under this plan, so its witness names
+            // the bound of every block it carries, and a chain it does not
+            // carry has no block a nonce could make.
             for (path, work) in minimumWork
-            where path.count > childPath.count
+            where !child.subtreeKnown
+                && path.count > childPath.count
                 && Array(path.prefix(childPath.count)) == childPath
                 && path != childPath + scheduled.path {
                 let cap = minimumWorkTarget(work)
