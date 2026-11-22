@@ -1,18 +1,9 @@
-import Crypto
 import Foundation
 import Ivy
 import XCTest
 @testable import LatticeNode
 
 final class DefaultBootstrapPeersTests: XCTestCase {
-    private func signingKey(_ byte: UInt8) throws -> Curve25519.Signing.PrivateKey {
-        // Throwing rather than `try!`: a trap would abort the whole test
-        // binary instead of failing this one test.
-        try Curve25519.Signing.PrivateKey(
-            rawRepresentation: Data(repeating: byte, count: 32)
-        )
-    }
-
     private func operatorPeer(_ byte: UInt8) throws -> PeerEndpoint {
         PeerEndpoint(
             publicKey: try PeerKey(
