@@ -381,41 +381,6 @@ private func healthHeight(_ client: some TestClientProtocol) async throws -> UIn
     return try XCTUnwrap(height)
 }
 
-/// Mines exactly one block atop the current tip through the loopback
-/// template/work routes, solving the issued template.
-private func mineOneBlock(client: some TestClientProtocol) async throws -> String {
-    var template: MiningTemplateResponse?
-    try await client.execute(
-        uri: "/mining/templates",
-        method: .post,
-        headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
-        body: ByteBuffer(bytes: try JSONEncoder().encode(MiningTemplateRequest()))
-    ) { response in
-        template = try JSONDecoder().decode(
-            MiningTemplateResponse.self,
-            from: Data(response.body.readableBytesView)
-        )
-    }
-    let issued = try XCTUnwrap(template)
-    var tipCID: String?
-    try await client.execute(
-        uri: "/mining/work",
-        method: .post,
-        headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
-        body: ByteBuffer(bytes: try JSONEncoder().encode(
-            SubmitWorkRequest(workID: issued.workID, nonce: solvedNonce(for: issued))
-        ))
-    ) { response in
-        let submitted = try JSONDecoder().decode(
-            SubmitWorkResponse.self,
-            from: Data(response.body.readableBytesView)
-        )
-        XCTAssertTrue(submitted.accepted)
-        tipCID = submitted.tipCID
-    }
-    return try XCTUnwrap(tipCID)
-}
-
 /// Parks the loader until every caller has registered, so a load cannot
 /// complete while any caller is still outside the cache.
 private actor CallerGate {

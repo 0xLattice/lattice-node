@@ -423,7 +423,7 @@ final class AnchoredChildTemplateTests: XCTestCase {
     func testAChildTemplateCarriesOnlyWhatItsPoliciesAccept() async throws {
         for (verdict, carried) in [(UInt8?.some(0), 0), (1, 2), (nil, 0)] {
             var builder = try await LevelWorld.Builder(levels: 2)
-            let module = WasmPolicyModule(bytes: Self.policyModule(verdict: verdict))
+            let module = WasmPolicyModule(bytes: policyModule(verdict: verdict))
             let header = try WasmPolicyModuleHeader(node: module)
             try await header.storeRecursively(storer: builder.cas as any VolumeStorer)
             let base = LevelWorld.specFor(Self.alpha)
@@ -456,27 +456,6 @@ final class AnchoredChildTemplateTests: XCTestCase {
                 refused, carried == 0 ? [PolicyRefusal(path: Self.alpha, tipCID: g.cid, cids: try spends.map(Mempool.cid(of:)))] : []
             )
         }
-    }
-
-    /// A WASM policy module that gives `verdict` for every transaction, or
-    /// traps (`unreachable`) without one.
-    private static func policyModule(verdict: UInt8?) -> Data {
-        func section(_ id: UInt8, _ body: [UInt8]) -> [UInt8] { [id, UInt8(body.count)] + body }
-        func export(_ name: String, kind: UInt8, index: UInt8) -> [UInt8] {
-            [UInt8(name.utf8.count)] + Array(name.utf8) + [kind, index]
-        }
-        var exports: [UInt8] = [0x03]
-        exports += export("memory", kind: 2, index: 0)
-        exports += export("lattice_alloc", kind: 0, index: 0)
-        exports += export("lattice_validate_transaction", kind: 0, index: 1)
-        var module: [UInt8] = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]
-        module += section(1, [0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f])
-        module += section(3, [0x02, 0x00, 0x01])
-        module += section(5, [0x01, 0x00, 0x01])
-        module += section(7, exports)
-        let validate: [UInt8] = verdict.map { [0x04, 0x00, 0x41, $0, 0x0b] } ?? [0x03, 0x00, 0x00, 0x0b]
-        module += section(10, [0x02, 0x05, 0x00, 0x41, 0x80, 0x08, 0x0b] + validate)
-        return Data(module)
     }
 
     /// A carrier on A2 (the branch a2 is anchored on): the act-on tip is

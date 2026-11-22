@@ -200,7 +200,7 @@ final class MergedMiningTests: XCTestCase {
             body: claims[0].body
         )
         XCTAssertThrowsError(try ChildGenesis.checkPremine(spec: Self.alphaSpec, to: nil, transactions: [forged], on: Self.alpha, modules: [], timestamp: Self.genesisCheckTime), "signed by someone else")
-        let refuse = Self.policyModule(verdict: 0)
+        let refuse = policyModule(verdict: 0)
         let refusing = ChainSpec(
             maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
             targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10,
@@ -263,7 +263,7 @@ final class MergedMiningTests: XCTestCase {
     /// genesis: mined and then refused, it would leave the chain weighing a
     /// root that never executes.
     func testAGenesisItsPolicyRefusesIsNeitherCreatedNorMined() async throws {
-        let refuse = Self.policyModule(verdict: 0), accept = Self.policyModule(verdict: 1)
+        let refuse = policyModule(verdict: 0), accept = policyModule(verdict: 1)
         func spec(_ module: Data) throws -> ChainSpec {
             ChainSpec(
                 maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 21,
@@ -439,28 +439,6 @@ final class MergedMiningTests: XCTestCase {
         }
     }
 
-    /// A WASM policy module that gives `verdict` for every transaction: the
-    /// memory, allocator and transaction entrypoint the policy ABI requires.
-    private static func policyModule(verdict: UInt8) -> Data {
-        func section(_ id: UInt8, _ body: [UInt8]) -> [UInt8] { [id, UInt8(body.count)] + body }
-        func export(_ name: String, kind: UInt8, index: UInt8) -> [UInt8] {
-            [UInt8(name.utf8.count)] + Array(name.utf8) + [kind, index]
-        }
-        var exports: [UInt8] = [0x03]
-        exports += export("memory", kind: 2, index: 0)
-        exports += export("lattice_alloc", kind: 0, index: 0)
-        exports += export("lattice_validate_transaction", kind: 0, index: 1)
-        var module: [UInt8] = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]
-        // (i32) -> i32 and (i32, i32) -> i32
-        module += section(1, [0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f])
-        module += section(3, [0x02, 0x00, 0x01])
-        module += section(5, [0x01, 0x00, 0x01])
-        module += section(7, exports)
-        // lattice_alloc returns 1024; the entrypoint returns the verdict.
-        module += section(10, [0x02, 0x05, 0x00, 0x41, 0x80, 0x08, 0x0b, 0x04, 0x00, 0x41, verdict, 0x0b])
-        return Data(module)
-    }
-
     /// A node hosting Nexus and Alpha. With `module`, Alpha's spec names it
     /// as its transaction policy and the node is given its bytes; without,
     /// the node only follows the Alpha others mine.
@@ -532,7 +510,7 @@ final class MergedMiningTests: XCTestCase {
     /// from the node that mined it, executes a block whose transaction the
     /// policy had to accept, and holds the module afterwards.
     func testAPeerSyncsAPolicyChildAndItsModuleFromTheNodeThatMinedIt() async throws {
-        let module = Self.policyModule(verdict: 1)
+        let module = policyModule(verdict: 1)
         let moduleCID = try WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: module)).rawCID
         let (minerConfiguration, minerOverlay, minerEndpoint) = try policyHost("6a", module: module)
         let miner = try await NodeRuntime.start(
@@ -572,7 +550,7 @@ final class MergedMiningTests: XCTestCase {
     /// same transfer the accepting policy's chain mines is refused at
     /// submission here, while the chain itself still advances.
     func testARejectingPolicyRefusesTheTransferAnAcceptingOneMines() async throws {
-        let (configuration, overlay, _) = try policyHost("6c", module: Self.policyModule(verdict: 0))
+        let (configuration, overlay, _) = try policyHost("6c", module: policyModule(verdict: 0))
         let node = try await NodeRuntime.start(
             storage: try await NodeStorage.open(configuration: configuration),
             configuration: configuration, overlay: overlay

@@ -1,3 +1,6 @@
+import Foundation
+import Hummingbird
+import HummingbirdTesting
 import Lattice
 import LatticeMinerCore
 import UInt256
@@ -61,4 +64,63 @@ func solvedNonce(
     return firstNonce(of: template.block, from: start, file: file, line: line) {
         $0 <= target
     }
+}
+
+/// Mines exactly one block atop the current tip through the template/work
+/// routes, solving the issued template, and returns the new tip's CID.
+func mineOneBlock(client: some TestClientProtocol) async throws -> String {
+    var template: MiningTemplateResponse?
+    try await client.execute(
+        uri: "/mining/templates",
+        method: .post,
+        headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
+        body: ByteBuffer(bytes: try JSONEncoder().encode(MiningTemplateRequest()))
+    ) { response in
+        template = try JSONDecoder().decode(
+            MiningTemplateResponse.self,
+            from: Data(response.body.readableBytesView)
+        )
+    }
+    let issued = try XCTUnwrap(template)
+    var tipCID: String?
+    try await client.execute(
+        uri: "/mining/work",
+        method: .post,
+        headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
+        body: ByteBuffer(bytes: try JSONEncoder().encode(
+            SubmitWorkRequest(workID: issued.workID, nonce: solvedNonce(for: issued))
+        ))
+    ) { response in
+        let submitted = try JSONDecoder().decode(
+            SubmitWorkResponse.self,
+            from: Data(response.body.readableBytesView)
+        )
+        XCTAssertTrue(submitted.accepted)
+        tipCID = submitted.tipCID
+    }
+    return try XCTUnwrap(tipCID)
+}
+
+/// A WASM policy module that gives `verdict` for every transaction, or traps
+/// (`unreachable`) without one: the memory, allocator and transaction
+/// entrypoint the policy ABI requires.
+func policyModule(verdict: UInt8?) -> Data {
+    func section(_ id: UInt8, _ body: [UInt8]) -> [UInt8] { [id, UInt8(body.count)] + body }
+    func export(_ name: String, kind: UInt8, index: UInt8) -> [UInt8] {
+        [UInt8(name.utf8.count)] + Array(name.utf8) + [kind, index]
+    }
+    var exports: [UInt8] = [0x03]
+    exports += export("memory", kind: 2, index: 0)
+    exports += export("lattice_alloc", kind: 0, index: 0)
+    exports += export("lattice_validate_transaction", kind: 0, index: 1)
+    var module: [UInt8] = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]
+    // (i32) -> i32 and (i32, i32) -> i32
+    module += section(1, [0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f])
+    module += section(3, [0x02, 0x00, 0x01])
+    module += section(5, [0x01, 0x00, 0x01])
+    module += section(7, exports)
+    // lattice_alloc returns 1024; the entrypoint returns the verdict.
+    let validate: [UInt8] = verdict.map { [0x04, 0x00, 0x41, $0, 0x0b] } ?? [0x03, 0x00, 0x00, 0x0b]
+    module += section(10, [0x02, 0x05, 0x00, 0x41, 0x80, 0x08, 0x0b] + validate)
+    return Data(module)
 }
