@@ -90,7 +90,7 @@ Docker-compatible runtime without the GUI.
 | `Sources/LatticeNodeCore/Mempool` | Transaction-pool policy and mutations. |
 | `Sources/LatticeNodeCore/Mining` | Mining state, template jobs, and issued-work tracking. |
 | `Sources/LatticeNode/Runtime` | `NodeRuntime`, the production shell that drives `NodeCore` and executes effects; boot recovery and the storage gateway. |
-| `Sources/LatticeNodeAPI` | The service's request and response models, the library clients build on without the node. |
+| `Sources/LatticeNodeAPI` | The client contract: the service's request and response models and the state proofs a client verifies (`StateDictionaryProof`), the library clients build on without the node. |
 | `Sources/LatticeNode/API` | Read operations, route-input validation, and the node's conversions into the models. |
 | `Sources/LatticeNodeNet` | The peer protocol: overlay handshake, wire codecs and validation, peer memory, read-endpoint discovery, the serving ledger, and the Ivy content source. It never imports the store or the shell. |
 | `Sources/LatticeNodeStore` | What is on disk: durable fact journals, header content, SQLite rows and migrations, and the Volume stores. |

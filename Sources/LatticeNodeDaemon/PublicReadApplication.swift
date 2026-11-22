@@ -675,8 +675,9 @@ struct TransactionResponse: Codable {
 /// NODE-ATTESTED, not proof-backed: unlike by-CID block/tx bytes (which a
 /// client can re-hash), these values are read from the node's content-verified
 /// post-state and returned as plain fields — a client cannot independently
-/// verify them without a sparse-Merkle proof (LatticeLightClient is kept out of
-/// the daemon). Trust rests on the replica being a full verifier.
+/// verify them without a sparse-Merkle proof, and account reads carry none
+/// (only deposit/receipt state does: `StateDictionaryProof`). Trust rests on
+/// the replica being a full verifier.
 struct AccountResponse: Codable {
     let owner: String
     let block: String

@@ -56,12 +56,6 @@ let package = Package(
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .target(
-            name: "LatticeLightClient",
-            dependencies: [
-                .product(name: "Lattice", package: "lattice"),
-                .product(name: "cashew", package: "cashew"),
-            ]),
-        .target(
             name: "LatticeNodeCore",
             dependencies: [
                 .product(name: "Lattice", package: "lattice"),
@@ -81,7 +75,6 @@ let package = Package(
         .target(
             name: "LatticeNodeAPI",
             dependencies: [
-                "LatticeLightClient",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "cashew", package: "cashew"),
                 .product(name: "UInt256", package: "UInt256"),
@@ -138,7 +131,6 @@ let package = Package(
                 "LatticeNodeStore",
                 "LatticeNodeSupport",
                 "CSQLite",
-                "LatticeLightClient",
                 "LatticeNodeCore",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "Ivy", package: "Ivy2"),

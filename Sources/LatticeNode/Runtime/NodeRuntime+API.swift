@@ -316,8 +316,7 @@ extension NodeRuntime {
         return SubmitWorkResponse(
             accepted: disposition == .canonicalized || disposition == .acceptedSide,
             disposition: disposition,
-            tipCID: tipCID,
-            durableChildProofs: []
+            tipCID: tipCID
         )
     }
 
@@ -357,7 +356,6 @@ extension NodeRuntime {
                     nexusGenesisCID: configuration.nexusGenesisCID,
                     tipCID: snapshot?.actOnTip.isEmpty == false ? snapshot?.actOnTip : nil,
                     height: snapshot?.actOnTip.isEmpty == false ? snapshot?.actOnHeight : nil,
-                    revision: nil,
                     bestHeaderHeight: snapshot?.bestHeaderTip.isEmpty == false ? snapshot?.bestHeaderHeight : nil,
                     waiting: view.value?.waiting.map { "body of \($0.cid): \($0.reason)" },
                     sync: view.value?.sync
@@ -445,7 +443,6 @@ extension NodeRuntime {
             nexusGenesisCID: read.nexusGenesisCID,
             tipCID: read.tipCID,
             height: read.height,
-            revision: read.revision,
             mempoolCount: read.mempoolCount,
             mempoolBytes: read.mempoolBytes,
             templateDigest: !root || read.tipCID == nil ? nil : readView.value?.templateDigest,

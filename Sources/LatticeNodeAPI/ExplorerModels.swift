@@ -1,5 +1,4 @@
 import Foundation
-import LatticeLightClient
 import UInt256
 
 // MARK: - Explorer read API DTOs

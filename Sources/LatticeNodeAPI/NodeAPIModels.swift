@@ -315,29 +315,15 @@ public struct SubmitWorkResponse: Codable, Sendable {
     public let accepted: Bool
     public let disposition: WorkDisposition
     public let tipCID: String?
-    public let durableChildProofs: [DirectChildProofSummary]
 
     public init(
         accepted: Bool,
         disposition: WorkDisposition,
-        tipCID: String?,
-        durableChildProofs: [DirectChildProofSummary]
+        tipCID: String?
     ) {
         self.accepted = accepted
         self.disposition = disposition
         self.tipCID = tipCID
-        self.durableChildProofs = durableChildProofs
-    }
-}
-
-/// Bounded miner-facing acknowledgement. Proof bytes stay in the node.
-public struct DirectChildProofSummary: Codable, Sendable, Equatable {
-    public let directory: String
-    public let childCID: String
-
-    public init(directory: String, childCID: String) {
-        self.directory = directory
-        self.childCID = childCID
     }
 }
 
@@ -352,7 +338,6 @@ public struct NodeStatusResponse: Codable, Sendable, Equatable {
     public let nexusGenesisCID: String
     public let tipCID: String?
     @OptionalDecimalString public var height: UInt64?
-    @OptionalDecimalString public var revision: UInt64?
     public let mempoolCount: Int
     public let mempoolBytes: Int
     /// Nil before the node can serve templates (no executed tip).
@@ -381,7 +366,6 @@ public struct NodeStatusResponse: Codable, Sendable, Equatable {
         nexusGenesisCID: String,
         tipCID: String?,
         height: UInt64? = nil,
-        revision: UInt64? = nil,
         mempoolCount: Int,
         mempoolBytes: Int,
         templateDigest: String?,
@@ -394,7 +378,6 @@ public struct NodeStatusResponse: Codable, Sendable, Equatable {
         self.nexusGenesisCID = nexusGenesisCID
         self.tipCID = tipCID
         self.height = height
-        self.revision = revision
         self.mempoolCount = mempoolCount
         self.mempoolBytes = mempoolBytes
         self.templateDigest = templateDigest

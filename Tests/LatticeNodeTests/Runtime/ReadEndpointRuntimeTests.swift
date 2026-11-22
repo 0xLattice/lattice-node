@@ -280,7 +280,7 @@ final class ReadEndpointRuntimeTests: XCTestCase {
             storage: storage,
             tip: { ChainStatus(
                 phase: .active, chainPath: ["Nexus"], nexusGenesisCID: configuration.nexusGenesisCID,
-                tipCID: tip.withLock { $0.cid }, height: tip.withLock { $0.height }, revision: nil
+                tipCID: tip.withLock { $0.cid }, height: tip.withLock { $0.height }
             ) },
             canonicalCID: { _ in
                 visited.withLock { $0 += 1 }

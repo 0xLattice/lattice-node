@@ -2,7 +2,6 @@ import Crypto
 import Foundation
 import Ivy
 import Lattice
-import LatticeLightClient
 import LatticeNodeCore
 import UInt256
 import XCTest

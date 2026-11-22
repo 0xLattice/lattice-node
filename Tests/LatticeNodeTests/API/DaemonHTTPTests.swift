@@ -2,7 +2,6 @@ import Crypto
 import Hummingbird
 import HummingbirdTesting
 import Lattice
-import LatticeLightClient
 import UInt256
 import Synchronization
 import XCTest

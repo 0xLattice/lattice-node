@@ -1120,7 +1120,7 @@ final class NodeRuntimeTests: XCTestCase {
             tip: { ChainStatus(
                 phase: .active, chainPath: ["Nexus"],
                 nexusGenesisCID: node.configuration.nexusGenesisCID,
-                tipCID: all.blocks[0].hash, height: 500, revision: nil
+                tipCID: all.blocks[0].hash, height: 500
             ) },
             canonicalCID: { _ in all.blocks[0].hash },
             mempool: { _ in ChainReads.MempoolListing(count: 0, bytes: 0, cids: []) }
@@ -1147,7 +1147,7 @@ final class NodeRuntimeTests: XCTestCase {
                 chainPath: chainPath,
                 tip: { ChainStatus(
                     phase: .active, chainPath: chainPath, nexusGenesisCID: configuration.nexusGenesisCID,
-                    tipCID: nil, height: nil, revision: nil
+                    tipCID: nil, height: nil
                 ) },
                 canonicalCID: { _ in nil },
                 mempool: { _ in ChainReads.MempoolListing(count: 0, bytes: 0, cids: []) }

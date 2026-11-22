@@ -2,8 +2,8 @@ import Foundation
 import Lattice
 import cashew
 
-// `LatticeLightClient` verifies state witnesses without booting a node: it
-// depends only on Lattice and cashew, never on LatticeNode.
+// State witnesses a client verifies without booting a node: part of the
+// client contract, so it depends only on Lattice and cashew.
 
 /// Namespace for the witness node shared by the proofs here.
 public enum LightClientProof {

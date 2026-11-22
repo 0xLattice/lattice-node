@@ -1,7 +1,6 @@
 import Foundation
 import Ivy
 import Lattice
-import LatticeLightClient
 import LatticeNodeCore
 import cashew
 import LatticeNodeAPI

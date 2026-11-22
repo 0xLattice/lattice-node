@@ -669,7 +669,7 @@ published.
 | `LatticeNodeStore` | 2,402 | what is on disk: the SQLite store (schema, facts, block index, header evidence, state pins, journals, migrations) and the Volume stores; it never imports the shell |
 | `LatticeNodeConfig` | 1,753 | the operator's configuration: topology and fragments, the host layout on disk, chain creation, Nexus's genesis, the setting limits |
 | `LatticeNodeSupport` | 517 | what every part of the process shares: the node log, sync tracing, the read tally, published values, timers |
-| `LatticeNodeAPI` | 1,447 | request and response models |
+| `LatticeNodeAPI` | 1,532 | the client contract: request and response models, and the state proofs a client verifies without a node |
 | `LatticeNodeDaemon` | 3,449 | HTTP servers and process entry |
 | `LatticeCtl`, `LatticeCtlCore` | 3,001 | the `lattice` CLI: it depends on the API, the configuration, the core and the store, never on `LatticeNode` |
 | `LatticeMiner*`, `LatticeMiningCoordinator*` | 1,558 | mining, as separate processes |
