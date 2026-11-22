@@ -88,9 +88,20 @@ let package = Package(
             ]
         ),
         .target(
+            name: "LatticeNodeConfig",
+            dependencies: [
+                "LatticeNodeAPI",
+                "LatticeNodeCore",
+                .product(name: "Lattice", package: "lattice"),
+                .product(name: "Ivy", package: "Ivy2"),
+                .product(name: "cashew", package: "cashew"),
+                .product(name: "UInt256", package: "UInt256"),
+            ]),
+        .target(
             name: "LatticeNode",
             dependencies: [
                 "LatticeNodeAPI",
+                "LatticeNodeConfig",
                 "CSQLite",
                 "LatticeLightClient",
                 "LatticeNodeCore",
@@ -141,7 +152,8 @@ let package = Package(
         .target(
             name: "LatticeCtlCore",
             dependencies: [
-                "LatticeNode",
+                "LatticeNodeAPI",
+                "LatticeNodeConfig",
                 "LatticeMinerCore",
                 "LatticeProcessWait",
                 .product(name: "Lattice", package: "lattice"),
@@ -150,6 +162,8 @@ let package = Package(
             name: "LatticeCtl",
             dependencies: [
                 "LatticeNodeAPI",
+                "LatticeNodeConfig",
+                "LatticeNodeCore",
                 "LatticeNode",
                 "LatticeCtlCore",
                 "LatticeProcessWait",

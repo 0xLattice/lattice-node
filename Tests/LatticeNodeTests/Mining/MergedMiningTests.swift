@@ -45,6 +45,8 @@ final class MergedMiningTests: XCTestCase {
     }
 
     static let alpha = ["Nexus", "Alpha"]
+    /// The clock genesis policies are checked against (milliseconds).
+    static let genesisCheckTime = Int64(Date().timeIntervalSince1970 * 1000)
     static let alphaSpec = ChainSpec(
         maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
         targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
@@ -94,10 +96,10 @@ final class MergedMiningTests: XCTestCase {
             targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
         )
         let artist = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
-        XCTAssertEqual(try NodeRuntime.premine(spec: spec, to: nil, on: Self.alpha).count, 0)
-        XCTAssertEqual(try NodeRuntime.premine(spec: Self.alphaSpec, to: artist, on: Self.alpha).count, 0)
-        XCTAssertThrowsError(try NodeRuntime.premine(spec: spec, to: "a/b", on: Self.alpha), "not an account")
-        XCTAssertThrowsError(try NodeRuntime.premine(spec: spec, to: "", on: Self.alpha), "not an account")
+        XCTAssertEqual(try ChildGenesis.premine(spec: spec, to: nil, on: Self.alpha).count, 0)
+        XCTAssertEqual(try ChildGenesis.premine(spec: Self.alphaSpec, to: artist, on: Self.alpha).count, 0)
+        XCTAssertThrowsError(try ChildGenesis.premine(spec: spec, to: "a/b", on: Self.alpha), "not an account")
+        XCTAssertThrowsError(try ChildGenesis.premine(spec: spec, to: "", on: Self.alpha), "not an account")
 
         func host(_ keyByte: String, creator: Bool, peers: [PeerEndpoint] = []) throws -> (NodeConfiguration, IvyConfig, PeerEndpoint) {
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -183,14 +185,14 @@ final class MergedMiningTests: XCTestCase {
             try Self.genesisTransaction(creator, actions: [Action(key: "name/alpha", oldValue: nil, newValue: address)], nonce: 0),
             try Self.genesisTransaction(creator, actions: [Action(key: "name/support", oldValue: nil, newValue: address)], nonce: 1),
         ]
-        XCTAssertNoThrow(try NodeRuntime.checkPremine(spec: Self.alphaSpec, to: nil, transactions: claims, on: Self.alpha, modules: []))
+        XCTAssertNoThrow(try ChildGenesis.checkPremine(spec: Self.alphaSpec, to: nil, transactions: claims, on: Self.alpha, modules: [], timestamp: Self.genesisCheckTime))
         let refused: [String: Transaction] = [
             "unsigned": try Self.genesisTransaction(creator, actions: [Action(key: "k", oldValue: nil, newValue: "v")], nonce: 2, signed: false),
             "another chain": try Self.genesisTransaction(creator, actions: [Action(key: "k", oldValue: nil, newValue: "v")], nonce: 2, chainPath: ["Nexus", "Beta"]),
             "moves coins": try Self.genesisTransaction(creator, actions: [], nonce: 2, accountActions: [AccountAction(owner: address, delta: 5)]),
         ]
         for (why, transaction) in refused {
-            XCTAssertThrowsError(try NodeRuntime.checkPremine(spec: Self.alphaSpec, to: nil, transactions: [transaction], on: Self.alpha, modules: []), why)
+            XCTAssertThrowsError(try ChildGenesis.checkPremine(spec: Self.alphaSpec, to: nil, transactions: [transaction], on: Self.alpha, modules: [], timestamp: Self.genesisCheckTime), why)
         }
         // A forged signature: another key's, over the creator's body.
         let other = CryptoUtils.generateKeyPair()
@@ -198,19 +200,19 @@ final class MergedMiningTests: XCTestCase {
             signatures: [other.publicKey: try XCTUnwrap(TransactionSigning.sign(bodyHeader: claims[0].body, privateKeyHex: other.privateKey))],
             body: claims[0].body
         )
-        XCTAssertThrowsError(try NodeRuntime.checkPremine(spec: Self.alphaSpec, to: nil, transactions: [forged], on: Self.alpha, modules: []), "signed by someone else")
+        XCTAssertThrowsError(try ChildGenesis.checkPremine(spec: Self.alphaSpec, to: nil, transactions: [forged], on: Self.alpha, modules: [], timestamp: Self.genesisCheckTime), "signed by someone else")
         let refuse = Self.policyModule(verdict: 0)
         let refusing = ChainSpec(
             maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
             targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10,
             wasmPolicies: [WasmPolicyRef(moduleCID: try WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: refuse)).rawCID, scope: .transaction)]
         )
-        XCTAssertThrowsError(try NodeRuntime.checkPremine(spec: refusing, to: nil, transactions: claims, on: Self.alpha, modules: [refuse]), "a policy refuses it")
+        XCTAssertThrowsError(try ChildGenesis.checkPremine(spec: refusing, to: nil, transactions: claims, on: Self.alpha, modules: [refuse], timestamp: Self.genesisCheckTime), "a policy refuses it")
         let small = ChainSpec(
             maxNumberOfTransactionsPerBlock: 1, maxStateGrowth: 100_000, premine: 0,
             targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
         )
-        XCTAssertThrowsError(try NodeRuntime.checkPremine(spec: small, to: nil, transactions: claims, on: Self.alpha, modules: []), "more than a block holds")
+        XCTAssertThrowsError(try ChildGenesis.checkPremine(spec: small, to: nil, transactions: claims, on: Self.alpha, modules: [], timestamp: Self.genesisCheckTime), "more than a block holds")
 
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-genesis-transactions-\(UUID().uuidString)", isDirectory: true
@@ -274,9 +276,9 @@ final class MergedMiningTests: XCTestCase {
             )
         }
         let artist = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
-        XCTAssertNoThrow(try NodeRuntime.checkPremine(spec: try spec(accept), to: artist, on: Self.alpha, modules: [accept]))
-        XCTAssertThrowsError(try NodeRuntime.checkPremine(spec: try spec(refuse), to: artist, on: Self.alpha, modules: [refuse]))
-        XCTAssertThrowsError(try NodeRuntime.checkPremine(spec: try spec(accept), to: artist, on: Self.alpha, modules: []))
+        XCTAssertNoThrow(try ChildGenesis.checkPremine(spec: try spec(accept), to: artist, on: Self.alpha, modules: [accept], timestamp: Self.genesisCheckTime))
+        XCTAssertThrowsError(try ChildGenesis.checkPremine(spec: try spec(refuse), to: artist, on: Self.alpha, modules: [refuse], timestamp: Self.genesisCheckTime))
+        XCTAssertThrowsError(try ChildGenesis.checkPremine(spec: try spec(accept), to: artist, on: Self.alpha, modules: [], timestamp: Self.genesisCheckTime))
 
         // The same node with a policy that accepts the credit offers the genesis.
         func host(_ module: Data, _ keyByte: String) async throws -> NodeRuntime {

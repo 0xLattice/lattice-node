@@ -1,5 +1,5 @@
 import Foundation
-import LatticeNode
+import LatticeNodeConfig
 
 /// This process's own executable, symlinks resolved: the real path, not
 /// argv[0], which is a bare name when `lattice` runs through PATH.

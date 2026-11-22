@@ -272,7 +272,7 @@ public struct Topology: Codable, Sendable {
         where ChainAddress(path.split(separator: "/").map(String.init)) == nil {
             throw CtlError("finalityWindows names \(path), which is not a chain path")
         }
-        if let announceLifetime, !(1...NodeConfiguration.maximumAnnounceLifetime).contains(announceLifetime) {
+        if let announceLifetime, !(1...SettingLimits.maximumAnnounceLifetime).contains(announceLifetime) {
             throw CtlError(NodeConfigurationError.invalidAnnounceLifetime.description)
         }
         if let connectBatch, connectBatch < 1 {
@@ -311,10 +311,10 @@ public struct Topology: Codable, Sendable {
         if operatorAllowedOrigins != nil, operatorListen == nil {
             throw CtlError("operatorAllowedOrigins requires operatorListen")
         }
-        if let publicReadURL, !NodeConfiguration.isValidPublicReadURL(publicReadURL) {
+        if let publicReadURL, !SettingLimits.isValidPublicReadURL(publicReadURL) {
             throw CtlError("publicReadURL must be an absolute http(s) URL with a host and no credentials, query or fragment")
         }
-        if let webSocketURL, !NodeConfiguration.isValidWebSocketURL(webSocketURL) {
+        if let webSocketURL, !SettingLimits.isValidWebSocketURL(webSocketURL) {
             throw CtlError(NodeConfigurationError.invalidWebSocketURL.description)
         }
         if webSocketURL != nil, webSocket == nil || webSocket == 0 {

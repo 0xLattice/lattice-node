@@ -12,7 +12,7 @@ import ArgumentParser
 import Lattice
 import LatticeProcessWait
 import LatticeCtlCore
-import LatticeNode
+import LatticeNodeConfig
 import LatticeNodeAPI
 
 func nodeBinary() throws -> URL {

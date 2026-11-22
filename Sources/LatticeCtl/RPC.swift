@@ -5,6 +5,7 @@ import FoundationNetworking
 import ArgumentParser
 import LatticeMiningCoordinator
 import LatticeNode
+import LatticeNodeConfig
 import LatticeNodeAPI
 
 /// A node's operator RPC: the local node's loopback port with the cookie the
@@ -210,6 +211,8 @@ struct NodeTarget: ParsableArguments {
         // Under the node's storage lock, so no node starts meanwhile.
         guard case .stopped(let lock) = localNode(layout) else { throw CtlError("the storage lock is held: the node started meanwhile, or another lattice command holds it; try again") }
         defer { _ = lock }
+        // The one runtime read the CLI makes: whether the store holds the
+        // chain (through `LatticeNode` until the store is its own module).
         return try ChainCreation.create(chain, layout: layout)
     }
 

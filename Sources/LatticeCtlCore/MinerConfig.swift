@@ -4,7 +4,7 @@
 
 import Foundation
 import LatticeMinerCore
-import LatticeNode
+import LatticeNodeConfig
 
 public struct MinerConfig: Codable, Sendable {
     /// "cpu" or a path to any contract-conforming worker executable.

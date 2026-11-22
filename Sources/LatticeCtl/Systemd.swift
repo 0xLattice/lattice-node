@@ -12,7 +12,7 @@
 import Foundation
 import ArgumentParser
 import LatticeCtlCore
-import LatticeNode
+import LatticeNodeConfig
 
 struct EmitSystemd: AsyncParsableCommand {
     static let configuration = CommandConfiguration(

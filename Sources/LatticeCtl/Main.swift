@@ -11,7 +11,7 @@ import ArgumentParser
 import Crypto
 import Ivy
 import Lattice
-import LatticeNode
+import LatticeNodeConfig
 
 @main
 struct LatticeCtl: AsyncParsableCommand {

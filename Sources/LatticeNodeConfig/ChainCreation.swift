@@ -1,6 +1,7 @@
 import Foundation
 import Lattice
 import LatticeNodeAPI
+import LatticeNodeCore
 
 /// Creating a child chain: a one-shot action, apart from the configuration.
 /// It checks what fixes the chain's genesis (its spec, premine recipient,
@@ -35,7 +36,13 @@ public enum ChainCreation {
     /// Checks `chain` and writes its files. False when it was created with
     /// exactly these already (nothing written); `Exists` when with others.
     @discardableResult
-    public static func create(_ chain: HostedChain, layout: HostLayout) throws -> Bool {
+    /// `holdsBlocks` answers whether this node's store holds blocks of a
+    /// chain path; it throws when the store cannot be read.
+    public static func create(
+        _ chain: HostedChain,
+        layout: HostLayout,
+        holdsBlocks: (_ chainPath: String) throws -> Bool
+    ) throws -> Bool {
         guard let address = ChainAddress(string: chain.path), address.key == chain.path, !address.isNexus else {
             throw CtlError("\(chain.path) is not a child chain's path")
         }
@@ -76,7 +83,7 @@ public enum ChainCreation {
         // Fails closed: a store that cannot be read refuses the creation.
         let holds: Bool
         do {
-            holds = try NodeStore.holdsBlocks(of: chain.path, storage: layout.chainDirectory(for: ChainAddress.nexus))
+            holds = try holdsBlocks(chain.path)
         } catch {
             throw CtlError("\(chain.path): whether this node holds the chain could not be read (\(error)); not created")
         }
@@ -103,9 +110,10 @@ public enum ChainCreation {
             throw CtlError("the spec names policy module \(missing); send it in policyModules")
         }
         do {
-            try NodeRuntime.checkPremine(
+            try ChildGenesis.checkPremine(
                 spec: spec, to: chain.premineTo, transactions: (chain.genesisTransactions ?? []).map(\.transaction),
-                on: address.components, modules: Array(modules.values)
+                on: address.components, modules: Array(modules.values),
+                timestamp: Int64(Date().timeIntervalSince1970 * 1000)
             )
         } catch {
             throw CtlError("\(chain.path): \(error)")

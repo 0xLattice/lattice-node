@@ -662,12 +662,13 @@ published.
 
 | Module | Lines | Role |
 |---|---|---|
-| `LatticeNodeCore` | 6,255 | deterministic decisions per chain |
+| `LatticeNodeCore` | 6,342 | deterministic decisions per chain, and the genesis rules a child chain is checked against |
 | `LatticeNodeSim` | 5,530 | the simulator that drives the core and checks invariants every step (`Tools/`, not shipped) |
-| `LatticeNode` | 16,825 | the shell: loop, stores, networking, jobs, reads |
-| `LatticeNodeAPI` | 1,493 | request and response models |
+| `LatticeNode` | 15,039 | the shell: loop, stores, networking, jobs, reads |
+| `LatticeNodeConfig` | 1,753 | the operator's configuration: topology and fragments, the host layout on disk, chain creation, Nexus's genesis, the setting limits |
+| `LatticeNodeAPI` | 1,447 | request and response models |
 | `LatticeNodeDaemon` | 3,449 | HTTP servers and process entry |
-| `LatticeCtl`, `LatticeCtlCore` | 2,948 | the `lattice` CLI |
+| `LatticeCtl`, `LatticeCtlCore` | 3,002 | the `lattice` CLI: it depends on the API, the configuration and the core, and on `LatticeNode` only to ask the store whether it holds a chain |
 | `LatticeMiner*`, `LatticeMiningCoordinator*` | 1,558 | mining, as separate processes |
 
 ---

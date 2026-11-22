@@ -1,8 +1,10 @@
 import ArgumentParser
 import Foundation
 import Lattice
-import LatticeNode
+import LatticeNodeConfig
+import LatticeNodeCore
 import LatticeNodeAPI
+import LatticeCtlCore
 
 /// Child chains this host runs as levels of its one process.
 struct Child: AsyncParsableCommand {
@@ -244,9 +246,10 @@ struct Child: AsyncParsableCommand {
                 }
             }
             do {
-                try NodeRuntime.checkPremine(
+                try ChildGenesis.checkPremine(
                     spec: chainSpec, to: premineTo, transactions: genesis?.transactions ?? [],
-                    on: path.split(separator: "/").map(String.init), modules: Array(modules.values)
+                    on: path.split(separator: "/").map(String.init), modules: Array(modules.values),
+                    timestamp: Int64(Date().timeIntervalSince1970 * 1000)
                 )
             } catch {
                 throw CtlError(genesis == nil ? "--premine-to: \(error)" : "the genesis: \(error)")

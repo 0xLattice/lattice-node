@@ -38,7 +38,7 @@ struct ReadEndpointRequestMessage: CanonicalJSONMessage, Equatable, Sendable {
 /// The answer: sent only by a host of `chainPath` that declared a URL; no
 /// answer means no.
 struct ReadEndpointResponseMessage: CanonicalJSONMessage, Equatable, Sendable {
-    static let maximumURLBytes = 512
+    static let maximumURLBytes = SettingLimits.maximumPublicReadURLBytes
 
     let chainPath: [String]
     let requestID: UInt64

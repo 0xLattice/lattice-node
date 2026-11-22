@@ -13,7 +13,7 @@ import FoundationNetworking
 #endif
 import ArgumentParser
 import Lattice
-import LatticeNode
+import LatticeNodeConfig
 import cashew
 import LatticeNodeAPI
 

@@ -5,6 +5,7 @@ import XCTest
 import cashew
 @testable import LatticeNode
 import LatticeNodeAPI
+import LatticeCtlCore
 
 /// `child/X` = `C@P` merged mining by a parent miner that does not host X:
 /// the node hosting X builds C (`buildChildBlock`), its author commits it on
