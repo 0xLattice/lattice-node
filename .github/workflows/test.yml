@@ -30,6 +30,16 @@ jobs:
       - name: Run strict concurrency gate
         run: .github/scripts/check-strict-concurrency.sh
 
+  source-rules:
+    runs-on: ubuntu-latest
+    container: swift:6.1-jammy
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check source rules
+        run: swift .github/scripts/check-source-rules.swift
+
   strict-concurrency-macos:
     runs-on: macos-15
     timeout-minutes: 90

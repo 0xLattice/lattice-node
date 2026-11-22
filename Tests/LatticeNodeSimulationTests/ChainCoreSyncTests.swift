@@ -1210,24 +1210,6 @@ final class ChainCoreSyncTests: XCTestCase {
         XCTAssertEqual(served, 3, "the rest were dropped")
     }
 
-    /// HeaderSync never reads canonicity: the sync sources (the step, serving,
-    /// catch-up, the pending queue, the messages) name no best-chain API.
-    /// Only what acts on the best chain may: `ChainSelection.swift` (the snapshot,
-    /// act-on tip and the operator's finality window), execution and templates.
-    /// The window is the one deliberate exception: a node that sets one
-    /// chooses to decline what lies too far below its best tip.
-    func testSyncNeverReadsCanonicity() throws {
-        let sources = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Sources/LatticeNodeCore")
-        for file in ["Chain/ChainCore.swift", "Sync/HeaderSync.swift", "Sync/SyncProtocol.swift"] {
-            let text = try String(contentsOf: sources.appendingPathComponent(file), encoding: .utf8)
-            for api in ["isCanonical", "canonicalTip", "canonicalBlockHash", "canonicalChain", "actOnTip", "bestChain"] {
-                XCTAssertFalse(text.contains(api), "\(file) reads \(api)")
-            }
-        }
-    }
-
     /// Zero-work junk dated in the future is off schedule (its target is
     /// not `parent.nextTarget`, checked before the time hold): blamed and
     /// disconnected, never held.
