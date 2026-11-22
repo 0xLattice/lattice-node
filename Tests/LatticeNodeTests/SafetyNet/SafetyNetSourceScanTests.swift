@@ -156,7 +156,7 @@ final class SafetyNetSourceScanTests: XCTestCase {
         let files = try SourceTree.swiftFiles(under: "Sources")
         let paths = files.map(\.path)
         XCTAssertEqual(paths, paths.sorted())
-        XCTAssertTrue(paths.contains("LatticeNode/Runtime/Timers.swift"), "walked \(paths.count) files")
+        XCTAssertTrue(paths.contains("LatticeNodeSupport/Timers.swift"), "walked \(paths.count) files")
         XCTAssertTrue(paths.contains("LatticeNodeStore/NodeStoreRow.swift"), "subdirectories are walked")
     }
 

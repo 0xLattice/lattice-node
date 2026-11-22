@@ -1,8 +1,8 @@
 import Foundation
 import XCTest
 
-/// Structural gate over `Sources/LatticeNode`: `Runtime/Timers.swift`
-/// is the only file that suspends on a sleep. Everything else arms a
+/// Structural gate over the node runtime and the modules split out of it:
+/// `LatticeNodeSupport/Timers.swift` is the only file that suspends on a sleep. Everything else arms a
 /// `Timers` deadline, retry, poll or repeat, so no site can reach for
 /// `Task.sleep(for:)` / `Clock.sleep(for:)` (which miscompile under Swift
 /// 6.3 -O) or re-grow its own copy of the deadline pattern.
@@ -14,8 +14,16 @@ final class SafetyNetSleepGateTests: XCTestCase {
     /// A direct sleep. `Timers.sleep(` is the sanctioned call, not a site.
     private static let sleepPattern = #"Task\.sleep|(?<!\bTimers)\.sleep\("#
 
+    private static let modules = [
+        "LatticeNode", "LatticeNodeConfig", "LatticeNodeCore",
+        "LatticeNodeNet", "LatticeNodeStore", "LatticeNodeSupport",
+    ]
+    private static let timers = "LatticeNodeSupport/Timers.swift"
+
     private func sources() throws -> [SourceFile] {
-        try SourceTree.swiftFiles(under: "Sources/LatticeNode")
+        try SourceTree.swiftFiles(under: "Sources").filter { file in
+            Self.modules.contains { file.path.hasPrefix($0 + "/") }
+        }
     }
 
     private func matches(_ pattern: String, in files: [SourceFile]) throws -> [String] {
@@ -24,8 +32,8 @@ final class SafetyNetSleepGateTests: XCTestCase {
 
     func testGateSeesTheSleepPrimitive() throws {
         let files = try sources()
-        XCTAssertTrue(files.map(\.path).contains("Runtime/Timers.swift"), "gate walked \(files.count) files")
-        let found = try matches(Self.sleepPattern, in: files.filter { $0.path == "Runtime/Timers.swift" })
+        XCTAssertTrue(files.map(\.path).contains(Self.timers), "gate walked \(files.count) files")
+        let found = try matches(Self.sleepPattern, in: files.filter { $0.path == Self.timers })
         XCTAssertFalse(found.isEmpty, "the pattern no longer finds the primitive itself")
     }
 
@@ -51,7 +59,7 @@ final class SafetyNetSleepGateTests: XCTestCase {
     func testOnlyTimersSleeps() throws {
         let found = try matches(
             Self.sleepPattern,
-            in: sources().filter { $0.path != "Runtime/Timers.swift" }
+            in: sources().filter { $0.path != Self.timers }
         )
         XCTAssertEqual(found, [], "sleep outside Timers.swift; use Timers")
     }
