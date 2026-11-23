@@ -242,8 +242,9 @@ final class ChildBlockBuildTests: XCTestCase {
             // commit sent right after a tip move can be refused once.
             func commit(_ block: BuildChildBlockResponse) async throws {
                 let transaction = try await pair.commit(block)
-                guard let cid = try? await builder.submitTransaction(SubmitTransactionRequest(transaction: transaction)).transactionCID
-                else { return }
+                let request = SubmitTransactionRequest(transaction: transaction)
+                guard let response = try? await builder.submitTransaction(request) else { return }
+                let cid = response.transactionCID
                 (taken, accepted) = (cid, true)
             }
             func round() async throws -> ChildCommitStep {
