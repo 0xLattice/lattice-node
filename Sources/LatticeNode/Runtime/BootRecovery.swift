@@ -1,0 +1,213 @@
+import Foundation
+import Lattice
+import VolumeBroker
+import cashew
+import LatticeNodeSupport
+import LatticeNodeStore
+
+/// Boot recovery for one hosted tree's storage: everything `NodeStorage.open`
+/// does before the runtime starts. Content stays because a scope names it,
+/// so boot leaves pins as it finds them and drops what no scope names; an
+/// empty journal is seeded with the configured Nexus genesis.
+enum BootRecovery {
+    /// What `NodeStorage.open` builds the storage from.
+    struct Result {
+        let store: NodeStore
+        let stores: VolumeStores
+        let retentionScope: String
+        let durableMempoolOwner: String
+        let liveMempoolOwner: String
+        let directoryLock: StorageDirectoryLock
+    }
+
+    /// The Volume stores and state.db, and the retention scopes derived from the tree's
+    /// identity.
+    private struct Stores {
+        let stores: VolumeStores
+        /// The root chain's Volume store: constants, the Nexus genesis and
+        /// the mempool's pins.
+        var broker: DiskBroker { stores.root }
+        /// Boot reads every store: it names no chain.
+        var localFetcher: CoalescingFetcher { stores.readers(.anyChain).local }
+        let retentionScope: String
+        let durableMempoolOwner: String
+        let liveMempoolOwner: String
+        let store: NodeStore
+    }
+
+    static func run(configuration: NodeConfiguration) async throws -> Result {
+        let started = ContinuousClock.now
+        let directoryLock = try lockStorageDirectory(configuration: configuration)
+        let stores = try openStores(configuration: configuration)
+        let constantRoots = try await materializeConstantRoots(stores, configuration: configuration)
+        try await settleRetention(stores, constantRoots: constantRoots)
+        try await pinMempool(stores)
+        try await seedNexusGenesis(stores, configuration: configuration)
+        // Content stays only because a scope names it. What none does (a
+        // write a crash cut short, a pool entry of the last run) goes now,
+        // while nothing is being stored.
+        try await stores.stores.sweep()
+        logLine("lattice-node: boot recovery done in \(seconds(started.duration(to: .now)))")
+        return Result(
+            store: stores.store,
+            stores: stores.stores,
+            retentionScope: stores.retentionScope,
+            durableMempoolOwner: stores.durableMempoolOwner,
+            liveMempoolOwner: stores.liveMempoolOwner,
+            directoryLock: directoryLock
+        )
+    }
+
+    private static func lockStorageDirectory(
+        configuration: NodeConfiguration
+    ) throws -> StorageDirectoryLock {
+        guard configuration.storagePath.isFileURL else {
+            throw NodeStorageError.invalidStoragePath
+        }
+        try FileManager.default.createDirectory(
+            at: configuration.storagePath,
+            withIntermediateDirectories: true
+        )
+        let directoryLock: StorageDirectoryLock
+        do {
+            directoryLock = try StorageDirectoryLock(directory: configuration.storagePath)
+        } catch StorageDirectoryLockError.alreadyLocked {
+            throw NodeStorageError.storageInUse
+        } catch {
+            throw NodeStorageError.storageUnavailable
+        }
+        return directoryLock
+    }
+
+    /// Stage 2: a Volume store per hosted chain (`VolumeStores`), state.db,
+    /// and the scopes and owners they use.
+    private static func openStores(
+        configuration: NodeConfiguration
+    ) throws -> Stores {
+        // state.db first: a store of another epoch or Nexus genesis is
+        // refused before anything is opened, let alone removed.
+        let store = try NodeStore(
+            databasePath: NodeStore.databasePath(storage: configuration.storagePath),
+            nexusGenesisCID: configuration.nexusGenesisCID
+        )
+        let volumes = try VolumeStores(
+            directory: configuration.storagePath, root: configuration.chainPath, hosted: configuration.hostedChildren,
+            headers: HeaderRecords(store: store)
+        )
+        let retentionScope = [
+            configuration.nexusGenesisCID,
+            configuration.address.key,
+        ].joined(separator: ":")
+        let durableMempoolOwner = retentionScope + ":durable-mempool"
+        let liveMempoolOwner = retentionScope + ":live-mempool"
+        return Stores(
+            stores: volumes,
+            retentionScope: retentionScope,
+            durableMempoolOwner: durableMempoolOwner,
+            liveMempoolOwner: liveMempoolOwner,
+            store: store
+        )
+    }
+
+    /// Stage 3: the protocol-constant roots, and the operator's policy
+    /// modules beside them.
+    private static func materializeConstantRoots(
+        _ stores: Stores,
+        configuration: NodeConfiguration
+    ) async throws -> [String] {
+        let broker = stores.broker
+        // Protocol constants are ordinary Volumes and therefore ordinary GC
+        // roots. Materialize them before they are pinned.
+        let constantStorage = NodeImportStorage(storage: broker)
+        try await LatticeState.emptyHeader.storeRecursively(
+            storer: constantStorage as any VolumeStorer
+        )
+        // A hosted child's genesis names its policy modules by CID, and
+        // storing that genesis resolves each from this store.
+        for bytes in configuration.policyModules {
+            try await WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: bytes))
+                .store(storer: constantStorage)
+        }
+        try await constantStorage.commit()
+        let constantRoots = await constantStorage.takeStoredVolumeRoots()
+        return constantRoots
+    }
+
+    /// Stage 4: the pins settled. The facts' derived rows are written in
+    /// the facts' own transaction, so nothing is re-derived here. Pins are
+    /// in the store and stay as a start finds them, and content a fact
+    /// names and the store lacks is no fault. The constants are pinned.
+    private static func settleRetention(
+        _ stores: Stores,
+        constantRoots: [String]
+    ) async throws {
+        let broker = stores.broker
+        let scopes = RetentionScopes(chain: stores.retentionScope)
+        try await broker.mergeRetainedRoots(scope: scopes.chain, roots: constantRoots)
+    }
+
+    /// Stage 6: the durable mempool's pins rebuilt, the live pool's cleared.
+    private static func pinMempool(_ stores: Stores) async throws {
+        let broker = stores.broker
+        let store = stores.store
+        let durableMempoolOwner = stores.durableMempoolOwner
+        let liveMempoolOwner = stores.liveMempoolOwner
+        let localMempoolRoots = try await store.localMempoolTransactions()
+            .map(\.transactionCID)
+        for root in localMempoolRoots {
+            guard await broker.fetchVolumeLocal(root: root) != nil,
+                  let resolved = try? await VolumeImpl<Transaction>(
+                    rawCID: root
+                  ).resolveRecursive(source: broker),
+                  resolved.node != nil else {
+                throw NodeStorageError.missingMaterializedVolume(root)
+            }
+        }
+        try await broker.advanceRetainedRoots(
+            scope: durableMempoolOwner, roots: localMempoolRoots
+        )
+        // The live pool is operational cache, not restart authority. Owner
+        // pins support O(changes) updates and are cleared for each storage.
+        try await broker.advanceRetainedRoots(scope: liveMempoolOwner, roots: [])
+    }
+
+    /// Stage 7: the configured Nexus genesis, whole: its content stored and
+    /// retained whenever the store lacks its block, and for an empty journal
+    /// its executed batch journaled. Every node holds it; nothing later can
+    /// supply its block's own node, which has no header record.
+    private static func seedNexusGenesis(
+        _ stores: Stores,
+        configuration: NodeConfiguration
+    ) async throws {
+        let seeded = try await stores.store.hasStagedImports()
+        if seeded, await stores.broker.hasVolume(root: configuration.nexusGenesisCID) { return }
+        let genesis = try await NexusGenesis.create(fetcher: stores.localFetcher)
+        guard try NexusGenesis.verifyGenesis(genesis) else {
+            throw NodeStorageError.invalidNexusGenesis
+        }
+        let header = try BlockHeader(node: genesis.block)
+        // Content first: bootstrap resolves the genesis's spec, children and
+        // body from the store.
+        let storage = NodeImportStorage(storage: stores.broker)
+        try await header.storeBlock(fetcher: stores.localFetcher, storer: storage)
+        try await storage.commit()
+        let booted = await ChainTree.bootstrap(
+            genesis: header,
+            fetcher: stores.localFetcher,
+            context: try configuration.runtimeContext
+        )
+        guard case .success(let boot) = booted else {
+            throw NodeStorageError.invalidNexusGenesis
+        }
+        if let state = boot.materializedPostState {
+            try await NodeStorage.storeExecutedState(state, in: storage)
+        }
+        try await storage.commit()
+        let roots = await storage.takeStoredVolumeRoots()
+        try await stores.broker.mergeRetainedRoots(scope: stores.retentionScope, roots: roots)
+        guard !seeded else { return }
+        try await stores.store.stageChainFacts(
+            [boot.facts], logID: UUID().uuidString.lowercased()
+        )
+    }
+}

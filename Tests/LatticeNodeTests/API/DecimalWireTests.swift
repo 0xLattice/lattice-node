@@ -31,7 +31,7 @@ final class DecimalWireTests: XCTestCase {
 
         let status = try object(NodeStatusResponse(
             phase: .active, chainPath: ["Nexus"], nexusGenesisCID: "g", tipCID: "t",
-            height: 42, revision: nil, mempoolCount: 1, mempoolBytes: 2, templateDigest: nil,
+            height: 42, mempoolCount: 1, mempoolBytes: 2, templateDigest: nil,
             bestHeaderHeight: 50
         ))
         XCTAssertEqual(status["height"] as? String, "42")

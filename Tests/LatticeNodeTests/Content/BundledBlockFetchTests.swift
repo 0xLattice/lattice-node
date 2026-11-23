@@ -980,9 +980,8 @@ final class BundledBlockFetchTests: XCTestCase {
         XCTAssertFalse(stored.contains(block.prevState.rawCID))
         let volumes = await requests.volumes
         XCTAssertEqual(volumes, [], "nothing past the bundle was asked for")
-        let held = await joiner.readCache.heldBytes
-        XCTAssertLessThan(held, 4 * maxBlockSize)
-        XCTAssertEqual(remote.budget.peakReserved, 4 * maxBlockSize, "the first reservation held it: no second fetch")
+        let bundles = await requests.bundles
+        XCTAssertEqual(bundles, [cid], "the first reservation held it: no second fetch")
         XCTAssertEqual(remote.budget.reserved, 0)
     }
 

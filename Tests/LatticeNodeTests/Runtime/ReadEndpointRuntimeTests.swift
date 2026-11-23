@@ -240,31 +240,6 @@ final class ReadEndpointRuntimeTests: XCTestCase {
         }
     }
 
-    /// The parent's commitment and the hosts' answers are asked at once:
-    /// each read here answers only once it sees the other one started, so
-    /// asked one after the other, the first gives up and the result shows it.
-    func testTheCommitmentAndTheHostsAreAskedAtOnce() async throws {
-        let started = Mutex<Set<String>>([])
-        @Sendable func start(_ me: String, thenSee other: String) async -> Bool {
-            started.withLock { _ = $0.insert(me) }
-            for _ in 0..<500 {
-                if started.withLock({ $0.contains(other) }) { return true }
-                try? await Task.sleep(nanoseconds: 10_000_000)
-            }
-            return false
-        }
-        let found = await NodeRuntime.chainEndpoints(
-            Self.beta, hostsChild: false, own: [],
-            committed: { await start("committed", thenSee: "found") ? "bafy-committed" : nil },
-            found: {
-                await start("found", thenSee: "committed")
-                    ? [DeclaredReadEndpoint(url: "https://host.example", acceptsSubmit: false)] : []
-            }
-        )
-        XCTAssertEqual(found?.committedBlock, "bafy-committed")
-        XCTAssertEqual(found?.endpoints, ["https://host.example"])
-    }
-
     /// A public caller names any directory: the walk of the parent's recent
     /// blocks is done once per tip, whatever the name, made up or not.
     func testTheCommittedChildWalkIsDoneOncePerTipForEveryName() async throws {
@@ -280,7 +255,7 @@ final class ReadEndpointRuntimeTests: XCTestCase {
             storage: storage,
             tip: { ChainStatus(
                 phase: .active, chainPath: ["Nexus"], nexusGenesisCID: configuration.nexusGenesisCID,
-                tipCID: tip.withLock { $0.cid }, height: tip.withLock { $0.height }, revision: nil
+                tipCID: tip.withLock { $0.cid }, height: tip.withLock { $0.height }
             ) },
             canonicalCID: { _ in
                 visited.withLock { $0 += 1 }

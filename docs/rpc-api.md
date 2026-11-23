@@ -628,8 +628,7 @@ Response:
 {
   "accepted": true,
   "disposition": "canonicalized",
-  "tipCID": "<cid>",
-  "durableChildProofs": []
+  "tipCID": "<cid>"
 }
 ```
 

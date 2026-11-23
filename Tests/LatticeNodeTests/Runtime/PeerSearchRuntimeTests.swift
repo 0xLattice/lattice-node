@@ -4,6 +4,7 @@ import Lattice
 import Tally
 import XCTest
 @testable import LatticeNode
+@testable import LatticeNodeNet
 import LatticeNodeAPI
 
 /// A fresh node finds the peers hosting a child level through the level's

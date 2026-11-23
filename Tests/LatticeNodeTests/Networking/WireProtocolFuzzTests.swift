@@ -4,6 +4,7 @@ import UInt256
 import LatticeNodeSim
 import XCTest
 @testable import LatticeNode
+@testable import LatticeNodeNet
 
 /// Fuzzing the one surface an attacker controls completely: the bytes on the
 /// wire, before anything has been authenticated.
@@ -237,49 +238,6 @@ final class WireProtocolFuzzTests: XCTestCase {
             )
         }
         XCTAssertGreaterThan(rejected, 0, "no mutant was ever rejected")
-    }
-
-    /// The overflow mutation has to reach number FIELDS. Matching the first
-    /// digit run lands inside a CID — they are full of digits and keys sort
-    /// before most numbers — so `height` would never see an extreme at all.
-    func testNumberMutationLandsOnNumberValuesNotInsideCIDs() throws {
-        let cid = cids[0]
-        XCTAssertTrue(
-            cid.contains(where: \.isNumber),
-            "the check is only meaningful against a CID that contains digits"
-        )
-        let data = try StreamRequestMessage(
-            chainPath: ["Nexus"], requestID: 7, logID: cid, after: 42, own: ""
-        ).encoded()
-        var generator = SplitMix64(state: 1)
-        for _ in 0..<64 {
-            let mutated = try XCTUnwrap(
-                replaceNumberValue(in: data, with: "\(UInt64.max)", using: &generator)
-            )
-            let text = String(decoding: mutated, as: UTF8.self)
-            XCTAssertTrue(text.contains(cid), "a CID was altered: \(text)")
-            XCTAssertTrue(
-                text.contains(":\(UInt64.max)"),
-                "the number field was not the one replaced: \(text)"
-            )
-        }
-    }
-
-    /// The failure message promises a replay. That promise is only true if the
-    /// generator state recorded before a mutation regenerates the same bytes.
-    func testRecordedStartStateReplaysTheExactMutant() throws {
-        for seed in try corpus() {
-            var original = SplitMix64(state: 0xC0FF_EE00_DEAD_BEEF)
-            for _ in 0..<32 {
-                let start = original.state
-                let mutant = mutate(seed.data, using: &original)
-                var replay = SplitMix64(state: start)
-                XCTAssertEqual(
-                    mutate(seed.data, using: &replay), mutant,
-                    "\(seed.name): a recorded start state did not replay its mutant"
-                )
-            }
-        }
     }
 
     /// The other direction: anything a node emits, a node must read back

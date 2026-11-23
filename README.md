@@ -143,7 +143,7 @@ Nexus is pinned to the deterministic local genesis CID:
 `bafyreiggtg4ezifboyekbf4gxst2jr3mpjqcxsbmopy7w6fp46g4ngpgxa`
 
 Its timestamp is the real launch time (Unix milliseconds) in
-`Sources/LatticeNode/Configuration/NexusGenesis.swift`. The full constants are
+`Sources/LatticeNodeConfig/NexusGenesis.swift`. The full constants are
 documented in [docs/protocol.md](docs/protocol.md).
 
 The genesis is fixed: its CID is committed in a Bitcoin transaction. See
@@ -173,6 +173,9 @@ benchmark reports, per block and per level: wall and CPU time, commits, fsyncs,
 bytes written, proof checks against derivations, and the time in weighing (W),
 body fetch (B), execution (E) and the facts transaction (P). Judge the result
 against the floor of 2–7 ms per block.
+The benchmark is the `ChildSyncBench` test target
+(`Benchmarks/ChildSyncBench`), skipped unless `CHILD_BENCH` is set; the
+scripts set it and run the release test bundle.
 
 The scripts need Docker with at least 8 CPUs: the server uses CPUs 4–7. The
 server runs the build under test, so server-side changes show up in fetch and

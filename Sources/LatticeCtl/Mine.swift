@@ -2,13 +2,14 @@
 // per round. Each block pays the configured recipient for its chain (the
 // block's `rewardRecipient`); a chain with none burns its reward and fees.
 
+import LatticeNodeAPI
 import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
 import ArgumentParser
 import LatticeCtlCore
-import LatticeNode
+import LatticeNodeConfig
 import LatticeMinerCore
 import LatticeMiningCoordinator
 import LatticeProcessWait

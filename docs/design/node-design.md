@@ -662,13 +662,17 @@ published.
 
 | Module | Lines | Role |
 |---|---|---|
-| `LatticeNodeCore` | 5,918 | deterministic decisions per chain |
-| `LatticeNodeSim` | 5,526 | the simulator that drives the core and checks invariants every step |
-| `LatticeNode` | 16,669 | the shell: loop, stores, networking, jobs, reads |
-| `LatticeNodeAPI` | 1,472 | request and response models |
-| `LatticeNodeDaemon` | 3,442 | HTTP servers and process entry |
-| `LatticeCtl`, `LatticeCtlCore` | 2,948 | the `lattice` CLI |
-| `LatticeMiner*`, `LatticeMiningCoordinator*` | 1,624 | mining, as separate processes |
+| `LatticeNodeCore` | 6,342 | deterministic decisions per chain, and the genesis rules a child chain is checked against |
+| `LatticeNodeSim` | 5,530 | the simulator that drives the core and checks invariants every step (`Tools/`, not shipped) |
+| `LatticeNode` | 9,705 | the shell: loop, jobs, reads, boot recovery, the storage gateway that wires the store to the loop, and the overlay delegate that wires the network to it |
+| `LatticeNodeNet` | 2,532 | the peer protocol: handshake, wire codecs, peer memory, read endpoints, the serving ledger, and the Ivy content source; it never imports the store or the shell |
+| `LatticeNodeStore` | 2,402 | what is on disk: the SQLite store (schema, facts, block index, header evidence, state pins, journals, migrations) and the Volume stores; it never imports the shell |
+| `LatticeNodeConfig` | 1,753 | the operator's configuration: topology and fragments, the host layout on disk, chain creation, Nexus's genesis, the setting limits |
+| `LatticeNodeSupport` | 517 | what every part of the process shares: the node log, sync tracing, the read tally, published values, timers |
+| `LatticeNodeAPI` | 1,532 | the client contract: request and response models, and the state proofs a client verifies without a node |
+| `LatticeNodeDaemon` | 3,449 | HTTP servers and process entry |
+| `LatticeCtl`, `LatticeCtlCore` | 3,001 | the `lattice` CLI: it depends on the API, the configuration, the core and the store, never on `LatticeNode` |
+| `LatticeMiner*`, `LatticeMiningCoordinator*` | 1,558 | mining, as separate processes |
 
 ---
 

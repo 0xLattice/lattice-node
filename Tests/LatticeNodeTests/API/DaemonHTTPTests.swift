@@ -2,7 +2,6 @@ import Crypto
 import Hummingbird
 import HummingbirdTesting
 import Lattice
-import LatticeLightClient
 import UInt256
 import Synchronization
 import XCTest
@@ -696,7 +695,7 @@ final class DaemonHTTPTests: XCTestCase {
                     XCTAssertEqual(response.status, .notFound, uri)
                 }
             }
-            for uri in ["/transactions", "/mining/templates", "/mining/work"] {
+            for uri in ["/mining/templates", "/mining/work"] {
                 try await client.execute(
                     uri: uri,
                     method: .post,
@@ -796,55 +795,6 @@ final class DaemonHTTPTests: XCTestCase {
                 XCTAssertEqual(response.status, .ok)
             }
 
-            // A refusal names itself. The operator surface is loopback-only and
-            // the caller holds the signing key, so an unexplained 400 only
-            // hides which rule it broke: a second transaction at the same
-            // (signer, nonce) bidding no more of a real fee is replace-by-fee
-            // refusing, and must say so.
-            // A different body at the same (signer, nonce) that nets the
-            // miner nothing more: its debit is returned to the signer.
-            let signer = CryptoUtils.createAddress(from: key.publicKey)
-            let rival = TransactionBody(
-                accountActions: [
-                    AccountAction(owner: signer, delta: -1),
-                    AccountAction(owner: signer, delta: 1),
-                ],
-                actions: [],
-                depositActions: [],
-                receiptActions: [],
-                withdrawalActions: [],
-                signers: [CryptoUtils.createAddress(from: key.publicKey)],
-                nonce: 0,
-                chainPath: ["Nexus"]
-            )
-            let rivalHeader = try HeaderImpl(node: rival)
-            let rivalTransaction = Transaction(
-                signatures: [key.publicKey: try XCTUnwrap(
-                    TransactionSigning.sign(
-                        bodyHeader: rivalHeader,
-                        privateKeyHex: key.privateKey
-                    )
-                )],
-                body: rivalHeader
-            )
-            XCTAssertNotEqual(rivalHeader.rawCID, bodyHeader.rawCID)
-            try await client.execute(
-                uri: "/transactions",
-                method: .post,
-                headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
-                body: ByteBuffer(bytes: try JSONEncoder().encode(
-                    SubmitTransactionRequest(transaction: rivalTransaction)
-                ))
-            ) { response in
-                XCTAssertEqual(response.status, .badRequest)
-                XCTAssertTrue(
-                    String(
-                        decoding: response.body.readableBytesView, as: UTF8.self
-                    ).contains("feeTooLow"),
-                    "the refusal must name itself, got: \(String(decoding: response.body.readableBytesView, as: UTF8.self))"
-                )
-            }
-
             try await client.execute(
                 uri: "/transactions/\(transactionCID)",
                 method: .get, headers: [.authorization: testOperatorAuthorization]
@@ -868,59 +818,6 @@ final class DaemonHTTPTests: XCTestCase {
                 XCTAssertEqual(response.status, .notFound)
             }
         }
-    }
-
-    func testTransactionForAnUnhostedChainReturns404AndDoesNotEnterNexusPool() async throws {
-        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-http-unknown-chain-\(UUID().uuidString)"
-        )
-        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: storageDirectory,
-            privateKeyHex: String(repeating: "01", count: 32)
-        )
-        let storage = try await NodeStorage.open(configuration: configuration)
-        let service = try await startRuntime(storage)
-        let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
-        let key = CryptoUtils.generateKeyPair()
-        let body = try HeaderImpl(node: TransactionBody(
-            accountActions: [],
-            actions: [],
-            depositActions: [],
-            receiptActions: [],
-            withdrawalActions: [],
-            signers: [CryptoUtils.createAddress(from: key.publicKey)],
-            nonce: 0,
-            chainPath: ["Nexus", "NotHosted"]
-        ))
-        let transaction = Transaction(
-            signatures: [key.publicKey: try XCTUnwrap(TransactionSigning.sign(
-                bodyHeader: body,
-                privateKeyHex: key.privateKey
-            ))],
-            body: body
-        )
-
-        try await app.test(.router) { client in
-            try await client.execute(
-                uri: "/transactions",
-                method: .post,
-                headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
-                body: ByteBuffer(bytes: try JSONEncoder().encode(
-                    SubmitTransactionRequest(transaction: transaction)
-                ))
-            ) { response in
-                XCTAssertEqual(response.status, .notFound)
-                XCTAssertTrue(
-                    String(decoding: response.body.readableBytesView, as: UTF8.self)
-                        .contains("unknownChain")
-                )
-            }
-        }
-
-        let status = await service.status()
-        XCTAssertEqual(status.mempoolCount, 0)
     }
 
     func testMalformedCIDPathParameterIsRejectedBeforeAnyLookup() async throws {
@@ -1227,102 +1124,6 @@ final class DaemonHTTPTests: XCTestCase {
             }
         }
     }
-
-    func testTransactionRoutePreservesConcreteBody() async throws {
-        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-http-test-\(UUID().uuidString)"
-        )
-        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: storageDirectory,
-            privateKeyHex: String(repeating: "01", count: 32)
-        )
-        let storage = try await NodeStorage.open(configuration: configuration)
-        let service = try await startRuntime(storage)
-        let app = makeApplication(
-            service: service,
-            host: "127.0.0.1",
-            port: 8080
-        )
-        let key = CryptoUtils.generateKeyPair()
-        let body = TransactionBody(
-            accountActions: [],
-            actions: [],
-            depositActions: [],
-            receiptActions: [],
-            withdrawalActions: [],
-            signers: [CryptoUtils.createAddress(from: key.publicKey)],
-            nonce: 0,
-            chainPath: ["Nexus"]
-        )
-        let bodyHeader = try HeaderImpl(node: body)
-        let signature = try XCTUnwrap(TransactionSigning.sign(
-            bodyHeader: bodyHeader,
-            privateKeyHex: key.privateKey
-        ))
-        let transaction = Transaction(
-            signatures: [key.publicKey: signature],
-            body: bodyHeader
-        )
-        let requestData = try JSONEncoder().encode(
-            SubmitTransactionRequest(transaction: transaction)
-        )
-
-        try await app.test(.router) { client in
-            try await client.execute(
-                uri: "/transactions",
-                method: .post,
-                headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
-                body: ByteBuffer(bytes: requestData)
-            ) { response in
-                XCTAssertEqual(response.status, .ok)
-                let submitted = try JSONDecoder().decode(
-                    SubmitTransactionResponse.self,
-                    from: Data(response.body.readableBytesView)
-                )
-                XCTAssertEqual(
-                    submitted.transactionCID,
-                    try VolumeImpl<Transaction>(node: transaction).rawCID
-                )
-            }
-        }
-    }
-}
-
-/// Mines exactly one block atop the current tip via the public template/work
-/// routes, solving the issued template, and returns the new tip's CID.
-private func mineOneBlock(client: some TestClientProtocol) async throws -> String {
-    var template: MiningTemplateResponse?
-    try await client.execute(
-        uri: "/mining/templates",
-        method: .post,
-        headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
-        body: ByteBuffer(bytes: try JSONEncoder().encode(MiningTemplateRequest()))
-    ) { response in
-        template = try JSONDecoder().decode(
-            MiningTemplateResponse.self,
-            from: Data(response.body.readableBytesView)
-        )
-    }
-    let issued = try XCTUnwrap(template)
-    var tipCID: String?
-    try await client.execute(
-        uri: "/mining/work",
-        method: .post,
-        headers: [.authorization: testOperatorAuthorization, .contentType: "application/json"],
-        body: ByteBuffer(bytes: try JSONEncoder().encode(
-            SubmitWorkRequest(workID: issued.workID, nonce: solvedNonce(for: issued))
-        ))
-    ) { response in
-        let submitted = try JSONDecoder().decode(
-            SubmitWorkResponse.self,
-            from: Data(response.body.readableBytesView)
-        )
-        XCTAssertTrue(submitted.accepted)
-        tipCID = submitted.tipCID
-    }
-    return try XCTUnwrap(tipCID)
 }
 
 /// A response body writer that records what it is given. With

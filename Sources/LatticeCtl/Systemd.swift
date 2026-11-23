@@ -9,10 +9,11 @@
 // bound to it: a node restart (exit 75) does not take the miner down, and
 // the miner, restarted always, waits out the node's absence itself.
 
+import LatticeNodeAPI
 import Foundation
 import ArgumentParser
 import LatticeCtlCore
-import LatticeNode
+import LatticeNodeConfig
 
 struct EmitSystemd: AsyncParsableCommand {
     static let configuration = CommandConfiguration(

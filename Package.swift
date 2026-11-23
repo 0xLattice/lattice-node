@@ -56,12 +56,6 @@ let package = Package(
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .target(
-            name: "LatticeLightClient",
-            dependencies: [
-                .product(name: "Lattice", package: "lattice"),
-                .product(name: "cashew", package: "cashew"),
-            ]),
-        .target(
             name: "LatticeNodeCore",
             dependencies: [
                 .product(name: "Lattice", package: "lattice"),
@@ -76,22 +70,66 @@ let package = Package(
                 .product(name: "cashew", package: "cashew"),
                 .product(name: "UInt256", package: "UInt256"),
                 .product(name: "Crypto", package: "swift-crypto"),
-            ]),
+            ],
+            path: "Tools/LatticeNodeSim"),
         .target(
             name: "LatticeNodeAPI",
             dependencies: [
-                "LatticeLightClient",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "cashew", package: "cashew"),
                 .product(name: "UInt256", package: "UInt256"),
             ]
         ),
         .target(
+            name: "LatticeNodeConfig",
+            dependencies: [
+                "LatticeNodeAPI",
+                "LatticeNodeCore",
+                .product(name: "Lattice", package: "lattice"),
+                .product(name: "Ivy", package: "Ivy2"),
+                .product(name: "cashew", package: "cashew"),
+                .product(name: "UInt256", package: "UInt256"),
+            ]),
+        .target(
+            name: "LatticeNodeSupport",
+            dependencies: [
+                .product(name: "cashew", package: "cashew"),
+            ]),
+        .target(
+            name: "LatticeNodeStore",
+            dependencies: [
+                "LatticeNodeAPI",
+                "LatticeNodeSupport",
+                "LatticeNodeCore",
+                "LatticeNodeConfig",
+                "CSQLite",
+                .product(name: "Lattice", package: "lattice"),
+                .product(name: "VolumeBroker", package: "VolumeBroker"),
+                .product(name: "cashew", package: "cashew"),
+                .product(name: "UInt256", package: "UInt256"),
+            ]),
+        .target(
+            name: "LatticeNodeNet",
+            dependencies: [
+                "LatticeNodeSupport",
+                "LatticeNodeCore",
+                "LatticeNodeConfig",
+                .product(name: "Lattice", package: "lattice"),
+                .product(name: "Ivy", package: "Ivy2"),
+                .product(name: "Tally", package: "Tally"),
+                .product(name: "VolumeBroker", package: "VolumeBroker"),
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "cashew", package: "cashew"),
+            ]),
+        .target(
             name: "LatticeNode",
             dependencies: [
                 "LatticeNodeAPI",
+                "LatticeNodeNet",
+                "LatticeNodeConfig",
+                "LatticeNodeStore",
+                "LatticeNodeSupport",
                 "CSQLite",
-                "LatticeLightClient",
                 "LatticeNodeCore",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "Ivy", package: "Ivy2"),
@@ -140,7 +178,8 @@ let package = Package(
         .target(
             name: "LatticeCtlCore",
             dependencies: [
-                "LatticeNode",
+                "LatticeNodeAPI",
+                "LatticeNodeConfig",
                 "LatticeMinerCore",
                 "LatticeProcessWait",
                 .product(name: "Lattice", package: "lattice"),
@@ -149,7 +188,9 @@ let package = Package(
             name: "LatticeCtl",
             dependencies: [
                 "LatticeNodeAPI",
-                "LatticeNode",
+                "LatticeNodeConfig",
+                "LatticeNodeCore",
+                "LatticeNodeStore",
                 "LatticeCtlCore",
                 "LatticeProcessWait",
                 "LatticeMinerCore",
@@ -174,6 +215,7 @@ let package = Package(
         .testTarget(
             name: "LatticeNodeTests",
             dependencies: [
+                "LatticeNodeNet",
                 "BenchVFS",
                 "LatticeNodeAPI",
                 "LatticeNode",
@@ -196,6 +238,19 @@ let package = Package(
                 .product(name: "HummingbirdTesting", package: "hummingbird"),
             ],
             path: "Tests/LatticeNodeTests"),
+        // The sync benchmark (Benchmarks/sync): opt-in, skipped unless CHILD_BENCH is set.
+        .testTarget(
+            name: "ChildSyncBench",
+            dependencies: [
+                "BenchVFS",
+                "LatticeNode",
+                "LatticeNodeAPI",
+                "LatticeNodeCore",
+                .product(name: "Lattice", package: "lattice"),
+                .product(name: "Ivy", package: "Ivy2"),
+                .product(name: "UInt256", package: "UInt256"),
+            ],
+            path: "Benchmarks/ChildSyncBench"),
         .testTarget(
             name: "LatticeNodeSimulationTests",
             dependencies: [

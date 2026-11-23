@@ -211,9 +211,9 @@ final class OperatorPinTests: XCTestCase {
                 await runtime.ivy.providers(for: alphaKey).map(\.publicKey).contains(ownKey)
             }
             runtime.inputs.yield(.maintenance)
-            try await Task.sleep(for: .seconds(1))
-            let announced = await runtime.ivy.providers(for: root)
-            XCTAssertEqual(announced, [], "no pass announces it")
+            try await alwaysDuring("no pass announces it", .seconds(1), poll: .milliseconds(50)) {
+                await runtime.ivy.providers(for: root).isEmpty
+            }
             let pins = await runtime.pinnedVolumes()
             XCTAssertEqual(pins, [root])
             await runtime.stop()

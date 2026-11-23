@@ -1,4 +1,5 @@
 import LatticeNodeCore
+import LatticeNodeSupport
 
 extension NodeRuntime {
     /// A worker job. One with a tip is skipped at dequeue when it is not its

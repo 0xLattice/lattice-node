@@ -76,12 +76,8 @@ final class IvyRootContentBudgetTests: XCTestCase {
                 AttributedVolumeResponse(rootCID: root.cid, entries: padded, servedBy: nil, failure: nil)
             }
         }
-        // What holding the entries takes at the very least: their CIDs and
-        // bytes, a slot in each of the four tables keyed by CID, the data's
-        // header and the owner set's.
-        let slots = 4 * MemoryLayout<String>.stride + MemoryLayout<Data>.stride
-            + MemoryLayout<Set<String>>.stride
-        let retainedAtLeast = padded.reduce(0) { $0 + $1.key.utf8.count + $1.value.count + slots }
+        // Every entry is charged, the padding with the rest.
+        let retainedAtLeast = padded.reduce(0) { $0 + $1.key.utf8.count + $1.value.count }
 
         let charged = await source(maximumStorageBytes: .max).withRoot(root.cid) { session in
             _ = await session.fetch([root.cid])

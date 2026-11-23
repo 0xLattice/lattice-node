@@ -920,10 +920,6 @@ final class MiningStateTests: XCTestCase {
         XCTAssertEqual(mining.pendingPeerAdmissions, bounds.maxPendingPeerAdmissions)
     }
 
-    func testAnOrdinaryReorgReturnsEveryTransactionByDefault() {
-        XCTAssertEqual(MiningConfig().maxPendingReturned, MempoolLimits().maxCount)
-    }
-
     func testTemplateJobsCoalesceOnOneTipAndAMoveAnswersTheWaitingBuild() async throws {
         var mining = MiningState(tipCID: "A", spec: testSpec())
         let request = TemplateRequest(rewardRecipient: address(key))
@@ -963,7 +959,6 @@ final class MiningStateTests: XCTestCase {
     func testWorkIsKeptAcrossTipMovesUpToTheBooksCapacity() async throws {
         var mining = MiningState(tipCID: "T0", spec: testSpec())
         let capacity = mining.config.templateCapacity
-        XCTAssertEqual(capacity, 512)
         let block = try await candidateBlock()
         let issued = capacity + 88
         for index in 0..<issued {

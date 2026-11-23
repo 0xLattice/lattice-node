@@ -3,6 +3,7 @@ import Lattice
 import LatticeNodeCore
 import Synchronization
 import UInt256
+import LatticeNodeSupport
 
 /// The block each hosted child level last built for a template, kept so the
 /// next template reuses it while nothing it was built from has changed.

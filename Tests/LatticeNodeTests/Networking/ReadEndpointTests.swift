@@ -4,6 +4,7 @@ import Ivy
 import Synchronization
 import XCTest
 @testable import LatticeNode
+@testable import LatticeNodeNet
 
 /// The read-endpoint directory's bounds, over a scripted transport: who is
 /// asked, what is counted, when a lookup ends, and what is reused.
@@ -631,20 +632,6 @@ final class ReadEndpointTests: XCTestCase {
         XCTAssertEqual(oldestURLs, ["https://20010.example"], "the closed lookup's late answer is dropped")
     }
 
-    /// A node answers only for a level it hosts, and only with a declared URL.
-    func testOnlyAHostedLevelWithADeclaredURLIsAnswered() {
-        let hosted: Set<[String]> = [["Nexus"], ["Nexus", "Alpha"]]
-        let request = ReadEndpointRequestMessage(chainPath: ["Nexus", "Alpha"], requestID: 9)
-        XCTAssertEqual(
-            ReadEndpointDirectory.answer(request, hosted: hosted, url: "https://a.example"),
-            ReadEndpointResponseMessage(chainPath: ["Nexus", "Alpha"], requestID: 9, url: "https://a.example")
-        )
-        XCTAssertNil(ReadEndpointDirectory.answer(
-            ReadEndpointRequestMessage(chainPath: Self.path, requestID: 9), hosted: hosted, url: "https://a.example"
-        ))
-        XCTAssertNil(ReadEndpointDirectory.answer(request, hosted: hosted, url: nil))
-    }
-
     /// A host accepting submits answers v2 then v1 with one URL: counted
     /// once, flagged. A v1-only host (an older node, or submit off) is not
     /// flagged, and a v2 answer cannot lift a responder past its cap.
@@ -673,23 +660,13 @@ final class ReadEndpointTests: XCTestCase {
         )
     }
 
-    /// The v2 answer exists only for a host that accepts submits, and only
-    /// where the v1 answer would.
+    /// The v2 answer exists only for a host that accepts submits (the
+    /// runtime tests cover what a submitting host answers), and an older
+    /// reader never mistakes it for a v1 answer.
     func testTheV2AnswerIsSentOnlyWhenSubmitIsOn() throws {
         let hosted: Set<[String]> = [["Nexus"], ["Nexus", "Alpha"]]
         let request = ReadEndpointRequestMessage(chainPath: ["Nexus", "Alpha"], requestID: 9)
-        XCTAssertEqual(
-            ReadEndpointDirectory.answerV2(request, hosted: hosted, url: "https://a.example", acceptsSubmit: true),
-            ReadEndpointResponseV2Message(
-                chainPath: ["Nexus", "Alpha"], requestID: 9, url: "https://a.example", acceptsSubmit: true
-            )
-        )
         XCTAssertNil(ReadEndpointDirectory.answerV2(request, hosted: hosted, url: "https://a.example", acceptsSubmit: false))
-        XCTAssertNil(ReadEndpointDirectory.answerV2(request, hosted: hosted, url: nil, acceptsSubmit: true))
-        XCTAssertNil(ReadEndpointDirectory.answerV2(
-            ReadEndpointRequestMessage(chainPath: Self.path, requestID: 9), hosted: hosted,
-            url: "https://a.example", acceptsSubmit: true
-        ))
         let v2 = ReadEndpointResponseV2Message(chainPath: Self.path, requestID: 3, url: "https://b.example", acceptsSubmit: true)
         XCTAssertEqual(try ReadEndpointResponseV2Message.decoded(v2.encoded()), v2)
         XCTAssertThrowsError(try ReadEndpointResponseV2Message(

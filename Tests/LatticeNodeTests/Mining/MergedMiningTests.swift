@@ -2,7 +2,6 @@ import Crypto
 import Foundation
 import Ivy
 import Lattice
-import LatticeLightClient
 import LatticeNodeCore
 import UInt256
 import XCTest
@@ -45,6 +44,8 @@ final class MergedMiningTests: XCTestCase {
     }
 
     static let alpha = ["Nexus", "Alpha"]
+    /// The clock genesis policies are checked against (milliseconds).
+    static let genesisCheckTime = Int64(Date().timeIntervalSince1970 * 1000)
     static let alphaSpec = ChainSpec(
         maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
         targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
@@ -94,10 +95,10 @@ final class MergedMiningTests: XCTestCase {
             targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
         )
         let artist = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
-        XCTAssertEqual(try NodeRuntime.premine(spec: spec, to: nil, on: Self.alpha).count, 0)
-        XCTAssertEqual(try NodeRuntime.premine(spec: Self.alphaSpec, to: artist, on: Self.alpha).count, 0)
-        XCTAssertThrowsError(try NodeRuntime.premine(spec: spec, to: "a/b", on: Self.alpha), "not an account")
-        XCTAssertThrowsError(try NodeRuntime.premine(spec: spec, to: "", on: Self.alpha), "not an account")
+        XCTAssertEqual(try ChildGenesis.premine(spec: spec, to: nil, on: Self.alpha).count, 0)
+        XCTAssertEqual(try ChildGenesis.premine(spec: Self.alphaSpec, to: artist, on: Self.alpha).count, 0)
+        XCTAssertThrowsError(try ChildGenesis.premine(spec: spec, to: "a/b", on: Self.alpha), "not an account")
+        XCTAssertThrowsError(try ChildGenesis.premine(spec: spec, to: "", on: Self.alpha), "not an account")
 
         func host(_ keyByte: String, creator: Bool, peers: [PeerEndpoint] = []) throws -> (NodeConfiguration, IvyConfig, PeerEndpoint) {
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -183,14 +184,14 @@ final class MergedMiningTests: XCTestCase {
             try Self.genesisTransaction(creator, actions: [Action(key: "name/alpha", oldValue: nil, newValue: address)], nonce: 0),
             try Self.genesisTransaction(creator, actions: [Action(key: "name/support", oldValue: nil, newValue: address)], nonce: 1),
         ]
-        XCTAssertNoThrow(try NodeRuntime.checkPremine(spec: Self.alphaSpec, to: nil, transactions: claims, on: Self.alpha, modules: []))
+        XCTAssertNoThrow(try ChildGenesis.checkPremine(spec: Self.alphaSpec, to: nil, transactions: claims, on: Self.alpha, modules: [], timestamp: Self.genesisCheckTime))
         let refused: [String: Transaction] = [
             "unsigned": try Self.genesisTransaction(creator, actions: [Action(key: "k", oldValue: nil, newValue: "v")], nonce: 2, signed: false),
             "another chain": try Self.genesisTransaction(creator, actions: [Action(key: "k", oldValue: nil, newValue: "v")], nonce: 2, chainPath: ["Nexus", "Beta"]),
             "moves coins": try Self.genesisTransaction(creator, actions: [], nonce: 2, accountActions: [AccountAction(owner: address, delta: 5)]),
         ]
         for (why, transaction) in refused {
-            XCTAssertThrowsError(try NodeRuntime.checkPremine(spec: Self.alphaSpec, to: nil, transactions: [transaction], on: Self.alpha, modules: []), why)
+            XCTAssertThrowsError(try ChildGenesis.checkPremine(spec: Self.alphaSpec, to: nil, transactions: [transaction], on: Self.alpha, modules: [], timestamp: Self.genesisCheckTime), why)
         }
         // A forged signature: another key's, over the creator's body.
         let other = CryptoUtils.generateKeyPair()
@@ -198,19 +199,19 @@ final class MergedMiningTests: XCTestCase {
             signatures: [other.publicKey: try XCTUnwrap(TransactionSigning.sign(bodyHeader: claims[0].body, privateKeyHex: other.privateKey))],
             body: claims[0].body
         )
-        XCTAssertThrowsError(try NodeRuntime.checkPremine(spec: Self.alphaSpec, to: nil, transactions: [forged], on: Self.alpha, modules: []), "signed by someone else")
-        let refuse = Self.policyModule(verdict: 0)
+        XCTAssertThrowsError(try ChildGenesis.checkPremine(spec: Self.alphaSpec, to: nil, transactions: [forged], on: Self.alpha, modules: [], timestamp: Self.genesisCheckTime), "signed by someone else")
+        let refuse = policyModule(verdict: 0)
         let refusing = ChainSpec(
             maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
             targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10,
             wasmPolicies: [WasmPolicyRef(moduleCID: try WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: refuse)).rawCID, scope: .transaction)]
         )
-        XCTAssertThrowsError(try NodeRuntime.checkPremine(spec: refusing, to: nil, transactions: claims, on: Self.alpha, modules: [refuse]), "a policy refuses it")
+        XCTAssertThrowsError(try ChildGenesis.checkPremine(spec: refusing, to: nil, transactions: claims, on: Self.alpha, modules: [refuse], timestamp: Self.genesisCheckTime), "a policy refuses it")
         let small = ChainSpec(
             maxNumberOfTransactionsPerBlock: 1, maxStateGrowth: 100_000, premine: 0,
             targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
         )
-        XCTAssertThrowsError(try NodeRuntime.checkPremine(spec: small, to: nil, transactions: claims, on: Self.alpha, modules: []), "more than a block holds")
+        XCTAssertThrowsError(try ChildGenesis.checkPremine(spec: small, to: nil, transactions: claims, on: Self.alpha, modules: [], timestamp: Self.genesisCheckTime), "more than a block holds")
 
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "lattice-genesis-transactions-\(UUID().uuidString)", isDirectory: true
@@ -262,7 +263,7 @@ final class MergedMiningTests: XCTestCase {
     /// genesis: mined and then refused, it would leave the chain weighing a
     /// root that never executes.
     func testAGenesisItsPolicyRefusesIsNeitherCreatedNorMined() async throws {
-        let refuse = Self.policyModule(verdict: 0), accept = Self.policyModule(verdict: 1)
+        let refuse = policyModule(verdict: 0), accept = policyModule(verdict: 1)
         func spec(_ module: Data) throws -> ChainSpec {
             ChainSpec(
                 maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 21,
@@ -274,9 +275,9 @@ final class MergedMiningTests: XCTestCase {
             )
         }
         let artist = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
-        XCTAssertNoThrow(try NodeRuntime.checkPremine(spec: try spec(accept), to: artist, on: Self.alpha, modules: [accept]))
-        XCTAssertThrowsError(try NodeRuntime.checkPremine(spec: try spec(refuse), to: artist, on: Self.alpha, modules: [refuse]))
-        XCTAssertThrowsError(try NodeRuntime.checkPremine(spec: try spec(accept), to: artist, on: Self.alpha, modules: []))
+        XCTAssertNoThrow(try ChildGenesis.checkPremine(spec: try spec(accept), to: artist, on: Self.alpha, modules: [accept], timestamp: Self.genesisCheckTime))
+        XCTAssertThrowsError(try ChildGenesis.checkPremine(spec: try spec(refuse), to: artist, on: Self.alpha, modules: [refuse], timestamp: Self.genesisCheckTime))
+        XCTAssertThrowsError(try ChildGenesis.checkPremine(spec: try spec(accept), to: artist, on: Self.alpha, modules: [], timestamp: Self.genesisCheckTime))
 
         // The same node with a policy that accepts the credit offers the genesis.
         func host(_ module: Data, _ keyByte: String) async throws -> NodeRuntime {
@@ -438,28 +439,6 @@ final class MergedMiningTests: XCTestCase {
         }
     }
 
-    /// A WASM policy module that gives `verdict` for every transaction: the
-    /// memory, allocator and transaction entrypoint the policy ABI requires.
-    private static func policyModule(verdict: UInt8) -> Data {
-        func section(_ id: UInt8, _ body: [UInt8]) -> [UInt8] { [id, UInt8(body.count)] + body }
-        func export(_ name: String, kind: UInt8, index: UInt8) -> [UInt8] {
-            [UInt8(name.utf8.count)] + Array(name.utf8) + [kind, index]
-        }
-        var exports: [UInt8] = [0x03]
-        exports += export("memory", kind: 2, index: 0)
-        exports += export("lattice_alloc", kind: 0, index: 0)
-        exports += export("lattice_validate_transaction", kind: 0, index: 1)
-        var module: [UInt8] = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]
-        // (i32) -> i32 and (i32, i32) -> i32
-        module += section(1, [0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f])
-        module += section(3, [0x02, 0x00, 0x01])
-        module += section(5, [0x01, 0x00, 0x01])
-        module += section(7, exports)
-        // lattice_alloc returns 1024; the entrypoint returns the verdict.
-        module += section(10, [0x02, 0x05, 0x00, 0x41, 0x80, 0x08, 0x0b, 0x04, 0x00, 0x41, verdict, 0x0b])
-        return Data(module)
-    }
-
     /// A node hosting Nexus and Alpha. With `module`, Alpha's spec names it
     /// as its transaction policy and the node is given its bytes; without,
     /// the node only follows the Alpha others mine.
@@ -531,7 +510,7 @@ final class MergedMiningTests: XCTestCase {
     /// from the node that mined it, executes a block whose transaction the
     /// policy had to accept, and holds the module afterwards.
     func testAPeerSyncsAPolicyChildAndItsModuleFromTheNodeThatMinedIt() async throws {
-        let module = Self.policyModule(verdict: 1)
+        let module = policyModule(verdict: 1)
         let moduleCID = try WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: module)).rawCID
         let (minerConfiguration, minerOverlay, minerEndpoint) = try policyHost("6a", module: module)
         let miner = try await NodeRuntime.start(
@@ -571,7 +550,7 @@ final class MergedMiningTests: XCTestCase {
     /// same transfer the accepting policy's chain mines is refused at
     /// submission here, while the chain itself still advances.
     func testARejectingPolicyRefusesTheTransferAnAcceptingOneMines() async throws {
-        let (configuration, overlay, _) = try policyHost("6c", module: Self.policyModule(verdict: 0))
+        let (configuration, overlay, _) = try policyHost("6c", module: policyModule(verdict: 0))
         let node = try await NodeRuntime.start(
             storage: try await NodeStorage.open(configuration: configuration),
             configuration: configuration, overlay: overlay

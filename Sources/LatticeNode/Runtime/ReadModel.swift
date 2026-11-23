@@ -1,6 +1,7 @@
 import Foundation
 import LatticeNodeAPI
 import LatticeNodeCore
+import LatticeNodeSupport
 
 extension NodeRuntime {
     /// The read model: each level's read view (its act-on chain by height,

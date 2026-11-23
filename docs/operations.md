@@ -438,7 +438,7 @@ are lost. A file there that cannot be read stops the node from starting.
 
 - `phase: active` when the selected level has an executed tip;
 - `phase: awaitingGenesis` for a hosted child with no executable genesis yet;
-- `tipCID`, `height`, and `revision` for the selected level;
+- `tipCID` and `height` for the selected level;
 - the pinned Nexus genesis CID and absolute chain path.
 
 An unknown or unhosted chain path is 404. It is not an internal error.

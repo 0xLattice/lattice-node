@@ -7,6 +7,7 @@ import cashew
 import UInt256
 import VolumeBroker
 import LatticeNodeAPI
+import LatticeNodeStore
 
 extension NodeRuntime {
     // MARK: - Jobs
@@ -23,7 +24,7 @@ extension NodeRuntime {
     /// resolved content only); none when its body is not held.
     static func transactions(ofBlock cid: String, fetcher: any Fetcher) async -> [Transaction] {
         guard let block = try? await BlockHeader(rawCID: cid).resolve(fetcher: fetcher).node,
-              let carried = try? await MiningTemplateAssembly.blockTransactions(in: block, fetcher: fetcher)
+              let carried = try? await block.orderedTransactions(fetcher: fetcher)
         else { return [] }
         var resolved: [Transaction] = []
         for transaction in carried {

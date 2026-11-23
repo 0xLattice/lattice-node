@@ -6,12 +6,13 @@
 // reconciles the declarative topology in lattice.json; none holds resident
 // state.
 
+import LatticeNodeAPI
 import Foundation
 import ArgumentParser
 import Crypto
 import Ivy
 import Lattice
-import LatticeNode
+import LatticeNodeConfig
 
 @main
 struct LatticeCtl: AsyncParsableCommand {

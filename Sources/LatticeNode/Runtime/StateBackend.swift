@@ -1,6 +1,7 @@
 import Foundation
 import LatticeNodeCore
 import VolumeBroker
+import LatticeNodeStore
 
 /// What the node does with executed state, behind one interface: keep what
 /// a block's storing and execution stored, let go of what a block read once

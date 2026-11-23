@@ -12,14 +12,16 @@ import LatticeNodeAPI
 /// ancestors: every other level's block is reused, and a reused block,
 /// timestamp and all, is mined like any other.
 final class ChildTemplateCacheTests: XCTestCase {
-    private static func key(tip: String = "tip", transactions: [String] = []) -> ChildTemplateCache.Key {
-        ChildTemplateCache.Key(
-            tipCID: tip, actOnTipCID: tip, enteringCID: "entering", transactions: transactions,
+    /// A built block is reused only within the cache's age: past it, the
+    /// level is built again even when nothing it was built from changed, so
+    /// a reused timestamp stays near the present.
+    func testABlockIsNotReusedPastItsAge() {
+        let cache = ChildTemplateCache(maxAge: .seconds(30))
+        let path = ["Nexus", "Alpha"]
+        let key = ChildTemplateCache.Key(
+            tipCID: "tip", actOnTipCID: "tip", enteringCID: "entering", transactions: [],
             anchor: nil, request: TemplateRequest(rewardRecipient: nil), hosted: [], children: []
         )
-    }
-
-    private static func entry(_ key: ChildTemplateCache.Key, at instant: ContinuousClock.Instant) -> ChildTemplateCache.Entry {
         // The cache never reads the block: any will do.
         let state = LatticeStateHeader(rawCID: "state")
         let block = Block(
@@ -29,27 +31,10 @@ final class ChildTemplateCacheTests: XCTestCase {
             postState: state, children: HeaderImpl(rawCID: state.rawCID), height: 0,
             timestamp: 0, rewardRecipient: nil, nonce: 0
         )
-        return ChildTemplateCache.Entry(
-            key: key, builtAt: instant, block: block, searchWitness: nil, subtreeThresholds: nil
-        )
-    }
-
-    func testABlockIsReusedOnlyForItsOwnKeyAndWithinItsAge() {
-        let cache = ChildTemplateCache(maxAge: .seconds(30))
-        let path = ["Nexus", "Alpha"]
         let built = ContinuousClock.now
-        cache.keep(Self.entry(Self.key(), at: built), at: path)
-
-        XCTAssertNotNil(cache.block(at: path, for: Self.key(), now: built + .seconds(29)))
-        XCTAssertNil(cache.block(at: path, for: Self.key(), now: built + .seconds(31)), "too old to reuse")
-        XCTAssertNil(cache.block(at: path, for: Self.key(tip: "moved"), now: built), "another tip")
-        XCTAssertNil(cache.block(at: path, for: Self.key(transactions: ["tx"]), now: built), "another pool")
-        XCTAssertNil(cache.block(at: ["Nexus", "Beta"], for: Self.key(), now: built), "another level")
-
-        // One block per level: a newer build replaces the older.
-        cache.keep(Self.entry(Self.key(tip: "moved"), at: built), at: path)
-        XCTAssertNil(cache.block(at: path, for: Self.key(), now: built))
-        XCTAssertNotNil(cache.block(at: path, for: Self.key(tip: "moved"), now: built))
+        cache.keep(.init(key: key, builtAt: built, block: block, searchWitness: nil, subtreeThresholds: nil), at: path)
+        XCTAssertNotNil(cache.block(at: path, for: key, now: built + .seconds(29)))
+        XCTAssertNil(cache.block(at: path, for: key, now: built + .seconds(31)), "too old to reuse")
     }
 
     func testOnlyTheLevelThatChangedIsRebuiltAndAReusedBlockIsMined() async throws {

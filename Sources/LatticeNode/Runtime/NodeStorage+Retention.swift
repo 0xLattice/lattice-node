@@ -3,6 +3,8 @@ import Lattice
 import LatticeNodeCore
 import VolumeBroker
 import cashew
+import LatticeNodeSupport
+import LatticeNodeStore
 
 /// The names content is pinned under. A Volume stays while any scope names
 /// it, and each scope says why.

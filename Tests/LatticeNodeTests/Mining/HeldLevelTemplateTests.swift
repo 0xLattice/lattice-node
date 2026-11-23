@@ -243,7 +243,7 @@ final class HeldLevelTemplateTests: XCTestCase {
         let template = try await follower.runtime.miningTemplate(MiningTemplateRequest())
         XCTAssertEqual(template.block.height, 5, "the root is mined")
         XCTAssertNil(template.block.children.node?.entries["Alpha"], "Alpha is left out while it holds a backlog")
-        let carried = try await MiningTemplateAssembly.blockTransactions(in: template.block, fetcher: follower.storage.workFetcher(.anyChain))
+        let carried = try await template.block.orderedTransactions(fetcher: follower.storage.workFetcher(.anyChain))
         XCTAssertTrue(carried.isEmpty, "Alpha's directory, left out, is still hosted: no foreign commitment")
         let status = await follower.runtime.status().templateDigest
         XCTAssertEqual(template.templateDigest, status)

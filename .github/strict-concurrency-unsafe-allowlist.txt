@@ -1,9 +1,9 @@
 # Every @unchecked Sendable or nonisolated(unsafe) site must be listed here with
 # a rationale. This keeps strict-concurrency escapes visible in review.
-Sources/LatticeNode/Storage/NodeSQLite.swift|final class NodeSQLite: @unchecked Sendable {|SQLite is opened FULLMUTEX and every operation uses that serialized handle without exposing it.
-Sources/LatticeNode/Content/IvyContentSource.swift|public final class AttributionCapture: @unchecked Sendable {|All access to the optional attribution value is guarded by AttributionCapture's NSLock.
-Sources/LatticeNode/Content/IvyContentSource.swift|private final class Trace: @unchecked Sendable {|All mutable attribution state is guarded by Trace's NSLock.
-Sources/LatticeNode/Content/IvyContentSource.swift|private final class Context: @unchecked Sendable {|The root CID is immutable and the referenced Trace synchronizes its own mutable state.
+Sources/LatticeNodeStore/NodeSQLite.swift|package final class NodeSQLite: @unchecked Sendable {|SQLite is opened FULLMUTEX and every operation uses that serialized handle without exposing it.
+Sources/LatticeNodeNet/IvyContentSource.swift|public final class AttributionCapture: @unchecked Sendable {|All access to the optional attribution value is guarded by AttributionCapture's NSLock.
+Sources/LatticeNodeNet/IvyContentSource.swift|private final class Trace: @unchecked Sendable {|All mutable attribution state is guarded by Trace's NSLock.
+Sources/LatticeNodeNet/IvyContentSource.swift|private final class Context: @unchecked Sendable {|The root CID is immutable and the referenced Trace synchronizes its own mutable state.
 Tests/LatticeMiningCoordinatorTests/MiningCoordinatorTests.swift|nonisolated(unsafe) static var responder: ((URLRequest) -> (Int, Data))?|The URLProtocol test stub installs and clears this callback serially within each test.
 Sources/LatticeCtl/Mine.swift|final class InterruptFlag: @unchecked Sendable {|All access to the boolean is guarded by InterruptFlag's NSLock; raised only from the SIGTERM dispatch source.
 Tests/LatticeNodeTests/Utilities/ProcessStderrReuseTests.swift|private final class PidCounter: @unchecked Sendable {|Test-only counter; the spawn count is guarded by PidCounter's NSLock.
@@ -14,20 +14,20 @@ Tests/LatticeNodeTests/Support/NodeRuntimeTestSupport.swift|private nonisolated(
 Tests/LatticeNodeTests/Runtime/SessionOutboxTests.swift|private final class Recorder: IvyDelegate, @unchecked Sendable {|Test-only Ivy delegate; its connected peers and received topics are guarded by Recorder's NSLock.
 Tests/LatticeNodeTests/Mining/MergedMiningTests.swift|private final class AnnouncementRecorder: IvyDelegate, @unchecked Sendable {|Test-only Ivy delegate; the topics it received are read and written only under its NSLock.
 Tests/LatticeNodeTests/Runtime/SessionOutboxTests.swift|final class Once: @unchecked Sendable {|Test-only resume-once box; the continuation is taken and cleared under Once's NSLock, so it is resumed exactly once.
-Sources/LatticeNode/Networking/PeerCapabilities.swift|final class PeerCapabilities: @unchecked Sendable {|The open sessions' capabilities and the revoked set are read and written only under PeerCapabilities' NSLock.
-Sources/LatticeNode/Storage/VolumeBundleCache.swift|final class VolumeBundleCache: @unchecked Sendable {|The cache's SQLite handle and its disabled/said-once flags are used only under VolumeBundleCache's NSLock.
+Sources/LatticeNodeNet/PeerCapabilities.swift|package final class PeerCapabilities: @unchecked Sendable {|The open sessions' capabilities and the revoked set are read and written only under PeerCapabilities' NSLock.
+Sources/LatticeNodeStore/VolumeBundleCache.swift|package final class VolumeBundleCache: @unchecked Sendable {|The cache's SQLite handle and its disabled/said-once flags are used only under VolumeBundleCache's NSLock.
 Tests/LatticeNodeTests/Runtime/NodeRuntimeTests.swift|private final class BootstrapHelloDelegate: IvyDelegate, @unchecked Sendable {|Test-only Ivy delegate; its current value is read and written only under its NSLock.
 Tests/LatticeNodeTests/Content/BundledBlockFetchTests.swift|private final class CountingSource: IvyContentSource, @unchecked Sendable {|Test-only content source; its request counters are read and written only under its NSLock.
 Tests/LatticeNodeTests/Content/BundledBlockFetchTests.swift|private final class Connections: IvyDelegate, @unchecked Sendable {|Test-only Ivy delegate; its recorded peers are read and written only under its NSLock.
-Sources/LatticeNode/Content/AcquisitionBudget.swift|public final class AcquisitionBudget: @unchecked Sendable {|All reservation, waiter-queue, and peak state is guarded by AcquisitionBudget's NSLock.
-Sources/LatticeNode/Content/AcquisitionBudget.swift|private final class Waiter: @unchecked Sendable {|A waiter's continuation and cancelled flag are read and written only under AcquisitionBudget's NSLock.
+Sources/LatticeNodeNet/AcquisitionBudget.swift|public final class AcquisitionBudget: @unchecked Sendable {|All reservation, waiter-queue, and peak state is guarded by AcquisitionBudget's NSLock.
+Sources/LatticeNodeNet/AcquisitionBudget.swift|private final class Waiter: @unchecked Sendable {|A waiter's continuation and cancelled flag are read and written only under AcquisitionBudget's NSLock.
 Sources/LatticeNode/Runtime/NodeRuntime.swift|private final class Handoff<Value>: @unchecked Sendable {|Written once in init before the loop Task is created (Task creation orders it), then taken exactly once by that Task; no other access.
 Tests/LatticeNodeSimulationTests/DerivedGrindTrace.swift|final class GrindTracer: @unchecked Sendable {|Test-only trace recorder; each tracer is owned by one test host and mutated serially within that test.
 Tests/LatticeNodeSimulationTests/DerivedGrindTrace.swift|nonisolated(unsafe) static var open: [GrindTracer] = []|The open tracer list is read and replaced only while holding its static NSLock.
 Sources/LatticeNodeDaemon/OperatorControl.swift|final class NodeLifecycle: @unchecked Sendable {|The request is read and written only under NodeLifecycle's NSLock; the stream and its continuation are immutable after init.
 Sources/LatticeNodeDaemon/OperatorTokens.swift|final class TokenStore: @unchecked Sendable {|The token set is read and replaced only under TokenStore's NSLock, the file written under the same lock; the file URL is immutable.
 Tests/LatticeNodeTests/API/OperatorConfigTests.swift|private final class FakeRuntime: HostingRuntime, @unchecked Sendable {|Test-only runtime fake; its hosted list and call counters are read and written only under its NSLock.
-Sources/LatticeNode/Observability/NodeLog.swift|public final class NodeLog: @unchecked Sendable {|The ring of kept lines, its start, count and byte count are read and written only under NodeLog's NSLock.
+Sources/LatticeNodeSupport/NodeLog.swift|public final class NodeLog: @unchecked Sendable {|The ring of kept lines, its start, count and byte count are read and written only under NodeLog's NSLock.
 Tests/LatticeNodeE2ETests/LatticeCtlE2ETests.swift|private final class NodeSupervisor: @unchecked Sendable {|Test-only process manager; its process, stopping flag and exit list are read and written only under its NSLock.
 Sources/LatticeNodeDaemon/LatticeNodeCommand.swift|final class Hangups: @unchecked Sendable {|The signal source, the action and the missed flag are read and written only under Hangups's NSLock.
 Tests/LatticeNodeTests/Storage/NodeSQLiteReadTests.swift|nonisolated(unsafe) var count: Int64?|Test-only result slot; the reader thread writes it before counted.signal() and the test reads it only after counted.wait(), so the semaphore orders the two.

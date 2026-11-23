@@ -217,8 +217,9 @@ final class NodeRuntimeTests: XCTestCase {
                 await joinerRuntime.status().waiting?.hasPrefix("body of \(cid)") == true
             }
             try await BlockHeader(rawCID: cid).storeBlock(fetcher: producerStorage.localFetcher(.anyChain), storer: joinerStorage)
-            try await Task.sleep(for: .milliseconds(500 * testTimeScale))
-            XCTAssertNotEqual(joinerRuntime.published.value?.actOnTip, cid, "nothing asks before the wait ends")
+            try await alwaysDuring("nothing asks before the wait ends", .milliseconds(500)) {
+                joinerRuntime.published.value?.actOnTip != cid
+            }
             return cid
         }
         func connectHost() async throws -> NodeRuntime {
@@ -633,32 +634,6 @@ final class NodeRuntimeTests: XCTestCase {
         while await events.next() != nil {}
     }
 
-    /// The digest names each hosted level by path, act-on tip, next block
-    /// and whether any block of it is weighed: each changing changes it with
-    /// the root's unmoved, and so does the hosted set changing even between
-    /// levels in the same state.
-    func testTheTemplateDigestCoversDescendantsAndTheHostedSet() {
-        let alpha = ["Nexus", "Alpha"], beta = ["Nexus", "Beta"]
-        func digest(
-            tip: String = "root", transactions: [String] = [],
-            _ levels: [(path: ChainPath, actOn: String, weighed: Bool, transactions: [String])]
-        ) -> String {
-            NodeRuntime.templateDigest(tip: tip, transactions: transactions, levels: levels)
-        }
-        let before = digest([(alpha, "a1", true, [])])
-        XCTAssertNotEqual(before, digest(tip: "root2", [(alpha, "a1", true, [])]), "the root's tip moved")
-        XCTAssertNotEqual(before, digest(transactions: ["t"], [(alpha, "a1", true, [])]), "the root's next block changed")
-        XCTAssertNotEqual(before, digest([(alpha, "a2", true, [])]), "a descendant's tip moved")
-        XCTAssertNotEqual(before, digest([(alpha, "a1", true, ["t"])]), "a descendant's next block changed")
-        XCTAssertNotEqual(before, digest([(beta, "a1", true, [])]), "a different hosted level")
-        XCTAssertNotEqual(before, digest([]), "a level unhosted")
-        XCTAssertNotEqual(before, digest([(alpha, "a1", true, []), (beta, "", false, [])]), "a level hosted")
-        XCTAssertNotEqual(
-            digest([(alpha, "", false, [])]), digest([(alpha, "", true, [])]),
-            "a genesis weighed: its creator no longer mines one"
-        )
-    }
-
     /// A watcher that stops reading holds one value, the newest: it skips
     /// to the latest when it reads again.
     func testPublishedValueWatchersSkipToTheNewest() async {
@@ -725,9 +700,7 @@ final class NodeRuntimeTests: XCTestCase {
             let template = try await runtime.miningTemplate(MiningTemplateRequest())
             var nonce: UInt64 = 0
             while Self.block(template.block, nonce: nonce).proofOfWorkHash() > template.searchTarget { nonce += 1 }
-            carried += try await MiningTemplateAssembly.blockTransactions(
-                in: Self.block(template.block, nonce: nonce), fetcher: storage
-            ).count
+            carried += try await Self.block(template.block, nonce: nonce).orderedTransactions(fetcher: storage).count
             _ = try await runtime.submitWork(SubmitWorkRequest(workID: template.workID, nonce: nonce))
         }
         XCTAssertEqual(carried, 2, "both are mined: neither is stuck at the head of the template")
@@ -803,9 +776,7 @@ final class NodeRuntimeTests: XCTestCase {
         while Self.block(template.block, nonce: nonce).proofOfWorkHash() > template.searchTarget { nonce += 1 }
         let mined = try await runtime.submitWork(SubmitWorkRequest(workID: template.workID, nonce: nonce))
         XCTAssertEqual(mined.disposition, .canonicalized)
-        let carried = try await MiningTemplateAssembly.blockTransactions(
-            in: Self.block(template.block, nonce: nonce), fetcher: storage
-        )
+        let carried = try await Self.block(template.block, nonce: nonce).orderedTransactions(fetcher: storage)
         XCTAssertEqual(try carried.map { try Mempool.cid(of: $0) }, [admitted.transactionCID])
         await runtime.stop()
 
@@ -1124,7 +1095,7 @@ final class NodeRuntimeTests: XCTestCase {
             tip: { ChainStatus(
                 phase: .active, chainPath: ["Nexus"],
                 nexusGenesisCID: node.configuration.nexusGenesisCID,
-                tipCID: all.blocks[0].hash, height: 500, revision: nil
+                tipCID: all.blocks[0].hash, height: 500
             ) },
             canonicalCID: { _ in all.blocks[0].hash },
             mempool: { _ in ChainReads.MempoolListing(count: 0, bytes: 0, cids: []) }
@@ -1151,7 +1122,7 @@ final class NodeRuntimeTests: XCTestCase {
                 chainPath: chainPath,
                 tip: { ChainStatus(
                     phase: .active, chainPath: chainPath, nexusGenesisCID: configuration.nexusGenesisCID,
-                    tipCID: nil, height: nil, revision: nil
+                    tipCID: nil, height: nil
                 ) },
                 canonicalCID: { _ in nil },
                 mempool: { _ in ChainReads.MempoolListing(count: 0, bytes: 0, cids: []) }

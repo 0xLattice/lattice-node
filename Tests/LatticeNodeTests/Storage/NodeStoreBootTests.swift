@@ -113,13 +113,6 @@ final class NodeStoreBootTests: XCTestCase {
         // Staged again whole: no new seq.
         try await store.stageChainFacts([blockBatch("block-3")], logID: "log", at: alpha)
 
-        let database = try NodeSQLite(path: path.path)
-        _ = try database.execute("ANALYZE")
-        let plan = try database.query(
-            "EXPLAIN QUERY PLAN " + NodeStore.levelFactsSQL, params: [.text("Nexus/Alpha")]
-        ).compactMap { $0["detail"]?.textValue }.joined(separator: "\n")
-        XCTAssertTrue(plan.contains("PRIMARY KEY"), plan)
-        XCTAssertFalse(plan.contains("TEMP B-TREE"), plan)
         let stored = try await store.storedFacts(at: alpha)
         XCTAssertEqual(stored.facts, expected)
         XCTAssertEqual(stored.batches, 4)

@@ -4,6 +4,7 @@ import UInt256
 import XCTest
 import cashew
 @testable import LatticeNode
+@testable import LatticeNodeNet
 
 /// Safety net: what boot does with one damaged row in each table it reads.
 ///
@@ -215,7 +216,7 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             storage: storage,
             tip: { ChainStatus(
                 phase: .active, chainPath: ["Nexus"], nexusGenesisCID: storage.configuration.nexusGenesisCID,
-                tipCID: storage.configuration.nexusGenesisCID, height: 0, revision: nil
+                tipCID: storage.configuration.nexusGenesisCID, height: 0
             ) },
             canonicalCID: { _ in nil },
             mempool: { _ in ChainReads.MempoolListing(count: 0, bytes: 0, cids: []) }

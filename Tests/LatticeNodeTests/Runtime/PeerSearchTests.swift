@@ -1,5 +1,6 @@
 import XCTest
 @testable import LatticeNode
+import LatticeNodeCore
 
 /// Each hosted level searches its own rendezvous when it has not progressed,
 /// whatever the other levels do: a live Nexus must not keep a stalled child

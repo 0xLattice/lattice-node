@@ -6,6 +6,7 @@ import LatticeNodeSim
 import XCTest
 import cashew
 @testable import LatticeNode
+@testable import LatticeNodeNet
 import LatticeNodeAPI
 
 /// Safety net: every wire codec in `Sources/LatticeNode` is canonical.

@@ -504,7 +504,10 @@ struct HostedChildren {
                 throw ValidationError("--premine-to names \(parts[0]), which is not a hosted chain with a spec")
             }
             do {
-                try NodeRuntime.checkPremine(spec: spec, to: parts[1], on: path, modules: policyModules)
+                try ChildGenesis.checkPremine(
+                    spec: spec, to: parts[1], on: path, modules: policyModules,
+                    timestamp: Int64(Date().timeIntervalSince1970 * 1000)
+                )
             } catch {
                 throw ValidationError("--premine-to \(entry): \(error)")
             }
@@ -527,8 +530,9 @@ struct HostedChildren {
                 transactions = try JSONDecoder().decode(
                     [SubmitTransactionRequest].self, from: Data(contentsOf: URL(fileURLWithPath: parts[1]))
                 ).map(\.transaction)
-                try NodeRuntime.checkPremine(
-                    spec: spec, to: premineRecipients[path], transactions: transactions, on: path, modules: policyModules
+                try ChildGenesis.checkPremine(
+                    spec: spec, to: premineRecipients[path], transactions: transactions, on: path, modules: policyModules,
+                    timestamp: Int64(Date().timeIntervalSince1970 * 1000)
                 )
             } catch {
                 throw ValidationError("--genesis-transactions \(entry): \(error)")

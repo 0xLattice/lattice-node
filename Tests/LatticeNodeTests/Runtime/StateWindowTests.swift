@@ -1067,7 +1067,7 @@ final class StateWindowTests: XCTestCase {
     /// block executes: with no peer they are still held. A chain no longer
     /// hosted lets them go.
     func testRecentKeepsAChildsSpecAndPolicyModulesWhileItIsHosted() async throws {
-        let module = Self.acceptingPolicyModule()
+        let module = policyModule(verdict: 1)
         let moduleCID = try WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: module)).rawCID
         let spec = ChainSpec(
             maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
@@ -1118,25 +1118,6 @@ final class StateWindowTests: XCTestCase {
         let kept = await storage.stores.anyChain.hasVolume(root: moduleCID)
         XCTAssertFalse(kept, "its policy module goes")
         await runtime.stop()
-    }
-
-    /// A WASM policy module that accepts every transaction.
-    private static func acceptingPolicyModule() -> Data {
-        func section(_ id: UInt8, _ body: [UInt8]) -> [UInt8] { [id, UInt8(body.count)] + body }
-        func export(_ name: String, kind: UInt8, index: UInt8) -> [UInt8] {
-            [UInt8(name.utf8.count)] + Array(name.utf8) + [kind, index]
-        }
-        var exports: [UInt8] = [0x03]
-        exports += export("memory", kind: 2, index: 0)
-        exports += export("lattice_alloc", kind: 0, index: 0)
-        exports += export("lattice_validate_transaction", kind: 0, index: 1)
-        var module: [UInt8] = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]
-        module += section(1, [0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f])
-        module += section(3, [0x02, 0x00, 0x01])
-        module += section(5, [0x01, 0x00, 0x01])
-        module += section(7, exports)
-        module += section(10, [0x02, 0x05, 0x00, 0x41, 0x80, 0x08, 0x0b, 0x04, 0x00, 0x41, 0x01, 0x0b])
-        return Data(module)
     }
 
     /// A start on `recent` lets go of the staging of a chain whose counts

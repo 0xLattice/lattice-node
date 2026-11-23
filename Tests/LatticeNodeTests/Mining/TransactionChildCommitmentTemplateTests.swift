@@ -75,7 +75,7 @@ final class TransactionChildCommitmentTemplateTests: XCTestCase {
 
     private func carried(_ block: Block, _ cas: SimCAS) async throws -> (child: String?, transactions: Int) {
         let children = try await block.children.resolve(fetcher: cas).node
-        let transactions = try await MiningTemplateAssembly.blockTransactions(in: block, fetcher: cas)
+        let transactions = try await block.orderedTransactions(fetcher: cas)
         return (children?[Self.directory]?.rawCID, transactions.count)
     }
 

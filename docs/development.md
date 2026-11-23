@@ -89,13 +89,14 @@ Docker-compatible runtime without the GUI.
 | `Sources/LatticeNodeCore/Sync` | Header-graph synchronization state and its decoded protocol values. |
 | `Sources/LatticeNodeCore/Mempool` | Transaction-pool policy and mutations. |
 | `Sources/LatticeNodeCore/Mining` | Mining state, template jobs, and issued-work tracking. |
-| `Sources/LatticeNode/Runtime` | `NodeRuntime`, the production shell that drives `NodeCore` and executes effects. |
-| `Sources/LatticeNodeAPI` | The service's request and response models, the library clients build on without the node. |
+| `Sources/LatticeNode/Runtime` | `NodeRuntime`, the production shell that drives `NodeCore` and executes effects; boot recovery and the storage gateway. |
+| `Sources/LatticeNodeAPI` | The client contract: the service's request and response models and the state proofs a client verifies (`StateDictionaryProof`), the library clients build on without the node. |
 | `Sources/LatticeNode/API` | Read operations, route-input validation, and the node's conversions into the models. |
-| `Sources/LatticeNode/Networking` | Overlay handshake, wire codecs, transport adapter, and wire validation. |
-| `Sources/LatticeNode/Content` | Content-addressed block decoding and Ivy/VolumeBroker adapters. |
-| `Sources/LatticeNode/Storage` | Durable fact journals, header content, SQLite rows, boot recovery, and locking. |
-| `Sources/LatticeNode/Configuration` | Node configuration, genesis, bootstrap peers, and public URL policy. |
+| `Sources/LatticeNodeNet` | The peer protocol: overlay handshake, wire codecs and validation, peer memory, read-endpoint discovery, the serving ledger, and the Ivy content source. It never imports the store or the shell. |
+| `Sources/LatticeNodeStore` | What is on disk: durable fact journals, header content, SQLite rows and migrations, and the Volume stores. |
+| `Sources/LatticeNodeSupport` | What every part of the process shares: the node log, sync tracing, the read tally, published values, timers. |
+| `Sources/LatticeNodeConfig` | The operator's configuration: topology and fragments, the host layout on disk, chain creation, Nexus's genesis, setting limits. |
+| `Sources/LatticeNode/Configuration` | The runtime's node configuration and bootstrap peers. |
 | `Sources/LatticeNode/Mining` | Mining-template assembly and multi-level mining plans. |
 | `Sources/LatticeNode/Observability` | Metrics and opt-in synchronization tracing. |
 | `Sources/LatticeNodeDaemon` | CLI and loopback HTTP adapter. |

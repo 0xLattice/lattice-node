@@ -6,6 +6,8 @@ import LatticeNodeAPI
 import LatticeNodeCore
 import Synchronization
 import cashew
+import LatticeNodeSupport
+import LatticeNodeStore
 
 extension NodeRuntime.Loop {
     // MARK: - Network → events

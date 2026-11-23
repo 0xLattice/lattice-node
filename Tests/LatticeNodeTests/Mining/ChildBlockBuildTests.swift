@@ -5,6 +5,7 @@ import XCTest
 import cashew
 @testable import LatticeNode
 import LatticeNodeAPI
+import LatticeCtlCore
 
 /// `child/X` = `C@P` merged mining by a parent miner that does not host X:
 /// the node hosting X builds C (`buildChildBlock`), its author commits it on
@@ -196,13 +197,13 @@ final class ChildBlockBuildTests: XCTestCase {
         XCTAssertEqual(pooled, 1, "the hosting node pools the commit")
         let template = try await pair.builder.miningTemplate(pair.mining)
         let fetcher = pair.builderStorage.workFetcher(.anyChain)
-        let carried = try await MiningTemplateAssembly.blockTransactions(in: template.block, fetcher: fetcher)
+        let carried = try await template.block.orderedTransactions(fetcher: fetcher)
         XCTAssertTrue(carried.isEmpty, "the hosting node's template leaves the commit out")
         let own = template.block.children.node?[Self.alpha[1]]?.rawCID
         XCTAssertNotNil(own)
         XCTAssertNotEqual(own, built.blockCID)
         let mined = try await pair.builder.mine(template)
-        let minedCarried = try await MiningTemplateAssembly.blockTransactions(in: mined, fetcher: fetcher)
+        let minedCarried = try await mined.orderedTransactions(fetcher: fetcher)
         XCTAssertTrue(minedCarried.isEmpty, "and so does the block it mines")
     }
 
@@ -234,9 +235,17 @@ final class ChildBlockBuildTests: XCTestCase {
             var accepted = false
             var taken: String?
             let past = twist == .staleTip ? try await miner.miningTemplate(pair.mining) : nil
+            // As the CLI's loop does, a refused commit is left unaccepted and
+            // sent again by a later round. The pool judges it on its own tip,
+            // which can trail by a step the executed tip the block was built
+            // on (it first reads the entered blocks' transactions), so a
+            // commit sent right after a tip move can be refused once.
             func commit(_ block: BuildChildBlockResponse) async throws {
-                taken = try await builder.submitTransaction(SubmitTransactionRequest(transaction: try await pair.commit(block))).transactionCID
-                accepted = true
+                let transaction = try await pair.commit(block)
+                let request = SubmitTransactionRequest(transaction: transaction)
+                guard let response = try? await builder.submitTransaction(request) else { return }
+                let cid = response.transactionCID
+                (taken, accepted) = (cid, true)
             }
             func round() async throws -> ChildCommitStep {
                 var pushed: SubmitChildBlockStatus?
@@ -264,7 +273,18 @@ final class ChildBlockBuildTests: XCTestCase {
             }
             func value(_ block: BuildChildBlockResponse) -> String { block.blockCID + "@" + block.parentState }
 
-            _ = try await round()
+            // Each scenario starts from a builder in step with the miner: a
+            // block of the last one still arriving would move P under the
+            // first build, and the loop would rightly build again.
+            try await eventually("\(label): the builder follows the miner") {
+                let tip = await miner.reads.readSnapshot().tipCID
+                let followed = await builder.reads.readSnapshot().tipCID
+                return tip != nil && followed == tip
+            }
+            try await eventually("\(label): the first round's commit is taken") {
+                _ = try await round()
+                return taken != nil
+            }
             XCTAssertEqual(builds.count, 1, "\(label): the first round builds")
             let first = try XCTUnwrap(taken)
             try await eventually("\(label): the miner pools the relayed commit") { await pooled(first) }
@@ -286,8 +306,13 @@ final class ChildBlockBuildTests: XCTestCase {
                     try await builder.childCommitment(chainPath: Self.alpha).value == value(ours)
                 }
                 let theirs = try await builder.buildChildBlock(pair.build)
-                let cid = try await builder.submitTransaction(SubmitTransactionRequest(transaction: try await pair.commit(theirs))).transactionCID
-                try await eventually("\(label): the miner pools their commit") { await pooled(cid) }
+                var cid: String?
+                try await eventually("\(label): their commit is taken") {
+                    let transaction = try await pair.commit(theirs)
+                    cid = try? await builder.submitTransaction(SubmitTransactionRequest(transaction: transaction)).transactionCID
+                    return cid != nil
+                }
+                try await eventually("\(label): the miner pools their commit") { await pooled(try XCTUnwrap(cid)) }
                 _ = try await miner.mineBlock(pair.mining)
                 try await eventually("\(label): theirs replaces ours") {
                     try await builder.childCommitment(chainPath: Self.alpha).value == value(theirs)
