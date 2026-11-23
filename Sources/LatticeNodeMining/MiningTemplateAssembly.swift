@@ -1,11 +1,11 @@
 import Crypto
 import Foundation
-import Ivy
 import Lattice
 import LatticeNodeCore
 import UInt256
 import cashew
 import LatticeNodeAPI
+import LatticeNodeConfig
 
 private enum MiningCandidateValidationError: Error {
     case invalid
@@ -14,11 +14,11 @@ private enum MiningCandidateValidationError: Error {
 public struct DirectChildCandidate: Sendable {
     public let directory: String
     public let block: Block
-    let searchWitness: ChildSchedulingWitness?
+    package let searchWitness: ChildSchedulingWitness?
     /// Every threshold a nonce can clear in this candidate's subtree, its own
     /// first, when this node assembled the whole subtree (the candidate's own
     /// template's `subtreeThresholds`); nil when some descendant's is unknown.
-    let subtreeThresholds: [UInt256]?
+    package let subtreeThresholds: [UInt256]?
 
     public init(
         directory: String,
@@ -34,7 +34,7 @@ public struct DirectChildCandidate: Sendable {
 
     /// Every threshold below this candidate is known here: it carries no
     /// children, or its subtree was assembled on this node.
-    var subtreeKnown: Bool {
+    package var subtreeKnown: Bool {
         subtreeThresholds != nil
             || (MiningTemplate.emptyChildrenCID.map { block.children.rawCID == $0 } ?? false)
     }
@@ -53,7 +53,7 @@ public struct ChildSchedulingWitness: Sendable {
 /// The committed target of the block a candidate schedules its search on,
 /// and that block's directory path below the candidate (empty when it is the
 /// candidate itself).
-func schedulingTargets(
+package func schedulingTargets(
     for candidate: DirectChildCandidate
 ) async -> (target: UInt256, path: [String])? {
     if let witness = candidate.searchWitness {
@@ -70,11 +70,11 @@ func schedulingTargets(
 /// or the miner's minimum-work target where that is harder. The threshold is
 /// `binding` when it is the harder one — a hash between the two still makes a
 /// valid block, one the miner declined to produce.
-struct SearchThreshold {
-    let target: UInt256
-    let binding: Bool
+package struct SearchThreshold {
+    package let target: UInt256
+    package let binding: Bool
 
-    init(committed: UInt256, minimumWork: UInt256?) {
+    package init(committed: UInt256, minimumWork: UInt256?) {
         if let work = minimumWork, minimumWorkTarget(work) < committed {
             target = minimumWorkTarget(work)
             binding = true
@@ -90,13 +90,26 @@ public struct MiningTemplate: Sendable {
     public let block: Block
     public let searchTarget: UInt256
     public let chainPath: [String]
-    let childCandidates: [DirectChildCandidate]
-    let searchWitness: ChildSchedulingWitness?
+    package let childCandidates: [DirectChildCandidate]
+    package let searchWitness: ChildSchedulingWitness?
     /// The search threshold of this block and of each direct child's block —
     /// never their committed targets. Where a minimum work binds, the
     /// committed target is easier, and advertising it would hand the miner
     /// back exactly the hits it declined.
-    let thresholds: [UInt256]
+    package let thresholds: [UInt256]
+
+    package init(
+        workID: String, block: Block, searchTarget: UInt256, chainPath: [String],
+        childCandidates: [DirectChildCandidate], searchWitness: ChildSchedulingWitness?, thresholds: [UInt256]
+    ) {
+        self.workID = workID
+        self.block = block
+        self.searchTarget = searchTarget
+        self.chainPath = chainPath
+        self.childCandidates = childCandidates
+        self.searchWitness = searchWitness
+        self.thresholds = thresholds
+    }
 
     /// Every distinct threshold a nonce for this work can clear, easiest
     /// first, so the first is `searchTarget`. A carrier leaves the work open
@@ -107,7 +120,7 @@ public struct MiningTemplate: Sendable {
     /// child carrying children this node never assembled can clear descendant
     /// thresholds it never sees, so such work advertises `searchTarget` alone
     /// and the miner stops at its first hit.
-    var targets: [UInt256] {
+    package var targets: [UInt256] {
         guard subtreeThresholds != nil else { return [searchTarget] }
         return Set(thresholds + [searchTarget])
             .filter { $0 <= searchTarget }
@@ -117,14 +130,14 @@ public struct MiningTemplate: Sendable {
     /// Every threshold a nonce for this work can clear, this block's first,
     /// when every child's subtree is known here; nil otherwise. A parent
     /// carrying this block as a child folds them into its own `targets`.
-    var subtreeThresholds: [UInt256]? {
+    package var subtreeThresholds: [UInt256]? {
         childCandidates.allSatisfy(\.subtreeKnown) ? thresholds : nil
     }
 
     /// The canonical empty index. A candidate whose index bytes are not
     /// canonical has a different CID and is treated as carrying children,
     /// which only makes its work advertise the search target alone.
-    static let emptyChildrenCID = try? HeaderImpl<FlatDictionary<BlockHeader>>(
+    package static let emptyChildrenCID = try? HeaderImpl<FlatDictionary<BlockHeader>>(
         node: FlatDictionary<BlockHeader>()
     ).rawCID
 }
@@ -134,16 +147,16 @@ public enum MiningTemplateError: Error, Equatable {
     case duplicateChildDirectory
 }
 
-struct FittingMiningTemplate {
-    let template: MiningTemplate
+package struct FittingMiningTemplate {
+    package let template: MiningTemplate
 }
 
 /// Template assembly, apart from the book that issues it: the bisecting
 /// transaction fit, the child candidates and the minimum-work search target.
 /// The node runtime's template job builds with it; `WorkTemplateBook` only
 /// issues completed builds.
-enum MiningTemplateAssembly {
-    static func assemble(
+package enum MiningTemplateAssembly {
+    package static func assemble(
         chainPath: [String],
         previous: Block,
         transactions: [Transaction],
@@ -273,7 +286,7 @@ enum MiningTemplateAssembly {
     /// carry and no pool entry can make a build read the network. The
     /// committed target is not what the work is searched to: no hash above
     /// the template's search target is taken.
-    static func committedChains(root: Block, chainPath: [String]) -> [TemplateChain] {
+    package static func committedChains(root: Block, chainPath: [String]) -> [TemplateChain] {
         var chains: [TemplateChain] = []
         var frontier: [(block: Block, path: [String])] = [(root, chainPath)]
         while let (block, path) = frontier.popLast() {
@@ -478,7 +491,7 @@ enum MiningTemplateAssembly {
     /// many of the `provided` child candidates as still fit. Assembly only:
     /// nothing is issued. `hosted` names the directories under `chainPath`
     /// this node hosts.
-    static func fit(
+    package static func fit(
         chainPath: [String],
         previous: Block,
         pooled: [Transaction],
@@ -645,7 +658,7 @@ enum MiningTemplateAssembly {
 
     /// Whether `block` is within its spec's size limit, by Lattice's own
     /// rule (`validateBlockSize`), which stops counting at the limit.
-    static func blockFits(
+    package static func blockFits(
         _ block: Block,
         spec: ChainSpec,
         fetcher: any Fetcher
@@ -653,7 +666,7 @@ enum MiningTemplateAssembly {
         try await block.validateBlockSize(spec: spec, fetcher: fetcher)
     }
 
-    static func requireSameTemplateContext(
+    package static func requireSameTemplateContext(
         _ provisional: Block,
         final: Block
     ) throws {

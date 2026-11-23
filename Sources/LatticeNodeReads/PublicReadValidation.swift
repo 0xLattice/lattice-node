@@ -1,4 +1,6 @@
+import LatticeNodeCore
 import Lattice
+import LatticeNodeNet
 
 /// Reject an untrusted route parameter before any storage lookup unless it is
 /// a canonical CID that fits the wire representation.

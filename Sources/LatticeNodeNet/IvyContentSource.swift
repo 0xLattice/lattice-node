@@ -1,3 +1,4 @@
+import func LatticeNodeCore._isBoundedWireAtom
 import LatticeNodeConfig
 import Foundation
 import Ivy

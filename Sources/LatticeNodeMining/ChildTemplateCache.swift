@@ -3,7 +3,6 @@ import Lattice
 import LatticeNodeCore
 import Synchronization
 import UInt256
-import LatticeNodeSupport
 
 /// The block each hosted child level last built for a template, kept so the
 /// next template reuses it while nothing it was built from has changed.
@@ -20,44 +19,69 @@ import LatticeNodeSupport
 /// and an older timestamp is never refused; the difficulty schedule reads it
 /// as an earlier block and corrects at the level's next block. `maxAge` keeps
 /// reused timestamps near the present all the same.
-final class ChildTemplateCache: Sendable {
+package final class ChildTemplateCache: Sendable {
     /// Everything a level's block is built from, but the time.
-    struct Key: Equatable, Sendable {
+    package struct Key: Equatable, Sendable {
         /// The tip the block builds on (the anchored tip below the act-on
         /// tip), and the act-on tip it was anchored from.
-        let tipCID: String
-        let actOnTipCID: String
+        package let tipCID: String
+        package let actOnTipCID: String
         /// The parent state the block enters.
-        let enteringCID: String
+        package let enteringCID: String
         /// The level's next-block transactions, in order, by CID.
-        let transactions: [String]
-        let anchor: DifficultyAnchor?
+        package let transactions: [String]
+        package let anchor: DifficultyAnchor?
         /// The recipients and minimum works of the whole template.
-        let request: TemplateRequest
+        package let request: TemplateRequest
         /// The hosted directories below the level.
-        let hosted: [String]
+        package let hosted: [String]
         /// Each child candidate's directory and block, in order.
-        let children: [String]
+        package let children: [String]
+
+        package init(
+            tipCID: String, actOnTipCID: String, enteringCID: String, transactions: [String],
+            anchor: DifficultyAnchor?, request: TemplateRequest, hosted: [String], children: [String]
+        ) {
+            self.tipCID = tipCID
+            self.actOnTipCID = actOnTipCID
+            self.enteringCID = enteringCID
+            self.transactions = transactions
+            self.anchor = anchor
+            self.request = request
+            self.hosted = hosted
+            self.children = children
+        }
     }
 
-    struct Entry: Sendable {
-        let key: Key
-        let builtAt: ContinuousClock.Instant
-        let block: Block
-        let searchWitness: ChildSchedulingWitness?
-        let subtreeThresholds: [UInt256]?
+    package struct Entry: Sendable {
+        package let key: Key
+        package let builtAt: ContinuousClock.Instant
+        package let block: Block
+        package let searchWitness: ChildSchedulingWitness?
+        package let subtreeThresholds: [UInt256]?
+
+        package init(
+            key: Key, builtAt: ContinuousClock.Instant, block: Block,
+            searchWitness: ChildSchedulingWitness?, subtreeThresholds: [UInt256]?
+        ) {
+            self.key = key
+            self.builtAt = builtAt
+            self.block = block
+            self.searchWitness = searchWitness
+            self.subtreeThresholds = subtreeThresholds
+        }
     }
 
-    let maxAge: Duration
+    package let maxAge: Duration
     private let entries = Mutex<[ChainPath: Entry]>([:])
 
-    init(maxAge: Duration = .seconds(30)) {
+    package init(maxAge: Duration = .seconds(30)) {
         self.maxAge = maxAge
     }
 
     /// The level's block for `key`, when it was built from exactly that and
     /// within `maxAge`.
-    func block(at path: ChainPath, for key: Key, now: ContinuousClock.Instant = .now) -> Entry? {
+    package func block(at path: ChainPath, for key: Key, now: ContinuousClock.Instant = .now) -> Entry? {
         entries.withLock { entries in
             guard let entry = entries[path], entry.key == key, now - entry.builtAt <= maxAge else { return nil }
             return entry
@@ -66,7 +90,7 @@ final class ChildTemplateCache: Sendable {
 
     /// Keep the level's newest block, replacing the one before: one block
     /// per level, so a level no longer hosted holds at most one.
-    func keep(_ entry: Entry, at path: ChainPath) {
+    package func keep(_ entry: Entry, at path: ChainPath) {
         entries.withLock { $0[path] = entry }
     }
 }

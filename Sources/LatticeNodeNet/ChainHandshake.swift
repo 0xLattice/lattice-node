@@ -1,3 +1,4 @@
+import LatticeNodeCore
 import Foundation
 
 public enum ChainHandshakeError: Error, Equatable, Sendable {

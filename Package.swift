@@ -122,10 +122,35 @@ let package = Package(
                 .product(name: "cashew", package: "cashew"),
             ]),
         .target(
+            name: "LatticeNodeMining",
+            dependencies: [
+                "LatticeNodeAPI",
+                "LatticeNodeConfig",
+                "LatticeNodeCore",
+                .product(name: "Lattice", package: "lattice"),
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "cashew", package: "cashew"),
+                .product(name: "UInt256", package: "UInt256"),
+            ]),
+        .target(
+            name: "LatticeNodeReads",
+            dependencies: [
+                "LatticeNodeAPI",
+                "LatticeNodeCore",
+                "LatticeNodeNet",
+                "LatticeNodeStore",
+                .product(name: "Lattice", package: "lattice"),
+                .product(name: "Ivy", package: "Ivy2"),
+                .product(name: "VolumeBroker", package: "VolumeBroker"),
+                .product(name: "cashew", package: "cashew"),
+            ]),
+        .target(
             name: "LatticeNode",
             dependencies: [
                 "LatticeNodeAPI",
+                "LatticeNodeMining",
                 "LatticeNodeNet",
+                "LatticeNodeReads",
                 "LatticeNodeConfig",
                 "LatticeNodeStore",
                 "LatticeNodeSupport",

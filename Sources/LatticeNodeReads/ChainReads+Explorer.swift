@@ -4,6 +4,8 @@ import Lattice
 import LatticeNodeCore
 import cashew
 import LatticeNodeAPI
+import LatticeNodeNet
+import LatticeNodeStore
 
 extension ChainReads {
     // MARK: - Explorer read API
@@ -248,7 +250,7 @@ extension ChainReads {
         }[directory]
     }
 
-    static let committedChildDepth: UInt64 = 64
+    package static let committedChildDepth: UInt64 = 64
 
     /// Up to `limit` of the child directories this chain's executed blocks
     /// have committed, after `after`, in order.
@@ -318,7 +320,7 @@ extension ChainReads {
     /// nonce too. Nil when it is not in this chain's canonical executed
     /// chain, or the content needed to tell is not held here. Reorg-correct by
     /// construction: only the current canonical chain is read.
-    func canonicalInclusion(
+    package func canonicalInclusion(
         cid: String,
         body: TransactionBody,
         fetcher: any Fetcher
@@ -451,7 +453,7 @@ extension ChainReads {
     /// `tipBlock` must hold every key, under dictionary root `tipRoot`. A key
     /// is left out when a state needed to place it is not held here; nothing
     /// is returned if the canonical chain moved during the search.
-    func canonicalDepositInclusions(
+    package func canonicalDepositInclusions(
         keys: [String], tipCID: String, tipBlock: Block, tipRoot: String, fetcher: any Fetcher
     ) async -> [String: (height: UInt64, hash: String)] {
         guard !keys.isEmpty else { return [:] }
@@ -665,11 +667,11 @@ extension ChainReads {
 private actor ProofVolumeCollector: VolumeStorer {
     private var volumes: [String: SerializedVolume] = [:]
 
-    func store(volume: SerializedVolume) async throws {
+    package func store(volume: SerializedVolume) async throws {
         volumes[volume.root] = volume
     }
 
-    func witness() -> [LightClientProof.WitnessNode] {
+    package func witness() -> [LightClientProof.WitnessNode] {
         let unique = volumes.values.reduce(into: [String: Data]()) { result, volume in
             result.merge(volume.entries) { existing, _ in existing }
         }
@@ -680,7 +682,7 @@ private actor ProofVolumeCollector: VolumeStorer {
 }
 
 extension ExplorerWeight {
-    init(_ weight: FeeWeight) {
+    package init(_ weight: FeeWeight) {
         self.init(
             blockRoom: weight.blockRoom, growthRoom: weight.growthRoom,
             maxTransactions: weight.maxTransactions, transactionAllowance: weight.transactionAllowance
@@ -690,7 +692,7 @@ extension ExplorerWeight {
 
 extension ExplorerProjectedBlock {
     /// A selected package's fee is funded, so it fits a balance.
-    init(_ block: ProjectedBlock) {
+    package init(_ block: ProjectedBlock) {
         self.init(
             transactionCount: block.transactionCount, bytes: block.bytes,
             lowestFee: block.lowestFee.uint64Value ?? .max, lowestFeeBytes: block.lowestFeeBytes,

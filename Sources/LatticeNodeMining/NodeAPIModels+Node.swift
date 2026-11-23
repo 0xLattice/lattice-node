@@ -5,7 +5,7 @@ import LatticeNodeCore
 // in LatticeNodeAPI, which clients depend on without the node.
 
 extension MiningTemplateResponse {
-    init(
+    package init(
         template: MiningTemplate,
         templateDigest: String
     ) {
@@ -22,7 +22,7 @@ extension MiningTemplateResponse {
 }
 
 extension TemplateChainBlock {
-    init(_ chain: TemplateChain) {
+    package init(_ chain: TemplateChain) {
         self.init(
             chainPath: chain.chainPath, target: chain.target, height: chain.height,
             rewardRecipient: chain.rewardRecipient

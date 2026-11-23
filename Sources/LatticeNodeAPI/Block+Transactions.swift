@@ -1,10 +1,9 @@
 import cashew
 import Lattice
-import LatticeNodeAPI
 
 extension Block {
     /// The block's transactions in index order, resolved through `fetcher`.
-    func orderedTransactions(fetcher: any Fetcher) async throws -> [Transaction] {
+    package func orderedTransactions(fetcher: any Fetcher) async throws -> [Transaction] {
         let transactionsHeader = try await transactions.resolve(
             fetcher: fetcher
         )

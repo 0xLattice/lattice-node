@@ -4,12 +4,13 @@ import UInt256
 import LatticeNodeCore
 import cashew
 import LatticeNodeAPI
+import LatticeNodeConfig
 
 /// The miner-facing plan and template checks the node runtime's RPC applies.
-enum MiningPlan {
-    struct ValidatedRecipientPlan {
-        let current: String?
-        let descendants: [MiningRecipient]
+package enum MiningPlan {
+    package struct ValidatedRecipientPlan {
+        package let current: String?
+        package let descendants: [MiningRecipient]
     }
 
     private static let maximumMiningPlanBytes = NodeAPILimits.maximumPayloadBytes
@@ -18,7 +19,7 @@ enum MiningPlan {
     /// commits, and the descendants', which travel with the child candidate
     /// requests. Each is a canonical address on a chain at or below this one,
     /// at most one per chain.
-    static func validatedRecipientPlan(
+    package static func validatedRecipientPlan(
         _ recipients: [MiningRecipient],
         chainPath currentPath: [String]
     ) throws -> ValidatedRecipientPlan {
@@ -60,7 +61,7 @@ enum MiningPlan {
     /// A miner's minimum-work entries by chain path — this chain's and its
     /// descendants', which bound the template's search — and the descendants'
     /// alone, which travel with the child candidate requests.
-    static func validatedMinimumWorkPlan(
+    package static func validatedMinimumWorkPlan(
         _ entries: [MiningMinimumWork],
         chainPath currentPath: [String]
     ) throws -> (works: [[String]: UInt256], descendants: [MiningMinimumWork]) {
@@ -105,7 +106,7 @@ enum MiningPlan {
     /// chain below it is left in is refused rather than silently dropping
     /// that chain too. A chain not hosted here is carried by no template;
     /// excluding it changes nothing.
-    static func validatedExclusions(
+    package static func validatedExclusions(
         _ paths: [[String]],
         chainPath currentPath: [String],
         hosted: [[String]]
@@ -138,7 +139,7 @@ enum MiningPlan {
     /// lacks, a failed fetch) is neither carried nor dropped. `transactions` is what the next block can carry
     /// (`Mempool.nextBlock`), so policies run on one block's worth, never the
     /// whole pool.
-    static func policyAcceptedTransactions(
+    package static func policyAcceptedTransactions(
         _ transactions: [Transaction],
         chainPath: [String],
         previous: Block,
@@ -176,7 +177,7 @@ enum MiningPlan {
         return (accepted, refused)
     }
 
-    static func nextTimestamp(
+    package static func nextTimestamp(
         after previous: Int64,
         parentCarrier: Block?,
         now: Int64
