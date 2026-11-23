@@ -3,7 +3,8 @@ import Lattice
 import VolumeBroker
 import cashew
 import LatticeNodeAPI
-import LatticeNodeStore
+import LatticeNodeConfig
+import LatticeNodeSupport
 
 public enum NodeStorageError: Error, Equatable, Sendable {
     case invalidStoragePath
@@ -39,31 +40,45 @@ public struct ChainStatus: Sendable, Equatable {
     public var waiting: String? = nil
     /// What the chain's sync holds (operator status only).
     public var sync: NodeSyncStatus? = nil
+
+    package init(
+        phase: ChainPhase, chainPath: [String], nexusGenesisCID: String, tipCID: String?, height: UInt64?,
+        bestHeaderHeight: UInt64? = nil, waiting: String? = nil, sync: NodeSyncStatus? = nil
+    ) {
+        self.phase = phase
+        self.chainPath = chainPath
+        self.nexusGenesisCID = nexusGenesisCID
+        self.tipCID = tipCID
+        self.height = height
+        self.bestHeaderHeight = bestHeaderHeight
+        self.waiting = waiting
+        self.sync = sync
+    }
 }
 
 
-struct DurableLocalTransaction: Sendable {
-    let transactionCID: String
-    let addedAt: Int64
-    let transaction: Transaction
+package struct DurableLocalTransaction: Sendable {
+    package let transactionCID: String
+    package let addedAt: Int64
+    package let transaction: Transaction
 }
 
 /// The node runtime's storage gateway: one hosted-tree fact journal, a
 /// Volume store per hosted chain and the local mempool journal, opened and reconciled
 /// at boot. It decides nothing; the core does.
 public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
-    public nonisolated let configuration: NodeConfiguration
+    public nonisolated let configuration: StoreConfiguration
 
-    let store: NodeStore
-    nonisolated let bundles: VolumeBundleCache
+    package nonisolated let store: NodeStore
+    package nonisolated let bundles: VolumeBundleCache
     /// One Volume store per hosted chain (`VolumeStores`). The root's also
     /// holds the mempool's pins.
-    nonisolated let stores: VolumeStores
+    package nonisolated let stores: VolumeStores
     /// Verified content finished sessions took from peers, in memory.
-    nonisolated let readCache: ReadCache
-    let retentionScope: String
-    let durableMempoolOwner: String
-    let liveMempoolOwner: String
+    package nonisolated let readCache: ReadCache
+    package nonisolated let retentionScope: String
+    package nonisolated let durableMempoolOwner: String
+    package nonisolated let liveMempoolOwner: String
     private let directoryLock: StorageDirectoryLock
     private var livePinnedMempoolRoots = Set<String>()
 
@@ -78,7 +93,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     private var operationWaiters: [OperationWaiter] = []
 
     private init(
-        configuration: NodeConfiguration,
+        configuration: StoreConfiguration,
         store: NodeStore,
         bundles: VolumeBundleCache,
         stores: VolumeStores,
@@ -101,7 +116,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// Completes store validation and settles what the store pins before
     /// returning a storage the runtime may expose.
     public static func open(
-        configuration: NodeConfiguration
+        _ configuration: StoreConfiguration
     ) async throws -> NodeStorage {
         let recovered = try await BootRecovery.run(configuration: configuration)
         return NodeStorage(
@@ -130,7 +145,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         (try? await store.hasAcceptedBlock(cid, at: chainPath)) ?? false
     }
 
-    func hasExecutedBlock(_ cid: String, at chainPath: [String]) async -> Bool {
+    package func hasExecutedBlock(_ cid: String, at chainPath: [String]) async -> Bool {
         (try? await store.hasExecutedBlock(cid, at: chainPath)) ?? false
     }
 
@@ -140,7 +155,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
 
     /// A block's own node: from its Volume, or from its header record when
     /// its body is not held. Enough to reach the state it commits to.
-    nonisolated func blockNodeBytes(_ cid: String) async -> Data? {
+    package nonisolated func blockNodeBytes(_ cid: String) async -> Data? {
         if let held = await stores.anyChain.fetchDataLocal(cid: cid) { return held }
         return store.headerBlockBytes(cid)
     }
@@ -151,7 +166,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// What this node sends to others, a peer or a reader, is checked
     /// against its CIDs first: bytes damaged in the store read as absent,
     /// never handed on. This node's own reads (`fetch`) take them unhashed.
-    func volume(_ rootCID: String) async -> SerializedVolume? {
+    package func volume(_ rootCID: String) async -> SerializedVolume? {
         guard let volume = await stores.anyChain.fetchVolumeLocal(root: rootCID),
               (try? volume.validate()) != nil else { return nil }
         return volume
@@ -176,7 +191,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     }
 
     @discardableResult
-    func persistLocalTransaction(
+    package func persistLocalTransaction(
         _ transaction: Transaction,
         addedAt: Int64 = Int64(Date().timeIntervalSince1970)
     ) async throws -> String {
@@ -212,7 +227,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
     /// Keeps an admitted peer transaction serveable for this storage lifetime.
     /// The scope is cleared on restart, so peer gossip never becomes recovery
     /// authority merely because its bytes use the durable broker.
-    func persistPeerTransaction(_ transaction: Transaction) async throws -> String {
+    package func persistPeerTransaction(_ transaction: Transaction) async throws -> String {
         try await acquireMutationOperation()
         defer { releaseOperation() }
         let volume = try VolumeImpl<Transaction>(node: transaction)
@@ -228,7 +243,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
 
     /// Owner/count deltas keep live-pool retention O(changes), while startup's
     /// owner reset makes these pins storage-local authority.
-    func updateLiveMempoolRoots(
+    package func updateLiveMempoolRoots(
         adding: Set<String>,
         removing: Set<String>
     ) async throws {
@@ -250,7 +265,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
 
     /// The live pool's pins of the transactions of the chain at `path` go:
     /// its pool went with its level.
-    func releaseLivePool(of path: [String]) async throws {
+    package func releaseLivePool(of path: [String]) async throws {
         var gone: Set<String> = []
         for root in livePinnedMempoolRoots {
             let read = try? await VolumeImpl<Transaction>(rawCID: root).resolveRecursive(source: stores.root)
@@ -259,7 +274,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         try await updateLiveMempoolRoots(adding: [], removing: gone)
     }
 
-    func removeLocalTransaction(_ transactionCID: String) async throws {
+    package func removeLocalTransaction(_ transactionCID: String) async throws {
         try await acquireMutationOperation()
         defer { releaseOperation() }
         try await store.removeLocalMempoolTransaction(
@@ -269,7 +284,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         )
     }
 
-    func localTransactions() async throws -> [DurableLocalTransaction] {
+    package func localTransactions() async throws -> [DurableLocalTransaction] {
         await acquireOperation()
         defer { releaseOperation() }
         var transactions: [DurableLocalTransaction] = []
@@ -291,7 +306,7 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
         return transactions
     }
 
-    func localTransactionTimestamps() async throws -> [String: Int64] {
+    package func localTransactionTimestamps() async throws -> [String: Int64] {
         await acquireOperation()
         defer { releaseOperation() }
         return Dictionary(uniqueKeysWithValues:
@@ -373,5 +388,11 @@ public actor NodeStorage: ContentSource, Fetcher, VolumeStorer {
             return
         }
         operationWaiters.removeFirst().continuation.resume(returning: true)
+    }
+}
+
+extension NodeStorage {
+    package nonisolated func syncTrace(_ message: @autoclosure () -> String) {
+        SyncTrace.log(chain: configuration.chainPath, message())
     }
 }

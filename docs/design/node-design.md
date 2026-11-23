@@ -19,7 +19,7 @@ chosen" below the table.
 >
 > Paths are under `Sources/`. `RT` is `LatticeNode/Runtime/NodeRuntime.swift`
 > with its `+Loop` and `+Effects` extensions, `API` is `NodeRuntime+API.swift`,
-> `NSE` is `NodeStorage+RuntimeEffects.swift`.
+> `NSE` is `LatticeNodeStore/NodeStorage+RuntimeEffects.swift`.
 
 ## Contents
 
@@ -1065,7 +1065,7 @@ sweep runs at start.
 | operator | pins | on unpin | the operator's promise | concept (beside state) |
 | durable / live mempool | journaled and pooled transactions | as they leave | the journal's promise; the live pool's cache | concept / detail |
 
-**The interface.** `StateBackend` (`Runtime/StateBackend.swift`) is what the
+**The interface.** `StateBackend` (`LatticeNodeStore/StateBackend.swift`) is what the
 node does with executed state: keep what a block's storing and execution
 stored (`keepExecuted`, `keepStored`, `keepWithValidBlock`), let go of what
 a block read once it executed or was found invalid (`releaseReads`), move

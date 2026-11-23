@@ -368,7 +368,9 @@ extension NodeRuntime {
             mempool: { _ in
                 view.value?.mempool ?? ChainReads.MempoolListing(count: 0, bytes: 0, cids: [])
             },
-            peerCount: { view.value?.peers ?? 0 }
+            peerCount: { view.value?.peers ?? 0 },
+            minRelayFee: configuration.minRelayFee,
+            finality: configuration.finality
         )
     }
 

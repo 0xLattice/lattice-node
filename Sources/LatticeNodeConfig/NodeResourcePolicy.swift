@@ -24,6 +24,15 @@ public struct NodeResourcePolicy: Sendable, Equatable {
     /// top of it. What goes first is in `ReadCache`.
     public var maximumCachedContentBytes: Int { maximumAcquisitionBytes / 4 }
 
+    /// What a content session, and the in-memory cache after it, is charged
+    /// for each entry it holds, beyond the entry's CID and bytes: the heap a
+    /// held entry costs in the session's set and its store's three tables
+    /// (hash slots at their load, the owner set, the string and data
+    /// headers). Measured at 273 to 430 bytes an entry (1,000 to 300,000
+    /// entries of 1 to 113 bytes, arm64 macOS) and rounded up, so the byte
+    /// budget bounds memory however small a peer makes the entries it sends.
+    package static let retainedEntryOverhead = 512
+
     public init(
         maximumAcquisitionStorageBytes: Int = 64 * 1_024 * 1_024,
         maximumAcquisitionBytes: Int = Self.defaultMaximumAcquisitionBytes

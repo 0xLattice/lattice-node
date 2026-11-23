@@ -28,8 +28,8 @@ final class MempoolRetentionTests: XCTestCase {
         let roots = try await submitLocals(configuration, overlay)
 
         let reopened = try await NodeStorage.open(configuration: configuration)
-        let live = await reopened.liveMempoolOwner
-        let durable = await reopened.durableMempoolOwner
+        let live = reopened.liveMempoolOwner
+        let durable = reopened.durableMempoolOwner
         let clearedLive = try await reopened.broker.retainedRoots(scope: live)
         let keptDurable = try await reopened.broker.retainedRoots(scope: durable)
         XCTAssertTrue(clearedLive.isEmpty, "startup left \(clearedLive)")

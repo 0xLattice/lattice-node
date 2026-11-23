@@ -3,6 +3,7 @@ import Foundation
 import Ivy
 import Lattice
 import LatticeNodeCore
+import LatticeNodeStore
 import UInt256
 
 /// Immutable setup and process identity for one Nexus-rooted hosted tree.
@@ -147,16 +148,12 @@ public struct NodeConfiguration: Sendable {
     /// chain's tip whose executions' state is kept (operator choice).
     public let stateWindows: FinalityWindows
     /// The state window of a chain without one of its own.
-    public static let defaultStateWindow: UInt64 = 64
+    public static let defaultStateWindow = StoreConfiguration.defaultStateWindow
 
     /// The blocks of the chain at `path` whose executions' state is kept,
     /// counting its tip: nil when every state is.
     public func stateWindow(for path: [String]) -> UInt64? {
-        switch state {
-        case .all: nil
-        case .recent: max(1, stateWindows.window(for: path) ?? Self.defaultStateWindow)
-        case .none: 1
-        }
+        StoreConfiguration.stateWindow(for: path, state: state, windows: stateWindows)
     }
 
     /// Overlay slots kept in reserve for outbound dials so a burst of inbound
@@ -394,12 +391,7 @@ public struct NodeConfiguration: Sendable {
         try! Curve25519.Signing.PrivateKey(rawRepresentation: signingKeyBytes)
     }
     public var runtimeContext: ChainRuntimeContext {
-        get throws {
-            // Only the root chain pins its genesis (Lattice §5.1).
-            try ChainRuntimeContext(
-                path: chainPath, genesisCID: address.isNexus ? nexusGenesisCID : nil
-            )
-        }
+        get throws { try StoreConfiguration.runtimeContext(of: address) }
     }
 
     private static func hexData(_ value: String) -> Data? {

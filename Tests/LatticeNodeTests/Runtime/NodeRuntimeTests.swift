@@ -1125,7 +1125,8 @@ final class NodeRuntimeTests: XCTestCase {
                     tipCID: nil, height: nil
                 ) },
                 canonicalCID: { _ in nil },
-                mempool: { _ in ChainReads.MempoolListing(count: 0, bytes: 0, cids: []) }
+                mempool: { _ in ChainReads.MempoolListing(count: 0, bytes: 0, cids: []) },
+                finality: configuration.finality
             )
             let data = try JSONEncoder().encode(await reads.explorerChainInfo())
             return try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])

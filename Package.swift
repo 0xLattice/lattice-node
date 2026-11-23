@@ -129,7 +129,6 @@ let package = Package(
                 "LatticeNodeConfig",
                 "LatticeNodeStore",
                 "LatticeNodeSupport",
-                "CSQLite",
                 "LatticeNodeCore",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "Ivy", package: "Ivy2"),

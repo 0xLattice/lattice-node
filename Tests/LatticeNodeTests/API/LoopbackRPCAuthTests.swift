@@ -15,12 +15,13 @@ final class LoopbackRPCAuthTests: XCTestCase {
             "lattice-rpc-auth-\(UUID().uuidString)"
         )
         addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
-        let storage = try await NodeStorage.open(configuration: NodeConfiguration(
+        let configuration = try NodeConfiguration(
             chainPath: ["Nexus"],
             storagePath: directory,
             privateKeyHex: String(repeating: "01", count: 32)
-        ))
-        let service = try await startRuntime(storage)
+        )
+        let storage = try await NodeStorage.open(configuration: configuration)
+        let service = try await startRuntime(storage, configuration)
         return makeApplication(
             service: service, host: "127.0.0.1", port: 8080,
             auth: .loopback(LoopbackRPCAuth(token: "test-cookie", allowedOrigins: Set(allowedOrigins)))

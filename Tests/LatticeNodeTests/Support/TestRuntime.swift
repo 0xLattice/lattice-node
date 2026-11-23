@@ -7,10 +7,9 @@ import XCTest
 import LatticeNodeAPI
 
 extension XCTestCase {
-    /// A node runtime over `storage`, on a loopback overlay with no peers,
-    /// stopped at teardown.
-    func startRuntime(_ storage: NodeStorage) async throws -> NodeRuntime {
-        let configuration = storage.configuration
+    /// A node runtime over `storage`, opened from `configuration`, on a
+    /// loopback overlay with no peers, stopped at teardown.
+    func startRuntime(_ storage: NodeStorage, _ configuration: NodeConfiguration) async throws -> NodeRuntime {
         let port = NetworkTransportTestPorts.allocate()
         let runtime = try await NodeRuntime.start(
             storage: storage,
