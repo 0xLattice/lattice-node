@@ -2,16 +2,16 @@ import Foundation
 import Lattice
 import VolumeBroker
 import cashew
+import LatticeNodeConfig
 import LatticeNodeSupport
-import LatticeNodeStore
 
 /// Boot recovery for one hosted tree's storage: everything `NodeStorage.open`
 /// does before the runtime starts. Content stays because a scope names it,
 /// so boot leaves pins as it finds them and drops what no scope names; an
 /// empty journal is seeded with the configured Nexus genesis.
-enum BootRecovery {
+package enum BootRecovery {
     /// What `NodeStorage.open` builds the storage from.
-    struct Result {
+    package struct Result {
         let store: NodeStore
         let stores: VolumeStores
         let retentionScope: String
@@ -35,7 +35,7 @@ enum BootRecovery {
         let store: NodeStore
     }
 
-    static func run(configuration: NodeConfiguration) async throws -> Result {
+    package static func run(configuration: StoreConfiguration) async throws -> Result {
         let started = ContinuousClock.now
         let directoryLock = try lockStorageDirectory(configuration: configuration)
         let stores = try openStores(configuration: configuration)
@@ -59,7 +59,7 @@ enum BootRecovery {
     }
 
     private static func lockStorageDirectory(
-        configuration: NodeConfiguration
+        configuration: StoreConfiguration
     ) throws -> StorageDirectoryLock {
         guard configuration.storagePath.isFileURL else {
             throw NodeStorageError.invalidStoragePath
@@ -82,7 +82,7 @@ enum BootRecovery {
     /// Stage 2: a Volume store per hosted chain (`VolumeStores`), state.db,
     /// and the scopes and owners they use.
     private static func openStores(
-        configuration: NodeConfiguration
+        configuration: StoreConfiguration
     ) throws -> Stores {
         // state.db first: a store of another epoch or Nexus genesis is
         // refused before anything is opened, let alone removed.
@@ -113,7 +113,7 @@ enum BootRecovery {
     /// modules beside them.
     private static func materializeConstantRoots(
         _ stores: Stores,
-        configuration: NodeConfiguration
+        configuration: StoreConfiguration
     ) async throws -> [String] {
         let broker = stores.broker
         // Protocol constants are ordinary Volumes and therefore ordinary GC
@@ -177,7 +177,7 @@ enum BootRecovery {
     /// supply its block's own node, which has no header record.
     private static func seedNexusGenesis(
         _ stores: Stores,
-        configuration: NodeConfiguration
+        configuration: StoreConfiguration
     ) async throws {
         let seeded = try await stores.store.hasStagedImports()
         if seeded, await stores.broker.hasVolume(root: configuration.nexusGenesisCID) { return }

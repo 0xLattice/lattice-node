@@ -3,7 +3,7 @@ import Lattice
 import VolumeBroker
 import cashew
 import LatticeNodeAPI
-import LatticeNodeStore
+import LatticeNodeConfig
 
 /// Verified content in memory, for reads that would otherwise ask peers
 /// again: the Volumes a body fetch derived for its block, whole, serve
@@ -27,7 +27,7 @@ import LatticeNodeStore
 /// What would go before everything it would have to evict is not kept. What
 /// is evicted is fetched again when it is read: this decides only what is
 /// asked of peers twice. What is put again replaces what is held.
-actor ReadCache: ContentSource {
+package actor ReadCache: ContentSource {
     private enum Key: Hashable {
         /// A whole Volume a body's fetch derived for its block, by its root.
         case body(block: String, root: String)
@@ -74,19 +74,19 @@ actor ReadCache: ContentSource {
     private var bytes = 0
     private let maximumBytes: Int
 
-    init(maximumBytes: Int) {
+    package init(maximumBytes: Int) {
         self.maximumBytes = maximumBytes
     }
 
-    var isEmpty: Bool { held.isEmpty }
+    package var isEmpty: Bool { held.isEmpty }
 
     /// The bytes held now.
-    var heldBytes: Int { bytes }
+    package var heldBytes: Int { bytes }
 
     /// The window blocks whose distance from their chain's next block to
     /// connect (0 for that block) changed, each by its distance, and the
     /// blocks that left every window: the order their bodies are needed in.
-    func order(bodies distances: [String: Int], leaving left: Set<String>) {
+    package func order(bodies distances: [String: Int], leaving left: Set<String>) {
         for (block, distance) in distances where self.distances.updateValue(distance, forKey: block) == nil {
             if bodies[block] != nil { outsideWindow -= 1 }
         }
@@ -96,7 +96,7 @@ actor ReadCache: ContentSource {
     }
 
     /// The whole Volume under `root`, when this node derived it and it is held.
-    func volume(_ root: String) -> SerializedVolume? {
+    package func volume(_ root: String) -> SerializedVolume? {
         guard let key = containing[root]?.first(where: { $0.root == root }),
               let entries = held[key]?.entries else { return nil }
         touch(key)
@@ -105,13 +105,13 @@ actor ReadCache: ContentSource {
 
     /// The whole Volumes a fetch of `block`'s body derived, when held: the
     /// Volumes storing the block derives.
-    func body(_ block: String) -> [SerializedVolume]? {
+    package func body(_ block: String) -> [SerializedVolume]? {
         bodies[block]?.roots.compactMap { root in
             held[.body(block: block, root: root)].map { SerializedVolume(root: root, entries: $0.entries) }
         }
     }
 
-    func fetch(_ cids: Set<String>) async -> [String: Data] {
+    package func fetch(_ cids: Set<String>) async -> [String: Data] {
         var found: [String: Data] = [:]
         for cid in cids {
             guard let key = held[.entry(cid)] != nil ? .entry(cid) : containing[cid]?.first,
@@ -123,7 +123,7 @@ actor ReadCache: ContentSource {
     }
 
     /// Keeps the Volumes a fetch of `block`'s body derived, all or none.
-    func put(_ volumes: [SerializedVolume], block: String) {
+    package func put(_ volumes: [SerializedVolume], block: String) {
         evict(body: block)
         var unique: [String: [String: Data]] = [:]
         for volume in volumes { unique[volume.root] = volume.entries }
@@ -142,7 +142,7 @@ actor ReadCache: ContentSource {
     }
 
     /// Keeps entries a read asked for, each on its own.
-    func put(entries: [String: Data]) {
+    package func put(entries: [String: Data]) {
         // An entry goes before every body in a window and after every other
         // body, so the bodies it may evict are the same for the whole batch.
         var victims: [(rank: Rank, block: String)]?
@@ -159,7 +159,7 @@ actor ReadCache: ContentSource {
     }
 
     /// `source`, with the entries a read asks of it kept here.
-    nonisolated func remembering(_ source: any ContentSource) -> any ContentSource {
+    package nonisolated func remembering(_ source: any ContentSource) -> any ContentSource {
         Remembering(source: source, cache: self)
     }
 
@@ -176,7 +176,7 @@ actor ReadCache: ContentSource {
 
     private static func charge(_ entries: [String: Data]) -> Int {
         entries.reduce(0) {
-            $0 + $1.key.utf8.count + $1.value.count + IvyRootContentSource.retainedEntryOverhead
+            $0 + $1.key.utf8.count + $1.value.count + NodeResourcePolicy.retainedEntryOverhead
         }
     }
 

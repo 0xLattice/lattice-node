@@ -30,12 +30,13 @@ final class OperatorListenerTests: XCTestCase {
             "lattice-operator-listener-\(UUID().uuidString)"
         )
         addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
-        let storage = try await NodeStorage.open(configuration: NodeConfiguration(
+        let configuration = try NodeConfiguration(
             chainPath: ["Nexus"],
             storagePath: directory,
             privateKeyHex: String(repeating: "02", count: 32)
-        ))
-        let service = try await startRuntime(storage)
+        )
+        let storage = try await NodeStorage.open(configuration: configuration)
+        let service = try await startRuntime(storage, configuration)
         let tokens = TokenStore(try OperatorTokens([
             .init(name: "seller", sha256: OperatorTokens.hash(Self.token), routes: [
                 "GET /hosted-chains", "put /config/fragments/{name}", "GET /api/state/account/{addr}", "POST /tokens",

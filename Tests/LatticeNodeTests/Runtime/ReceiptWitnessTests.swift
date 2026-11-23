@@ -155,7 +155,7 @@ final class ReceiptWitnessTests: XCTestCase {
         while let cid = walk, placed == nil {
             let node = try await BlockHeader(rawCID: cid).resolve(fetcher: local).node
             let block = try XCTUnwrap(node)
-            if try await NodeRuntime.carriedTransactionIDs(of: block, fetcher: local).contains(withdrawalCID) {
+            if try await NodeStorage.carriedTransactionIDs(of: block, fetcher: local).contains(withdrawalCID) {
                 placed = cid
             }
             walk = block.parent?.rawCID

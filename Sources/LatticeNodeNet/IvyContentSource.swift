@@ -12,13 +12,8 @@ import LatticeNodeSupport
 public struct IvyRootContentSource: Sendable {
     private static let defaultPolicy = NodeResourcePolicy.default
     /// What a session is charged for each entry it holds, beyond the entry's
-    /// CID and bytes: the heap a held entry costs in the session's set and
-    /// its store's three tables (hash slots at their load, the owner set, the
-    /// string and data headers). Measured at 273 to 430 bytes an entry
-    /// (1,000 to 300,000 entries of 1 to 113 bytes, arm64 macOS) and rounded
-    /// up, so the byte budget bounds memory however small a peer makes the
-    /// entries it sends.
-    package static let retainedEntryOverhead = 512
+    /// CID and bytes (`NodeResourcePolicy.retainedEntryOverhead`).
+    package static let retainedEntryOverhead = NodeResourcePolicy.retainedEntryOverhead
 
     public struct Attribution: Sendable, Equatable {
         public let servedByPublicKeys: Set<String>

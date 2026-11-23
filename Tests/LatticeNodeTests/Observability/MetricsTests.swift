@@ -249,15 +249,20 @@ final class MetricsTests: XCTestCase {
             "lattice-metrics-test-\(UUID().uuidString)"
         )
         addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
-        return try await NodeStorage.open(configuration: NodeConfiguration(
+        return try await NodeStorage.open(configuration: configuration(chainPath: chainPath, storageDirectory: storageDirectory))
+    }
+
+    private func configuration(chainPath: [String], storageDirectory: URL) throws -> NodeConfiguration {
+        try NodeConfiguration(
             chainPath: chainPath,
             storagePath: storageDirectory,
             privateKeyHex: String(repeating: "01", count: 32)
-        ))
+        )
     }
 
     private func openService(chainPath: [String]) async throws -> NodeRuntime {
-        try await startRuntime(try await openStorage(chainPath: chainPath))
+        let storage = try await openStorage(chainPath: chainPath)
+        return try await startRuntime(storage, try configuration(chainPath: chainPath, storageDirectory: storage.configuration.storagePath))
     }
 }
 

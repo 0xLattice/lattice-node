@@ -89,14 +89,14 @@ Docker-compatible runtime without the GUI.
 | `Sources/LatticeNodeCore/Sync` | Header-graph synchronization state and its decoded protocol values. |
 | `Sources/LatticeNodeCore/Mempool` | Transaction-pool policy and mutations. |
 | `Sources/LatticeNodeCore/Mining` | Mining state, template jobs, and issued-work tracking. |
-| `Sources/LatticeNode/Runtime` | `NodeRuntime`, the production shell that drives `NodeCore` and executes effects; boot recovery and the storage gateway. |
+| `Sources/LatticeNode/Runtime` | `NodeRuntime`, the production shell that drives `NodeCore` and executes effects; the storage's reads from peers (`NodeStorage+Peers.swift`) and opening it from a `NodeConfiguration`. |
 | `Sources/LatticeNodeAPI` | The client contract: the service's request and response models and the state proofs a client verifies (`StateDictionaryProof`), the library clients build on without the node. |
 | `Sources/LatticeNode/API` | Read operations, route-input validation, and the node's conversions into the models. |
 | `Sources/LatticeNodeNet` | The peer protocol: overlay handshake, wire codecs and validation, peer memory, read-endpoint discovery, the serving ledger, and the Ivy content source. It never imports the store or the shell. |
-| `Sources/LatticeNodeStore` | What is on disk: durable fact journals, header content, SQLite rows and migrations, and the Volume stores. |
+| `Sources/LatticeNodeStore` | What is on disk: durable fact journals, header content, SQLite rows and migrations, the Volume stores, and the storage gateway over them (`NodeStorage`, opened from a `StoreConfiguration`: boot recovery, retention, the state backend, the read cache). |
 | `Sources/LatticeNodeSupport` | What every part of the process shares: the node log, sync tracing, the read tally, published values, timers. |
 | `Sources/LatticeNodeConfig` | The operator's configuration: topology and fragments, the host layout on disk, chain creation, Nexus's genesis, setting limits. |
-| `Sources/LatticeNode/Configuration` | The runtime's node configuration and bootstrap peers. |
+| `Sources/LatticeNode/Configuration` | The runtime's node configuration, from which it builds each module's settings (the store's `StoreConfiguration`), and bootstrap peers. |
 | `Sources/LatticeNode/Mining` | Mining-template assembly and multi-level mining plans. |
 | `Sources/LatticeNode/Observability` | Metrics and opt-in synchronization tracing. |
 | `Sources/LatticeNodeDaemon` | CLI and loopback HTTP adapter. |

@@ -5,21 +5,20 @@ import LatticeNodeAPI
 import VolumeBroker
 import cashew
 import LatticeNodeSupport
-import LatticeNodeStore
 
 /// The store side of the node runtime: the existing NodeStore (state.db) and
 /// Volume broker of an opened `NodeStorage`, used as the effect executor's
 /// persistence and content layer. Nothing here decides anything.
 extension NodeStorage {
     /// One level's stored facts, in the order it took them.
-    nonisolated func nodeFacts(at path: ChainPath) async throws -> StoredFacts {
+    package nonisolated func nodeFacts(at path: ChainPath) async throws -> StoredFacts {
         try await store.storedFacts(at: path)
     }
 
     /// Policy modules an operator supplies while the node runs, stored as
     /// at start, with the root chain's constants, so a genesis that names
     /// one can be stored.
-    nonisolated func storePolicyModules(_ modules: [Data]) async throws {
+    package nonisolated func storePolicyModules(_ modules: [Data]) async throws {
         guard !modules.isEmpty else { return }
         let storage = NodeImportStorage(storage: stores.root)
         for bytes in modules {
@@ -30,11 +29,11 @@ extension NodeStorage {
     }
 
     /// The weigh log id state.db recorded with its first chain fact.
-    nonisolated func chainLogID() async throws -> String? {
+    package nonisolated func chainLogID() async throws -> String? {
         try await store.chainLogID()
     }
 
-    nonisolated func chainCursors(at path: ChainPath) async throws -> [String: StreamCursor] {
+    package nonisolated func chainCursors(at path: ChainPath) async throws -> [String: StreamCursor] {
         try await store.chainCursors(at: path)
     }
 
@@ -45,7 +44,7 @@ extension NodeStorage {
     /// crash between stores leaves content no fact names, retained under its
     /// window's scope like any execution's: it goes when the tip is a window
     /// past it, or with its chain.
-    nonisolated func persistNodeBatch(_ batch: NodeBatch, logID: String) async throws {
+    package nonisolated func persistNodeBatch(_ batch: NodeBatch, logID: String) async throws {
         var durable: [NodeFactBatch] = []
         // Each level's content, for its own store, and where what its
         // executions created is kept there, by scope
@@ -116,7 +115,7 @@ extension NodeStorage {
 
     /// A trace line's account of one store: its Volumes, their entries, the
     /// entries' bytes and their CIDs' text, and the roots it retains.
-    static func storedLine(_ volumes: [ValidatedVolume], _ retaining: [String: [String]]) -> String {
+    package static func storedLine(_ volumes: [ValidatedVolume], _ retaining: [String: [String]]) -> String {
         let entries = volumes.flatMap(\.volume.entries)
         return "volumes \(volumes.count) entries \(entries.count) bytes \(entries.reduce(0) { $0 + $1.value.count })"
             + " cidBytes \(entries.reduce(0) { $0 + $1.key.utf8.count }) retained \(retaining.values.reduce(0) { $0 + $1.count })"
@@ -129,7 +128,7 @@ extension NodeStorage {
     /// only the roots held.
     /// `broker` is the store of the chain the roots are kept for.
     @discardableResult
-    nonisolated func retainHeld(_ roots: [String], scope: String? = nil, in broker: DiskBroker) async throws -> [String] {
+    package nonisolated func retainHeld(_ roots: [String], scope: String? = nil, in broker: DiskBroker) async throws -> [String] {
         var roots = Set(roots)
         var lacked: [String] = []
         while !roots.isEmpty {
@@ -156,7 +155,7 @@ extension NodeStorage {
     /// is asked only for what neither these stores nor memory holds: a state
     /// this node let go of, as a reorganization past its kept windows needs.
     /// A block's body is fetched without its state (`fetchChainBody`).
-    nonisolated func ownReads(through peers: any ContentSource, _ scope: ReadScope) -> CoalescingFetcher {
+    package nonisolated func ownReads(through peers: any ContentSource, _ scope: ReadScope) -> CoalescingFetcher {
         CoalescingFetcher(CompositeContentSource([
             stores.readers(scope).workSource, ReadTally.wrap("memory", readCache),
             ReadTally.wrap("peers", readCache.remembering(peers)),
@@ -167,19 +166,19 @@ extension NodeStorage {
     /// block's own node is read from them when its body is not held.
     /// Execution and mining build on blocks through this. One per scope,
     /// shared by its reads in flight.
-    nonisolated func workFetcher(_ scope: ReadScope) -> CoalescingFetcher {
+    package nonisolated func workFetcher(_ scope: ReadScope) -> CoalescingFetcher {
         stores.readers(scope).work
     }
 
     /// The stores `scope` names alone.
-    nonisolated func localFetcher(_ scope: ReadScope) -> CoalescingFetcher {
+    package nonisolated func localFetcher(_ scope: ReadScope) -> CoalescingFetcher {
         stores.readers(scope).local
     }
 
     /// How a reader's state read reads: the stores `scope` names, a block's
     /// header record, what is in memory, then peers, whose answers are not
     /// kept for later reads.
-    nonisolated func readersReads(through peers: any ContentSource, _ scope: ReadScope) -> CoalescingFetcher {
+    package nonisolated func readersReads(through peers: any ContentSource, _ scope: ReadScope) -> CoalescingFetcher {
         CoalescingFetcher(CompositeContentSource([
             stores.readers(scope).workSource, ReadTally.wrap("memory", readCache), ReadTally.wrap("peers", peers),
         ]))
@@ -187,7 +186,7 @@ extension NodeStorage {
 
     /// Stores a block and pins what was stored: its body is what `fetcher`,
     /// the content it was stored from, says it carries.
-    nonisolated func storingAndRetaining(
+    package nonisolated func storingAndRetaining(
         _ header: BlockHeader, at path: ChainPath, from fetcher: any Fetcher,
         _ store: (NodeImportStorage) async throws -> Void
     ) async throws -> [String] {
@@ -201,10 +200,27 @@ extension NodeStorage {
         for volume in witness { try await storage.store(volume: volume) }
         try await storage.commit()
         let roots = await storage.takeStoredVolumeRoots()
-        let body = [blockCID] + (try await NodeRuntime.carriedTransactionIDs(ofBlock: blockCID, fetcher: fetcher))
+        let body = [blockCID] + (try await Self.carriedTransactionIDs(ofBlock: blockCID, fetcher: fetcher))
             + witness.map(\.root)
         try await retainStored(roots, body: body, ofBlock: blockCID, at: path)
         return roots
+    }
+
+    /// The transactions a block carries, by CID, as storing the block
+    /// finds them: every entry of its transaction index, whatever its key.
+    package static func carriedTransactionIDs(ofBlock cid: String, fetcher: any Fetcher) async throws -> [String] {
+        guard let block = try await BlockHeader(rawCID: cid).resolve(fetcher: fetcher).node else {
+            throw NodeAPIError.unresolvedTransactionContent
+        }
+        return try await carriedTransactionIDs(of: block, fetcher: fetcher)
+    }
+
+    /// `carriedTransactionIDs(ofBlock:)` of a block already decoded.
+    package static func carriedTransactionIDs(of block: Block, fetcher: any Fetcher) async throws -> [String] {
+        guard let index = try await block.transactions.resolve(fetcher: fetcher).node else {
+            throw NodeAPIError.unresolvedTransactionContent
+        }
+        return try await index.boundedKeysAndValues(limit: index.count, fetcher: fetcher).map(\.1.rawCID)
     }
 
     /// A block's parent-receipt witness (`storeParentReceiptWitness`): the
@@ -214,7 +230,7 @@ extension NodeStorage {
     /// name, and served with it, so the block executes where its parent's
     /// state is gone. None for a block without withdrawals, or when
     /// `fetcher` cannot read them (the execution then reads them itself).
-    nonisolated func receiptWitness(of block: BlockHeader, fetcher: any Fetcher) async -> [SerializedVolume] {
+    package nonisolated func receiptWitness(of block: BlockHeader, fetcher: any Fetcher) async -> [SerializedVolume] {
         let walked = NodeImportStorage(storage: nil, keepsVolumes: true)
         do {
             try await block.storeParentReceiptWitness(fetcher: fetcher, storer: walked)
@@ -229,7 +245,7 @@ extension NodeStorage {
     /// (`storeValidBlocks` of the one block). Returns the CIDs of the
     /// transactions the block carries; throws when it was not stored.
     @discardableResult
-    nonisolated func storeValidBlock(
+    package nonisolated func storeValidBlock(
         _ cid: String, decoded: Block? = nil, at path: ChainPath, from fetcher: any Fetcher
     ) async throws -> [String] {
         guard let transactions = try await storeValidBlocks([(cid, decoded)], at: path, from: fetcher)[cid] else {
@@ -257,7 +273,7 @@ extension NodeStorage {
     /// `decoded` is the
     /// block's node as its connect decoded it (`ConnectVerdict.connectedBlock`),
     /// or nil to resolve it through `fetcher`.
-    nonisolated func storeValidBlocks(
+    package nonisolated func storeValidBlocks(
         _ blocks: [(cid: String, decoded: Block?)], at path: ChainPath, from fetcher: any Fetcher
     ) async throws -> [String: [String]] {
         var stored: [String: SerializedVolume] = [:]
@@ -288,7 +304,7 @@ extension NodeStorage {
                     resolved = try await BlockHeader(rawCID: cid).resolve(fetcher: fetcher).node
                 }
                 guard let block = resolved else { throw NodeAPIError.unresolvedTransactionContent }
-                let transactions = try await NodeRuntime.carriedTransactionIDs(of: block, fetcher: fetcher)
+                let transactions = try await Self.carriedTransactionIDs(of: block, fetcher: fetcher)
                 // What is neither the block's, its transactions' nor its
                 // rules (spec and policy modules) is its receipt witness (for
                 // a genesis, the empty state it starts from): body too.
@@ -321,111 +337,10 @@ extension NodeStorage {
         return carried
     }
 
-    /// `ChainEffect.fetchBody`: the block's content (`storeBlockContent`: its
-    /// Volume, its transactions', its spec and policy modules) through the
-    /// content layer (local store first, then any overlay provider of the
-    /// root), read into memory and not stored: the block is stored once its
-    /// execution finds it valid. Returns the roots it read. Never the state
-    /// its execution reads: this node derives a block's pre-state by
-    /// executing its parent, as Bitcoin's initial block download and geth's
-    /// full sync do, and a peer keeping recent state only holds no old one.
-    /// The execution reads that state through `ownReads`, which asks a
-    /// peer only for what this node does not hold.
-    ///
-    /// `bundle` is false once a fetch of the block failed: a bundle is an
-    /// optimisation, so such a block is fetched one Volume at a time, as it
-    /// would be from peers that speak no bundles. `hosts` names the
-    /// block's child chain: its body is asked of that chain's current peers,
-    /// the peers that store it, then of the connected peers known to
-    /// provide the block or a Volume of it, and with none of them connected
-    /// no peer is asked.
-    ///
-    /// The session reserves from the node's budget when it first asks a
-    /// peer, an estimate of its worst case (`bodyReservation`): the chain's
-    /// `maxBlockSize` (when its spec is held) bounds a body's bytes, not
-    /// what holding them costs this node. A body past the estimate is
-    /// fetched once more under the whole allowance, after the first
-    /// reservation is released. The Volumes the
-    /// walk derives, once it reaches the end of the body, are kept in memory
-    /// for the block's connect.
-    nonisolated func fetchChainBody(
-        _ cid: String, remote: IvyRootContentSource, bundle: Bool = true, hosts: ChainHosts? = nil,
-        maxBlockSize: Int? = nil
-    ) async throws -> [String] {
-        let allowance = remote.maximumStorageBytes
-        let first = Self.bodyReservation(maxBlockSize: maxBlockSize, allowance: allowance)
-        do {
-            return try await fetchChainBody(cid, remote: remote, bundle: bundle, hosts: hosts, reserving: first)
-        } catch NodeStorageError.bodyExceedsLocalBudget where first < allowance {
-            return try await fetchChainBody(cid, remote: remote, bundle: bundle, hosts: hosts, reserving: allowance)
-        }
-    }
-
-    /// What a body session reserves: four times `maxBlockSize`, at most
-    /// `allowance` (the whole allowance when the spec is not held).
-    /// `maxBlockSize` counts the data of the block's own Volume and its
-    /// transactions, which is all the walk reads from peers. Holding an
-    /// entry costs its CID and `retainedEntryOverhead` beside its data: a
-    /// body of 0.97 MB of minimal transactions costs 3.5 MB to hold, hence
-    /// four. A body past that (one of unusually small entries, or one whose
-    /// spec or policy modules are not held yet) is fetched once more under
-    /// the whole allowance. The spec and modules cost the session nothing
-    /// once held (stored with the chain's genesis, then with each block):
-    /// the walk reads the store first.
-    static func bodyReservation(maxBlockSize: Int?, allowance: Int) -> Int {
-        guard let maxBlockSize, maxBlockSize < allowance / 4 else { return allowance }
-        return 4 * max(maxBlockSize, 0)
-    }
-
-    private nonisolated func fetchChainBody(
-        _ cid: String, remote: IvyRootContentSource, bundle: Bool, hosts: ChainHosts?, reserving bytes: Int
-    ) async throws -> [String] {
-        let capture = IvyRootContentSource.AttributionCapture()
-        do {
-            return try await remote.withRootTracing(
-                cid, bundle: bundle, hosts: hosts, onlyHosts: true, capture: capture, reserving: bytes, priority: .body(
-                    cid, depth: hosts.map { $0.path.count - 1 } ?? 0
-                )
-            ) { session in
-                // Read into memory, never into the store: what a peer sent is
-                // stored once the block's execution has found it valid.
-                let fetcher = CoalescingFetcher(CompositeContentSource([
-                    ReadTally.wrap("store", stores.reads(.chain(hosts?.path ?? stores.rootPath))), ReadTally.wrap("peers", session),
-                ]))
-                let walked = NodeImportStorage(storage: nil, keepsVolumes: true)
-                do {
-                    // With its receipt witness, which the bundle carries,
-                    // read from the content this walk resolved: a witness
-                    // not obtained fails the fetch as content not obtained
-                    // does (its execution could not read it either), and one
-                    // past the reservation is retried under the whole
-                    // allowance.
-                    try await BlockHeader(rawCID: cid)
-                        .storeBlockContent(fetcher: fetcher, storer: walked, parentReceiptWitness: true)
-                    // The walk reached the end: the Volumes it derived are the
-                    // ones storing the block would, and serve its connect.
-                    await readCache.put(walked.takeVolumes().map(\.volume), block: cid)
-                } catch BlockContentSizeError.exceedsLimit {
-                    // Past the chain's own maxBlockSize the block is invalid,
-                    // and its execution proves it from what was read: run it
-                    // rather than retry a fetch that can never succeed.
-                } catch {
-                    throw await incompleteBody(cid, read: walked.takeVolumes().map(\.volume), error: error)
-                }
-                return await walked.takeStoredVolumeRoots()
-            }.value
-        } catch {
-            // Content this node's own budget declined is named as that, not
-            // as content nobody served.
-            guard capture.snapshot()?.byteBudgetExceeded == true else { throw error }
-            throw NodeStorageError.bodyExceedsLocalBudget(bytes: bytes)
-        }
-    }
-
     /// Why a body's walk failed: when what it read, with this store, holds
     /// the block's whole content, what no peer served is the receipt proofs
     /// that travel with it (`receiptProofsUnavailable`); otherwise `error`.
-    nonisolated func incompleteBody(_ cid: String, read: [SerializedVolume], error: any Error) async -> any Error {
+    package nonisolated func incompleteBody(_ cid: String, read: [SerializedVolume], error: any Error) async -> any Error {
         var entries: [String: Data] = [:]
         for volume in read { entries.merge(volume.entries) { first, _ in first } }
         let local = CompositeContentSource([InMemoryContentSource(entries), stores.anyChain])
@@ -441,7 +356,7 @@ extension NodeStorage {
     /// block was stored; for a block stored before bundles were recorded, the same
     /// walk over local content only, recorded once it completes. A root that
     /// is no block this node holds whole bundles only itself.
-    nonisolated func volumeBundle(_ rootCID: String) async -> [String] {
+    package nonisolated func volumeBundle(_ rootCID: String) async -> [String] {
         // A recording outlives a store a start removed: one whose block is
         // no longer held is not advertised. A served bundle names no chain,
         // so this asks every store: a known cost per bundle served.
@@ -465,30 +380,7 @@ extension NodeStorage {
         return [rootCID] + roots.filter { $0 != rootCID }
     }
 
-    /// `MiningEffect.mined`: the mined block's content, stored and retained
-    /// before its header is weighed (content first). Returns its child
-    /// index, which the root header is inserted with. What the block names
-    /// and this store lacks is read from peers, as the template that built
-    /// it read it. A child block built for its author to commit (`at` its
-    /// chain) is stored the same way, before any parent commits it.
-    nonisolated func storeMinedBlock(
-        _ block: Block, at path: ChainPath? = nil, remote: IvyRootContentSource? = nil
-    ) async throws -> FlatDictionary<BlockHeader> {
-        let header = try BlockHeader(node: block)
-        let path = path ?? configuration.chainPath
-        // A mined block carries the levels below it.
-        guard let remote else {
-            return try await storeMinedBlock(header, block, at: path, fetcher: localFetcher(.subtree(path)))
-        }
-        return try await remote.withRootTracing(header.rawCID, bundle: false) { session in
-            let children = try await storeMinedBlock(
-                header, block, at: path, fetcher: ownReads(through: session, .subtree(path))
-            )
-            return children
-        }.value
-    }
-
-    private nonisolated func storeMinedBlock(
+    package nonisolated func storeMinedBlock(
         _ header: BlockHeader, _ block: Block, at path: ChainPath, fetcher: any Fetcher
     ) async throws -> FlatDictionary<BlockHeader> {
         let roots = try await storingAndRetaining(header, at: path, from: fetcher) { storage in
@@ -501,26 +393,7 @@ extension NodeStorage {
         return children
     }
 
-    /// The child blocks a mined root carries at hosted levels, outermost
-    /// first, each stored and with its proof from this root: only those the
-    /// grind's work meets (a verified contribution), at any depth below
-    /// carriers it misses.
-    nonisolated func carriedGrinds(
-        of root: Block, hosted: Set<ChainPath>, remote: IvyRootContentSource? = nil
-    ) async throws -> [MinedGrind.Carried] {
-        guard let remote else {
-            return try await carriedGrinds(of: root, hosted: hosted, fetcher: localFetcher(.subtree(stores.rootPath)))
-        }
-        let rootCID = try BlockHeader(node: root).rawCID
-        return try await remote.withRootTracing(rootCID, bundle: false) { session in
-            let carried = try await carriedGrinds(
-                of: root, hosted: hosted, fetcher: ownReads(through: session, .subtree(stores.rootPath))
-            )
-            return carried
-        }.value
-    }
-
-    private nonisolated func carriedGrinds(
+    package nonisolated func carriedGrinds(
         of root: Block, hosted: Set<ChainPath>, fetcher localFetcher: any Fetcher
     ) async throws -> [MinedGrind.Carried] {
         var carried: [MinedGrind.Carried] = []
@@ -559,7 +432,7 @@ extension NodeStorage {
     /// added transaction's Volume stored and pinned for this storage, each
     /// journaled one written to the local journal, and every removed one
     /// unpinned and dropped from the journal. The journal keeps seconds.
-    nonisolated func persistPoolDelta(_ delta: PoolDelta) async throws {
+    package nonisolated func persistPoolDelta(_ delta: PoolDelta) async throws {
         for item in delta.added {
             _ = try await persistPeerTransaction(item.transaction)
         }
@@ -579,7 +452,7 @@ extension NodeStorage {
     /// fetched yet); its spec Volume was stored with it.
     /// `operatorSpecs` are the operator's specs now, when they changed since
     /// start.
-    nonisolated func chainGenesisSpec(
+    package nonisolated func chainGenesisSpec(
         _ cid: String, operatorSpecs: [ChainPath: ChainSpec]? = nil
     ) async throws -> ChainSpec? {
         guard let block = await chainHeader(cid)?.block else { return nil }
@@ -599,7 +472,7 @@ extension NodeStorage {
         return nil
     }
 
-    nonisolated func chainHeader(_ cid: String) async -> (block: Block, children: FlatDictionary<BlockHeader>)? {
+    package nonisolated func chainHeader(_ cid: String) async -> (block: Block, children: FlatDictionary<BlockHeader>)? {
         if let stored = store.header(cid) { return stored }
         guard let blockBytes = try? await localFetcher(.anyChain).fetch(rawCid: cid),
               let block = Block(data: blockBytes),
@@ -610,7 +483,7 @@ extension NodeStorage {
 
     /// Store an execution's materialized post-state: every Volume the
     /// execution loaded, each as its own boundary.
-    static func storeExecutedState(_ state: LatticeState, in storer: any VolumeStorer) async throws {
+    package static func storeExecutedState(_ state: LatticeState, in storer: any VolumeStorer) async throws {
         try await storeLoaded(LatticeStateHeader(node: state), in: storer)
     }
 
@@ -625,7 +498,7 @@ extension NodeStorage {
     }
 
     /// The headers a loaded node names; none when it is not loaded.
-    static func children(of header: any Header) -> [any Header] {
+    package static func children(of header: any Header) -> [any Header] {
         guard let node: any cashew.Node = loadedNode(of: header) else { return [] }
         var children: [any Header] = node.properties().sorted().compactMap { node.get(property: $0) }
         if let radix = node as? any RadixNode, let value = radix.value as? any Header {

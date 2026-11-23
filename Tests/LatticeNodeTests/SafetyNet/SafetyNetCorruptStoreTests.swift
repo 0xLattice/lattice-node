@@ -281,7 +281,7 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
     private func buildFixture() async throws -> URL {
         let root = temporaryDirectory()
         let runtime = try await startRuntime(
-            try await NodeStorage.open(configuration: try configuration(root))
+            try await NodeStorage.open(configuration: try configuration(root)), try configuration(root)
         )
         for _ in 0..<2 { _ = try await runtime.mineBlock() }
         await runtime.stop()

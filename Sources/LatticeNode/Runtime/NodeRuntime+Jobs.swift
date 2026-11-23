@@ -54,23 +54,6 @@ extension NodeRuntime {
         await transactions(ofBlock: cid, fetcher: fetcher).compactMap { try? Mempool.cid(of: $0) }
     }
 
-    /// The transactions a block carries, by CID, as storing the block
-    /// finds them: every entry of its transaction index, whatever its key.
-    static func carriedTransactionIDs(ofBlock cid: String, fetcher: any Fetcher) async throws -> [String] {
-        guard let block = try await BlockHeader(rawCID: cid).resolve(fetcher: fetcher).node else {
-            throw NodeAPIError.unresolvedTransactionContent
-        }
-        return try await carriedTransactionIDs(of: block, fetcher: fetcher)
-    }
-
-    /// `carriedTransactionIDs(ofBlock:)` of a block already decoded.
-    static func carriedTransactionIDs(of block: Block, fetcher: any Fetcher) async throws -> [String] {
-        guard let index = try await block.transactions.resolve(fetcher: fetcher).node else {
-            throw NodeAPIError.unresolvedTransactionContent
-        }
-        return try await index.boundedKeysAndValues(limit: index.count, fetcher: fetcher).map(\.1.rawCID)
-    }
-
     /// How a connect job stores the blocks it found valid
     /// (`NodeStorage.storeValidBlocks`); a test's stands in to fail it.
     typealias StoreValidBlocks = @Sendable (

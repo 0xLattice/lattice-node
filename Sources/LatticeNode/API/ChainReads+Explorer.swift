@@ -620,7 +620,7 @@ extension ChainReads {
     public func explorerFees() async -> ExplorerFees {
         let pool = await mempool(false)
         return ExplorerFees(
-            minRelayFee: storage.configuration.minRelayFee,
+            minRelayFee: minRelayFee,
             blocks: pool.projected.map(ExplorerProjectedBlock.init),
             weight: pool.weight.map(ExplorerWeight.init)
         )
@@ -633,8 +633,8 @@ extension ChainReads {
             height: snapshot.height,
             tipCID: snapshot.tipCID,
             chain: chainPath,
-            minRelayFee: storage.configuration.minRelayFee,
-            finalityWindow: storage.configuration.finality.window(for: chainPath)
+            minRelayFee: minRelayFee,
+            finalityWindow: finality.window(for: chainPath)
         )
     }
 

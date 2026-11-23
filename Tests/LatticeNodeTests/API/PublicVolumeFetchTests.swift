@@ -102,11 +102,12 @@ final class PublicVolumeFetchTests: XCTestCase {
             "lattice-public-fetch-busy-\(UUID().uuidString)"
         )
         addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
-        let storage = try await NodeStorage.open(configuration: NodeConfiguration(
+        let configuration = try NodeConfiguration(
             chainPath: ["Nexus"], storagePath: storageDirectory,
             privateKeyHex: String(repeating: "01", count: 32)
-        ))
-        let service = try await startRuntime(storage)
+        )
+        let storage = try await NodeStorage.open(configuration: configuration)
+        let service = try await startRuntime(storage, configuration)
         let full = PublicVolumeFetches(limit: 1) { _ in throw NodeRuntimeError.busy }
         let app = makePublicReadApplication(service: service, host: "127.0.0.1", port: 8081, fetches: full)
         let root = try spec(77).rawCID
@@ -127,11 +128,12 @@ final class PublicVolumeFetchTests: XCTestCase {
             "lattice-public-fetch-wait-\(UUID().uuidString)"
         )
         addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
-        let storage = try await NodeStorage.open(configuration: NodeConfiguration(
+        let configuration = try NodeConfiguration(
             chainPath: ["Nexus"], storagePath: storageDirectory,
             privateKeyHex: String(repeating: "01", count: 32)
-        ))
-        let service = try await startRuntime(storage)
+        )
+        let storage = try await NodeStorage.open(configuration: configuration)
+        let service = try await startRuntime(storage, configuration)
         let first = try spec(78).rawCID
         let root = try spec(79).rawCID
         for wait in [Duration.seconds(2), .seconds(30)] {
@@ -181,11 +183,12 @@ final class PublicVolumeFetchTests: XCTestCase {
             "lattice-public-fetch-live-\(UUID().uuidString)"
         )
         addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
-        let storage = try await NodeStorage.open(configuration: NodeConfiguration(
+        let configuration = try NodeConfiguration(
             chainPath: ["Nexus"], storagePath: storageDirectory,
             privateKeyHex: String(repeating: "01", count: 32)
-        ))
-        let service = try await startRuntime(storage)
+        )
+        let storage = try await NodeStorage.open(configuration: configuration)
+        let service = try await startRuntime(storage, configuration)
         let volume = try spec(501)
         let serialized = try await serializedVolume(volume)
         let fetches = PublicVolumeFetches(limit: 1) { root in

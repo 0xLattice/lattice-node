@@ -28,7 +28,7 @@ final class PublicReadRateLimitTests: XCTestCase {
         )
         let storage = try await NodeStorage.open(configuration: configuration)
         return (
-            try await startRuntime(storage),
+            try await startRuntime(storage, configuration),
             configuration
         )
     }

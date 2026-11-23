@@ -1,7 +1,7 @@
 import Foundation
+import LatticeNodeConfig
 import LatticeNodeCore
 import VolumeBroker
-import LatticeNodeStore
 
 /// What the node does with executed state, behind one interface: keep what
 /// a block's storing and execution stored, let go of what a block read once
@@ -29,39 +29,39 @@ import LatticeNodeStore
 ///
 /// Block bodies and operator pins are beside it, not in it: they are
 /// content the node serves or promised to keep, whatever it keeps of state.
-struct StateBackend: Sendable {
-    let storage: NodeStorage
-    let scheme: StateRetention
+package struct StateBackend: Sendable {
+    package let storage: NodeStorage
+    package let scheme: StateRetention
 
-    init(storage: NodeStorage) {
+    package init(storage: NodeStorage) {
         self.storage = storage
         scheme = storage.configuration.state
     }
 
     /// The blocks of the chain at `path` whose executions' state is kept,
     /// counting its tip: nil when every state is.
-    func window(for path: ChainPath) -> UInt64? {
+    package func window(for path: ChainPath) -> UInt64? {
         storage.configuration.stateWindow(for: path)
     }
 
     /// Whether each chain's current state is counted (`recent`).
-    var counts: Bool { scheme == .recent }
+    package var counts: Bool { scheme == .recent }
 
     /// Whether every state executions stored is kept, so nothing moves with
     /// the tip.
-    var keepsAll: Bool { scheme == .all }
+    package var keepsAll: Bool { scheme == .all }
 
     // MARK: - Apply: what a block's storing and execution stored
 
     /// Whether the facts keep each executed block's state diff, which the
     /// counts move by.
-    var keepsStateDiffs: Bool { scheme == .recent }
+    package var keepsStateDiffs: Bool { scheme == .recent }
 
     /// Where what one level's executions stored is kept, by scope, in the
     /// persist's own transaction: `produced`, each with the height of the
     /// block that produced it, and `specs`, a child genesis's spec, which
     /// stays with the chain.
-    func keepExecuted(
+    package func keepExecuted(
         _ produced: [(height: UInt64?, roots: [String])], specs: [String], at path: ChainPath
     ) async throws -> [String: [String]] {
         switch scheme {
@@ -94,7 +94,7 @@ struct StateBackend: Sendable {
     /// `rest`. With all state kept, with the chain; otherwise the spec and
     /// policy modules with the chain at `path` while it is hosted, and any
     /// state with the block until it executes.
-    func keepStored(_ rest: [String], ofBlock blockCID: String, at path: ChainPath) async throws {
+    package func keepStored(_ rest: [String], ofBlock blockCID: String, at path: ChainPath) async throws {
         let store = try storage.stores.store(at: path)
         guard scheme != .all else {
             try await storage.retainHeld(rest, in: store)
@@ -109,7 +109,7 @@ struct StateBackend: Sendable {
     /// nor its parent's state, `rest`, of which `rules` are its spec and
     /// policy modules: with the chain when all state is kept, else only its
     /// rules, with the chain at `path` while it is hosted.
-    func keepWithValidBlock(
+    package func keepWithValidBlock(
         _ rest: Set<String>, rules: Set<String>, at path: ChainPath
     ) -> (scope: String, roots: Set<String>) {
         scheme == .all ? (storage.retentionScope, rest) : (storage.scopes.rules(at: path), rest.intersection(rules))
@@ -119,7 +119,7 @@ struct StateBackend: Sendable {
 
     /// What a block read goes once it has executed, or was found invalid,
     /// when the operator does not keep all state.
-    func releaseReads(_ blockCID: String, at path: ChainPath) async {
+    package func releaseReads(_ blockCID: String, at path: ChainPath) async {
         guard scheme != .all else { return }
         await storage.releaseReads(blockCID, at: path)
     }
@@ -128,48 +128,34 @@ struct StateBackend: Sendable {
 
     /// What executions of the chain at `path` stored more than a window
     /// below `height`, the tip's, goes, with their state diffs.
-    func letGo(at path: ChainPath, below height: UInt64) async {
+    package func letGo(at path: ChainPath, below height: UInt64) async {
         guard let window = window(for: path) else { return }
         await storage.letGoOfState(at: path, below: height, window: window)
     }
 
     /// Moves the counts of the chain at `path` from `marker` to `tip`
     /// (`NodeStorage.settleCounted`).
-    func moveCounts(at path: ChainPath, tip: String, window: UInt64, marker: String, known: [String]?) async -> CountedOutcome {
+    package func moveCounts(at path: ChainPath, tip: String, window: UInt64, marker: String, known: [String]?) async -> CountedOutcome {
         await storage.settleCounted(at: path, tip: tip, window: window, marker: marker, known: known)
     }
 
     /// Commits a state sync's counts moved on to `tip`
     /// (`NodeStorage.commitCounted`).
-    func commitCounts(
+    package func commitCounts(
         at path: ChainPath, block: CountedMarker.Block, places: [String: Int], tip: String, window: UInt64
     ) async -> CountedOutcome {
         await storage.commitCounted(at: path, block: block, places: places, tip: tip, window: window)
     }
 
     /// What a state sync or heal read is counted now.
-    func releaseStaging(at path: ChainPath) async {
+    package func releaseStaging(at path: ChainPath) async {
         await storage.releaseStaging(at: path)
     }
 
     // MARK: - Bringing the current state into reach
 
-    /// A state sync of the chain at `path` below `tip`: the block it reads,
-    /// then every node of that block's state with its places.
-    func syncCounts(
-        at path: ChainPath, below tip: String, window: UInt64, remote: IvyRootContentSource
-    ) async throws -> (CountedMarker.Block, [String: Int]) {
-        let block = try await storage.countedSyncBlock(at: path, below: tip, window: window)
-        return (block, try await storage.syncCountedState(at: path, block: block, remote: remote))
-    }
-
-    /// The roots a move found missing, read from peers.
-    func healCounts(_ roots: [String], at path: ChainPath, remote: IvyRootContentSource) async throws {
-        try await storage.healCounted(roots, at: path, remote: remote)
-    }
-
     /// The counts checked against the store: their chain when they match.
-    func auditCounts(at path: ChainPath, marker: String) async -> [String]? {
+    package func auditCounts(at path: ChainPath, marker: String) async -> [String]? {
         await storage.auditCounted(at: path, marker: marker)
     }
 
@@ -177,14 +163,14 @@ struct StateBackend: Sendable {
     /// tip heights: what a block read goes once it executed (all of it,
     /// when all state is kept), and the counts of the hosted chains are
     /// found. Returns their markers.
-    func start(tips: [ChainPath: UInt64]) async -> [ChainPath: String] {
+    package func start(tips: [ChainPath: UInt64]) async -> [ChainPath: String] {
         await letGoOfReads()
         return await settleCountedScopes(hosted: Set(tips.keys))
     }
 
     /// At a start: what a block read goes when the block has executed (a
     /// stop came between), or when the operator keeps all state.
-    func letGoOfReads() async {
+    package func letGoOfReads() async {
         do {
             for (broker, scope) in try await storage.stores.retainedScopes(prefix: storage.scopes.readsPrefix) {
                 guard let (path, cid) = storage.scopes.block(named: scope, after: storage.scopes.readsPrefix) else { continue }
@@ -207,7 +193,7 @@ struct StateBackend: Sendable {
     /// without keeps it for its state sync). When the operator keeps recent
     /// state no more, every chain's counts go: on `all` what they counted
     /// is kept with the chain first.
-    func settleCountedScopes(hosted: Set<ChainPath>) async -> [ChainPath: String] {
+    package func settleCountedScopes(hosted: Set<ChainPath>) async -> [ChainPath: String] {
         func path(_ scope: String, after prefix: String) -> ChainPath {
             scope.dropFirst(prefix.count).split(separator: "/").map(String.init)
         }
@@ -243,5 +229,5 @@ struct StateBackend: Sendable {
 
 extension NodeStorage {
     /// The state scheme the operator chose (`StateBackend`).
-    nonisolated var stateBackend: StateBackend { StateBackend(storage: self) }
+    package nonisolated var stateBackend: StateBackend { StateBackend(storage: self) }
 }

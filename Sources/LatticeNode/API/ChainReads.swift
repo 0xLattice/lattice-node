@@ -68,6 +68,10 @@ public struct ChainReads: Sendable {
     let accepted: @Sendable (String) async -> Bool
     /// This chain's current peers: the open sessions that serve it.
     public let peerCount: @Sendable () -> Int
+    /// The smallest fee this node admits to its pool (`NodeConfiguration.minRelayFee`).
+    let minRelayFee: UInt64
+    /// This node's finality windows (`NodeConfiguration.finality`).
+    let finality: FinalityWindows
     /// `committedChild`'s walk, done once per tip for every name.
     let committedChildren = CommittedChildren()
 
@@ -80,9 +84,13 @@ public struct ChainReads: Sendable {
         canonicalCID: @escaping @Sendable (UInt64) async -> String?,
         childDirectories: @escaping @Sendable () async -> ExecutedChildren? = { nil },
         mempool: @escaping @Sendable (_ listing: Bool) async -> MempoolListing,
-        peerCount: @escaping @Sendable () -> Int = { 0 }
+        peerCount: @escaping @Sendable () -> Int = { 0 },
+        minRelayFee: UInt64 = 0,
+        finality: FinalityWindows = FinalityWindows()
     ) {
         self.storage = storage
+        self.minRelayFee = minRelayFee
+        self.finality = finality
         let chainPath = chainPath ?? storage.configuration.chainPath
         self.remote = remote
         self.hosts = ChainHosts.of(chainPath, nexusGenesisCID: storage.configuration.nexusGenesisCID)
