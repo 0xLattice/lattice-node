@@ -6,7 +6,9 @@ import XCTest
 
 /// Two releases on one network:
 /// a node of an older release and a node of this build, peered on loopback,
-/// each following the blocks the other mines to the same tip.
+/// each following the blocks the other mines to the same tip; and one root
+/// upgraded in place, the older release's chain opened and extended by this
+/// build.
 ///
 /// Black box: each release's own shipped binaries, driven through its own
 /// `lattice` CLI and read over `/health`, so nothing here depends on either
@@ -46,16 +48,7 @@ final class TwoVersionE2ETests: XCTestCase {
 
     override func tearDown() async throws {
         let failed = (testRun?.totalFailureCount ?? 0) > 0
-        for host in hosts {
-            if host.mining { _ = try? run(host, ["mine", "stop"]) }
-            _ = try? run(host, ["down"])
-            if let up = host.up, up.isRunning {
-                up.terminate()
-                let deadline = Date().addingTimeInterval(60)
-                while up.isRunning, Date() < deadline { usleep(100_000) }
-                if up.isRunning { kill(up.processIdentifier, SIGKILL) }
-            }
-        }
+        for host in hosts { stop(host) }
         hosts = []
         if let scratch {
             if failed {
@@ -75,15 +68,83 @@ final class TwoVersionE2ETests: XCTestCase {
         try await follow(minerIsOlder: false)
     }
 
+    /// The upgrade an operator runs on a network still mining the older
+    /// release: this build refuses the older store as `wipe required`, and
+    /// after `lattice wipe` the same root resyncs from an older-release peer
+    /// to its tip. Identity and `lattice.json` survive the wipe.
+    func testAnUpgradedRootIsWipedAndResyncsFromAnOlderPeer() async throws {
+        let directory = try makeScratch()
+        let ports = Self.freePorts(4)
+        let miner = Host(
+            name: "miner", lattice: try olderLattice(), root: directory.appendingPathComponent("miner"),
+            listen: ports[0], rpc: ports[1]
+        )
+        let upgraded = Host(
+            name: "older", lattice: try olderLattice(), root: directory.appendingPathComponent("upgraded"),
+            listen: ports[2], rpc: ports[3]
+        )
+        hosts = [miner, upgraded]
+        for host in hosts { try run(host, ["init"]) }
+        let minerKey = try identity(miner)
+        try write(miner, [
+            "listen": Int(miner.listen), "rpc": Int(miner.rpc), "peers": [String](),
+            "mine": ["enabled": true, "worker": "cpu", "workers": 1, "batchSize": 100_000],
+        ])
+        try write(upgraded, [
+            "listen": Int(upgraded.listen), "rpc": Int(upgraded.rpc),
+            "peers": ["\(minerKey)@127.0.0.1:\(miner.listen)"],
+        ])
+        for host in hosts { try start(host) }
+        for host in hosts {
+            try await waitFor("\(host.name) active") { await self.health(host)?["phase"] as? String == "active" }
+        }
+        try run(miner, ["mine", "start"])
+        miner.mining = true
+        try await waitFor("the older miner mines \(Self.blocks) blocks", seconds: 240) {
+            await self.height(miner) >= Self.blocks
+        }
+        try run(miner, ["mine", "stop"])
+        miner.mining = false
+        let minerTip = await health(miner)?["tipCID"] as? String
+        let mined = try XCTUnwrap(minerTip)
+        try await waitFor("the older follower reaches the tip", seconds: 120) {
+            await self.health(upgraded)?["tipCID"] as? String == mined
+        }
+        let identityBefore = try identity(upgraded)
+
+        // The upgrade: the older node stopped, this build started on its root.
+        stop(upgraded)
+        let current = Host(
+            name: "current", lattice: try currentLattice(), root: upgraded.root,
+            listen: upgraded.listen, rpc: upgraded.rpc
+        )
+        hosts = [miner, current]
+        try? start(current)
+        try await waitFor("this build refuses the older store") {
+            self.log(of: current).contains("node store is incompatible")
+        }
+        XCTAssertTrue(self.log(of: current).contains("schema epoch"), self.log(of: current))
+        let refusedHealth = await health(current)
+        XCTAssertNotEqual(refusedHealth?["phase"] as? String, "active", "the older store was opened, not refused")
+        stop(current)
+
+        try run(current, ["wipe"])
+        XCTAssertEqual(try identity(current), identityBefore, "the wipe keeps the node's identity")
+        try start(current)
+        try await waitFor("the wiped root resyncs to the older miner's tip", seconds: 120) {
+            await self.health(current)?["tipCID"] as? String == mined
+        }
+        let resyncedHeight = await height(current)
+        let minedHeight = await height(miner)
+        XCTAssertEqual(resyncedHeight, minedHeight)
+    }
+
     // MARK: - The scenario
 
     /// One host mines Nexus; the other, of the other release, peers with it
     /// and reaches the same tip.
     private func follow(minerIsOlder: Bool) async throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("lattice-node-e2e-twoversion-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        scratch = directory
+        let directory = try makeScratch()
         let ports = Self.freePorts(4)
         let older = Host(
             name: "older", lattice: try olderLattice(), root: directory.appendingPathComponent("older"),
@@ -145,6 +206,28 @@ final class TwoVersionE2ETests: XCTestCase {
     private static let blocks = 6
 
     // MARK: - Harness
+
+    private func makeScratch() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lattice-node-e2e-twoversion-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        scratch = directory
+        return directory
+    }
+
+    /// Mining stopped, `lattice down`, and a foreground `lattice up` ended.
+    private func stop(_ host: Host) {
+        if host.mining { _ = try? run(host, ["mine", "stop"]) }
+        host.mining = false
+        _ = try? run(host, ["down"])
+        if let up = host.up, up.isRunning {
+            up.terminate()
+            let deadline = Date().addingTimeInterval(60)
+            while up.isRunning, Date() < deadline { usleep(100_000) }
+            if up.isRunning { kill(up.processIdentifier, SIGKILL) }
+        }
+        host.up = nil
+    }
 
     private func olderLattice() throws -> URL {
         let directory = ProcessInfo.processInfo.environment["E2E_OLD_BIN_DIR"] ?? ""
@@ -225,6 +308,12 @@ final class TwoVersionE2ETests: XCTestCase {
             let output = (try? String(contentsOf: log, encoding: .utf8)) ?? ""
             throw TwoVersionError("\(host.name): lattice up failed: \(output)")
         }
+    }
+
+    /// What `lattice up` has printed so far for `host`.
+    private func log(of host: Host) -> String {
+        let log = host.root.deletingLastPathComponent().appendingPathComponent("\(host.name)-up.out")
+        return (try? String(contentsOf: log, encoding: .utf8)) ?? ""
     }
 
     /// The node's public key, as `lattice identity` prints it.
