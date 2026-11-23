@@ -4,6 +4,8 @@ import Lattice
 import LatticeNodeCore
 import cashew
 import LatticeNodeAPI
+import LatticeNodeNet
+import LatticeNodeStore
 
 /// The node's read surface — chain status, blocks, transactions, state reads
 /// and the explorer API — over content-verified, by-CID reads of this
@@ -30,18 +32,18 @@ public struct ChainReads: Sendable {
         }
     }
 
-    static let maximumReadResponseBytes = Int(IvyConfig.defaultProtocolMaxFrameSize)
-    static let maximumExplorerPageLimit = 100
-    static let maximumExplorerMempoolListing = 200
+    package static let maximumReadResponseBytes = Int(IvyConfig.defaultProtocolMaxFrameSize)
+    package static let maximumExplorerPageLimit = 100
+    package static let maximumExplorerMempoolListing = 200
     /// Each listed height costs three local reads (index, block, transactions
     /// root), and the list is billed as a cheap read: a page stays small.
     public static let maximumExplorerBlocksPage = 25
 
-    static func boundedExplorerLimit(_ limit: Int) -> Int {
+    package static func boundedExplorerLimit(_ limit: Int) -> Int {
         min(max(limit, 0), maximumExplorerPageLimit)
     }
 
-    let storage: NodeStorage
+    package let storage: NodeStorage
     /// What state reads (an executed block's post-state: accounts, nonces,
     /// deposits, receipts) read through when this store lacks it (nil: this
     /// store alone), and a child chain's hosts, asked first. State is a
@@ -50,22 +52,22 @@ public struct ChainReads: Sendable {
     /// index) and anything asked for by CID are read from this store alone:
     /// which bodies a node keeps is the operator's choice (`blockBodies`),
     /// and a reader cannot make this node fetch whatever it names.
-    let remote: IvyRootContentSource?
-    let hosts: ChainHosts?
+    package let remote: IvyRootContentSource?
+    package let hosts: ChainHosts?
     /// The tip readers see: the tip this node acts on, its heaviest executed tip.
-    let tip: @Sendable () async -> ChainStatus
+    package let tip: @Sendable () async -> ChainStatus
     /// The block at a height of the chain to that tip.
-    let canonicalCID: @Sendable (UInt64) async -> String?
+    package let canonicalCID: @Sendable (UInt64) async -> String?
     /// The child directories this chain's executed blocks commit (the level
     /// core's grow-only list).
-    let childDirectories: @Sendable () async -> ExecutedChildren?
+    package let childDirectories: @Sendable () async -> ExecutedChildren?
     /// The pool's size, and its CIDs only when `listing` (status reads
     /// never build the listing).
-    let mempool: @Sendable (_ listing: Bool) async -> MempoolListing
+    package let mempool: @Sendable (_ listing: Bool) async -> MempoolListing
     /// The chain these reads serve: the root, or a hosted child level.
     public let chainPath: [String]
     /// Whether this chain durably accepted a block (its own journal).
-    let accepted: @Sendable (String) async -> Bool
+    package let accepted: @Sendable (String) async -> Bool
     /// This chain's current peers: the open sessions that serve it.
     public let peerCount: @Sendable () -> Int
     /// The smallest fee this node admits to its pool (`NodeConfiguration.minRelayFee`).
@@ -73,9 +75,9 @@ public struct ChainReads: Sendable {
     /// This node's finality windows (`NodeConfiguration.finality`).
     let finality: FinalityWindows
     /// `committedChild`'s walk, done once per tip for every name.
-    let committedChildren = CommittedChildren()
+    package let committedChildren = CommittedChildren()
 
-    init(
+    package init(
         storage: NodeStorage,
         remote: IvyRootContentSource? = nil,
         chainPath: [String]? = nil,
@@ -131,7 +133,7 @@ public struct ChainReads: Sendable {
     /// A decoded, content-verified block, gated to only what this node has
     /// durably accepted. It reads `NodeStorage` directly without entering the
     /// runtime loop.
-    func block(cid: String) async -> Block? {
+    package func block(cid: String) async -> Block? {
         guard await accepted(cid) else { return nil }
         guard let data = await storage.content([cid])[cid],
               data.count <= Self.maximumReadResponseBytes else {
@@ -144,7 +146,7 @@ public struct ChainReads: Sendable {
     /// held here even when the block's body is not. A block this node has
     /// only weighed commits to a state nobody here has checked, and is not
     /// answered for.
-    func blockNode(cid: String) async -> Block? {
+    package func blockNode(cid: String) async -> Block? {
         guard await storage.hasExecutedBlock(cid, at: chainPath),
               let data = await storage.blockNodeBytes(cid),
               data.count <= Self.maximumReadResponseBytes else {
@@ -174,7 +176,7 @@ public struct ChainReads: Sendable {
     /// read can never fetch more than a frame. Peers' answers are not kept
     /// for later reads, so readers do not evict what the node's own work
     /// fetched. A reader that went away stops the session.
-    func readingState<T: Sendable>(
+    package func readingState<T: Sendable>(
         _ rootCID: String, _ work: @Sendable (any Fetcher) async throws -> T
     ) async rethrows -> T {
         guard let remote else { return try await work(storage) }
@@ -219,10 +221,10 @@ public struct ChainReads: Sendable {
     }
 }
 
-actor CommittedChildren {
+package actor CommittedChildren {
     private var latest: (tip: String, build: Task<[String: String], Never>)?
 
-    func at(_ tip: String, build: @escaping @Sendable () async -> [String: String]) async -> [String: String] {
+    package func at(_ tip: String, build: @escaping @Sendable () async -> [String: String]) async -> [String: String] {
         if let latest, latest.tip == tip { return await latest.build.value }
         let task = Task { await build() }
         latest = (tip, task)

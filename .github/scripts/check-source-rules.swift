@@ -7,9 +7,9 @@
 //   Swift 6.3 -O).
 // - raw-column: only LatticeNodeStore/NodeSQLite.swift and NodeStoreRow.swift
 //   read a `NodeSQLiteValue` through textValue / intValue / blobValue; every
-//   other reader goes through a per-table record. (LatticeNodeStore and
-//   LatticeNode only: LatticeCtl and LatticeNodeDaemon read
-//   `NSNumber.intValue`.)
+//   other reader goes through a per-table record. (LatticeNodeStore,
+//   LatticeNodeReads and LatticeNode only: LatticeCtl and LatticeNodeDaemon
+//   read `NSNumber.intValue`.)
 // - tier-literal: no execution tier is spelled as an integer; every
 //   `accepted_blocks.validated` read and write goes through `BlockStatus`.
 // - hierarchy-topic: the hierarchy plane is gone (a child reads its parent
@@ -276,7 +276,7 @@ let sources = swiftFiles(under: "Sources")
 do {
     let modules = [
         "LatticeNode", "LatticeNodeConfig", "LatticeNodeCore", "LatticeNodeMining",
-        "LatticeNodeNet", "LatticeNodeStore", "LatticeNodeSupport",
+        "LatticeNodeNet", "LatticeNodeReads", "LatticeNodeStore", "LatticeNodeSupport",
     ]
     let timers = "Sources/LatticeNodeSupport/Timers.swift"
     // A direct sleep. `Timers.sleep(` is the sanctioned call, not a site.
@@ -295,6 +295,7 @@ do {
 do {
     let files = sources.filter {
         $0.path.hasPrefix("Sources/LatticeNodeStore/") || $0.path.hasPrefix("Sources/LatticeNode/")
+            || $0.path.hasPrefix("Sources/LatticeNodeReads/")
     }
     let rowLayer = ["Sources/LatticeNodeStore/NodeSQLite.swift", "Sources/LatticeNodeStore/NodeStoreRow.swift"]
     for path in rowLayer + ["Sources/LatticeNodeStore/BlockStatus.swift"] { require(path, in: files) }

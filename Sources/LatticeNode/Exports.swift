@@ -3,3 +3,4 @@
 @_exported import LatticeNodeSupport
 @_exported import LatticeNodeNet
 @_exported import LatticeNodeMining
+@_exported import LatticeNodeReads

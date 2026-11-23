@@ -134,11 +134,24 @@ let package = Package(
                 .product(name: "UInt256", package: "UInt256"),
             ]),
         .target(
+            name: "LatticeNodeReads",
+            dependencies: [
+                "LatticeNodeAPI",
+                "LatticeNodeCore",
+                "LatticeNodeNet",
+                "LatticeNodeStore",
+                .product(name: "Lattice", package: "lattice"),
+                .product(name: "Ivy", package: "Ivy2"),
+                .product(name: "VolumeBroker", package: "VolumeBroker"),
+                .product(name: "cashew", package: "cashew"),
+            ]),
+        .target(
             name: "LatticeNode",
             dependencies: [
                 "LatticeNodeAPI",
                 "LatticeNodeMining",
                 "LatticeNodeNet",
+                "LatticeNodeReads",
                 "LatticeNodeConfig",
                 "LatticeNodeStore",
                 "LatticeNodeSupport",
