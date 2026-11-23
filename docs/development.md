@@ -97,7 +97,7 @@ Docker-compatible runtime without the GUI.
 | `Sources/LatticeNodeSupport` | What every part of the process shares: the node log, sync tracing, the read tally, published values, timers. |
 | `Sources/LatticeNodeConfig` | The operator's configuration: topology and fragments, the host layout on disk, chain creation, Nexus's genesis, setting limits. |
 | `Sources/LatticeNode/Configuration` | The runtime's node configuration, from which it builds each module's settings (the store's `StoreConfiguration`), and bootstrap peers. |
-| `Sources/LatticeNode/Mining` | Mining-template assembly and multi-level mining plans. |
+| `Sources/LatticeNodeMining` | Mining-template assembly, multi-level mining plans and the child-template cache. |
 | `Sources/LatticeNode/Observability` | Metrics and opt-in synchronization tracing. |
 | `Sources/LatticeNodeDaemon` | CLI and loopback HTTP adapter. |
 | `Sources/LatticeMiner` | External proof-of-work worker target; nonce search only. |

@@ -275,7 +275,7 @@ let sources = swiftFiles(under: "Sources")
 // sleep
 do {
     let modules = [
-        "LatticeNode", "LatticeNodeConfig", "LatticeNodeCore",
+        "LatticeNode", "LatticeNodeConfig", "LatticeNodeCore", "LatticeNodeMining",
         "LatticeNodeNet", "LatticeNodeStore", "LatticeNodeSupport",
     ]
     let timers = "Sources/LatticeNodeSupport/Timers.swift"
