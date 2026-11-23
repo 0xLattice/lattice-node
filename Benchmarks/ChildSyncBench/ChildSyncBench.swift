@@ -47,6 +47,7 @@ final class ChildSyncBench: XCTestCase {
     }
     static let producerKey: UInt8 = 0xe1
     static let followerKey: UInt8 = 0xe2
+    private var ports = Ports()
 
     private static func leaves(_ count: Int) -> [[String]] {
         (0..<count).map { alpha + ["Leaf\($0)"] }
@@ -91,7 +92,7 @@ final class ChildSyncBench: XCTestCase {
         let configuration = try NodeConfiguration(
             chainPath: ["Nexus"], storagePath: dir,
             privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
-            listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(), webSocket: .off,
+            listenPort: port, rpcPort: ports.allocate(), webSocket: .off,
             peerSearchInterval: 600,
             blockBodies: bodies, state: state,
             hostedChildren: levels,
@@ -270,7 +271,7 @@ final class ChildSyncBench: XCTestCase {
         let state = try setting("BENCH_STATE", default: StateRetention.recent, StateRetention.init(rawValue:))
         let bodies = try setting("BENCH_BODIES", default: BlockBodies.all, BlockBodies.init(rawValue:))
         let (fc, fo) = try host(
-            Self.followerKey, dir, port: NetworkTransportTestPorts.allocate(),
+            Self.followerKey, dir, port: ports.allocate(),
             levels: targets.map(\.0).filter { $0 != ["Nexus"] }, specs: false, peers: [peer],
             state: state, bodies: bodies
         )

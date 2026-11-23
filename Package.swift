@@ -239,6 +239,19 @@ let package = Package(
                 .product(name: "HummingbirdTesting", package: "hummingbird"),
             ],
             path: "Tests/LatticeNodeTests"),
+        // The sync benchmark (Benchmarks/sync): opt-in, skipped unless CHILD_BENCH is set.
+        .testTarget(
+            name: "ChildSyncBench",
+            dependencies: [
+                "BenchVFS",
+                "LatticeNode",
+                "LatticeNodeAPI",
+                "LatticeNodeCore",
+                .product(name: "Lattice", package: "lattice"),
+                .product(name: "Ivy", package: "Ivy2"),
+                .product(name: "UInt256", package: "UInt256"),
+            ],
+            path: "Benchmarks/ChildSyncBench"),
         .testTarget(
             name: "LatticeNodeSimulationTests",
             dependencies: [

@@ -15,5 +15,7 @@ image
 docker run --rm -v "$WORK/src":/work -w /work $IMAGE \
   swift build -c release --build-tests -Xswiftc -enable-testing
 cp "$WORK/src/.build/release/LatticeNodePackageTests.xctest" "$OUT/"
+# The benchmark's test suite: its own target, or LatticeNodeTests in a ref from before.
+if [ -d "$WORK/src/Benchmarks/ChildSyncBench" ]; then echo ChildSyncBench.ChildSyncBench; else echo LatticeNodeTests.ChildSyncBench; fi > "$OUT/suite"
 echo "$(git -C "$REPO" rev-parse "$REF")" > "$OUT/ref"
 echo "built $(cat "$OUT/ref") -> $OUT"
