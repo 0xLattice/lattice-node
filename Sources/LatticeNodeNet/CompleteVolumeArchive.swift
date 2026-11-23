@@ -104,7 +104,7 @@ public func encodeCompleteVolumeRecords(
 }
 
 private extension Data {
-    package mutating func appendBigEndian<T: FixedWidthInteger>(_ value: T) {
+    mutating func appendBigEndian<T: FixedWidthInteger>(_ value: T) {
         Swift.withUnsafeBytes(of: value.bigEndian) { append(contentsOf: $0) }
     }
 }
