@@ -113,7 +113,8 @@ public struct WorkTemplateBook: Sendable {
 }
 
 extension Block {
-    func replacingNonce(_ nonce: UInt64) -> Block {
+    /// This block with `nonce` in place of its own: a miner's candidate.
+    public func replacingNonce(_ nonce: UInt64) -> Block {
         Block(
             version: version,
             parent: parent,

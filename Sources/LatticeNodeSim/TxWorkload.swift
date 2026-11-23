@@ -556,38 +556,42 @@ public struct TxWorkload {
 
     // MARK: - Jobs (the real Lattice work)
 
-    /// The preflight job: the state reads Lattice's `preflightTransaction`
-    /// makes against the tip's post-state. Signature and policy checks are
-    /// package-internal to Lattice and are not run: every workload
-    /// transaction is correctly signed.
+    /// The preflight job: the node's own `TransactionPreflight`, against the
+    /// job's tip, at the simulated clock. A ready verdict brings the balances
+    /// it was funded from, read from the same tip state, as the runtime does.
     func classify(_ job: PreflightJob) async throws -> (MempoolDisposition, [String: UInt64]) {
-        guard let body = job.transaction.body.node, body.minerSurplus() != nil,
-              body.chainPath == [DEFAULT_ROOT_DIRECTORY] else { return (.invalid, [:]) }
-        guard let tipBlock = blocks[job.tipCID]?.sim.block,
-              let state = try await tipBlock.postState.resolve(fetcher: cas).node else { return (.unavailable, [:]) }
-        var future = false
-        for signer in Set(body.signers).sorted() {
-            let expected = try await state.accountState.nextExpectedNonce(for: signer, fetcher: cas)
-            if body.nonce < expected { return (.invalid, [:]) }
-            if body.nonce > expected { future = true }
-        }
-        if future { return (.future, [:]) }
-        do {
-            _ = try await state.proveAndUpdateState(
-                allAccountActions: body.accountActions,
-                allActions: body.actions,
-                allDepositActions: body.depositActions,
-                allReceiptActions: body.receiptActions,
-                allWithdrawalActions: body.withdrawalActions,
-                transactionBodies: [body],
-                fetcher: cas
-            )
-            guard let balances = await Mempool.balances(debitedBy: body, on: state, fetcher: cas) else {
+        guard let tipBlock = blocks[job.tipCID]?.sim.block else { return (.unavailable, [:]) }
+        let snapshot = TipBlockSnapshot(
+            postStateCID: tipBlock.postState.rawCID,
+            prevStateCID: tipBlock.prevState.rawCID,
+            parentStateCID: tipBlock.parentState.rawCID,
+            specCID: tipBlock.spec.rawCID,
+            target: tipBlock.target,
+            nextTarget: tipBlock.nextTarget,
+            tipHeight: tipBlock.height,
+            timestamp: tipBlock.timestamp
+        )
+        let result = await TransactionPreflight.classify(
+            job.transaction,
+            tipCID: job.tipCID,
+            snapshot: snapshot,
+            chainPath: [DEFAULT_ROOT_DIRECTORY],
+            fetcher: cas,
+            validationContext: ValidationContext(nowMilliseconds: now),
+            checksPolicies: job.checksPolicies,
+            checksSignatures: job.checksPolicies
+        )
+        switch result.disposition {
+        case .invalid: return (.invalid, [:])
+        case .unavailable: return (.unavailable, [:])
+        case .future: return (.future, [:])
+        case .ready:
+            guard let body = job.transaction.body.node,
+                  let state = try await tipBlock.postState.resolve(fetcher: cas).node,
+                  let balances = await Mempool.balances(debitedBy: body, on: state, fetcher: cas) else {
                 return (.unavailable, [:])
             }
             return (.ready, balances)
-        } catch {
-            return (.invalid, [:])
         }
     }
 

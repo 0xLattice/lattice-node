@@ -284,11 +284,13 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
             case .preflight(let job):
                 let basis = try XCTUnwrap(NodeRuntime.miningBasis(effect, tree: tree))
                 let read = await TransactionPreflight.classify(
-                    job.transaction, tipCID: job.tipCID, snapshot: basis.snapshot, chainPath: root, fetcher: fetcher
+                    job.transaction, tipCID: job.tipCID, snapshot: basis.snapshot, chainPath: root, fetcher: fetcher,
+                    validationContext: .current
                 )
                 let tip = copy.transactionPreflightTip(at: job.tipCID)
                 let copied = await TransactionPreflight.classify(
-                    job.transaction, tipCID: tip.cid, snapshot: tip.snapshot, chainPath: root, fetcher: fetcher
+                    job.transaction, tipCID: tip.cid, snapshot: tip.snapshot, chainPath: root, fetcher: fetcher,
+                    validationContext: .current
                 )
                 XCTAssertEqual(read, copied)
                 dispositions.append(read.disposition)

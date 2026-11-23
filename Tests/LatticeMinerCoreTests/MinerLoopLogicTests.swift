@@ -186,26 +186,6 @@ final class MinerLoopLogicTests: XCTestCase {
 
     // MARK: - ProofOfWork
 
-    func testProofOfWorkSearchFindsNonceInRequestedRange() async throws {
-        let fetcher = InMemoryContentSource([:])
-        let block = try await BlockBuilder.buildGenesis(
-            spec: testSpec(),
-            timestamp: 1,
-            target: UInt256.max,
-            fetcher: fetcher
-        )
-
-        let nonce = await ProofOfWork.searchNonce(
-            midstate: ProofOfWork.midstate(for: block),
-            target: UInt256.max,
-            totalBatchSize: 4,
-            workerCount: 1,
-            nonceOffset: 7
-        )
-
-        XCTAssertEqual(nonce, 7)
-    }
-
     func testProofOfWorkWithNonceOnlyChangesNonce() async throws {
         let fetcher = InMemoryContentSource([:])
         let block = try await BlockBuilder.buildGenesis(

@@ -62,24 +62,3 @@ func solvedNonce(
         $0 <= target
     }
 }
-
-extension Block {
-    func replacingNonce(_ nonce: UInt64) -> Block {
-        Block(
-            version: version,
-            parent: parent,
-            transactions: transactions,
-            target: target,
-            nextTarget: nextTarget,
-            spec: spec,
-            parentState: parentState,
-            prevState: prevState,
-            postState: postState,
-            children: children,
-            height: height,
-            timestamp: timestamp,
-            rewardRecipient: rewardRecipient,
-            nonce: nonce
-        )
-    }
-}

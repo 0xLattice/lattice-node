@@ -1,6 +1,5 @@
 # Every @unchecked Sendable or nonisolated(unsafe) site must be listed here with
 # a rationale. This keeps strict-concurrency escapes visible in review.
-Sources/LatticeMinerCore/ProofOfWork.swift|private struct SendableSearchArgs: @unchecked Sendable {|SHA256 midstate is copied into worker arguments and not mutated after task creation.
 Sources/LatticeNode/Storage/NodeSQLite.swift|final class NodeSQLite: @unchecked Sendable {|SQLite is opened FULLMUTEX and every operation uses that serialized handle without exposing it.
 Sources/LatticeNode/Content/IvyContentSource.swift|public final class AttributionCapture: @unchecked Sendable {|All access to the optional attribution value is guarded by AttributionCapture's NSLock.
 Sources/LatticeNode/Content/IvyContentSource.swift|private final class Trace: @unchecked Sendable {|All mutable attribution state is guarded by Trace's NSLock.

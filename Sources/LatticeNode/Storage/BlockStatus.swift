@@ -6,14 +6,12 @@
 ///   verified work, not executed.
 /// - `executed`: executed at import.
 /// - `executedAndPinned`: executed by the execution walk; body + state under
-///   the block's owner pin.
+///   the block's owner pin. No longer written, but kept: stores written
+///   before may hold the value 2.
 enum BlockStatus: Int64, Sendable, CaseIterable {
     case header = 0
     case executed = 1
     case executedAndPinned = 2
-
-    /// Executed at either tier.
-    var isExecuted: Bool { self != .header }
 
     var sqlValue: NodeSQLiteValue { .int(rawValue) }
 }

@@ -53,6 +53,10 @@ public enum ProofOfWork {
         }
     }
 
+    /// The proof-of-work hash of `nonce` over a block's midstate. The nonce
+    /// is appended big-endian: Lattice's `Block.proofOfWorkNonceBytes` is the
+    /// consensus encoding, inlined here so the search loop allocates nothing
+    /// per nonce (`testMinerHashExactlyMatchesLatticeConsensus` pins the two).
     public static func hash(midstate: SHA256, nonce: UInt64) -> UInt256 {
         var nonceBytes = nonce.bigEndian
         var hasher = midstate
@@ -69,24 +73,6 @@ public enum ProofOfWork {
                 UInt64(bigEndian: p[3])
             ])
         }
-    }
-
-    public static func searchNonce(
-        midstate: SHA256,
-        target: UInt256,
-        totalBatchSize: UInt64,
-        workerCount: Int,
-        nonceOffset: UInt64
-    ) async -> UInt64? {
-        await searchNonce(
-            midstate: midstate,
-            target: target,
-            ranges: nonceSearchRanges(
-                totalBatchSize: totalBatchSize,
-                workerCount: workerCount,
-                nonceOffset: nonceOffset
-            )
-        )
     }
 
     public static func nonceSearchRanges(
@@ -112,38 +98,6 @@ public enum ProofOfWork {
         return ranges
     }
 
-    public static func searchNonce(
-        midstate: SHA256,
-        target: UInt256,
-        ranges: [NonceSearchRange]
-    ) async -> UInt64? {
-        guard !ranges.isEmpty else { return nil }
-        let args = SendableSearchArgs(
-            midstate: midstate,
-            target: target
-        )
-
-        return await withTaskGroup(of: UInt64?.self) { group in
-            for range in ranges {
-                group.addTask {
-                    searchBatch(
-                        midstate: args.midstate,
-                        target: args.target,
-                        startNonce: range.startNonce,
-                        count: range.count
-                    )
-                }
-            }
-            for await result in group {
-                if let nonce = result {
-                    group.cancelAll()
-                    return nonce
-                }
-            }
-            return nil
-        }
-    }
-
     public static func searchBatch(
         midstate: SHA256,
         target: UInt256,
@@ -156,31 +110,10 @@ public enum ProofOfWork {
         while remaining > 0 {
             if nonce & 0x3FF == 0 && Task.isCancelled { return nil }
 
-            var nonceBytes = nonce.bigEndian
-            var hasher = midstate
-            withUnsafeBytes(of: &nonceBytes) { bytes in
-                hasher.update(bufferPointer: bytes)
-            }
-            let digest = hasher.finalize()
-            let hash: UInt256 = digest.withUnsafeBytes { raw in
-                let p = raw.bindMemory(to: UInt64.self)
-                return UInt256([
-                    UInt64(bigEndian: p[0]),
-                    UInt64(bigEndian: p[1]),
-                    UInt64(bigEndian: p[2]),
-                    UInt64(bigEndian: p[3])
-                ])
-            }
-            if target >= hash { return nonce }
+            if target >= hash(midstate: midstate, nonce: nonce) { return nonce }
             nonce &+= 1
             remaining -= 1
         }
         return nil
     }
-
-}
-
-private struct SendableSearchArgs: @unchecked Sendable {
-    let midstate: SHA256
-    let target: UInt256
 }

@@ -56,7 +56,7 @@ public enum TransactionPreflight {
         chainPath: [String],
         parentState: LatticeStateHeader? = nil,
         fetcher: any Fetcher,
-        validationContext: ValidationContext = .current,
+        validationContext: ValidationContext,
         checksPolicies: Bool = true,
         checksSignatures: Bool = true
     ) async -> TransactionPreflightResult {
