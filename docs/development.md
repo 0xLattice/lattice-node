@@ -95,8 +95,8 @@ Docker-compatible runtime without the GUI.
 | `Sources/LatticeNodeNet` | The peer protocol: overlay handshake, wire codecs and validation, peer memory, read-endpoint discovery, the serving ledger, and the Ivy content source. It never imports the store or the shell. |
 | `Sources/LatticeNodeStore` | What is on disk: durable fact journals, header content, SQLite rows and migrations, the Volume stores, and the storage gateway over them (`NodeStorage`, opened from a `StoreConfiguration`: boot recovery, retention, the state backend, the read cache). |
 | `Sources/LatticeNodeSupport` | What every part of the process shares: the node log, sync tracing, the read tally, published values, timers. |
-| `Sources/LatticeNodeConfig` | The operator's configuration: topology and fragments, the host layout on disk, chain creation, Nexus's genesis, setting limits. |
-| `Sources/LatticeNode/Configuration` | The runtime's node configuration, from which it builds each module's settings (the store's `StoreConfiguration`), and bootstrap peers. |
+| `Sources/LatticeNodeConfig` | The operator's configuration: topology and fragments, the host layout on disk, chain creation, Nexus's genesis, setting limits, content-serving limits, and the built-in bootstrap peers. |
+| `Sources/LatticeNode/Configuration` | The runtime's node configuration, from which it builds each module's settings (the store's `StoreConfiguration`), and the overlay configuration built from it. |
 | `Sources/LatticeNodeMining` | Mining-template assembly, multi-level mining plans, the child-template cache, and the template's conversion into the API's response. |
 | `Sources/LatticeNode/Observability` | Metrics and opt-in synchronization tracing. |
 | `Sources/LatticeNodeDaemon` | CLI and loopback HTTP adapter. |
