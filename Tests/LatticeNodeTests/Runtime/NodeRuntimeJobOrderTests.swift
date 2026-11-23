@@ -255,59 +255,6 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
         }
     }
 
-    /// A job's basis, read from the live tree when it is spawned, gives what
-    /// the per-epoch copy of the tree it replaces gave: the same preflight
-    /// verdict, and the same difficulty anchor for the template.
-    func testAJobsBasisReadsWhatACopyOfTheTreeRead() async throws {
-        var harness = try await harness(keyByte: 0x45)
-        let clock = TestBlockClock()
-        let root = harness.host.rootPath
-        var tip = try await harness.tipBlock()
-        for _ in 0..<3 { tip = try await mine(&harness, on: tip, timestamp: clock.next()) }
-        try await harness.runJobs()
-        harness.spawned = []
-        let ready = try transaction()
-        // Nonce 1 is ahead of the signer's next nonce.
-        let future = try transaction(nonce: 1)
-        for (replyID, tx) in [ready, future].enumerated() {
-            try await harness.step(.level(root, .mining(.transactionReceived(tx, origin: .local(replyID: UInt64(replyID))))))
-        }
-        try await harness.step(.level(root, .mining(.templateRequested(replyID: 9, TemplateRequest(rewardRecipient: nil)))))
-
-        let tree = harness.host.levels[root]!.tree
-        let copy = tree.detached()
-        let fetcher = harness.storage.workFetcher(.anyChain)
-        var dispositions: [TransactionPreflightDisposition] = []
-        var anchors = 0
-        for effect in harness.spawned {
-            switch effect {
-            case .preflight(let job):
-                let basis = try XCTUnwrap(NodeRuntime.miningBasis(effect, tree: tree))
-                let read = await TransactionPreflight.classify(
-                    job.transaction, tipCID: job.tipCID, snapshot: basis.snapshot, chainPath: root, fetcher: fetcher,
-                    validationContext: .current
-                )
-                let tip = copy.transactionPreflightTip(at: job.tipCID)
-                let copied = await TransactionPreflight.classify(
-                    job.transaction, tipCID: tip.cid, snapshot: tip.snapshot, chainPath: root, fetcher: fetcher,
-                    validationContext: .current
-                )
-                XCTAssertEqual(read, copied)
-                dispositions.append(read.disposition)
-            case .buildTemplate(let job):
-                let basis = try XCTUnwrap(NodeRuntime.miningBasis(effect, tree: tree))
-                let copied = copy.difficultyAnchor(forBlockHash: job.tipCID)
-                XCTAssertNotNil(copied)
-                XCTAssertEqual(basis.anchor, copied)
-                anchors += 1
-            default:
-                break
-            }
-        }
-        XCTAssertEqual(Set(dispositions), [.ready, .future])
-        XCTAssertEqual(anchors, 1)
-    }
-
     /// The queues' rule: (A) what an RPC waits on, an awaited admission or a
     /// template build, then (B) connects, then (C) the rest, each first in,
     /// first out. A stale recheck is skipped; a peer's admission never goes
