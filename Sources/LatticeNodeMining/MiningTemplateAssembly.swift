@@ -6,7 +6,6 @@ import UInt256
 import cashew
 import LatticeNodeAPI
 import LatticeNodeConfig
-import LatticeNodeNet
 
 private enum MiningCandidateValidationError: Error {
     case invalid

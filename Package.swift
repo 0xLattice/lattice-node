@@ -127,7 +127,6 @@ let package = Package(
                 "LatticeNodeAPI",
                 "LatticeNodeConfig",
                 "LatticeNodeCore",
-                "LatticeNodeNet",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "cashew", package: "cashew"),
