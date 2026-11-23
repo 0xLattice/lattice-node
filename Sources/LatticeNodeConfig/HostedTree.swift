@@ -1,3 +1,4 @@
+import LatticeNodeAPI
 import Foundation
 
 /// A chain's settings, merged across the layers: its peers (the union), its

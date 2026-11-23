@@ -111,7 +111,6 @@ let package = Package(
         .target(
             name: "LatticeNodeNet",
             dependencies: [
-                "LatticeNodeAPI",
                 "LatticeNodeSupport",
                 "LatticeNodeCore",
                 "LatticeNodeConfig",

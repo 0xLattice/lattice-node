@@ -1,5 +1,4 @@
 import Lattice
-import LatticeNodeAPI
 import cashew
 
 /// What the node fetches and stores for a block, apart from the pre-state it
@@ -110,37 +109,5 @@ extension VolumeImpl where NodeType == Block {
         guard let parentState = resolved.node?.parentState else { throw DataErrors.nodeNotAvailable }
         let statePaths = Dictionary(uniqueKeysWithValues: paths.keys.map { (Array($0.dropFirst()), StorageStrategy.targeted) })
         try await parentState.store(paths: statePaths, storer: storer)
-    }
-}
-
-extension Block {
-    /// The block's transactions in index order, resolved through `fetcher`.
-    package func orderedTransactions(fetcher: any Fetcher) async throws -> [Transaction] {
-        let transactionsHeader = try await transactions.resolve(
-            fetcher: fetcher
-        )
-        guard let dictionary = transactionsHeader.node else {
-            throw NodeAPIError.unresolvedTransactionContent
-        }
-        let entries = try await dictionary.boundedKeysAndValues(
-            limit: dictionary.count,
-            fetcher: fetcher
-        )
-        guard entries.count == dictionary.count else {
-            throw NodeAPIError.unresolvedTransactionContent
-        }
-        let headers = Dictionary(uniqueKeysWithValues: entries)
-        var transactions: [Transaction] = []
-        for index in 0..<headers.count {
-            guard let transactionHeader = headers[String(index)] else {
-                throw NodeAPIError.unresolvedTransactionContent
-            }
-            let resolved = try await transactionHeader.resolve(fetcher: fetcher)
-            guard let transaction = resolved.node else {
-                throw NodeAPIError.unresolvedTransactionContent
-            }
-            transactions.append(transaction)
-        }
-        return transactions
     }
 }

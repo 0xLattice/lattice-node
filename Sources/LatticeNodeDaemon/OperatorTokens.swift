@@ -1,3 +1,4 @@
+import LatticeNodeAPI
 import ArgumentParser
 import Crypto
 import Foundation

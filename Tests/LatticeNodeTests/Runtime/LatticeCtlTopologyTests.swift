@@ -1,3 +1,4 @@
+import LatticeNodeAPI
 import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking

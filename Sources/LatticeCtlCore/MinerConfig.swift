@@ -2,6 +2,7 @@
 // --config`). The miner is a separate process and a client of a node; the
 // node knows nothing of this file and keeps none of it in its lattice.json.
 
+import LatticeNodeAPI
 import Foundation
 import LatticeMinerCore
 import LatticeNodeConfig
