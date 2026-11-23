@@ -53,7 +53,7 @@ final class HostChainsRuntimeTests: XCTestCase {
             externalAddress: ("127.0.0.1", port),
             mode: .overlay
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let runtime = try await NodeRuntime.start(
             storage: storage, configuration: configuration, overlay: overlay,
             workers: observe == nil ? max(1, ProcessInfo.processInfo.activeProcessorCount - 1) : 2, observeJob: observe
@@ -319,17 +319,9 @@ final class HostChainsRuntimeTests: XCTestCase {
             await follower.runtime.stop()
         }
         do {
-            let configuration = try NodeConfiguration(
+            let storage = try await NodeStorage.openWhenFree(configuration: try NodeConfiguration(
                 chainPath: ["Nexus"], storagePath: directory, privateKeyHex: String(repeating: "8a", count: 32)
-            )
-            // The stopped node's lock goes with its last reference, which
-            // its tasks can hold a moment past `stop()`.
-            var opened: NodeStorage?
-            try await eventually("the stopped node lets go of its storage") {
-                do { opened = try await NodeStorage.open(configuration: configuration) } catch NodeStorageError.storageInUse {}
-                return opened != nil
-            }
-            let storage = try XCTUnwrap(opened)
+            ))
             let bodies = try await storage.broker.retainedScopes(prefix: storage.scopes.bodyPrefix + "Nexus/Alpha:")
             try await storage.broker.releaseRetainedScopes(bodies)
         }

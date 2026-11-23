@@ -26,7 +26,7 @@ final class PublicReadRateLimitTests: XCTestCase {
             storagePath: storageDirectory,
             privateKeyHex: String(repeating: "01", count: 32)
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         return (
             try await startRuntime(storage, configuration),
             configuration

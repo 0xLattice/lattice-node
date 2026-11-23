@@ -56,7 +56,7 @@ final class NodeRuntimeTests: XCTestCase {
 
     func testJoinerSyncsHeadersAndExecutesBodiesOverLoopbackIvy() async throws {
         let producer = try host(keyByte: 0x31)
-        let producerStorage = try await NodeStorage.open(configuration: producer.configuration)
+        let producerStorage = try await NodeStorage.openWhenFree(configuration: producer.configuration)
         let producerRuntime = try await NodeRuntime.start(
             storage: producerStorage, configuration: producer.configuration, overlay: producer.overlay
         )
@@ -69,7 +69,7 @@ final class NodeRuntimeTests: XCTestCase {
 
         let joiner = try host(keyByte: 0x32, peers: [producer.endpoint])
         do {
-            let joinerStorage = try await NodeStorage.open(configuration: joiner.configuration)
+            let joinerStorage = try await NodeStorage.openWhenFree(configuration: joiner.configuration)
             let joinerRuntime = try await NodeRuntime.start(
                 storage: joinerStorage, configuration: joiner.configuration, overlay: joiner.overlay
             )
@@ -82,7 +82,7 @@ final class NodeRuntimeTests: XCTestCase {
         await producerRuntime.stop()
 
         // Restart: the joiner's own journal replays to the same tip.
-        let reopened = try await NodeStorage.open(configuration: joiner.configuration)
+        let reopened = try await NodeStorage.openWhenFree(configuration: joiner.configuration)
         let host = try await NodeRuntime.boot(
             storage: reopened, configuration: joiner.configuration, coreConfig: .init()
         )
@@ -103,7 +103,7 @@ final class NodeRuntimeTests: XCTestCase {
     /// the reason, for as long as the node waits on it.
     func testStatusNamesTheBodyThisNodesBudgetDeclinesUntilItIsHeld() async throws {
         let producer = try host(keyByte: 0x3C)
-        let producerStorage = try await NodeStorage.open(configuration: producer.configuration)
+        let producerStorage = try await NodeStorage.openWhenFree(configuration: producer.configuration)
         let producerRuntime = try await NodeRuntime.start(
             storage: producerStorage, configuration: producer.configuration, overlay: producer.overlay
         )
@@ -113,7 +113,7 @@ final class NodeRuntimeTests: XCTestCase {
             keyByte: 0x3D, peers: [producer.endpoint],
             resourcePolicy: NodeResourcePolicy(maximumAcquisitionStorageBytes: 1)
         )
-        let joinerStorage = try await NodeStorage.open(configuration: joiner.configuration)
+        let joinerStorage = try await NodeStorage.openWhenFree(configuration: joiner.configuration)
         let joinerRuntime = try await NodeRuntime.start(
             storage: joinerStorage, configuration: joiner.configuration, overlay: joiner.overlay
         )
@@ -142,7 +142,7 @@ final class NodeRuntimeTests: XCTestCase {
     /// host has no status.
     func testOperatorStatusCountsWhatTheChainsSyncHolds() async throws {
         let producer = try host(keyByte: 0x3A)
-        let producerStorage = try await NodeStorage.open(configuration: producer.configuration)
+        let producerStorage = try await NodeStorage.openWhenFree(configuration: producer.configuration)
         let producerRuntime = try await NodeRuntime.start(
             storage: producerStorage, configuration: producer.configuration, overlay: producer.overlay
         )
@@ -152,7 +152,7 @@ final class NodeRuntimeTests: XCTestCase {
             keyByte: 0x3B, peers: [producer.endpoint],
             resourcePolicy: NodeResourcePolicy(maximumAcquisitionStorageBytes: 1)
         )
-        let joinerStorage = try await NodeStorage.open(configuration: joiner.configuration)
+        let joinerStorage = try await NodeStorage.openWhenFree(configuration: joiner.configuration)
         let joinerRuntime = try await NodeRuntime.start(
             storage: joinerStorage, configuration: joiner.configuration, overlay: joiner.overlay
         )
@@ -197,7 +197,7 @@ final class NodeRuntimeTests: XCTestCase {
     func testAWaitingBodyIsAskedForAgainWhenAHostConnectsAndReconnects() async throws {
         let waits = ChainCoreConfig(bodyRetryBase: 600_000, bodyRetryCap: 600_000)
         let producer = try host(keyByte: 0x4A)
-        let producerStorage = try await NodeStorage.open(configuration: producer.configuration)
+        let producerStorage = try await NodeStorage.openWhenFree(configuration: producer.configuration)
         let producerRuntime = try await NodeRuntime.start(
             storage: producerStorage, configuration: producer.configuration, overlay: producer.overlay
         )
@@ -205,7 +205,7 @@ final class NodeRuntimeTests: XCTestCase {
             keyByte: 0x4B, peers: [producer.endpoint],
             resourcePolicy: NodeResourcePolicy(maximumAcquisitionStorageBytes: 1)
         )
-        let joinerStorage = try await NodeStorage.open(configuration: joiner.configuration)
+        let joinerStorage = try await NodeStorage.openWhenFree(configuration: joiner.configuration)
         let joinerRuntime = try await NodeRuntime.start(
             storage: joinerStorage, configuration: joiner.configuration, overlay: joiner.overlay, coreConfig: waits
         )
@@ -224,7 +224,7 @@ final class NodeRuntimeTests: XCTestCase {
         }
         func connectHost() async throws -> NodeRuntime {
             let visitor = try host(keyByte: 0x4C, peers: [joiner.endpoint])
-            let storage = try await NodeStorage.open(configuration: visitor.configuration)
+            let storage = try await NodeStorage.openWhenFree(configuration: visitor.configuration)
             return try await NodeRuntime.start(storage: storage, configuration: visitor.configuration, overlay: visitor.overlay)
         }
 
@@ -252,7 +252,7 @@ final class NodeRuntimeTests: XCTestCase {
         struct Unknown: Error { let text: String }
         let marker = "MARKER-disk-full"
         let node = try host(keyByte: 0x3E)
-        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: node.configuration)
         let view = PublishedValue<NodeReadView>()
         let reads = NodeRuntime.reads(
             storage: storage, configuration: node.configuration,
@@ -316,7 +316,7 @@ final class NodeRuntimeTests: XCTestCase {
             externalAddress: "127.0.0.1"
         )
         let runtime = try await NodeRuntime.start(
-            storage: try await NodeStorage.open(configuration: configuration),
+            storage: try await NodeStorage.openWhenFree(configuration: configuration),
             configuration: configuration,
             overlay: IvyConfig(
                 signingKey: configuration.signingKey, listenPort: nodePort, bootstrapPeers: [peerEndpoint],
@@ -374,7 +374,7 @@ final class NodeRuntimeTests: XCTestCase {
             bootstrapPeers: [peerEndpoint], externalAddress: "127.0.0.1"
         )
         let runtime = try await NodeRuntime.start(
-            storage: try await NodeStorage.open(configuration: configuration),
+            storage: try await NodeStorage.openWhenFree(configuration: configuration),
             configuration: configuration,
             overlay: IvyConfig(
                 signingKey: configuration.signingKey, listenPort: nodePort, bootstrapPeers: [peerEndpoint],
@@ -464,7 +464,7 @@ final class NodeRuntimeTests: XCTestCase {
             externalAddress: ("127.0.0.1", nodePort),
             mode: .overlay
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let runtime = try await NodeRuntime.start(
             storage: storage,
             configuration: configuration,
@@ -498,7 +498,7 @@ final class NodeRuntimeTests: XCTestCase {
     /// submitted and weighed, its body connected, and every read following.
     func testRPCWritesAreCoreEventsAndReadsFollowThePublishedSnapshot() async throws {
         let node = try host(keyByte: 0x33)
-        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: node.configuration)
         let runtime = try await NodeRuntime.start(
             storage: storage, configuration: node.configuration, overlay: node.overlay
         )
@@ -552,7 +552,7 @@ final class NodeRuntimeTests: XCTestCase {
     /// checks no tip).
     func testWorkIssuedBeforeATipMoveIsAcceptedAsASideBlock() async throws {
         let node = try host(keyByte: 0x38)
-        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: node.configuration)
         let runtime = try await NodeRuntime.start(
             storage: storage, configuration: node.configuration, overlay: node.overlay
         )
@@ -582,7 +582,7 @@ final class NodeRuntimeTests: XCTestCase {
     /// runtime.
     func testMiningEventsFollowTheTemplateDigest() async throws {
         let node = try host(keyByte: 0x36)
-        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: node.configuration)
         let runtime = try await NodeRuntime.start(
             storage: storage, configuration: node.configuration, overlay: node.overlay
         )
@@ -657,7 +657,7 @@ final class NodeRuntimeTests: XCTestCase {
     /// is mined, and the transaction behind it after.
     func testTheLargestTransactionThePoolAdmitsIsMined() async throws {
         let node = try host(keyByte: 0x30)
-        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: node.configuration)
         let runtime = try await NodeRuntime.start(
             storage: storage, configuration: node.configuration, overlay: node.overlay
         )
@@ -709,7 +709,7 @@ final class NodeRuntimeTests: XCTestCase {
 
     func testAPoolChangeInsideTheProjectionIntervalIsProjectedWhenItEnds() async throws {
         let node = try host(keyByte: 0x3F)
-        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: node.configuration)
         let runtime = try await NodeRuntime.start(
             storage: storage, configuration: node.configuration, overlay: node.overlay
         )
@@ -752,7 +752,7 @@ final class NodeRuntimeTests: XCTestCase {
     /// restart (nothing about it is kept in memory).
     func testAReorgRightAfterARestartReturnsTheLeftBlocksTransactions() async throws {
         let node = try host(keyByte: 0x34)
-        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: node.configuration)
         var runtime = try await NodeRuntime.start(
             storage: storage, configuration: node.configuration, overlay: node.overlay
         )
@@ -782,7 +782,7 @@ final class NodeRuntimeTests: XCTestCase {
 
         // A producer with a heavier two-block branch from genesis.
         let producer = try host(keyByte: 0x35)
-        let producerStorage = try await NodeStorage.open(configuration: producer.configuration)
+        let producerStorage = try await NodeStorage.openWhenFree(configuration: producer.configuration)
         let producerRuntime = try await NodeRuntime.start(
             storage: producerStorage, configuration: producer.configuration, overlay: producer.overlay
         )
@@ -832,7 +832,7 @@ final class NodeRuntimeTests: XCTestCase {
     /// once a reorg leaves that block.
     func testTransactionInclusionFollowsTheCanonicalChain() async throws {
         let node = try host(keyByte: 0x3A)
-        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: node.configuration)
         var runtime = try await NodeRuntime.start(
             storage: storage, configuration: node.configuration, overlay: node.overlay
         )
@@ -873,7 +873,7 @@ final class NodeRuntimeTests: XCTestCase {
 
         // A heavier branch from genesis that never carried it.
         let producer = try host(keyByte: 0x3B)
-        let producerStorage = try await NodeStorage.open(configuration: producer.configuration)
+        let producerStorage = try await NodeStorage.openWhenFree(configuration: producer.configuration)
         let producerRuntime = try await NodeRuntime.start(
             storage: producerStorage, configuration: producer.configuration, overlay: producer.overlay
         )
@@ -902,7 +902,7 @@ final class NodeRuntimeTests: XCTestCase {
     /// consensus credited it: reward + fees, or 0 when the recipient is nil.
     func testExplorerBlockReadsReportTheRewardRecipientAndCredit() async throws {
         let node = try host(keyByte: 0x36)
-        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: node.configuration)
         let runtime = try await NodeRuntime.start(
             storage: storage, configuration: node.configuration, overlay: node.overlay
         )
@@ -991,7 +991,7 @@ final class NodeRuntimeTests: XCTestCase {
     /// compute `rewardCredited`.
     func testExplorerBlocksPagesSummariesWithoutReadingTransactionBodies() async throws {
         let node = try host(keyByte: 0x37)
-        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: node.configuration)
         let runtime = try await NodeRuntime.start(
             storage: storage, configuration: node.configuration, overlay: node.overlay
         )
@@ -1056,7 +1056,7 @@ final class NodeRuntimeTests: XCTestCase {
 
         // A store holding only each block and its transactions-dictionary
         // root: no transaction body at all.
-        let bare = try await NodeStorage.open(configuration: NodeConfiguration(
+        let bare = try await NodeStorage.openWhenFree(configuration: NodeConfiguration(
             chainPath: ["Nexus"],
             storagePath: temporaryDirectory(prefix: "lattice-blocks-bare"),
             privateKeyHex: String(repeating: "38", count: 32)
@@ -1116,7 +1116,7 @@ final class NodeRuntimeTests: XCTestCase {
                 privateKeyHex: String(repeating: "39", count: 32),
                 finality: finality
             )
-            let storage = try await NodeStorage.open(configuration: configuration)
+            let storage = try await NodeStorage.openWhenFree(configuration: configuration)
             let reads = ChainReads(
                 storage: storage,
                 chainPath: chainPath,

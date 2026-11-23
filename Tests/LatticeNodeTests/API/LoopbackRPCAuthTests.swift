@@ -20,7 +20,7 @@ final class LoopbackRPCAuthTests: XCTestCase {
             storagePath: directory,
             privateKeyHex: String(repeating: "01", count: 32)
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let service = try await startRuntime(storage, configuration)
         return makeApplication(
             service: service, host: "127.0.0.1", port: 8080,

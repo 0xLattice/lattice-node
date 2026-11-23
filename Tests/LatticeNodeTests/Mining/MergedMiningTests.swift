@@ -72,7 +72,7 @@ final class MergedMiningTests: XCTestCase {
 
         // A restart serves Alpha's headers with their proofs at once, and
         // resumes both chains where they were.
-        let reopened = try await NodeStorage.open(configuration: configuration)
+        let reopened = try await NodeStorage.openWhenFree(configuration: configuration)
         let storedProofs = try await Self.savedProofs(reopened, at: Self.alpha)
         XCTAssertFalse(storedProofs.isEmpty, "Alpha's credited proofs survive the restart")
         let restarted = try await NodeRuntime.start(storage: reopened, configuration: configuration, overlay: overlay)
@@ -127,7 +127,7 @@ final class MergedMiningTests: XCTestCase {
 
         let (minerConfiguration, minerOverlay, minerEndpoint) = try host("6a", creator: true)
         let miner = try await NodeRuntime.start(
-            storage: try await NodeStorage.open(configuration: minerConfiguration),
+            storage: try await NodeStorage.openWhenFree(configuration: minerConfiguration),
             configuration: minerConfiguration, overlay: minerOverlay
         )
         addTeardownBlock { await miner.stop() }
@@ -142,7 +142,7 @@ final class MergedMiningTests: XCTestCase {
 
         let (followerConfiguration, followerOverlay, _) = try host("6b", creator: false, peers: [minerEndpoint])
         let follower = try await NodeRuntime.start(
-            storage: try await NodeStorage.open(configuration: followerConfiguration),
+            storage: try await NodeStorage.openWhenFree(configuration: followerConfiguration),
             configuration: followerConfiguration, overlay: followerOverlay
         )
         addTeardownBlock { await follower.stop() }
@@ -230,7 +230,7 @@ final class MergedMiningTests: XCTestCase {
             mode: .overlay
         )
         let runtime = try await NodeRuntime.start(
-            storage: try await NodeStorage.open(configuration: configuration), configuration: configuration, overlay: overlay
+            storage: try await NodeStorage.openWhenFree(configuration: configuration), configuration: configuration, overlay: overlay
         )
         addTeardownBlock { await runtime.stop() }
         let alpha = try XCTUnwrap(runtime.levelReads[Self.alpha])
@@ -298,7 +298,7 @@ final class MergedMiningTests: XCTestCase {
                 mode: .overlay
             )
             let runtime = try await NodeRuntime.start(
-                storage: try await NodeStorage.open(configuration: configuration), configuration: configuration, overlay: overlay
+                storage: try await NodeStorage.openWhenFree(configuration: configuration), configuration: configuration, overlay: overlay
             )
             addTeardownBlock { await runtime.stop() }
             return runtime
@@ -342,7 +342,7 @@ final class MergedMiningTests: XCTestCase {
         }
         let (minerConfiguration, minerOverlay, minerEndpoint) = try host("5a")
         let miner = try await NodeRuntime.start(
-            storage: try await NodeStorage.open(configuration: minerConfiguration),
+            storage: try await NodeStorage.openWhenFree(configuration: minerConfiguration),
             configuration: minerConfiguration, overlay: minerOverlay
         )
         addTeardownBlock { await miner.stop() }
@@ -368,7 +368,7 @@ final class MergedMiningTests: XCTestCase {
         // one a transaction is submitted to, as a public submit node would be.
         let (entryConfiguration, entryOverlay, entryEndpoint) = try host("5b", peers: [minerEndpoint])
         let entry = try await NodeRuntime.start(
-            storage: try await NodeStorage.open(configuration: entryConfiguration),
+            storage: try await NodeStorage.openWhenFree(configuration: entryConfiguration),
             configuration: entryConfiguration, overlay: entryOverlay
         )
         addTeardownBlock { await entry.stop() }
@@ -514,7 +514,7 @@ final class MergedMiningTests: XCTestCase {
         let moduleCID = try WasmPolicyModuleHeader(node: WasmPolicyModule(bytes: module)).rawCID
         let (minerConfiguration, minerOverlay, minerEndpoint) = try policyHost("6a", module: module)
         let miner = try await NodeRuntime.start(
-            storage: try await NodeStorage.open(configuration: minerConfiguration),
+            storage: try await NodeStorage.openWhenFree(configuration: minerConfiguration),
             configuration: minerConfiguration, overlay: minerOverlay
         )
         addTeardownBlock { await miner.stop() }
@@ -528,7 +528,7 @@ final class MergedMiningTests: XCTestCase {
         }
 
         let (followerConfiguration, followerOverlay, _) = try policyHost("6b", module: nil, peers: [minerEndpoint])
-        let followerStorage = try await NodeStorage.open(configuration: followerConfiguration)
+        let followerStorage = try await NodeStorage.openWhenFree(configuration: followerConfiguration)
         let before = await followerStorage.stores.anyChain.fetchVolumeLocal(root: moduleCID)
         XCTAssertNil(before, "the follower starts without the module")
         let follower = try await NodeRuntime.start(
@@ -552,7 +552,7 @@ final class MergedMiningTests: XCTestCase {
     func testARejectingPolicyRefusesTheTransferAnAcceptingOneMines() async throws {
         let (configuration, overlay, _) = try policyHost("6c", module: policyModule(verdict: 0))
         let node = try await NodeRuntime.start(
-            storage: try await NodeStorage.open(configuration: configuration),
+            storage: try await NodeStorage.openWhenFree(configuration: configuration),
             configuration: configuration, overlay: overlay
         )
         addTeardownBlock { await node.stop() }
@@ -595,7 +595,7 @@ final class MergedMiningTests: XCTestCase {
             requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
             mode: .overlay
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration, overlay: overlay)
         let nexusReads = runtime.reads
         let alphaReads = try XCTUnwrap(runtime.levelReads[Self.alpha])
@@ -866,7 +866,7 @@ final class MergedMiningTests: XCTestCase {
         // A nested proof crosses two child indexes. Restoring only Alpha is
         // not enough: Beta must have its exact evidence immediately after a
         // process restart, and the next merged grind must keep advancing it.
-        let reopened = try await NodeStorage.open(configuration: configuration)
+        let reopened = try await NodeStorage.openWhenFree(configuration: configuration)
         let storedProofs = try await Self.savedProofs(reopened, at: beta)
         XCTAssertFalse(storedProofs.isEmpty, "Beta's credited proofs survive the restart")
         let restarted = try await NodeRuntime.start(
@@ -910,7 +910,7 @@ final class MergedMiningTests: XCTestCase {
             requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
             mode: .overlay
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration, overlay: overlay)
         let betaReads = try XCTUnwrap(runtime.levelReads[beta])
         let recipient = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
@@ -974,7 +974,7 @@ final class MergedMiningTests: XCTestCase {
         _ overlay: IvyConfig,
         beta: [String]
     ) async throws -> UInt64 {
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let runtime = try await NodeRuntime.start(
             storage: storage, configuration: configuration, overlay: overlay
         )
@@ -999,7 +999,7 @@ final class MergedMiningTests: XCTestCase {
     /// a share, and a transaction to Alpha is mined. Returns Alpha's height;
     /// the storage closes on return.
     private func mineFirstRun(_ configuration: NodeConfiguration, _ overlay: IvyConfig) async throws -> UInt64 {
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration, overlay: overlay)
         let alphaReads = try XCTUnwrap(runtime.levelReads[Self.alpha])
 

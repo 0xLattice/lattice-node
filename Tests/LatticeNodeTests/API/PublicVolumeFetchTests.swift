@@ -30,7 +30,7 @@ final class PublicVolumeFetchTests: XCTestCase {
             peerTarget: 1,
             peerSearchInterval: 3_600
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let runtime = try await NodeRuntime.start(
             storage: storage, configuration: configuration,
             overlay: IvyConfig(
@@ -106,7 +106,7 @@ final class PublicVolumeFetchTests: XCTestCase {
             chainPath: ["Nexus"], storagePath: storageDirectory,
             privateKeyHex: String(repeating: "01", count: 32)
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let service = try await startRuntime(storage, configuration)
         let full = PublicVolumeFetches(limit: 1) { _ in throw NodeRuntimeError.busy }
         let app = makePublicReadApplication(service: service, host: "127.0.0.1", port: 8081, fetches: full)
@@ -132,7 +132,7 @@ final class PublicVolumeFetchTests: XCTestCase {
             chainPath: ["Nexus"], storagePath: storageDirectory,
             privateKeyHex: String(repeating: "01", count: 32)
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let service = try await startRuntime(storage, configuration)
         let first = try spec(78).rawCID
         let root = try spec(79).rawCID
@@ -187,7 +187,7 @@ final class PublicVolumeFetchTests: XCTestCase {
             chainPath: ["Nexus"], storagePath: storageDirectory,
             privateKeyHex: String(repeating: "01", count: 32)
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let service = try await startRuntime(storage, configuration)
         let volume = try spec(501)
         let serialized = try await serializedVolume(volume)

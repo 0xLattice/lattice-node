@@ -27,7 +27,7 @@ final class MempoolRetentionTests: XCTestCase {
         )
         let roots = try await submitLocals(configuration, overlay)
 
-        let reopened = try await NodeStorage.open(configuration: configuration)
+        let reopened = try await NodeStorage.openWhenFree(configuration: configuration)
         let live = reopened.liveMempoolOwner
         let durable = reopened.durableMempoolOwner
         let clearedLive = try await reopened.broker.retainedRoots(scope: live)
@@ -45,7 +45,7 @@ final class MempoolRetentionTests: XCTestCase {
 
     /// Three local submissions on a first run; the storage closes on return.
     private func submitLocals(_ configuration: NodeConfiguration, _ overlay: IvyConfig) async throws -> Set<String> {
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration, overlay: overlay)
         var roots: Set<String> = []
         for _ in 0..<3 {

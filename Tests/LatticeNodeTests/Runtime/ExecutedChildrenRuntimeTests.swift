@@ -38,7 +38,7 @@ final class ExecutedChildrenRuntimeTests: XCTestCase {
         // Running: Alpha executes blocks that commit Beta. Scoped, so the
         // store is released before it is opened again.
         do {
-            let storage = try await NodeStorage.open(configuration: configuration)
+            let storage = try await NodeStorage.openWhenFree(configuration: configuration)
             let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration, overlay: overlay)
             let alphaReads = try XCTUnwrap(runtime.levelReads[alpha])
             let betaReads = try XCTUnwrap(runtime.levelReads[beta])
@@ -57,7 +57,7 @@ final class ExecutedChildrenRuntimeTests: XCTestCase {
         }
 
         // Restarted from the same store, before anything new executes.
-        let reopened = try await NodeStorage.open(configuration: configuration)
+        let reopened = try await NodeStorage.openWhenFree(configuration: configuration)
         let restored = try await NodeRuntime.boot(storage: reopened, configuration: configuration, coreConfig: .init())
         XCTAssertEqual(restored.levels[alpha]?.executedChildren.names, ["Beta"])
         XCTAssertEqual(restored.levels[["Nexus"]]?.executedChildren.names, ["Alpha"])
