@@ -279,25 +279,18 @@ final class NodeRuntimeTests: XCTestCase {
             publicKey: try PeerKey(rawRepresentation: peerKey.publicKey.rawRepresentation).hex,
             host: "127.0.0.1", port: peerPort
         )
-        let nodePort = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: temporaryDirectory(),
-            privateKeyHex: String(repeating: "48", count: 32),
-            listenPort: nodePort,
-            rpcPort: NetworkTransportTestPorts.allocate(),
-            bootstrapPeers: [peerEndpoint],
-            externalAddress: "127.0.0.1"
-        )
-        let runtime = try await NodeRuntime.start(
-            storage: try await NodeStorage.openWhenFree(configuration: configuration),
-            configuration: configuration,
-            overlay: IvyConfig(
-                signingKey: configuration.signingKey, listenPort: nodePort, bootstrapPeers: [peerEndpoint],
-                requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
-                externalAddress: ("127.0.0.1", nodePort), mode: .overlay
+        let node = try testNode(keyByte: 0x48, peers: [peerEndpoint]) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: $0.storagePath,
+                privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort,
+                rpcPort: $0.rpcPort,
+                bootstrapPeers: [peerEndpoint],
+                externalAddress: "127.0.0.1"
             )
-        )
+        }
+        let (runtime, _) = try await start(node)
         addTeardownBlock { await runtime.stop() }
         try await eventually("the session that advertised bundles is listed") {
             runtime.peerCapabilities.sessions(speaking: ChainHandshake.volumeBundle).count == 1
@@ -312,9 +305,7 @@ final class NodeRuntimeTests: XCTestCase {
         try await eventually("the ended session is no longer listed") {
             runtime.peerCapabilities.sessions(speaking: ChainHandshake.volumeBundle).isEmpty
         }
-        try await peer.connect(to: PeerEndpoint(
-            publicKey: configuration.processPublicKey, host: "127.0.0.1", port: nodePort
-        ))
+        try await peer.connect(to: node.endpoint)
         try await eventually("the new session is ready") { runtime.peerCount == 1 }
         XCTAssertTrue(runtime.peerCapabilities.sessions(speaking: ChainHandshake.volumeBundle).isEmpty)
     }
@@ -341,21 +332,14 @@ final class NodeRuntimeTests: XCTestCase {
             publicKey: try PeerKey(rawRepresentation: peerKey.publicKey.rawRepresentation).hex,
             host: "127.0.0.1", port: peerPort
         )
-        let nodePort = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"], storagePath: temporaryDirectory(), privateKeyHex: String(repeating: "4a", count: 32),
-            listenPort: nodePort, rpcPort: NetworkTransportTestPorts.allocate(),
-            bootstrapPeers: [peerEndpoint], externalAddress: "127.0.0.1"
-        )
-        let runtime = try await NodeRuntime.start(
-            storage: try await NodeStorage.openWhenFree(configuration: configuration),
-            configuration: configuration,
-            overlay: IvyConfig(
-                signingKey: configuration.signingKey, listenPort: nodePort, bootstrapPeers: [peerEndpoint],
-                requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
-                externalAddress: ("127.0.0.1", nodePort), mode: .overlay
+        let node = try testNode(keyByte: 0x4a, peers: [peerEndpoint]) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"], storagePath: $0.storagePath, privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort, rpcPort: $0.rpcPort,
+                bootstrapPeers: [peerEndpoint], externalAddress: "127.0.0.1"
             )
-        )
+        }
+        let (runtime, _) = try await start(node)
         addTeardownBlock { await runtime.stop() }
         try await eventually("the session is ready") { runtime.peerCount == 1 }
         let session = try XCTUnwrap(delegate.connected)
@@ -405,8 +389,6 @@ final class NodeRuntimeTests: XCTestCase {
             host: "127.0.0.1",
             port: routerPort
         )
-        let storageDirectory = temporaryDirectory()
-        let nodePort = NetworkTransportTestPorts.allocate()
         let alpha = ["Nexus", "Alpha"]
         let childSpec = ChainSpec(
             maxNumberOfTransactionsPerBlock: 100,
@@ -417,33 +399,21 @@ final class NodeRuntimeTests: XCTestCase {
             halvingInterval: 10_000,
             halfLife: 10
         )
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: storageDirectory,
-            privateKeyHex: String(repeating: "47", count: 32),
-            listenPort: nodePort,
-            rpcPort: NetworkTransportTestPorts.allocate(),
-            bootstrapPeers: [routerEndpoint],
-            externalAddress: "127.0.0.1",
-            hostedChildren: [alpha],
-            childSpecs: [alpha: childSpec]
-        )
-        let overlay = IvyConfig(
-            signingKey: configuration.signingKey,
-            listenPort: nodePort,
-            bootstrapPeers: [routerEndpoint],
-            requestTimeout: .seconds(5),
-            stunServers: [],
-            healthConfig: PeerHealthConfig(enabled: false),
-            externalAddress: ("127.0.0.1", nodePort),
-            mode: .overlay
-        )
-        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
-        let runtime = try await NodeRuntime.start(
-            storage: storage,
-            configuration: configuration,
-            overlay: overlay
-        )
+        let node = try testNode(keyByte: 0x47, peers: [routerEndpoint]) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: $0.storagePath,
+                privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort,
+                rpcPort: $0.rpcPort,
+                bootstrapPeers: [routerEndpoint],
+                externalAddress: "127.0.0.1",
+                hostedChildren: [alpha],
+                childSpecs: [alpha: childSpec]
+            )
+        }
+        let configuration = node.configuration
+        let (runtime, _) = try await start(node)
         addTeardownBlock { await runtime.stop() }
         try await eventually("the bootstrap session becomes ready") {
             runtime.peerCount == 1

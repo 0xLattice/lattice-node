@@ -13,38 +13,20 @@ import LatticeNodeAPI
 /// Content stays because a scope names it: a block's body under the
 /// block's name, what executions read and create under the chain's.
 final class RetentionRulesTests: XCTestCase {
-    private struct Host {
-        let configuration: NodeConfiguration
-        let overlay: IvyConfig
-        let endpoint: PeerEndpoint
-    }
-
     private func host(
         keyByte: UInt8, peers: [PeerEndpoint] = [], storageDirectory reused: URL? = nil, state: StateRetention = .all
-    ) throws -> Host {
-        let storageDirectory = reused ?? FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-node-rules-\(UUID().uuidString)", isDirectory: true
-        )
-        if reused == nil { addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) } }
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: storageDirectory,
-            privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
-            listenPort: port,
-            rpcPort: NetworkTransportTestPorts.allocate(),
-            webSocket: .off,
-            state: state
-        )
-        return Host(
-            configuration: configuration,
-            overlay: IvyConfig(
-                signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: peers,
-                requestTimeout: .seconds(5), stunServers: [],
-                healthConfig: PeerHealthConfig(enabled: false), mode: .overlay
-            ),
-            endpoint: PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port)
-        )
+    ) throws -> TestNode {
+        try testNode(keyByte: keyByte, peers: peers, reusing: reused) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: $0.storagePath,
+                privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort,
+                rpcPort: $0.rpcPort,
+                webSocket: .off,
+                state: state
+            )
+        }
     }
 
     private func transaction() throws -> Transaction {

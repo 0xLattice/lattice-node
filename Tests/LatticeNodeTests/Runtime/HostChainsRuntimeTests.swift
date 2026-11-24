@@ -29,38 +29,29 @@ final class HostChainsRuntimeTests: XCTestCase {
         keyByte: UInt8, hosted: [[String]], peers: [PeerEndpoint] = [], storagePath: URL? = nil,
         stopAtTeardown: Bool = true, observe: NodeRuntime.JobObserver? = nil
     ) async throws -> (runtime: NodeRuntime, endpoint: PeerEndpoint, storage: NodeStorage) {
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: storagePath ?? temporaryDirectory(),
-            privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
-            listenPort: port,
-            rpcPort: NetworkTransportTestPorts.allocate(),
-            bootstrapPeers: peers,
-            externalAddress: "127.0.0.1",
-            hostedChildren: hosted,
-            childSpecs: [Self.alpha: Self.spec, Self.beta: Self.betaSpec].filter { hosted.contains($0.key) },
-            // One block per connect: a held connect holds one block.
-            connectBatch: observe == nil ? NodeConfiguration.defaultConnectBatch : 1
-        )
-        let overlay = IvyConfig(
-            signingKey: configuration.signingKey,
-            listenPort: port,
-            bootstrapPeers: peers,
-            requestTimeout: .seconds(5),
-            stunServers: [],
-            healthConfig: PeerHealthConfig(enabled: false),
-            externalAddress: ("127.0.0.1", port),
-            mode: .overlay
-        )
-        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
+        let node = try testNode(keyByte: keyByte, peers: peers, reusing: storagePath) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: $0.storagePath,
+                privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort,
+                rpcPort: $0.rpcPort,
+                bootstrapPeers: peers,
+                externalAddress: "127.0.0.1",
+                hostedChildren: hosted,
+                childSpecs: [Self.alpha: Self.spec, Self.beta: Self.betaSpec].filter { hosted.contains($0.key) },
+                // One block per connect: a held connect holds one block.
+                connectBatch: observe == nil ? NodeConfiguration.defaultConnectBatch : 1
+            )
+        }
+        let storage = try await NodeStorage.openWhenFree(configuration: node.configuration)
         let runtime = try await NodeRuntime.start(
-            storage: storage, configuration: configuration, overlay: overlay,
+            storage: storage, configuration: node.configuration, overlay: node.overlay,
             workers: observe == nil ? max(1, ProcessInfo.processInfo.activeProcessorCount - 1) : 2, observeJob: observe
         )
         // A node the test stops itself is not held: its store is opened again.
         if stopAtTeardown { addTeardownBlock { await runtime.stop() } }
-        return (runtime, PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port), storage)
+        return (runtime, node.endpoint, storage)
     }
 
     /// A host that mines `chains`, one block every 200 ms, until the test ends.

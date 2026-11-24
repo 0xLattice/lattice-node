@@ -43,35 +43,28 @@ final class AdmissionWhileSyncingTests: XCTestCase {
         bodyWindow: Int = 64,
         observe: NodeRuntime.JobObserver? = nil
     ) async throws -> Node {
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: temporaryDirectory(),
-            privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
-            listenPort: port,
-            rpcPort: NetworkTransportTestPorts.allocate(),
-            // One block per connect job: these tests hold and count
-            // connects block by block, which batching would merge.
-            connectBatch: 1
-        )
+        let node = try testNode(keyByte: keyByte, peers: peers) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: $0.storagePath,
+                privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort,
+                rpcPort: $0.rpcPort,
+                // One block per connect job: these tests hold and count
+                // connects block by block, which batching would merge.
+                connectBatch: 1
+            )
+        }
         let runtime = try await NodeRuntime.start(
-            storage: try await NodeStorage.openWhenFree(configuration: configuration),
-            configuration: configuration,
-            overlay: IvyConfig(
-                signingKey: configuration.signingKey,
-                listenPort: port,
-                bootstrapPeers: peers,
-                requestTimeout: .seconds(5),
-                stunServers: [],
-                healthConfig: PeerHealthConfig(enabled: false),
-                mode: .overlay
-            ),
+            storage: try await NodeStorage.openWhenFree(configuration: node.configuration),
+            configuration: node.configuration,
+            overlay: node.overlay,
             coreConfig: ChainCoreConfig(bodyWindow: bodyWindow),
             workers: workers,
             observeJob: observe
         )
         addTeardownBlock { await runtime.stop() }
-        return Node(runtime: runtime, endpoint: PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port))
+        return Node(runtime: runtime, endpoint: node.endpoint)
     }
 
     private static func transaction() throws -> Transaction {

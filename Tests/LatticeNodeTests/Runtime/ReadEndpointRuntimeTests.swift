@@ -35,37 +35,24 @@ final class ReadEndpointRuntimeTests: XCTestCase {
         publicSubmit: Bool = false,
         peers: [PeerEndpoint] = []
     ) async throws -> Node {
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: temporaryDirectory(),
-            privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
-            listenPort: port,
-            rpcPort: NetworkTransportTestPorts.allocate(),
-            bootstrapPeers: peers,
-            externalAddress: "127.0.0.1",
-            hostedChildren: hosted,
-            childSpecs: specs,
-            publicReadURL: url,
-            publicSubmit: publicSubmit
-        )
-        let overlay = IvyConfig(
-            signingKey: configuration.signingKey,
-            listenPort: port,
-            bootstrapPeers: peers,
-            requestTimeout: .seconds(5),
-            stunServers: [],
-            healthConfig: PeerHealthConfig(enabled: false),
-            externalAddress: ("127.0.0.1", port),
-            mode: .overlay
-        )
-        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
-        let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration, overlay: overlay)
+        let node = try testNode(keyByte: keyByte, peers: peers) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: $0.storagePath,
+                privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort,
+                rpcPort: $0.rpcPort,
+                bootstrapPeers: peers,
+                externalAddress: "127.0.0.1",
+                hostedChildren: hosted,
+                childSpecs: specs,
+                publicReadURL: url,
+                publicSubmit: publicSubmit
+            )
+        }
+        let (runtime, _) = try await start(node)
         addTeardownBlock { await runtime.stop() }
-        return Node(
-            runtime: runtime,
-            endpoint: PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port)
-        )
+        return Node(runtime: runtime, endpoint: node.endpoint)
     }
 
     func testAChildsDeclaredURLIsFoundOnlyThroughANodeHostingItsParent() async throws {
