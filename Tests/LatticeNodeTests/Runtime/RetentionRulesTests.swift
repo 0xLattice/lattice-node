@@ -13,38 +13,20 @@ import LatticeNodeAPI
 /// Content stays because a scope names it: a block's body under the
 /// block's name, what executions read and create under the chain's.
 final class RetentionRulesTests: XCTestCase {
-    private struct Host {
-        let configuration: NodeConfiguration
-        let overlay: IvyConfig
-        let endpoint: PeerEndpoint
-    }
-
     private func host(
         keyByte: UInt8, peers: [PeerEndpoint] = [], storageDirectory reused: URL? = nil, state: StateRetention = .all
-    ) throws -> Host {
-        let storageDirectory = reused ?? FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-node-rules-\(UUID().uuidString)", isDirectory: true
-        )
-        if reused == nil { addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) } }
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: storageDirectory,
-            privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
-            listenPort: port,
-            rpcPort: NetworkTransportTestPorts.allocate(),
-            webSocket: .off,
-            state: state
-        )
-        return Host(
-            configuration: configuration,
-            overlay: IvyConfig(
-                signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: peers,
-                requestTimeout: .seconds(5), stunServers: [],
-                healthConfig: PeerHealthConfig(enabled: false), mode: .overlay
-            ),
-            endpoint: PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port)
-        )
+    ) throws -> TestNode {
+        try testNode(keyByte: keyByte, peers: peers, reusing: reused) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: $0.storagePath,
+                privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort,
+                rpcPort: $0.rpcPort,
+                webSocket: .off,
+                state: state
+            )
+        }
     }
 
     private func transaction() throws -> Transaction {
@@ -75,7 +57,7 @@ final class RetentionRulesTests: XCTestCase {
         var mined = ""
         var carried = ""
         do {
-            let storage = try await NodeStorage.open(configuration: node.configuration)
+            let storage = try await NodeStorage.openWhenFree(configuration: node.configuration)
             let runtime = try await NodeRuntime.start(
                 storage: storage, configuration: node.configuration, overlay: node.overlay
             )
@@ -94,7 +76,7 @@ final class RetentionRulesTests: XCTestCase {
             await runtime.stop()
         }
 
-        let reopened = try await NodeStorage.open(configuration: node.configuration)
+        let reopened = try await NodeStorage.openWhenFree(configuration: node.configuration)
         let pinned = try await Set(reopened.broker.retainedRoots(scope: reopened.scopes.body(mined)))
         XCTAssertEqual(pinned, [mined, carried])
         let body = await reopened.volume(mined)
@@ -111,8 +93,8 @@ final class RetentionRulesTests: XCTestCase {
     /// the block finds them: consensus puts no rule on the index's keys.
     func testABodyIsEveryEntryOfTheTransactionIndexWhateverItsKey() async throws {
         for key in ["0", "a", "1"] {
-            let producer = try await NodeStorage.open(configuration: try host(keyByte: 0x86).configuration)
-            let joiner = try await NodeStorage.open(configuration: try host(keyByte: 0x87).configuration)
+            let producer = try await NodeStorage.openWhenFree(configuration: try host(keyByte: 0x86).configuration)
+            let joiner = try await NodeStorage.openWhenFree(configuration: try host(keyByte: 0x87).configuration)
             let genesisCID = NexusGenesis.expectedBlockHash
             let genesisData = await producer.content([genesisCID])[genesisCID]
             let genesis = try XCTUnwrap(Block(data: try XCTUnwrap(genesisData)))
@@ -175,7 +157,7 @@ final class RetentionRulesTests: XCTestCase {
     /// state.
     func testOnRecentAValidBlockIsStoredWithoutTheStateItRead() async throws {
         let producerHost = try host(keyByte: 0x8a)
-        let producer = try await NodeStorage.open(configuration: producerHost.configuration)
+        let producer = try await NodeStorage.openWhenFree(configuration: producerHost.configuration)
         let runtime = try await NodeRuntime.start(
             storage: producer, configuration: producerHost.configuration, overlay: producerHost.overlay
         )
@@ -195,7 +177,7 @@ final class RetentionRulesTests: XCTestCase {
             )
         }, fetchBundle: { _ in [] })
 
-        let joiner = try await NodeStorage.open(configuration: try host(keyByte: 0x8b, state: .recent).configuration)
+        let joiner = try await NodeStorage.openWhenFree(configuration: try host(keyByte: 0x8b, state: .recent).configuration)
         _ = try await joiner.fetchChainBody(mined, remote: remote)
         let cached = await joiner.readCache.body(mined)
         let fetched = try XCTUnwrap(cached).map(\.root)
@@ -235,7 +217,7 @@ final class RetentionRulesTests: XCTestCase {
         let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: miner)])
         var blocks: [String] = []
         do {
-            let storage = try await NodeStorage.open(configuration: node.configuration)
+            let storage = try await NodeStorage.openWhenFree(configuration: node.configuration)
             let runtime = try await NodeRuntime.start(
                 storage: storage, configuration: node.configuration, overlay: node.overlay
             )
@@ -243,7 +225,7 @@ final class RetentionRulesTests: XCTestCase {
             await runtime.stop()
         }
 
-        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: node.configuration)
         let runtime = try await NodeRuntime.start(
             storage: storage, configuration: node.configuration, overlay: node.overlay
         )
@@ -262,7 +244,7 @@ final class RetentionRulesTests: XCTestCase {
     /// reading state and building on that block.
     func testLettingGoOfABodyKeepsWhatTheChainNames() async throws {
         let node = try host(keyByte: 0x82)
-        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: node.configuration)
         let runtime = try await NodeRuntime.start(
             storage: storage, configuration: node.configuration, overlay: node.overlay
         )
@@ -297,7 +279,7 @@ final class RetentionRulesTests: XCTestCase {
     /// A transaction two bodies carry is let go of with the second.
     func testATransactionTwoBodiesCarryGoesWithTheSecond() async throws {
         let node = try host(keyByte: 0x83)
-        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: node.configuration)
         let shared = try VolumeImpl<Transaction>(node: try transaction())
         let storer = NodeImportStorage(storage: await storage.broker)
         try await shared.store(storer: storer)

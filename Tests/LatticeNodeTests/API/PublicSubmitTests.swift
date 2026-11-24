@@ -15,31 +15,19 @@ import LatticeNodeAPI
 /// volatile (never journaled) admission relayed by ordinary gossip.
 final class PublicSubmitTests: XCTestCase {
     private func node(keyByte: UInt8, peers: [PeerEndpoint] = []) async throws -> (NodeRuntime, NodeStorage, PeerEndpoint) {
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: temporaryDirectory(),
-            privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
-            listenPort: port,
-            rpcPort: NetworkTransportTestPorts.allocate(),
-            publicSubmit: true
-        )
-        let storage = try await NodeStorage.open(configuration: configuration)
-        let runtime = try await NodeRuntime.start(
-            storage: storage,
-            configuration: configuration,
-            overlay: IvyConfig(
-                signingKey: configuration.signingKey,
-                listenPort: port,
-                bootstrapPeers: peers,
-                requestTimeout: .seconds(5),
-                stunServers: [],
-                healthConfig: PeerHealthConfig(enabled: false),
-                mode: .overlay
+        let node = try testNode(keyByte: keyByte, peers: peers) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: $0.storagePath,
+                privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort,
+                rpcPort: $0.rpcPort,
+                publicSubmit: true
             )
-        )
+        }
+        let (runtime, storage) = try await start(node)
         addTeardownBlock { await runtime.stop() }
-        return (runtime, storage, PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port))
+        return (runtime, storage, node.endpoint)
     }
 
     private static func transaction(

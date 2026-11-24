@@ -29,14 +29,18 @@ extension NodeRuntime {
         try await mine(try await miningTemplate(request))
     }
 
-    /// Grind and submit a template taken earlier.
-    func mine(_ template: MiningTemplateResponse) async throws -> Block {
+    /// Grind and submit a template taken earlier, to `meeting` as well when
+    /// given: the target of a child block the work commits without carrying
+    /// it, which adds work to that block only if its hash meets it.
+    func mine(_ template: MiningTemplateResponse, meeting committed: UInt256? = nil) async throws -> Block {
         var nonce: UInt64 = 0
         // The hardest threshold: the advertised ones and every carried
         // block's own target. A child's target can be harder than the
         // root's, and work whose child carries children advertises only its
         // search target.
-        let target = min(Self.hardestTarget(template.block), template.targets.min() ?? template.searchTarget)
+        let target = min(
+            Self.hardestTarget(template.block), template.targets.min() ?? template.searchTarget, committed ?? .max
+        )
         while template.block.replacingNonce(nonce).proofOfWorkHash() > target { nonce += 1 }
         _ = try await submitWork(SubmitWorkRequest(workID: template.workID, nonce: nonce))
         return template.block.replacingNonce(nonce)

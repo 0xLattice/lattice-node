@@ -20,28 +20,20 @@ final class ChildBlockBuildTests: XCTestCase {
     private func host(
         _ keyByte: String, hostsAlpha: Bool, alphaPremineTo: String? = nil, peers: [PeerEndpoint] = []
     ) throws -> (NodeConfiguration, IvyConfig, PeerEndpoint) {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-child-build-\(UUID().uuidString)", isDirectory: true
-        )
-        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"], storagePath: directory, privateKeyHex: String(repeating: keyByte, count: 32),
-            listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
-            hostedChildren: hostsAlpha ? [Self.alpha] : [],
-            childSpecs: hostsAlpha ? [Self.alpha: Self.alphaSpec] : [:],
-            childPremineRecipients: alphaPremineTo.map { [Self.alpha: $0] } ?? [:]
-        )
-        let overlay = IvyConfig(
-            signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: peers,
-            requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
-            mode: .overlay
-        )
-        return (configuration, overlay, PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port))
+        let node = try testNode(keyByte: UInt8(keyByte, radix: 16)!, peers: peers) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"], storagePath: $0.storagePath, privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort, rpcPort: $0.rpcPort,
+                hostedChildren: hostsAlpha ? [Self.alpha] : [],
+                childSpecs: hostsAlpha ? [Self.alpha: Self.alphaSpec] : [:],
+                childPremineRecipients: alphaPremineTo.map { [Self.alpha: $0] } ?? [:]
+            )
+        }
+        return (node.configuration, node.overlay, node.endpoint)
     }
 
     private func start(_ configuration: NodeConfiguration, _ overlay: IvyConfig) async throws -> (NodeRuntime, NodeStorage) {
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration, overlay: overlay)
         addTeardownBlock { await runtime.stop() }
         return (runtime, storage)
@@ -247,6 +239,13 @@ final class ChildBlockBuildTests: XCTestCase {
                 let cid = response.transactionCID
                 (taken, accepted) = (cid, true)
             }
+            // The miner hosts only Nexus, so its template's targets leave
+            // Alpha's out; Alpha's grows harder each round, and a carrier
+            // that misses it adds no work to ours, which then waits for good.
+            func carry() async throws {
+                let ours = try XCTUnwrap(Block(data: try XCTUnwrap(built).submit.block))
+                _ = try await miner.mine(try await miner.miningTemplate(pair.mining), meeting: ours.target)
+            }
             func round() async throws -> ChildCommitStep {
                 var pushed: SubmitChildBlockStatus?
                 if let built { pushed = try await builder.submitChildBlock(built.submit).status }
@@ -298,9 +297,9 @@ final class ChildBlockBuildTests: XCTestCase {
                 // a second time (it can no longer be carried).
                 _ = try await miner.mine(try XCTUnwrap(past))
             case .none:
-                _ = try await miner.mineBlock(pair.mining)
+                try await carry()
             case .overwritten:
-                _ = try await miner.mineBlock(pair.mining)
+                try await carry()
                 let ours = try XCTUnwrap(built)
                 try await eventually("\(label): ours is carried") {
                     try await builder.childCommitment(chainPath: Self.alpha).value == value(ours)
@@ -322,7 +321,7 @@ final class ChildBlockBuildTests: XCTestCase {
                 let step = try? await round()
                 if let taken, taken != mined, await pooled(taken) {
                     mined = taken
-                    _ = try await miner.mineBlock(pair.mining)
+                    try await carry()
                 }
                 return step == .done
             }

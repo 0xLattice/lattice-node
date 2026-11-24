@@ -44,7 +44,7 @@ final class WebAddressRuntimeTests: XCTestCase {
             relayEnabled: relays,
             mode: .overlay
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration, overlay: overlay)
         addTeardownBlock { await runtime.stop() }
         return Node(

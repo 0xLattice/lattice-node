@@ -1,5 +1,4 @@
 import Foundation
-import Ivy
 import Lattice
 import LatticeNodeCore
 import XCTest
@@ -17,28 +16,22 @@ final class ExecutedChildrenRuntimeTests: XCTestCase {
     )
 
     func testTheListIsRebuiltFromTheStoreOnBoot() async throws {
-        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-executed-children-\(UUID().uuidString)", isDirectory: true
-        )
-        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"], storagePath: storageDirectory,
-            privateKeyHex: String(repeating: "5e", count: 32),
-            listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
-            externalAddress: "127.0.0.1",
-            hostedChildren: [alpha, beta], childSpecs: [alpha: spec, beta: spec]
-        )
-        let overlay = IvyConfig(
-            signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: [],
-            requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
-            externalAddress: ("127.0.0.1", port), mode: .overlay
-        )
+        let node = try testNode(keyByte: 0x5e) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"], storagePath: $0.storagePath,
+                privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort, rpcPort: $0.rpcPort,
+                externalAddress: "127.0.0.1",
+                hostedChildren: [alpha, beta], childSpecs: [alpha: spec, beta: spec]
+            )
+        }
+        let configuration = node.configuration
+        let overlay = node.overlay
 
         // Running: Alpha executes blocks that commit Beta. Scoped, so the
         // store is released before it is opened again.
         do {
-            let storage = try await NodeStorage.open(configuration: configuration)
+            let storage = try await NodeStorage.openWhenFree(configuration: configuration)
             let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration, overlay: overlay)
             let alphaReads = try XCTUnwrap(runtime.levelReads[alpha])
             let betaReads = try XCTUnwrap(runtime.levelReads[beta])
@@ -57,7 +50,7 @@ final class ExecutedChildrenRuntimeTests: XCTestCase {
         }
 
         // Restarted from the same store, before anything new executes.
-        let reopened = try await NodeStorage.open(configuration: configuration)
+        let reopened = try await NodeStorage.openWhenFree(configuration: configuration)
         let restored = try await NodeRuntime.boot(storage: reopened, configuration: configuration, coreConfig: .init())
         XCTAssertEqual(restored.levels[alpha]?.executedChildren.names, ["Beta"])
         XCTAssertEqual(restored.levels[["Nexus"]]?.executedChildren.names, ["Alpha"])

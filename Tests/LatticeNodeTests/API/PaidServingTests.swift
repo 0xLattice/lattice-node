@@ -1,7 +1,6 @@
 import Foundation
 import Hummingbird
 import HummingbirdTesting
-import Ivy
 import Lattice
 import Tally
 import XCTest
@@ -16,27 +15,7 @@ final class PaidServingTests: XCTestCase {
     private static let peer = String(repeating: "ab", count: 32)
 
     private func node(keyByte: UInt8) async throws -> NodeRuntime {
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: temporaryDirectory(),
-            privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
-            listenPort: port,
-            rpcPort: NetworkTransportTestPorts.allocate()
-        )
-        let storage = try await NodeStorage.open(configuration: configuration)
-        let runtime = try await NodeRuntime.start(
-            storage: storage,
-            configuration: configuration,
-            overlay: IvyConfig(
-                signingKey: configuration.signingKey,
-                listenPort: port,
-                requestTimeout: .seconds(5),
-                stunServers: [],
-                healthConfig: PeerHealthConfig(enabled: false),
-                mode: .overlay
-            )
-        )
+        let (runtime, _) = try await start(testNode(keyByte: keyByte))
         addTeardownBlock { await runtime.stop() }
         return runtime
     }

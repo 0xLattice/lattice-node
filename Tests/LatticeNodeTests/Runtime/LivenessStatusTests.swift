@@ -10,49 +10,21 @@ import XCTest
 /// acted-on height against the best header chain it knows, and how long its
 /// acted-on tip has not moved. Behind and not moving is a stall.
 final class LivenessStatusTests: XCTestCase {
-    private struct Host {
-        let configuration: NodeConfiguration
-        let overlay: IvyConfig
-        let endpoint: PeerEndpoint
-    }
-
-    private func host(keyByte: UInt8, peers: [PeerEndpoint] = [], blockBodies: BlockBodies = .all) throws -> Host {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-node-liveness-\(UUID().uuidString)", isDirectory: true
-        )
-        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"], storagePath: directory,
-            privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
-            listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(), webSocket: .off,
-            peerSearchInterval: 600, blockBodies: blockBodies
-        )
-        return Host(
-            configuration: configuration,
-            overlay: IvyConfig(
-                signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: peers,
-                requestTimeout: .seconds(5), stunServers: [],
-                healthConfig: PeerHealthConfig(enabled: false), mode: .overlay
-            ),
-            endpoint: PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port)
-        )
-    }
-
-    private func start(_ host: Host) async throws -> NodeRuntime {
-        try await startWithStorage(host).runtime
-    }
-
-    private func startWithStorage(_ host: Host) async throws -> (runtime: NodeRuntime, storage: NodeStorage) {
-        let storage = try await NodeStorage.open(configuration: host.configuration)
-        let runtime = try await NodeRuntime.start(storage: storage, configuration: host.configuration, overlay: host.overlay)
-        return (runtime, storage)
+    private func host(keyByte: UInt8, peers: [PeerEndpoint] = [], blockBodies: BlockBodies = .all) throws -> TestNode {
+        try testNode(keyByte: keyByte, peers: peers) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"], storagePath: $0.storagePath,
+                privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort, rpcPort: $0.rpcPort, webSocket: .off,
+                peerSearchInterval: 600, blockBodies: blockBodies
+            )
+        }
     }
 
     /// A node at its best tip is at its best header, and each block it acts
     /// on moves the time its tip last advanced.
     func testANodeAtItsTipIsNotBehindAndItsTipMoves() async throws {
-        let runtime = try await start(try host(keyByte: 0x71))
+        let (runtime, _) = try await start(try host(keyByte: 0x71))
         _ = try await runtime.mineBlock()
         var first: NodeStatusResponse?
         try await eventually("the mined block is acted on") {
@@ -78,7 +50,7 @@ final class LivenessStatusTests: XCTestCase {
     /// behind, with a tip that does not move.
     func testAFollowerThatCannotExecuteReportsItselfBehindAndNotMoving() async throws {
         let producer = try host(keyByte: 0x72, blockBodies: .none)
-        let (producerRuntime, producerStorage) = try await startWithStorage(producer)
+        let (producerRuntime, producerStorage) = try await start(producer)
         var mined: [String] = []
         for _ in 0..<5 { mined.append(try BlockHeader(node: try await producerRuntime.mineBlock()).rawCID) }
         let height = try XCTUnwrap(producerRuntime.published.value?.actOnHeight)
@@ -89,7 +61,7 @@ final class LivenessStatusTests: XCTestCase {
             return true
         }
 
-        let follower = try await start(try host(keyByte: 0x73, peers: [producer.endpoint]))
+        let (follower, _) = try await start(try host(keyByte: 0x73, peers: [producer.endpoint]))
         var seen: NodeStatusResponse?
         try await eventually("the follower weighs the producer's headers", within: .seconds(60)) {
             seen = await follower.status(chainPath: ["Nexus"])

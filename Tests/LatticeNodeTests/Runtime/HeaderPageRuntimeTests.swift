@@ -22,35 +22,26 @@ final class HeaderPageRuntimeTests: XCTestCase {
         storagePath: URL? = nil, stopAtTeardown: Bool = true,
         failStop: @escaping @Sendable (any Error) -> Void = { fatalError("node runtime: persist failed: \($0)") }
     ) async throws -> (runtime: NodeRuntime, endpoint: PeerEndpoint) {
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: storagePath ?? temporaryDirectory(),
-            privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
-            listenPort: port,
-            rpcPort: NetworkTransportTestPorts.allocate(),
-            bootstrapPeers: peers,
-            externalAddress: "127.0.0.1",
-            hostedChildren: [Self.alpha],
-            childSpecs: [Self.alpha: Self.spec]
-        )
-        let overlay = IvyConfig(
-            signingKey: configuration.signingKey,
-            listenPort: port,
-            bootstrapPeers: peers,
-            requestTimeout: .seconds(5),
-            stunServers: [],
-            healthConfig: PeerHealthConfig(enabled: false),
-            externalAddress: ("127.0.0.1", port),
-            mode: .overlay
-        )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let node = try testNode(keyByte: keyByte, peers: peers, reusing: storagePath) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: $0.storagePath,
+                privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort,
+                rpcPort: $0.rpcPort,
+                bootstrapPeers: peers,
+                externalAddress: "127.0.0.1",
+                hostedChildren: [Self.alpha],
+                childSpecs: [Self.alpha: Self.spec]
+            )
+        }
+        let storage = try await NodeStorage.openWhenFree(configuration: node.configuration)
         let runtime = try await NodeRuntime.start(
-            storage: storage, configuration: configuration, overlay: overlay, coreConfig: coreConfig,
+            storage: storage, configuration: node.configuration, overlay: node.overlay, coreConfig: coreConfig,
             failStop: failStop
         )
         if stopAtTeardown { addTeardownBlock { await runtime.stop() } }
-        return (runtime, PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port))
+        return (runtime, node.endpoint)
     }
 
     func testAFollowerSyncsAChildLevelThroughOneHeaderPages() async throws {

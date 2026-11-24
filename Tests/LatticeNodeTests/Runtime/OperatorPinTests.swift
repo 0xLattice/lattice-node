@@ -10,12 +10,6 @@ import cashew
 /// Operator pins: a Volume the operator names by CID is held, served and
 /// announced until the operator unpins it, whatever it is.
 final class OperatorPinTests: XCTestCase {
-    private struct Host {
-        let configuration: NodeConfiguration
-        let overlay: IvyConfig
-        let endpoint: PeerEndpoint
-    }
-
     /// Each node advertises a routable address, since a loopback address is
     /// never accepted as a referral; dials to it are rewritten to loopback.
     private static func advertised(_ port: UInt16) -> String { "8.8.\(port >> 8).\(port & 0xFF)" }
@@ -25,49 +19,31 @@ final class OperatorPinTests: XCTestCase {
     private func host(
         keyByte: UInt8, peers: [PeerEndpoint] = [], storageDirectory reused: URL? = nil,
         hosted: [[String]] = [], announcePins: Bool = true, announceLifetime: UInt64 = 1_200
-    ) throws -> Host {
-        let storageDirectory = reused ?? FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-node-pins-\(UUID().uuidString)", isDirectory: true
-        )
-        if reused == nil { addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) } }
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: storageDirectory,
-            privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
-            listenPort: port,
-            rpcPort: NetworkTransportTestPorts.allocate(),
-            webSocket: .off,
-            bootstrapPeers: peers,
-            // One peer is enough: a node does not go looking for others.
-            peerTarget: 1,
-            externalAddress: Self.advertised(port),
-            peerSearchInterval: 3_600,
-            announceLifetime: announceLifetime,
-            announcePins: announcePins,
-            hostedChildren: hosted
-        )
-        return Host(
-            configuration: configuration,
-            overlay: IvyConfig(
-                signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: peers,
-                requestTimeout: .seconds(5), stunServers: [],
-                healthConfig: PeerHealthConfig(enabled: false),
-                // No background routing refresh: a node meets only the peers
-                // it is given, and finds the rest by lookup.
-                routingRefreshInterval: .seconds(3_600),
-                externalAddress: (Self.advertised(port), port),
-                mode: .overlay
-            ),
-            endpoint: PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port)
-        )
+    ) throws -> TestNode {
+        // No background routing refresh: a node meets only the peers it is
+        // given, and finds the rest by lookup.
+        try testNode(keyByte: keyByte, peers: peers, reusing: reused, routingRefreshInterval: .seconds(3_600)) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: $0.storagePath,
+                privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort,
+                rpcPort: $0.rpcPort,
+                webSocket: .off,
+                bootstrapPeers: peers,
+                // One peer is enough: a node does not go looking for others.
+                peerTarget: 1,
+                externalAddress: Self.advertised($0.listenPort),
+                peerSearchInterval: 3_600,
+                announceLifetime: announceLifetime,
+                announcePins: announcePins,
+                hostedChildren: hosted
+            )
+        }
     }
 
-    private func start(_ host: Host) async throws -> (NodeRuntime, NodeStorage) {
-        let storage = try await NodeStorage.open(configuration: host.configuration)
-        let runtime = try await NodeRuntime.start(
-            storage: storage, configuration: host.configuration, overlay: host.overlay
-        )
+    private func startRewritingDials(_ host: TestNode) async throws -> (NodeRuntime, NodeStorage) {
+        let (runtime, storage) = try await start(host)
         await runtime.ivy.setDialEndpointRewriteForTesting { endpoint in
             endpoint.host.hasPrefix("8.8.")
                 ? PeerEndpoint(publicKey: endpoint.publicKey, host: "127.0.0.1", port: endpoint.port)
@@ -91,7 +67,7 @@ final class OperatorPinTests: XCTestCase {
         try await volume.store(storer: captured)
         let volumes = await captured.volumes
         let entries = try XCTUnwrap(volumes.first { $0.root == root }).entries
-        let (relayRuntime, _) = try await start(try host(keyByte: 0xc4))
+        let (relayRuntime, _) = try await startRewritingDials(try host(keyByte: 0xc4))
         let relay = PeerEndpoint(
             publicKey: relayRuntime.configuration.processPublicKey, host: "127.0.0.1",
             port: relayRuntime.configuration.listenPort
@@ -99,7 +75,7 @@ final class OperatorPinTests: XCTestCase {
 
         var pinner = try host(keyByte: 0xc1, peers: [relay])
         do {
-            let (runtime, storage) = try await start(pinner)
+            let (runtime, storage) = try await startRewritingDials(pinner)
             try await runtime.pinVolume(root, entries: entries)
             let held = await storage.volume(root)
             XCTAssertNotNil(held)
@@ -109,10 +85,10 @@ final class OperatorPinTests: XCTestCase {
         }
 
         pinner = try host(keyByte: 0xc1, peers: [relay], storageDirectory: pinner.configuration.storagePath)
-        let (runtime, storage) = try await start(pinner)
+        let (runtime, storage) = try await startRewritingDials(pinner)
         let held = await storage.volume(root)
         XCTAssertNotNil(held, "a pin survives a restart, which sweeps what no scope names")
-        let (reader, readerStorage) = try await start(try host(keyByte: 0xc2, peers: [relay]))
+        let (reader, readerStorage) = try await startRewritingDials(try host(keyByte: 0xc2, peers: [relay]))
         try await eventually("another node's operator reads it, found by lookup", within: .seconds(20)) {
             try await reader.fetchVolume(root)?.entries == entries
         }
@@ -148,13 +124,13 @@ final class OperatorPinTests: XCTestCase {
             targetBlockTime: 9_000, initialReward: 9, halvingInterval: 9_999, halfLife: 9
         ))
         let holder = try host(keyByte: 0xc0)
-        let (holderRuntime, holderStorage) = try await start(holder)
+        let (holderRuntime, holderStorage) = try await startRewritingDials(holder)
         let storer = NodeImportStorage(storage: await holderStorage.broker)
         try await volume.store(storer: storer)
         try await storer.commit()
         try await holderRuntime.pinVolume(volume.rawCID)
 
-        let (runtime, storage) = try await start(try host(keyByte: 0xc3, peers: [holder.endpoint]))
+        let (runtime, storage) = try await startRewritingDials(try host(keyByte: 0xc3, peers: [holder.endpoint]))
         try await eventually("the node is connected to the holder") { await runtime.ivy.connectedPeers.count == 1 }
         do {
             try await runtime.pinVolume(volume.rawCID)
@@ -190,7 +166,7 @@ final class OperatorPinTests: XCTestCase {
             nexusGenesisCID: pinner.configuration.nexusGenesisCID, chainPath: Self.alpha
         )
         do {
-            let (runtime, storage) = try await start(pinner)
+            let (runtime, storage) = try await startRewritingDials(pinner)
             try await runtime.pinVolume(root, entries: entries)
             let held = await storage.volume(root)
             XCTAssertNotNil(held)
@@ -206,7 +182,7 @@ final class OperatorPinTests: XCTestCase {
             announcePins: false
         )
         do {
-            let (runtime, _) = try await start(pinner)
+            let (runtime, _) = try await startRewritingDials(pinner)
             try await eventually("the first pass announces Alpha") {
                 await runtime.ivy.providers(for: alphaKey).map(\.publicKey).contains(ownKey)
             }
@@ -220,7 +196,7 @@ final class OperatorPinTests: XCTestCase {
         }
 
         pinner = try host(keyByte: 0xc9, storageDirectory: pinner.configuration.storagePath, hosted: [Self.alpha])
-        let (runtime, _) = try await start(pinner)
+        let (runtime, _) = try await startRewritingDials(pinner)
         try await eventually("with pins announced, the first pass announces it") {
             await runtime.ivy.providers(for: root).map(\.publicKey).contains(ownKey)
         }
@@ -245,7 +221,7 @@ final class OperatorPinTests: XCTestCase {
         var pinner = try host(keyByte: 0xca, announceLifetime: NodeConfiguration.maximumAnnounceLifetime)
         let ownKey = pinner.configuration.processPublicKey
         do {
-            let (runtime, _) = try await start(pinner)
+            let (runtime, _) = try await startRewritingDials(pinner)
             try await runtime.pinVolume(root, entries: entries)
             await runtime.stop()
         }
@@ -255,12 +231,12 @@ final class OperatorPinTests: XCTestCase {
             keyByte: 0xca, storageDirectory: pinner.configuration.storagePath,
             announceLifetime: NodeConfiguration.maximumAnnounceLifetime
         )
-        let (runtime, _) = try await start(pinner)
+        let (runtime, _) = try await startRewritingDials(pinner)
         try await eventually("the first pass reads the pin") {
             await runtime.ivy.providers(for: root).map(\.publicKey).contains(ownKey)
         }
 
-        let (first, _) = try await start(try host(keyByte: 0xcb, peers: [pinner.endpoint]))
+        let (first, _) = try await startRewritingDials(try host(keyByte: 0xcb, peers: [pinner.endpoint]))
         try await eventually("the first peer is told the pin", within: .seconds(20)) {
             await first.ivy.providers(for: root).map(\.publicKey).contains(ownKey)
         }
@@ -269,7 +245,7 @@ final class OperatorPinTests: XCTestCase {
             await runtime.ivy.connectedPeers.isEmpty
         }
 
-        let (next, _) = try await start(try host(keyByte: 0xcc, peers: [pinner.endpoint]))
+        let (next, _) = try await startRewritingDials(try host(keyByte: 0xcc, peers: [pinner.endpoint]))
         try await eventually("the next peer is told the pin", within: .seconds(20)) {
             await next.ivy.providers(for: root).map(\.publicKey).contains(ownKey)
         }
@@ -280,7 +256,7 @@ final class OperatorPinTests: XCTestCase {
     /// Bytes the operator provides that are not the Volume its CID names are
     /// refused as invalid, not taken for a Volume the node lacks.
     func testProvidedBytesThatAreNotTheVolumeAreRefused() async throws {
-        let storage = try await NodeStorage.open(configuration: try host(keyByte: 0xc8).configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: try host(keyByte: 0xc8).configuration)
         let volume = try VolumeImpl<ChainSpec>(node: ChainSpec(
             maxNumberOfTransactionsPerBlock: 8, maxStateGrowth: 8_888, premine: 8,
             targetBlockTime: 8_000, initialReward: 8, halvingInterval: 8_888, halfLife: 8
@@ -299,7 +275,7 @@ final class OperatorPinTests: XCTestCase {
 
     /// Unpinning a CID the operator did not pin lets go of nothing.
     func testUnpinningWhatWasNotPinnedKeepsIt() async throws {
-        let storage = try await NodeStorage.open(configuration: try host(keyByte: 0xc6).configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: try host(keyByte: 0xc6).configuration)
         let volume = try VolumeImpl<ChainSpec>(node: ChainSpec(
             maxNumberOfTransactionsPerBlock: 6, maxStateGrowth: 6_666, premine: 6,
             targetBlockTime: 6_000, initialReward: 6, halvingInterval: 6_666, halfLife: 6

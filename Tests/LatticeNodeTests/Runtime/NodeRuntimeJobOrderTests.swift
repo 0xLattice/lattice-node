@@ -110,7 +110,7 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
             storagePath: storageDirectory,
             privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32)
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let config = ChainCoreConfig(bodyWindow: bodyWindow)
         return Harness(
             host: try await NodeRuntime.boot(
@@ -332,7 +332,7 @@ final class NodeRuntimeJobOrderTests: XCTestCase {
             rpcPort: NetworkTransportTestPorts.allocate()
         )
         let runtime = try await NodeRuntime.start(
-            storage: try await NodeStorage.open(configuration: configuration), configuration: configuration
+            storage: try await NodeStorage.openWhenFree(configuration: configuration), configuration: configuration
         )
         let levels = LiveLevels(inputs: runtime.inputs)
         let tip = await levels.read { $0[["Nexus"]]?.snapshot.actOnTip }

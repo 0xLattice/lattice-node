@@ -37,7 +37,7 @@ final class BundledBlockFetchTests: XCTestCase {
                 to: directory.appendingPathComponent(VolumeBundleCache.fileName)
             )
         }
-        return try await NodeStorage.open(configuration: try NodeConfiguration(
+        return try await NodeStorage.openWhenFree(configuration: try NodeConfiguration(
             chainPath: ["Nexus"],
             storagePath: directory,
             privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),

@@ -1,5 +1,4 @@
 import Foundation
-import Ivy
 import Lattice
 import LatticeNodeCore
 import UInt256
@@ -44,23 +43,14 @@ final class ChildTemplateCacheTests: XCTestCase {
             maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
             targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
         )
-        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-template-cache-\(UUID().uuidString)", isDirectory: true
-        )
-        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"], storagePath: storageDirectory, privateKeyHex: String(repeating: "5b", count: 32),
-            listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
-            hostedChildren: [alpha, beta, gamma], childSpecs: [alpha: spec, beta: spec, gamma: spec]
-        )
-        let overlay = IvyConfig(
-            signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: [],
-            requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
-            mode: .overlay
-        )
-        let storage = try await NodeStorage.open(configuration: configuration)
-        let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration, overlay: overlay)
+        let node = try testNode(keyByte: 0x5b) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"], storagePath: $0.storagePath, privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort, rpcPort: $0.rpcPort,
+                hostedChildren: [alpha, beta, gamma], childSpecs: [alpha: spec, beta: spec, gamma: spec]
+            )
+        }
+        let (runtime, _) = try await start(node)
         let betaReads = try XCTUnwrap(runtime.levelReads[beta])
         let gammaReads = try XCTUnwrap(runtime.levelReads[gamma])
         let recipient = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)

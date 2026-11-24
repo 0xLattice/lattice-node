@@ -13,12 +13,6 @@ import LatticeNodeAPI
 /// Content a fact names and the store lacks is no fault: the node reads what
 /// its own work needs from peers, checked against its CID.
 final class AbsentContentTests: XCTestCase {
-    private struct Host {
-        let configuration: NodeConfiguration
-        let overlay: IvyConfig
-        let endpoint: PeerEndpoint
-    }
-
     static let alpha = ["Nexus", "Alpha"]
     static let alphaSpec = ChainSpec(
         maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
@@ -30,35 +24,19 @@ final class AbsentContentTests: XCTestCase {
         peers: [PeerEndpoint] = [],
         storageDirectory reused: URL? = nil,
         hosted: Bool = false
-    ) throws -> Host {
-        let storageDirectory = reused ?? FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-node-absent-\(UUID().uuidString)", isDirectory: true
-        )
-        if reused == nil { addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) } }
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: storageDirectory,
-            privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
-            listenPort: port,
-            rpcPort: NetworkTransportTestPorts.allocate(),
-            webSocket: .off,
-            hostedChildren: hosted ? [Self.alpha] : [],
-            childSpecs: hosted ? [Self.alpha: Self.alphaSpec] : [:]
-        )
-        return Host(
-            configuration: configuration,
-            overlay: IvyConfig(
-                signingKey: configuration.signingKey,
-                listenPort: port,
-                bootstrapPeers: peers,
-                requestTimeout: .seconds(5),
-                stunServers: [],
-                healthConfig: PeerHealthConfig(enabled: false),
-                mode: .overlay
-            ),
-            endpoint: PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port)
-        )
+    ) throws -> TestNode {
+        try testNode(keyByte: keyByte, peers: peers, reusing: reused) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: $0.storagePath,
+                privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort,
+                rpcPort: $0.rpcPort,
+                webSocket: .off,
+                hostedChildren: hosted ? [Self.alpha] : [],
+                childSpecs: hosted ? [Self.alpha: Self.alphaSpec] : [:]
+            )
+        }
     }
 
     private func mine(
@@ -76,7 +54,7 @@ final class AbsentContentTests: XCTestCase {
         CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
     }
 
-    private func empty(_ host: Host) {
+    private func empty(_ host: TestNode) {
         try? FileManager.default.removeItem(at: host.configuration.storagePath.appendingPathComponent("volumes"))
     }
 
@@ -87,7 +65,7 @@ final class AbsentContentTests: XCTestCase {
         let first = address()
         let second = address()
         let producer = try host(keyByte: 0x61)
-        let producerStorage = try await NodeStorage.open(configuration: producer.configuration)
+        let producerStorage = try await NodeStorage.openWhenFree(configuration: producer.configuration)
         let producerRuntime = try await NodeRuntime.start(
             storage: producerStorage, configuration: producer.configuration, overlay: producer.overlay
         )
@@ -96,7 +74,7 @@ final class AbsentContentTests: XCTestCase {
 
         let joiner = try host(keyByte: 0x62, peers: [producer.endpoint])
         do {
-            let storage = try await NodeStorage.open(configuration: joiner.configuration)
+            let storage = try await NodeStorage.openWhenFree(configuration: joiner.configuration)
             let runtime = try await NodeRuntime.start(
                 storage: storage, configuration: joiner.configuration, overlay: joiner.overlay
             )
@@ -107,7 +85,7 @@ final class AbsentContentTests: XCTestCase {
         }
         empty(joiner)
 
-        let storage = try await NodeStorage.open(configuration: joiner.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: joiner.configuration)
         let runtime = try await NodeRuntime.start(
             storage: storage, configuration: joiner.configuration, overlay: joiner.overlay
         )
@@ -153,7 +131,7 @@ final class AbsentContentTests: XCTestCase {
     func testAnEmptiedNodeAndItsPeerFollowEachOther() async throws {
         let first = address()
         let producer = try host(keyByte: 0x68)
-        let producerStorage = try await NodeStorage.open(configuration: producer.configuration)
+        let producerStorage = try await NodeStorage.openWhenFree(configuration: producer.configuration)
         let producerRuntime = try await NodeRuntime.start(
             storage: producerStorage, configuration: producer.configuration, overlay: producer.overlay
         )
@@ -161,7 +139,7 @@ final class AbsentContentTests: XCTestCase {
         for _ in 0..<3 { tip = try await mine(producerRuntime, paying(first)) }
         let joiner = try host(keyByte: 0x69, peers: [producer.endpoint])
         do {
-            let storage = try await NodeStorage.open(configuration: joiner.configuration)
+            let storage = try await NodeStorage.openWhenFree(configuration: joiner.configuration)
             let runtime = try await NodeRuntime.start(
                 storage: storage, configuration: joiner.configuration, overlay: joiner.overlay
             )
@@ -171,7 +149,7 @@ final class AbsentContentTests: XCTestCase {
             await runtime.stop()
         }
         empty(joiner)
-        let storage = try await NodeStorage.open(configuration: joiner.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: joiner.configuration)
         let runtime = try await NodeRuntime.start(
             storage: storage, configuration: joiner.configuration, overlay: joiner.overlay
         )
@@ -196,13 +174,13 @@ final class AbsentContentTests: XCTestCase {
     /// store lacks it.
     func testANodeEmptiedAtItsGenesisTipExecutesTheFirstBlock() async throws {
         let producer = try host(keyByte: 0x64)
-        let producerStorage = try await NodeStorage.open(configuration: producer.configuration)
+        let producerStorage = try await NodeStorage.openWhenFree(configuration: producer.configuration)
         let producerRuntime = try await NodeRuntime.start(
             storage: producerStorage, configuration: producer.configuration, overlay: producer.overlay
         )
         let joiner = try host(keyByte: 0x65, peers: [producer.endpoint])
         do {
-            let storage = try await NodeStorage.open(configuration: joiner.configuration)
+            let storage = try await NodeStorage.openWhenFree(configuration: joiner.configuration)
             let runtime = try await NodeRuntime.start(
                 storage: storage, configuration: joiner.configuration, overlay: joiner.overlay
             )
@@ -210,7 +188,7 @@ final class AbsentContentTests: XCTestCase {
         }
         empty(joiner)
 
-        let storage = try await NodeStorage.open(configuration: joiner.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: joiner.configuration)
         let genesis = await storage.volume(joiner.configuration.nexusGenesisCID)
         XCTAssertNotNil(genesis, "every node holds the genesis block")
         let runtime = try await NodeRuntime.start(
@@ -229,7 +207,7 @@ final class AbsentContentTests: XCTestCase {
     /// root carries read what they need the same way the root does.
     func testANodeHostingAChildChainStartsAndMinesOnAnEmptiedStore() async throws {
         let producer = try host(keyByte: 0x66, hosted: true)
-        let producerStorage = try await NodeStorage.open(configuration: producer.configuration)
+        let producerStorage = try await NodeStorage.openWhenFree(configuration: producer.configuration)
         let producerRuntime = try await NodeRuntime.start(
             storage: producerStorage, configuration: producer.configuration, overlay: producer.overlay
         )
@@ -240,7 +218,7 @@ final class AbsentContentTests: XCTestCase {
 
         let joiner = try host(keyByte: 0x67, peers: [producer.endpoint], hosted: true)
         do {
-            let storage = try await NodeStorage.open(configuration: joiner.configuration)
+            let storage = try await NodeStorage.openWhenFree(configuration: joiner.configuration)
             let runtime = try await NodeRuntime.start(
                 storage: storage, configuration: joiner.configuration, overlay: joiner.overlay
             )
@@ -258,7 +236,7 @@ final class AbsentContentTests: XCTestCase {
         }
         empty(joiner)
 
-        let storage = try await NodeStorage.open(configuration: joiner.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: joiner.configuration)
         let runtime = try await NodeRuntime.start(
             storage: storage, configuration: joiner.configuration, overlay: joiner.overlay
         )
@@ -286,7 +264,7 @@ final class AbsentContentTests: XCTestCase {
     /// state the store lacks through peers.
     func testATransactionThisStoreRefusesSpendsNoRequestsToPeers() async throws {
         let producer = try host(keyByte: 0x6A)
-        let producerStorage = try await NodeStorage.open(configuration: producer.configuration)
+        let producerStorage = try await NodeStorage.openWhenFree(configuration: producer.configuration)
         let producerRuntime = try await NodeRuntime.start(
             storage: producerStorage, configuration: producer.configuration, overlay: producer.overlay
         )
@@ -294,7 +272,7 @@ final class AbsentContentTests: XCTestCase {
         for _ in 0..<3 { tip = try await mine(producerRuntime, paying(address())) }
         let joiner = try host(keyByte: 0x6B, peers: [producer.endpoint])
         do {
-            let storage = try await NodeStorage.open(configuration: joiner.configuration)
+            let storage = try await NodeStorage.openWhenFree(configuration: joiner.configuration)
             let runtime = try await NodeRuntime.start(
                 storage: storage, configuration: joiner.configuration, overlay: joiner.overlay
             )
@@ -304,7 +282,7 @@ final class AbsentContentTests: XCTestCase {
             await runtime.stop()
         }
         empty(joiner)
-        let storage = try await NodeStorage.open(configuration: joiner.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: joiner.configuration)
         let runtime = try await NodeRuntime.start(
             storage: storage, configuration: joiner.configuration, overlay: joiner.overlay
         )
@@ -336,7 +314,7 @@ final class AbsentContentTests: XCTestCase {
     /// fetched: what is held is retained, and the rest is no error.
     func testRetainingKeepsWhatIsHeldAndIgnoresWhatIsNot() async throws {
         let node = try host(keyByte: 0x63)
-        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: node.configuration)
         let genesis = node.configuration.nexusGenesisCID
         let absent = try VolumeImpl<ChainSpec>(node: ChainSpec(
             maxNumberOfTransactionsPerBlock: 7, maxStateGrowth: 7, premine: 0,

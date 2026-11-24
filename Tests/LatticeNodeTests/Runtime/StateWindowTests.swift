@@ -14,12 +14,6 @@ import LatticeNodeAPI
 /// what the last executions read and created. Either reads the rest from
 /// peers.
 final class StateWindowTests: XCTestCase {
-    private struct Host {
-        let configuration: NodeConfiguration
-        let overlay: IvyConfig
-        let endpoint: PeerEndpoint
-    }
-
     static let alpha = ["Nexus", "Alpha"]
     static let alphaSpec = ChainSpec(
         maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
@@ -30,42 +24,23 @@ final class StateWindowTests: XCTestCase {
         keyByte: UInt8, peers: [PeerEndpoint] = [], storageDirectory reused: URL? = nil, state: StateRetention = .all,
         stateWindow: UInt64? = nil, hosted: Bool = false, peerSearchInterval: TimeInterval = 600,
         alphaSpec: ChainSpec = alphaSpec, policyModules: [Data] = []
-    ) throws -> Host {
-        let storageDirectory = reused ?? FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-node-state-\(UUID().uuidString)", isDirectory: true
-        )
-        if reused == nil { addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) } }
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: storageDirectory,
-            privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
-            listenPort: port,
-            rpcPort: NetworkTransportTestPorts.allocate(),
-            webSocket: .off,
-            peerSearchInterval: peerSearchInterval,
-            state: state,
-            hostedChildren: hosted ? [Self.alpha] : [],
-            childSpecs: hosted ? [Self.alpha: alphaSpec] : [:],
-            policyModules: policyModules,
-            stateWindows: FinalityWindows(all: stateWindow)
-        )
-        return Host(
-            configuration: configuration,
-            overlay: IvyConfig(
-                signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: peers,
-                requestTimeout: .seconds(5), stunServers: [],
-                healthConfig: PeerHealthConfig(enabled: false), mode: .overlay
-            ),
-            endpoint: PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port)
-        )
-    }
-
-    private func start(_ host: Host) async throws -> (NodeRuntime, NodeStorage) {
-        let storage = try await NodeStorage.open(configuration: host.configuration)
-        return (try await NodeRuntime.start(
-            storage: storage, configuration: host.configuration, overlay: host.overlay
-        ), storage)
+    ) throws -> TestNode {
+        try testNode(keyByte: keyByte, peers: peers, reusing: reused) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: $0.storagePath,
+                privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort,
+                rpcPort: $0.rpcPort,
+                webSocket: .off,
+                peerSearchInterval: peerSearchInterval,
+                state: state,
+                hostedChildren: hosted ? [Self.alpha] : [],
+                childSpecs: hosted ? [Self.alpha: alphaSpec] : [:],
+                policyModules: policyModules,
+                stateWindows: FinalityWindows(all: stateWindow)
+            )
+        }
     }
 
     private typealias Key = (privateKey: String, publicKey: String)
@@ -417,7 +392,7 @@ final class StateWindowTests: XCTestCase {
     /// and its tip.
     private func produceAnAccountPaidOnce(
         keyByte: UInt8, payer: Key
-    ) async throws -> (host: Host, runtime: NodeRuntime, tip: String) {
+    ) async throws -> (host: TestNode, runtime: NodeRuntime, tip: String) {
         let producer = try host(keyByte: keyByte)
         let (runtime, _) = try await start(producer)
         _ = try await runtime.mineBlock(MiningTemplateRequest(
@@ -615,7 +590,7 @@ final class StateWindowTests: XCTestCase {
 
     /// Two producers' chains from genesis, a shorter and a longer: each
     /// block pays `payee`.
-    private func produce(_ keyByte: UInt8, paying payee: Key, _ count: Int) async throws -> (Host, NodeRuntime, [String]) {
+    private func produce(_ keyByte: UInt8, paying payee: Key, _ count: Int) async throws -> (TestNode, NodeRuntime, [String]) {
         let producer = try host(keyByte: keyByte)
         let (runtime, _) = try await start(producer)
         let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(payee))])
@@ -1125,7 +1100,7 @@ final class StateWindowTests: XCTestCase {
     func testAStartLetsGoOfCountsNoLongerNeeded() async throws {
         let node = try host(keyByte: 0xf6, state: .recent)
         let genesis = node.configuration.nexusGenesisCID
-        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: node.configuration)
         do {
             let scopes = storage.scopes
             // Counts of Nexus at its genesis, which hold nothing of its
