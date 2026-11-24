@@ -53,30 +53,27 @@ final class HeldLevelTemplateTests: XCTestCase {
         connectBatch: Int = 1,
         observe: NodeRuntime.JobObserver? = nil
     ) async throws -> (runtime: NodeRuntime, endpoint: PeerEndpoint, storage: NodeStorage) {
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: Self.nexus, storagePath: temporaryDirectory(),
-            privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
-            listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
-            hostedChildren: alpha ? [Self.alpha] : [],
-            childSpecs: alpha && creator ? [Self.alpha: MergedMiningTests.alphaSpec] : [:],
-            connectBatch: connectBatch
-        )
-        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
+        let node = try testNode(keyByte: keyByte, peers: peers) {
+            try NodeConfiguration(
+                chainPath: Self.nexus, storagePath: $0.storagePath,
+                privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort, rpcPort: $0.rpcPort,
+                hostedChildren: alpha ? [Self.alpha] : [],
+                childSpecs: alpha && creator ? [Self.alpha: MergedMiningTests.alphaSpec] : [:],
+                connectBatch: connectBatch
+            )
+        }
+        let storage = try await NodeStorage.openWhenFree(configuration: node.configuration)
         let runtime = try await NodeRuntime.start(
             storage: storage,
-            configuration: configuration,
-            overlay: IvyConfig(
-                signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: peers,
-                requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
-                mode: .overlay
-            ),
+            configuration: node.configuration,
+            overlay: node.overlay,
             coreConfig: coreConfig,
             workers: 2,
             observeJob: observe
         )
         addTeardownBlock { await runtime.stop() }
-        return (runtime, PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port), storage)
+        return (runtime, node.endpoint, storage)
     }
 
     /// Whether `path` on `runtime` has the body of the best chain's block at

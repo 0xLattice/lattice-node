@@ -14,34 +14,19 @@ import cashew
 /// it from peers, within the operator's `--public-read-fetches`.
 final class PublicVolumeFetchTests: XCTestCase {
     private func node(keyByte: UInt8, peers: [PeerEndpoint] = []) async throws -> (NodeRuntime, NodeStorage) {
-        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-public-fetch-\(UUID().uuidString)", isDirectory: true
-        )
-        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: storageDirectory,
-            privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
-            listenPort: port,
-            rpcPort: NetworkTransportTestPorts.allocate(),
-            webSocket: .off,
-            bootstrapPeers: peers,
-            peerTarget: 1,
-            peerSearchInterval: 3_600
-        )
-        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
-        let runtime = try await NodeRuntime.start(
-            storage: storage, configuration: configuration,
-            overlay: IvyConfig(
-                signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: peers,
-                requestTimeout: .seconds(5), stunServers: [],
-                healthConfig: PeerHealthConfig(enabled: false),
-                routingRefreshInterval: .seconds(3_600),
-                mode: .overlay
+        try await start(testNode(keyByte: keyByte, peers: peers, routingRefreshInterval: .seconds(3_600)) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: $0.storagePath,
+                privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort,
+                rpcPort: $0.rpcPort,
+                webSocket: .off,
+                bootstrapPeers: peers,
+                peerTarget: 1,
+                peerSearchInterval: 3_600
             )
-        )
-        return (runtime, storage)
+        })
     }
 
     private func spec(_ n: UInt64) throws -> VolumeImpl<ChainSpec> {

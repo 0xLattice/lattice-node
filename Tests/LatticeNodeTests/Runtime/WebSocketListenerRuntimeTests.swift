@@ -2,7 +2,6 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
-import Ivy
 import XCTest
 @testable import LatticeNode
 
@@ -17,25 +16,17 @@ private let datagram = Int32(SOCK_DGRAM.rawValue)
 /// A started node listens for browsers: WebSocket and STUN on one port.
 final class WebSocketListenerRuntimeTests: XCTestCase {
     private func runtime(_ webSocket: WebSocketListener) async throws -> NodeRuntime {
-        let directory = temporaryDirectory()
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: directory,
-            privateKeyHex: String(repeating: "5c", count: 32),
-            listenPort: port,
-            rpcPort: NetworkTransportTestPorts.allocate(),
-            webSocket: webSocket
-        )
-        let runtime = try await NodeRuntime.start(
-            storage: try await NodeStorage.openWhenFree(configuration: configuration),
-            configuration: configuration,
-            overlay: IvyConfig(
-                signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: [],
-                requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
-                mode: .overlay
+        let node = try testNode(keyByte: 0x5c) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: $0.storagePath,
+                privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort,
+                rpcPort: $0.rpcPort,
+                webSocket: webSocket
             )
-        )
+        }
+        let (runtime, _) = try await start(node)
         addTeardownBlock { await runtime.stop() }
         return runtime
     }

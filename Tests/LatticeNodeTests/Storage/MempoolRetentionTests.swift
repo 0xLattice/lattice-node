@@ -11,20 +11,8 @@ import LatticeNodeAPI
 /// in the live scope again once the pool re-admits it.
 final class MempoolRetentionTests: XCTestCase {
     func testRestoredLocalRootsArePinnedAgainAfterStartupClearsTheLiveOwner() async throws {
-        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-mempool-retention-\(UUID().uuidString)", isDirectory: true
-        )
-        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"], storagePath: storageDirectory, privateKeyHex: String(repeating: "5e", count: 32),
-            listenPort: port, rpcPort: NetworkTransportTestPorts.allocate()
-        )
-        let overlay = IvyConfig(
-            signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: [],
-            requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
-            mode: .overlay
-        )
+        let node = try testNode(keyByte: 0x5e)
+        let (configuration, overlay) = (node.configuration, node.overlay)
         let roots = try await submitLocals(configuration, overlay)
 
         let reopened = try await NodeStorage.openWhenFree(configuration: configuration)

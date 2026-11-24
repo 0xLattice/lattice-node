@@ -52,22 +52,14 @@ final class MergedMiningTests: XCTestCase {
     )
 
     func testOneGrindAdvancesNexusAndItsHostedChild() async throws {
-        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-merged-\(UUID().uuidString)", isDirectory: true
-        )
-        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"], storagePath: storageDirectory,
-            privateKeyHex: String(repeating: "4d", count: 32),
-            listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
-            hostedChildren: [Self.alpha], childSpecs: [Self.alpha: Self.alphaSpec]
-        )
-        let overlay = IvyConfig(
-            signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: [],
-            requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
-            mode: .overlay
-        )
+        let node = try testNode(keyByte: 0x4d) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"], storagePath: $0.storagePath, privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort, rpcPort: $0.rpcPort,
+                hostedChildren: [Self.alpha], childSpecs: [Self.alpha: Self.alphaSpec]
+            )
+        }
+        let (configuration, overlay) = (node.configuration, node.overlay)
         let alphaHeight = try await mineFirstRun(configuration, overlay)
 
         // A restart serves Alpha's headers with their proofs at once, and
@@ -101,24 +93,16 @@ final class MergedMiningTests: XCTestCase {
         XCTAssertThrowsError(try ChildGenesis.premine(spec: spec, to: "", on: Self.alpha), "not an account")
 
         func host(_ keyByte: String, creator: Bool, peers: [PeerEndpoint] = []) throws -> (NodeConfiguration, IvyConfig, PeerEndpoint) {
-            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-                "lattice-premine-\(UUID().uuidString)", isDirectory: true
-            )
-            addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
-            let port = NetworkTransportTestPorts.allocate()
-            let configuration = try NodeConfiguration(
-                chainPath: ["Nexus"], storagePath: directory, privateKeyHex: String(repeating: keyByte, count: 32),
-                listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
-                hostedChildren: [Self.alpha],
-                childSpecs: creator ? [Self.alpha: spec] : [:],
-                childPremineRecipients: creator ? [Self.alpha: artist] : [:]
-            )
-            let overlay = IvyConfig(
-                signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: peers,
-                requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
-                mode: .overlay
-            )
-            return (configuration, overlay, PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port))
+            let node = try testNode(keyByte: UInt8(keyByte, radix: 16)!, peers: peers) {
+                try NodeConfiguration(
+                    chainPath: ["Nexus"], storagePath: $0.storagePath, privateKeyHex: $0.privateKeyHex,
+                    listenPort: $0.listenPort, rpcPort: $0.rpcPort,
+                    hostedChildren: [Self.alpha],
+                    childSpecs: creator ? [Self.alpha: spec] : [:],
+                    childPremineRecipients: creator ? [Self.alpha: artist] : [:]
+                )
+            }
+            return (node.configuration, node.overlay, node.endpoint)
         }
         func balance(_ reads: ChainReads) async -> UInt64? {
             guard let tip = await reads.readSnapshot().tipCID else { return nil }
@@ -213,25 +197,15 @@ final class MergedMiningTests: XCTestCase {
         )
         XCTAssertThrowsError(try ChildGenesis.checkPremine(spec: small, to: nil, transactions: claims, on: Self.alpha, modules: [], timestamp: Self.genesisCheckTime), "more than a block holds")
 
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-genesis-transactions-\(UUID().uuidString)", isDirectory: true
-        )
-        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"], storagePath: directory, privateKeyHex: String(repeating: "6e", count: 32),
-            listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
-            hostedChildren: [Self.alpha], childSpecs: [Self.alpha: Self.alphaSpec],
-            childGenesisTransactions: [Self.alpha: claims]
-        )
-        let overlay = IvyConfig(
-            signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: [],
-            requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
-            mode: .overlay
-        )
-        let runtime = try await NodeRuntime.start(
-            storage: try await NodeStorage.openWhenFree(configuration: configuration), configuration: configuration, overlay: overlay
-        )
+        let node = try testNode(keyByte: 0x6e) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"], storagePath: $0.storagePath, privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort, rpcPort: $0.rpcPort,
+                hostedChildren: [Self.alpha], childSpecs: [Self.alpha: Self.alphaSpec],
+                childGenesisTransactions: [Self.alpha: claims]
+            )
+        }
+        let (runtime, _) = try await start(node)
         addTeardownBlock { await runtime.stop() }
         let alpha = try XCTUnwrap(runtime.levelReads[Self.alpha])
         try await eventually("Alpha's genesis is mined") {
@@ -281,25 +255,15 @@ final class MergedMiningTests: XCTestCase {
 
         // The same node with a policy that accepts the credit offers the genesis.
         func host(_ module: Data, _ keyByte: String) async throws -> NodeRuntime {
-            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-                "lattice-premine-policy-\(UUID().uuidString)", isDirectory: true
-            )
-            addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
-            let port = NetworkTransportTestPorts.allocate()
-            let configuration = try NodeConfiguration(
-                chainPath: ["Nexus"], storagePath: directory, privateKeyHex: String(repeating: keyByte, count: 32),
-                listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
-                hostedChildren: [Self.alpha], childSpecs: [Self.alpha: try spec(module)],
-                childPremineRecipients: [Self.alpha: artist], policyModules: [module]
-            )
-            let overlay = IvyConfig(
-                signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: [],
-                requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
-                mode: .overlay
-            )
-            let runtime = try await NodeRuntime.start(
-                storage: try await NodeStorage.openWhenFree(configuration: configuration), configuration: configuration, overlay: overlay
-            )
+            let node = try testNode(keyByte: UInt8(keyByte, radix: 16)!) {
+                try NodeConfiguration(
+                    chainPath: ["Nexus"], storagePath: $0.storagePath, privateKeyHex: $0.privateKeyHex,
+                    listenPort: $0.listenPort, rpcPort: $0.rpcPort,
+                    hostedChildren: [Self.alpha], childSpecs: [Self.alpha: try spec(module)],
+                    childPremineRecipients: [Self.alpha: artist], policyModules: [module]
+                )
+            }
+            let (runtime, _) = try await start(node)
             addTeardownBlock { await runtime.stop() }
             return runtime
         }
@@ -323,22 +287,14 @@ final class MergedMiningTests: XCTestCase {
     /// the child's.
     func testAPeerPoolsAnAnnouncedTransactionOnTheChainItNames() async throws {
         func host(_ keyByte: String, peers: [PeerEndpoint] = []) throws -> (NodeConfiguration, IvyConfig, PeerEndpoint) {
-            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-                "lattice-relay-\(UUID().uuidString)", isDirectory: true
-            )
-            addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
-            let port = NetworkTransportTestPorts.allocate()
-            let configuration = try NodeConfiguration(
-                chainPath: ["Nexus"], storagePath: directory, privateKeyHex: String(repeating: keyByte, count: 32),
-                listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
-                hostedChildren: [Self.alpha], childSpecs: [Self.alpha: Self.alphaSpec]
-            )
-            let overlay = IvyConfig(
-                signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: peers,
-                requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
-                mode: .overlay
-            )
-            return (configuration, overlay, PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port))
+            let node = try testNode(keyByte: UInt8(keyByte, radix: 16)!, peers: peers) {
+                try NodeConfiguration(
+                    chainPath: ["Nexus"], storagePath: $0.storagePath, privateKeyHex: $0.privateKeyHex,
+                    listenPort: $0.listenPort, rpcPort: $0.rpcPort,
+                    hostedChildren: [Self.alpha], childSpecs: [Self.alpha: Self.alphaSpec]
+                )
+            }
+            return (node.configuration, node.overlay, node.endpoint)
         }
         let (minerConfiguration, minerOverlay, minerEndpoint) = try host("5a")
         let miner = try await NodeRuntime.start(
@@ -445,11 +401,6 @@ final class MergedMiningTests: XCTestCase {
     private func policyHost(
         _ keyByte: String, module: Data?, peers: [PeerEndpoint] = []
     ) throws -> (NodeConfiguration, IvyConfig, PeerEndpoint) {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-policy-\(UUID().uuidString)", isDirectory: true
-        )
-        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
-        let port = NetworkTransportTestPorts.allocate()
         let spec = try module.map { module in
             ChainSpec(
                 maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
@@ -460,18 +411,15 @@ final class MergedMiningTests: XCTestCase {
                 )]
             )
         }
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"], storagePath: directory, privateKeyHex: String(repeating: keyByte, count: 32),
-            listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
-            hostedChildren: [Self.alpha], childSpecs: spec.map { [Self.alpha: $0] } ?? [:],
-            policyModules: module.map { [$0] } ?? []
-        )
-        let overlay = IvyConfig(
-            signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: peers,
-            requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
-            mode: .overlay
-        )
-        return (configuration, overlay, PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port))
+        let node = try testNode(keyByte: UInt8(keyByte, radix: 16)!, peers: peers) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"], storagePath: $0.storagePath, privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort, rpcPort: $0.rpcPort,
+                hostedChildren: [Self.alpha], childSpecs: spec.map { [Self.alpha: $0] } ?? [:],
+                policyModules: module.map { [$0] } ?? []
+            )
+        }
+        return (node.configuration, node.overlay, node.endpoint)
     }
 
     /// A payer the node's mining has funded on Alpha, and a transfer of theirs on it.
@@ -580,23 +528,14 @@ final class MergedMiningTests: XCTestCase {
     /// template must still offer it, to be checked against the carrier's
     /// entering state.
     func testAChildWithdrawalIsMinedOnceItsParentReceiptLands() async throws {
-        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-swap-\(UUID().uuidString)", isDirectory: true
-        )
-        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"], storagePath: storageDirectory, privateKeyHex: String(repeating: "4f", count: 32),
-            listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
-            hostedChildren: [Self.alpha], childSpecs: [Self.alpha: Self.alphaSpec]
-        )
-        let overlay = IvyConfig(
-            signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: [],
-            requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
-            mode: .overlay
-        )
-        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
-        let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration, overlay: overlay)
+        let node = try testNode(keyByte: 0x4f) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"], storagePath: $0.storagePath, privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort, rpcPort: $0.rpcPort,
+                hostedChildren: [Self.alpha], childSpecs: [Self.alpha: Self.alphaSpec]
+            )
+        }
+        let (runtime, _) = try await start(node)
         let nexusReads = runtime.reads
         let alphaReads = try XCTUnwrap(runtime.levelReads[Self.alpha])
         let demander = CryptoUtils.generateKeyPair()
@@ -846,21 +785,14 @@ final class MergedMiningTests: XCTestCase {
     /// merged mining.
     func testANestedChildGenesisIsMinedOnceItsParentExecutes() async throws {
         let beta = Self.alpha + ["Beta"]
-        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-nested-\(UUID().uuidString)", isDirectory: true
-        )
-        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"], storagePath: storageDirectory, privateKeyHex: String(repeating: "4e", count: 32),
-            listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
-            hostedChildren: [Self.alpha, beta], childSpecs: [Self.alpha: Self.alphaSpec, beta: Self.alphaSpec]
-        )
-        let overlay = IvyConfig(
-            signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: [],
-            requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
-            mode: .overlay
-        )
+        let node = try testNode(keyByte: 0x4e) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"], storagePath: $0.storagePath, privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort, rpcPort: $0.rpcPort,
+                hostedChildren: [Self.alpha, beta], childSpecs: [Self.alpha: Self.alphaSpec, beta: Self.alphaSpec]
+            )
+        }
+        let (configuration, overlay) = (node.configuration, node.overlay)
         let betaHeight = try await mineNestedFirstRun(configuration, overlay, beta: beta)
 
         // A nested proof crosses two child indexes. Restoring only Alpha is
@@ -895,23 +827,14 @@ final class MergedMiningTests: XCTestCase {
             maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
             targetBlockTime: 1, initialReward: 10, halvingInterval: 10_000, halfLife: 10
         )
-        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-grandchild-\(UUID().uuidString)", isDirectory: true
-        )
-        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"], storagePath: storageDirectory, privateKeyHex: String(repeating: "4f", count: 32),
-            listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
-            hostedChildren: [Self.alpha, beta], childSpecs: [Self.alpha: Self.alphaSpec, beta: betaSpec]
-        )
-        let overlay = IvyConfig(
-            signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: [],
-            requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
-            mode: .overlay
-        )
-        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
-        let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration, overlay: overlay)
+        let node = try testNode(keyByte: 0x4f) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"], storagePath: $0.storagePath, privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort, rpcPort: $0.rpcPort,
+                hostedChildren: [Self.alpha, beta], childSpecs: [Self.alpha: Self.alphaSpec, beta: betaSpec]
+            )
+        }
+        let (runtime, _) = try await start(node)
         let betaReads = try XCTUnwrap(runtime.levelReads[beta])
         let recipient = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
         let request = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: Self.alpha, address: recipient)])
