@@ -35,7 +35,7 @@ final class OperatorListenerTests: XCTestCase {
             storagePath: directory,
             privateKeyHex: String(repeating: "02", count: 32)
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let service = try await startRuntime(storage, configuration)
         let tokens = TokenStore(try OperatorTokens([
             .init(name: "seller", sha256: OperatorTokens.hash(Self.token), routes: [

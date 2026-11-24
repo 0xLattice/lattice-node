@@ -128,22 +128,12 @@ final class RetentionCrashTests: XCTestCase {
         return try await storage.broker.retainedScopes(prefix: scopes.stagingPrefix).isEmpty
     }
 
-    /// Waits until the storage a stopped runtime opened is released.
-    private func closed(_ storage: inout NodeStorage?) async throws {
-        // Assigned after its declaration: Linux's compiler refuses a weak
-        // `let`, and macOS's warns of a weak `var` never assigned.
-        weak var released: NodeStorage?
-        released = storage
-        storage = nil
-        try await eventually("the first storage is closed") { released == nil }
-    }
-
     private func crashAndRecover(afterWrites writes: Int64, armedAtStart: Bool) async throws {
         let at = "\(armedAtStart ? "start" : "following"), \(writes) writes"
         let (payer, payee): (Key, Key) = (CryptoUtils.generateKeyPair(), CryptoUtils.generateKeyPair())
         let paid = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: ["Nexus"], address: address(payer))])
         let producer = try node(keyByte: 0xc1, directory: directory(), peers: [], state: .all, bodies: .all)
-        let producerStorage = try await NodeStorage.open(configuration: producer.0)
+        let producerStorage = try await NodeStorage.openWhenFree(configuration: producer.0)
         let producerRuntime = try await NodeRuntime.start(
             storage: producerStorage, configuration: producer.0, overlay: producer.1
         )
@@ -158,10 +148,9 @@ final class RetentionCrashTests: XCTestCase {
             keyByte: 0xc2, directory: followerDirectory, peers: [producer.2], state: .recent, bodies: .none
         )
         var acknowledged: String?
-        var first: NodeStorage? = try await NodeStorage.open(configuration: follower.0)
         defer { Crash.off() }
         do {
-            let storage = try XCTUnwrap(first)
+            let storage = try await NodeStorage.openWhenFree(configuration: follower.0)
             if armedAtStart { Crash.after(writes, under: followerDirectory) }
             // A crash fail-stops the persist it lands in; the loop ends there.
             let runtime = try await NodeRuntime.start(
@@ -193,10 +182,9 @@ final class RetentionCrashTests: XCTestCase {
             await runtime.stop()
         }
         Crash.off()
-        try await closed(&first)
 
         try await mine(2)
-        let storage = try await NodeStorage.open(configuration: follower.0)
+        let storage = try await NodeStorage.openWhenFree(configuration: follower.0)
         let runtime = try await NodeRuntime.start(storage: storage, configuration: follower.0, overlay: follower.1)
         try await eventually(
             "\(at): after the restart the follower reaches the tip and its counts it", passes: runtime, within: .seconds(60)
@@ -235,7 +223,7 @@ final class RetentionCrashTests: XCTestCase {
     private func crashWhileUnhosting(afterWrites writes: Int64) async throws {
         let boundary = "letting Alpha go, \(writes) writes"
         let producer = try node(keyByte: 0xc3, directory: directory(), peers: [], state: .all, bodies: .all, hosted: true)
-        let producerStorage = try await NodeStorage.open(configuration: producer.0)
+        let producerStorage = try await NodeStorage.openWhenFree(configuration: producer.0)
         let producerRuntime = try await NodeRuntime.start(
             storage: producerStorage, configuration: producer.0, overlay: producer.1
         )
@@ -260,10 +248,9 @@ final class RetentionCrashTests: XCTestCase {
         let follower = try node(
             keyByte: 0xc4, directory: followerDirectory, peers: [producer.2], state: .recent, bodies: .none, hosted: true
         )
-        var first: NodeStorage? = try await NodeStorage.open(configuration: follower.0)
         defer { Crash.off() }
         do {
-            let storage = try XCTUnwrap(first)
+            let storage = try await NodeStorage.openWhenFree(configuration: follower.0)
             let runtime = try await NodeRuntime.start(
                 storage: storage, configuration: follower.0, overlay: follower.1, failStop: { _ in }, observeJob: nil
             )
@@ -285,10 +272,9 @@ final class RetentionCrashTests: XCTestCase {
             await runtime.stop()
         }
         Crash.off()
-        try await closed(&first)
 
         let alone = try node(keyByte: 0xc4, directory: followerDirectory, peers: [producer.2], state: .recent, bodies: .none)
-        let storage = try await NodeStorage.open(configuration: alone.0)
+        let storage = try await NodeStorage.openWhenFree(configuration: alone.0)
         let runtime = try await NodeRuntime.start(storage: storage, configuration: alone.0, overlay: alone.1)
         try await eventually(
             "\(boundary): after the restart Nexus is at its tip and its counts match", passes: runtime, within: .seconds(60)

@@ -32,7 +32,7 @@ extension XCTestCase {
 
     func startLoopbackHost(_ configuration: NodeConfiguration, _ overlay: IvyConfig) async throws -> NodeRuntime {
         try await NodeRuntime.start(
-            storage: try await NodeStorage.open(configuration: configuration),
+            storage: try await NodeStorage.openWhenFree(configuration: configuration),
             configuration: configuration, overlay: overlay
         )
     }

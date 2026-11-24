@@ -84,7 +84,7 @@ final class BlockBodiesTests: XCTestCase {
     }
 
     private func start(_ host: Host) async throws -> (NodeRuntime, NodeStorage) {
-        let storage = try await NodeStorage.open(configuration: host.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: host.configuration)
         return (try await NodeRuntime.start(
             storage: storage, configuration: host.configuration, overlay: host.overlay
         ), storage)
@@ -151,7 +151,7 @@ final class BlockBodiesTests: XCTestCase {
         XCTAssertEqual(kept, blocks, "a node keeping all lets go of no body")
         await producerRuntime.stop()
 
-        let reopened = try await NodeStorage.open(configuration: joiner.configuration)
+        let reopened = try await NodeStorage.openWhenFree(configuration: joiner.configuration)
         let booted = try await NodeRuntime.boot(
             storage: reopened, configuration: joiner.configuration, coreConfig: .init()
         )

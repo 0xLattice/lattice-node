@@ -58,7 +58,7 @@ final class ReceiptWitnessTests: XCTestCase {
     }
 
     private func start(_ host: Host) async throws -> (NodeRuntime, NodeStorage) {
-        let storage = try await NodeStorage.open(configuration: host.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: host.configuration)
         return (try await NodeRuntime.start(
             storage: storage, configuration: host.configuration, overlay: host.overlay
         ), storage)
@@ -211,7 +211,7 @@ final class ReceiptWitnessTests: XCTestCase {
         let unreadable = Set(witness).subtracting(contentVolumes.map(\.root))
         XCTAssertFalse(unreadable.isEmpty)
         // Stored by a node holding nothing of it, so storing reads it.
-        let empty = try await NodeStorage.open(configuration: try host(keyByte: 0xd3, blockBodies: .all).configuration)
+        let empty = try await NodeStorage.openWhenFree(configuration: try host(keyByte: 0xd3, blockBodies: .all).configuration)
         let stored = try await empty.storeValidBlocks(
             [(withdrawalBlock, nil)], at: Self.alpha, from: Unreadable(local, cids: unreadable)
         )

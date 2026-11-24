@@ -62,7 +62,7 @@ final class HeldLevelTemplateTests: XCTestCase {
             childSpecs: alpha && creator ? [Self.alpha: MergedMiningTests.alphaSpec] : [:],
             connectBatch: connectBatch
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let runtime = try await NodeRuntime.start(
             storage: storage,
             configuration: configuration,

@@ -31,7 +31,7 @@ final class ChildLevelRestartTests: XCTestCase {
         let genesisCID = try await weighChildGenesis(configuration)
 
         // Restart: boot reconciles the retained roots, then a sweep.
-        let reopened = try await NodeStorage.open(configuration: configuration)
+        let reopened = try await NodeStorage.openWhenFree(configuration: configuration)
         _ = try await reopened.broker.sweep()
         let restored = try await NodeRuntime.boot(
             storage: reopened, configuration: configuration, coreConfig: .init()
@@ -48,7 +48,7 @@ final class ChildLevelRestartTests: XCTestCase {
     func testParentAndChildFactsRestoreTogether() async throws {
         let configuration = try configuration()
         let genesisCID = try await weighChildGenesis(configuration)
-        let reopened = try await NodeStorage.open(configuration: configuration)
+        let reopened = try await NodeStorage.openWhenFree(configuration: configuration)
         let restored = try await NodeRuntime.boot(
             storage: reopened, configuration: configuration, coreConfig: .init()
         )
@@ -68,7 +68,7 @@ final class ChildLevelRestartTests: XCTestCase {
             privateKeyHex: String(repeating: "3a", count: 32),
             listenPort: NetworkTransportTestPorts.allocate(), rpcPort: NetworkTransportTestPorts.allocate()
         )
-        let reopened = try await NodeStorage.open(configuration: unhosted)
+        let reopened = try await NodeStorage.openWhenFree(configuration: unhosted)
         let alphaRows = try await reopened.store.storedFacts(at: alpha)
         XCTAssertFalse(alphaRows.facts.isEmpty, "fixture guard: Alpha's facts must still be present")
         let restored = try await NodeRuntime.boot(
@@ -90,7 +90,7 @@ final class ChildLevelRestartTests: XCTestCase {
         let orphan = ["Nexus", "Gamma", "Delta"]
         let configuration = try configuration(hosting: [alpha, beta, leaf])
         let geneses = try await weighChildGeneses(["Alpha", "Beta"], configuration)
-        let store = try await NodeStorage.open(configuration: configuration).store
+        let store = try await NodeStorage.openWhenFree(configuration: configuration).store
         let storedLogID = try await store.chainLogID()
         let logID = try XCTUnwrap(storedLogID)
         try await store.stageNodeFacts([
@@ -113,7 +113,7 @@ final class ChildLevelRestartTests: XCTestCase {
             ),
         ], logID: logID)
 
-        let reopened = try await NodeStorage.open(configuration: configuration)
+        let reopened = try await NodeStorage.openWhenFree(configuration: configuration)
         let restored = try await NodeRuntime.boot(
             storage: reopened, configuration: configuration, coreConfig: .init()
         )
@@ -179,7 +179,7 @@ final class ChildLevelRestartTests: XCTestCase {
     func testACreditedChildProofIsSavedWithItsWorkFact() async throws {
         let configuration = try configuration()
         let genesisCID = try await weighChildGenesis(configuration)
-        let reopened = try await NodeStorage.open(configuration: configuration)
+        let reopened = try await NodeStorage.openWhenFree(configuration: configuration)
         let work = try await reopened.store.storedFacts(at: alpha).facts
             .compactMap { fact -> String? in
                 guard case .work(let work) = fact, work.blockHash == genesisCID else { return nil }
@@ -205,14 +205,14 @@ final class ChildLevelRestartTests: XCTestCase {
         }
         let (unpinned, chained) = (try spec(7), try spec(9))
         do {
-            let storage = try await NodeStorage.open(configuration: configuration)
+            let storage = try await NodeStorage.openWhenFree(configuration: configuration)
             let storer = NodeImportStorage(storage: await storage.broker)
             for volume in [unpinned, chained] { try await volume.store(storer: storer) }
             try await storer.commit()
             try await storage.broker.mergeRetainedRoots(scope: storage.scopes.chain, roots: [chained.rawCID])
         }
 
-        let reopened = try await NodeStorage.open(configuration: configuration)
+        let reopened = try await NodeStorage.openWhenFree(configuration: configuration)
         let sweptUnpinned = await reopened.volume(unpinned.rawCID)
         XCTAssertNil(sweptUnpinned, "no scope named it")
         let kept = await reopened.volume(chained.rawCID)
@@ -231,7 +231,7 @@ final class ChildLevelRestartTests: XCTestCase {
     /// children), weighed by its proof and persisted as the runtime persists
     /// it. The genesis CIDs, in `names` order.
     private func weighChildGeneses(_ names: [String], _ configuration: NodeConfiguration) async throws -> [String] {
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         var host = try await NodeRuntime.boot(
             storage: storage, configuration: configuration, coreConfig: .init()
         )

@@ -41,7 +41,7 @@ final class ChildBlockBuildTests: XCTestCase {
     }
 
     private func start(_ configuration: NodeConfiguration, _ overlay: IvyConfig) async throws -> (NodeRuntime, NodeStorage) {
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration, overlay: overlay)
         addTeardownBlock { await runtime.stop() }
         return (runtime, storage)
@@ -247,6 +247,13 @@ final class ChildBlockBuildTests: XCTestCase {
                 let cid = response.transactionCID
                 (taken, accepted) = (cid, true)
             }
+            // The miner hosts only Nexus, so its template's targets leave
+            // Alpha's out; Alpha's grows harder each round, and a carrier
+            // that misses it adds no work to ours, which then waits for good.
+            func carry() async throws {
+                let ours = try XCTUnwrap(Block(data: try XCTUnwrap(built).submit.block))
+                _ = try await miner.mine(try await miner.miningTemplate(pair.mining), meeting: ours.target)
+            }
             func round() async throws -> ChildCommitStep {
                 var pushed: SubmitChildBlockStatus?
                 if let built { pushed = try await builder.submitChildBlock(built.submit).status }
@@ -298,9 +305,9 @@ final class ChildBlockBuildTests: XCTestCase {
                 // a second time (it can no longer be carried).
                 _ = try await miner.mine(try XCTUnwrap(past))
             case .none:
-                _ = try await miner.mineBlock(pair.mining)
+                try await carry()
             case .overwritten:
-                _ = try await miner.mineBlock(pair.mining)
+                try await carry()
                 let ours = try XCTUnwrap(built)
                 try await eventually("\(label): ours is carried") {
                     try await builder.childCommitment(chainPath: Self.alpha).value == value(ours)
@@ -322,7 +329,7 @@ final class ChildBlockBuildTests: XCTestCase {
                 let step = try? await round()
                 if let taken, taken != mined, await pooled(taken) {
                     mined = taken
-                    _ = try await miner.mineBlock(pair.mining)
+                    try await carry()
                 }
                 return step == .done
             }

@@ -158,7 +158,7 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             of: fixture, database: "volumes/" + VolumeStores.fileName(["Nexus"]),
             applying: ["UPDATE cas_data SET data = X'00' WHERE cid = '\(genesis)'"]
         )
-        let storage = try await NodeStorage.open(configuration: try configuration(root))
+        let storage = try await NodeStorage.openWhenFree(configuration: try configuration(root))
         let served = await storage.fetch([genesis])
         XCTAssertEqual(served, [genesis: Data([0])])
         do {
@@ -173,7 +173,7 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
         let fixture = try await buildFixture()
         let genesis = try configuration(fixture).nexusGenesisCID
         let intact = NodeStorageIvyContentSource(
-            storage: try await NodeStorage.open(configuration: try configuration(try damagedCopy(of: fixture, applying: [])))
+            storage: try await NodeStorage.openWhenFree(configuration: try configuration(try damagedCopy(of: fixture, applying: [])))
         )
         let sent = await intact.volume(rootCID: genesis, maxDataBytes: .max)
         XCTAssertFalse(sent.isEmpty, "fixture guard: the intact Volume is sent")
@@ -189,7 +189,7 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
     func testDamagedVolumeBytesAreNotServedOnThePublicReadRoutes() async throws {
         let fixture = try await buildFixture()
         let genesis = try configuration(fixture).nexusGenesisCID
-        let intact = reads(try await NodeStorage.open(configuration: try configuration(try damagedCopy(of: fixture, applying: []))))
+        let intact = reads(try await NodeStorage.openWhenFree(configuration: try configuration(try damagedCopy(of: fixture, applying: []))))
         let archive = await intact.completeVolumeArchive(rootCID: genesis)
         XCTAssertNotNil(archive, "fixture guard: the intact Volume is served")
 
@@ -208,7 +208,7 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
             of: fixture, database: "volumes/" + VolumeStores.fileName(["Nexus"]),
             applying: ["UPDATE cas_data SET data = X'00' WHERE cid = '\(cid)'"]
         )
-        return try await NodeStorage.open(configuration: try configuration(root))
+        return try await NodeStorage.openWhenFree(configuration: try configuration(root))
     }
 
     private func reads(_ storage: NodeStorage) -> ChainReads {
@@ -260,7 +260,7 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
     private func observeBoot(at root: URL) async -> Observed {
         do {
             let configuration = try configuration(root)
-            let storage = try await NodeStorage.open(configuration: configuration)
+            let storage = try await NodeStorage.openWhenFree(configuration: configuration)
             _ = try await NodeRuntime.boot(storage: storage, configuration: configuration, coreConfig: .init())
             return .opened
         } catch NodeStoreError.corrupt {
@@ -281,7 +281,7 @@ final class SafetyNetCorruptStoreTests: XCTestCase {
     private func buildFixture() async throws -> URL {
         let root = temporaryDirectory()
         let runtime = try await startRuntime(
-            try await NodeStorage.open(configuration: try configuration(root)), try configuration(root)
+            try await NodeStorage.openWhenFree(configuration: try configuration(root)), try configuration(root)
         )
         for _ in 0..<2 { _ = try await runtime.mineBlock() }
         await runtime.stop()
