@@ -19,7 +19,7 @@ final class DirectConnectionRuntimeTests: XCTestCase {
             bootstrapPeers: peers
         )
         let runtime = try await NodeRuntime.start(
-            storage: try await NodeStorage.open(configuration: configuration),
+            storage: try await NodeStorage.openWhenFree(configuration: configuration),
             configuration: configuration,
             overlay: IvyConfig(
                 signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: peers,

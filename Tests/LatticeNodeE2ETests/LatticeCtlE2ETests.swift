@@ -573,7 +573,7 @@ final class LatticeCtlE2ETests: XCTestCase {
     }
 
     private func postJSON<Body: Encodable>(
-        _ address: String, _ body: Body, cookie: URL? = nil
+        _ address: String, _ body: Body, cookie: URL? = nil, session: URLSession = .shared
     ) async throws -> (Int, Data) {
         var request = URLRequest(url: URL(string: address)!)
         request.httpMethod = "POST"
@@ -582,7 +582,7 @@ final class LatticeCtlE2ETests: XCTestCase {
             request.setValue("Basic " + Data(value.utf8).base64EncodedString(), forHTTPHeaderField: "Authorization")
         }
         request.httpBody = try JSONEncoder().encode(body)
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         return ((response as? HTTPURLResponse)?.statusCode ?? 0, data)
     }
 
@@ -1048,7 +1048,13 @@ extension LatticeCtlE2ETests {
                 }
             }
             try await Task.sleep(for: .seconds(1))
-            let (status, _) = try await postJSON("\(node)/\(route)", [String: String](), cookie: cookie)
+            // On a connection of its own: one kept alive in the shared pool
+            // may already be closed by the server, and macOS's client sends
+            // no POST again on one (-1005, "the network connection was
+            // lost"), where Linux's does.
+            let own = URLSession(configuration: .ephemeral)
+            defer { own.finishTasksAndInvalidate() }
+            let (status, _) = try await postJSON("\(node)/\(route)", [String: String](), cookie: cookie, session: own)
             XCTAssertEqual(status, 202, route)
             try await waitFor("the node exits after /\(route)") { host.supervisor.exits.count > before }
             await arrive.stop()

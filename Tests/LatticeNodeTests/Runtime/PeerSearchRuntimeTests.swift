@@ -60,7 +60,7 @@ final class PeerSearchRuntimeTests: XCTestCase {
             externalAddress: (host, port),
             mode: .overlay
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration, overlay: overlay)
         await runtime.ivy.setDialEndpointRewriteForTesting { endpoint in
             endpoint.host.hasPrefix("8.8.")

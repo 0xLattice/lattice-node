@@ -24,7 +24,7 @@ final class PaidServingTests: XCTestCase {
             listenPort: port,
             rpcPort: NetworkTransportTestPorts.allocate()
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let runtime = try await NodeRuntime.start(
             storage: storage,
             configuration: configuration,

@@ -62,7 +62,7 @@ final class StateWindowTests: XCTestCase {
     }
 
     private func start(_ host: Host) async throws -> (NodeRuntime, NodeStorage) {
-        let storage = try await NodeStorage.open(configuration: host.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: host.configuration)
         return (try await NodeRuntime.start(
             storage: storage, configuration: host.configuration, overlay: host.overlay
         ), storage)
@@ -1125,7 +1125,7 @@ final class StateWindowTests: XCTestCase {
     func testAStartLetsGoOfCountsNoLongerNeeded() async throws {
         let node = try host(keyByte: 0xf6, state: .recent)
         let genesis = node.configuration.nexusGenesisCID
-        let storage = try await NodeStorage.open(configuration: node.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: node.configuration)
         do {
             let scopes = storage.scopes
             // Counts of Nexus at its genesis, which hold nothing of its

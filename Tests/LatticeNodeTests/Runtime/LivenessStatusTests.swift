@@ -44,7 +44,7 @@ final class LivenessStatusTests: XCTestCase {
     }
 
     private func startWithStorage(_ host: Host) async throws -> (runtime: NodeRuntime, storage: NodeStorage) {
-        let storage = try await NodeStorage.open(configuration: host.configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: host.configuration)
         let runtime = try await NodeRuntime.start(storage: storage, configuration: host.configuration, overlay: host.overlay)
         return (runtime, storage)
     }

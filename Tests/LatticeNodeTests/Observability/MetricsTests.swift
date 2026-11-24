@@ -249,7 +249,7 @@ final class MetricsTests: XCTestCase {
             "lattice-metrics-test-\(UUID().uuidString)"
         )
         addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
-        return try await NodeStorage.open(configuration: configuration(chainPath: chainPath, storageDirectory: storageDirectory))
+        return try await NodeStorage.openWhenFree(configuration: configuration(chainPath: chainPath, storageDirectory: storageDirectory))
     }
 
     private func configuration(chainPath: [String], storageDirectory: URL) throws -> NodeConfiguration {

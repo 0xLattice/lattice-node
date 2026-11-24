@@ -22,7 +22,7 @@ final class DaemonHTTPTests: XCTestCase {
             storagePath: storageDirectory,
             privateKeyHex: String(repeating: "01", count: 32)
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let service = try await startRuntime(storage, configuration)
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         let genesis = storage.configuration.nexusGenesisCID
@@ -58,7 +58,7 @@ final class DaemonHTTPTests: XCTestCase {
             storagePath: storageDirectory,
             privateKeyHex: String(repeating: "01", count: 32)
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let held = try [
             VolumeImpl<ChainSpec>(node: ChainSpec(
                 maxNumberOfTransactionsPerBlock: 3, maxStateGrowth: 3_333, premine: 3,
@@ -209,7 +209,7 @@ final class DaemonHTTPTests: XCTestCase {
             storagePath: storageDirectory,
             privateKeyHex: String(repeating: "01", count: 32)
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let service = try await startRuntime(storage, configuration)
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         let body = try JSONEncoder().encode(MiningTemplateRequest())
@@ -272,7 +272,7 @@ final class DaemonHTTPTests: XCTestCase {
             storagePath: storageDirectory,
             privateKeyHex: String(repeating: "01", count: 32)
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let held = try VolumeImpl<ChainSpec>(node: ChainSpec(
             maxNumberOfTransactionsPerBlock: 3, maxStateGrowth: 3_333, premine: 3,
             targetBlockTime: 3_000, initialReward: 3, halvingInterval: 3_333, halfLife: 3
@@ -360,7 +360,7 @@ final class DaemonHTTPTests: XCTestCase {
             storagePath: storageDirectory,
             privateKeyHex: String(repeating: "01", count: 32)
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let service = try await startRuntime(storage, configuration)
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         let body = try JSONEncoder().encode(MiningTemplateRequest())
@@ -409,7 +409,7 @@ final class DaemonHTTPTests: XCTestCase {
             storagePath: storageDirectory,
             privateKeyHex: String(repeating: "01", count: 32)
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let service = try await startRuntime(storage, configuration)
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         let genesis = try await NexusGenesis.buildGenesisBlock(fetcher: storage.workFetcher(.anyChain))
@@ -449,7 +449,7 @@ final class DaemonHTTPTests: XCTestCase {
                 targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
             )]
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let service = try await startRuntime(storage, configuration)
         let recipient = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
         let template = MiningTemplateRequest(recipients: [MiningRecipient(chainPath: alpha, address: recipient)])
@@ -499,7 +499,7 @@ final class DaemonHTTPTests: XCTestCase {
                 targetBlockTime: 1_000, initialReward: 10, halvingInterval: 10_000, halfLife: 10
             )]
         )
-        let service = try await startRuntime(try await NodeStorage.open(configuration: configuration), configuration)
+        let service = try await startRuntime(try await NodeStorage.openWhenFree(configuration: configuration), configuration)
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         try await app.test(.router) { client in
             var read: ChildCommitmentResponse?
@@ -559,7 +559,7 @@ final class DaemonHTTPTests: XCTestCase {
             storagePath: storageDirectory,
             privateKeyHex: String(repeating: "01", count: 32)
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let service = try await startRuntime(storage, configuration)
         let app = makeApplication(
             service: service,
@@ -618,7 +618,7 @@ final class DaemonHTTPTests: XCTestCase {
             storagePath: storageDirectory,
             privateKeyHex: String(repeating: "01", count: 32)
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let service = try await startRuntime(storage, configuration)
 
         let publicApp = makePublicReadApplication(
@@ -764,7 +764,7 @@ final class DaemonHTTPTests: XCTestCase {
             storagePath: storageDirectory,
             privateKeyHex: String(repeating: "01", count: 32)
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let service = try await startRuntime(storage, configuration)
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         let key = CryptoUtils.generateKeyPair()
@@ -836,7 +836,7 @@ final class DaemonHTTPTests: XCTestCase {
             storagePath: storageDirectory,
             privateKeyHex: String(repeating: "01", count: 32)
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let service = try await startRuntime(storage, configuration)
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
 
@@ -860,7 +860,7 @@ final class DaemonHTTPTests: XCTestCase {
             storagePath: storageDirectory,
             privateKeyHex: String(repeating: "01", count: 32)
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let service = try await startRuntime(storage, configuration)
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         // Nexus genesis premines to this fixed owner address — a known funded
@@ -953,7 +953,7 @@ final class DaemonHTTPTests: XCTestCase {
             storagePath: storageDirectory,
             privateKeyHex: String(repeating: "01", count: 32)
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let service = try await startRuntime(storage, configuration)
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         // Genesis carries the premine transaction, so a transactions page on
@@ -1089,7 +1089,7 @@ final class DaemonHTTPTests: XCTestCase {
             storagePath: temporaryDirectory(prefix: "lattice-http-blocks"),
             privateKeyHex: String(repeating: "01", count: 32)
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let service = try await startRuntime(storage, configuration)
         let app = makeApplication(service: service, host: "127.0.0.1", port: 8080)
         try await app.test(.router) { client in

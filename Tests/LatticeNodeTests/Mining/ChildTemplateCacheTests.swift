@@ -59,7 +59,7 @@ final class ChildTemplateCacheTests: XCTestCase {
             requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
             mode: .overlay
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration, overlay: overlay)
         let betaReads = try XCTUnwrap(runtime.levelReads[beta])
         let gammaReads = try XCTUnwrap(runtime.levelReads[gamma])

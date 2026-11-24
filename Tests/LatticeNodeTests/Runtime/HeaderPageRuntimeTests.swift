@@ -44,7 +44,7 @@ final class HeaderPageRuntimeTests: XCTestCase {
             externalAddress: ("127.0.0.1", port),
             mode: .overlay
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let runtime = try await NodeRuntime.start(
             storage: storage, configuration: configuration, overlay: overlay, coreConfig: coreConfig,
             failStop: failStop

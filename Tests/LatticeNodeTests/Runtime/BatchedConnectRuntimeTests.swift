@@ -87,7 +87,7 @@ final class BatchedConnectRuntimeTests: XCTestCase {
     }
 
     private func boot() async throws -> Process {
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         // The configuration's batch applies (the core config's is the default).
         return Process(
             host: try await NodeRuntime.boot(

@@ -59,7 +59,7 @@ final class ReadEndpointRuntimeTests: XCTestCase {
             externalAddress: ("127.0.0.1", port),
             mode: .overlay
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration, overlay: overlay)
         addTeardownBlock { await runtime.stop() }
         return Node(
@@ -248,7 +248,7 @@ final class ReadEndpointRuntimeTests: XCTestCase {
             storagePath: temporaryDirectory(prefix: "lattice-committed-child"),
             privateKeyHex: String(repeating: "3a", count: 32)
         )
-        let storage = try await NodeStorage.open(configuration: configuration)
+        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
         let tip = Mutex((cid: "tip-1", height: UInt64(500)))
         let visited = Mutex(0)
         let reads = ChainReads(
