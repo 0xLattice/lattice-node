@@ -290,9 +290,9 @@ public struct HeaderSync: Sendable {
     public internal(set) var log = WeighLog()
     /// Per peer key: the last position of its log received and applied.
     /// Written with the facts (`ChainBatch.cursors`) and handed back to
-    /// `ChainCore.init`; kept only for connected peers and those handed back.
+    /// `ChainCore.init`; kept across sessions, so a reconnect resumes where
+    /// the last session ended, as a restart does.
     public internal(set) var cursors: [String: StreamCursor] = [:]
-    var knownCursors: Set<String> = []
 
     public init() {}
 
