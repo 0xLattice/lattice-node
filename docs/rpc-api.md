@@ -697,10 +697,11 @@ Response, read after the submit's step:
 Only `tree` is final. The author submits again on any other status, and
 after a restart, an unhost or an eviction. `400` `invalidChainPath` for a
 root path, `400` `malformedBlock` for bytes (a proof's included) that do
-not parse or are not canonical, `400` `invalidChildProof` for a proof that
-does not verify work for the block (as a peer that sent it would be
-disconnected; nothing is taken), `404` `unknownChain` for an unhosted
-chain.
+not parse or are not canonical, `404` `unknownChain` for an unhosted
+chain (checked first), `400` `invalidChildProof` for a proof that does not
+verify work for the block (as a peer that sent it would be disconnected;
+nothing is taken) or for proofs past the bounds a synced header's are taken
+within (8 per block, 64 KiB each, by default).
 
 ### `POST /child-blocks/build`
 

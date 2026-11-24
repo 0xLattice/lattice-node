@@ -140,12 +140,18 @@ extension NodeRuntime {
         guard path.count > 1 else { throw NodeConfigurationError.invalidChainPath }
         let wire = WireHeaderEntry(block: request.block, children: request.children, proofs: request.proofs ?? [], spec: request.spec)
         guard let entry = wire.decoded, let cid = entry.cid else { throw NodeAPIError.malformedBlock }
+        guard let limits = await LiveLevels(inputs: inputs).read({ $0[path]?.config.proofs }) ?? nil else {
+            throw NodeRuntimeError.unknownChain
+        }
+        // The bounds a synced header's proofs are taken within: past them a
+        // proof would be dropped unchecked and the block left awaiting.
+        guard (request.proofs ?? []).count <= limits.maxPerHeader,
+              (request.proofs ?? []).allSatisfy({ $0.count <= limits.maxProofBytes }) else {
+            throw NodeAPIError.invalidChildProof
+        }
         for proof in entry.proofs
         where ChildProofJob.credit(proof.verifySecuringWork(child: entry.block, chainPath: path), at: cid) == nil {
             throw NodeAPIError.invalidChildProof
-        }
-        guard await LiveLevels(inputs: inputs).read({ $0[path] != nil }) == true else {
-            throw NodeRuntimeError.unknownChain
         }
         if case .terminated = inputs.yield(.event(.level(path, .submitted(entry)))) {
             throw NodeRuntimeError.stopped

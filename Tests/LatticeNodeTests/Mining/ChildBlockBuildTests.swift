@@ -448,6 +448,16 @@ extension ChildBlockBuildTests {
             _ = try await push([Data([1, 2, 3])])
             XCTFail("bytes that are no proof are refused")
         } catch NodeAPIError.malformedBlock {}
+        do {
+            _ = try await push(Array(repeating: offState, count: 9))
+            XCTFail("more proofs than a synced header's are taken is refused")
+        } catch NodeAPIError.invalidChildProof {}
+        do {
+            _ = try await node.submitChildBlock(SubmitChildBlockRequest(
+                chainPath: ["Nexus", "Unhosted"], block: built.submit.block, children: built.submit.children, spec: built.submit.spec, proofs: [offState]
+            ))
+            XCTFail("an unhosted chain is unknown, whatever its proofs")
+        } catch NodeRuntimeError.unknownChain {}
         // (b) Without proofs, as before: no weighed parent block commits it.
         let bare = try await push(nil)
         XCTAssertEqual(bare.status, .dropped)
