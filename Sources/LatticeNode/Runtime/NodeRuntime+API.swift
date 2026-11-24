@@ -128,18 +128,30 @@ extension NodeRuntime {
     }
 
     /// A child block submitted on this node (its author's push): taken
-    /// exactly as the same header gossiped from no peer, so it is held only
-    /// when a weighed parent block commits it, and its content is stored as
-    /// a received header's. Nothing records the submit: the author pushes
-    /// again until the block is weighed (after a restart, an unhost or an
-    /// eviction too).
+    /// exactly as the same header, with the same proofs, synced from no
+    /// peer. Without proofs it is held only when a weighed parent block
+    /// commits it; with them it waits for their check as a synced header
+    /// does. A proof that does not verify is refused, as the peer that sent
+    /// it would be disconnected. Its content is stored as a received
+    /// header's. Nothing records the submit: the author pushes again until
+    /// the block is weighed (after a restart, an unhost or an eviction too).
     public func submitChildBlock(_ request: SubmitChildBlockRequest) async throws -> SubmitChildBlockResponse {
         let path = request.chainPath
         guard path.count > 1 else { throw NodeConfigurationError.invalidChainPath }
-        guard let entry = WireHeaderEntry(block: request.block, children: request.children, proofs: [], spec: request.spec).decoded,
-              let cid = entry.cid else { throw NodeAPIError.malformedBlock }
-        guard await LiveLevels(inputs: inputs).read({ $0[path] != nil }) == true else {
+        let wire = WireHeaderEntry(block: request.block, children: request.children, proofs: request.proofs ?? [], spec: request.spec)
+        guard let entry = wire.decoded, let cid = entry.cid else { throw NodeAPIError.malformedBlock }
+        guard let limits = await LiveLevels(inputs: inputs).read({ $0[path]?.config.proofs }) ?? nil else {
             throw NodeRuntimeError.unknownChain
+        }
+        // The bounds a synced header's proofs are taken within: past them a
+        // proof would be dropped unchecked and the block left awaiting.
+        guard (request.proofs ?? []).count <= limits.maxPerHeader,
+              (request.proofs ?? []).allSatisfy({ $0.count <= limits.maxProofBytes }) else {
+            throw NodeAPIError.invalidChildProof
+        }
+        for proof in entry.proofs
+        where ChildProofJob.credit(proof.verifySecuringWork(child: entry.block, chainPath: path), at: cid) == nil {
+            throw NodeAPIError.invalidChildProof
         }
         if case .terminated = inputs.yield(.event(.level(path, .submitted(entry)))) {
             throw NodeRuntimeError.stopped

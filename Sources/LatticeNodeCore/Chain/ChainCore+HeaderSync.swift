@@ -227,7 +227,7 @@ extension ChainCore {
             return nil
         }
         if tree.contains(blockHash: cid) {
-            if !isRoot, let peer { offer(entry.proofs, cid: cid, from: peer, &turn) }
+            if !isRoot { offer(entry.proofs, cid: cid, from: peer, &turn) }
             return cid
         }
         if sync.declined.contains(cid) { return cid }
@@ -261,7 +261,7 @@ extension ChainCore {
             if held.spec == nil, let spec = Self.bound(entry.spec, by: entry.block) {
                 sync.pending.entries[cid]?.spec = spec
             }
-            if !isRoot, let peer { offer(entry.proofs, cid: cid, from: peer, &turn) }
+            if !isRoot { offer(entry.proofs, cid: cid, from: peer, &turn) }
             dirty(cid, &turn)
             return cid
         }
