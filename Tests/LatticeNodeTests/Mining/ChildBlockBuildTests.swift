@@ -369,6 +369,187 @@ final class ChildBlockBuildTests: XCTestCase {
     }
 }
 
+extension ChildBlockBuildTests {
+    /// A child genesis mined elsewhere: built on the parent's state P,
+    /// carried by a parent block entering P that no node ever weighs, the
+    /// parent then moving past P. Pushed with the proof a synced header would
+    /// carry, it is weighed, executed, synced by a peer with that proof, and
+    /// extended by the node's own template; pushed without proofs it is
+    /// dropped as before; a proof that does not verify is refused.
+    func testAChildBlockPushedWithItsProofsIsTakenAsASyncedHeader() async throws {
+        let alice = CryptoUtils.generateKeyPair()
+        let aliceAddress = CryptoUtils.createAddress(from: alice.publicKey)
+        let (configuration, overlay, endpoint) = try host("8a", hostsAlpha: true, alphaPremineTo: aliceAddress)
+        let (node, storage) = try await start(configuration, overlay)
+        let alphaReads = try XCTUnwrap(node.levelReads[Self.alpha])
+        // Nexus blocks pay a miner, so each moves Nexus's state.
+        let miner = CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
+        let leaveAlphaOut = MiningTemplateRequest(
+            recipients: [MiningRecipient(chainPath: ["Nexus"], address: miner)], exclude: [Self.alpha]
+        )
+        _ = try await node.mineBlock(leaveAlphaOut)
+
+        // G on P, by the node's own builder.
+        let built = try await node.buildChildBlock(BuildChildBlockRequest(chainPath: Self.alpha, recipient: aliceAddress))
+        let genesis = try XCTUnwrap(Block(data: built.submit.block))
+        XCTAssertNil(genesis.parent)
+
+        // A carrier: a parent block entering `state` whose only child is G,
+        // ground to G's target and never submitted. Its proof is the one a
+        // peer would send with G.
+        let fetcher = storage.workFetcher(.anyChain)
+        func carrier(enteredBy template: MiningTemplateResponse) throws -> Block {
+            let block = template.block
+            let children = try HeaderImpl<FlatDictionary<BlockHeader>>(
+                node: FlatDictionary([Self.alpha[1]: try BlockHeader(node: genesis)])
+            )
+            var nonce: UInt64 = 0
+            func carrying(_ nonce: UInt64) -> Block {
+                Block(
+                    version: block.version, parent: block.parent, transactions: block.transactions,
+                    target: block.target, nextTarget: block.nextTarget, spec: block.spec,
+                    parentState: block.parentState, prevState: block.prevState, postState: block.postState,
+                    children: children, height: block.height, timestamp: block.timestamp,
+                    rewardRecipient: block.rewardRecipient, nonce: nonce
+                )
+            }
+            while carrying(nonce).proofOfWorkHash() > genesis.target { nonce += 1 }
+            return carrying(nonce)
+        }
+        func proof(from carrier: Block) async throws -> Data {
+            try await ChildBlockProof.generate(
+                rootHeader: try BlockHeader(node: carrier), childDirectory: Self.alpha[1], fetcher: fetcher
+            ).serialize()
+        }
+        let onP = try await node.miningTemplate(leaveAlphaOut)
+        XCTAssertEqual(onP.block.prevState.rawCID, built.parentState, "the carrier enters P")
+        let good = try carrier(enteredBy: onP)
+        let goodProof = try await proof(from: good)
+
+        // The parent moves past P without carrying G.
+        _ = try await node.mineBlock(leaveAlphaOut)
+        let moved = try await Self.tipState(node.reads)
+        XCTAssertNotEqual(moved, built.parentState)
+
+        func push(_ proofs: [Data]?) async throws -> SubmitChildBlockResponse {
+            let submit = built.submit
+            return try await node.submitChildBlock(SubmitChildBlockRequest(
+                chainPath: submit.chainPath, block: submit.block, children: submit.children, spec: submit.spec, proofs: proofs
+            ))
+        }
+        // (c) Refused: a carrier entering another state than G's P, and
+        // bytes that are no proof.
+        let offState = try await proof(from: try carrier(enteredBy: try await node.miningTemplate(leaveAlphaOut)))
+        do {
+            _ = try await push([offState])
+            XCTFail("a proof from a carrier not entering P is refused")
+        } catch NodeAPIError.invalidChildProof {}
+        do {
+            _ = try await push([Data([1, 2, 3])])
+            XCTFail("bytes that are no proof are refused")
+        } catch NodeAPIError.malformedBlock {}
+        // (b) Without proofs, as before: no weighed parent block commits it.
+        let bare = try await push(nil)
+        XCTAssertEqual(bare.status, .dropped)
+        XCTAssertEqual(bare.blockCID, built.blockCID)
+
+        // (a) With its proof: checked, weighed, executed.
+        let first = try await push([goodProof])
+        XCTAssertNotEqual(first.status, .dropped, "taken to wait for its proof's check")
+        try await eventually("G is weighed") { try await push([goodProof]).status == .tree }
+        try await eventually("Alpha executes G") { await alphaReads.readSnapshot().tipCID == built.blockCID }
+        let premined = await alphaReads.account(owner: aliceAddress, blockCID: built.blockCID)?.balance
+        XCTAssertEqual(premined, Self.alphaSpec.premineAmount())
+
+        // A peer syncs G with its saved proof.
+        let (followerConfiguration, followerOverlay, _) = try host("8b", hostsAlpha: true, peers: [endpoint])
+        let (follower, _) = try await start(followerConfiguration, followerOverlay)
+        let followerAlpha = try XCTUnwrap(follower.levelReads[Self.alpha])
+        try await eventually("the peer executes G") { await followerAlpha.readSnapshot().tipCID == built.blockCID }
+
+        // Block 1 on G, from the node's own template.
+        try await eventually("the node mines Alpha's block 1") {
+            _ = try await node.mineBlock(MiningTemplateRequest(recipients: leaveAlphaOut.recipients))
+            return await alphaReads.readSnapshot().tipCID != built.blockCID
+        }
+        var cid = await alphaReads.readSnapshot().tipCID
+        var held = await alphaReads.blockNode(cid: try XCTUnwrap(cid))
+        while let block = held, block.height > 1 {
+            cid = block.parent?.rawCID
+            held = await alphaReads.blockNode(cid: try XCTUnwrap(cid))
+        }
+        let block = try XCTUnwrap(held)
+        XCTAssertEqual(block.height, 1)
+        XCTAssertEqual(block.parent?.rawCID, built.blockCID, "block 1 extends G")
+
+        if let out = ProcessInfo.processInfo.environment["LATTICE_PROOF_VECTOR"] {
+            try Self.writeVector(
+                to: out, built: built, genesis: genesis, carrier: good, proof: goodProof,
+                premineTo: aliceAddress, request: SubmitChildBlockRequest(
+                    chainPath: built.submit.chainPath, block: built.submit.block, children: built.submit.children,
+                    spec: built.submit.spec, proofs: [goodProof]
+                )
+            )
+        }
+    }
+
+    /// The inputs and bytes of a pushed genesis and its proof, for a builder
+    /// outside this repository to check its own bytes against.
+    private static func writeVector(
+        to path: String, built: BuildChildBlockResponse, genesis: Block, carrier: Block, proof: Data,
+        premineTo: String, request: SubmitChildBlockRequest
+    ) throws {
+        let decoded = try XCTUnwrap(ChildBlockProof.deserialize(proof))
+        let json = JSONEncoder()
+        json.outputFormatting = [.sortedKeys]
+        func object<T: Encodable>(_ value: T) throws -> Any {
+            try JSONSerialization.jsonObject(with: try json.encode(value), options: [.fragmentsAllowed])
+        }
+        func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
+        let carrierBytes = try XCTUnwrap(carrier.toData())
+        let carrierChildren = try XCTUnwrap(carrier.children.node?.toData())
+        let vector: [String: Any] = [
+            "about": "A child genesis built by lattice-node's buildChildBlock, a carrier (a parent block entering the genesis's parentState whose children index holds only the genesis, never weighed), and the ChildBlockProof the node generates for it (ChildBlockProof.generate(rootHeader: carrier, childDirectory:), serialize()). POST /child-blocks takes `request`; each `proofs` element is base64 of the proof's serialize() bytes, as one element of the sync wire's WireHeaderEntry.proofs.",
+            "chainPath": built.submit.chainPath,
+            "childDirectory": built.submit.chainPath.last ?? "",
+            "spec": try object(alphaSpec),
+            "specBytesBase64": built.submit.spec?.base64EncodedString() ?? "",
+            "specCID": genesis.spec.rawCID,
+            "premineTo": premineTo,
+            "parentStateCID": built.parentState,
+            "genesis": [
+                "cid": built.blockCID,
+                "fields": try object(genesis),
+                "timestamp": genesis.timestamp,
+                "nonce": genesis.nonce,
+                "bytesBase64": built.submit.block.base64EncodedString(),
+                "childrenBytesBase64": built.submit.children.base64EncodedString(),
+            ] as [String: Any],
+            "carrier": [
+                "cid": try BlockHeader(node: carrier).rawCID,
+                "fields": try object(carrier),
+                "timestamp": carrier.timestamp,
+                "nonce": carrier.nonce,
+                "prevStateCID": carrier.prevState.rawCID,
+                "bytesBase64": carrierBytes.base64EncodedString(),
+                "bytesHex": hex(carrierBytes),
+                "childrenBytesBase64": carrierChildren.base64EncodedString(),
+                "childrenCID": carrier.children.rawCID,
+            ] as [String: Any],
+            "proof": [
+                "base64": proof.base64EncodedString(),
+                "hex": hex(proof),
+                "rootCID": decoded.rootCID,
+                "directoryPath": decoded.directoryPath,
+                "entries": decoded.entries.map { ["cid": $0.cid, "dataBase64": $0.data.base64EncodedString()] },
+            ] as [String: Any],
+            "request": try object(request),
+        ]
+        let data = try JSONSerialization.data(withJSONObject: vector, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: URL(fileURLWithPath: path))
+    }
+}
+
 private func XCTAssertThrowsErrorAsync<T>(
     _ expression: @autoclosure () async throws -> T, file: StaticString = #filePath, line: UInt = #line
 ) async {

@@ -650,7 +650,8 @@ grinds](design/proof-derived-work.md#push-only-derived-grinds)).
 `lattice child commit` drives these routes
 ([operator CLI](operator-cli.md#committing-a-child-block-on-its-parent)).
 They are on the operator port only. `block`, `children` and `spec` are the
-base64 bytes of the block node, its child index and a child genesis's spec.
+base64 bytes of the block node, its child index and a child genesis's spec;
+`proofs` are its `ChildBlockProof`s' bytes.
 
 ### `POST /child-blocks`
 
@@ -659,14 +660,26 @@ base64 bytes of the block node, its child index and a child genesis's spec.
   "chainPath": ["Nexus", "Alpha"],
   "block": "<base64 bytes>",
   "children": "<base64 bytes>",
-  "spec": "<base64 bytes>"
+  "spec": "<base64 bytes>",
+  "proofs": ["<base64 bytes>"]
 }
 ```
 
 `spec` is given only for a genesis. The bytes must be canonical, as on the
-gossip wire. The block is taken as a header gossiped without proofs from no
-peer would be, and stored as a received header is. Nothing records the
-submit.
+gossip wire. The block is taken as the same header synced from no peer
+would be, and stored as a received header is. Nothing records the submit.
+
+`proofs` is optional. Each element is the base64 of one `ChildBlockProof`'s
+canonical bytes (Lattice's `ChildBlockProof.serialize()`), exactly what one
+element of a synced header entry's `proofs` carries on the sync wire: a
+proof that the block sits at `children[d0]…[dn]` under a mined root whose
+hash meets the block's target, the terminal carrier's `prevState` being the
+block's `parentState`. A carrier need not be a valid or connected parent
+block. With proofs the block waits for their check as a synced header does
+(`awaiting`), then is weighed (`pending`, `tree`) and executes once the
+parent has executed a block leaving its `parentState`, and peers sync it
+with its proofs. Without them it is held only when a weighed parent block
+commits it.
 
 Response, read after the submit's step:
 
@@ -683,8 +696,11 @@ Response, read after the submit's step:
 
 Only `tree` is final. The author submits again on any other status, and
 after a restart, an unhost or an eviction. `400` `invalidChainPath` for a
-root path, `400` `malformedBlock` for bytes that do not parse or are not
-canonical, `404` `unknownChain` for an unhosted chain.
+root path, `400` `malformedBlock` for bytes (a proof's included) that do
+not parse or are not canonical, `400` `invalidChildProof` for a proof that
+does not verify work for the block (as a peer that sent it would be
+disconnected; nothing is taken), `404` `unknownChain` for an unhosted
+chain.
 
 ### `POST /child-blocks/build`
 

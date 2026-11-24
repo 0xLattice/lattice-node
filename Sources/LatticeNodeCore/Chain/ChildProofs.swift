@@ -43,13 +43,13 @@ public struct ChildProofKey: Hashable, Comparable, Sendable {
     }
 }
 
-/// A peer's proof in a check: for a block, from the peer that sent it, with
-/// its serialized size.
+/// A proof in a check: for a block, from the peer that sent it (none for a
+/// local submit), with its serialized size.
 public struct QueuedChildProof: Sendable {
     public let cid: String
     public let proof: ChildBlockProof
     public let id: String
-    public let source: PeerID
+    public let source: PeerID?
     public let bytes: Int
 
     public var key: ChildProofKey { ChildProofKey(childCID: cid, proofID: id) }
@@ -80,6 +80,17 @@ public struct ChildProofJob: Sendable {
     public static func id(of proof: ChildBlockProof) -> String? {
         guard let bytes = try? proof.serialize() else { return nil }
         return "\(UInt256.hash(bytes))"
+    }
+
+    /// What a check's result credits the block `cid`: its evidence and
+    /// work, or nil for a proof-of-work failure (malformed, another block's,
+    /// or no work for this block).
+    public static func credit(
+        _ result: Result<VerifiedChildEvidence, ChildProofVerificationFailure>, at cid: String
+    ) -> (evidence: VerifiedChildEvidence, work: VerifiedWorkContribution)? {
+        guard case .success(let evidence) = result, evidence.childCID == cid,
+              let work = evidence.contribution, work.work > .zero else { return nil }
+        return (evidence, work)
     }
 }
 
@@ -266,14 +277,14 @@ extension ChainCore {
     /// names it as parent, or a parent-level block commits it, whose grinds
     /// are then derived); otherwise it is dropped, so strangers cannot fill
     /// the waiting pool for free. One from no peer (a local submit) has no
-    /// announcer and no proofs.
+    /// announcer; its proofs are checked as a peer's, blaming no one.
     mutating func awaitProof(_ entry: HeaderEntry, cid: String, from peer: PeerID?, _ turn: inout Turn) {
         if var held = sync.proofs.awaiting[cid] {
             if let peer, !held.announcers.contains(peer) { held.announcers.append(peer) }
             if held.children == nil, let children = entry.children { held.children = children }
             if held.spec == nil { held.spec = Self.bound(entry.spec, by: entry.block) }
             sync.proofs.awaiting[cid] = held
-            if let peer { offer(entry.proofs, cid: cid, from: peer, &turn) }
+            offer(entry.proofs, cid: cid, from: peer, &turn)
             return
         }
         let wanted = sync.pending.childrenOf[cid] != nil
@@ -287,7 +298,7 @@ extension ChainCore {
             announcers: peer.map { [$0] } ?? [], sequence: sync.proofs.sequence
         )
         arrived.append(cid)
-        if let peer { offer(entry.proofs, cid: cid, from: peer, &turn) }
+        offer(entry.proofs, cid: cid, from: peer, &turn)
     }
 
     /// Room for one more waiting header: evict the oldest with no proof in a
@@ -307,7 +318,7 @@ extension ChainCore {
     /// blame, taken again only if a peer sends it again. A proof whose grind
     /// a derivation credits instead (`derives`) is not checked. The step's
     /// checks run as one job (`finish`).
-    mutating func offer(_ proofs: [ChildBlockProof], cid: String, from source: PeerID, _ turn: inout Turn) {
+    mutating func offer(_ proofs: [ChildBlockProof], cid: String, from source: PeerID?, _ turn: inout Turn) {
         // Work crediting a block beyond the finality window is declined.
         if pastFinality(cid) { return }
         // Grinds not yet credited first, so a header served again with the
@@ -415,8 +426,7 @@ extension ChainCore {
             source = checked.source
         }
         let cid = job.childCID
-        guard case .success(let evidence) = result, evidence.childCID == cid,
-              let work = evidence.contribution, work.work > .zero else {
+        guard let (evidence, work) = ChildProofJob.credit(result, at: cid) else {
             if let peer = source { disconnect(peer, .proofOfWorkInvalid, &turn) }
             return
         }

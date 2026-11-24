@@ -43,19 +43,23 @@ public struct SubmitTransactionResponse: Codable, Sendable, Equatable {
 }
 
 /// `POST /child-blocks`: a child block this node's operator holds (normally
-/// its author), as a peer would gossip it without proofs: its block node's
-/// bytes, its child index's, and a child genesis's spec.
+/// its author), as a peer would send it: its block node's bytes, its child
+/// index's, a child genesis's spec, and optionally its proofs, each the
+/// bytes of one `ChildBlockProof` (`serialize()`), as a synced header's
+/// entry carries them.
 public struct SubmitChildBlockRequest: Codable, Sendable {
     public let chainPath: [String]
     public let block: Data
     public let children: Data
     public let spec: Data?
+    public let proofs: [Data]?
 
-    public init(chainPath: [String], block: Data, children: Data, spec: Data? = nil) {
+    public init(chainPath: [String], block: Data, children: Data, spec: Data? = nil, proofs: [Data]? = nil) {
         self.chainPath = chainPath
         self.block = block
         self.children = children
         self.spec = spec
+        self.proofs = proofs
     }
 }
 
@@ -477,6 +481,8 @@ public enum NodeAPIError: Error, Equatable, Sendable {
     case timestampOverflow
     case templateTooLarge
     case malformedBlock
+    /// A submitted child block's proof that does not verify work for it.
+    case invalidChildProof
     /// The node's template carries no block for the child chain now (its
     /// root is weighed but not executed, or it has no spec to start from).
     case noChildCandidate
