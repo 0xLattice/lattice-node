@@ -180,6 +180,8 @@ public struct Mempool: Sendable {
         /// What its fee rate is over (`FeeWeight`).
         let weight: Int
         let claims: Set<String>
+        /// The write claims of the keys it asserts (`asserts(of:)`).
+        let asserts: Set<String>
         let debits: [String: UInt64]
         let fee: WorkSum
         let addedAt: Int64
@@ -189,6 +191,8 @@ public struct Mempool: Sendable {
     private var entries: [String: Entry] = [:]
     /// Each claim's pooled transaction.
     private var claimants: [String: String] = [:]
+    /// Each asserted key's pooled transactions, by its write claim.
+    private var asserters: [String: Set<String>] = [:]
     /// Each account's debits across the pool, for accounts pooled
     /// transactions debit.
     private var committed: [String: UInt64] = [:]
@@ -219,13 +223,27 @@ public struct Mempool: Sendable {
     /// signers' funds are budgeted, not claimed (`debits(of:)`).
     static func claims(of body: TransactionBody) -> Set<String> {
         var claims = Set(body.signers.prefix(1).map { "nonce:\($0):\(body.nonce)" })
-        for action in body.actions { claims.insert("action:" + action.key) }
+        for action in body.actions where !isAssert(action) { claims.insert("action:" + action.key) }
         for deposit in body.depositActions { claims.insert("deposit:" + DepositKey(depositAction: deposit).description) }
         for withdrawal in body.withdrawalActions {
             claims.insert("deposit:" + DepositKey(withdrawalAction: withdrawal).description)
         }
         for receipt in body.receiptActions { claims.insert("receipt:" + ReceiptKey(receiptAction: receipt).description) }
         return claims
+    }
+
+    /// The keys a transaction asserts, as the write claims they share: as in
+    /// consensus, any number of transactions may assert a key, but not
+    /// beside a write of it.
+    static func asserts(of body: TransactionBody) -> Set<String> {
+        Set(body.actions.filter(isAssert).map { "action:" + $0.key })
+    }
+
+    /// Consensus's assert: oldValue and newValue the same bytes. Lattice's
+    /// `Action.isAssert` replaces this once the node pins a release with it.
+    static func isAssert(_ action: Action) -> Bool {
+        guard let oldValue = action.oldValue, let newValue = action.newValue else { return false }
+        return oldValue.utf8.elementsEqual(newValue.utf8)
     }
 
     /// What a transaction takes from each account, as consensus nets it:
@@ -329,6 +347,7 @@ public struct Mempool: Sendable {
             growth: measured.growth,
             weight: FeeWeight(spec).of(size: measured.size, growth: measured.growth),
             claims: Self.claims(of: measured.body),
+            asserts: Self.asserts(of: measured.body),
             debits: measured.debits,
             fee: measured.surplus,
             addedAt: addedAt
@@ -344,6 +363,10 @@ public struct Mempool: Sendable {
         // displaces may sit anywhere in the pool, its own fee aside.
         var displaced: [String: Entry] = [:]
         for claim in entry.claims {
+            if let holder = claimants[claim], let existing = entries[holder] { displaced[holder] = existing }
+            for holder in asserters[claim] ?? [] { if let existing = entries[holder] { displaced[holder] = existing } }
+        }
+        for claim in entry.asserts {
             if let holder = claimants[claim], let existing = entries[holder] { displaced[holder] = existing }
         }
         let claimsConflict = !displaced.isEmpty
@@ -573,6 +596,7 @@ public struct Mempool: Sendable {
         precondition(entries[entry.cid] == nil)
         entries[entry.cid] = entry
         for claim in entry.claims { claimants[claim] = entry.cid }
+        for claim in entry.asserts { asserters[claim, default: []].insert(entry.cid) }
         for (account, debit) in entry.debits { committed[account, default: 0] += debit }
         byteCount += entry.size
         version &+= 1
@@ -581,6 +605,10 @@ public struct Mempool: Sendable {
     private mutating func removeEntry(_ cid: String) -> Entry? {
         guard let removed = entries.removeValue(forKey: cid) else { return nil }
         for claim in removed.claims where claimants[claim] == cid { claimants.removeValue(forKey: claim) }
+        for claim in removed.asserts {
+            asserters[claim]?.remove(cid)
+            if asserters[claim]?.isEmpty == true { asserters.removeValue(forKey: claim) }
+        }
         for (account, debit) in removed.debits {
             let left = committed[account, default: 0] - debit
             committed[account] = left == 0 ? nil : left

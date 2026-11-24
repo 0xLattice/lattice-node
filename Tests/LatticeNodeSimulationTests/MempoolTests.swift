@@ -262,6 +262,44 @@ final class MempoolTests: XCTestCase {
         XCTAssertEqual(pool.count, 2, "the nonce it lost is free")
     }
 
+    /// As in consensus: any number of transactions assert a key (oldValue ==
+    /// newValue) together, but an assert and a write of the key never share
+    /// the pool, nor two writes. A write holding a key keeps asserts out; one
+    /// outbidding the asserts displaces them all.
+    func testAssertsShareAKeyAWriteExcludesThem() throws {
+        func action(_ key: (privateKey: String, publicKey: String), _ action: Action, fee: Int64) throws -> Transaction {
+            let body = TransactionBody(
+                accountActions: [AccountAction(owner: address(key), delta: -fee)],
+                actions: [action],
+                depositActions: [], receiptActions: [], withdrawalActions: [],
+                signers: [address(key)], nonce: 0, chainPath: ["Nexus"]
+            )
+            return Transaction(signatures: [key.publicKey: "x"], body: try HeaderImpl(node: body))
+        }
+        let assert = Action(key: "offer", oldValue: "v", newValue: "v")
+        let update = Action(key: "offer", oldValue: "v", newValue: "w")
+        var pool = Mempool()
+        let orders = try (0..<3).map { _ in try action(CryptoUtils.generateKeyPair(), assert, fee: 1) }
+        for order in orders { try pool.submit(order, spec: testSpec(), addedAt: 0) }
+        XCTAssertEqual(pool.count, 3, "asserts of one key share the pool")
+
+        XCTAssertThrowsError(try pool.submit(try action(CryptoUtils.generateKeyPair(), update, fee: 3), spec: testSpec(), addedAt: 0)) {
+            XCTAssertEqual($0 as? MempoolError, .feeTooLow, "a write displacing three asserts pays for all three")
+        }
+        let write = try action(CryptoUtils.generateKeyPair(), update, fee: 4)
+        XCTAssertEqual(
+            try pool.submit(write, spec: testSpec(), addedAt: 0).replaced.map(\.cid).sorted(),
+            try orders.map(Mempool.cid(of:)).sorted()
+        )
+        XCTAssertThrowsError(try pool.submit(try action(CryptoUtils.generateKeyPair(), assert, fee: 1), spec: testSpec(), addedAt: 0)) {
+            XCTAssertEqual($0 as? MempoolError, .feeTooLow, "an assert cannot join a write of its key")
+        }
+        XCTAssertThrowsError(try pool.submit(try action(CryptoUtils.generateKeyPair(), update, fee: 1), spec: testSpec(), addedAt: 0)) {
+            XCTAssertEqual($0 as? MempoolError, .feeTooLow, "two writes of one key still conflict")
+        }
+        XCTAssertEqual(pool.count, 1)
+    }
+
     /// A conflict goes to what makes the next block pay more. A large write
     /// paying a high fee at a low rate never reaches the next block, so it
     /// holds its key against nothing that would: a small bid paying less in
