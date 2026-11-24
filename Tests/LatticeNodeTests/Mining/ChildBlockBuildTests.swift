@@ -20,24 +20,16 @@ final class ChildBlockBuildTests: XCTestCase {
     private func host(
         _ keyByte: String, hostsAlpha: Bool, alphaPremineTo: String? = nil, peers: [PeerEndpoint] = []
     ) throws -> (NodeConfiguration, IvyConfig, PeerEndpoint) {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-child-build-\(UUID().uuidString)", isDirectory: true
-        )
-        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"], storagePath: directory, privateKeyHex: String(repeating: keyByte, count: 32),
-            listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
-            hostedChildren: hostsAlpha ? [Self.alpha] : [],
-            childSpecs: hostsAlpha ? [Self.alpha: Self.alphaSpec] : [:],
-            childPremineRecipients: alphaPremineTo.map { [Self.alpha: $0] } ?? [:]
-        )
-        let overlay = IvyConfig(
-            signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: peers,
-            requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
-            mode: .overlay
-        )
-        return (configuration, overlay, PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port))
+        let node = try testNode(keyByte: UInt8(keyByte, radix: 16)!, peers: peers) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"], storagePath: $0.storagePath, privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort, rpcPort: $0.rpcPort,
+                hostedChildren: hostsAlpha ? [Self.alpha] : [],
+                childSpecs: hostsAlpha ? [Self.alpha: Self.alphaSpec] : [:],
+                childPremineRecipients: alphaPremineTo.map { [Self.alpha: $0] } ?? [:]
+            )
+        }
+        return (node.configuration, node.overlay, node.endpoint)
     }
 
     private func start(_ configuration: NodeConfiguration, _ overlay: IvyConfig) async throws -> (NodeRuntime, NodeStorage) {

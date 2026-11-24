@@ -1,5 +1,4 @@
 import Foundation
-import Ivy
 import Lattice
 import UInt256
 import XCTest
@@ -21,26 +20,17 @@ final class TemplateExclusionTests: XCTestCase {
     }
 
     private func start(_ key: String) async throws -> NodeRuntime {
-        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-exclude-\(UUID().uuidString)", isDirectory: true
-        )
-        addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) }
-        let port = NetworkTransportTestPorts.allocate()
         // `b`'s blocks always come later than its 1 ms schedule, so its target
         // stays the maximum while `a`, on a 60 s schedule, hardens fast.
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"], storagePath: storageDirectory, privateKeyHex: String(repeating: key, count: 32),
-            listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(),
-            hostedChildren: [Self.testnet, Self.a, Self.b],
-            childSpecs: [Self.testnet: Self.spec(blockTime: 1_000), Self.a: Self.spec(blockTime: 60_000), Self.b: Self.spec(blockTime: 1)]
-        )
-        let overlay = IvyConfig(
-            signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: [],
-            requestTimeout: .seconds(5), stunServers: [], healthConfig: PeerHealthConfig(enabled: false),
-            mode: .overlay
-        )
-        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
-        return try await NodeRuntime.start(storage: storage, configuration: configuration, overlay: overlay)
+        let node = try testNode(keyByte: UInt8(key, radix: 16)!) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"], storagePath: $0.storagePath, privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort, rpcPort: $0.rpcPort,
+                hostedChildren: [Self.testnet, Self.a, Self.b],
+                childSpecs: [Self.testnet: Self.spec(blockTime: 1_000), Self.a: Self.spec(blockTime: 60_000), Self.b: Self.spec(blockTime: 1)]
+            )
+        }
+        return try await start(node).0
     }
 
     private static func carried(_ template: MiningTemplateResponse) -> (testnet: Block, a: Block?, b: Block?)? {
