@@ -27,6 +27,22 @@ final class SimulationTests: XCTestCase {
         print("simulated \(count) seeds from \(first)")
     }
 
+    /// A core whose one link to a source drops again and again while the
+    /// source releases its last blocks: each session resumes where the last
+    /// ended, where one starting from the log's start never got through it
+    /// before the next drop (seed 0xA7C30F737, the nightly's).
+    func testALinkThatKeepsDroppingResumesWhereItsLastSessionEnded() async throws {
+        let replay = TestSeed(value: 0xA_7C30_F737)
+        var simulator = try await Simulator.make(.random(seed: replay.value))
+        let report: SimReport
+        do {
+            report = try await simulator.run()
+        } catch {
+            return XCTFail("\(error) — replay with \(replay)")
+        }
+        assertSynced(report, replay)
+    }
+
     /// Every core holds every block of every honest source's final best chain.
     private func assertSynced(_ report: SimReport, _ replay: TestSeed, line: UInt = #line) {
         for (core, held) in report.coreHeld.sorted(by: { $0.key < $1.key }) {

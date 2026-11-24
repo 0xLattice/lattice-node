@@ -836,9 +836,9 @@ final class ChainCoreSyncTests: XCTestCase {
         XCTAssertEqual(asked.sorted(), chain[0..<3].map(\.cid).sorted())
     }
 
-    /// Until the store keeps cursors, only those it handed back outlive
-    /// their session.
-    func testOnlyHandedBackCursorsOutliveTheirSession() throws {
+    /// A cursor outlives its session, whether the store handed it back or
+    /// the session learned it: the next session resumes from it.
+    func testACursorOutlivesItsSession() throws {
         var core = ChainCore(tree: world.bootstrap.tree.detached(), cursors: ["kept": StreamCursor(logID: "K", position: 3)])
         let kept = PeerID(key: "kept", session: 1)
         for peer in [kept, peer] {
@@ -846,7 +846,7 @@ final class ChainCoreSyncTests: XCTestCase {
             _ = core.step(.received(peer, .stream(StreamPage(requestID: request.requestID, logID: "K", entries: [], hasMore: false))), now: Self.now)
             _ = core.step(.peerGone(peer), now: Self.now)
         }
-        XCTAssertEqual(Array(core.sync.cursors.keys), ["kept"])
+        XCTAssertEqual(core.sync.cursors.keys.sorted(), ["kept", peer.key].sorted())
     }
 
 

@@ -272,7 +272,6 @@ public struct ChainCore: Sendable {
         self.config = config
         self.sync.log = log
         self.sync.cursors = cursors
-        self.sync.knownCursors = Set(cursors.keys)
     }
 
     /// The weigh log the fact log implies, in fact order: each block fact a
@@ -543,9 +542,6 @@ public struct ChainCore: Sendable {
     /// live announcer.
     private mutating func drop(_ peer: PeerID, _ turn: inout Turn) {
         guard sync.peers.removeValue(forKey: peer) != nil else { return }
-        if !sync.knownCursors.contains(peer.key), !sync.peers.keys.contains(where: { $0.key == peer.key }) {
-            sync.cursors[peer.key] = nil
-        }
         if !isRoot { dropProofSource(peer) }
         for parent in [true, false] {
             sync.wants[WantSlot(peer: peer, parent: parent)] = nil
