@@ -13,12 +13,6 @@ import LatticeNodeAPI
 /// (the ones waiting to execute, each chain's tip, each genesis) and goes
 /// on mining, syncing and restarting.
 final class BlockBodiesTests: XCTestCase {
-    private struct Host {
-        let configuration: NodeConfiguration
-        let overlay: IvyConfig
-        let endpoint: PeerEndpoint
-    }
-
     private static let alpha = ["Nexus", "Alpha"]
     private static let alphaSpec = ChainSpec(
         maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
@@ -32,33 +26,21 @@ final class BlockBodiesTests: XCTestCase {
         blockBodies: BlockBodies = .all,
         hosted: Bool = false,
         resourcePolicy: NodeResourcePolicy = .default
-    ) throws -> Host {
-        let storageDirectory = reused ?? FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-node-bodies-\(UUID().uuidString)", isDirectory: true
-        )
-        if reused == nil { addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) } }
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: storageDirectory,
-            privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
-            listenPort: port,
-            rpcPort: NetworkTransportTestPorts.allocate(),
-            webSocket: .off,
-            resourcePolicy: resourcePolicy,
-            blockBodies: blockBodies,
-            hostedChildren: hosted ? [Self.alpha] : [],
-            childSpecs: hosted ? [Self.alpha: Self.alphaSpec] : [:]
-        )
-        return Host(
-            configuration: configuration,
-            overlay: IvyConfig(
-                signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: peers,
-                requestTimeout: .seconds(5), stunServers: [],
-                healthConfig: PeerHealthConfig(enabled: false), mode: .overlay
-            ),
-            endpoint: PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port)
-        )
+    ) throws -> TestNode {
+        try testNode(keyByte: keyByte, peers: peers, reusing: reused) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: $0.storagePath,
+                privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort,
+                rpcPort: $0.rpcPort,
+                webSocket: .off,
+                resourcePolicy: resourcePolicy,
+                blockBodies: blockBodies,
+                hostedChildren: hosted ? [Self.alpha] : [],
+                childSpecs: hosted ? [Self.alpha: Self.alphaSpec] : [:]
+            )
+        }
     }
 
     private func transaction() throws -> Transaction {
@@ -81,13 +63,6 @@ final class BlockBodiesTests: XCTestCase {
         _ runtime: NodeRuntime, _ request: MiningTemplateRequest = MiningTemplateRequest()
     ) async throws -> String {
         try BlockHeader(node: try await runtime.mineBlock(request)).rawCID
-    }
-
-    private func start(_ host: Host) async throws -> (NodeRuntime, NodeStorage) {
-        let storage = try await NodeStorage.openWhenFree(configuration: host.configuration)
-        return (try await NodeRuntime.start(
-            storage: storage, configuration: host.configuration, overlay: host.overlay
-        ), storage)
     }
 
     private func bodiesHeld(_ storage: NodeStorage, of blocks: [String]) async -> [String] {

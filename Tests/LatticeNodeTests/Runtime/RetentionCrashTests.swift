@@ -54,22 +54,18 @@ final class RetentionCrashTests: XCTestCase {
         keyByte: UInt8, directory: URL, peers: [PeerEndpoint], state: StateRetention, bodies: BlockBodies,
         hosted: Bool = false
     ) throws -> (NodeConfiguration, IvyConfig, PeerEndpoint) {
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"], storagePath: directory,
-            privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
-            listenPort: port, rpcPort: NetworkTransportTestPorts.allocate(), webSocket: .off,
-            peerSearchInterval: 600, blockBodies: bodies, state: state,
-            hostedChildren: hosted ? [Self.alpha] : [],
-            childSpecs: hosted ? [Self.alpha: StateWindowTests.alphaSpec] : [:],
-            stateWindows: FinalityWindows(all: 2)
-        )
-        let overlay = IvyConfig(
-            signingKey: configuration.signingKey, listenPort: port, bootstrapPeers: peers,
-            requestTimeout: .seconds(5), stunServers: [],
-            healthConfig: PeerHealthConfig(enabled: false), mode: .overlay
-        )
-        return (configuration, overlay, PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port))
+        let node = try testNode(keyByte: keyByte, peers: peers, reusing: directory) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"], storagePath: $0.storagePath,
+                privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort, rpcPort: $0.rpcPort, webSocket: .off,
+                peerSearchInterval: 600, blockBodies: bodies, state: state,
+                hostedChildren: hosted ? [Self.alpha] : [],
+                childSpecs: hosted ? [Self.alpha: StateWindowTests.alphaSpec] : [:],
+                stateWindows: FinalityWindows(all: 2)
+            )
+        }
+        return (node.configuration, node.overlay, node.endpoint)
     }
 
     private func directory() -> URL {

@@ -31,47 +31,32 @@ final class PeerSearchRuntimeTests: XCTestCase {
         keyByte: UInt8, hosted: [[String]], peers: [PeerEndpoint] = [], interval: TimeInterval = 5,
         storage: URL? = nil, alphaSeeds: [PeerEndpoint] = [], peerTarget: Int = 8
     ) async throws -> Node {
-        let port = NetworkTransportTestPorts.allocate()
-        let host = Self.advertised(port)
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: storage ?? temporaryDirectory(),
-            privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
-            listenPort: port,
-            rpcPort: NetworkTransportTestPorts.allocate(),
-            bootstrapPeers: peers,
-            childSeedPeers: alphaSeeds.isEmpty ? [:] : [Self.alpha: alphaSeeds],
-            peerTarget: peerTarget,
-            externalAddress: host,
-            peerSearchInterval: interval,
-            hostedChildren: hosted,
-            childSpecs: hosted.isEmpty ? [:] : [Self.alpha: Self.spec]
-        )
-        let overlay = IvyConfig(
-            signingKey: configuration.signingKey,
-            listenPort: port,
-            bootstrapPeers: peers,
-            requestTimeout: .seconds(5),
-            stunServers: [],
-            healthConfig: PeerHealthConfig(enabled: false),
-            // No background routing refresh: only the node's peer search
-            // may connect the follower to the host.
-            routingRefreshInterval: .seconds(3_600),
-            externalAddress: (host, port),
-            mode: .overlay
-        )
-        let storage = try await NodeStorage.openWhenFree(configuration: configuration)
-        let runtime = try await NodeRuntime.start(storage: storage, configuration: configuration, overlay: overlay)
+        // No background routing refresh: only the node's peer search may
+        // connect the follower to the host.
+        let node = try testNode(keyByte: keyByte, peers: peers, reusing: storage, routingRefreshInterval: .seconds(3_600)) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: $0.storagePath,
+                privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort,
+                rpcPort: $0.rpcPort,
+                bootstrapPeers: peers,
+                childSeedPeers: alphaSeeds.isEmpty ? [:] : [Self.alpha: alphaSeeds],
+                peerTarget: peerTarget,
+                externalAddress: Self.advertised($0.listenPort),
+                peerSearchInterval: interval,
+                hostedChildren: hosted,
+                childSpecs: hosted.isEmpty ? [:] : [Self.alpha: Self.spec]
+            )
+        }
+        let (runtime, _) = try await start(node)
         await runtime.ivy.setDialEndpointRewriteForTesting { endpoint in
             endpoint.host.hasPrefix("8.8.")
                 ? PeerEndpoint(publicKey: endpoint.publicKey, host: "127.0.0.1", port: endpoint.port)
                 : endpoint
         }
         addTeardownBlock { await runtime.stop() }
-        return Node(
-            runtime: runtime,
-            endpoint: PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port)
-        )
+        return Node(runtime: runtime, endpoint: node.endpoint)
     }
 
     func testAFollowerFindsTheChildsHostWhileNexusAdvances() async throws {

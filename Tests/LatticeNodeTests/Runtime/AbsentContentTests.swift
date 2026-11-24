@@ -13,12 +13,6 @@ import LatticeNodeAPI
 /// Content a fact names and the store lacks is no fault: the node reads what
 /// its own work needs from peers, checked against its CID.
 final class AbsentContentTests: XCTestCase {
-    private struct Host {
-        let configuration: NodeConfiguration
-        let overlay: IvyConfig
-        let endpoint: PeerEndpoint
-    }
-
     static let alpha = ["Nexus", "Alpha"]
     static let alphaSpec = ChainSpec(
         maxNumberOfTransactionsPerBlock: 100, maxStateGrowth: 100_000, premine: 0,
@@ -30,35 +24,19 @@ final class AbsentContentTests: XCTestCase {
         peers: [PeerEndpoint] = [],
         storageDirectory reused: URL? = nil,
         hosted: Bool = false
-    ) throws -> Host {
-        let storageDirectory = reused ?? FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lattice-node-absent-\(UUID().uuidString)", isDirectory: true
-        )
-        if reused == nil { addTeardownBlock { try? FileManager.default.removeItem(at: storageDirectory) } }
-        let port = NetworkTransportTestPorts.allocate()
-        let configuration = try NodeConfiguration(
-            chainPath: ["Nexus"],
-            storagePath: storageDirectory,
-            privateKeyHex: String(repeating: String(format: "%02x", keyByte), count: 32),
-            listenPort: port,
-            rpcPort: NetworkTransportTestPorts.allocate(),
-            webSocket: .off,
-            hostedChildren: hosted ? [Self.alpha] : [],
-            childSpecs: hosted ? [Self.alpha: Self.alphaSpec] : [:]
-        )
-        return Host(
-            configuration: configuration,
-            overlay: IvyConfig(
-                signingKey: configuration.signingKey,
-                listenPort: port,
-                bootstrapPeers: peers,
-                requestTimeout: .seconds(5),
-                stunServers: [],
-                healthConfig: PeerHealthConfig(enabled: false),
-                mode: .overlay
-            ),
-            endpoint: PeerEndpoint(publicKey: configuration.processPublicKey, host: "127.0.0.1", port: port)
-        )
+    ) throws -> TestNode {
+        try testNode(keyByte: keyByte, peers: peers, reusing: reused) {
+            try NodeConfiguration(
+                chainPath: ["Nexus"],
+                storagePath: $0.storagePath,
+                privateKeyHex: $0.privateKeyHex,
+                listenPort: $0.listenPort,
+                rpcPort: $0.rpcPort,
+                webSocket: .off,
+                hostedChildren: hosted ? [Self.alpha] : [],
+                childSpecs: hosted ? [Self.alpha: Self.alphaSpec] : [:]
+            )
+        }
     }
 
     private func mine(
@@ -76,7 +54,7 @@ final class AbsentContentTests: XCTestCase {
         CryptoUtils.createAddress(from: CryptoUtils.generateKeyPair().publicKey)
     }
 
-    private func empty(_ host: Host) {
+    private func empty(_ host: TestNode) {
         try? FileManager.default.removeItem(at: host.configuration.storagePath.appendingPathComponent("volumes"))
     }
 
