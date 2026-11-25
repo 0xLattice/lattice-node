@@ -26,7 +26,7 @@ final class AssertTemplateTests: XCTestCase {
 
     /// Block 1 lists the offer; templates are fit on it.
     private func template(pooled: [Transaction]) async throws -> (block: Block, cas: SimCAS) {
-        var builder = try await LevelWorld.Builder(levels: 1)
+        let builder = try await LevelWorld.Builder(levels: 1)
         let genesis = try XCTUnwrap(builder.geneses[Self.nexus]).block
         let listed = try await BlockBuilder.buildBlock(
             previous: genesis,
