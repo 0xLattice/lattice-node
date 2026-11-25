@@ -18,20 +18,17 @@ for local macOS builds.
 swift run lattice-node --help
 swift run lattice-node --rpc-port 8080
 
-# External proof-of-work pipeline:
-swift run lattice-mining-coordinator \
-  --node http://127.0.0.1:8080 \
-  --rpc-cookie-file ~/.lattice/chains/Nexus/.cookie \
-  --worker-executable .build/debug/lattice-miner \
-  --workers 2
+# Mining, with lattice-miner (github.com/0xLattice/lattice-miner):
+lattice-miner run --node http://127.0.0.1:8080 \
+  --cookie-file ~/.lattice/chains/Nexus/.cookie --config miner.json
 ```
 
 See [getting-started.md](getting-started.md) for first-run details and
 [../deploy/README.md](../deploy/README.md) for multi-node and per-process child chains.
-Mining code should follow the E15 [Mining role boundaries](design/mining-role-boundaries.md):
+Mining code should follow the [Mining role boundaries](design/mining-role-boundaries.md):
 `LatticeNode` owns chain state, sealing, validation, persistence, and gossip;
-`MiningCoordinator` owns work lifecycle and range fan-out; `LatticeMiner`
-workers only search assigned nonces.
+lattice-miner owns work lifecycle and range fan-out, and its workers only
+search assigned nonces.
 
 ## Test
 
@@ -100,8 +97,6 @@ Docker-compatible runtime without the GUI.
 | `Sources/LatticeNodeMining` | Mining-template assembly, multi-level mining plans, the child-template cache, and the template's conversion into the API's response. |
 | `Sources/LatticeNode/Observability` | Metrics and opt-in synchronization tracing. |
 | `Sources/LatticeNodeDaemon` | CLI and loopback HTTP adapter. |
-| `Sources/LatticeMiner` | External proof-of-work worker target; nonce search only. |
-| `Sources/LatticeMiningCoordinatorTool` | Node-facing coordinator CLI; fetches work, allocates local ranges, and submits nonce results. |
 | `Sources/CSQLite` | SQLite C shim. |
 
 Consensus protocol types (Block, Transaction, ChainState, consensus) live in the

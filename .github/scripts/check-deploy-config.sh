@@ -8,6 +8,3 @@ sh -n deploy/entrypoint.sh
 
 ! grep -R -E 'sha-21c9f0e|lattice-miner\.service|Nexus-v3' \
     deploy --exclude='check-deploy-config.sh'
-grep -q 'EnvironmentFile=/etc/lattice/mining.env' \
-    deploy/lattice-mining-coordinator.service
-grep -q '\$RECIPIENT_ARGS' deploy/lattice-mining-coordinator.service

@@ -91,7 +91,7 @@ final class OperatorListenerTests: XCTestCase {
         }
     }
 
-    /// A separate miner (`lattice mine run --node --token-file`) needs the
+    /// A separate miner (`lattice-miner run --node --token-file`) needs the
     /// template, work and status routes, and its token reaches nothing else.
     func testAMinerTokenReachesTheMiningRoutesAlone() async throws {
         let app = try await node().app

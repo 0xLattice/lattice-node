@@ -155,25 +155,16 @@ struct Restart: AsyncParsableCommand {
 
 struct Logs: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Print the running node's recent log lines (GET /logs), or the local mining loop's.",
+        abstract: "Print the running node's recent log lines (GET /logs).",
         discussion: "The node logs to standard error and keeps its recent lines in memory; a stopped node's log is wherever its process manager put it (journalctl, the launchd log file, docker logs)."
     )
 
     @OptionGroup var target: NodeTarget
 
-    @Flag(help: "The mining loop's log under --root (`lattice mine start`), instead of the node's.")
-    var miner = false
-
     @Option(help: "How many lines.")
     var tail = 200
 
     func run() async throws {
-        // The miner is a process of its own: its log is on this machine.
-        if miner {
-            let file = target.layout.logFile(for: "mine")
-            let lines = try String(contentsOf: file, encoding: .utf8).split(separator: "\n", omittingEmptySubsequences: false)
-            return print(lines.suffix(tail + 1).joined(separator: "\n"), terminator: "")
-        }
         guard let rpc = try await target.running() else {
             throw CtlError("the node is not running; its log is wherever its process manager put it (journalctl -u lattice-tree for `lattice emit-systemd`'s unit or -u lattice-node for the checked-in one, the launchd log file, docker logs)")
         }

@@ -336,9 +336,10 @@ The node constructs the final nonce-zero template and owns transaction
 selection, contextual child candidates, target calculation, import,
 durability, and publication. It never runs a nonce-search loop.
 
-`lattice-mining-coordinator` fetches work, allocates disjoint ranges, detects a
-changed tip, and submits `workID + nonce`. `lattice-miner` only searches one
-immutable serialized block/range assignment.
+The miner ([lattice-miner](https://github.com/0xLattice/lattice-miner)) fetches
+work, allocates disjoint ranges, detects a changed tip, and submits
+`workID + nonce`. Its workers only search one immutable serialized
+block/range assignment.
 
 The miner-facing API is:
 

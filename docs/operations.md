@@ -11,8 +11,9 @@ process owns:
 - optionally one public-read listener (GET-only unless public submit is on);
 - one `state.db` and `volumes/` recovery unit (a Volume store per hosted chain).
 
-Run mining outside the node with `lattice-mining-coordinator` and one or more
-workers. Use a supervisor for both processes.
+Run mining outside the node with
+[lattice-miner](https://github.com/0xLattice/lattice-miner) (`lattice-miner run`
+and its workers). Use a supervisor for both the node and the miner.
 
 ## Preflight checklist
 
@@ -197,22 +198,14 @@ For systemd, install the checked-in units and a topology:
 ```bash
 install -m 0644 deploy/lattice-node.service \
   /etc/systemd/system/lattice-node.service
-install -m 0644 deploy/lattice-mining-coordinator.service \
-  /etc/systemd/system/lattice-mining-coordinator.service
 systemctl daemon-reload
 systemctl enable --now lattice-node
 ```
 
-The coordinator unit requires `/etc/lattice/mining.env`:
-
-```bash
-install -d -m 0750 /etc/lattice
-cat >/etc/lattice/mining.env <<'EOF'
-RECIPIENT_ARGS=--recipient Nexus=<address> --recipient Nexus/Alpha=<address>
-EOF
-chmod 0640 /etc/lattice/mining.env
-systemctl enable --now lattice-mining-coordinator
-```
+To mine, write lattice-miner's settings to `<root>/miner.json` and install
+the `lattice-mine.service` unit `lattice emit-systemd` prints for it (see
+[the operator CLI](operator-cli.md#systemd-launchd-containers)). The miner
+unit restarts always and waits out a node restart itself.
 
 ## Network surfaces
 
@@ -454,28 +447,32 @@ For a nested child stuck at `awaitingGenesis`, check in order:
 
 ## Mining
 
-The recommended production command is equivalent to:
+The recommended production command is:
 
 ```bash
-lattice-mining-coordinator \
-  --node http://127.0.0.1:8080 \
-  --rpc-cookie-file <root>/chains/Nexus/.cookie \
-  --worker-executable /usr/local/bin/lattice-miner \
-  --workers 2 \
-  --recipient Nexus=<address> \
-  --recipient Nexus/Alpha=<address>
+lattice-miner run --node http://127.0.0.1:8080 \
+  --cookie-file <root>/chains/Nexus/.cookie --config <root>/miner.json
+```
+
+with `<root>/miner.json` naming the worker and each chain's recipient:
+
+```json
+{
+  "worker": "/usr/local/bin/lattice-miner-gpu",
+  "recipients": {"Nexus": "<address>", "Nexus/Alpha": "<address>"}
+}
 ```
 
 The node fingerprints the complete hosted tree. A new transaction, child
 candidate, or accepted child block changes the template digest, sending the
-coordinator for new work, even when the Nexus tip did not change. Work already
+miner for new work, even when the Nexus tip did not change. Work already
 issued stays submittable; a solution on an old tip is a side block. Submitted work is persisted only for child levels whose
 target the hash actually meets.
 
 Alert when:
 
-- the coordinator reports no usable template for longer than one expected
-  block interval;
+- the miner reports no usable template for longer than one expected block
+  interval;
 - a round deadline is exceeded;
 - rewards are intentionally or accidentally burning because a recipient is
   absent;
@@ -743,10 +740,10 @@ Back up only while the process is stopped, and snapshot both databases
 together. The identity and child specs need separate backups.
 
 ```bash
-systemctl stop lattice-mining-coordinator lattice-node
+systemctl stop lattice-node
 tar -C /var/lib/lattice -czf lattice-tree-backup.tgz \
   lattice.json identity specs chains/Nexus
-systemctl start lattice-node lattice-mining-coordinator
+systemctl start lattice-node
 ```
 
 Startup fails closed when:
@@ -814,11 +811,11 @@ There are no migrations, compatibility readers, or mixed-version operation.
 For an incompatible release:
 
 ```bash
-systemctl stop lattice-mining-coordinator lattice-node
+systemctl stop lattice-node
 # Preserve identity, lattice.json, and specs. Remove the complete runtime tree.
 lattice wipe --root /var/lib/lattice
-# Install all four binaries from the same release.
-systemctl start lattice-node lattice-mining-coordinator
+# Install lattice and lattice-node from the same release.
+systemctl start lattice-node
 ```
 
 The pinned Nexus genesis is recreated deterministically. Child roots are

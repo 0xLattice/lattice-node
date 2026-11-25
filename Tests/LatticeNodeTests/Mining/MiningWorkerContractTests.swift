@@ -1,6 +1,6 @@
 import XCTest
 import Lattice
-import LatticeMinerCore
+import UInt256
 import cashew
 @testable import LatticeNode
 import LatticeNodeAPI
@@ -38,17 +38,16 @@ final class MiningWorkerContractTests: XCTestCase {
             ).toHexString(),
             Self.vectorHashHex
         )
-        // A prefix-only midstate is byte-for-byte the block midstate: workers
-        // given --prefix-hex need no block parse.
+        // The midstate search is the consensus hash of the whole preimage.
         XCTAssertEqual(
-            ProofOfWork.hash(
-                midstate: ProofOfWork.midstate(prefixBytes: prefix),
-                nonce: Self.vectorNonce
-            ).toHexString(),
+            UInt256.hash(Block.makeProofOfWorkPreimage(block: block, nonce: Self.vectorNonce)).toHexString(),
             Self.vectorHashHex
         )
     }
 
+    /// A miner reads the block out of the template and derives the PoW
+    /// prefix from it: the block survives the template's JSON with every
+    /// byte of its preimage, and the targets with it.
     func testTemplateResponseCarriesConsensusPrefix() async throws {
         let store = InMemoryContentStore()
         let genesis = try await NexusGenesis.create(fetcher: store)
@@ -64,17 +63,15 @@ final class MiningWorkerContractTests: XCTestCase {
             ),
             templateDigest: "digest"
         )
-        let decoded = try JSONDecoder().decode(
-            TemplateResponse.self,
-            from: try JSONEncoder().encode(response)
-        )
-        let expected = ProofOfWork.proofOfWorkHashPrefixBytes(genesis.block)
-            .map { String(format: "%02x", $0) }.joined()
-        XCTAssertEqual(decoded.prefixHex, expected)
-        XCTAssertEqual(decoded.targets, response.targets.map { $0.toHexString() })
+        struct Wire: Decodable {
+            let block: Block
+            let targets: [UInt256]
+        }
+        let decoded = try JSONDecoder().decode(Wire.self, from: try JSONEncoder().encode(response))
         XCTAssertEqual(
-            TemplateResponse.derivePrefixHex(blockHex: decoded.blockHex),
-            expected
+            ProofOfWork.proofOfWorkHashPrefixBytes(decoded.block),
+            ProofOfWork.proofOfWorkHashPrefixBytes(genesis.block)
         )
+        XCTAssertEqual(decoded.targets, response.targets)
     }
 }

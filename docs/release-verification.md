@@ -2,8 +2,9 @@
 
 Lattice Node release archives are published with four operator-verifiable artifacts:
 
-- `*.tar.gz`: release binaries for `lattice`, `lattice-node`,
-  `lattice-mining-coordinator`, and `lattice-miner`.
+- `*.tar.gz`: release binaries for `lattice` and `lattice-node`. The miner is
+  [lattice-miner](https://github.com/0xLattice/lattice-miner), released from
+  its own repository.
 - `*.tar.gz.sha256`: SHA-256 checksum for the archive.
 - `*.spdx.json`: SBOM generated from `Package.resolved`.
 - `*.artifacts.json`: portable manifest binding the archive name, checksum, archive digest, and SBOM digest. Its paths are file names relative to the manifest, so keep all four assets together after download.
@@ -21,11 +22,10 @@ gh attestation verify lattice-node-<version>-<platform>.tar.gz --repo 0xLattice/
 ```
 
 Before packaging each platform archive, the release workflow runs the test
-suite. During bundle assembly, the smoke test exercises the bundle's node,
-`lattice`, `lattice-mining-coordinator`, and `lattice-miner` together. After
+suite. During bundle assembly, the smoke test exercises the bundle's node and
+`lattice` together, mining a block through the node's mining routes. After
 archive assembly, the workflow extracts that archive and reruns the multichain
-operator E2E suite against its `lattice`, `lattice-node`, coordinator, and
-miner. Linux release binaries statically include
+operator E2E suite against its `lattice` and `lattice-node`. Linux release binaries statically include
 the Swift runtime and are also executed in a plain Ubuntu container without a
 Swift toolchain. Linux hosts still need the standard system libraries used by
 the executables: libatomic, libcurl, libsqlite3, and libxml2. The smoke test

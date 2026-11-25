@@ -9,8 +9,7 @@ public var currentExecutable: URL {
 }
 
 /// The executable `name` beside `executable` (symlinks resolved), or in
-/// /usr/local/bin: lattice-node, or the miner's lattice-mining-coordinator
-/// and lattice-miner, which a miner-only host has without lattice-node.
+/// /usr/local/bin: lattice-node.
 public func siblingBinary(_ name: String, beside executable: URL = currentExecutable) throws -> URL {
     let own = executable.resolvingSymlinksInPath().deletingLastPathComponent()
     for candidate in [

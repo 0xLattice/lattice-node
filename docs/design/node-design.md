@@ -672,7 +672,6 @@ published.
 | `LatticeNodeAPI` | 1,532 | the client contract: request and response models, and the state proofs a client verifies without a node |
 | `LatticeNodeDaemon` | 3,449 | HTTP servers and process entry |
 | `LatticeCtl`, `LatticeCtlCore` | 3,001 | the `lattice` CLI: it depends on the API, the configuration, the core and the store, never on `LatticeNode` |
-| `LatticeMiner*`, `LatticeMiningCoordinator*` | 1,558 | mining, as separate processes |
 
 ---
 
@@ -1483,9 +1482,10 @@ adapter around them.
 
 ### 4.13 Mining
 
-**What.** Mining runs outside the node: `lattice-miner` searches a nonce
-range; a coordinator fetches templates, watches a template digest, and
-submits work. The digest hashes the tip, the pool and each hosted level's
+**What.** Mining runs outside the node, in a separate repository
+([lattice-miner](https://github.com/0xLattice/lattice-miner)): its
+`lattice-miner` fetches templates, watches a template digest, and submits
+work; its workers search a nonce range. The digest hashes the tip, the pool and each hosted level's
 inputs. Child templates are cached per level for up to 30 s; a template
 request while a level holds a backlog is refused with a 503.
 

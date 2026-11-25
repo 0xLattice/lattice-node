@@ -24,13 +24,12 @@ SIM_SEEDS=5 swift test --filter LatticeNodeSimulationTests
   loss, delay, crashes, invalid peers, reorgs, body unavailability, proof
   contention, and transaction workloads. The same seed reproduces the same
   run.
-- `LatticeMinerCoreTests` and `LatticeMiningCoordinatorTests` cover target
-  parsing, template freshness, nonce-range allocation, worker lifecycle,
-  cancellation, and the current unversioned mining payloads.
 - `LatticeNodeE2ETests` contains the opt-in `LatticeCtlE2ETests`. These launch
-  the shipped `lattice`, `lattice-node`, coordinator, and miner as external
-  processes, mine real blocks, create and resume a child chain, submit signed
-  transactions, and verify state after restart.
+  the shipped `lattice` and `lattice-node` as external processes, mine real
+  blocks through the node's mining routes (`TestMiner`, a CPU miner in the
+  test process that speaks the routes as lattice-miner does), create and
+  resume a child chain, submit signed transactions, and verify state after
+  restart.
 
   `TwoVersionE2ETests`, also opt-in, peers a node of an older release with a
   node of this build and has each follow the blocks the other mines.
@@ -49,8 +48,6 @@ swift build --build-tests -Xswiftc -warnings-as-errors
 E2E_CTL=1 \
 E2E_CTL_BIN="$PWD/.build/release/lattice" \
 E2E_NODE_BIN="$PWD/.build/release/lattice-node" \
-E2E_COORDINATOR_BIN="$PWD/.build/release/lattice-mining-coordinator" \
-E2E_MINER_BIN="$PWD/.build/release/lattice-miner" \
 swift test --skip-build --filter LatticeCtlE2ETests
 ```
 
@@ -69,9 +66,10 @@ E2E_OLD_BIN_DIR=/path/to/lattice-node-4.0.0-macos-arm64/bin \
 swift test --skip-build --filter TwoVersionE2ETests
 ```
 
-Each release is driven through its own `lattice` CLI on loopback and read over
-`/health`; neither host can reach the public peers. One host mines Nexus, the
-other follows it to the same tip, in both directions. It covers Nexus blocks
+Each release is driven through its own `lattice` CLI on loopback, read over
+`/health` and mined through its mining routes by `TestMiner`; neither host can
+reach the public peers. One host mines Nexus, the other follows it to the same
+tip, in both directions. It covers Nexus blocks
 only: not child chains, transactions or state reads between the two.
 
 ## Invariants pinned here

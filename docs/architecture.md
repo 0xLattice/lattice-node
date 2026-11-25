@@ -314,21 +314,22 @@ all qualifying carried children in path order.
 ## External mining
 
 ```text
-lattice-mining-coordinator
+lattice-miner
   │ POST /mining/templates
   ▼
 lattice-node
   │ immutable candidate + search target
   ▼
-lattice-miner workers
+lattice-miner workers (lattice-miner-gpu, or its built-in CPU search)
   │ nonce result
   ▼
-lattice-mining-coordinator
+lattice-miner
   │ POST /mining/work
   ▼
 lattice-node runtime and durable effects
 ```
 
 The node owns chain truth, template construction, and submission validation.
-The coordinator owns work lifecycle and range allocation. Workers only search
-nonces for an immutable assignment.
+The miner, [lattice-miner](https://github.com/0xLattice/lattice-miner), owns
+work lifecycle and range allocation. Workers only search nonces for an
+immutable assignment.

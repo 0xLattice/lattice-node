@@ -26,9 +26,10 @@ mempool, and mining candidates inside that process.
   provider record per hosted child chain, by its path, and search a chain's
   record for peers when it has none, stops progressing, or is short of its
   peer target.
-- **External mining.** The node owns templates and validation,
-  `lattice-mining-coordinator` owns ranges, and stateless `lattice-miner`
-  workers search nonces.
+- **External mining.** The node owns templates and validation; the miner,
+  [lattice-miner](https://github.com/0xLattice/lattice-miner), is a separate
+  process that fetches templates, searches nonces with its CPU, Metal, CUDA or
+  OpenCL workers, and submits work.
 
 The detailed implementation map is in [docs/architecture.md](docs/architecture.md).
 
@@ -89,9 +90,11 @@ positive rewards before using it as a parent.
 
 ## Mine the tree
 
-The miner is a separate process, a client of the node's template and work
-routes. Its settings are its own file, `node-data/miner.json` (the node's
-`lattice.json` holds none):
+The miner is [lattice-miner](https://github.com/0xLattice/lattice-miner), a
+separate process and a client of the node's template and work routes. Build it
+from that repository (`cargo build --release --workspace`); its releases carry
+the `lattice-miner-gpu` worker. Its settings are its own file, here
+`node-data/miner.json` (the node's `lattice.json` holds none):
 
 ```json
 {
@@ -105,8 +108,8 @@ routes. Its settings are its own file, `node-data/miner.json` (the node's
 ```
 
 ```bash
-swift run lattice mine start --root node-data
-swift run lattice mine status --root node-data
+lattice-miner run --node http://127.0.0.1:8080 \
+  --cookie-file node-data/chains/Nexus/.cookie --config node-data/miner.json
 ```
 
 Every grind is checked against every hosted target. Configure a recipient for

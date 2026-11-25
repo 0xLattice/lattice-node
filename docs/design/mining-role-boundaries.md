@@ -1,7 +1,9 @@
 # Mining Role Boundaries
 
 This document is the mining contract. It defines the boundary between the
-node, a coordinator, and nonce-search workers.
+node, a coordinator, and nonce-search workers. Both mining roles live outside
+this repository, in [lattice-miner](https://github.com/0xLattice/lattice-miner):
+its `lattice-miner` is the coordinator and its `lattice-miner-gpu` a worker.
 
 ## Roles
 
@@ -10,12 +12,13 @@ construction, transaction selection, reward-plan validation, effective target
 calculation, child-chain candidate embedding, merged-mining proof handling,
 solution validation, block acceptance, persistence, and gossip publication.
 
-`MiningCoordinator` owns work lifecycle outside the node. It fetches or
+The coordinator (`lattice-miner`) owns work lifecycle outside the node. It fetches or
 subscribes to node work, detects stale work, cancels old assignments, allocates
 non-overlapping nonce ranges, collects worker results, resolves result races,
 and submits the winning result to the node-owned solution API.
 
-`LatticeMiner` is a worker. A worker receives a serialized nonce-0 `Block` node
+A worker (`lattice-miner-gpu`, or the coordinator's built-in CPU search)
+receives a serialized nonce-0 `Block` node
 assignment, deserializes it locally, searches the assigned nonce range, and
 returns a nonce result or no result. It does not construct blocks, choose
 transactions, resolve block content roots, know child-chain topology, gossip
@@ -64,10 +67,10 @@ The worker does not define a second proof-of-work encoding.
 | Merged-mining child proof generation and verification | `LatticeNode` |
 | Block sealing from accepted solution | `LatticeNode` |
 | Block acceptance, persistence, and gossip publication | `LatticeNode` |
-| Stale-work detection and cancellation | `MiningCoordinator` |
-| Nonce-range allocation and de-duplication | `MiningCoordinator` |
-| Worker retry/backoff and result race resolution | `MiningCoordinator` |
-| Proof-of-work nonce search | `LatticeMiner` worker |
+| Stale-work detection and cancellation | Coordinator (`lattice-miner`) |
+| Nonce-range allocation and de-duplication | Coordinator (`lattice-miner`) |
+| Worker retry/backoff and result race resolution | Coordinator (`lattice-miner`) |
+| Proof-of-work nonce search | Worker (`lattice-miner-gpu`) |
 
 ## Submission Contract
 
@@ -115,8 +118,9 @@ protocols:
 
 ## Implementation Rule
 
-Mining code must stay on the matrix above. `Sources/LatticeMiner` is a nonce
-search worker target only. RPC transport, stale-work handling, range allocation,
+Mining code must stay on the matrix above. This repository holds the node's
+side only: templates, submission validation and the mining routes. A worker is
+a nonce search only. RPC transport, stale-work handling, range allocation,
 and solution submission live in the coordinator. Contextual child orchestration
 and proof generation stay inside the node, between its co-hosted levels. No
 Ivy gossip, child topology, proof generation, or private-key submission may

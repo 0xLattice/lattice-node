@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# Exercise the shipped node, coordinator, and worker as one mining pipeline.
+# Exercise the shipped node through its mining routes, as an external miner
+# does: block 1's target is the maximum, so nonce 0 mines it.
 set -euo pipefail
 
-node_binary="${1:?usage: smoke-lattice-node.sh <lattice-node> <lattice-mining-coordinator> <lattice-miner> <lattice>}"
-coordinator_binary="${2:?usage: smoke-lattice-node.sh <lattice-node> <lattice-mining-coordinator> <lattice-miner> <lattice>}"
-miner_binary="${3:?usage: smoke-lattice-node.sh <lattice-node> <lattice-mining-coordinator> <lattice-miner> <lattice>}"
-ctl_binary="${4:?usage: smoke-lattice-node.sh <lattice-node> <lattice-mining-coordinator> <lattice-miner> <lattice>}"
+node_binary="${1:?usage: smoke-lattice-node.sh <lattice-node> <lattice>}"
+ctl_binary="${2:?usage: smoke-lattice-node.sh <lattice-node> <lattice>}"
 
-for binary in "$node_binary" "$coordinator_binary" "$miner_binary" "$ctl_binary"; do
+for binary in "$node_binary" "$ctl_binary"; do
     [[ -x "$binary" ]] || {
         echo "artifact smoke requires an executable: $binary" >&2
         exit 1
@@ -26,11 +25,10 @@ readonly tmp="$(mktemp -d)"
 readonly port="$((20000 + RANDOM % 20000))"
 readonly rpc_port="$((port + 2))"
 readonly node_log="$tmp/node.log"
-readonly coordinator_output="$tmp/coordinator.json"
-readonly coordinator_log="$tmp/coordinator.log"
+readonly template_json="$tmp/template.json"
+readonly work_json="$tmp/work.json"
 readonly health_json="$tmp/health.json"
 node_pid=""
-coordinator_pid=""
 
 is_running() {
     local process_pid="${1:-}"
@@ -46,13 +44,9 @@ dump_logs() {
         echo "last health response:" >&2
         cat "$health_json" >&2
     }
-    [[ ! -s "$coordinator_output" ]] || {
-        echo "coordinator output:" >&2
-        cat "$coordinator_output" >&2
-    }
-    [[ ! -s "$coordinator_log" ]] || {
-        echo "coordinator log:" >&2
-        cat "$coordinator_log" >&2
+    [[ ! -s "$work_json" ]] || {
+        echo "work response:" >&2
+        cat "$work_json" >&2
     }
     [[ ! -s "$node_log" ]] || {
         echo "node log:" >&2
@@ -81,7 +75,6 @@ stop_process_for_cleanup() {
 }
 
 cleanup() {
-    stop_process_for_cleanup "$coordinator_pid"
     stop_process_for_cleanup "$node_pid"
     rm -rf "$tmp"
 }
@@ -160,47 +153,29 @@ await_status() {
     fail "node did not reach $label"
 }
 
-run_coordinator() {
-    "$coordinator_binary" \
-        --node "http://127.0.0.1:$rpc_port" \
-        --rpc-cookie-file "$tmp/data/.cookie" \
-        --worker-executable "$miner_binary" \
-        --workers 1 \
-        --once \
-        --batch-size 1 \
-        >"$coordinator_output" 2>"$coordinator_log" &
-    coordinator_pid=$!
-
-    for ((attempt = 0; attempt < 200; attempt += 1)); do
-        is_running "$coordinator_pid" || break
-        sleep 0.1
-    done
-    if is_running "$coordinator_pid"; then
-        kill -TERM "$coordinator_pid" 2>/dev/null || true
-        wait "$coordinator_pid" 2>/dev/null || true
-        coordinator_pid=""
-        fail "mining coordinator did not finish within 20 seconds"
-    fi
-
-    local status=0
-    if wait "$coordinator_pid"; then
-        status=0
-    else
-        status=$?
-    fi
-    coordinator_pid=""
-    ((status == 0)) || fail "mining coordinator exited with status $status"
-
+mine_block_one() {
+    local cookie
+    cookie="$(cat "$tmp/data/.cookie")"
+    curl --fail --silent --show-error --max-time 30 --user "$cookie" \
+        --header 'Content-Type: application/json' --data '{"recipients":[]}' \
+        "http://127.0.0.1:$rpc_port/mining/templates" >"$template_json" \
+        || fail "the node served no mining template"
+    local work_id
+    work_id="$(jq -er '.workID' "$template_json")" || fail "the template has no workID"
+    curl --fail --silent --show-error --max-time 30 --user "$cookie" \
+        --header 'Content-Type: application/json' \
+        --data "$(jq -cn --arg work "$work_id" '{workID: $work, nonce: 0}')" \
+        "http://127.0.0.1:$rpc_port/mining/work" >"$work_json" \
+        || fail "the node refused the submitted work"
     jq -e \
         --arg genesis "$expected_genesis" \
         '
-            .result == "submitted"
-            and .accepted == true
+            .accepted == true
             and .disposition == "canonicalized"
             and (.tipCID | type == "string" and length > 0)
             and .tipCID != $genesis
-        ' "$coordinator_output" >/dev/null \
-        || fail "mining coordinator did not report an accepted canonical block"
+        ' "$work_json" >/dev/null \
+        || fail "the node did not canonicalize the mined block"
 }
 
 start_node
@@ -211,10 +186,10 @@ await_status 0 "$expected_genesis" "active Nexus genesis"
 [[ "$(curl --silent --output /dev/null --write-out '%{http_code}' \
     --user "$(cat "$tmp/data/.cookie")" "http://127.0.0.1:$rpc_port/status")" == 200 ]] \
     || fail "operator /status refused the node's cookie"
-run_coordinator
+mine_block_one
 
-if ! mined_tip="$(jq -er '.tipCID' "$coordinator_output")"; then
-    fail "mining coordinator did not return a tip CID"
+if ! mined_tip="$(jq -er '.tipCID' "$work_json")"; then
+    fail "the work response has no tip CID"
 fi
 await_status 1 "$mined_tip" "mined Nexus tip"
 

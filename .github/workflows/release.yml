@@ -73,8 +73,6 @@ jobs:
           trap 'rm -rf "$extract_root"' EXIT
           tar -xzf "$ARCHIVE_PATH" -C "$extract_root"
           E2E_NODE_BIN="$extract_root/$bundle_name/bin/lattice-node" \
-          E2E_COORDINATOR_BIN="$extract_root/$bundle_name/bin/lattice-mining-coordinator" \
-          E2E_MINER_BIN="$extract_root/$bundle_name/bin/lattice-miner" \
           E2E_CTL_BIN="$extract_root/$bundle_name/bin/lattice" \
           E2E_CTL=1 \
           E2E_TIME_SCALE=3 \
@@ -165,8 +163,6 @@ jobs:
           trap 'rm -rf "$extract_root"' EXIT
           tar -xzf "$ARCHIVE_PATH" -C "$extract_root"
           E2E_NODE_BIN="$extract_root/$bundle_name/bin/lattice-node" \
-          E2E_COORDINATOR_BIN="$extract_root/$bundle_name/bin/lattice-mining-coordinator" \
-          E2E_MINER_BIN="$extract_root/$bundle_name/bin/lattice-miner" \
           E2E_CTL_BIN="$extract_root/$bundle_name/bin/lattice" \
           E2E_CTL=1 \
           E2E_TIME_SCALE=3 \

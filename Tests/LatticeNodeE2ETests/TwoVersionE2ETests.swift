@@ -11,10 +11,10 @@ import XCTest
 /// build.
 ///
 /// Black box: each release's own shipped binaries, driven through its own
-/// `lattice` CLI and read over `/health`, so nothing here depends on either
-/// release's Swift types. Opt-in: `E2E_OLD_BIN_DIR` names the directory
-/// holding an older release's `lattice`, `lattice-node`, `lattice-miner` and
-/// `lattice-mining-coordinator` (the `bin` of its release archive).
+/// `lattice` CLI, read over `/health` and mined through its mining routes
+/// (`TestMiner`), so nothing here depends on either release's Swift types.
+/// Opt-in: `E2E_OLD_BIN_DIR` names the directory holding an older release's
+/// `lattice` and `lattice-node` (the `bin` of its release archive).
 final class TwoVersionE2ETests: XCTestCase {
     /// One release's host: its CLI, its root and the ports it listens on.
     private final class Host {
@@ -25,7 +25,8 @@ final class TwoVersionE2ETests: XCTestCase {
         let rpc: UInt16
         /// `lattice up`, when this release runs it in the foreground.
         var up: Process?
-        var mining = false
+        /// Mines this host through its loopback API once started.
+        let miner: TestMiner
 
         init(name: String, lattice: URL, root: URL, listen: UInt16, rpc: UInt16) {
             self.name = name
@@ -33,6 +34,10 @@ final class TwoVersionE2ETests: XCTestCase {
             self.root = root
             self.listen = listen
             self.rpc = rpc
+            self.miner = TestMiner(
+                rpc: rpc,
+                cookieFile: root.appendingPathComponent("chains/Nexus/.cookie")
+            )
         }
     }
 
@@ -48,7 +53,7 @@ final class TwoVersionE2ETests: XCTestCase {
 
     override func tearDown() async throws {
         let failed = (testRun?.totalFailureCount ?? 0) > 0
-        for host in hosts { stop(host) }
+        for host in hosts { await stop(host) }
         hosts = []
         if let scratch {
             if failed {
@@ -88,7 +93,6 @@ final class TwoVersionE2ETests: XCTestCase {
         let minerKey = try identity(miner)
         try write(miner, [
             "listen": Int(miner.listen), "rpc": Int(miner.rpc), "peers": [String](),
-            "mine": ["enabled": true, "worker": "cpu", "workers": 1, "batchSize": 100_000],
         ])
         try write(upgraded, [
             "listen": Int(upgraded.listen), "rpc": Int(upgraded.rpc),
@@ -98,13 +102,11 @@ final class TwoVersionE2ETests: XCTestCase {
         for host in hosts {
             try await waitFor("\(host.name) active") { await self.health(host)?["phase"] as? String == "active" }
         }
-        try run(miner, ["mine", "start"])
-        miner.mining = true
+        miner.miner.start()
         try await waitFor("the older miner mines \(Self.blocks) blocks", seconds: 240) {
             await self.height(miner) >= Self.blocks
         }
-        try run(miner, ["mine", "stop"])
-        miner.mining = false
+        await miner.miner.stop()
         let minerTip = await health(miner)?["tipCID"] as? String
         let mined = try XCTUnwrap(minerTip)
         try await waitFor("the older follower reaches the tip", seconds: 120) {
@@ -113,7 +115,7 @@ final class TwoVersionE2ETests: XCTestCase {
         let identityBefore = try identity(upgraded)
 
         // The upgrade: the older node stopped, this build started on its root.
-        stop(upgraded)
+        await stop(upgraded)
         let current = Host(
             name: "current", lattice: try currentLattice(), root: upgraded.root,
             listen: upgraded.listen, rpc: upgraded.rpc
@@ -126,7 +128,7 @@ final class TwoVersionE2ETests: XCTestCase {
         XCTAssertTrue(self.log(of: current).contains("schema epoch"), self.log(of: current))
         let refusedHealth = await health(current)
         XCTAssertNotEqual(refusedHealth?["phase"] as? String, "active", "the older store was opened, not refused")
-        stop(current)
+        await stop(current)
 
         try run(current, ["wipe"])
         XCTAssertEqual(try identity(current), identityBefore, "the wipe keeps the node's identity")
@@ -161,11 +163,8 @@ final class TwoVersionE2ETests: XCTestCase {
         let minerKey = try identity(miner)
         // Peers are always spelled out, the miner's as none: neither host may
         // fall back to the shipped bootstrap peers and reach the public network.
-        // `mine` in lattice.json is where the older release reads its miner
-        // settings, and this build still takes them from there.
         try write(miner, [
             "listen": Int(miner.listen), "rpc": Int(miner.rpc), "peers": [String](),
-            "mine": ["enabled": true, "worker": "cpu", "workers": 1, "batchSize": 100_000],
         ])
         try write(follower, [
             "listen": Int(follower.listen), "rpc": Int(follower.rpc),
@@ -181,14 +180,12 @@ final class TwoVersionE2ETests: XCTestCase {
         let followerGenesis = await health(follower)?["tipCID"] as? String
         XCTAssertEqual(followerGenesis, genesis, "the two releases pin the same Nexus genesis")
 
-        try run(miner, ["mine", "start"])
-        miner.mining = true
+        miner.miner.start()
         try await waitFor("\(miner.name) mines \(Self.blocks) Nexus blocks", seconds: 240) {
             await self.height(miner) >= Self.blocks
         }
         // A stopped miner's tip stands still, so the two can be compared.
-        try run(miner, ["mine", "stop"])
-        miner.mining = false
+        await miner.miner.stop()
 
         try await waitFor("\(follower.name) reaches \(miner.name)'s tip", seconds: 120) {
             guard let mined = await self.health(miner)?["tipCID"] as? String,
@@ -216,9 +213,8 @@ final class TwoVersionE2ETests: XCTestCase {
     }
 
     /// Mining stopped, `lattice down`, and a foreground `lattice up` ended.
-    private func stop(_ host: Host) {
-        if host.mining { _ = try? run(host, ["mine", "stop"]) }
-        host.mining = false
+    private func stop(_ host: Host) async {
+        await host.miner.stop()
         _ = try? run(host, ["down"])
         if let up = host.up, up.isRunning {
             up.terminate()

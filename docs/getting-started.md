@@ -6,12 +6,15 @@
 - SQLite development headers on Linux
 - `curl` and `jq` for the examples
 
-The repository builds four executables:
+The repository builds two executables:
 
 - `lattice-node` — one full-node process for a hosted chain tree;
-- `lattice` — topology, lifecycle, key, transaction, and mining CLI;
-- `lattice-mining-coordinator` — assigns nonce ranges and submits results;
-- `lattice-miner` — stateless CPU nonce worker.
+- `lattice` — topology, lifecycle, key, transaction, and child-chain CLI.
+
+Mining is a separate program,
+[lattice-miner](https://github.com/0xLattice/lattice-miner): the miner
+`lattice-miner` and its worker `lattice-miner-gpu` (CPU, Metal, CUDA and
+OpenCL backends).
 
 ## Build
 
@@ -105,8 +108,13 @@ that is a consensus consequence, not an availability error.
 
 ## Configure mining
 
-The miner is a separate process that asks the node for templates and submits
-work; the node keeps no mining settings. Write the miner's own settings to
+The miner, [lattice-miner](https://github.com/0xLattice/lattice-miner), is a
+separate process that asks the node for templates and submits work; the node
+keeps no mining settings. Build it from its repository
+(`cargo build --release --workspace`, which also builds the
+`lattice-miner-gpu` worker; that worker is also attached to lattice-miner's
+[releases](https://github.com/0xLattice/lattice-miner/releases) for
+linux-amd64, macos-arm64 and windows-amd64). Write the miner's own settings to
 `./node-data/miner.json`:
 
 ```json
@@ -121,12 +129,15 @@ work; the node keeps no mining settings. Write the miner's own settings to
 }
 ```
 
-Then start the mining loop (it mines through the node under `--root`; see
-[Mining](operator-cli.md#mining) for a node elsewhere):
+`worker` is `cpu` (the miner's built-in search) or the path of a worker such
+as `lattice-miner-gpu`. Then run the miner against the node's loopback API and
+the cookie the node writes at every start (see [Mining](operator-cli.md#mining)
+for a node elsewhere):
 
 ```bash
-swift run lattice mine start --root ./node-data
-swift run lattice mine status --root ./node-data
+lattice-miner run --node http://127.0.0.1:8080 \
+  --cookie-file ./node-data/chains/Nexus/.cookie \
+  --config ./node-data/miner.json
 ```
 
 An omitted recipient burns that chain's block reward and fees. A nested parent

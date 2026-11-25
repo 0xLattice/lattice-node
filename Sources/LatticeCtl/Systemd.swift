@@ -1,9 +1,10 @@
 // Host integration: systemd units (or a launchd job) for the tree and, when
-// the root holds miner settings, the miner beside it (a process of its own).
-// The CLI stays a reconciler — restart policy, cgroups, and log routing
-// belong to the init system, so the units run the foreground modes. The
-// node exits 0 when asked to stop, 75 when asked to restart and 78 when its
-// configuration is invalid: systemd restarts it on failure but not on 78
+// the root holds miner settings (<root>/miner.json), lattice-miner beside it
+// (a process of its own, from 0xLattice/lattice-miner). The CLI stays a
+// reconciler — restart policy, cgroups, and log routing belong to the init
+// system, so the units run the foreground modes. The node exits 0 when asked
+// to stop, 75 when asked to restart and 78 when its configuration is
+// invalid: systemd restarts it on failure but not on 78
 // (`RestartPreventExitStatus`); launchd and Docker have no such setting and
 // restart it on 78 too, throttled. The miner is only Wanted by the tree, not
 // bound to it: a node restart (exit 75) does not take the miner down, and
@@ -12,19 +13,21 @@
 import LatticeNodeAPI
 import Foundation
 import ArgumentParser
-import LatticeCtlCore
 import LatticeNodeConfig
 
 struct EmitSystemd: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "emit-systemd",
-        abstract: "Print systemd units running this host's tree and miner in the foreground."
+        abstract: "Print systemd units running this host's tree, and lattice-miner when <root>/miner.json exists, in the foreground."
     )
 
     @OptionGroup var rootOption: RootOption
 
     @Option(name: .long, help: "Path of the lattice binary in the units.")
     var binary: String = "/usr/local/bin/lattice"
+
+    @Option(name: .long, help: "Path of the lattice-miner binary in the miner's unit.")
+    var minerBinary: String = "/usr/local/bin/lattice-miner"
 
     func run() async throws {
         let layout = rootOption.layout
@@ -46,19 +49,18 @@ struct EmitSystemd: AsyncParsableCommand {
         [Install]
         WantedBy=multi-user.target
         """)
-        guard FileManager.default.fileExists(
-            atPath: layout.root.appendingPathComponent(MinerConfig.fileName).path
-        ) || Topology.holdsRetiredMining(root: layout.root) else { return }
+        let minerConfig = layout.root.appendingPathComponent("miner.json")
+        guard FileManager.default.fileExists(atPath: minerConfig.path) else { return }
         print("""
 
         # lattice-mine.service
         [Unit]
-        Description=Lattice mining loop
+        Description=Lattice miner (lattice-miner)
         Wants=lattice-tree.service
         After=lattice-tree.service
 
         [Service]
-        ExecStart=\(binary) mine run --root \(root)
+        ExecStart=\(minerBinary) run --node http://127.0.0.1:\(topology.rpc) --cookie-file \(layout.rpcCookie.path) --config \(minerConfig.path)
         Restart=always
         RestartSec=5
         TimeoutStopSec=90
