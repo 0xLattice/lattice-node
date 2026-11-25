@@ -223,7 +223,7 @@ public struct Mempool: Sendable {
     /// signers' funds are budgeted, not claimed (`debits(of:)`).
     static func claims(of body: TransactionBody) -> Set<String> {
         var claims = Set(body.signers.prefix(1).map { "nonce:\($0):\(body.nonce)" })
-        for action in body.actions where !isAssert(action) { claims.insert("action:" + action.key) }
+        for action in body.actions where !action.isAssert { claims.insert("action:" + action.key) }
         for deposit in body.depositActions { claims.insert("deposit:" + DepositKey(depositAction: deposit).description) }
         for withdrawal in body.withdrawalActions {
             claims.insert("deposit:" + DepositKey(withdrawalAction: withdrawal).description)
@@ -236,14 +236,7 @@ public struct Mempool: Sendable {
     /// consensus, any number of transactions may assert a key, but not
     /// beside a write of it.
     static func asserts(of body: TransactionBody) -> Set<String> {
-        Set(body.actions.filter(isAssert).map { "action:" + $0.key })
-    }
-
-    /// Consensus's assert: oldValue and newValue the same bytes. Lattice's
-    /// `Action.isAssert` replaces this once the node pins a release with it.
-    static func isAssert(_ action: Action) -> Bool {
-        guard let oldValue = action.oldValue, let newValue = action.newValue else { return false }
-        return oldValue.utf8.elementsEqual(newValue.utf8)
+        Set(body.actions.filter(\.isAssert).map { "action:" + $0.key })
     }
 
     /// What a transaction takes from each account, as consensus nets it:
