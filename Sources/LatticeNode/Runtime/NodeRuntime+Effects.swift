@@ -309,11 +309,23 @@ extension NodeRuntime.Loop {
             }
             jobs.start(in: core)
         case .verifyProofs(let batch):
-            // Off the loop: a check without its block reads it from the
-            // header store there; one whose block is gone answers nil,
-            // blaming no one.
-            jobs.enqueue(NodeRuntime.proofJob(batch, at: path, storage: storage))
-            jobs.start(in: core)
+            // The page's checks run where the step took it, in a task of
+            // their own, not on the worker pool: as Bitcoin Core checks
+            // headers apart from connecting blocks, a page never waits
+            // behind connects, nor a connect behind checks. What is in a
+            // check at once is the level's proof budget. Off the loop: a
+            // check without its block reads it from the header store there;
+            // one whose block is gone answers nil, blaming no one.
+            let (storage, inputs, taken) = (storage, inputs, SyncTrace.now())
+            NodeRuntime.spawn {
+                let started = SyncTrace.now()
+                let answers = batch.run { storage.store.header($0)?.block }
+                SyncTrace.log(
+                    chain: path,
+                    "checks \(answers.count) wait \(SyncTrace.ms(taken, started)) run \(SyncTrace.ms(started, SyncTrace.now())) ms"
+                )
+                inputs.yield(.event(.level(path, .proofsVerified(answers))))
+            }
         case .readTransactions(let blocks):
             jobs.enqueue(NodeRuntime.readJob(blocks, at: path, storage: storage))
             jobs.start(in: core)

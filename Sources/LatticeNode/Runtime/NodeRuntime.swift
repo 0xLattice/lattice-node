@@ -32,8 +32,9 @@ public enum NodeRuntimeError: Error, Equatable, Sendable {
 /// - `send` / `serveHeaders` / `disconnect` → the Ivy overlay.
 /// - `fetchBody` / `cancelBody` / `fetchByCID` → the content layer
 ///   (VolumeBroker, then overlay providers by CID).
-/// - `connect` / `verifyProofs` → a bounded worker pool; the result comes
-///   back as an event.
+/// - `connect` → a bounded worker pool; the result comes back as an event.
+/// - `verifyProofs` → a task of its own, beside the pool; its answers come
+///   back as one event.
 /// - `wakeAt` → one timer that posts `tick`.
 /// - `mining` → the pool delta persisted like `persist` (fail-stop), RPC
 ///   replies answered by reply ID, announces to every ready peer, and the

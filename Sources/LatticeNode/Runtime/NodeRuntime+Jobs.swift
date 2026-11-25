@@ -12,14 +12,6 @@ import LatticeNodeStore
 extension NodeRuntime {
     // MARK: - Jobs
 
-    /// A level's proof checks of one step, in one job: each check on its
-    /// block, read from the header store when the batch carries none.
-    static func proofJob(_ batch: ChildProofBatch, at path: ChainPath, storage: NodeStorage) -> RuntimeJob {
-        RuntimeJob(path: path, tipCID: nil) {
-            [.level(path, .proofsVerified(batch.run { storage.store.header($0)?.block }))]
-        }
-    }
-
     /// A block's transactions with their bodies resolved (the pool takes
     /// resolved content only); none when its body is not held.
     static func transactions(ofBlock cid: String, fetcher: any Fetcher) async -> [Transaction] {
