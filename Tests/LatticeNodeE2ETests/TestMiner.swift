@@ -43,8 +43,7 @@ final class TestMiner: @unchecked Sendable {
     /// Mines through the node's loopback API with the cookie at `cookieFile`.
     convenience init(rpc: UInt16, cookieFile: URL, recipients: [String: String] = [:]) {
         self.init(node: "http://127.0.0.1:\(rpc)", recipients: recipients) {
-            (try? String(contentsOf: cookieFile, encoding: .utf8))
-                .map { "Basic " + Data($0.trimmingCharacters(in: .whitespacesAndNewlines).utf8).base64EncodedString() }
+            rpcCookieAuthorization(file: cookieFile)
         }
     }
 
