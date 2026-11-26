@@ -73,7 +73,8 @@ established clients are built. The node has no scheduler of its own.
 | Decisions: every step of the core | One serial loop | It stays deterministic and simulated. The core took 9% to 16% of wall time in the first baseline |
 | What an RPC waits on | The first queue | Latency |
 | Execution of a chain's blocks | The second queue, one job per chain at a time: a batch of up to `connectBatch` ready blocks, one atomic change set | A chain executes in order anyway; chains run side by side; a chain's next block never waits behind thousands of child proof checks (#64, #76) |
-| Header work: proof checks and derivations, and everything else | The third queue, in arrival order | Batched per page |
+| A page's proof checks | A task of their own, beside the pool, started as the step that took the page ends | A check never waits behind connects, nor a connect behind checks (#203: checks waited 85–100 s behind connects on a 3-worker host). What is in a check at once is each level's proof byte budget |
+| Derivations, and everything else | The third queue, in arrival order | Batched per step |
 | Storage writes | Validated content by its job; then, as each step ends, the step's state and facts by the loop, facts in one transaction | One boundary, one order, one place: no caller orders writes |
 
 The loop decides, and makes each step's writes before it publishes what
@@ -126,7 +127,7 @@ the runtime to them:
 | Work | Runs on | Superseded |
 |---|---|---|
 | Connect (a level's next blocks) | the connect queue, one per level at a time | never: a verdict is a fact about a block and counts on any branch; a run is at most `connectBatch` blocks |
-| Proof checks | the rest queue, one job per level per step, a page under a byte budget | never: a verdict is a fact about a header |
+| Proof checks | a task beside the pool, one per level per step, a page under a byte budget | never: a verdict is a fact about a header |
 | Derivations | the rest queue, a level's of one step in at most one job per worker | never: a derived proof is a fact |
 | Transaction reads (`readTransactions`) | the rest queue | never: local reads, cheap |
 | Mining preflight (an RPC's, or a recheck) | the answered queue (awaited) or the rest | a recheck whose mining tip moved is dropped before it runs; an admission always runs, its submit is waiting |

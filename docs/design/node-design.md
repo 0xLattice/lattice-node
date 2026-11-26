@@ -1391,7 +1391,8 @@ the one store (101 against 100 MiB), with under 1 MiB of free pages.
 order — what an RPC waits on, each chain's next blocks, the rest — first in,
 first out within each; a recheck whose tip moved is dropped
 (`Runtime/JobPool.swift`: `JobQueues`, and `JobPool`, which owns them and the
-running jobs).
+running jobs). A page's proof checks are not queued: they run in a task of
+their own beside the pool (`NodeRuntime+Effects.swift`, `.verifyProofs`).
 
 **Why.** #64: a testnet root chain executed one block every five minutes, its
 next block queued behind thousands of child proof checks; #76 made three
@@ -1566,7 +1567,7 @@ not be able to take what others need. What is bounded today, by reading:
 | Messages queued to a peer | per-session message and byte limits (`SessionOutbox`) |
 | Content served to peers | concurrent and in-flight byte limits (`servingMaxConcurrent`, `servingMaxInFlightVolumeBytes`) |
 | Mempool | per-chain limits |
-| Worker queues | per step, not in total: a level's proof checks of a step are one job, a page under a byte budget; its derivations at most one per worker; its connects one at a time; a mining recheck whose tip moved is dropped. On the child-sync benchmark (macOS) the peak queued fell from 1,993 jobs (one per derivation) to 23, with 7–9% less CPU and the same wall time. Steps can still queue faster than workers drain them; no total bound |
+| Worker queues | per step, not in total: a level's proof checks of a step are one task beside the pool, a page under a byte budget; its derivations at most one per worker; its connects one at a time; a mining recheck whose tip moved is dropped. On the child-sync benchmark (macOS) the peak queued fell from 1,993 jobs (one per derivation) to 23, with 7–9% less CPU and the same wall time. Steps can still queue faster than workers drain them; no total bound |
 | Bodies fetched but not yet executed | bounded by the window and the byte budget; not reported |
 
 Not yet measured: how these behave with many hosted chains, and whether one
