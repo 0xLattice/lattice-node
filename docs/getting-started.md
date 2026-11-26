@@ -1,44 +1,56 @@
 # Getting started
 
-## Requirements
+Run a node on one machine: install it, start it, and check that it follows
+the network. It takes a few minutes, plus the time to sync.
 
-- Swift 6.1 or newer for a source build
-- SQLite development headers on Linux
-- `curl` and `jq` for the examples
+## Install
 
-The repository builds four executables:
-
-- `lattice-node` — one full-node process for a hosted chain tree;
-- `lattice` — topology, lifecycle, key, transaction, and mining CLI;
-- `lattice-mining-coordinator` — assigns nonce ranges and submits results;
-- `lattice-miner` — stateless CPU nonce worker.
-
-## Build
+On macOS (Apple silicon) or Linux (x86-64), install the latest release:
 
 ```bash
-swift build
-swift test
+curl -fsSL https://lattice.build/install.sh | sh
 ```
 
-For a production binary, use `swift build -c release` or a verified release
-archive.
+It checks the download against its published SHA-256 and puts the programs
+in `~/.lattice/bin`; add that directory to your `PATH`. To check a release
+yourself, see [Release verification](release-verification.md).
 
-## Initialize a host
+Or build from source:
 
 ```bash
-mkdir -p ./node-data
-swift run lattice init --root ./node-data
+git clone https://github.com/0xLattice/lattice-node
+cd lattice-node
+swift build -c release
 ```
 
-This creates:
+A source build needs Swift 6.1 or newer, and the SQLite development headers
+on Linux. The examples also use `curl` and `jq`.
+
+Either way you get four programs:
+
+| Program | Purpose |
+|---|---|
+| `lattice` | The command-line tool you operate the node with. |
+| `lattice-node` | The node. `lattice up` runs it. |
+| `lattice-mining-coordinator` | Hands nonce ranges to mining workers and submits results. |
+| `lattice-miner` | The CPU mining worker. |
+
+The commands below assume they are on your `PATH`. A source build puts them
+in `.build/release/`.
+
+## Create a node
+
+```bash
+lattice init --root ./node-data
+```
+
+This creates the node's configuration and its identity key:
 
 ```text
 node-data/
   lattice.json
   identity/Nexus.key
 ```
-
-The initial topology is flat because one process owns the whole tree:
 
 ```json
 {
@@ -47,141 +59,36 @@ The initial topology is flat because one process owns the whole tree:
 }
 ```
 
-`listen` is the Ivy overlay. `rpc` is the loopback operator API. Add explicit
-bootstrap peers with `peers`, or leave the field absent to use the built-in
-Nexus bootstrap set.
+`listen` is the port other nodes connect to. `rpc` is the operator API,
+which only this machine can reach. With no `peers` listed, the node finds
+the network through its built-in seeds.
 
-## Start and inspect the node
+## Start it
 
 ```bash
-swift run lattice up --root ./node-data
+lattice up --root ./node-data
 ```
 
-The node runs in the foreground and logs to the terminal. From another shell:
+The node runs in the foreground and logs to the terminal. From another
+shell:
 
 ```bash
-swift run lattice status --root ./node-data
+lattice status --root ./node-data
 curl -s http://127.0.0.1:8080/health | jq
 ```
 
-Stop it with Ctrl-C, or from another shell:
+`status` shows Nexus's height climbing as the node syncs. Stop the node with
+Ctrl-C, or with `lattice down --root ./node-data`.
 
-```bash
-swift run lattice down --root ./node-data
-```
+## Next
 
-`lattice restart` makes the node exit 75 for a process manager to start it
-again; run by hand, start it again yourself. For a service, see
-`lattice emit-systemd` and `lattice emit-launchd`
-([Operator CLI](operator-cli.md#systemd-launchd-containers)).
-
-## Add a child
-
-```bash
-swift run lattice child create Nexus/Payments \
-  --root ./node-data \
-  --block-time 10000 \
-  --reward 1000
-```
-
-The CLI adds the chain, with its spec, to the `operator` fragment
-(`config.d/operator.json`); the node keeps the spec as
-`specs/Nexus%2FPayments.json` and hosts the chain, without a restart when it
-runs. The next mining
-template that can carry the child builds its genesis from the spec and the
-parent's executed state.
-
-Nested paths must be added parent first:
-
-```bash
-swift run lattice child create Nexus/Payments/Rollups \
-  --root ./node-data \
-  --reward 1000
-```
-
-The nested genesis waits until `Nexus/Payments` has executed a block of its
-own. A reward-free parent whose state never changes cannot host a nested child;
-that is a consensus consequence, not an availability error.
-
-## Configure mining
-
-The miner is a separate process that asks the node for templates and submits
-work; the node keeps no mining settings. Write the miner's own settings to
-`./node-data/miner.json`:
-
-```json
-{
-  "worker": "cpu",
-  "workers": 2,
-  "batchSize": 2000000,
-  "recipients": {
-    "Nexus": "<nexus-address>",
-    "Nexus/Payments": "<payments-address>"
-  }
-}
-```
-
-Then start the mining loop (it mines through the node under `--root`; see
-[Mining](operator-cli.md#mining) for a node elsewhere):
-
-```bash
-swift run lattice mine start --root ./node-data
-swift run lattice mine status --root ./node-data
-```
-
-An omitted recipient burns that chain's block reward and fees. A nested parent
-should have a valid recipient and a positive reward so its state advances.
-
-## Send transactions
-
-Create a spending key:
-
-```bash
-swift run lattice key generate --out ./spend-key.json
-```
-
-Submit a transfer to any hosted level through the one RPC listener:
-
-```bash
-swift run lattice tx send \
-  --root ./node-data \
-  --chain Nexus/Payments \
-  --key ./spend-key.json \
-  --to <address> \
-  --amount 10
-```
-
-## Public reads
-
-The operator RPC remains loopback-only. Set `publicRead` in `lattice.json` to
-open the code-enforced GET-only read surface on all interfaces:
-
-```json
-{
-  "listen": 4001,
-  "rpc": 8080,
-  "publicRead": 8081,
-  "publicReadMaxRate": 200
-}
-```
-
-Use `?chainPath=Nexus/Payments` to select a child on routes that accept a
-chain. Unknown or unhosted paths return 404.
-
-## Storage and upgrades
-
-The running tree stores data under `node-data/chains/Nexus/`:
-
-```text
-state.db
-volumes/            a Volume store per hosted chain
-volume-bundles.db
-storage.lock
-```
-
-There are no migrations. On an incompatible schema or protocol cutover, stop
-the node and wipe the complete tree storage with `lattice wipe`. Identity,
-specs, and `lattice.json` remain outside that directory.
-
-Continue with the [operator CLI](operator-cli.md), [RPC API](rpc-api.md), and
-[operations runbook](operations.md).
+| To | Read |
+|---|---|
+| Run it as a service, monitor it, upgrade it | [Running in production](operations.md) |
+| Change settings | [Configuration](configuration.md) |
+| Mine | [Mining](mining.md) |
+| Launch or host a child chain | [Child chains](child-chains.md) |
+| Open ports, serve public reads, list a chain on an explorer | [Networking](networking.md) |
+| Bound disk use, back up | [Storage](storage.md) |
+| Send a transaction | [Operator CLI](operator-cli.md#keys-and-transactions) |
+| Fix a problem | [Troubleshooting](troubleshooting.md) |

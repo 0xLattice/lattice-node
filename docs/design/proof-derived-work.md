@@ -284,7 +284,7 @@ or by a local submit ([`POST /child-blocks`](../rpc-api.md#post-child-blocks)).
 The node keeps no record of authored blocks. A submit dropped before its
 carrier is weighed, or lost to a restart, an unhost or an eviction, is pushed
 again; `lattice child commit` does this until the submit answers `tree`
-([operator CLI](../operator-cli.md#committing-a-child-block-on-its-parent)).
+([Child chains](../child-chains.md#committing-a-child-block-yourself)).
 
 **Budgets.** Proofs in a check share one operator budget,
 `ChildProofConfig.maxQueuedBytes` (default 16 MiB), over all sources. A proof

@@ -73,7 +73,7 @@ public struct ChainCoreConfig: Sendable {
     }
     /// The level's mempool and template bounds.
     public var mining = MiningConfig()
-    /// Node-local finality (docs/operations.md, "Node-local finality"), per chain, in blocks: a header more
+    /// Node-local finality (docs/configuration.md, "Node-local finality"), per chain, in blocks: a header more
     /// than its chain's window below that chain's best weighed tip, or work
     /// crediting such a block, is declined — never stored, never blamed. The
     /// node then does not follow a reorganization deeper than the window. A
