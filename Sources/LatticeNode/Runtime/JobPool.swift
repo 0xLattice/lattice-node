@@ -30,12 +30,13 @@ extension NodeRuntime {
     /// The worker's queues, each first in, first out, served in a fixed
     /// order: (A) what an RPC waits on, a submit's admission and a template
     /// build; then (B) each level's next block, so a level's connect never
-    /// waits behind the child proof checks queued before it, thousands
-    /// while a node syncs a tree of chains, and no level goes ahead of
-    /// another; then (C) everything else in arrival order: proof checks,
-    /// derivations, reads, rechecks, and a peer's or a returned
-    /// transaction's admission. A recheck whose tip is not the current one
-    /// is dropped at dequeue: it runs nothing, posts nothing.
+    /// waits behind the derivations queued before it while a node syncs a
+    /// tree of chains, and no level goes ahead of another; then (C)
+    /// everything else in arrival order: derivations, reads, rechecks, and
+    /// a peer's or a returned transaction's admission. A page's proof
+    /// checks are not here: they run where the page was taken. A recheck
+    /// whose tip is not the current one is dropped at dequeue: it runs
+    /// nothing, posts nothing.
     struct JobQueues {
         var answered: [RuntimeJob] = []
         var connects: [RuntimeJob] = []
