@@ -1,4 +1,3 @@
-import Crypto
 import Foundation
 import Hummingbird
 import HummingbirdTesting
@@ -18,35 +17,6 @@ import LatticeNodeAPI
 // A scan from nonce 0 drops the block's own nonce, so callers that need "the
 // first solution at or above N" scan here instead.
 
-/// The consensus proof of work as an external miner computes it: SHA-256 of
-/// the block's preimage prefix (`Block.makeProofOfWorkPreimagePrefix`),
-/// hashed once into a midstate, then the nonce appended as
-/// `Block.proofOfWorkNonceBytes` encodes it.
-enum ProofOfWork {
-    static func proofOfWorkHashPrefixBytes(_ block: Block) -> Data {
-        Block.makeProofOfWorkPreimagePrefix(block: block)
-    }
-
-    static func midstate(for block: Block) -> SHA256 {
-        midstate(prefixBytes: proofOfWorkHashPrefixBytes(block))
-    }
-
-    static func midstate(prefixBytes: Data) -> SHA256 {
-        var hasher = SHA256()
-        hasher.update(data: prefixBytes)
-        return hasher
-    }
-
-    static func hash(midstate: SHA256, nonce: UInt64) -> UInt256 {
-        var hasher = midstate
-        hasher.update(data: Block.proofOfWorkNonceBytes(nonce))
-        let digest = Array(hasher.finalize())
-        return UInt256((0..<4).map { word in
-            digest[(word * 8)..<(word * 8 + 8)].reduce(UInt64(0)) { $0 << 8 | UInt64($1) }
-        })
-    }
-}
-
 /// Nonce scan over the consensus PoW preimage midstate: the first nonce at or
 /// above `start` whose hash the predicate accepts. Same inputs, same nonce.
 func firstNonce(
@@ -57,7 +27,7 @@ func firstNonce(
     line: UInt = #line,
     where accepts: (UInt256) -> Bool
 ) -> UInt64 {
-    let midstate = ProofOfWork.midstate(for: block)
+    let midstate = ProofOfWorkMidstate(block: block)
     var nonce = start
     // Bounded on purpose. A predicate can be UNSATISFIABLE rather than merely
     // unlikely -- searching for a hash strictly above a target that is the
@@ -65,7 +35,7 @@ func firstNonce(
     // unbounded scan turns that into a hang instead of a failure. One such
     // search spun for over two hours before it was noticed.
     while nonce - start < maxAttempts {
-        if accepts(ProofOfWork.hash(midstate: midstate, nonce: nonce)) {
+        if accepts(midstate.hash(nonce: nonce)) {
             return nonce
         }
         nonce += 1

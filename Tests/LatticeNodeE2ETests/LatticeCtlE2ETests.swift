@@ -494,11 +494,11 @@ final class LatticeCtlE2ETests: XCTestCase {
             let assignment: String
             let nonce: String
         }
-        let midstate = proofOfWorkMidstate(prefix: prefix)
+        let midstate = ProofOfWorkMidstate(prefix: prefix)
         var found: UInt64 = 0
         var nonce = start
         while found < needed {
-            if proofOfWorkHash(midstate: midstate, nonce: nonce) <= shareTarget {
+            if midstate.hash(nonce: nonce) <= shareTarget {
                 let (status, body) = try await postJSON(
                     "\(sponsor)/shares", Share(assignment: assignment, nonce: String(nonce))
                 )

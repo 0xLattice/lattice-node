@@ -22,7 +22,7 @@ final class MiningWorkerContractTests: XCTestCase {
         let store = InMemoryContentStore()
         let genesis = try await NexusGenesis.create(fetcher: store)
         let block = genesis.block
-        let prefix = ProofOfWork.proofOfWorkHashPrefixBytes(block)
+        let prefix = Block.makeProofOfWorkPreimagePrefix(block: block)
         let prefixHex = prefix.map { String(format: "%02x", $0) }.joined()
         // The full prefix is long; pin its head plus the derived hash, which
         // commits to every byte.
@@ -30,12 +30,8 @@ final class MiningWorkerContractTests: XCTestCase {
             String(prefixHex.prefix(60)),
             String(Self.vectorPrefixPrefixHex.prefix(60))
         )
-        let midstate = ProofOfWork.midstate(for: block)
         XCTAssertEqual(
-            ProofOfWork.hash(
-                midstate: midstate,
-                nonce: Self.vectorNonce
-            ).toHexString(),
+            ProofOfWorkMidstate(block: block).hash(nonce: Self.vectorNonce).toHexString(),
             Self.vectorHashHex
         )
         // The midstate search is the consensus hash of the whole preimage.
@@ -69,8 +65,8 @@ final class MiningWorkerContractTests: XCTestCase {
         }
         let decoded = try JSONDecoder().decode(Wire.self, from: try JSONEncoder().encode(response))
         XCTAssertEqual(
-            ProofOfWork.proofOfWorkHashPrefixBytes(decoded.block),
-            ProofOfWork.proofOfWorkHashPrefixBytes(genesis.block)
+            Block.makeProofOfWorkPreimagePrefix(block: decoded.block),
+            Block.makeProofOfWorkPreimagePrefix(block: genesis.block)
         )
         XCTAssertEqual(decoded.targets, response.targets)
     }

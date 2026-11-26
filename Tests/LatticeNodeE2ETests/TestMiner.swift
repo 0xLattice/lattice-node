@@ -1,4 +1,3 @@
-import Crypto
 import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
@@ -6,24 +5,6 @@ import FoundationNetworking
 import Lattice
 import LatticeNodeAPI
 import UInt256
-
-/// The consensus proof-of-work hash of `nonce` over a SHA-256 midstate of a
-/// block's preimage prefix (`Block.makeProofOfWorkPreimagePrefix`), the
-/// nonce appended as `Block.proofOfWorkNonceBytes` encodes it.
-func proofOfWorkHash(midstate: SHA256, nonce: UInt64) -> UInt256 {
-    var hasher = midstate
-    hasher.update(data: Block.proofOfWorkNonceBytes(nonce))
-    let digest = Array(hasher.finalize())
-    return UInt256((0..<4).map { word in
-        digest[(word * 8)..<(word * 8 + 8)].reduce(UInt64(0)) { $0 << 8 | UInt64($1) }
-    })
-}
-
-func proofOfWorkMidstate(prefix: Data) -> SHA256 {
-    var hasher = SHA256()
-    hasher.update(data: prefix)
-    return hasher
-}
 
 /// Mines a node as an external miner (lattice-miner) does, through its
 /// mining routes alone: a template per round (`POST /mining/templates`), a
@@ -96,14 +77,14 @@ final class TestMiner: @unchecked Sendable {
             MiningRecipient(chainPath: $0.key.components(separatedBy: "/"), address: $0.value)
         })
         guard let template: Work = try await post("mining/templates", request) else { return false }
-        let midstate = proofOfWorkMidstate(prefix: Block.makeProofOfWorkPreimagePrefix(block: template.block))
+        let midstate = ProofOfWorkMidstate(block: template.block)
         var nonce = UInt64.random(in: 0...(UInt64.max / 2))
         for _ in 0..<Self.batchSize {
             if nonce & 0x3FF == 0 {
                 if Task.isCancelled { return true }
                 await Task.yield()
             }
-            if proofOfWorkHash(midstate: midstate, nonce: nonce) <= template.searchTarget {
+            if midstate.hash(nonce: nonce) <= template.searchTarget {
                 let submitted: Submitted? = try await post(
                     "mining/work", SubmitWorkRequest(workID: template.workID, nonce: nonce)
                 )
