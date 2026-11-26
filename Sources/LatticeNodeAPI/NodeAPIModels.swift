@@ -243,8 +243,9 @@ public struct MiningTemplateResponse: Codable, Sendable {
     public let targets: [UInt256]
     public let chainPath: [String]
     /// Kept for clients that require the field: always
-    /// `pullRefreshMilliseconds`. The node never refuses work on a clock;
-    /// work is valid until the tip moves.
+    /// `pullRefreshMilliseconds`. The node never refuses work on a clock:
+    /// issued work stays submittable, and a solution on an old tip is a side
+    /// block.
     public let expiresInMilliseconds: UInt64
     /// A miner compares this with the status route's digest to learn its work
     /// is stale.

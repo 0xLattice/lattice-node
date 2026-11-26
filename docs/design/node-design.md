@@ -1,21 +1,32 @@
 # Lattice node: what it is for, how it is built, and where it goes next
 
-> **Status: in effect; Phases 1, 2 and 4 done, 3 and 5 in part (§6).** What
-> the node is for, how it is built, how that compares with other clients,
-> and what to do next, in one document. It was first written against `main`
-> after the write-behind persistence layer (#135–#147) was reverted (#156,
-> #157), verified against the code by four independent reads with the
-> load-bearing claims checked by hand, and revised after an external
-> architecture review; it now describes `main` after the redesign's five
-> phases (#167–#170). Where the code and this document disagree,
-> the code is right. The rules a change is reviewed against stay in
-> [sync architecture](sync-architecture.md) and the
-> [PR checklist](../pr-checklist.md).
+> **Status:** Decision record, in effect. Phases 1, 2 and 4 are done, 3
+> and 5 in part ([§6](#6-what-to-do-next)).
+> **Purpose:** What the node is for, how it is built, how that compares
+> with other clients, what was measured, and what to do next, in one
+> document. It holds the decisions
+> ([Decisions taken](#decisions-taken)) and the benchmark log
+> ([§2](#2-where-it-stands-today)).
+> **Which document is current.** Where the code and this document
+> disagree, the code is right; [Node architecture](../architecture.md)
+> describes the code as it stands. The rules a change is reviewed against
+> are in [Sync architecture](sync-architecture.md) and the
+> [PR checklist](../pr-checklist.md). Where that document's *target*
+> differs from a decision here, the decision here is the one in effect:
+> the worker queues (§4.10; its rule 4 agrees) and storage (§4.9b, which
+> keeps content-addressed state in a Volume store per hosted chain; its
+> rule 13 and store layout are a target not adopted).
+>
+> It was first written against `main` after the write-behind persistence
+> layer (#135–#147) was reverted (#156, #157), verified against the code by
+> four independent reads with the load-bearing claims checked by hand, and
+> revised after an external architecture review; it now describes `main`
+> after the redesign's five phases (#167–#170).
 >
 > Every external figure is cited. A project's own benchmark, or a third
 > party's, is marked as a claim. Where nothing comparable is published, this
 > document says so. Each target's reasoning is in "How the targets were
-chosen" below the table.
+> chosen" below the table.
 >
 > Paths are under `Sources/`. `RT` is `LatticeNode/Runtime/NodeRuntime.swift`
 > with its `+Loop` and `+Effects` extensions, `API` is `NodeRuntime+API.swift`,
@@ -23,14 +34,44 @@ chosen" below the table.
 
 ## Contents
 
-1. What the node is for
-2. Where it stands today
-3. The architecture at a glance
-4. The parts, one by one
-5. How easy it is to change
-6. What to do next
-7. How a change is judged
-8. Sources
+- [1. What the node is for](#1-what-the-node-is-for)
+  - [Outcomes, in order](#outcomes-in-order)
+  - [Measures and targets](#measures-and-targets)
+- [2. Where it stands today](#2-where-it-stands-today)
+  - [Measured](#measured)
+  - [Where the disk writes go](#where-the-disk-writes-go)
+  - [Where the CPU goes](#where-the-cpu-goes)
+  - [Measured: per chain, by chain count, writes by operation, CID and decoding](#measured-per-chain-by-chain-count-writes-by-operation-cid-and-decoding)
+  - [Not measured, and should be](#not-measured-and-should-be)
+- [3. The architecture at a glance](#3-the-architecture-at-a-glance)
+- [4. The parts, one by one](#4-the-parts-one-by-one)
+  - [4.1 The core: how decisions are made](#41-the-core-how-decisions-are-made)
+  - [4.1a The loop's contract](#41a-the-loops-contract)
+  - [4.2 Weigh: headers and work](#42-weigh-headers-and-work)
+  - [4.3 Select: fork choice and "caught up"](#43-select-fork-choice-and-caught-up)
+  - [4.4 Liveness reporting](#44-liveness-reporting)
+  - [4.5 Fetch: bodies](#45-fetch-bodies)
+  - [4.6 Execute](#46-execute)
+  - [4.7 The write model](#47-the-write-model)
+  - [4.8 Stores and storage engines](#48-stores-and-storage-engines)
+  - [4.9 State and its retention](#49-state-and-its-retention)
+  - [4.9a Decision: receipt proofs travel with the child block](#49a-decision-receipt-proofs-travel-with-the-child-block)
+  - [4.9b Storage: three requirements, one mechanism (Phase 4 analysis)](#49b-storage-three-requirements-one-mechanism-phase-4-analysis)
+  - [4.10 Workers and scheduling](#410-workers-and-scheduling)
+  - [4.11 Mempool and the operator's promises](#411-mempool-and-the-operators-promises)
+  - [4.12 Representation: identifiers and wire format](#412-representation-identifiers-and-wire-format)
+  - [4.13 Mining](#413-mining)
+  - [4.14 Networking and serving](#414-networking-and-serving)
+  - [4.15 Start-up and bootstrap](#415-start-up-and-bootstrap)
+  - [4.16 Processes and the operator surface](#416-processes-and-the-operator-surface)
+  - [4.17 Bounds and backpressure](#417-bounds-and-backpressure)
+  - [4.18 Failure isolation](#418-failure-isolation)
+  - [4.19 Reorganisations](#419-reorganisations)
+- [5. How easy it is to change](#5-how-easy-it-is-to-change)
+- [6. What to do next](#6-what-to-do-next)
+  - [Decisions taken](#decisions-taken)
+- [7. How a change is judged](#7-how-a-change-is-judged)
+- [8. Sources](#8-sources)
 
 ---
 
@@ -41,10 +82,10 @@ executes it, and serves what it holds to peers, miners, operators and
 readers. The network's chain is the truth; a node holds a checked view of it.
 
 Lattice is a hierarchy of chains, not one chain
-([specification §1](https://github.com/0xLattice/Lattice/blob/57.5.0/docs/spec.md)):
+([specification §1](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md)):
 each child is secured by work it inherits from its parent, keeps its own
 fork choice, and is hosted only by the nodes that opt into it
-([philosophy](https://github.com/0xLattice/Lattice/blob/57.5.0/docs/philosophy.md)).
+([philosophy](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/philosophy.md)).
 So most outcomes are measured **per chain path**: a node can be at the tip of
 Nexus while a child three levels down has stopped.
 
@@ -60,7 +101,7 @@ When two conflict, the earlier one wins.
    invalid; every wait has a reason and a wake. A stall is a bug.
 3. **Security of each chain.** Blocks reach the network fast enough that few
    go stale, and each child keeps the share of parent work its security rests
-   on ([merged-mining security](https://github.com/0xLattice/Lattice/blob/57.5.0/docs/economics/merged-mining-security.md)).
+   on ([merged-mining security](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/economics/merged-mining-security.md)).
 4. **Promises kept.** What the node tells an operator or a miner it has kept
    outlives a crash and a power loss: an acknowledged transaction, a pin, the
    configuration, a block it said it accepted.
@@ -1300,7 +1341,7 @@ usually touches one or two. geth's path scheme stays the next step if one
 chain's own growth over time ever misses a target.
 
 **Result (schema epoch 50, measured on macOS).** Built as chosen:
-`VolumeStores` (`Storage/VolumeStores.swift`) owns a store per hosted chain
+`VolumeStores` (`LatticeNodeStore/VolumeStores.swift`) owns a store per hosted chain
 under `volumes/`, and routes by chain path. A chain's writes go to its
 store; its work reads its own store, then its ancestors' (a template's and
 a mined block's, its descendants' too). Only reads that name no chain ask every store, root first: a read by CID from
@@ -1400,12 +1441,12 @@ queues.
 
 **How others do it.** Bitcoin Core: one validation thread plus a script-check
 pool fed from one queue (`CCheckQueue`). Block-STM: a collaborative
-scheduler. Erigon, Reth: stages in sequence, parallel within a stage. The
-sync architecture's rule 4 asks for a queue per chain and kind ("lanes"):
-built and measured, 10.7–10.8 s against 10.4–10.5 s for the queues.
+scheduler. Erigon, Reth: stages in sequence, parallel within a stage. A
+queue per chain and kind ("lanes") was built and measured: 10.7–10.8 s
+against 10.4–10.5 s for the queues.
 
-**Ease of change.** Easy: one struct. **Judgment.** Keep the queues; rule 4
-now says so.
+**Ease of change.** Easy: one struct. **Judgment.** Keep the queues, as the
+sync architecture's rule 4 states.
 
 ### 4.11 Mempool and the operator's promises
 
@@ -1430,7 +1471,7 @@ submission.
 ### 4.12 Representation: identifiers and wire format
 
 **What.** Text CIDs (multibase, multihash) throughout, the core included;
-canonical JSON on the wire (`Networking/ChainSyncWire.swift`); content stored
+canonical JSON on the wire (`LatticeNodeNet/ChainSyncWire.swift`); content stored
 as DAG-CBOR, decoded on read and checked against its hash.
 
 **How others do it.** Bitcoin Core: fixed 32-byte hashes inside, binary
@@ -1857,10 +1898,10 @@ modules.
 
 ## 8. Sources
 
-Lattice: [specification](https://github.com/0xLattice/Lattice/blob/57.5.0/docs/spec.md),
-[philosophy](https://github.com/0xLattice/Lattice/blob/57.5.0/docs/philosophy.md),
-[foundational architecture](https://github.com/0xLattice/Lattice/blob/57.5.0/docs/foundational-architecture.md),
-[merged-mining security](https://github.com/0xLattice/Lattice/blob/57.5.0/docs/economics/merged-mining-security.md).
+Lattice: [specification](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md),
+[philosophy](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/philosophy.md),
+[foundational architecture](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/foundational-architecture.md),
+[merged-mining security](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/economics/merged-mining-security.md).
 
 Bitcoin Core: [`validation.cpp`](https://github.com/bitcoin/bitcoin/blob/master/src/validation.cpp),
 [`txdb.cpp`](https://github.com/bitcoin/bitcoin/blob/master/src/txdb.cpp),

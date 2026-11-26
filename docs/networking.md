@@ -168,7 +168,7 @@ on the same port over UDP. No other server is involved.
 ## Public reads
 
 `publicRead` opens a second listener on all interfaces that serves only the
-bounded GET read routes ([HTTP API](rpc-api.md#read-routes)). It never serves
+bounded GET read routes ([HTTP API](rpc-api.md#route-index)). It never serves
 operator status, metrics or mining routes.
 
 ```json
@@ -184,10 +184,34 @@ path is 404.
 - **A proxy in front must allow no more than the listener does**: never
   `/status`, `/metrics`, `/core/snapshot` or any POST route other than public
   submit.
-- **Content the node does not hold is read from peers** for the reader, at
-  most `publicReadFetches` Volumes at once. Further readers wait in arrival
-  order, and readers of the same Volume share one read. A reader still
-  waiting after 30 seconds gets 503 with `Retry-After`.
+- **Content the node does not hold is read from peers** for the reader, a
+  bounded number of Volumes at once
+  ([below](#content-the-node-does-not-hold)).
+
+### Content the node does not hold
+
+On the public read listener, `GET /volumes/:cid` for a Volume the node does
+not hold reads it from peers, checks it against its CID, serves it and does
+not keep it. `publicReadFetches` (default 4) caps how many such reads run at
+once; `0` serves only what the node holds. What a reader sees is in
+[HTTP API](api-reads-and-transactions.md#get-volumescid).
+
+- **Readers of the same Volume share one read.**
+- **The cap is also bounded by memory.** No more reads run than fit, at the
+  64 MiB cap each, in half of the node's in-flight content budget
+  (`servingMaxInFlightVolumeBytes`), so the node's own sync keeps the other
+  half. At least one always runs. At the default budget (128 MiB) that is
+  one at a time. The node prints the number at start.
+- **Past the limit a reader waits**, first come first served, for a read to
+  end. It is never refused for that alone, and one that closes its
+  connection while it waits gives up its place.
+- **A reader that waited 30 seconds without a place** is answered 503 with
+  `Retry-After: 30`. One whose read found the budget, or the node's pending
+  peer requests, with no room is answered 503 with `Retry-After: 1`.
+- **Behind a proxy that presents every client as one address**, all clients
+  share these reads.
+
+`GET /volumes?cids=` never reads from peers.
 
 ### Listing a chain on an explorer
 
@@ -214,13 +238,31 @@ URL. The URLs come back unverified, and a reader checks what each serves. An
 explorer starts from its Nexus nodes and repeats this step per level, so a
 chain appears once a node hosting its parent can reach a declaring host.
 
+The lookup is bounded:
+
+- It asks at most 8 hosts, found through the child's read-endpoint provider
+  records, in random order, and takes at most 2 URLs from any one.
+- It ends within 2 seconds, provider discovery included, and closes any
+  session it dialed only to ask.
+- Identical concurrent lookups share one. A result is cached for 30 seconds,
+  an empty one for 5.
+- At most 16 lookups run at once. Past that, a lookup for another name finds
+  nothing and is not cached.
+
+Hosts are asked over the overlay with
+`lattice.overlay.read-endpoint.request.v1`, and a node answers only for a
+chain it hosts. A host that accepts submits answers `.response.v2` (the v1
+fields plus `acceptsSubmit`) before its `.response.v1`. A reader that does
+not know v2 drops the unknown topic and still gets the URL, and a v1 answer
+alone counts as not accepting submits.
+
 ### Public submit
 
 Whether a node accepts transactions from the public is its operator's
 choice, off by default. Turn it on with `"publicSubmit": true` (needs
 `publicRead`). The read listener then also accepts `POST /transactions` for
 every hosted chain, with the same answers as the operator route
-([HTTP API](rpc-api.md#public-submit)).
+([HTTP API](api-reads-and-transactions.md#public-submit)).
 
 - **One pool policy for every source.** A public submit is admitted under
   the same fee, replacement and eviction rules as a transaction from a peer.
@@ -240,12 +282,12 @@ its standing:
 
 - bytes the operator credited it, plus
 - verified content it served this node, less
-- Volume bytes this node served it.
+- Volume archive bytes this node served it, contended or not.
 
 Standing is never below zero, does not decay and is not capped.
 
 The operator credits standing with `POST /serving-credit` on the operator
-API ([HTTP API](rpc-api.md#serving-standing)), by hand or through a sponsor
+API ([HTTP API](api-operator.md#serving-credit)), by hand or through a sponsor
 such as lattice-sponsor.
 
 Standings are kept in `serving.json` in the data directory. A crash loses

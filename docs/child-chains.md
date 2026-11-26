@@ -164,14 +164,14 @@ Call the child block `C` and the parent state it is built on `P`. The commit
 on the parent sets `child/Alpha` to `C@P` (Lattice spec §6.3).
 
 Every 3 seconds the loop pushes `C`
-([`POST /child-blocks`](rpc-api.md#post-child-blocks)) and acts on the
+([`POST /child-blocks`](api-operator.md#post-child-blocks)) and acts on the
 answer:
 
 | Answer | The loop |
 |---|---|
 | `tree` | Stops: the block is in the tree. |
 | `pending`, `awaiting` | Waits: a miner is carrying the commit. |
-| `dropped` | Reads the parent's commitment ([`GET /child-blocks/commitment`](rpc-api.md#get-child-blockscommitment)). If it is still on `C`'s `P`, it sends the commit again. If `P` has changed (a new tip, or a reorganization), it builds a new block there ([`POST /child-blocks/build`](rpc-api.md#post-child-blocksbuild)) and commits that. |
+| `dropped` | Reads the parent's commitment ([`GET /child-blocks/commitment`](api-operator.md#get-child-blockscommitment)). If it is still on `C`'s `P`, it sends the commit again. If `P` has changed (a new tip, or a reorganization), it builds a new block there ([`POST /child-blocks/build`](api-operator.md#post-child-blocksbuild)) and commits that. |
 
 It builds at most once per `P` and never commits a carried block again.
 Errors are printed and the loop goes on.

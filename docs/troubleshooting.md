@@ -19,7 +19,7 @@ The reason is on standard error. Fix `lattice.json` or the fragment it
 names. Under systemd the unit stays stopped until then; launchd and Docker
 retry at their throttle ([Running in production](operations.md#exit-codes)).
 
-### `wipe required`
+### `The node store is incompatible`
 
 The store was written for another schema version or another Nexus genesis.
 There is no migration: wipe the chain storage and sync again.

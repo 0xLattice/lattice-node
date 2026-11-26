@@ -1,193 +1,134 @@
-# Deferred Execution (Weigh on Possession, Execute on Selection)
+# Deferred execution (weigh on possession, execute on selection)
 
-> **Status: implemented design rationale.** The current implementation is
-> `HeaderSync` plus `BodyPipeline`; some component names and measurements below
-> describe the earlier prototype. See [body acquisition](block-fetching.md) for
-> the concise current boundary.
+> **Status:** Proposal, implemented. The rule is in the Lattice
+> specification,
+> [§9.9](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md#99-deferred-execution-weighed-and-validated-tiers);
+> the node's mechanism is `HeaderSync` plus `BodyPipeline`, described in
+> [Body acquisition](block-fetching.md).
+> **Purpose:** Why the node weighs a block from its header and executes it
+> only when it matters, and the invariants the design had to keep. For the
+> rule itself read the spec; for the mechanism read Body acquisition.
 
-## Model
+## The problem it solved
 
-Any peer may lie, withhold, stall, or be honestly pruned; a withholding
-miner is normal operation, not an edge case. Security comes from per-item
-verification plus objectively comparable work, under partial synchrony.
-The one non-peer trust edge is the node's own configured immediate parent.
-Publishing a block's bytes is, and remains, the price of being weighed:
-this design never weakens the network's data-availability enforcement,
-which today lives — easily missed — inside the import gate itself.
+Acceptance used to be one gate: a block entered the accepted graph and
+contributed fork-choice weight only after its body was fetched, every
+transaction resolved, and its state transition executed and checked against
+the declared post-state. The gate was sound (nothing invalid was ever
+accepted) but it priced *weighing* a block at the cost of *using* it.
 
-## Problem
+The expensive parts were not the bytes:
 
-Acceptance is one gate today: a block enters the accepted graph and
-contributes fork-choice weight only after its body is fetched, every
-transaction resolved, and its state transition executed and checked
-against the declared post-state. The gate is sound (nothing invalid is
-ever accepted) but it prices *weighing* a block at the cost of *using* it.
+- A block's own Volume is skeleton-sized (~1 KB), and a losing sibling's
+  transactions are largely the same content-addressed objects as its
+  canonical rival's, already held and deduplicated by CID.
+- What each accepted block cost was the state execution, the materialized
+  state it durably stored, and its occupancy of the single sequential
+  import lane.
 
-The expensive parts are not the bytes. A block's own volume is
-skeleton-sized (~1 KB), and a losing sibling's transactions are largely
-the same content-addressed objects as its canonical rival's — already
-held, deduplicated by CID. What each accepted block actually costs is the
-state execution, the materialized state it durably stores, and its
-occupancy of the single sequential import lane. On the live testnet
-child, ~74% of the accepted graph is losing same-height siblings: the
-majority of execution and state-storage work is spent on blocks whose
-only consensus contribution is their weight — which never required
-executing them. (On a fork-free chain this design saves nothing; every
-block is spine and must be executed before anyone builds on it.)
+On the testnet child chain measured for the proposal, about 74% of the
+accepted graph was losing same-height siblings: most execution and
+state-storage work was spent on blocks whose only consensus contribution
+was their weight, which never required executing them. On a fork-free chain
+the design saves nothing: every block is on the spine and must be executed
+before anyone builds on it.
 
-## Concept
+## The decision
 
-**A node weighs a block when it possesses and structurally verifies it,
-and executes it only when the block matters.** Two tiers of belief:
+**A node weighs a block when it possesses and structurally verifies it, and
+executes it only when the block matters.** The spec defines the two tiers,
+*weighed* and *validated*, and the act-on tip (§9.9).
 
-- **Weighed**: the node holds the block's header and has verified
-  everything a header proves: the proof of work over it, parent linkage,
-  and for a child block its securing-work proof and reference-level
-  continuity. The header alone gives weight - the work commits to the
-  body by its root and does not need it - so a block whose body the node
-  does not hold is weighed all the same. Its declared post-state is
-  recorded as an unverified claim.
-- **Validated**: the state transition has been executed and the declared
-  post-state checked. Only now may the node *use* the block — build
-  templates at its tip, serve its state, or issue the parent-side
-  continuity facts children consume. The complete acted-on set, which
-  additionally covers asserting a head externally, is enumerated under
-  Pivotality below.
+The threat model behind it: any peer may lie, withhold, stall, or be
+honestly pruned, and a withholding miner is normal operation, not an edge
+case. Security comes from per-item verification plus objectively comparable
+work, under partial synchrony. The one non-peer trust edge is the node's
+own co-hosted immediate parent.
 
-Execution runs when a block becomes *load-bearing*, under two triggers:
+### When a block is executed
 
-- **Selection**: fork choice selects a branch; the node validates it
+Execution runs when a block becomes *load-bearing*:
+
+- **Selection.** Fork choice selects a branch; the node validates it
   forward from its last validated ancestor before producing on or serving
-  its tip. What the node acts on meanwhile is the **act-on tip**, the
-  heaviest executed tip: descend from genesis and, at each fork, follow
-  the heaviest child that is executed (heaviest by its whole subtree's
-  header work); stop where no child is executed. A heavier branch takes
-  over at its fork once its first block there is executed - until then the
-  node keeps acting on the branch it has validated, and does not retreat
-  to the fork point on headers alone. A block whose body the node does
-  not hold is weighed and unvalidated, never invalid.
-- **Pivotality**: everything the node acts on — exhaustively: building
-  templates, serving state, issuing continuity facts, and asserting a
-  head externally (head announcements, read and status views of the
-  canonical tip — never possession inventory, which advertises what the
-  node holds and is governed by the possession boundary, not by
-  pivotality) — is the act-on tip and its ancestry, all executed.
-  Unvalidated weight ranks and is never itself acted on: it chooses
-  which executed child is followed at a fork, and a block that is not
-  executed is never stepped into, however heavy. A block that could
-  change the act-on tip is therefore one that matters: at each fork on
-  the chain the node acts on, every child heavier than the executed one
-  it follows — at the tip, every child — is asked for and executed when
-  its body is held. Whichever executes is followed; a heavier one is
-  followed once it executes. Nothing tells the node that a body will
-  never come, so no wait ends in a verdict and a body not held holds
-  nothing up: the node keeps acting on what it has executed. The
-  asymmetry that makes deferral work is structural: a losing sibling
-  sits on the losing side at its own fork base and never needs
-  executing — so the measured majority is deferrable by construction.
-  The cost is at forks: each alternative that arrives heavier than
-  those executed before it is executed too, so a fork whose children
-  arrive lightest first executes more than one of them. A stale
-  sibling's descendants are not executed unless it becomes the tip.
+  its tip. A heavier branch takes over at its fork once its first block
+  there is executed. Until then the node keeps acting on the branch it has
+  validated, and does not retreat to the fork point on headers alone.
+- **Pivotality.** Everything the node acts on is the act-on tip and its
+  ancestry, all executed. The acted-on set is exhaustive: building
+  templates, serving state, issuing continuity facts, and asserting a head
+  externally (head announcements, read and status views of the canonical
+  tip). Possession inventory is not in it: it advertises what the node
+  holds.
 
-Invariants:
+A block that could change the act-on tip is one that matters. At each fork
+on the chain the node acts on, every child heavier than the executed one it
+follows (at the tip, every child) is asked for and executed when its body
+is held. Whichever executes is followed; a heavier one is followed once it
+executes.
 
-- **Acted-on decisions are uniform over obtained bytes.** Every decision
-  a node acts on is identical to that of a node which validated every
-  block whose bytes it obtained. Computed weight includes work beneath
-  blocks a validating node has excluded — as does that node's own, since
-  exclusion removes no weight (spec §9.9); it weighs, and no excluded or
-  unexecuted block is ever acted on. A validate-at-import
-  node and a deferred-execution node therefore differ only in *when*
-  work is examined, never in any decision either acts on, and the two
-  interoperate on one network.
-- **Deferral without the seam is forbidden.** No implementation may count
-  weight it has not validated unless it can exclude what it later proves
-  invalid; deferring execution is only safe together with the exclusion
-  seam below.
-- **Availability never judges.** Execution invalidity is recorded only
-  from a *complete* judgment: every named input resolved and verified
-  against its CID, the transition executed, the declared post-state
-  mismatched (or a chain-committed validity rule failed). The verdict is
-  a pure function of content-addressed inputs, identical on every node
-  that reaches it regardless of which prefix that node validated. Failure
-  to obtain an input is never a verdict — it is an availability gap,
-  retried indefinitely, excluding nothing. The durable record of an
-  exclusion is the evidence of the failing check, sufficient to re-derive
-  the verdict, and the inputs that proved it are retained as an
-  obligation — an unre-derivable marking is not a judgment. Anything
-  short of a completed deterministic check is retryable, never recorded.
-- **Exclusion is chain-local and never touches work.** A proven
-  execution-invalid block's subtree keeps its weight — work weighs,
-  validity selects (spec §9.9) — but the excluding chain's *own* canonical
-  descent never steps into it, so nothing at or below it is selected,
-  extended or attested; the exclusion is a staged, durable, replayed fact
-  like any other, so a restart selects the same head. A securing grind's
-  contribution to a child chain is independent of carrier validity, so
-  the work facts the chain *serves* are likewise unaffected, and the runs
-  it serves only grow (spec §9.10). Nothing is ever pruned — verified work
-  facts and invalidity evidence are both kept forever; exclusion changes
-  where the chain's own descent may step, not what it weighs, knows or
-  serves.
-- **Children consume continuity from the validated subgraph only.** A
-  weighed block's declared post-state is an unverified claim, so
-  parent-state continuity paths are computed over validated blocks alone.
-  Carrier securing-work proofs are exempt — carriers need not be valid,
-  by spec. The binding constraint is narrower than it first appears: a
-  child binds to its carrier's *pre*-state, which is the carrier's
-  predecessor's post-state — so a carrier that forks one block off the
-  validated spine already names a state the parent holds. The residual
-  coupling: a parent that *tracks* a child validates the branch prefixes
-  that child's carriers name, regardless of the parent's own fork choice
-  — the same tracked-child obligation eviction already carries. For
-  untracked children, the general guarantee only. The cost of this
-  coupling is liveness for deep-off-branch carriers, never child safety.
-- **Child deployments must not defer silently.** A child genesis anchored
-  in an unselected carrier is real — canonicity never changes child
-  validity — and discovering it requires the carrier's transaction
-  bodies. Whatever surface serves child discovery must account for every
-  possessed block, not only the validated spine.
+### Why deferral pays, and what it costs
 
-This design removes execution and state storage for unselected blocks,
-but weighing a child block still requires soliciting its securing-work
-proof, so the per-sibling round trip for that proof is unchanged.
+- A losing sibling sits on the losing side at its own fork base and never
+  needs executing, so the measured majority is deferrable by construction.
+- The cost is at forks: each alternative that arrives heavier than those
+  executed before it is executed too, so a fork whose children arrive
+  lightest first executes more than one of them.
+- A stale sibling's descendants are not executed unless it becomes the tip.
+- Weighing a child block still requires its securing-work proof, so the
+  per-sibling round trip for that proof is unchanged.
 
-In short: **eviction is weight-preserving, transport is an ordered
-stream, and execution is deferred to load-bearing blocks — weigh what you
-hold, move bytes in order, execute exactly what matters.**
+## Invariants the design keeps
+
+| Invariant | Meaning | Rule |
+|---|---|---|
+| Acted-on decisions are uniform over obtained bytes | Every decision a node acts on is identical to that of a node which validated every block whose bytes it obtained. A validate-at-import node and a deferred-execution node differ only in *when* work is examined, so the two interoperate on one network. | Spec §9.9 |
+| Deferral without the seam is forbidden | No implementation may count weight it has not validated unless it can exclude what it later proves invalid. | Spec §9.9 |
+| Availability never judges | Invalidity is recorded only from a *complete* judgment: every named input resolved and verified against its CID, the transition executed, the declared post-state mismatched (or a chain-committed validity rule failed). Failure to obtain an input is an availability gap, retried indefinitely, excluding nothing. | Spec §9.9; NODE-SEMANTICS-003 in [Correctness invariants](../correctness-invariants.md) |
+| Exclusion is chain-local and never touches work | A proven execution-invalid block's subtree keeps its weight, but the excluding chain's own descent never steps into it. The exclusion is a staged, durable, replayed fact, so a restart selects the same head. Work facts the chain serves are unaffected, and the runs it serves only grow. | Spec §9.9, §9.10 |
+| Children consume continuity from the validated subgraph only | A weighed block's declared post-state is an unverified claim, so parent-state continuity is computed over validated blocks alone. Carrier securing-work proofs are exempt: carriers need not be valid. | Spec §9.5 |
+| Child genesis must not defer silently | A child genesis anchored in an unselected carrier is real: canonicity never changes child validity. Whatever serves child discovery must account for every possessed block, not only the validated spine. | |
+
+### Continuity and off-branch carriers
+
+The continuity constraint is narrower than it first appears. A child binds
+to its carrier's *pre*-state, which is the carrier's predecessor's
+post-state, so a carrier that forks one block off the validated spine
+already names a state the parent holds. The residual coupling is that a
+parent level validates the branch prefixes its hosted child's carriers
+name, regardless of the parent's own fork choice. The cost of this coupling
+is liveness for deep-off-branch carriers, never child safety.
 
 ## Boundaries
 
-- Weight comparison and heaviest selection are untouched. What changes is
-  what acceptance *asserts*: the accepted
-  graph records possessed, structurally-verified work; validity becomes a
-  second, recorded, deterministic judgment. The consensus spec must be
-  amended explicitly, at minimum: the meaning of "accepted" in the
-  effective-work invariant (and its rider that exclusion removes no
-  weight while the descent never steps into an excluded block); the
-  never-prunes invariant's rider that exclusion is
-  not pruning and excluded facts remain served; the import procedure's
-  split into per-tier gates with per-tier durability ordering, the
-  invalidity marking included; and continuity's "connected accepted
-  graph" becoming the validated subgraph. The sibling fork-choice doc's
-  description of deferred execution as "consensus-neutral" is corrected
-  by the same change — this is consensus-adjacent and is treated with
-  that gravity.
-- Data availability never judges and never un-weighs: a withheld branch
-  keeps its header weight and is simply never acted on, because the
-  act-on tip follows executed blocks only. Honest work chains on the
-  act-on tip meanwhile, so withholding buys what a secret chain already
-  buys and no more.
-- Recovery and boot invariants hold per tier; no index, page, or
-  advertisement promises a tier the node has not reached for that block.
-  Served surfaces already advertise possession truthfully — possession
-  and acceptance coincide at the weighed tier by construction.
-- Serving a block whose bytes match their CID is never a serving fault,
-  regardless of whether its transition later proves invalid — minting a
-  PoW-valid, execution-invalid block is available to anyone, so relaying
-  one attributes nothing to the relayer. Attribution is reserved for
-  bytes that do not match what was advertised.
-- Durable formats evolve additively or by flag day per the standing
-  compatibility constraint; the interoperability claim above is behavioral
-  (same decisions, different timing), not a license to skip that
-  discipline.
+- **Weight comparison and heaviest selection were untouched.** What changed
+  is what acceptance *asserts*: the accepted graph records possessed,
+  structurally verified work, and validity is a second, recorded,
+  deterministic judgment. This is consensus-adjacent, so the specification
+  was amended rather than the node alone changed (§9.9, and the continuity
+  rule of §9.5).
+- **Data availability never judges and never un-weighs.** A withheld branch
+  keeps its header weight and is simply never acted on, because the act-on
+  tip follows executed blocks only. Honest work chains on the act-on tip
+  meanwhile, so withholding buys what a secret chain already buys and no
+  more.
+- **No surface promises a tier the node has not reached.** Recovery and
+  boot invariants hold per tier; no index, page or advertisement promises a
+  tier the node has not reached for that block.
+- **Serving a block whose bytes match their CID is never a serving fault,**
+  whether or not its transition later proves invalid. Minting a PoW-valid,
+  execution-invalid block is available to anyone, so relaying one
+  attributes nothing to the relayer. Attribution is reserved for bytes that
+  do not match what was advertised.
+- **Durable formats evolve additively or by flag day.** The
+  interoperability claim above is behavioral (same decisions, different
+  timing), not a license to skip that discipline.
+
+## Where the implementation differs from the proposal
+
+- The proposal required the inputs that proved an exclusion to be retained
+  as an obligation. The node keeps the exclusion as a durable fact and lets
+  go of the body of a block found invalid
+  ([Node architecture](../architecture.md#what-keeps-content)).
+- Component names and measurements in the proposal described an earlier
+  prototype. The current components are `HeaderSync` and `BodyPipeline`.

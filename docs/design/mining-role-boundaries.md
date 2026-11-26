@@ -1,7 +1,11 @@
-# Mining Role Boundaries
+# Mining role boundaries
 
-This document is the mining contract. It defines the boundary between the
-node, a coordinator, and nonce-search workers.
+> **Status:** Current description.
+> **Purpose:** The mining contract: what the node, a coordinator and a
+> nonce-search worker each own, and what crosses between them. The worker's
+> command line and search are in
+> [External mining workers](../mining-workers.md); the routes are in
+> [Mining routes](../api-mining.md).
 
 ## Roles
 
@@ -22,9 +26,8 @@ transactions, resolve block content roots, know child-chain topology, gossip
 blocks, generate child proofs, publish to Ivy, or send wallet private keys.
 Rewards are paid to a recipient address the coordinator names per chain; the
 block header carries it and nothing is signed for it.
-It must not gossip blocks.
 
-## Worker Protocol
+## Worker protocol
 
 Worker input is an immutable assignment:
 
@@ -54,7 +57,7 @@ Workers derive the midstate from Lattice's canonical nonce-independent block
 preimage and append every candidate nonce as exactly eight big-endian bytes.
 The worker does not define a second proof-of-work encoding.
 
-## Ownership Matrix
+## Ownership matrix
 
 | Responsibility | Owner |
 | --- | --- |
@@ -69,7 +72,7 @@ The worker does not define a second proof-of-work encoding.
 | Worker retry/backoff and result race resolution | `MiningCoordinator` |
 | Proof-of-work nonce search | `LatticeMiner` worker |
 
-## Submission Contract
+## Submission contract
 
 The coordinator submits a result to the node, not a sealed block to peers. The
 node validates that `workID` still names issued work,
@@ -84,7 +87,7 @@ generates any required merged-mining proof material, accepts and persists the
 block through the normal block-acceptance path, and publishes the accepted block
 through the node network runtime and same-chain overlay.
 
-## Private-Key Boundary
+## Private-key boundary
 
 Workers and coordinators must not send private key material to the node in
 template/work requests. A reward needs no signature: the template endpoint
@@ -92,7 +95,7 @@ receives only a recipient address per chain, which the block's
 `rewardRecipient` commits and its proof of work covers. Process identity
 remains a network identity, never a payout identity.
 
-## SOTA Basis
+## Prior art
 
 The contract follows the role split used by modern proof-of-work mining
 protocols:
@@ -113,7 +116,7 @@ protocols:
   keeps auxiliary proof material at the chain/protocol layer. Hash workers
   should not need child-chain topology or proof-generation responsibilities.
 
-## Implementation Rule
+## Implementation rule
 
 Mining code must stay on the matrix above. `Sources/LatticeMiner` is a nonce
 search worker target only. RPC transport, stale-work handling, range allocation,

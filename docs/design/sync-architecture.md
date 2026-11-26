@@ -1,14 +1,21 @@
 # Sync architecture: modules, roles and rules
 
-> **Status: agreed target design.** The code does not follow all of it yet.
-> [Where the code departs](#where-the-code-departs) lists the gaps. A change to sync, storage or the wire is reviewed
-> against the rules here ([PR checklist](../pr-checklist.md)).
+> **Status:** Decision record: the agreed rules, in effect for review. The
+> code does not follow all of them;
+> [Where the code departs](#where-the-code-departs) lists the gaps.
+> **Purpose:** The modules, the loop's contract and the fifteen rules a
+> change to sync, storage or the wire is reviewed against
+> ([PR checklist](../pr-checklist.md)).
+> **Which document is current.** [Node architecture](../architecture.md)
+> describes the code as it stands. Two parts of this page are a target
+> that [Node design](node-design.md) decided not to build for now, and are
+> marked where they appear: the [store layout](#store-layout) with rule 13,
+> and the [node roles](#node-roles) with rule 14.
 
-Sync was rebuilt several times, each time after a node stopped making
-progress, and each fix was a sound local decision. This document is the
-global design those decisions are checked against. Nothing in it changes a
-hashed byte or a consensus decision; the [protocol
-specification](https://github.com/0xLattice/Lattice/blob/57.5.0/docs/spec.md)
+This document is the global design that local decisions about sync are
+checked against. Nothing in it changes a hashed byte or a consensus
+decision; the [protocol
+specification](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md)
 stays normative.
 
 ## What sync produces
@@ -152,6 +159,13 @@ first solved through the loop's existing inputs and effects.
 
 ## Node roles
 
+> **Target, not current.** The node has no light role
+> ([Node design](node-design.md#7-how-a-change-is-judged) lists light nodes
+> as a non-goal for now), and any node reads missing state from peers while
+> executing (rule 14 in [Where the code departs](#where-the-code-departs)).
+> What a node keeps is set by `blockBodies` and `state`
+> ([Storage](../storage.md)).
+
 | Role | Holds | Executes from |
 |---|---|---|
 | Archive | All bodies and all historical state, to answer reads of old state | Its own store only |
@@ -159,6 +173,14 @@ first solved through the loop's existing inputs and effects.
 | Light | Headers, plus what it has fetched | Witnesses fetched from full or archive nodes |
 
 ## Store layout
+
+> **Target, not adopted.** The node stores state as content-addressed trie
+> nodes in one Volume store per hosted chain, kept by retention scopes and
+> counts ([Node architecture](../architecture.md#storage-and-recovery)).
+> [Node design §4.9b](node-design.md#49b-storage-three-requirements-one-mechanism-phase-4-analysis)
+> compared this layout with that one and chose a Volume store per chain;
+> the path scheme stays the next step if one chain's own growth over time
+> ever misses a target.
 
 Content-addressing is for what is immutable and shared between nodes.
 Mutable current state is stored by position. The trie remains the
@@ -230,11 +252,14 @@ code no longer departs.
 
 | Rule | Today | Measured |
 |---|---|---|
-| 13 | State is content-addressed trie nodes in the content store, pruned by reference counts | 2.9 GB written for 82 MB kept |
-| 4 | Every job shares one worker pool behind three strict queues | Derivations of 0.7 ms waited 3.5 to 3.9 s for a worker |
+| 13 | State is content-addressed trie nodes in each chain's Volume store, pruned by reference counts. Node design §4.9b decided to keep this | 2.9 GB written for 82 MB kept |
 | 2 | A child reads its peers only once its parent has applied every header of one peer's log. A parent header that never applies (its child index not obtainable, say) holds its child's weight back, as does a parent with no peer running it. And the log is whichever peer's ended first: a peer that is behind opens the child on a parent that has weighed little, and the child then checks peers' proofs where it could have derived them | Not measured |
 | 3 | A child's step receives its parent's whole tree and a `parentWeighed` flag | |
 | 5 | Backoff, wake and let-go logic is separate per subsystem | |
 | 12 | CID text keys throughout the core; canonical JSON on the wire | Header messages cost the loop about 0.6 s of 25.8 s |
 | 14 | Any node reads missing state from peers while executing | |
-| 15 | The wire is additive already; no test runs two versions together | |
+| 15 | The wire is additive already. `TwoVersionE2ETests` runs this build against an older release on Nexus blocks only: not child chains, transactions or state reads between the two ([Testing](../testing.md#two-version-e2e)) | |
+
+The code follows rule 4: every job shares one worker pool behind three
+strict queues. Its measured cost on this baseline: derivations of 0.7 ms
+waited 3.5 to 3.9 s for a worker.

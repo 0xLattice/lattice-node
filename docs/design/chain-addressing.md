@@ -1,5 +1,9 @@
 # Chain addressing
 
+> **Status:** Current description.
+> **Purpose:** How a chain is named in the node (configuration, wire,
+> storage, API), and what makes a path valid.
+
 ## Rule
 
 A chain's public and internal identity is one absolute path from the single
@@ -78,5 +82,6 @@ nexus/Payments
 
 Nexus has no parent, so an empty store constructs the one pinned unsigned
 genesis locally before configured root bootstrap. It is never accepted from a
-peer. The path representation is not special-cased; Nexus is simply the valid
-one-component absolute path `["Nexus"]`.
+peer ([The Nexus genesis](../protocol.md#the-nexus-genesis)). The path
+representation is not special-cased; Nexus is simply the valid one-component
+absolute path `["Nexus"]`.

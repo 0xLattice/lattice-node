@@ -1,5 +1,10 @@
 # Bitcoin-anchored genesis
 
+> **Status:** Current description.
+> **Purpose:** Where the Nexus genesis CID is committed on Bitcoin, and how
+> to verify that commitment without trusting this repository
+> ([Verifying the anchor](#verifying-the-anchor)).
+
 The Nexus genesis is pinned in source as `NexusGenesis.expectedBlockHash`
 (`bafyreiggtg4ezifboyekbf4gxst2jr3mpjqcxsbmopy7w6fp46g4ngpgxa`), and a node verifies
 that the genesis it builds matches that value at boot. On its own the pin is a

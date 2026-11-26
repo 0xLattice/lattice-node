@@ -1,14 +1,32 @@
-# Lattice Node Protocol Boundary
+# Lattice node peer protocol
 
-The Lattice library is the normative owner of validation, state transitions,
-work accounting, and fork choice. Its `spec.md`, `foundational-architecture.md`,
-`consensus-fork-choice.md`, and `philosophy.md` define protocol behavior. This
-document records how `lattice-node` realizes that boundary.
+How two `lattice-node` processes talk to each other: the session hello, the
+messages that sync headers and proofs, how content is exchanged, how the
+hosts of a chain find each other, and what a peer can be blamed for.
 
-## Chain identity
+This page does not define consensus. Validation, state transitions, work
+accounting and fork choice are defined by the
+[Lattice specification](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md).
+Related references:
 
-A process hosts one Nexus-rooted tree. Every level has one absolute
-Nexus-inclusive path:
+| For | Read |
+|---|---|
+| HTTP routes, request and response bodies | [HTTP API](rpc-api.md) |
+| What the pool admits, replaces and evicts | [Transaction pool policy](mempool.md) |
+| The contract between node, coordinator and mining workers | [Mining role boundaries](design/mining-role-boundaries.md), [External mining workers](mining-workers.md) |
+| How the node is built | [Node architecture](architecture.md) |
+| How a child block's work and parent state are checked | [Proof-derived child work](design/proof-derived-work.md) |
+| Operating the network side of a node | [Networking](networking.md) |
+
+## One overlay for the whole tree
+
+A process hosts one Nexus-rooted tree of chains and has one Ivy network
+plane. A peer session serves every chain both ends host. The overlay
+carries three kinds of traffic: transaction announcements, sync messages
+scoped to one chain, and content.
+
+Every chain is named by its absolute path, which always begins with `Nexus`
+([Chain addressing](design/chain-addressing.md)):
 
 ```text
 Nexus
@@ -16,10 +34,15 @@ Nexus/Payments
 Nexus/Payments/Receipts
 ```
 
-The root and operator-selected descendants run as independent consensus levels
-inside one `NodeCore`. Paths are immutable setup and signed transaction replay
-protection; the shared overlay and HTTP surface use them for routing. Each
-level validates its own sparse route and chooses its own canonical projection.
+Sync messages carry the path of the chain they concern.
+
+Parent facts, run reports and merged-mining candidates never cross a network
+plane. They pass in-process between the levels one node hosts
+([Process trust model](design/process-trust-model.md)). No network peer
+holds a parent or child role, and no peer can provide a parent-state
+verdict.
+
+## The Nexus genesis
 
 The pinned Nexus genesis CID is:
 
@@ -29,360 +52,260 @@ bafyreiggtg4ezifboyekbf4gxst2jr3mpjqcxsbmopy7w6fp46g4ngpgxa
 
 It contains the deterministic premine transaction for public key
 `ed01fe416588df6e7fa5213c0d3e430f504bb5203172120c86b874826b55f53bdb7d`.
-On an empty store, the node constructs it locally, recomputes its CID, and
-uses it only for configured root bootstrap. The CID is a trust anchor, never a
-peer-admission signature permit. Every transaction in any genesis has empty
-signers and signatures. Nexus is admitted only at the configured CID. A child
-root is built from its configured spec and the parent's entering state, then
-admitted only with a valid mined directory proof. Ordinary post-genesis
-transactions remain signature-strict.
 
-This genesis is a storage cutover. Existing node data is not migrated; remove
-the old chain directory before starting this version.
+- On an empty store the node constructs the genesis locally, recomputes its
+  CID, and uses it only for configured root bootstrap. It is never accepted
+  from a peer.
+- The CID is a trust anchor, never a peer-admission signature permit. Nexus
+  is admitted only at the configured CID.
+- Every transaction in any genesis has empty signers and signatures.
+  Ordinary post-genesis transactions remain signature-strict.
+- A child root is built from its configured spec and the parent's entering
+  state, then admitted only with a valid mined directory proof.
 
-## Transactions
+The CID is also committed to Bitcoin; see
+[Bitcoin-anchored genesis](design/bitcoin-anchored-genesis.md) to verify it.
 
-HTTP messages carry concrete transaction bodies with their
-signatures. A cashew header alone is not a complete transaction payload.
-`lattice-node` binds the concrete body back to its CID before admission, then
-Lattice validates the transaction for its signed absolute path, which the host
-must serve.
+## Sessions
 
-Lattice accepts only the domain-separated `lattice-tx-v1` envelope signature;
-a signature over the bare body CID is invalid. One body therefore has exactly
-one valid signature form per key.
+### Hello
 
-A block pays its reward and fees to its `rewardRecipient`, a header field the
-proof of work covers; a block with none burns them. The recipient is only an
-address: process identity is never converted into wallet identity, and the
-node never receives a private key.
+Ivy authenticates the peer's key. Each connection must then complete a
+compatible hello before it may request anything, including a connection
+that replaces an earlier one from the same key. The hello grants no
+authority over facts.
 
-## Work and hierarchy evidence
+| Field | Meaning |
+|---|---|
+| `version` | The node protocol version. The overlay requires version 6; a peer on another version is refused the session. |
+| `nexusGenesisCID` | The Nexus genesis the sender runs. It must equal the receiver's. |
+| `chainPath` | The root path of the sender's tree. It must equal the receiver's. |
+| `capabilities` | Optional. What the sender speaks beyond version 6: a sorted list of strings, absent when empty. |
 
-One mined root CID identifies one physical grind. It has one terminal block
-location per chain and may be projected across exact hierarchy edges. Repeated
-observations of that root do not create additional work.
+The hello is decoded leniently, so a node that predates `capabilities`, or
+any later field, accepts a hello that carries it.
 
-Same-chain predecessor connectivity makes a later grind support its ancestors
-within that chain's GHOST calculation; it does not move the grind's terminal
-location onto an ancestor. The sparse directory proof itself identifies the
-root grind and its unique terminal location in each traversed chain.
+### Capabilities
 
-CID spellings are normalized at the content-addressing boundary before they
-become work keys. Alternate multibase text for the same CID therefore cannot
-create a second identity. This encoding rule is distinct from branch
-canonicity: every accepted branch's eligible work still counts whether or not
-that branch is the current canonical projection.
+| Capability | The peer |
+|---|---|
+| `volume-bundle` | answers a Volume bundle request ([Bundles](#bundles)). |
+| `relay` | carries a session between two peers it has sessions with. |
+| `host:<path>` | hosts that child chain. Nexus is not named: every node hosts it. |
+| `hello-updates` | sends its hello again when what it hosts changes, and takes a later hello on an open session as what that peer now speaks and hosts. |
+| `stream-tail` | answers a stream request whose `after` is the largest 64-bit value with its log's last entry and subscribes the asker, so a peer that wants only what is new need not page the history. |
 
-A child candidate is delivered with a sparse proof from the mined root to that
-exact child. Lattice verifies the directory path and derives target-qualified
-work directly from the proof. The carrier block need not itself be valid,
-accepted, connected, or canonical: proof-of-work is a physical fact, not a
-parent-consensus claim. Work influences fork choice only after the child block
-is accepted and connected. No node-local work floor exists: any filter on work
-that can reach fork choice would be consensus-relevant, so the chain's own
-target is the only work gate.
-
-Parent canonicity never affects work. A node hosts a child only with every
-ancestor, and the child reads two narrow facts from its co-hosted parent: the
-set of states produced by fully executed parent blocks, and attributed runs
-for its directory under spec §9.10. The parent cannot declare the child valid
-or choose its tip.
-
-Every child block anchors its `parentState` directly to the parent chain's
-executed-from-genesis set. The continuity link therefore runs from the empty
-state to the named state; it is not a link from the child's predecessor. A
-weighed but unexecuted parent block issues no fact. A child block whose required
-state is not yet present parks and is retried when its parent level executes
-more history. Child genesis follows the same anchor rule.
-
-A run report names a quantity only. The child binds it to its own directory,
-the block named by a verified carrier proof, and a grind already credited at
-that location. It derives `runWork - ownWork` under an identity keyed by the
-carrier and directory, accepts only strict increases, and never revokes it.
-
-A locally submitted grind is one `NodeCore` step. The root and every carried
-block whose target the hash meets contribute to one path-keyed `NodeBatch`;
-all affected facts and cursors commit together before any new snapshot is
-published. A remotely learned carried block follows the same acquisition and
-proof path on the shared overlay. A missing proof is requested with the child
-header from a peer that streamed it; no peer can provide the parent-state
-verdict.
-
-`parentState` commits the carrier's `prevState`. It is not a parent-block
-backlink and is never inverted to discover ancestry.
-
-## Import and durability
-
-All ingress follows one sequence:
-
-```text
-acquire
-  -> verify
-  -> produce one path-keyed NodeBatch
-  -> retain complete selected volumes
-  -> atomically commit every affected level and cursor
-  -> publish the resulting level snapshots
-```
-
-The transaction is the durability boundary. Success means the complete tree
-batch is durable; failure publishes none of it and stops the runtime. Live
-execution and recovery consume the same immutable facts. Path-keyed facts,
-indexes, cursors, incomplete header boundaries, and child proofs share
-`state.db`; content lives in each hosted chain's Volume store under
-`volumes/`.
-
-## Network plane
-
-The process has one Ivy network plane. Sync messages carry an absolute path,
-and a peer session serves every level both hosts. The overlay exchanges
-transaction announcements, path-scoped sync messages, and content.
-
-A node joins any chain by first being a node of its parent, then asking the
-DHT which of the parent's nodes host the child, as a provider announce and
-lookup work in IPFS. One process hosts a chain's whole ancestry on one overlay,
-so every host of a child is already in its parent's network and they share one
-DHT: the hosts of a child announce its rendezvous key there, a joiner looks the
-key up and dials the hosts it finds. The same rule applies at every depth, the
-key carrying the full path.
-
-Provider discovery is keyed per child chain: the node periodically announces
-each hosted child under its path
-(`lattice.chain-peers.v1:<nexus genesis>:<path>`), and names each in its
-session hello as the capability `host:<path>`; Nexus, which every node
-hosts, has neither. It does not publish a provider record per block or
-state. A child's current peers are the sessions whose hello named it or that
-its providers include. While a hosted child has no current peer, when its
-verified progress stalls, and once an interval while it has fewer current peers
-than the target, the node dials a bounded random set of that chain's providers.
-A lookup answers with a sample of the key's providers that announcing more
-often does not buy a place in. A child's current peers are what is routed by:
-its transaction announcements go only to them; a block's body is asked of
-them alone (its bundle of the capable ones, then each Volume), then of the
-connected peers known to provide the block or that Volume, never of anyone
-else. Nexus's go
-to every session. A Nexus stall retries disconnected bootstrap peers.
-
-Parent facts, run reports and merged-mining candidates never cross a network
-plane: they pass in-process between co-hosted levels.
-
-The overlay currently requires node protocol version 6; mixed-version peers
-refuse the session.
-
-### Adding to the wire without a flag day
-
-The version changes, and old and new nodes part, only for a change that makes
-them disagree about what is valid. Everything else is an addition, and old and
-new nodes keep one network:
-
-- An addition is a new message type (a new overlay topic, a new Ivy message
-  tag) or a new optional field of the hello. An existing message never changes
-  its meaning or its encoding. Overlay messages are canonical-exact
-  (`CanonicalJSONMessage`: a decoded message must re-encode to the bytes
-  received), so adding a field to an existing message is not compatible: it
-  is a new message on a new topic, as `read-endpoint.response.v2` stands
-  beside `read-endpoint.response`.
-- The hello's optional `capabilities` names what a node speaks beyond version
-  6 (a sorted list of strings, absent when empty). The hello is decoded
-  leniently, so a node that predates the field, or any later field, accepts a
-  hello that carries it.
-- A node sends a new message type only to a peer whose hello advertised it.
-  A peer that advertised nothing is spoken to exactly as before.
-- What a node does not know it ignores: an unknown capability, an overlay
-  message of an unknown topic, an Ivy message of an unknown tag. None of them
-  ends the session or counts against the peer.
-
-Ivy releases through 14.0.0 end the session of a peer that sends an unknown
-Ivy tag; later ones ignore it. That is why the third rule is not optional.
-
-Capabilities in use: `volume-bundle`, the peer answers a Volume bundle
-request; `relay`, the peer carries a session between two peers it has
-sessions with; `host:<path>`, the peer hosts that child chain;
-`hello-updates`, the peer sends its hello again when what it hosts changes and
-takes a later hello on an open session as what that peer now speaks and hosts.
 A node sends a later hello only to a peer that named `hello-updates`, and
 takes one only from a peer whose hello named it.
 
-A level's weigh log streams header and proof entries by position. Stream pages
-carry IDs only. `getData` and `getAncestors` return bounded header entries that
-contain the canonical block bytes, an optional child index, the credited
-`ChildBlockProof` values for that block, and a genesis spec when needed. The
-receiver verifies every header and proof before adding it to its own log.
-A child index larger than the node's `maxChildIndexBytes` (default 1 MiB) or
-a proof larger than `maxProofBytes` (default 64 KiB) is unavailable on that
-node, like content it cannot fetch: never judged, never blamed. These are local
-resource limits, not consensus rules.
+### Adding to the wire without a flag day
+
+The version changes, and old and new nodes part, only for a change that
+makes them disagree about what is valid. Everything else is an addition,
+and old and new nodes keep one network:
+
+1. An addition is a new message type (a new overlay topic, a new Ivy message
+   tag) or a new optional field of the hello. An existing message never
+   changes its meaning or its encoding. Overlay messages are canonical-exact
+   (`CanonicalJSONMessage`: a decoded message must re-encode to the bytes
+   received), so adding a field to an existing message is not compatible:
+   it is a new message on a new topic, as `read-endpoint.response.v2` stands
+   beside `read-endpoint.response`.
+2. The hello's optional `capabilities` names what a node speaks beyond
+   version 6.
+3. A node sends a new message type only to a peer whose hello advertised
+   it. A peer that advertised nothing is spoken to exactly as before.
+4. What a node does not know it ignores: an unknown capability, an overlay
+   message of an unknown topic, an Ivy message of an unknown tag. None of
+   them ends the session or counts against the peer.
+
+Ivy releases through 14.0.0 end the session of a peer that sends an unknown
+Ivy tag; later ones ignore it. That is why rule 3 is not optional.
+
+## Finding the hosts of a chain
+
+A node joins any chain by first being a node of its parent, then asking the
+DHT which of the parent's nodes host the child, as a provider announce and
+lookup work in IPFS. One process hosts a chain's whole ancestry on one
+overlay, so every host of a child is already in its parent's network and
+they share one DHT. The same rule applies at every depth.
+
+| What | How |
+|---|---|
+| Rendezvous key | `lattice.chain-peers.v1:<nexus genesis>:<path>`, one per hosted child chain, carrying the full path. |
+| Announce | The node periodically announces each hosted child under its key, and names each in its hello as `host:<path>`. Nexus has neither. |
+| Lookup | A joiner looks the key up and dials the hosts it finds. A lookup answers with a sample of the key's providers; announcing more often does not buy a place in it. |
+| Not announced | The node publishes no provider record per block or per state. |
+
+A child's **current peers** are the sessions whose hello named it or that
+its providers include. The node dials a bounded random set of that chain's
+providers:
+
+- while a hosted child has no current peer;
+- when the child's verified progress stalls;
+- once an interval while it has fewer current peers than the target.
+
+A Nexus stall retries disconnected bootstrap peers.
+
+Current peers are what a child chain is routed by:
+
+- its transaction announcements go only to them (Nexus's go to every
+  session);
+- a block's body is asked of them alone (its bundle of the capable ones,
+  then each Volume), then of the connected peers known to provide the block
+  or that Volume, never of anyone else.
+
+Provider records advertise availability. They grant neither consensus
+authority nor a parent or child network role.
+
+## Header and proof sync
+
+Each chain level keeps a weigh log: the headers it weighed and the child
+proofs it credited, by position. Peers read each other's logs and fetch the
+entries they lack. All five messages are canonical JSON on their own overlay
+topic and carry the chain's path.
+
+| Message | Topic | Carries |
+|---|---|---|
+| `getStream` | `lattice.overlay.stream.request.v1` | A request for the receiver's log after a position, in the log the sender last read (`logID`); from position 0 when that log changed. It also names the sender's own log, so the receiver reads it again when it changed. |
+| `stream` | `lattice.overlay.stream.page.v1` | A page of the sender's log, or a push of what it appended (`requestID` 0). Pages carry IDs only: each entry is a position, whether it is a header or a proof, its CID and its block. At most 4,096 entries. |
+| `getData` | `lattice.overlay.data.request.v1` | A request for weighed headers by CID, with their proofs. At most 4,096 CIDs. |
+| `getAncestors` | `lattice.overlay.ancestors.request.v1` | A request for a header (the unknown parent of a header the sender sent) and up to 2,048 of its ancestors, child to parent. |
+| `headers` | `lattice.overlay.headers.response.v1` | The answer to `getData` or `getAncestors`, or an unsolicited header (`requestID` 0). At most 4,096 entries; `hasMore` when the answer was cut by bytes. |
+
+A header entry contains:
+
+- the canonical block bytes;
+- an optional child index;
+- the `ChildBlockProof` values the sender credited for that block;
+- a genesis spec when needed.
+
+The receiver verifies every header and proof before adding it to its own
+log. When serving a child header, the node attaches the proofs it has
+already verified. A receiver missing a streamed proof requests the
+corresponding header entry from the peer that advertised it.
+
+A block carried by a grind learned from a peer follows the same acquisition
+and proof path as any other on the shared overlay.
+
+### Local size limits
+
+| Limit | Default | Applies to |
+|---|---|---|
+| `maxChildIndexBytes` | 1 MiB | a header's child index |
+| `maxProofBytes` | 64 KiB | one child proof |
+
+An entry over a limit is unavailable on that node, like content it cannot
+fetch: never judged, never blamed. These are local resource limits, not
+consensus rules.
+
+### Cursors and the proof index
+
 Durable sync cursors are written in the same tree-wide transaction as the
 facts they pass.
 
-Verified child proofs are indexed locally by chain path, child CID, and grind
-root in `state.db`. The index is recovery and serving evidence, not a
-second network or consensus authority. A restart refuses unreadable or
-misindexed proof rows. When serving a child header, the node attaches the
-proofs it has already verified; a receiver missing a streamed proof requests
-the corresponding header entry from the peer that advertised it.
+Verified child proofs are indexed locally by chain path, child CID and grind
+root in `state.db`. The index is recovery and serving evidence, not a second
+network or consensus authority. A restart refuses unreadable or misindexed
+proof rows.
 
-Peer content exchange is Volume-native. An announcer names one complete Volume
-by its root CID and must serve that Volume from the exact authenticated session
-that made the claim. Each connection must complete a compatible hello before it
-may request a Volume, including a same-key replacement connection. Entry CIDs,
-bounded framing, and atomic publication are transport/storage details; node
-protocol messages never request arbitrary CID selections.
+## Content exchange
+
+Peer content exchange is Volume-native. A Volume is one complete
+content-addressed unit named by its root CID.
+
+- An announcer names one complete Volume by its root CID and must serve
+  that Volume from the exact authenticated session that made the claim.
+- Node protocol messages never request arbitrary CID selections. Entry
+  CIDs, bounded framing and atomic publication are transport and storage
+  details.
+- Content bytes are non-secret availability and grant no validity: the
+  consumer verifies every CID and the exact Lattice evidence it reads.
+
+### What a block carries
 
 A block's bundle is the content the protocol says a block carries
 (`Block.carriedContentPaths`, which the node's `storeBlockContent` stores):
-the block's own Volume, its transactions', its spec and policy modules, never
-the state it reads or writes, its parent or its child blocks, with one
-exception: a child block's parent-receipt witness
+
+- the block's own Volume;
+- its transactions';
+- its spec and policy modules.
+
+It never includes the state the block reads or writes, its parent, or its
+child blocks, with one exception: a child block's parent-receipt witness
 (`Block.parentReceiptWitnessPaths`, stored by `storeParentReceiptWitness`),
-the parent state's nodes on the path to each of its withdrawals' receipts. That state is another chain's, which the node
-does not derive by executing the block's parent, so the witness travels with
-the body, as the protocol's validation witness data (§3.5).
+the parent state's nodes on the path to each of its withdrawals' receipts.
+That state is another chain's, which the node does not derive by executing
+the block's parent, so the witness travels with the body, as the protocol's
+validation witness data (spec §3.5).
+
 A node derives a block's pre-state by executing its parent, as Bitcoin's
-initial block download and geth's full sync do, and its execution reads that
+initial block download and geth's full sync do. Its execution reads that
 state from this node's store first, then what is in memory, and asks peers
 only for what neither holds (a state it let go of, as a reorganization past
-its kept windows needs). Storing a block records those Volume roots in
-`volume-bundles.db`, a cache beside the stores that nothing else reads and
-whose failure costs only speed; for a block with no record the server walks
-the same paths over its local content and records what it finds. A content
-session asks, on its first miss, for the
-bundle of its root from the connected peers that advertised `volume-bundle`,
-and is sent those Volumes with one request; a root with nothing recorded
-bundles only itself. A bundled Volume is verified, charged to the session and
-credited to its server only when the session's traversal asks for its root,
-exactly as a requested Volume is. A Volume, bundled or requested, that does
-not verify (another root, or an entry that does not match its CID) costs the
-peer that sent it: Tally records a protocol violation, which lowers its
-standing. The Volume is then requested again. A Volume nobody sent (none found,
-this node's own capacity or byte budget, its cancellation) blames no one. A
-bundle is an optimisation
-and never the only way to a block: it is asked for on a block's first attempt
-only, so a retry is the per-Volume traversal; and a session keeps
-`volume-bundle` only while every bundle it is asked for ends (whole, or "no
-bundle") — one whose answer times out, breaks the stream, carries a Volume
-that does not verify, or is cut off is from then on fetched from one Volume at
-a time, until it reconnects and says hello again. Whatever a bundle lacks, and everything when
-no connected peer advertised bundles, is requested one Volume at a time.
-Merged-mining candidates pass in-process. One template job reads an immutable
-epoch copy of every hosted level and recursively builds at most one candidate
-per directory. A child with an executed tip builds on that tip; a child with
-no root builds a genesis from its configured spec and the carrier's entering
-state; a root that is weighed but not yet executed waits. Nested genesis waits
-until its parent has executed a block of its own. A sibling built before a
-child imports another carried block is ordinary fork input: the child's fork
-choice settles it just as it settles stale blocks in conventional merged
-mining. Candidate content is retained with the issued work and becomes durable
-only if the submitted grind actually secures that level.
+its kept windows needs).
+
+### Bundles
+
+A bundle sends a block's Volumes with one request.
+
+- **Recording.** Storing a block records its Volume roots in
+  `volume-bundles.db`, a cache beside the stores that nothing else reads and
+  whose failure costs only speed. For a block with no record the server
+  walks the same paths over its local content and records what it finds. A
+  root with nothing recorded bundles only itself.
+- **Asking.** A content session asks, on its first miss, for the bundle of
+  its root from the connected peers that advertised `volume-bundle`.
+- **Accounting.** A bundled Volume is verified, charged to the session and
+  credited to its server only when the session's traversal asks for its
+  root, exactly as a requested Volume is.
+- **Fallback.** Whatever a bundle lacks, and everything when no connected
+  peer advertised bundles, is requested one Volume at a time.
+
+A bundle is an optimisation and never the only way to a block:
+
+- It is asked for on a block's first attempt only, so a retry is the
+  per-Volume traversal.
+- A session keeps `volume-bundle` only while every bundle it is asked for
+  ends, whole or "no bundle". One whose answer times out, breaks the
+  stream, carries a Volume that does not verify, or is cut off is from then
+  on fetched from one Volume at a time, until it reconnects and says hello
+  again.
+
+### Local ceilings
 
 Each candidate-root content session uses the node's `NodeResourcePolicy` for
 the bytes it may hold, and nothing else. `ChainSpec.maxBlockSize` remains
 chain-selected validity for that chain's complete block Volume boundary
-(excluding the spec and materialized state Volumes). Exceeding a local ceiling
-declines or defers acquisition without proving the candidate invalid or
-punishing its advertiser.
+(excluding the spec and materialized state Volumes). Exceeding a local
+ceiling declines or defers acquisition without proving the candidate invalid
+or punishing its advertiser.
 
-Hierarchy authorization comes from the host, not from a process key choosing
-a branch: a child level trusts only the parent level it is co-hosted with,
-read in-process, and no network peer holds a parent or child role. CAS bytes are non-secret availability and grant no validity:
-the consumer verifies every CID and the exact Lattice evidence it reads.
+## Transaction announcements
 
-### Transaction pool
+Transactions are same-chain Volumes.
 
-The mempool is operationally first-class but never consensus authority.
-Transactions are same-chain Volumes: peers advertise a transaction Volume root,
-the receiver pulls it from that exact session, resolves the transaction, and
-re-materializes the canonical typed Volume locally. Unrelated peer-supplied
-members are never retained or relayed. Lattice then validates the transaction
-against the current state, and the node relays only a newly admitted root.
-Co-hosted parent and child levels never merge mempools.
+1. A peer advertises a transaction Volume root
+   (`lattice.overlay.transaction.available.v1`).
+2. The receiver pulls it from that exact session, resolves the transaction,
+   and re-materializes the canonical typed Volume locally. Unrelated
+   peer-supplied members are never retained or relayed.
+3. Lattice validates the transaction against the current state.
+4. The node relays only a newly admitted root.
 
-The pool holds only transactions Lattice finds ready on the executed tip,
-funds checked; a nonce ahead of the chain or evidence this node lacks is a
-retriable refusal, never held. Its rules:
+Peer transactions are serveable while pooled. What the pool then admits and
+keeps is in [Transaction pool policy](mempool.md).
 
-- Claimed once: a first signer's nonce, each state key written, each deposit
-  and each receipt belong to one pooled transaction.
-- Budgeted: an account's debits across the pool never exceed its balance on
-  the tip, so every pooled transaction executes alongside every other.
-- Conflicts go to what pays the miner more: a newcomer displaces what it
-  conflicts with, by claim or by an account's budget, when the next block,
-  filled in fee-rate order, then carries it and pays the relay floor (at
-  least 1) more. In an uncongested pool that is all of their fees plus the
-  floor. Congested, what it displaces may sit anywhere in the pool and its
-  own fee does not count, only the next block's; a node with a different
-  backlog may judge the same replacement differently.
-- Every tip move re-checks each pooled transaction's nonce, funds and
-  evidence, and one no longer ready leaves. Policies are judged at admission
-  and by templates, which are handed only what the next block can carry
-  (fee order, skipping what does not fit its bytes, count or state growth,
-  each charged its growth at most); what a template's policies refuse
-  leaves.
+## What costs a peer
 
-There is no time-based expiry; capacity evicts the lowest fee rate. A fee
-rate is fee per weight: the most of a block a transaction takes of its bytes,
-state growth or count, in bytes (`rpc-api.md`, fee pricing).
-Transactions confirmed on the new chain leave the pool;
-ordinary transactions from removed blocks are reinserted when still valid.
-Locally submitted transaction roots survive restart and are revalidated before
-becoming visible again. Live pool roots use process-owner VolumeBroker pin
-deltas and are unpinned on removal; startup clears that owner before restoring
-only durable local submissions. Peer transactions are therefore serveable while
-pooled but never become restart authority.
+| Event | Consequence |
+|---|---|
+| A Volume, bundled or requested, that does not verify (another root, or an entry that does not match its CID) | Tally records a protocol violation against the peer that sent it, which lowers its standing. The Volume is then requested again. |
+| A Volume nobody sent (none found, this node's own capacity or byte budget, its cancellation) | Blames no one. |
+| A child index or proof over a local size limit | Unavailable on this node; blames no one. |
+| A candidate over a local ceiling | Acquisition is declined or deferred; its advertiser is not punished. |
+| An unknown capability, overlay topic or Ivy tag | Ignored. |
 
-## External mining
-
-The node constructs the final nonce-zero template and owns transaction
-selection, contextual child candidates, target calculation, import,
-durability, and publication. It never runs a nonce-search loop.
-
-`lattice-mining-coordinator` fetches work, allocates disjoint ranges, detects a
-changed tip, and submits `workID + nonce`. `lattice-miner` only searches one
-immutable serialized block/range assignment.
-
-The miner-facing API is:
-
-```text
-POST /mining/templates
-POST /mining/work
-```
-
-Template requests may name one reward recipient per absolute chain path. The
-node partitions those recipients through the hierarchy, carries a child's
-block only when it pays the recipient named for that chain, and issues only
-the final parent template.
-
-There is no template mode or deployment transaction. A merged-mining template
-may carry a child genesis when that hosted level has no root and has a
-configured spec; later templates carry ordinary child candidates.
-
-## HTTP surface
-
-Two listeners serve two surfaces. The unauthenticated operator adapter binds
-loopback only and refuses any other bind address; it carries the writes and
-the operator-only reads:
-
-```text
-GET  /status              (with the template digest)
-GET  /metrics
-POST /transactions
-POST /mining/templates
-POST /mining/work
-```
-
-The public read listener (`--public-read-port`) binds all interfaces and
-serves only the bounded, non-mutating read allowlist below; the same routes
-are registered on the loopback listener so the two cannot drift. `/health`
-is served from an ungated snapshot and omits the template digest.
-
-```text
-GET|HEAD /health
-GET /transactions/:cid, /accounts/:owner
-GET /api/block/latest, /api/block/:id, /api/block/:id/transactions,
-    /api/block/:id/children, /api/transaction/:cid, /api/state/account/:addr,
-    /api/mempool, /api/peers, /api/chain/info, /api/chain/spec,
-    /api/chain/genesis
-```
-
-See [RPC API](rpc-api.md) for DTOs and [Architecture](architecture.md) for
-component ownership.
+The rules for headers and proofs (only a proof-of-work failure blames) are
+invariants NODE-SEMANTICS-003 and NODE-SEMANTICS-005 in
+[Correctness invariants](correctness-invariants.md).
