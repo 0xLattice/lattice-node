@@ -384,6 +384,9 @@ public struct TxWorkload {
         )
         let sibling = World.mined(built.replacing(parent: built.parent?.removingNode(), nonce: built.nonce))
         let recorded = try await World.record(sibling, releaseAt: now, anchor: anchor(below: parent.sim, sibling), in: cas)
+        // An empty block on the same parent in the same millisecond is a
+        // block this chain already had: a tip never moves to one it was on.
+        guard blocks[recorded.cid] == nil else { return }
         blocks[recorded.cid] = ChainBlock(sim: recorded, transactions: [:])
         tip = recorded.cid
         var returned: [Transaction] = []
