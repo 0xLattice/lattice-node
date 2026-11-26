@@ -321,7 +321,7 @@ retriable refusal, never held. Its rules:
 
 There is no time-based expiry; capacity evicts the lowest fee rate. A fee
 rate is fee per weight: the most of a block a transaction takes of its bytes,
-state growth or count, in bytes (`rpc-api.md`, fee pricing).
+state growth or count, in bytes (`api-reads-and-transactions.md`, fees).
 Transactions confirmed on the new chain leave the pool;
 ordinary transactions from removed blocks are reinserted when still valid.
 Locally submitted transaction roots survive restart and are revalidated before
@@ -384,5 +384,5 @@ GET /api/block/latest, /api/block/:id, /api/block/:id/transactions,
     /api/chain/genesis
 ```
 
-See [RPC API](rpc-api.md) for DTOs and [Architecture](architecture.md) for
+See [HTTP API](rpc-api.md) for DTOs and [Architecture](architecture.md) for
 component ownership.

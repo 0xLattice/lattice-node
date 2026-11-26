@@ -73,7 +73,7 @@ logged and the last good settings are kept.
 
 By default the miner mines through the node under `--root`, over its loopback
 API. To mine through a node elsewhere, give that node's
-[remote operator listener](rpc-api.md#remote-operator-listener) and a token.
+[remote operator listener](api-operator.md#remote-operator-listener) and a token.
 A mining token needs three routes:
 
 ```bash

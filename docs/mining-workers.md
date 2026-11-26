@@ -76,7 +76,7 @@ work adds two requirements:
 - A worker must not assume one invocation per assigned range, or one target per
   `--work-id`.
 
-A template request's `exclude` (see `rpc-api.md`) leaves named chains out of
+A template request's `exclude` (see [Mining routes](api-mining.md#post-miningtemplates)) leaves named chains out of
 the work: they get no block from any nonce, and their targets set neither
 `searchTarget` nor `targets`. Use it, not `minimumWork`, to keep a chain that
 is not due from advancing: a filter on a chain the work still carries stops the
