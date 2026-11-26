@@ -1,10 +1,24 @@
-# Correctness invariants
+# Lattice node correctness invariants
 
-The node-level claims that still hold on the node runtime. Each entry names
-the check that enforces it after every simulated step (`Tools/LatticeNodeSim`)
-or the test that pins it. The consensus invariants (weighed graph, executed
-set, GHOST, continuity) are the architecture doc's and are checked by
-`Invariants.checkTree` and `LevelInvariants.checkLevel`.
+The node-level claims that hold on the node runtime, each with a stable ID.
+Each entry names the check that enforces it after every simulated step
+(`Tools/LatticeNodeSim`) or the test that pins it.
+
+The consensus invariants (weighed graph, executed set, GHOST, continuity)
+are not listed here. They are the
+[Lattice specification](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md)'s
+(§9.9 and §12), and the simulators check them with `Invariants.checkTree`
+and `LevelInvariants.checkLevel`.
+
+| ID | Claim |
+|---|---|
+| [NODE-SEMANTICS-003](#node-semantics-003--availability-is-retriable-not-punishable) | Availability is retriable, not punishable (a to e) |
+| [NODE-SEMANTICS-005](#node-semantics-005--only-obtained-invalid-evidence-is-punishable) | Only obtained invalid evidence is punishable (a, b) |
+| [NODE-STORAGE-002](#node-storage-002--content-is-stored-before-the-facts-that-name-it-and-a-fact-never-depends-on-it-being-held) | Content is stored before the facts that name it, and a fact never depends on it being held (a to l) |
+| [NODE-MEMPOOL-001](#node-mempool-001--the-mempool-is-tip-relative-not-consensus) | The mempool is tip-relative, not consensus (a to e) |
+
+IDs are stable and are not renumbered, which is why the numbering has
+gaps.
 
 ## NODE-SEMANTICS-003 — availability is retriable, not punishable
 
@@ -68,6 +82,11 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   `ChildLevelRestartTests.testAStartKeepsWhatAScopeNamesAndDropsTheRest`,
   `ChildLevelRestartTests.testAWeighedUnexecutedChildGenesisSurvivesARestart`
   and `NodeRuntimeTests.testJoinerSyncsHeadersAndExecutesBodiesOverLoopbackIvy`.
+- **NODE-STORAGE-002.d** — Levels write parent before child; a crash
+  between them restores with the child behind, never ahead. Pinned by
+  `ChildLevelRestartTests.testACrashBetweenLevelWritesRestoresTheParentAhead`.
+- **NODE-STORAGE-002.e** — Replaying the store reproduces the trees.
+  Enforced by `Simulator.checkReplay` and `LevelSimulator.checkReplay`.
 - **NODE-STORAGE-002.f** — Content a fact names and the store lacks is no
   fault. The node starts on its facts, with the Nexus genesis block stored
   again; executing a block and building on one read this store, a block's
@@ -100,6 +119,13 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   lets go of the scopes and counts earlier versions kept a tip's state
   under. State the store lacks is read from peers by execution, preflight
   and state reads alike. Pinned by `StateWindowTests`.
+- **NODE-STORAGE-002.i** — With `state: recent` or `none` what a stored
+  block reads is named by that block until it executes or is found invalid
+  (a start lets go of what an executed block's scope still names). Pinned
+  by `StateWindowTests.testANodeOnNoneSyncsAndKeepsValidatingHoldingNoState`.
+- **NODE-STORAGE-002.j** — A Volume the operator pins is named by the
+  operator scope until it is unpinned, whatever the other rules keep. Pinned
+  by `OperatorPinTests` and `DaemonHTTPTests.testOperatorPinRoutes`.
 - **NODE-STORAGE-002.k** — With `state: recent`, once a chain's counts are
   in place, its counted scope counts each node for every place it holds in
   the act-on tip's state plus every place a block above the cursor
@@ -113,18 +139,6 @@ set, GHOST, continuity) are the architecture doc's and are checked by
   adjustment, the old ones serving until then. Pinned by
   `StateWindowTests.testTheCountsFollowEveryMoveOfTheTip` and the other
   `StateWindowTests` that check the counts.
-- **NODE-STORAGE-002.i** — With `state: recent` or `none` what a stored
-  block reads is named by that block until it executes or is found invalid
-  (a start lets go of what an executed block's scope still names). Pinned
-  by `StateWindowTests.testANodeOnNoneSyncsAndKeepsValidatingHoldingNoState`.
-- **NODE-STORAGE-002.j** — A Volume the operator pins is named by the
-  operator scope until it is unpinned, whatever the other rules keep. Pinned
-  by `OperatorPinTests` and `DaemonHTTPTests.testOperatorPinRoutes`.
-- **NODE-STORAGE-002.d** — Levels write parent before child; a crash
-  between them restores with the child behind, never ahead. Pinned by
-  `ChildLevelRestartTests.testACrashBetweenLevelWritesRestoresTheParentAhead`.
-- **NODE-STORAGE-002.e** — Replaying the store reproduces the trees.
-  Enforced by `Simulator.checkReplay` and `LevelSimulator.checkReplay`.
 - **NODE-STORAGE-002.l** — A chain the configuration does not host has its
   data let go of, live once its level stops and at every start (after
   `state.db` is validated): first its content, its own Volume store with
