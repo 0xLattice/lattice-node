@@ -289,19 +289,17 @@ final class HeldLevelTemplateTests: XCTestCase {
             return await levels.read { $0[Self.alpha]?.snapshot.bestHeaderHeight } == 3
         }
         let alpha = await levels.read { levels in
-            levels[Self.alpha].map { ($0.snapshot.actOnHeight, $0.holdsBacklog) }
+            levels[Self.alpha].map { ($0.snapshot.actOnHeight, $0.holdsBacklog, $0.holdsNextBlock) }
         } ?? nil
         XCTAssertEqual(alpha?.0, 0, "Alpha has executed only its genesis")
-        XCTAssertEqual(alpha?.1, false, "Alpha holds no backlog: it is mined")
+        XCTAssertEqual(alpha?.1, false, "Alpha holds no backlog")
+        XCTAssertEqual(alpha?.2, true, "Alpha holds its next block")
         let expected = await levels.read { levels -> String? in
-            guard let nexus = levels[Self.nexus], let alpha = levels[Self.alpha] else { return nil }
-            return NodeRuntime.templateDigest(
-                tip: nexus.snapshot.actOnTip, carrying: nexus.mining.nextBlock,
-                levels: [(Self.alpha, alpha.snapshot.actOnTip, true, alpha.mining.nextBlock)]
-            )
+            guard let nexus = levels[Self.nexus] else { return nil }
+            return NodeRuntime.templateDigest(tip: nexus.snapshot.actOnTip, carrying: nexus.mining.nextBlock)
         } ?? nil
         let status = await follower.runtime.status().templateDigest
-        XCTAssertEqual(status, expected, "the digest names Alpha's act-on tip, not its best header")
+        XCTAssertEqual(status, expected, "the digest leaves Alpha out while its next block awaits its connect")
         let template = try await follower.runtime.miningTemplate(MiningTemplateRequest())
         XCTAssertNil(template.block.children.node?.entries["Alpha"], "Alpha's next block awaits its connect")
         XCTAssertEqual(template.templateDigest, status, "the template is the status's")
@@ -311,6 +309,48 @@ final class HeldLevelTemplateTests: XCTestCase {
         }
         let carrying = try await follower.runtime.miningTemplate(MiningTemplateRequest())
         XCTAssertEqual(carrying.block.children.node?.entries["Alpha"]?.node?.height, 4, "Alpha is carried on its new tip")
+        XCTAssertNotEqual(carrying.templateDigest, status, "the digest names Alpha again")
+    }
+
+    /// A hold that ends without its block executing (a connect that could
+    /// not read the block's content: it parks) changes the digest at once,
+    /// and Alpha is offered again on its executed tip.
+    func testAHoldEndingWithoutExecutionChangesTheDigestAndOffersTheChildAgain() async throws {
+        let gate = Gate()
+        let miner = try await node(keyByte: 0x8b, hosting: true, observe: Self.holding(Self.alpha, at: gate))
+        let alpha = try XCTUnwrap(miner.runtime.levelReads[Self.alpha])
+        for height in 0..<2 {
+            _ = try await miner.runtime.mineBlock()
+            try await eventually("Alpha executes its block \(height)") {
+                await alpha.readSnapshot().height == UInt64(height)
+            }
+        }
+        await gate.hold()
+        _ = try await miner.runtime.mineBlock()
+        try await eventually("Alpha's block 2 is at its connect") { await gate.held == 1 }
+        let heldDigest = await miner.runtime.status().templateDigest
+        let held = try await miner.runtime.miningTemplate(MiningTemplateRequest())
+        XCTAssertNil(held.block.children.node?.entries["Alpha"], "Alpha's block 2 awaits execution")
+        XCTAssertEqual(held.templateDigest, heldDigest)
+
+        // A connect of block 2 that cannot read its content.
+        let levels = LiveLevels(inputs: miner.runtime.inputs)
+        let job = await levels.read { levels -> ConnectJob? in
+            guard var tree = levels[Self.alpha]?.tree, let cid = tree.canonicalBlockHash(atHeight: 2) else { return nil }
+            return tree.connectJob(for: cid)
+        } ?? nil
+        let verdict = await ChainTree.connect(try XCTUnwrap(job), fetcher: FailingFetcher())
+        XCTAssertNotNil(verdict.retryFailure)
+        miner.runtime.inputs.yield(.event(.level(Self.alpha, .connected([ConnectResult(verdict)]))))
+        try await eventually("the hold ends, block 2 parked unexecuted") {
+            await levels.read { $0[Self.alpha].map { !$0.holdsNextBlock && !$0.bodies.parked.isEmpty } } == true
+        }
+        let released = await miner.runtime.status().templateDigest
+        XCTAssertNotEqual(released, heldDigest, "a hold ending changes the digest")
+        let offered = try await miner.runtime.miningTemplate(MiningTemplateRequest())
+        XCTAssertEqual(offered.templateDigest, released)
+        XCTAssertEqual(offered.block.children.node?.entries["Alpha"]?.node?.height, 2, "Alpha is offered on its executed tip")
+        await gate.release()
     }
 
     /// One grind mines Nexus and Alpha. Nexus executes its block first and
@@ -379,16 +419,21 @@ final class HeldLevelTemplateTests: XCTestCase {
             if hash > template.block.target, hash <= carried.target { break }
             nonce += 1
         }
+        let unheld = await miner.runtime.status().templateDigest
         let share = try await miner.runtime.submitWork(SubmitWorkRequest(workID: template.workID, nonce: nonce))
         XCTAssertEqual(share.disposition, .childOnly)
         let next = try await miner.runtime.miningTemplate(MiningTemplateRequest())
         XCTAssertEqual(next.block.height, template.block.height, "Nexus is still mined on its tip")
         XCTAssertNil(next.block.children.node?.entries["Alpha"], "Alpha's own block awaits execution")
+        XCTAssertNotEqual(next.templateDigest, unheld, "the hold starting changes the digest, no tip moved")
+        let heldDigest = await miner.runtime.status().templateDigest
+        XCTAssertEqual(next.templateDigest, heldDigest)
 
         await gate.release()
         try await eventually("Alpha executes the share's block") { await alpha.readSnapshot().height == before + 1 }
         let after = try await miner.runtime.miningTemplate(MiningTemplateRequest())
         XCTAssertEqual(after.block.children.node?.entries["Alpha"]?.node?.height, before + 2, "Alpha is carried on it")
+        XCTAssertNotEqual(after.templateDigest, heldDigest)
     }
 
     /// A `child/Alpha` commit from `key` (nonce 0, a fee of 1): `previous`

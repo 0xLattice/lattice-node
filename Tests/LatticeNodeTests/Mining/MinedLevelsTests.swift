@@ -7,7 +7,8 @@ import XCTest
 /// A level is mined unless it, or a level above it, holds a backlog of its
 /// best chain to execute (`NodeRuntime.mined`): the same rule at the root,
 /// which then has no template, and at a child, which is left out of the
-/// root's.
+/// root's. A child is left out too while it holds its next block
+/// (`ChainCore.holdsNextBlock`).
 final class MinedLevelsTests: XCTestCase {
     private static let now = World.genesisTime + 1_000_000
     private static let nexus = LevelWorld.nexus
@@ -75,13 +76,13 @@ final class MinedLevelsTests: XCTestCase {
         XCTAssertEqual(host.node.levels[Self.nexus]?.snapshot.actOnTip, n1.cid)
         XCTAssertEqual(host.node.levels[Self.alpha]?.snapshot.actOnTip, g.cid)
 
-        // One block arriving at each level, as at the tip: both are mined
-        // while it executes.
+        // One block arriving at each level, as at the tip: the root is
+        // mined while it executes; Alpha, holding its next block, is not.
         host.holding = true
         await host.drive(.mined(grinds[grinds.count - 2].mined))
         XCTAssertEqual(host.held.map(\.path), [Self.nexus, Self.alpha], "N2 carried a1")
         XCTAssertTrue(host.mined(Self.nexus))
-        XCTAssertTrue(host.mined(Self.alpha))
+        XCTAssertFalse(host.mined(Self.alpha), "a1 awaits execution")
 
         // A second block behind it: Nexus holds a backlog (N2, N3), so
         // nothing is mined, and the root answers 503 executing.
@@ -96,13 +97,16 @@ final class MinedLevelsTests: XCTestCase {
         XCTAssertTrue(host.mined(Self.nexus))
         XCTAssertFalse(host.mined(Self.alpha))
 
-        // a1 executes: Alpha holds only a2, and both are mined.
+        // a1 executes: Alpha holds only a2, its next block, so it is still
+        // left out; once a2 executes both are mined.
         await host.runHeld()
         XCTAssertEqual(host.node.levels[Self.alpha]?.snapshot.actOnTip, a1.cid)
         XCTAssertTrue(host.mined(Self.nexus))
-        XCTAssertTrue(host.mined(Self.alpha))
+        XCTAssertFalse(host.mined(Self.alpha), "a2 awaits execution")
         while !host.held.isEmpty { await host.runHeld() }
         XCTAssertEqual(host.node.levels[Self.nexus]?.snapshot.actOnTip, n3.cid)
         XCTAssertEqual(host.node.levels[Self.alpha]?.snapshot.actOnTip, a2.cid)
+        XCTAssertTrue(host.mined(Self.nexus))
+        XCTAssertTrue(host.mined(Self.alpha))
     }
 }

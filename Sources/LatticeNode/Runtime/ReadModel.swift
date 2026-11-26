@@ -43,12 +43,13 @@ extension NodeRuntime {
             // it are left out of the root's (`mined`).
             let mined = !level.holdsBacklog
             // A child is mined while neither it nor a level above it holds a
-            // backlog (`NodeRuntime.mined`): parents come first, so each
-            // level's backlog is read once.
+            // backlog or, below the root, its next block (`NodeRuntime
+            // .mined`): parents come first, so each level is read once.
             var unmined: Set<ChainPath> = []
             let children = path == core.rootPath && mined
                 ? core.ordered.dropFirst().filter { child in
-                    guard !unmined.contains(Array(child.dropLast())), core.levels[child]?.holdsBacklog != true else {
+                    guard !unmined.contains(Array(child.dropLast())),
+                          core.levels[child].map({ $0.holdsBacklog || $0.holdsNextBlock }) != true else {
                         unmined.insert(child)
                         return false
                     }

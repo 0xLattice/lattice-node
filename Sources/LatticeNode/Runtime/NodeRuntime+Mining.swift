@@ -227,11 +227,15 @@ extension NodeRuntime {
     }
 
     /// Whether `path` is mined: neither it nor a level above it, up to
-    /// `root`, holds a backlog to execute (`ChainCore.holdsBacklog`). A
-    /// child is carried only under its parent's block.
+    /// `root`, holds a backlog to execute (`ChainCore.holdsBacklog`), and
+    /// no child level among them holds its next block
+    /// (`ChainCore.holdsNextBlock`): a block built on its executed tip now
+    /// would be that block's sibling. A child is carried only under its
+    /// parent's block.
     static func mined(_ path: ChainPath, root: ChainPath, levels: [ChainPath: ChainCore]) -> Bool {
         (root.count...max(root.count, path.count)).allSatisfy {
-            levels[Array(path.prefix($0))]?.holdsBacklog != true
+            guard let level = levels[Array(path.prefix($0))] else { return true }
+            return !level.holdsBacklog && ($0 == root.count || !level.holdsNextBlock)
         }
     }
 
@@ -260,11 +264,8 @@ extension NodeRuntime {
         let paths = hosted ?? inputs.map(\.path)
         var candidates: [DirectChildCandidate] = []
         // An excluded chain gets no candidate: its subtree, all excluded too
-        // (`MiningPlan.validatedExclusions`), is never built. Nor does one
-        // whose next block is here to execute: a block built on its executed
-        // tip now would be that block's sibling.
-        for input in inputs where input.path.dropLast().elementsEqual(parent)
-            && !request.exclude.contains(input.path) && !input.holdsNextBlock {
+        // (`MiningPlan.validatedExclusions`), is never built.
+        for input in inputs where input.path.dropLast().elementsEqual(parent) && !request.exclude.contains(input.path) {
             let carrier = Block(
                 version: Block.currentVersion, parent: nil,
                 transactions: HeaderImpl(rawCID: entering.rawCID), target: .max, nextTarget: .max,

@@ -94,10 +94,11 @@ extension ChainCore {
     /// Whether this level's next block, the one after its executed prefix
     /// on its best chain, is here to execute: weighed, its body held (this
     /// node's own counts from the step that weighed it), waiting on nothing
-    /// but its connect. While it is, a child level is left out of templates
-    /// (`NodeRuntime.childCandidates`): a block built on its executed
-    /// tip now would be that block's sibling, and one built from the same
-    /// inputs the very block again. Bitcoin's `submitblock` connects a block
+    /// but its connect. While it is, a child level and the levels below it
+    /// are left out of templates and of the template digest
+    /// (`NodeRuntime.mined`): a block built on its executed tip now would
+    /// be that block's sibling, and one built from the same inputs the very
+    /// block again. A hold that ends changes the digest, so miners ask again. Bitcoin's `submitblock` connects a block
     /// before the next template is built on it. A body not held (withheld or
     /// missing), one whose content could not be read, one waiting on its
     /// parent level, or an invalid one (excluded when it executes, so no

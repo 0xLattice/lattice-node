@@ -454,8 +454,7 @@ extension NodeRuntime.Loop {
                 genesisSpec: snapshot.bestHeaderTip.isEmpty ? configuration.childSpecs[child] : nil,
                 genesisPremineRecipient: configuration.childPremineRecipients[child],
                 genesisTransactions: configuration.childGenesisTransactions[child] ?? [],
-                genesisTarget: .max,
-                holdsNextBlock: level.holdsNextBlock
+                genesisTarget: .max
             )
         }
     }
