@@ -87,7 +87,7 @@ public struct Topology: Codable, Sendable {
     /// in requests per second. Absent = the node's default; `0` disables it.
     public var publicSubmitRate: Double?
     /// The smallest fee the node admits to its pool (`--min-relay-fee`; node
-    /// policy, never consensus). Absent = the node's default, 0.
+    /// policy, never consensus). Absent = the node's default, 1.
     public var minRelayFee: UInt64?
     /// Content-serving limits (`--serving-max-*`). Absent = the node's defaults.
     public var servingMaxConcurrent: Int?
