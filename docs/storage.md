@@ -174,7 +174,7 @@ forward from where the backup ends.
 Startup fails closed when:
 
 - the store was written for another schema or another Nexus genesis
-  ([wipe required](troubleshooting.md#wipe-required));
+  ([the node store is incompatible](troubleshooting.md#the-node-store-is-incompatible));
 - a stored fact does not decode;
 - a hosted child chain's genesis spec is in neither its Volume store nor
   `specs/`, or one of the node's own pending transactions is missing

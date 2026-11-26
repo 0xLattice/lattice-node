@@ -209,7 +209,7 @@ Install all four binaries from the same release, then restart the node and
 the miner.
 
 Releases do not migrate stored data. When a release changes the storage
-schema, the node refuses to start with `wipe required`, and the node must be
+schema, the node refuses to start with `The node store is incompatible`, and the node must be
 wiped and synced again:
 
 ```bash
