@@ -10,7 +10,6 @@ import FoundationNetworking
 #endif
 import ArgumentParser
 import Lattice
-import LatticeProcessWait
 import LatticeCtlCore
 import LatticeNodeConfig
 import LatticeNodeAPI

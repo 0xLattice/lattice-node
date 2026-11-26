@@ -1,14 +1,16 @@
 # External mining workers
 
-The coordinator (`lattice-mining-coordinator`) owns templates, staleness, and
-submission. A worker is a dumb nonce searcher: it receives one immutable
-assignment as CLI flags, prints exactly one JSON result to stdout, and exits.
-Anything that honors this contract can mine — the shipped CPU worker
-(`lattice-miner`), a GPU binary, or a shim in front of remote hardware.
+The miner ([lattice-miner](https://github.com/0xLattice/lattice-miner)) owns
+templates, staleness, and submission. A worker is a dumb nonce searcher: it
+receives one immutable assignment as CLI flags, prints exactly one JSON result
+to stdout, and exits. Anything that honors this contract can mine —
+lattice-miner's `lattice-miner-gpu` (CPU, Metal, CUDA, OpenCL), another GPU
+binary, or a shim in front of remote hardware.
 
 ## Invocation
 
-The coordinator spawns the `--worker-executable` per batch with:
+The miner spawns the worker its settings name (`worker` in `miner.json`) per
+batch with:
 
 ```
 --work-id <opaque id>
@@ -58,9 +60,9 @@ and the batch is retried.
 One template can clear several chains' targets: the Nexus root and every
 hosted chain it carries, at any depth. The template's `searchTarget` is the
 easiest of them; `targets` lists all of them when the node built every carried
-subtree itself, and only `searchTarget` otherwise. The coordinator first
+subtree itself, and only `searchTarget` otherwise. The miner first
 searches the easiest. A hit that clears only some of them is `childOnly`: the
-coordinator submits it, the node keeps the work open, and the coordinator
+miner submits it, the node keeps the work open, and the miner
 invokes the worker again over the rest of its range (`--start-nonce` just past
 the hit) with `--target` set to the easiest target still uncleared. That
 repeats until the hardest target is hit, the range is exhausted, or the work
@@ -70,7 +72,7 @@ Each invocation is still one immutable prefix, target, and range, but merged
 work adds two requirements:
 
 - A `found` result must report the **lowest** winning nonce in the assigned
-  range. The coordinator resumes just past the reported nonce, so a worker that
+  range. The miner resumes just past the reported nonce, so a worker that
   reports a higher winner silently skips the nonces below it for the harder
   targets.
 - A worker must not assume one invocation per assigned range, or one target per

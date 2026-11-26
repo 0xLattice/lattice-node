@@ -2,7 +2,6 @@ import Foundation
 import Hummingbird
 import HummingbirdTesting
 import Lattice
-import LatticeMinerCore
 import UInt256
 import XCTest
 @testable import LatticeNode
@@ -28,7 +27,7 @@ func firstNonce(
     line: UInt = #line,
     where accepts: (UInt256) -> Bool
 ) -> UInt64 {
-    let midstate = ProofOfWork.midstate(for: block)
+    let midstate = ProofOfWorkMidstate(block: block)
     var nonce = start
     // Bounded on purpose. A predicate can be UNSATISFIABLE rather than merely
     // unlikely -- searching for a hash strictly above a target that is the
@@ -36,7 +35,7 @@ func firstNonce(
     // unbounded scan turns that into a hang instead of a failure. One such
     // search spun for over two hours before it was noticed.
     while nonce - start < maxAttempts {
-        if accepts(ProofOfWork.hash(midstate: midstate, nonce: nonce)) {
+        if accepts(midstate.hash(nonce: nonce)) {
             return nonce
         }
         nonce += 1

@@ -1,6 +1,7 @@
 // Wallet keys: a key file holds an address, its private key, and its public
-// key. `tx` and `child add` sign with one; its address is what `mine`
-// names as a chain's recipient. Moved here from the retired lattice-rewards.
+// key. `tx` and `child add` sign with one; its address is what a miner
+// (lattice-miner's miner.json) names as a chain's recipient. Moved here from
+// the retired lattice-rewards.
 
 import Foundation
 import ArgumentParser

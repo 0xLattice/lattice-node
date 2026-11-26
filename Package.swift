@@ -9,14 +9,7 @@ let package = Package(
     products: [
         .library(name: "LatticeNode", targets: ["LatticeNode"]),
         .library(name: "LatticeNodeAPI", targets: ["LatticeNodeAPI"]),
-        .library(name: "LatticeMinerCore", targets: ["LatticeMinerCore"]),
-        .library(name: "LatticeMiningCoordinator", targets: ["LatticeMiningCoordinator"]),
         .executable(name: "lattice-node", targets: ["LatticeNodeDaemon"]),
-        .executable(name: "lattice-miner", targets: ["LatticeMiner"]),
-        .executable(
-            name: "lattice-mining-coordinator",
-            targets: ["LatticeMiningCoordinatorTool"]
-        ),
         .executable(
             name: "lattice",
             targets: ["LatticeCtl"]
@@ -178,34 +171,10 @@ let package = Package(
                 .product(name: "VolumeBroker", package: "VolumeBroker"),
             ]),
         .target(
-            name: "LatticeProcessWait"),
-        .target(
-            name: "LatticeMinerCore",
-            dependencies: [
-                .product(name: "Lattice", package: "lattice"),
-                .product(name: "_CryptoExtras", package: "swift-crypto"),
-            ]),
-        .target(
-            name: "LatticeMiningCoordinator",
-            dependencies: [
-                "LatticeMinerCore",
-                "LatticeProcessWait",
-                .product(name: "Lattice", package: "lattice"),
-                .product(name: "cashew", package: "cashew"),
-            ]),
-        .executableTarget(
-            name: "LatticeMiningCoordinatorTool",
-            dependencies: [
-                "LatticeMiningCoordinator",
-                .product(name: "ArgumentParser", package: "swift-argument-parser"),
-            ]),
-        .target(
             name: "LatticeCtlCore",
             dependencies: [
                 "LatticeNodeAPI",
                 "LatticeNodeConfig",
-                "LatticeMinerCore",
-                "LatticeProcessWait",
                 .product(name: "Lattice", package: "lattice"),
             ]),
         .executableTarget(
@@ -216,20 +185,9 @@ let package = Package(
                 "LatticeNodeCore",
                 "LatticeNodeStore",
                 "LatticeCtlCore",
-                "LatticeProcessWait",
-                "LatticeMinerCore",
-                "LatticeMiningCoordinator",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "Ivy", package: "Ivy2"),
                 .product(name: "cashew", package: "cashew"),
-                .product(name: "Crypto", package: "swift-crypto"),
-                .product(name: "ArgumentParser", package: "swift-argument-parser"),
-            ]),
-        .executableTarget(
-            name: "LatticeMiner",
-            dependencies: [
-                "LatticeMinerCore",
-                .product(name: "Lattice", package: "lattice"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]),
@@ -244,9 +202,7 @@ let package = Package(
                 "LatticeNodeAPI",
                 "LatticeNode",
                 "LatticeCtlCore",
-                "LatticeProcessWait",
                 "LatticeNodeDaemon",
-                "LatticeMinerCore",
                 "LatticeNodeSim",
                 "LatticeNodeCore",
                 "CSQLite",
@@ -293,26 +249,12 @@ let package = Package(
                 "LatticeNode",
                 "LatticeNodeDaemon",
                 "LatticeCtlCore",
-                "LatticeMinerCore",
-                "LatticeMiningCoordinatorTool",
-                "LatticeMiner",
                 .product(name: "Lattice", package: "lattice"),
                 .product(name: "Ivy", package: "Ivy2"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "cashew", package: "cashew"),
+                .product(name: "UInt256", package: "UInt256"),
             ],
             path: "Tests/LatticeNodeE2ETests"),
-        .testTarget(
-            name: "LatticeMinerCoreTests",
-            dependencies: [
-                "LatticeMinerCore",
-                .product(name: "Lattice", package: "lattice"),
-            ]),
-        .testTarget(
-            name: "LatticeMiningCoordinatorTests",
-            dependencies: [
-                "LatticeMiningCoordinator",
-                "LatticeMinerCore",
-            ]),
     ]
 )

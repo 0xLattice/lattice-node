@@ -81,19 +81,6 @@ final class LatticeCtlTopologyTests: XCTestCase {
         XCTAssertThrowsError(try JSONDecoder().decode(Topology.self, from: legacy))
     }
 
-    /// Round-deadline headroom belongs to the operator, and a bad value is a
-    /// named refusal rather than a precondition trap.
-    func testRoundDeadlineMultiplierIsOperatorSettableAndRefusesNonpositive() throws {
-        XCTAssertEqual(
-            try MinerConfig(roundDeadlineMultiplier: 3)
-                .validated().roundDeadlineMultiplier,
-            3
-        )
-        XCTAssertThrowsError(try MinerConfig(roundDeadlineMultiplier: 0).validated())
-        XCTAssertThrowsError(try MinerConfig(roundDeadlineMultiplier: -1).validated())
-        XCTAssertNil(try MinerConfig().validated().roundDeadlineMultiplier)
-    }
-
     func testRoundTripThroughDisk() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ctl-topology-\(UUID().uuidString)")
@@ -104,28 +91,6 @@ final class LatticeCtlTopologyTests: XCTestCase {
         let loaded = try Topology.load(root: root).validated()
         XCTAssertEqual(loaded.rpc, 4003)
         XCTAssertEqual(loaded.hostedChains, ["Nexus/Payments"])
-    }
-
-    /// The miner's settings are its own file, beside the node's lattice.json.
-    func testMinerSettingsAreTheirOwnFile() throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ctl-miner-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let file = root.appendingPathComponent(MinerConfig.fileName)
-        try JSONEncoder().encode(MinerConfig(
-            worker: "cpu", workers: 2, batchSize: 1_000,
-            recipients: ["Nexus": "addr-nexus"],
-            minWork: ["Nexus": "2^32"]
-        )).write(to: file)
-        let loaded = try MinerConfig.load(file: file)
-        XCTAssertEqual(loaded.batchSize, 1_000)
-        XCTAssertEqual(loaded.minWork, ["Nexus": "2^32"])
-        XCTAssertEqual(loaded.recipients, ["Nexus": "addr-nexus"])
-        XCTAssertEqual(loaded.coordinatorRecipientArguments, ["--recipient", "Nexus=addr-nexus"])
-        // A misspelt key would burn rewards silently: refused.
-        try Data(#"{"recipient":{"Nexus":"x"}}"#.utf8).write(to: file)
-        XCTAssertThrowsError(try MinerConfig.load(file: file))
     }
 
     /// A lattice.json from before mining was a process of its own still
@@ -139,45 +104,8 @@ final class LatticeCtlTopologyTests: XCTestCase {
         XCTAssertThrowsError(try Topology.load(data: Data(#"{"listen":4001,"rpc":4003,"nope":1}"#.utf8)))
     }
 
-    /// While there is no miner.json, the miner reads an older lattice.json's
-    /// `mine` (its `enabled` ignored) and copies it there once; miner.json
-    /// wins.
-    func testTheMinerFallsBackToAnOlderLatticeJSONsMine() throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ctl-miner-fallback-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        try Data(
-            #"{"listen":4001,"rpc":4003,"mine":{"enabled":true,"workers":3,"batchSize":10000000000,"recipients":{"Nexus":"old"}}}"#.utf8
-        ).write(to: root.appendingPathComponent(Topology.fileName))
-        XCTAssertTrue(Topology.holdsRetiredMining(root: root))
-        let (fallback, warning) = try MinerConfig.load(root: root)
-        XCTAssertEqual(fallback.workers, 3)
-        XCTAssertEqual(fallback.batchSize, 10_000_000_000)
-        XCTAssertEqual(fallback.recipients, ["Nexus": "old"])
-        XCTAssertTrue(warning?.contains("copied") == true, warning ?? "no warning")
-        // Copied once, without `enabled`: a later node rewrite of
-        // lattice.json (which drops `mine`) strands nothing.
-        let copied = root.appendingPathComponent(MinerConfig.fileName)
-        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: copied)) as? [String: Any])
-        XCTAssertNil(object["enabled"])
-        XCTAssertEqual(try MinerConfig.load(file: copied).batchSize, 10_000_000_000)
-        try Data(#"{"listen":4001,"rpc":4003}"#.utf8).write(to: root.appendingPathComponent(Topology.fileName))
-        let (again, said) = try MinerConfig.load(root: root)
-        XCTAssertEqual(again.recipients, ["Nexus": "old"])
-        XCTAssertNil(said, "said once")
-        // miner.json wins, and is never overwritten by the fallback.
-        try Data(#"{"listen":4001,"rpc":4003,"mine":{"recipients":{"Nexus":"older"}}}"#.utf8)
-            .write(to: root.appendingPathComponent(Topology.fileName))
-        try JSONEncoder().encode(MinerConfig(recipients: ["Nexus": "new"])).write(to: copied)
-        let (own, none) = try MinerConfig.load(root: root)
-        XCTAssertEqual(own.recipients, ["Nexus": "new"])
-        XCTAssertNil(own.workers)
-        XCTAssertNil(none)
-    }
-
-    /// The miner's binaries are found beside the real `lattice`, through a
-    /// symlink (as on PATH), not beside argv[0] or lattice-node.
+    /// lattice-node is found beside the real `lattice`, through a symlink
+    /// (as on PATH), not beside argv[0].
     func testSiblingBinariesResolveBesideTheRealExecutable() throws {
         let scratch = FileManager.default.temporaryDirectory
             .appendingPathComponent("ctl-siblings-\(UUID().uuidString)")
@@ -186,7 +114,7 @@ final class LatticeCtlTopologyTests: XCTestCase {
         try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: onPath, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: scratch) }
-        for name in ["lattice", "lattice-miner"] {
+        for name in ["lattice", "lattice-node"] {
             let file = real.appendingPathComponent(name)
             try Data("#!/bin/sh\n".utf8).write(to: file)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
@@ -194,18 +122,14 @@ final class LatticeCtlTopologyTests: XCTestCase {
         try FileManager.default.createSymbolicLink(
             at: onPath.appendingPathComponent("lattice"), withDestinationURL: real.appendingPathComponent("lattice")
         )
-        let found = try siblingBinary("lattice-miner", beside: onPath.appendingPathComponent("lattice"))
-        XCTAssertEqual(found.resolvingSymlinksInPath().path, real.appendingPathComponent("lattice-miner").resolvingSymlinksInPath().path)
+        let found = try siblingBinary("lattice-node", beside: onPath.appendingPathComponent("lattice"))
+        XCTAssertEqual(found.resolvingSymlinksInPath().path, real.appendingPathComponent("lattice-node").resolvingSymlinksInPath().path)
         XCTAssertThrowsError(try siblingBinary("lattice-no-such-binary", beside: onPath.appendingPathComponent("lattice")))
         XCTAssertTrue(currentExecutable.path.hasPrefix("/"), currentExecutable.path)
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: currentExecutable.path))
     }
 
     func testValidationRejectsInvalidOperationalValues() {
-        XCTAssertThrowsError(try MinerConfig(recipients: ["Nexus": ""]).validated())
-        XCTAssertThrowsError(try MinerConfig(workers: 0).validated())
-        XCTAssertThrowsError(try MinerConfig(batchSize: 0).validated())
-
         var negativeRate = topology()
         negativeRate.publicReadRate = -1
         XCTAssertThrowsError(try negativeRate.validated())
@@ -486,108 +410,6 @@ final class LatticeCtlTopologyTests: XCTestCase {
         XCTAssertThrowsError(try load(#"{"listen":4001,"rpc":4003,"peers":"k@a.example:4001"}"#))
     }
 
-    /// `minWork` reaches the coordinator as a search plan. There is no
-    /// companion setting that commits it: blocks still commit their schedule.
-    func testMinimumWorkPassesThroughAsASearchPlan() throws {
-        let mine = MinerConfig(
-            minWork: ["Nexus/Payments": "2^20", "Nexus": "2^32"]
-        )
-        XCTAssertEqual(
-            try mine.validated().coordinatorMinimumWorkArguments,
-            [
-                "--min-work", "Nexus=2^32",
-                "--min-work", "Nexus/Payments=2^20",
-            ]
-        )
-    }
-
-    /// The cadence is a floor on block spacing, not a fixed block time.
-    func testPacingIsAFloorThatReleasesItself() {
-        let paced = MinerConfig(minBlockIntervalSeconds: 600)
-        XCTAssertEqual(paced.pacingHold(afterRoundOf: .zero), .seconds(600))
-        XCTAssertEqual(paced.pacingHold(afterRoundOf: .seconds(100)), .seconds(500))
-        XCTAssertEqual(paced.pacingHold(afterRoundOf: .seconds(600)), .zero)
-        XCTAssertEqual(paced.pacingHold(afterRoundOf: .seconds(9_000)), .zero)
-        XCTAssertEqual(MinerConfig().pacingHold(afterRoundOf: .zero), .zero)
-    }
-
-    func testPacingRoundTripsAndIsOptional() throws {
-        let encoded = try JSONEncoder().encode(
-            MinerConfig(minBlockIntervalSeconds: 3_300)
-        )
-        XCTAssertEqual(
-            try JSONDecoder().decode(MinerConfig.self, from: encoded)
-                .minBlockIntervalSeconds,
-            3_300
-        )
-        XCTAssertNil(try JSONDecoder().decode(
-            MinerConfig.self, from: Data("{}".utf8)
-        ).minBlockIntervalSeconds)
-    }
-
-    func testRetiredMiningTopologyKeysAreRefused() {
-        for body in [#"{"chain":"Nexus"}"#, #"{"rewards":{}}"#] {
-            XCTAssertThrowsError(try JSONDecoder().decode(
-                MinerConfig.self, from: Data(body.utf8)
-            ))
-        }
-    }
-
-    func testPacingIsNotACoordinatorArgument() {
-        XCTAssertEqual(
-            MinerConfig(
-                minWork: ["Nexus": "2^40"],
-                minBlockIntervalSeconds: 600
-            ).coordinatorMinimumWorkArguments,
-            ["--min-work", "Nexus=2^40"]
-        )
-    }
-
-    func testTemplateTimeoutIsOperatorSettable() throws {
-        XCTAssertEqual(
-            MinerConfig().resolvedTemplateTimeoutSeconds,
-            MinerConfig.defaultTemplateTimeoutSeconds
-        )
-        XCTAssertEqual(
-            MinerConfig(templateTimeoutSeconds: 60).resolvedTemplateTimeoutSeconds,
-            60
-        )
-        XCTAssertThrowsError(try MinerConfig(templateTimeoutSeconds: 0).validated()) { error in
-            XCTAssertEqual(
-                (error as? CtlError)?.description,
-                "templateTimeoutSeconds must be at least 1; a zero timeout can never see the node answer a template request, so the miner would never mine"
-            )
-        }
-    }
-
-    func testTemplateTimeoutCeilingDoesNotExceedTheCoordinatorsOwnLimit() {
-        let coordinatorLimit = URLRequest(
-            url: URL(string: "http://127.0.0.1:8080/mining/templates")!
-        ).timeoutInterval
-        XCTAssertLessThanOrEqual(
-            TimeInterval(MinerConfig.maximumTemplateTimeoutSeconds),
-            coordinatorLimit
-        )
-        XCTAssertLessThanOrEqual(
-            TimeInterval(MinerConfig.defaultTemplateTimeoutSeconds),
-            coordinatorLimit
-        )
-    }
-
-    func testTemplateTimeoutAboveTheCoordinatorsLimitIsRefused() {
-        XCTAssertThrowsError(try MinerConfig(
-            templateTimeoutSeconds: MinerConfig.maximumTemplateTimeoutSeconds + 1
-        ).validated()) { error in
-            XCTAssertEqual(
-                (error as? CtlError)?.description,
-                "templateTimeoutSeconds must be at most \(MinerConfig.maximumTemplateTimeoutSeconds); the coordinator's own template fetch is fixed at that, so a longer probe would start rounds that then die fetching the same template"
-            )
-        }
-        XCTAssertNoThrow(try MinerConfig(
-            templateTimeoutSeconds: MinerConfig.maximumTemplateTimeoutSeconds
-        ).validated())
-    }
-
     func testLayoutSeparatesIdentityFromWipeableChainTree() {
         let layout = HostLayout(root: "/var/lib/lattice")
         XCTAssertTrue(layout.identityKey(for: "Nexus").path
@@ -595,23 +417,5 @@ final class LatticeCtlTopologyTests: XCTestCase {
         XCTAssertTrue(layout.chainDirectory(for: "Nexus/Payments").path
             .hasSuffix("chains/Nexus/Payments"))
         XCTAssertFalse(layout.identityKey(for: "Nexus").path.contains("/chains/"))
-    }
-
-    /// A stop removes the pidfile only while it names the pid the stop
-    /// signalled: a daemon a restart spawned meanwhile keeps its pidfile.
-    func testAStopLeavesAPidFileNamingAnotherPid() throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ctl-pid-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: root) }
-        let layout = HostLayout(root: root.path)
-        let url = layout.pidFile(for: "lattice-node")
-        try FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
-        )
-        try Data("4243 lattice-node".utf8).write(to: url)
-        layout.removePidFile(for: "lattice-node", ifNaming: 4242)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
-        layout.removePidFile(for: "lattice-node", ifNaming: 4243)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
     }
 }

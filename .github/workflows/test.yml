@@ -100,8 +100,6 @@ jobs:
         run: |
           swift run lattice --help
           swift run lattice-node --help
-          swift run lattice-mining-coordinator --help
-          swift run lattice-miner --help
 
       - name: Collect retained E2E artifacts
         if: failure()
@@ -156,8 +154,6 @@ jobs:
         run: |
           swift run lattice --help
           swift run lattice-node --help
-          swift run lattice-mining-coordinator --help
-          swift run lattice-miner --help
 
       - name: Collect retained E2E artifacts
         if: failure()
@@ -209,8 +205,6 @@ jobs:
       - name: Run operator-CLI E2Es
         env:
           E2E_NODE_BIN: ${{ github.workspace }}/.build/release/lattice-node
-          E2E_COORDINATOR_BIN: ${{ github.workspace }}/.build/release/lattice-mining-coordinator
-          E2E_MINER_BIN: ${{ github.workspace }}/.build/release/lattice-miner
           E2E_CTL_BIN: ${{ github.workspace }}/.build/release/lattice
         run: swift test --skip-build --filter LatticeCtlE2ETests
 

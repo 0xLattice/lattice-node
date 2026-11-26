@@ -120,11 +120,12 @@ numbers. Targets are hex strings. An absent optional field is omitted, never
 The mining routes (`/mining/templates`, `/mining/events`, `/mining/work`) are the miner's
 protocol, not this read/submit contract, and are unchanged: their `block` is
 the consensus block's own encoding. The miner is a separate process, a client
-of these routes (`lattice mine run`, or `lattice-mining-coordinator`); the
-node runs none and keeps no mining settings. Each template request carries
-its recipients. On the remote listener a miner's token needs only
-`POST /mining/templates`, `POST /mining/work` and `GET /status` (the
-coordinator's freshness probe).
+of these routes ([lattice-miner](https://github.com/0xLattice/lattice-miner));
+the node runs none and keeps no mining settings. Each template request carries
+its recipients. On the remote listener a miner's token needs
+`POST /mining/templates`, `POST /mining/work` and `GET /status` (the miner's
+freshness probe), and `GET /mining/events` to be pushed template changes
+rather than poll for them.
 
 ## Selecting a hosted chain
 

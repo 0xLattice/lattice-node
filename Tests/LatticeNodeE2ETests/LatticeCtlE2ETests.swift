@@ -4,15 +4,16 @@ import FoundationNetworking
 #endif
 import Lattice
 import LatticeCtlCore
-import LatticeMinerCore
 import LatticeNode
+import UInt256
 import XCTest
 import cashew
 import LatticeNodeAPI
 
 /// Black-box E2Es for the `lattice` operator CLI: real shipped binaries,
-/// public HTTP, nothing in-process. Proves the CLI can bring up a Nexus
-/// node, mine it, and move value with `lattice tx`.
+/// public HTTP, nothing in-process but the miner (`TestMiner`), which mines
+/// through the node's mining routes as lattice-miner does. Proves the CLI can
+/// bring up a Nexus node and move value with `lattice tx`.
 final class LatticeCtlE2ETests: XCTestCase {
     // MARK: harness
 
@@ -20,11 +21,13 @@ final class LatticeCtlE2ETests: XCTestCase {
         let root: URL
         let nexusRPC: UInt16
         let supervisor: NodeSupervisor
+        /// Mines this host through its loopback API once started.
+        let miner: TestMiner
     }
 
     private var hosts: [CtlHost] = []
-    /// Miners run under roots of their own, apart from any node's.
-    private var minerRoots: [URL] = []
+    /// Miners through a node's operator listener, apart from any host's.
+    private var remoteMiners: [TestMiner] = []
 
     /// These drive real multi-chain CPU mining and starve when co-run with
     /// the rest of the E2E suite on a small shared runner, so they gate on
@@ -38,13 +41,10 @@ final class LatticeCtlE2ETests: XCTestCase {
 
     override func tearDown() async throws {
         let failed = (testRun?.totalFailureCount ?? 0) > 0
-        for root in minerRoots {
-            _ = try? await runCtl(["mine", "stop"], root: root)
-            if !failed { try? FileManager.default.removeItem(at: root) }
-        }
-        minerRoots = []
+        for miner in remoteMiners { await miner.stop() }
+        remoteMiners = []
         for host in hosts {
-            _ = try? await runCtl(["mine", "stop"], root: host.root)
+            await host.miner.stop()
             _ = try? await runCtl(["down"], root: host.root)
             host.supervisor.stop()
             if failed {
@@ -237,14 +237,14 @@ final class LatticeCtlE2ETests: XCTestCase {
         }
     }
 
-    /// Brings up one CLI-managed host mining Nexus with rewards to `miner`
-    /// (none when nil: they burn).
+    /// Brings up one CLI-managed host whose miner, once started, pays Nexus
+    /// rewards to `miner` (none when nil: they burn).
     ///
     /// Pass a Nexus `miner` only when the test spends Nexus rewards. A
     /// credited recipient changes Nexus's post-state on every block, and at
     /// this host's near-maximum Nexus target nearly every hash is a full
     /// Nexus block, so each one stales every hosted child's prebuilt
-    /// candidate (it binds the tip's post-state) before the coordinator's
+    /// candidate (it binds the tip's post-state) before the miner's
     /// next template can carry it. A child is then carried only when its
     /// rebuild wins that race, and a grandchild topology, or a child with a
     /// transaction pooled, can lose it on every block. At Nexus's real
@@ -273,22 +273,24 @@ final class LatticeCtlE2ETests: XCTestCase {
         topology.minRelayFee = minRelayFee
         configure(&topology)
         try topology.validated().save(root: root)
-        try writeMinerConfig(root, recipients: miner.map { ["Nexus": $0.address] } ?? [:])
         if olderMiningConfig {
             // As a host upgraded from a release whose miner read lattice.json:
-            // its `mine` object there and no miner.json.
-            let file = root.appendingPathComponent(MinerConfig.fileName)
+            // its `mine` object there, which the node ignores.
             var object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: topologyURL)) as? [String: Any])
-            var mine = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
-            mine["enabled"] = true
-            object["mine"] = mine
+            object["mine"] = [
+                "enabled": true, "worker": "cpu", "workers": 1, "batchSize": 100_000,
+                "recipients": miner.map { ["Nexus": $0.address] } ?? [:],
+            ] as [String: Any]
             try JSONSerialization.data(withJSONObject: object).write(to: topologyURL)
-            try FileManager.default.removeItem(at: file)
         }
 
         let host = CtlHost(
             root: root, nexusRPC: ports[1],
-            supervisor: NodeSupervisor(lattice: try binary("E2E_CTL_BIN", "lattice"), root: root)
+            supervisor: NodeSupervisor(lattice: try binary("E2E_CTL_BIN", "lattice"), root: root),
+            miner: TestMiner(
+                rpc: ports[1], cookieFile: HostLayout(root: root.path).rpcCookie,
+                recipients: miner.map { ["Nexus": $0.address] } ?? [:]
+            )
         )
         try host.supervisor.start()
         hosts.append(host)
@@ -296,23 +298,6 @@ final class LatticeCtlE2ETests: XCTestCase {
             await self.health(host.nexusRPC)?["phase"] as? String == "active"
         }
         return host
-    }
-
-    /// The miner's own settings under `root` (its miner.json), which the
-    /// loop reads again before each round.
-    private func writeMinerConfig(_ root: URL, recipients: [String: String]) throws {
-        try JSONEncoder().encode(MinerConfig(
-            worker: "cpu", workers: 1, batchSize: 100_000, recipients: recipients
-        )).write(to: root.appendingPathComponent(MinerConfig.fileName), options: .atomic)
-    }
-
-    /// Pays `chain`'s rewards to `address` from the next round, beside the
-    /// recipients already set.
-    private func setRecipient(_ root: URL, _ chain: String, _ address: String) throws {
-        let file = root.appendingPathComponent(MinerConfig.fileName)
-        var recipients = try MinerConfig.load(file: file).recipients ?? [:]
-        recipients[chain] = address
-        try writeMinerConfig(root, recipients: recipients)
     }
 
     /// The configuration in layers: a fragment applied, one written by hand
@@ -382,17 +367,15 @@ final class LatticeCtlE2ETests: XCTestCase {
         let miner = try await makeKey(scratch, "miner")
         let recipient = try await makeKey(scratch, "recipient")
         // Upgraded with no edits: the node starts from a lattice.json that
-        // still holds `mine`, and the miner mines from it.
+        // still holds `mine`.
         let host = try await bringUpMiningHost(miner: miner, olderMiningConfig: true)
         // The operator port refuses a client without the cookie; the CLI and
-        // its coordinator below carry it.
+        // the miner below carry it.
         var bare = URLRequest(url: URL(string: "http://127.0.0.1:\(host.nexusRPC)/status")!)
         bare.cachePolicy = .reloadIgnoringLocalCacheData
         let (_, refused) = try await URLSession.shared.data(for: bare)
         XCTAssertEqual((refused as? HTTPURLResponse)?.statusCode, 401)
-        let started = try await runCtl(["mine", "start"], root: host.root)
-        XCTAssertTrue(started.contains("copied"), "the miner copies the older settings to miner.json: \(started)")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: host.root.appendingPathComponent(MinerConfig.fileName).path))
+        host.miner.start()
         try await waitFor("miner funded by Nexus rewards", seconds: 180) {
             await self.balance(host, miner.address) >= 10
         }
@@ -418,7 +401,7 @@ final class LatticeCtlE2ETests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: scratch) }
         let sponsorKey = try await makeKey(scratch, "sponsor")
         let host = try await bringUpMiningHost(miner: sponsorKey, minRelayFee: 5)
-        _ = try await runCtl(["mine", "start"], root: host.root)
+        host.miner.start()
         try await waitFor("sponsor funded by Nexus rewards", seconds: 180) {
             await self.balance(host, sponsorKey.address) >= 50
         }
@@ -426,10 +409,10 @@ final class LatticeCtlE2ETests: XCTestCase {
 
         // Nexus rewards burn from here: a credited Nexus recipient stales
         // the child's candidates (`bringUpMiningHost`).
-        _ = try await runCtl(["mine", "stop"], root: host.root)
+        await host.miner.stop()
         _ = try await runCtl(["child", "create", alpha, "--block-time", "1000", "--reward", "100"], root: host.root)
-        try writeMinerConfig(host.root, recipients: [alpha: sponsorKey.address])
-        _ = try await runCtl(["mine", "start"], root: host.root)
+        host.miner.recipients = [alpha: sponsorKey.address]
+        host.miner.start()
         try await waitFor("sponsor funded by Alpha rewards", seconds: 180) {
             await self.balance(host, sponsorKey.address, chain: alpha) >= 50
         }
@@ -502,7 +485,7 @@ final class LatticeCtlE2ETests: XCTestCase {
         let clientToken = try XCTUnwrap(work["client"] as? String)
         let assignment = try XCTUnwrap(work["assignment"] as? String)
         let prefix = try XCTUnwrap((work["prefixHex"] as? String).flatMap { Data(hex: $0) })
-        let shareTarget = try XCTUnwrap((work["shareTarget"] as? String).flatMap(MinerLoopLogic.parseTarget))
+        let shareTarget = try XCTUnwrap((work["shareTarget"] as? String).flatMap(UInt256.fromHexString))
         let start = try XCTUnwrap((work["startNonce"] as? String).flatMap { UInt64($0) })
         let needed = try XCTUnwrap((work["sharesForFee"] as? String).flatMap { UInt64($0) })
         XCTAssertGreaterThan(needed, 0)
@@ -511,11 +494,11 @@ final class LatticeCtlE2ETests: XCTestCase {
             let assignment: String
             let nonce: String
         }
-        let midstate = ProofOfWork.midstate(prefixBytes: ContiguousArray(prefix))
+        let midstate = ProofOfWorkMidstate(prefix: prefix)
         var found: UInt64 = 0
         var nonce = start
         while found < needed {
-            if ProofOfWork.hash(midstate: midstate, nonce: nonce) <= shareTarget {
+            if midstate.hash(nonce: nonce) <= shareTarget {
                 let (status, body) = try await postJSON(
                     "\(sponsor)/shares", Share(assignment: assignment, nonce: String(nonce))
                 )
@@ -704,8 +687,8 @@ final class LatticeCtlE2ETests: XCTestCase {
         let again = try await runCtl(["child", "create", alpha], root: host.root, expectFailure: true)
         XCTAssertTrue(again.contains("already exists"), "a second create is refused: \(again)")
 
-        try setRecipient(host.root, alpha, miner.address)
-        _ = try await runCtl(["mine", "start"], root: host.root)
+        host.miner.recipients[alpha] = miner.address
+        host.miner.start()
         try await waitFor("Alpha mined by merged mining", seconds: 180) {
             await self.height(host.nexusRPC, chain: alpha) >= 2
         }
@@ -727,7 +710,7 @@ final class LatticeCtlE2ETests: XCTestCase {
             await self.balance(host, recipient.address, chain: alpha) == 310
         }
         let before = await height(host.nexusRPC, chain: alpha)
-        _ = try await runCtl(["mine", "stop"], root: host.root)
+        await host.miner.stop()
         // Asked to stop, the node exits 0 and its process manager leaves it.
         _ = try await runCtl(["down"], root: host.root)
         try await waitFor("the node exits") { !host.supervisor.isRunning }
@@ -740,17 +723,17 @@ final class LatticeCtlE2ETests: XCTestCase {
         XCTAssertEqual(listed, ["Alpha"], "the list is rebuilt from the store on restart")
         let balance = await balance(host, recipient.address, chain: alpha)
         XCTAssertEqual(balance, 310)
-        _ = try await runCtl(["mine", "start"], root: host.root)
+        host.miner.start()
         try await waitFor("Alpha advances after the restart", seconds: 180) {
             await self.height(host.nexusRPC, chain: alpha) > before
         }
         // Unhosted, its data is let go of: hosted again, it starts over
         // from its genesis, which pays the premine, without the transfer.
-        _ = try await runCtl(["mine", "stop"], root: host.root)
+        await host.miner.stop()
         let unhosted = try await runCtl(["child", "unhost", alpha], root: host.root)
         XCTAssertTrue(unhosted.contains("no longer hosted"), unhosted)
         _ = try await runCtl(["child", "host", alpha], root: host.root)
-        _ = try await runCtl(["mine", "start"], root: host.root)
+        host.miner.start()
         try await waitFor("Alpha is mined again from its genesis", seconds: 180) {
             await self.height(host.nexusRPC, chain: alpha) >= 1
         }
@@ -955,11 +938,10 @@ private func e2eScaled(_ timeout: Duration) -> Duration {
 /// --token-file` against its operator listener, nothing on its disk.
 extension LatticeCtlE2ETests {
     private func runRemote(
-        _ arguments: [String], _ url: String, _ tokenFile: URL, expectFailure: Bool = false,
-        lattice: URL? = nil
+        _ arguments: [String], _ url: String, _ tokenFile: URL, expectFailure: Bool = false
     ) async throws -> String {
         let process = Process()
-        process.executableURL = try lattice ?? binary("E2E_CTL_BIN", "lattice")
+        process.executableURL = try binary("E2E_CTL_BIN", "lattice")
         process.arguments = arguments + ["--node", url, "--token-file", tokenFile.path]
         let stdout = Pipe()
         process.standardOutput = stdout
@@ -1154,47 +1136,27 @@ extension LatticeCtlE2ETests {
         let status = try await remote(["status"])
         XCTAssertTrue(status.contains("Nexus: active"), status)
 
-        // A chain created remotely, mined by a separate miner process with
-        // its own settings and a token for the mining routes alone, its
-        // recipient changed in the miner's own file.
+        // A chain created remotely, mined by a separate miner with a token
+        // for the mining routes alone, its recipient changed as it mines.
         _ = try await remote(["child", "create", alpha, "--block-time", "1000", "--reward", "100"])
         let minerToken = scratch.appendingPathComponent("miner.token")
         _ = try await remote([
             "tokens", "create", "miner", "--out", minerToken.path,
             "--route", "GET /status", "--route", "POST /mining/templates", "--route", "POST /mining/work",
         ])
-        let minerRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("lattice-node-e2e-miner-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: minerRoot, withIntermediateDirectories: true)
-        minerRoots.append(minerRoot)
-        try writeMinerConfig(minerRoot, recipients: [alpha: first.address])
-        // A miner-only host: lattice and the mining binaries, no lattice-node.
-        let minerBin = minerRoot.appendingPathComponent("bin")
-        try FileManager.default.createDirectory(at: minerBin, withIntermediateDirectories: true)
-        let lattice = try binary("E2E_CTL_BIN", "lattice")
-        for name in ["lattice", "lattice-mining-coordinator", "lattice-miner"] {
-            try FileManager.default.copyItem(
-                at: lattice.deletingLastPathComponent().appendingPathComponent(name),
-                to: minerBin.appendingPathComponent(name)
-            )
-        }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: minerBin.appendingPathComponent("lattice-node").path))
-        _ = try await runRemote(
-            ["mine", "start", "--root", minerRoot.path], url, minerToken,
-            lattice: minerBin.appendingPathComponent("lattice")
-        )
+        let remoteMiner = TestMiner(node: url, tokenFile: minerToken, recipients: [alpha: first.address])
+        remoteMiners.append(remoteMiner)
+        remoteMiner.start()
         try await waitFor("Alpha mined", seconds: 180) {
             await self.height(host.nexusRPC, chain: alpha) >= 2
         }
         try await waitFor("the first recipient is paid", seconds: 180) {
             await self.balance(host, first.address, chain: alpha) > 0
         }
-        try setRecipient(minerRoot, alpha, second.address)
+        remoteMiner.recipients = [alpha: second.address]
         try await waitFor("the changed recipient is paid", seconds: 240) {
             await self.balance(host, second.address, chain: alpha) > 0
         }
-        let mining = try await runRemote(["mine", "status", "--root", minerRoot.path], url, minerToken)
-        XCTAssertTrue(mining.contains("mining: running"), mining)
         // The miner's token reaches nothing but mining.
         let unscoped = try await runRemote(["config", "get"], url, minerToken, expectFailure: true)
         XCTAssertTrue(unscoped.contains("403"), unscoped)
@@ -1231,7 +1193,7 @@ extension LatticeCtlE2ETests {
         XCTAssertTrue(revoked.contains("401"), revoked)
 
         // A wipe: storage goes, configuration and identity stay.
-        _ = try await runCtl(["mine", "stop"], root: minerRoot)
+        await remoteMiner.stop()
         let height = await self.height(host.nexusRPC, chain: "Nexus")
         _ = try await remote(["wipe"])
         XCTAssertEqual(host.supervisor.exits.suffix(2), [75, 75], "a wipe restarts the node")

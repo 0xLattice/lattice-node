@@ -3,8 +3,9 @@
 The tracked deployment assets run one `lattice-node` process for a complete
 Nexus-rooted tree. The process has one identity, overlay, operator RPC,
 optional public-read listener, content store, and path-keyed fact journal.
-Mining remains external: one coordinator assigns nonce ranges to stateless
-workers.
+Mining is external:
+[lattice-miner](https://github.com/0xLattice/lattice-miner) is a client of the
+node's mining routes.
 
 ## Required invariants
 
@@ -15,8 +16,7 @@ workers.
 4. Treat `state.db` and `volumes/` (a Volume store per hosted chain) as one
    recovery unit.
    `volume-bundles.db` is a cache and may be lost.
-5. Use one reviewed revision for the node, coordinator, workers, CLI, and
-   deployment image.
+5. Use one reviewed revision for the node, CLI, and deployment image.
 6. Pin Nexus to
    `bafyreiggtg4ezifboyekbf4gxst2jr3mpjqcxsbmopy7w6fp46g4ngpgxa`.
 7. Start with a fresh runtime store after any incompatible release. There are
@@ -24,14 +24,11 @@ workers.
 
 ## systemd
 
-Install all four release binaries from the same build:
+Install both release binaries from the same build:
 
 ```bash
 sudo install -m 0755 .build/release/lattice /usr/local/bin/lattice
 sudo install -m 0755 .build/release/lattice-node /usr/local/bin/lattice-node
-sudo install -m 0755 .build/release/lattice-mining-coordinator \
-  /usr/local/bin/lattice-mining-coordinator
-sudo install -m 0755 .build/release/lattice-miner /usr/local/bin/lattice-miner
 ```
 
 Initialize `/var/lib/lattice`, edit the generated flat topology, and verify it
@@ -49,16 +46,11 @@ place the spec under `/var/lib/lattice/specs` and add the absolute path to
 own; configure a positive parent reward when the parent otherwise has no state
 changes.
 
-Install [lattice-node.service](lattice-node.service) and
-[lattice-mining-coordinator.service](lattice-mining-coordinator.service). The
-coordinator requires `/etc/lattice/mining.env`:
-
-```text
-RECIPIENT_ARGS=--recipient Nexus=<address> --recipient Nexus/Alpha=<address>
-```
-
-Protect the file as mode `0640`. Omit a recipient only when burning that
-chain's payout is intentional.
+Install [lattice-node.service](lattice-node.service). To mine, run
+lattice-miner beside it with its own `miner.json` (`recipients` maps each chain
+path to the address its reward and fees go to; an omitted chain burns its
+payout); `lattice emit-systemd` prints a unit for it when the root holds
+`miner.json` (see [the operator CLI](../docs/operator-cli.md#mining)).
 
 The persistent layout is:
 
@@ -90,13 +82,14 @@ The public-read listener or proxy must never expose `/status`, `/metrics`,
 ## Flag-day upgrades
 
 There is no in-place migration. For an incompatible schema, consensus, or
-wire cutover, stop both units, preserve only identity/config/specs, wipe the
-whole runtime tree with the CLI, install one release, and restart:
+wire cutover, stop the node (and its miner), preserve only
+identity/config/specs, wipe the whole runtime tree with the CLI, install one
+release, and restart:
 
 ```bash
-sudo systemctl stop lattice-mining-coordinator lattice-node
+sudo systemctl stop lattice-node
 sudo -u lattice lattice wipe --root /var/lib/lattice
-sudo systemctl start lattice-node lattice-mining-coordinator
+sudo systemctl start lattice-node
 ```
 
 Never combine databases from different snapshots. For ordinary backups, stop
