@@ -21,7 +21,7 @@ groups:
           severity: page
         annotations:
           summary: "{{ $labels.chain }} is behind its best header and its tip has not moved for 30 minutes"
-          description: "Read GET /status?chain=<path>: sync.blockedOn and waiting say what it waits on. See docs/operations.md, Common failures."
+          description: "Read GET /status?chain=<path>: sync.blockedOn and waiting say what it waits on. See docs/troubleshooting.md."
 
       # Behind with nothing under way for the next block: never expected.
       - alert: LatticeChainStalled
@@ -41,7 +41,7 @@ groups:
           severity: warn
         annotations:
           summary: "{{ $labels.chain }} waits on a block body, or its receipt proofs, that no peer serves"
-          description: "See docs/operations.md: 'A child chain stops at a block: receipt proofs not obtained'."
+          description: "See docs/troubleshooting.md: 'A child chain stops at a block: receipt proofs not obtained'."
 
       # Not caught up an hour after start: takes no peer transactions.
       - alert: LatticeChainNotCaughtUp

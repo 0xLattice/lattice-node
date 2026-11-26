@@ -428,7 +428,7 @@ transaction again later; the rest say to change it.
 | `tooLarge`, `invalidState` | it can never be pooled | no |
 
 `GET /api/chain/info` also reports the chain's
-[node-local finality](operations.md#node-local-finality) window, in blocks,
+[node-local finality](configuration.md#node-local-finality) window, in blocks,
 as `finalityWindow`: the operator's `--finality-window` for that chain. It is
 node policy, never consensus, and is absent when off (the default).
 
@@ -648,7 +648,7 @@ at `children[X]` (Lattice spec §6.3), and the block's author pushes `C`
 until a carrier weighs it ([push-only derived
 grinds](design/proof-derived-work.md#push-only-derived-grinds)).
 `lattice child commit` drives these routes
-([operator CLI](operator-cli.md#committing-a-child-block-on-its-parent)).
+([Child chains](child-chains.md#committing-a-child-block-yourself)).
 They are on the operator port only. `block`, `children` and `spec` are the
 base64 bytes of the block node, its child index and a child genesis's spec;
 `proofs` are its `ChildBlockProof`s' bytes.
@@ -856,7 +856,7 @@ does not check, `404` when there is none, `412` as for `PUT` with an
 `If-Match` that is not its version. A chain no layer lists any more stops,
 unless a chain listed under it keeps it, implied. A chain the configuration
 does not host has its data let go of; hosting it again syncs it again from
-its peers (see [What a node keeps](operations.md#what-a-node-keeps)). The
+its peers (see [Storage](storage.md#chains-the-node-stops-hosting)). The
 same holds for a `PUT` that leaves a chain out.
 
 ### `POST /chains`
@@ -1023,7 +1023,7 @@ bytes the operator credits (paid for, say, through a sponsor such as
 lattice-sponsor) and by verified content the peer served this node on
 request. It goes down by the Volume archive bytes this node serves the peer,
 contended or not, and never below zero. It does not decay (see
-[operations.md](operations.md#serving-standing)).
+[Networking](networking.md#serving-standing)).
 
 A peer is named by its Ed25519 public key as Ivy and the node print it (the
 `storage:` line at start, `PeerEndpoint.publicKey`): exactly 64 lowercase hex
