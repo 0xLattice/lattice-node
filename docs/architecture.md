@@ -279,10 +279,13 @@ content its facts name is not damaged.
   it stores a block, and a block a peer sent is stored only once its
   execution has found it valid: until then its body is read into memory,
   and read again whole from peers if memory let it go.
-- **Checking a submitted transaction** reads this store alone, and so do
-  the public read routes: anyone may submit or read, and neither spends
-  this node's requests to its peers. A transaction whose state is not held
-  stays pooled, unchecked.
+- **A public read of a block body, or of content by CID,** reads this store
+  alone: anyone may read, and such a read does not spend this node's
+  requests to its peers.
+- **Checking a submitted transaction** reads this store first, so what it
+  refuses there (a bad signature, the wrong chain, a stale nonce) costs no
+  request to peers. State of the tip the store lacks is then read from
+  peers, and the transaction is judged again.
 
 Every entry is checked against its CID. A read nobody can serve is no
 verdict: a block parks and is asked for again, and a template is not built.

@@ -99,8 +99,10 @@ gaps.
   node's own reads it unhashed, and the read that checks it against its CID
   fails rather than falling through to peers. What the node sends, to a
   peer or a public reader, is checked first, and damaged content is
-  answered as not held. The checks anyone
-  can cause (a submitted transaction, a public read) read this store alone.
+  answered as not held. A public read of a
+  block body, or of content by CID, reads this store alone; a submitted
+  transaction is checked against this store first, and state of the tip the
+  store lacks is then read from peers (002.h).
   Pinned by `AbsentContentTests` and
   `SafetyNetCorruptStoreTests.testBootOpensAStoreWhoseVolumesAreGone`.
 - **NODE-STORAGE-002.g** — With `blockBodies: none` the node lets go of a
