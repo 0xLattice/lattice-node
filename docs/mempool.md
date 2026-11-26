@@ -5,7 +5,7 @@ across a restart. The pool is local policy, never consensus authority: two
 honest nodes may hold different pools. Each hosted chain has its own pool,
 and co-hosted parent and child levels never merge theirs.
 
-Refusal codes and fee pricing are in the [HTTP API](rpc-api.md). How
+Refusal codes and fee pricing are in [Reads and transactions](api-reads-and-transactions.md#submitting-a-transaction). How
 transactions travel between peers is in the
 [peer protocol](protocol.md#transaction-announcements).
 

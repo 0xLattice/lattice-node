@@ -360,7 +360,7 @@ committers are derived again.
 ### The author pushes until `C` is weighed
 
 `C` enters a node only by gossip or by a local submit
-([`POST /child-blocks`](../rpc-api.md)). The node keeps
+([`POST /child-blocks`](../api-operator.md#post-child-blocks)). The node keeps
 no record of authored blocks. A submit dropped before its carrier is
 weighed, or lost to a restart, an unhost or an eviction, is pushed again;
 `lattice child commit` does this until the submit answers `tree`

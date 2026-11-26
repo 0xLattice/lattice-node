@@ -146,4 +146,4 @@ lattice config set minRelayFee=5 --node http://10.0.0.5:8090 --token-file ops.to
 Keep the listener on a private network or behind a TLS proxy: it is plain
 HTTP. A remote client may not set `operatorTokens`, which names a file on
 the node's machine. The listener is described in the
-[HTTP API](rpc-api.md#remote-operator-listener).
+[HTTP API](api-operator.md#remote-operator-listener).

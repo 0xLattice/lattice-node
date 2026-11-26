@@ -4,8 +4,8 @@
 > **Purpose:** The mining contract: what the node, a coordinator and a
 > nonce-search worker each own, and what crosses between them. The worker's
 > command line and search are in
-> [External mining workers](../mining-workers.md); the routes are in the
-> [HTTP API](../rpc-api.md).
+> [External mining workers](../mining-workers.md); the routes are in
+> [Mining routes](../api-mining.md).
 
 ## Roles
 

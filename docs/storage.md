@@ -125,7 +125,7 @@ the bytes yourself, use `POST /pins`.
 A pinned Volume is served, announced (unless the node runs with
 `--no-announce-pins`) and kept across restarts until removed. Only the
 Volume the CID names is kept, not the Volumes it links to. The node never
-stores a pin a peer sent. See [HTTP API](rpc-api.md#operator-pins).
+stores a pin a peer sent. See [HTTP API](api-operator.md#pins).
 
 ### Chains the node stops hosting
 
