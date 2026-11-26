@@ -558,6 +558,8 @@ extension ChainCore {
         }
         guard case .applied(let update) = admission else { return [] }
         weighed += update.weighed
+        // Its content is stored: held while its fetch reads it back.
+        if !tree.isExecuted(blockHash: cid) { bodies.own.insert(cid) }
         if !held {
             let waiting = sync.pending.childrenOf[cid] ?? []
             sync.removePending(cid)

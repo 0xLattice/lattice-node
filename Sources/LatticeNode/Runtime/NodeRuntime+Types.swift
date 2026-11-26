@@ -137,6 +137,10 @@ struct ChildTemplateInput: Sendable {
     let genesisPremineRecipient: String?
     let genesisTransactions: [Transaction]
     let genesisTarget: UInt256
+    /// Whether its next block is here to execute (`ChainCore.holdsNextBlock`):
+    /// it gets no candidate, nor do the levels below it, until that block
+    /// executes. The template's digest still names it, as status does.
+    var holdsNextBlock = false
 }
 
 /// What a mining job reads of its level, taken on the loop when the job is

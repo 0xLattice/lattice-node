@@ -260,8 +260,11 @@ extension NodeRuntime {
         let paths = hosted ?? inputs.map(\.path)
         var candidates: [DirectChildCandidate] = []
         // An excluded chain gets no candidate: its subtree, all excluded too
-        // (`MiningPlan.validatedExclusions`), is never built.
-        for input in inputs where input.path.dropLast().elementsEqual(parent) && !request.exclude.contains(input.path) {
+        // (`MiningPlan.validatedExclusions`), is never built. Nor does one
+        // whose next block is here to execute: a block built on its executed
+        // tip now would be that block's sibling.
+        for input in inputs where input.path.dropLast().elementsEqual(parent)
+            && !request.exclude.contains(input.path) && !input.holdsNextBlock {
             let carrier = Block(
                 version: Block.currentVersion, parent: nil,
                 transactions: HeaderImpl(rawCID: entering.rawCID), target: .max, nextTarget: .max,
