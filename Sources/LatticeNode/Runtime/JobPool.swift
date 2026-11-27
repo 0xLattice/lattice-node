@@ -33,8 +33,9 @@ extension NodeRuntime {
     /// waits behind the derivations queued before it while a node syncs a
     /// tree of chains, and no level goes ahead of another; then (C)
     /// everything else in arrival order: derivations, reads, rechecks, and
-    /// a peer's or a returned transaction's admission. A page's proof
-    /// checks are not here: they run where the page was taken. A recheck
+    /// a peer's or a returned transaction's admission. A peer's proofs
+    /// are not here: they are checked where their header is decoded,
+    /// before the loop sees it (`NodeRuntimeIvyDelegate`). A recheck
     /// whose tip is not the current one is dropped at dequeue: it runs
     /// nothing, posts nothing.
     struct JobQueues {

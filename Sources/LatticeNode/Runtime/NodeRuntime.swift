@@ -33,8 +33,6 @@ public enum NodeRuntimeError: Error, Equatable, Sendable {
 /// - `fetchBody` / `cancelBody` / `fetchByCID` → the content layer
 ///   (VolumeBroker, then overlay providers by CID).
 /// - `connect` → a bounded worker pool; the result comes back as an event.
-/// - `verifyProofs` → a task of its own, beside the pool; its answers come
-///   back as one event.
 /// - `wakeAt` → one timer that posts `tick`.
 /// - `mining` → the pool delta persisted like `persist` (fail-stop), RPC
 ///   replies answered by reply ID, announces to every ready peer, and the
@@ -370,6 +368,7 @@ public final class NodeRuntime: Sendable {
     ) {
         let (stream, continuation) = AsyncStream<Input>.makeStream()
         let inputs = Inputs(continuation: continuation)
+        let maxProofBytes = core.config.proofs.maxProofBytes
         let published = PublishedValue(core.levels[core.rootPath]?.snapshot)
         let readView = PublishedValue<NodeReadView>()
         self.published = published
@@ -429,7 +428,8 @@ public final class NodeRuntime: Sendable {
             hosted: hosted,
             publicReadURL: configuration.publicReadURL,
             publicSubmit: configuration.publicSubmit,
-            readEndpoints: readEndpoints
+            readEndpoints: readEndpoints,
+            maxProofBytes: maxProofBytes
         ) { inputs.yield(.network($0)) }
         // Stands in front of the delegate, which it passes everything on to
         // but its own signalling. The loop asks it for each relayed session.

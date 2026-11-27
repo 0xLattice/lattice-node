@@ -4,8 +4,7 @@ import LatticeNodeSim
 import XCTest
 
 /// A child genesis travels with its spec. A spec that is not the one the
-/// genesis names never blocks it: the next announcer's is held. A proof
-/// check whose block the shell no longer holds frees its slot, blaming no one.
+/// genesis names never blocks it: the next announcer's is held.
 final class ChildGenesisSpecTests: XCTestCase {
     private let now = World.genesisTime + 10_000
     private let alpha = LevelWorld.alpha
@@ -31,10 +30,10 @@ final class ChildGenesisSpecTests: XCTestCase {
         return host
     }
 
-    /// `peer` streams the genesis and answers its `getData` with `spec`;
-    /// proof checks run to completion. Returns the effects seen.
+    /// `peer` streams the genesis and answers its `getData` with `spec`,
+    /// its proofs checked as received. Returns the effects seen.
     private func announce(
-        _ world: LevelWorld, to host: inout NodeCore, from peer: PeerID, spec: ChainSpec, verify: Bool = true
+        _ world: LevelWorld, to host: inout NodeCore, from peer: PeerID, spec: ChainSpec
     ) async throws -> [NodeEffect] {
         let genesis = try XCTUnwrap(world.geneses[alpha])
         let proofs = world.publicProofs(alpha, genesis.cid, at: .max)
@@ -49,11 +48,9 @@ final class ChildGenesisSpecTests: XCTestCase {
                 switch effect {
                 case .level(let path, .send(let to, .getData(let id, let cids))) where path == alpha && to == peer:
                     guard cids.contains(genesis.cid) else { continue }
-                    queue.append(.received(peer, alpha, .headers(HeadersResponse(requestID: id, entries: [
+                    queue.append(.received(peer, alpha, SyncMessage.headers(HeadersResponse(requestID: id, entries: [
                         HeaderEntry(block: genesis.block, children: genesis.children, proofs: proofs, spec: spec),
-                    ], hasMore: false))))
-                case .level(let path, .verifyProofs(let batch)) where verify:
-                    queue.append(.level(path, .proofsVerified(batch.run { _ in genesis.block })))
+                    ], hasMore: false)).checkingProofs(at: alpha, maxProofBytes: ChildProofConfig().maxProofBytes)))
                 default:
                     break
                 }
@@ -76,30 +73,5 @@ final class ChildGenesisSpecTests: XCTestCase {
 
         _ = try await announce(world, to: &host, from: honest, spec: try XCTUnwrap(world.specs[alpha]))
         XCTAssertTrue(host.levels[alpha]?.tree.contains(blockHash: genesis) ?? false, "the honest spec admits the genesis")
-    }
-
-    func testAProofCheckWhoseBlockIsGoneFreesItsPlaceWithoutBlame() async throws {
-        let world = try await world()
-        var host = syncedHost(world)
-        let peer = PeerID(key: "peer", session: 1)
-        _ = host.step(.peerReady(peer), now: now)
-        let effects = try await announce(
-            world, to: &host, from: peer, spec: try XCTUnwrap(world.specs[alpha]), verify: false
-        )
-        let batches = effects.compactMap { effect -> ChildProofBatch? in
-            if case .level(_, .verifyProofs(let batch)) = effect { return batch }
-            return nil
-        }
-        XCTAssertEqual(batches.count, 1)
-        let jobs = try XCTUnwrap(batches.first).jobs
-        XCTAssertFalse(jobs.isEmpty)
-        XCTAssertGreaterThan(host.levels[alpha]?.sync.proofs.verifying.count ?? 0, 0)
-        // The shell found no block for any check: each answers nil.
-        let gone = jobs.map { ChildProofAnswer(job: $0, result: nil) }
-        let dropped = host.step(.level(alpha, .proofsVerified(gone)), now: now)
-        XCTAssertEqual(host.levels[alpha]?.sync.proofs.verifying.count, 0)
-        XCTAssertEqual(host.levels[alpha]?.sync.proofs.verifyingBytes, 0)
-        XCTAssertFalse(host.levels[alpha]?.tree.contains(blockHash: world.geneses[alpha]!.cid) ?? true, "nothing credited")
-        XCTAssertFalse(dropped.contains { if case .disconnect = $0 { true } else { false } })
     }
 }

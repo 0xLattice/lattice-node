@@ -62,6 +62,8 @@ final class NodeRuntimeIvyDelegate: IvyDelegate {
     private let publicReadURL: String?
     private let publicSubmit: Bool
     private let readEndpoints: ReadEndpointDirectory?
+    /// The largest peer proof checked at a hosted child level.
+    private let maxProofBytes: Int
 
     init(
         gate: NodeRuntimeInputGate,
@@ -69,8 +71,10 @@ final class NodeRuntimeIvyDelegate: IvyDelegate {
         publicReadURL: String? = nil,
         publicSubmit: Bool = false,
         readEndpoints: ReadEndpointDirectory? = nil,
+        maxProofBytes: Int,
         _ forward: @escaping @Sendable (NodeRuntimeNetworkInput) -> Void
     ) {
+        self.maxProofBytes = maxProofBytes
         self.gate = gate
         self.hosted = hosted
         self.publicReadURL = publicReadURL
@@ -122,7 +126,14 @@ final class NodeRuntimeIvyDelegate: IvyDelegate {
         } else if message.topic == OverlayTopic.transactionAvailable,
                   let announced = try? TransactionAvailableMessage.decoded(message.payload) {
             input = .transactionAvailable(peer, cid: announced.volumeRootCID)
-        } else if let decoded = try? ChainSyncWire.decode(topic: message.topic, payload: message.payload) {
+        } else if let decoded = try? ChainSyncWire.decode(topic: message.topic, payload: message.payload, checking: { path in
+            // A header's proofs are checked here, on this message's own
+            // task, before the loop sees it: in parallel across peers, and
+            // a peer's checks hold back only its own messages. Only at a
+            // hosted child level: a root header carries none, and an
+            // unhosted level's are dropped by the loop.
+            path.count > 1 && self.hosted.value?.contains(path) == true ? self.maxProofBytes : nil
+        }) {
             input = .sync(peer, chainPath: decoded.chainPath, decoded.message)
         } else {
             return

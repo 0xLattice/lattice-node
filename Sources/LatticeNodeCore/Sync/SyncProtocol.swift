@@ -1,5 +1,7 @@
 import Lattice
 import cashew
+import Foundation
+import UInt256
 
 /// A peer as the core sees it: its key and the session it arrived on. An
 /// event from a session the core no longer holds misses the `HeaderSync.peers`
@@ -20,15 +22,47 @@ public struct PeerID: Hashable, Comparable, Sendable, CustomStringConvertible {
     public var description: String { "\(key)#\(session)" }
 }
 
+/// A peer's proof of a header, checked where the header was decoded: on
+/// the task that received it, never on the decision loop. Its verdict is a
+/// fact about the proof and the block, so the step that takes the header
+/// applies it at once.
+public struct CheckedChildProof: Sendable {
+    public let proof: ChildBlockProof
+    /// The proof's content identity: the hash of its canonical bytes.
+    public let id: String
+    public let result: Result<VerifiedChildEvidence, ChildProofVerificationFailure>
+
+    /// `verifySecuringWork` of `proof`, whose canonical bytes are `bytes`,
+    /// for `block` on the chain at `chainPath`.
+    public init(_ proof: ChildBlockProof, bytes: Data, of block: Block, at chainPath: [String]) {
+        self.proof = proof
+        self.id = "\(UInt256.hash(bytes))"
+        self.result = proof.verifySecuringWork(child: block, chainPath: chainPath)
+    }
+
+    /// Whether the proof failed: malformed, or no work for this block. An
+    /// honest peer never sends one; the core disconnects the sender.
+    public var failed: Bool {
+        guard case .success(let evidence) = result, let work = evidence.contribution else { return true }
+        return work.work == .zero
+    }
+}
+
 /// One header on the wire: the block node and, when it fits, the children
 /// map its `children` link commits. An omitted children map is fetched by
 /// CID. A child chain's header adds the proofs that weigh it: a
 /// `ChildBlockProof` per root that carries it. A child genesis carries its
 /// spec, which every root holds as its own.
+///
+/// `proofs` is what a header carries out; `checked` is what a received
+/// header brings in: its proofs within the receiver's `maxProofBytes`, each
+/// checked where it was decoded (`checkingProofs`). The core takes only
+/// `checked`: a proof not checked is unavailable, never judged.
 public struct HeaderEntry: Sendable {
     public let block: Block
     public let children: FlatDictionary<BlockHeader>?
     public let proofs: [ChildBlockProof]
+    public let checked: [CheckedChildProof]
     public let spec: ChainSpec?
     /// The block's CID when it came with the block: a received header's, the
     /// hash of the bytes it was decoded from, taken where they arrived.
@@ -39,13 +73,39 @@ public struct HeaderEntry: Sendable {
     /// keys the header by it unchecked, so it must be the CID of `block`.
     public init(
         block: Block, children: FlatDictionary<BlockHeader>?, proofs: [ChildBlockProof] = [], spec: ChainSpec? = nil,
-        cid: String? = nil
+        cid: String? = nil, checked: [CheckedChildProof] = []
     ) {
         self.block = block
         self.children = children
         self.proofs = proofs
+        self.checked = checked
         self.spec = spec
         self.receivedCID = cid
+    }
+
+    /// The entry as received at `chainPath`: each proof whose canonical
+    /// bytes (`bytes`, when the caller holds them, in `proofs` order) fit
+    /// `maxProofBytes` checked, up to the first that fails. A proof over the
+    /// limit is left unchecked: a local resource limit, never blamed. None
+    /// after a failure is checked: the core disconnects the sender at it
+    /// and reads no further, so a page of junk costs one failed check.
+    public func checkingProofs(at chainPath: [String], maxProofBytes: Int, bytes: [Data]? = nil) -> HeaderEntry {
+        var checked: [CheckedChildProof] = []
+        for (index, proof) in proofs.enumerated() {
+            guard let data = bytes?[index] ?? (try? proof.serialize()), data.count <= maxProofBytes else { continue }
+            let check = CheckedChildProof(proof, bytes: data, of: block, at: chainPath)
+            checked.append(check)
+            if check.failed { break }
+        }
+        return HeaderEntry(block: block, children: children, proofs: proofs, spec: spec, cid: receivedCID, checked: checked)
+    }
+
+    /// Whether a proof of this received entry failed its check.
+    public var failedACheck: Bool { checked.last?.failed == true }
+
+    /// The same entry without its inline children map.
+    public func withoutChildren() -> HeaderEntry {
+        HeaderEntry(block: block, children: nil, proofs: proofs, spec: spec, cid: receivedCID, checked: checked)
     }
 
     /// The block's CID: a received header's, hashed once from its bytes; a
@@ -270,4 +330,25 @@ public enum SyncMessage: Sendable {
     /// `GetBlockHeaders`, Avalanche's `GetAncestors`.
     case getAncestors(requestID: UInt64, cid: String, max: Int)
     case headers(HeadersResponse)
+}
+
+extension SyncMessage {
+    /// The message as a receiver at `chainPath` takes it: a headers page's
+    /// proofs checked, as the wire decode checks them where they arrive
+    /// (`HeaderEntry.checkingProofs`). Any other message is unchanged.
+    public func checkingProofs(at chainPath: [String], maxProofBytes: Int) -> SyncMessage {
+        guard case .headers(let response) = self else { return self }
+        var failed = false
+        return .headers(HeadersResponse(
+            requestID: response.requestID,
+            entries: response.entries.map { entry in
+                // Past a failure the core reads nothing: nothing is checked.
+                guard !failed else { return entry }
+                let checked = entry.checkingProofs(at: chainPath, maxProofBytes: maxProofBytes)
+                failed = checked.failedACheck
+                return checked
+            },
+            hasMore: response.hasMore
+        ))
+    }
 }

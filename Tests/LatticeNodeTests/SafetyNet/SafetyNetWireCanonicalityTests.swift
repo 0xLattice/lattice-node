@@ -297,6 +297,51 @@ final class SafetyNetWireCanonicalityTests: XCTestCase {
         XCTAssertThrowsError(try ChainSyncWire.decode(topic: frame.topic, payload: payload))
     }
 
+    /// A headers page is checked where it is decoded, at a level whose
+    /// checks the receiver asks for: each proof within the size limit comes
+    /// with its verdict (these random ones all fail), one over it with none.
+    /// At a level it does not check (not hosted, or a root), nothing is
+    /// checked.
+    func testAHeadersPageIsCheckedWhereItIsDecoded() throws {
+        var generator = SplitMix64(state: 0x44)
+        let path = randomChainPath(&generator, minimumCount: 2)
+        let small = ChildBlockProof(
+            rootCID: randomCID(&generator), directoryPath: path,
+            entries: [(cid: randomCID(&generator), data: Data("a".utf8))]
+        )
+        let large = ChildBlockProof(
+            rootCID: randomCID(&generator), directoryPath: path,
+            entries: [(cid: randomCID(&generator), data: Data(repeating: 0x61, count: 4_096))]
+        )
+        let block = Block(
+            parent: nil,
+            transactions: HeaderImpl(rawCID: randomCID(&generator)),
+            target: UInt256(1), nextTarget: UInt256(1),
+            spec: VolumeImpl(rawCID: randomCID(&generator)),
+            parentState: LatticeStateHeader(rawCID: randomCID(&generator)),
+            prevState: LatticeStateHeader(rawCID: randomCID(&generator)),
+            postState: LatticeStateHeader(rawCID: randomCID(&generator)),
+            children: HeaderImpl(rawCID: randomCID(&generator)),
+            height: 1, timestamp: 1, rewardRecipient: nil, nonce: 1
+        )
+        let page = HeadersResponse(
+            requestID: 7, entries: [HeaderEntry(block: block, children: nil, proofs: [small, large])], hasMore: false
+        )
+        let frame = try ChainSyncWire.encode(.headers(page), at: path)
+        let limit = try small.serialize().count
+        func checked(_ checking: @escaping ([String]) -> Int?) throws -> [CheckedChildProof] {
+            let decoded = try XCTUnwrap(ChainSyncWire.decode(topic: frame.topic, payload: frame.payload, checking: checking))
+            guard case .headers(let response) = decoded.message else { XCTFail("not a headers page"); return [] }
+            XCTAssertEqual(response.entries.first?.proofs.count, 2, "every proof still travels")
+            return response.entries.first?.checked ?? []
+        }
+        let verdicts = try checked { $0 == path ? limit : nil }
+        XCTAssertEqual(verdicts.map(\.proof.rootCID), [small.rootCID], "only the proof within the limit is checked")
+        XCTAssertEqual(verdicts.first?.id, "\(UInt256.hash(try small.serialize()))")
+        guard case .failure = try XCTUnwrap(verdicts.first).result else { return XCTFail("a random proof verified") }
+        XCTAssertEqual(try checked { _ in nil }.count, 0, "a level not checked here")
+    }
+
     // MARK: - Content fixtures for the binary frames
 
     /// An unsigned-but-content-bound transaction under `chainPath`: the frame

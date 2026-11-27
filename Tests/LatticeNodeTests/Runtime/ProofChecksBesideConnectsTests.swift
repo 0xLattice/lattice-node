@@ -6,8 +6,8 @@ import XCTest
 @testable import LatticeNode
 import cashew
 
-/// A child level weighs a header by its peer proof while the worker pool is
-/// taken by connects: the check runs where the header was taken, never
+/// A child level weighs a header by its proof while the worker pool is taken
+/// by connects: the proof is checked where the header is received, never
 /// queued behind blocks to execute.
 final class ProofChecksBesideConnectsTests: XCTestCase {
     private static let alpha = ["Nexus", "Alpha"]
@@ -80,7 +80,7 @@ final class ProofChecksBesideConnectsTests: XCTestCase {
             )).status
         }
         let first = try await push()
-        XCTAssertNotEqual(first, .dropped, "taken to wait for its proof's check")
+        XCTAssertNotEqual(first, .dropped, "taken with its checked proof")
         try await eventually("Alpha weighs G by its proof", within: .seconds(20)) { try await push() == .tree }
         XCTAssertEqual(held.withLock { $0 }, 1, "the connect still holds the worker")
         XCTAssertEqual(runtime.published.value?.actOnHeight, 0, "Nexus has executed nothing since")

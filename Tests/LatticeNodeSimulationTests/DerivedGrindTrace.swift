@@ -74,9 +74,9 @@ final class GrindTracer: @unchecked Sendable {
         var status: [String: String] = [:]
         var credited: [String: [String]] = [:]
         var deriving: [String: Int] = [:]
+        /// The model's peer proofs awaiting a check: always empty after a
+        /// step, since a peer's proofs are checked as their header arrives.
         var peerQ: [String: [String]] = [:]
-        var peerKeys: Set<ChildProofKey> = []
-        var peerLabels: [ChildProofKey: String] = [:]
         var weighed: Set<String> = []
         var cgr: [String: [String]] = [:]
         var peers: Set<PeerID> = []
@@ -102,7 +102,7 @@ final class GrindTracer: @unchecked Sendable {
             "hosted": start.hosted, "weighed": start.weighed.sorted(), "cgr": start.cgr,
             "status": start.status, "credited": start.credited,
         ]
-        if start.status.values.contains(where: { $0 == "awaiting" || $0 == "pending" }) || !start.peerKeys.isEmpty
+        if start.status.values.contains(where: { $0 == "awaiting" || $0 == "pending" })
             || start.deriving.values.contains(where: { $0 > 0 }) {
             anomalies.append("trace started with work in flight")
         }
@@ -139,7 +139,6 @@ final class GrindTracer: @unchecked Sendable {
         for carrier in fixture.carriers where snap.cgr[carrier.label] == nil { snap.cgr[carrier.label] = [] }
         guard let level = core.levels[path] else { return snap }
         let proofs = level.sync.proofs
-        let held = proofs.verifying.map { ($0.key, $0.value.proof) }
         for child in fixture.children {
             let cid = child.cid
             var credited: [String] = []
@@ -158,10 +157,7 @@ final class GrindTracer: @unchecked Sendable {
             }
             snap.credited[child.label] = credited
             snap.deriving[child.label] = proofs.deriving[cid] ?? 0
-            let mine = held.filter { $0.0.childCID == cid }
-            snap.peerQ[child.label] = Set(mine.map { label(of: $0.1) }).sorted()
-            snap.peerKeys.formUnion(mine.map(\.0))
-            for (key, proof) in mine { snap.peerLabels[key] = label(of: proof) }
+            snap.peerQ[child.label] = []
         }
         return snap
     }
@@ -186,7 +182,6 @@ final class GrindTracer: @unchecked Sendable {
 
         var main: [String: Any]?
         var checked: [[String: Any]] = []
-        var checkedKeys: Set<ChildProofKey> = []
         var clears = false
         var gossiped: String?
         if booting {
@@ -206,14 +201,6 @@ final class GrindTracer: @unchecked Sendable {
                     anomalies.append("\(name): answer of a job not in flight")
                 }
             }
-        case .level(let at, .proofsVerified(let answers)) where at == path:
-            // One verify job: each of its checks a model check, in order.
-            for answer in answers {
-                let job = answer.job
-                guard s0.peerKeys.contains(job.key), let child = childLabel[job.childCID] else { continue }
-                checked.append(["kind": "check", "child": child, "proof": label(of: job.proof)])
-                checkedKeys.insert(job.key)
-            }
         case .level(let at, .submitted(let entry)) where at == path:
             if let cid = try? BlockHeader(node: entry.block).rawCID, let child = childLabel[cid] {
                 main = ["kind": "gossip", "child": child, "proof": "none", "from": "self"]
@@ -227,6 +214,11 @@ final class GrindTracer: @unchecked Sendable {
                 main = ["kind": "gossip", "child": child, "proof": entry.proofs.first.map(label(of:)) ?? "none",
                         "from": peer.key]
                 gossiped = child
+                // Checked where it was received: the model's check follows
+                // the gossip in the same step.
+                for proof in entry.checked {
+                    checked.append(["kind": "check", "child": child, "proof": label(of: proof.proof)])
+                }
             }
         case .unhost(let at) where at == path || at == parentPath:
             main = ["kind": "unhost", "x": at == parentPath]
@@ -270,14 +262,6 @@ final class GrindTracer: @unchecked Sendable {
         if let main { sub.append(main) }
         sub += checked
         if !clears {
-            // Peer proofs gone without a verdict (their block not held, or
-            // already credited): each a check the model takes to no effect.
-            // A gone peer's checks still answer, so nothing is purged.
-            let gone = s0.peerKeys.subtracting(s1.peerKeys).subtracting(checkedKeys)
-            for key in gone.sorted() {
-                guard let child = childLabel[key.childCID] else { continue }
-                sub.append(["kind": "check", "child": child, "proof": s0.peerLabels[key] ?? "bogus"])
-            }
             // A block promoted and evicted in one step.
             if gossiped == nil {
                 for child in fixture.children.map(\.label)

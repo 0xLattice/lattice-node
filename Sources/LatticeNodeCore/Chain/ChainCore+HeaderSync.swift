@@ -102,7 +102,6 @@ extension ChainCore {
                 && sync.proofs.awaiting[entry.block] == nil && !sync.declined.contains(entry.block)
         case .proof:
             return !applied(entry) && sync.pending.entries[entry.block]?.evidence[entry.cid] == nil
-                && !sync.proofs.checking(entry.block, root: entry.cid)
         }
     }
 
@@ -211,24 +210,24 @@ extension ChainCore {
 
     // MARK: - Accepting headers
 
-    /// Take one header: only its proof-of-work is checked before it waits in
-    /// the pending queue. Returns its CID, or nil when the peer was
-    /// disconnected. A child header from no peer (a local submit) is judged
+    /// Take one header: only its proof-of-work is judged before it waits in
+    /// the pending queue (a child header's proofs were checked where it was
+    /// decoded). Returns its CID, or nil when the peer was disconnected. A child header from no peer (a local submit) is judged
     /// the same way and blames no one.
     mutating func accept(_ entry: HeaderEntry, from peer: PeerID?, _ turn: inout Turn) -> String? {
         // An inline children map over the operator's limit is as if not sent:
         // asked for by CID, where the same limit makes it unavailable.
         var entry = entry
         if let children = entry.children, Self.size(of: children) > config.maxChildIndexBytes {
-            entry = HeaderEntry(block: entry.block, children: nil, proofs: entry.proofs, spec: entry.spec, cid: entry.cid)
+            entry = entry.withoutChildren()
         }
         guard let cid = entry.cid else {
             if let peer { disconnect(peer, .proofOfWorkInvalid, &turn) }
             return nil
         }
         if tree.contains(blockHash: cid) {
-            if !isRoot { offer(entry.proofs, cid: cid, from: peer, &turn) }
-            return cid
+            if !isRoot { offer(entry.checked, cid: cid, from: peer, &turn) }
+            return stillHeld(peer) ? cid : nil
         }
         if sync.declined.contains(cid) { return cid }
         // A root header proves its own work first: one that fails is blamed
@@ -261,15 +260,15 @@ extension ChainCore {
             if held.spec == nil, let spec = Self.bound(entry.spec, by: entry.block) {
                 sync.pending.entries[cid]?.spec = spec
             }
-            if !isRoot { offer(entry.proofs, cid: cid, from: peer, &turn) }
+            if !isRoot { offer(entry.checked, cid: cid, from: peer, &turn) }
             dirty(cid, &turn)
-            return cid
+            return stillHeld(peer) ? cid : nil
         }
         // A child header's work is its proofs': it waits apart until one
-        // verifies (see `ChildProofs.swift`).
+        // weighs (see `ChildProofs.swift`).
         if !isRoot {
             awaitProof(entry, cid: cid, from: peer, &turn)
-            return cid
+            return stillHeld(peer) ? cid : nil
         }
         // A peer that sent a header holds all its ancestors: this header
         // inherits every announcer of its pending children.
@@ -292,6 +291,12 @@ extension ChainCore {
         dirty(cid, &turn)
         if let parent = entry.block.parent?.rawCID { announce(parent, by: peer, &turn) }
         return cid
+    }
+
+    /// Whether `peer` is still a peer of this level: a proof of its that
+    /// failed disconnected it. No peer (a local submit) always is.
+    func stillHeld(_ peer: PeerID?) -> Bool {
+        peer.map { sync.peers[$0] != nil } ?? true
     }
 
     /// `peer` sent `cid` or a descendant, so it holds `cid` and every

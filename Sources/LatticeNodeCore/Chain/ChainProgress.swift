@@ -9,8 +9,7 @@ public enum ChainProgress: String, Sendable, Equatable, CaseIterable {
     case atTip
     /// Headers are read or waiting for their parent header.
     case headers
-    /// Child-chain headers wait for a proof that weighs them, or their
-    /// proofs are being checked.
+    /// Child-chain headers wait for a proof that weighs them.
     case proofs
     /// A child level waits for its parent level: to weigh a peer's whole
     /// log before it reads its own peers, or to execute the fact its next
@@ -52,7 +51,7 @@ extension ChainCore {
             if bodies.requested.contains(cid) { return .bodies }
             return .stalled
         }
-        if !sync.proofs.awaiting.isEmpty || !sync.proofs.verifying.isEmpty { return .proofs }
+        if !sync.proofs.awaiting.isEmpty { return .proofs }
         if !sync.pending.entries.isEmpty { return .headers }
         return .atTip
     }

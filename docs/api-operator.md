@@ -125,7 +125,6 @@ Every field of `GET /health`, read live, and:
 |---|---|---|
 | `pendingHeaders` | number | Headers received and not yet weighed, most waiting for their parent header. |
 | `headersAwaitingProof` | number | Child-chain headers waiting for a proof that weighs them. |
-| `proofChecksRunning` | number | Peers' proofs in a check, one job per page of headers. |
 | `bodyWindow` | number | The blocks the node asks to execute next: every fork child on the acted-on path and the best chain's look-ahead. |
 | `bodiesRequested` | number | Bodies asked of peers that have not arrived. |
 | `bodiesUnavailable` | number | Window blocks whose last fetch failed: no peer served the body, or this node's byte budget or store declined it. |

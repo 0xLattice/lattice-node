@@ -229,10 +229,11 @@ light-client artifact this design forbids.
 - Candidate content is retained with issued mining work; a submitted grind
   transfers the roots only for levels whose targets it actually meets.
 
-Child proofs in a check share one operator byte budget across all sources,
-with no per-peer bound ([Push-only derived grinds](#push-only-derived-grinds)).
-A flood of valid but cheap pages is bounded only by network ingress: it
-costs the checks, never a verdict. A valid proof for a child that has not
+A peer's child proofs are checked as its page is decoded, on the task that
+received it, with no per-peer bound
+([Push-only derived grinds](#push-only-derived-grinds)). A flood of valid
+but cheap pages is bounded only by network ingress: it costs the checks,
+spent on the flooder's own messages, never a verdict. A valid proof for a child that has not
 yet arrived is not punishable; lying about advertised availability or
 returning malformed bytes is.
 
@@ -287,7 +288,7 @@ whole log does not hold.
 
 With the gate open while the parent still executes, the levels' working
 sets are held at once, each within its own bounds: its pending headers, its
-headers awaiting proof, its proofs in a check, and a body window of fetched
+headers awaiting proof, and a body window of fetched
 blocks. Execution keeps its own rule: a child block executes once its
 parent state is held and continuous
 ([Parent-state continuity](#parent-state-continuity)).
@@ -324,33 +325,32 @@ uncommitted one is dropped.
    derived.
 
 A derivation is pure over this node's own content and its answer is always
-applied; credit is idempotent. It does not wait on peer proofs that are in
-a check, so neither a bogus front-run proof nor a peer that leaves can keep
-`C` from being credited.
+applied; credit is idempotent. A bogus front-run proof fails its check and
+disconnects its sender, and the grind is still owed, so it cannot keep `C`
+from being credited.
 
-### Derived or checked, per block
+### Derived or checked, per grind
 
 The rule is the same at every level with a parent, whatever its depth, and
-is decided per block:
+is decided per grind:
 
-- A block a weighed parent block commits has its work derived, with no
-  peer check at all.
-- Any other block's work is its peers' proofs, checked.
+- A peer's proof is checked where its header is decoded, before the loop
+  sees it, and credits its grind in the step that takes the header.
+- A derivation is issued only for the grinds still owed when that step
+  ends: those of weighed parent blocks committing `C` that no proof
+  credited.
 
-A peer's proof of a grind a derivation credits is not checked: one whose
-root is a grind of a weighed parent block committing `C`, while `C`'s
-derivation is in flight or is issued in the same step (`C` just arrived).
-Both are the same path from the same root, so they verify alike, and
-checking both would be double work.
+A derived proof and a peer's proof of one grind at one block are the same
+path from the same root, so they verify alike: whichever is checked first
+credits, and the other is never run. A peer's proof is already checked by
+the time the core sees it, so deriving its grind as well would be the
+double work; a derivation also reads the carrier's hop and builds the
+proof before its check.
 
-A peer's proof is checked when no derivation will answer for it: the parent
-committed `C` by no weighed block, or `C`'s derivation already ran and
-credited nothing for content it could not read (the proof is then checked
-when it is sent again).
-
-How many blocks are derivable is a property of the chains, not of depth: a
-parent that commits its child every block makes the child all derived, one
-that rarely does leaves it to peer proofs.
+How many blocks are derived is a property of the chains and of what peers
+send, not of depth: a header gossiped without proofs (an author's first
+push, a peer that could not derive) is derived from a parent that commits
+it; one gossiped with its proofs is credited by them.
 
 A derived proof that fails blames no one. A header with a derivation in
 flight is never evicted. Nothing about a derivation is persisted: a
@@ -368,13 +368,12 @@ weighed, or lost to a restart, an unhost or an eviction, is pushed again;
 
 ### Budgets
 
-- Proofs in a check share one operator budget,
-  `ChildProofConfig.maxQueuedBytes` (default 16 MiB), over all sources. A
-  proof past it is dropped without blame and nothing is evicted; the block
-  is looked up again, so its hole is asked again once the checks drain.
-- There is no bound on the number of checks: a page's proofs are one job.
+- A peer's proofs are checked where its page is decoded, so none is held
+  in a check: the work is bounded by what the peer sends, and spent on its
+  own messages. A proof over `ChildProofConfig.maxProofBytes` (default
+  64 KiB) is not checked: unavailable on this node, never blamed.
 - Headers awaiting a proof share the global `maxAwaiting`, which evicts the
-  oldest with no proof in a check and no derivation in flight.
+  oldest with no derivation in flight.
 - There are no per-peer or per-source caps: peers are cheap to make, so
   such a cap protects nothing.
 
