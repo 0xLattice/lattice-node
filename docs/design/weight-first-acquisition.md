@@ -2,7 +2,7 @@
 
 > **Status:** Proposal, implemented. The rule is in the Lattice
 > specification,
-> [§9.9](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md#99-deferred-execution-weighed-and-validated-tiers);
+> [§9.9](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/spec.md#99-deferred-execution-weighed-and-validated-tiers);
 > the node's mechanism is `HeaderSync` plus `BodyPipeline`, described in
 > [Body acquisition](block-fetching.md).
 > **Purpose:** Why the node weighs a block from its header and executes it

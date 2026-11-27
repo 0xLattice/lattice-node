@@ -5,11 +5,11 @@
 > together across Lattice and `lattice-node`: what the node verifies, what
 > it takes from its co-hosted parent level, how it syncs child levels, and
 > the invariants both keep. The consensus rules themselves are normative in
-> the [Lattice specification](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md)
-> ([§5.3](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md#53-child-chain-block-validation),
-> [§9.1](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md#91-verified-work-contributions),
-> [§9.5](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md#95-cross-chain-evidence-independence),
-> [§9.10](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md#910-parent-attributed-run-work)).
+> the [Lattice specification](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/spec.md)
+> ([§5.3](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/spec.md#53-child-chain-block-validation),
+> [§9.1](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/spec.md#91-verified-work-contributions),
+> [§9.5](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/spec.md#95-cross-chain-evidence-independence),
+> [§9.10](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/spec.md#910-parent-attributed-run-work)).
 
 ## Motivation
 
@@ -408,7 +408,7 @@ reference: `ForkChoiceOracle`, written from the specification alone and
 sharing nothing with the production descent, weight index or arithmetic,
 must agree with the production fork choice on the golden, differential and
 replay fixtures. Its
-[consensus simulator](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/consensus-simulator.md)
+[consensus simulator](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/consensus-simulator.md)
 quantifies the deterministic tie-break and no-finality tradeoffs under
 deep-reorg, selfish-mining and balancing strategies (see the
-[adversarial report](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/consensus/adversarial-report.md)).
+[adversarial report](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/consensus/adversarial-report.md)).

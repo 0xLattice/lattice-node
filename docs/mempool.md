@@ -23,7 +23,7 @@ retriable refusal; such a transaction is never held.
 
 Signature form, reward payment and the other validity rules are consensus:
 see the specification's
-[transaction validation](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md#7-transaction-validation).
+[transaction validation](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/spec.md#7-transaction-validation).
 
 ## Pool rules
 

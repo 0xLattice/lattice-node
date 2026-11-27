@@ -6,7 +6,7 @@ Each entry names the check that enforces it after every simulated step
 
 The consensus invariants (weighed graph, executed set, GHOST, continuity)
 are not listed here. They are the
-[Lattice specification](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md)'s
+[Lattice specification](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/spec.md)'s
 (§9.9 and §12), and the simulators check them with `Invariants.checkTree`
 and `LevelInvariants.checkLevel`.
 
