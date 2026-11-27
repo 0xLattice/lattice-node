@@ -5,7 +5,7 @@ of page each is. Every page states its status at the top. For how the node
 is built start with [Node architecture](../architecture.md); for what
 nodes say to each other, the [Peer protocol](../protocol.md). Consensus
 rules are in the
-[Lattice specification](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md),
+[Lattice specification](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/spec.md),
 not here.
 
 ## Current descriptions

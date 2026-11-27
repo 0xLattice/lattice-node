@@ -6,7 +6,7 @@ hosts of a chain find each other, and what a peer can be blamed for.
 
 This page does not define consensus. Validation, state transitions, work
 accounting and fork choice are defined by the
-[Lattice specification](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md).
+[Lattice specification](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/spec.md).
 Related references:
 
 | For | Read |

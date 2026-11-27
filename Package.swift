@@ -25,7 +25,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/0xLattice/Lattice.git",
-            exact: "59.3.0"
+            exact: "59.3.1"
         ),
         .package(
             url: "https://github.com/0xLattice/cashew.git",
@@ -33,11 +33,11 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/0xLattice/Ivy2.git",
-            exact: "3.3.0"
+            exact: "3.3.1"
         ),
         .package(
             url: "https://github.com/0xLattice/Tally.git",
-            exact: "4.0.0"
+            exact: "4.0.1"
         ),
         .package(
             url: "https://github.com/0xLattice/VolumeBroker.git",

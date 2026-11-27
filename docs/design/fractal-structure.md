@@ -3,8 +3,8 @@
 > **Status:** Current description.
 > **Purpose:** The four rules the node follows because the chain hierarchy
 > is recursive. The consensus rationale is Lattice's
-> [philosophy](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/philosophy.md)
-> and [foundational architecture](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/foundational-architecture.md).
+> [philosophy](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/philosophy.md)
+> and [foundational architecture](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/foundational-architecture.md).
 
 The hierarchy is recursive data hosted by one tree runtime. A mined Nexus
 root may commit a child candidate that commits another child candidate. One

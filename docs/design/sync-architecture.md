@@ -15,7 +15,7 @@
 This document is the global design that local decisions about sync are
 checked against. Nothing in it changes a hashed byte or a consensus
 decision; the [protocol
-specification](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md)
+specification](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/spec.md)
 stays normative.
 
 ## What sync produces

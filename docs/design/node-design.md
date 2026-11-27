@@ -82,10 +82,10 @@ executes it, and serves what it holds to peers, miners, operators and
 readers. The network's chain is the truth; a node holds a checked view of it.
 
 Lattice is a hierarchy of chains, not one chain
-([specification §1](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md)):
+([specification §1](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/spec.md)):
 each child is secured by work it inherits from its parent, keeps its own
 fork choice, and is hosted only by the nodes that opt into it
-([philosophy](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/philosophy.md)).
+([philosophy](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/philosophy.md)).
 So most outcomes are measured **per chain path**: a node can be at the tip of
 Nexus while a child three levels down has stopped.
 
@@ -101,7 +101,7 @@ When two conflict, the earlier one wins.
    invalid; every wait has a reason and a wake. A stall is a bug.
 3. **Security of each chain.** Blocks reach the network fast enough that few
    go stale, and each child keeps the share of parent work its security rests
-   on ([merged-mining security](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/economics/merged-mining-security.md)).
+   on ([merged-mining security](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/economics/merged-mining-security.md)).
 4. **Promises kept.** What the node tells an operator or a miner it has kept
    outlives a crash and a power loss: an acknowledged transaction, a pin, the
    configuration, a block it said it accepted.
@@ -1898,10 +1898,10 @@ modules.
 
 ## 8. Sources
 
-Lattice: [specification](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md),
-[philosophy](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/philosophy.md),
-[foundational architecture](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/foundational-architecture.md),
-[merged-mining security](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/economics/merged-mining-security.md).
+Lattice: [specification](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/spec.md),
+[philosophy](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/philosophy.md),
+[foundational architecture](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/foundational-architecture.md),
+[merged-mining security](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/economics/merged-mining-security.md).
 
 Bitcoin Core: [`validation.cpp`](https://github.com/bitcoin/bitcoin/blob/master/src/validation.cpp),
 [`txdb.cpp`](https://github.com/bitcoin/bitcoin/blob/master/src/txdb.cpp),

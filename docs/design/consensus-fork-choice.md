@@ -6,17 +6,17 @@
 > from nothing has to trust.
 
 Consensus is defined by Lattice, not by `lattice-node`. The rules are the
-[protocol specification](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md)
+[protocol specification](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/spec.md)
 and the
-[work and fork-choice rationale](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/consensus-fork-choice.md).
+[work and fork-choice rationale](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/consensus-fork-choice.md).
 This page restates none of them.
 
 | Rule | Owned by |
 |---|---|
-| How much work one grind credits at a child block | [Spec §9.5](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md#95-cross-chain-evidence-independence) |
-| Parent-attributed run work | [Spec §9.10](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md#910-parent-attributed-run-work) |
-| The tie-break between blocks of equal work | [Spec §9.4](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md#94-fork-choice-and-reorganization) |
-| Weighed and validated tiers, exclusion | [Spec §9.9](https://github.com/0xLattice/Lattice/blob/59.3.0/docs/spec.md#99-deferred-execution-weighed-and-validated-tiers) |
+| How much work one grind credits at a child block | [Spec §9.5](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/spec.md#95-cross-chain-evidence-independence) |
+| Parent-attributed run work | [Spec §9.10](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/spec.md#910-parent-attributed-run-work) |
+| The tie-break between blocks of equal work | [Spec §9.4](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/spec.md#94-fork-choice-and-reorganization) |
+| Weighed and validated tiers, exclusion | [Spec §9.9](https://github.com/0xLattice/Lattice/blob/59.3.1/docs/spec.md#99-deferred-execution-weighed-and-validated-tiers) |
 | How the node applies them to a child chain | [Proof-derived child work](proof-derived-work.md) |
 
 ## What the node owns
