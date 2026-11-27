@@ -46,27 +46,6 @@ public enum LevelInvariants {
         }
     }
 
-    /// The checks the shell runs are the core's: at each level the peer
-    /// proof checks in verify jobs the shell has not answered are exactly
-    /// the core's `verifying`, each once, so the operator's byte budget
-    /// bounds what the shell runs. A check the core forgot while the shell
-    /// still ran it would be work past the budget, its answer landing on
-    /// nothing.
-    public static func checkProofChecks(
-        node: String, host: NodeCore, running: [ChainPath: [ChildProofKey: Int]]
-    ) throws {
-        for (path, core) in host.levels {
-            let checks = running[path] ?? [:]
-            let name = "\(node)\(path.dropFirst().map { "/" + $0 }.joined())"
-            if checks.values.contains(where: { $0 > 1 }) {
-                throw Invariants.fail(name, "a proof check runs twice")
-            }
-            if Set(checks.keys) != Set(core.sync.proofs.verifying.keys) {
-                throw Invariants.fail(name, "the proof checks running are not the ones the core holds in flight")
-            }
-        }
-    }
-
     static func checkLevel(
         _ node: String,
         path: ChainPath,
@@ -219,15 +198,8 @@ public enum LevelInvariants {
         }
         // The plain proof caps.
         let proofs = core.sync.proofs, bounds = core.config.proofs
-        let held = Array(proofs.verifying.values)
         if proofs.awaiting.count > bounds.maxAwaiting {
             throw fail("\(proofs.awaiting.count) headers await a proof, over the bound")
-        }
-        if held.contains(where: { $0.bytes > bounds.maxProofBytes }) {
-            throw fail("a proof larger than the per-proof bound is held")
-        }
-        if held.reduce(0, { $0 + $1.bytes }) > bounds.maxQueuedBytes {
-            throw fail("proofs in a check exceed their byte budget")
         }
         // Top-down by weight: a child level asks its peers for nothing
         // while its parent level has not weighed a peer's whole log.

@@ -170,7 +170,12 @@ package struct WireHeaderEntry: Codable, Equatable, Sendable {
     /// DAG-CBOR decode accepts only bytes its value encodes back to, so a
     /// decode is the whole canonical check for the block, the child index
     /// and the spec, and the block's CID is the hash of the bytes received.
-    package var decoded: HeaderEntry? {
+    package var decoded: HeaderEntry? { decoded(checking: nil) }
+
+    /// The entry decoded, and, with `checking`, each proof within its
+    /// `maxProofBytes` checked against the block at its chain, here where
+    /// the bytes arrived (`HeaderEntry.checked`).
+    package func decoded(checking: ProofChecking?) -> HeaderEntry? {
         guard let decodedBlock = Block(data: block) else { return nil }
         var index: FlatDictionary<BlockHeader>?
         if let children {
@@ -187,9 +192,23 @@ package struct WireHeaderEntry: Codable, Equatable, Sendable {
             guard let value = ChainSpec(data: spec) else { return nil }
             decodedSpec = value
         }
-        return HeaderEntry(
+        let entry = HeaderEntry(
             block: decodedBlock, children: index, proofs: decodedProofs, spec: decodedSpec, cid: _standardCID(of: block)
         )
+        guard let checking, !decodedProofs.isEmpty else { return entry }
+        return entry.checkingProofs(at: checking.chainPath, maxProofBytes: checking.maxProofBytes, bytes: proofs)
+    }
+}
+
+/// Where a received header's proofs are checked: its level's chain path,
+/// and the largest proof checked there.
+package struct ProofChecking: Sendable {
+    package let chainPath: [String]
+    package let maxProofBytes: Int
+
+    package init(chainPath: [String], maxProofBytes: Int) {
+        self.chainPath = chainPath
+        self.maxProofBytes = maxProofBytes
     }
 }
 
@@ -259,8 +278,13 @@ package enum ChainSyncWire {
         }
     }
 
-    /// Nil for a topic outside chain synchronization; throws for a malformed frame.
-    package static func decode(topic: String, payload: Data) throws -> (chainPath: [String], message: SyncMessage)? {
+    /// Nil for a topic outside chain synchronization; throws for a malformed
+    /// frame. A headers page's proofs are checked when `checking` names a
+    /// limit for its chain (a hosted child level), on the caller's task:
+    /// the receiving one, never the loop.
+    package static func decode(
+        topic: String, payload: Data, checking: ([String]) -> Int? = { _ in nil }
+    ) throws -> (chainPath: [String], message: SyncMessage)? {
         switch topic {
         case ChainSyncTopic.streamRequest:
             let message = try StreamRequestMessage.decoded(payload)
@@ -289,13 +313,26 @@ package enum ChainSyncWire {
         case ChainSyncTopic.headersResponse:
             let message = try HeadersResponseMessage.decoded(payload)
             SyncTrace.log(chain: message.chainPath, "headers received \(Self.fieldsLine(message.entries, payload: payload.count)) request \(message.requestID)")
+            let proofs = checking(message.chainPath).map { ProofChecking(chainPath: message.chainPath, maxProofBytes: $0) }
+            let started = SyncTrace.now()
+            var failed = false
+            let entries = try message.entries.map {
+                // Past a failing proof the core reads nothing of the page
+                // (it disconnects the sender there): nothing is checked.
+                guard let entry = $0.decoded(checking: failed ? nil : proofs) else { throw OverlayWireError.malformed }
+                failed = failed || entry.failedACheck
+                return entry
+            }
+            if proofs != nil {
+                // In the format of a worker job's line, so a sync benchmark
+                // counts a page's checks as weighing work.
+                SyncTrace.log(
+                    chain: message.chainPath,
+                    "job proofsChecked \(message.chainPath.joined(separator: "/")) queued 0.0 run \(SyncTrace.ms(started, SyncTrace.now())) loop 0.0 ms"
+                )
+            }
             return (message.chainPath, .headers(HeadersResponse(
-                requestID: message.requestID,
-                entries: try message.entries.map {
-                    guard let entry = $0.decoded else { throw OverlayWireError.malformed }
-                    return entry
-                },
-                hasMore: message.hasMore
+                requestID: message.requestID, entries: entries, hasMore: message.hasMore
             )))
         default:
             return nil

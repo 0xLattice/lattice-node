@@ -80,7 +80,6 @@ extension NodeRuntime {
                 : tip.hash.isEmpty ? nil : Date().timeIntervalSince1970
             sync.pendingHeaders = level.sync.pending.entries.count
             sync.headersAwaitingProof = level.sync.proofs.awaiting.count
-            sync.proofChecksRunning = level.sync.proofs.verifying.count
             sync.bodyWindow = window?.distances.count ?? 0
             sync.bodiesRequested = level.bodies.requested.count
             sync.bodiesUnavailable = unavailable

@@ -204,19 +204,18 @@ final class LevelSimulationTests: XCTestCase {
 
     // MARK: - Proofs under a flood
 
-    /// Proof checks are scarce (4 at once, 1 for the index) against pages of
-    /// up to 12 proof-bearing headers, doubled roots, and a flooder relaying
-    /// every child block ahead of honest relays with forged twins of its
-    /// honest proofs and other blocks' proofs. Its first failed check fails
-    /// proof-of-work: it alone is blamed, and every honest proof is still
-    /// credited everywhere (checked at the quiet point) with identical
-    /// weights.
-    func testEveryHonestProofIsCreditedUnderATightBudgetAndAFlood() async throws {
+    /// Pages of up to 12 proof-bearing headers, doubled roots, and a
+    /// flooder relaying every child block ahead of honest relays with
+    /// forged twins of its honest proofs and other blocks' proofs. Its first
+    /// failed check fails proof-of-work: it alone is blamed, and every
+    /// honest proof is still credited everywhere (checked at the quiet
+    /// point) with identical weights.
+    func testEveryHonestProofIsCreditedUnderAFlood() async throws {
         let (_, report) = try await simulate(config(0xF100D) {
             $0.flooders = 1
             $0.doubleProbability = 0.5
             $0.pageSize = 12
-            $0.proofs = ChildProofConfig(maxQueuedBytes: Self.tightProofBudget, maxAwaiting: 64)
+            $0.proofs = ChildProofConfig(maxAwaiting: 64)
             $0.withholder = false
             $0.zeroWork = false
             $0.scheduleLiar = false
@@ -226,12 +225,8 @@ final class LevelSimulationTests: XCTestCase {
                       "\(report.disconnects)")
     }
 
-    /// The operator's byte budget for proofs in a check, a few proofs' worth.
-    private static let tightProofBudget = 16 * 1_024
-
     /// Sybils: several flooders, each relaying every child block with free
-    /// junk proofs and coming back on every reconnection, against a tight
-    /// operator budget for proofs in a check. A flooder is disconnected at
+    /// junk proofs and coming back on every reconnection. A flooder is disconnected at
     /// its first failed check, so with only plain caps every honest proof is
     /// credited everywhere within a bounded latency, no honest peer is
     /// blamed, and state stays within the caps (checked every step). A page
@@ -240,7 +235,7 @@ final class LevelSimulationTests: XCTestCase {
     /// or asked of another is never asked, so its junk is never checked and
     /// it stays: harmless, and which flooder that is depends on timing.
     func testSybilFloodersAreDisconnectedAndCannotStarveHonestProofs() async throws {
-        let proofs = ChildProofConfig(maxQueuedBytes: Self.tightProofBudget, maxAwaiting: 64)
+        let proofs = ChildProofConfig(maxAwaiting: 64)
         let flooders = 5
         let (_, report) = try await simulate(config(0x5B11) {
             $0.flooders = flooders
@@ -309,10 +304,8 @@ final class LevelSimulationTests: XCTestCase {
                     for case .send(_, let path, let reply) in source.received(
                         message, at: path, from: PeerID(key: "node", session: 1), now: now, world: world
                     ) {
-                        queue.append(.received(peer, path, reply))
+                        queue.append(.received(peer, path, reply.checkingProofs(at: path, maxProofBytes: config.proofs.maxProofBytes)))
                     }
-                case .level(let path, .verifyProofs(let batch)):
-                    queue.append(.level(path, .proofsVerified(batch.run { world.blocks[path]?[$0]?.block })))
                 case .level(let path, .deriveProofs(let jobs)):
                     for job in jobs {
                         let held = job.block ?? world.blocks[path]?[job.childCID]?.block
@@ -382,10 +375,8 @@ final class LevelSimulationTests: XCTestCase {
                     for case .send(_, let path, let reply) in source.received(
                         message, at: path, from: PeerID(key: "node", session: 1), now: now, world: world
                     ) {
-                        queue.append(.received(peer, path, reply))
+                        queue.append(.received(peer, path, reply.checkingProofs(at: path, maxProofBytes: config.proofs.maxProofBytes)))
                     }
-                case .level(let path, .verifyProofs(let batch)):
-                    queue.append(.level(path, .proofsVerified(batch.run { world.blocks[path]?[$0]?.block })))
                 case .level(let path, .deriveProofs(let jobs)):
                     for job in jobs {
                         let held = job.block ?? world.blocks[path]?[job.childCID]?.block
@@ -413,8 +404,7 @@ final class LevelSimulationTests: XCTestCase {
     }
 
     /// A peer answers each child-level `getData` with every header it has,
-    /// proofs and all: only the asked ones wait for a proof, and no check is
-    /// spent on another.
+    /// proofs and all: only the asked ones wait for a proof.
     func testAChildDataAnswerIsTakenOnlyForWhatWasAsked() async throws {
         var rng = SplitMix64(state: 0x51075)
         let world = try await LevelWorld.generate(
@@ -453,13 +443,8 @@ final class LevelSimulationTests: XCTestCase {
                             ))
                             answers += 1
                         }
-                        queue.append(.received(peer, path, reply))
+                        queue.append(.received(peer, path, reply.checkingProofs(at: path, maxProofBytes: config.proofs.maxProofBytes)))
                     }
-                case .level(let path, .verifyProofs(let batch)):
-                    for job in batch.jobs {
-                        XCTAssertTrue(asked.contains(job.childCID), "a check spent on a header not asked for")
-                    }
-                    queue.append(.level(path, .proofsVerified(batch.run { world.blocks[path]?[$0]?.block })))
                 case .level(let path, .deriveProofs(let jobs)):
                     for job in jobs {
                         let held = job.block ?? world.blocks[path]?[job.childCID]?.block
@@ -484,7 +469,6 @@ final class LevelSimulationTests: XCTestCase {
             }
             let level = try XCTUnwrap(host.levels[alpha])
             XCTAssertTrue(asked.isSuperset(of: level.sync.proofs.awaiting.keys), "a header not asked for awaits a proof")
-            XCTAssertTrue(asked.isSuperset(of: level.sync.proofs.verifying.values.map(\.cid)))
         }
         XCTAssertGreaterThan(answers, 1)
         let weighed = TreeDigest(try XCTUnwrap(host.levels[alpha]).tree).blocks
@@ -492,8 +476,7 @@ final class LevelSimulationTests: XCTestCase {
     }
 
     /// Child blocks carried by seventeen roots each, served with every
-    /// proof: all seventeen are credited, a few per answer, the rest as the
-    /// header is asked again on a tick.
+    /// proof: all seventeen are credited.
     func testAChildBlockCarriedBySeventeenRootsIsCreditedWithAll() async throws {
         var rng = SplitMix64(state: 0x17)
         let world = try await LevelWorld.generate(
@@ -531,10 +514,8 @@ final class LevelSimulationTests: XCTestCase {
                         for case .send(_, let path, let reply) in source.received(
                             message, at: path, from: PeerID(key: "node", session: 1), now: now, world: world
                         ) {
-                            queue.append(.received(peer, path, reply))
+                            queue.append(.received(peer, path, reply.checkingProofs(at: path, maxProofBytes: config.proofs.maxProofBytes)))
                         }
-                    case .level(let path, .verifyProofs(let batch)):
-                        queue.append(.level(path, .proofsVerified(batch.run { world.blocks[path]?[$0]?.block })))
                     case .level(let path, .deriveProofs(let jobs)):
                         for job in jobs {
                             let held = job.block ?? world.blocks[path]?[job.childCID]?.block
@@ -590,18 +571,26 @@ final class LevelSimulationTests: XCTestCase {
         let served = world.released(alpha, at: now, withheld: false).filter { $0.height > 0 }.map(\.cid)
         let first = try XCTUnwrap(world.grinds.firstIndex { !$0.mined.carried.isEmpty })
         var queue: [NodeEvent] = world.grinds.prefix(through: first).map { .mined($0.mined) } + [.peerReady(peer)]
+        var servedOnce = Set<String>()
         for _ in 0..<20 {
             while !queue.isEmpty {
                 for effect in host.step(queue.removeFirst(), now: now) {
                     switch effect {
                     case .level(let path, .send(_, let message)):
-                        for case .send(_, let path, let reply) in source.received(
+                        for case .send(_, let path, var reply) in source.received(
                             message, at: path, from: PeerID(key: "node", session: 1), now: now, world: world
                         ) {
-                            queue.append(.received(peer, path, reply))
+                            // A child header is served first with one proof: the
+                            // others come when it is asked again, late.
+                            if path == alpha, case .headers(let page) = reply {
+                                reply = .headers(HeadersResponse(requestID: page.requestID, entries: page.entries.map { entry in
+                                    guard let cid = entry.cid, servedOnce.insert(cid).inserted else { return entry }
+                                    return HeaderEntry(block: entry.block, children: entry.children,
+                                                       proofs: Array(entry.proofs.prefix(1)), spec: entry.spec, cid: cid)
+                                }, hasMore: page.hasMore))
+                            }
+                            queue.append(.received(peer, path, reply.checkingProofs(at: path, maxProofBytes: config.proofs.maxProofBytes)))
                         }
-                    case .level(let path, .verifyProofs(let batch)):
-                        queue.append(.level(path, .proofsVerified(batch.run { world.blocks[path]?[$0]?.block })))
                     case .level(let path, .deriveProofs(let jobs)):
                         for job in jobs {
                             let held = job.block ?? world.blocks[path]?[job.childCID]?.block

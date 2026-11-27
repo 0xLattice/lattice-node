@@ -673,7 +673,7 @@ public struct Simulator {
                     to: name,
                     .runConnect(job, incarnation: node.incarnation)
                 )
-            case .verifyProofs, .deriveProofs:
+            case .deriveProofs:
                 // Child-level effects: a root level never emits them.
                 throw Invariants.fail(name, "a root level emitted a child-level effect")
             }

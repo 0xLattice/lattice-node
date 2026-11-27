@@ -284,7 +284,7 @@ public struct ProofFlooder: LevelScript {
         let others = (world.proofs[path] ?? [:]).sorted { $0.key < $1.key }.flatMap { $0.value.values.map(\.proof) }
         let honest = world.publicProofs(path, block.cid, at: now)
         let garbage = others.filter { proof in !honest.contains { $0.rootCID == proof.rootCID } }
-        let proofs = Array((honest.map(Self.twin) + garbage).prefix(config.proofs.maxPerHeader))
+        let proofs = Array((honest.map(Self.twin) + garbage).prefix(8))
         return HeaderEntry(block: block.block, children: block.children, proofs: proofs)
     }
 

@@ -2,9 +2,9 @@
 """report.py <run-dir>...: the sync benchmark's tables from run.sh outputs.
 
 Per block means per block synced over every level (the sum of the recorded
-heights). W = header weighing jobs (proof checks + derivations), B = body
-fetch, E = connect jobs, P = the step's facts transaction (one per step, all
-levels). Job and fetch times are summed run times; with more than one worker
+heights). W = header weighing work (proof checks, where a page is decoded,
+and derivations), B = body fetch, E = connect jobs, P = the step's facts
+transaction (one per step, all levels). Job and fetch times are summed run times; with more than one worker
 or fetches in flight they overlap, so they need not add up to wall time.
 Trace figures count only lines between the follower's start and done
 markers. A run without a trace (TRACE=0) shows no split. Every job label
@@ -93,7 +93,7 @@ def run(d):
     if not steps[0]: fail(d, 'no step lines with persist time in the trace')
     # Grind proofs come with child-only shares: a follower of Nexus alone
     # verifies none.
-    for label in ('connected',) if r['hosted'] == '0' else ('proofsVerified', 'connected'):
+    for label in ('connected',) if r['hosted'] == '0' else ('proofsChecked', 'connected'):
         if not any(k[0] == label for k in jobs): fail(d, 'no %s jobs in the trace' % label)
     r['jobs'], r['bodies'], r['steps'] = jobs, bodies, steps
     return r
@@ -180,7 +180,7 @@ print('|---|---|---|---|---|---|---|---|---|---|---|')
 for r in traced:
     for path, l in r['levels'].items():
         h = max(l['height'], 1); j = r['jobs']
-        check, derive, conn = j.get(('proofsVerified', path), [0, 0]), j.get(('derived', path), [0, 0]), j.get(('connected', path), [0, 0])
+        check, derive, conn = j.get(('proofsChecked', path), [0, 0]), j.get(('derived', path), [0, 0]), j.get(('connected', path), [0, 0])
         b = r['bodies'].get(path, [0, 0])
         print('| %s | %s | %d | %.1f | %d | %d | %.2f | %d | %.2f | %d | %.2f |' % (
             r['name'], path, l['height'], l['wall'], check[0], derive[0], (check[1] + derive[1]) / h,

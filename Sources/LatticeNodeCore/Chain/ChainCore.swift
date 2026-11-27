@@ -60,9 +60,6 @@ public enum ChainEvent: Sendable {
     /// (`headersSynced`), so this level's gate opens for good and every
     /// peer's stream is read.
     case parentWeighed
-    /// A child level: a `verifyProofs` job finished, every check answered
-    /// (nil for one whose block was not held: no verdict, no blame).
-    case proofsVerified([ChildProofAnswer])
     /// A child level: a derivation of `deriveProofs` finished, every time it ran.
     case derived(ChildDerivation)
     /// A child level: a header submitted on this node (its author's push),
@@ -146,15 +143,10 @@ public enum ChainEffect: Sendable {
     case persist(ChainBatch)
     case publish(ChainSnapshot)
     case wakeAt(Int64)
-    /// A child level: run every check of the batch (`verifySecuringWork`,
-    /// pure) in one job off the step, reading from the store a block the
-    /// batch does not carry, and answer `proofsVerified` once.
-    case verifyProofs(ChildProofBatch)
     /// A child level: derive held blocks' proofs from the parent-level
     /// blocks that commit them, from this node's own content only, and
     /// answer `derived` for each (`ChildDeriveJob`). One per level and
-    /// step, as `verifyProofs`: the shell runs it in at most one job per
-    /// worker.
+    /// step: the shell runs it in at most one job per worker.
     case deriveProofs([ChildDeriveJob])
     /// The answer to a mined grind (`NodeEvent.mined` with a reply ID): at
     /// once unless its root waits to execute, then from its verdict.
@@ -394,8 +386,6 @@ public struct ChainCore: Sendable {
         case .parentWeighed:
             heldBack = false
             for peer in sync.peers.keys.sorted() { requestStream(from: peer, &turn) }
-        case .proofsVerified(let answers):
-            proofsVerified(answers, &turn)
         case .derived(let derivation):
             // Applied even when it outlived its count (an unhost between):
             // the job is pure and credit idempotent.
@@ -445,8 +435,6 @@ public struct ChainCore: Sendable {
         var effects: [ChainEffect] = []
         /// Child proofs this step credited, to index.
         var indexed: [StoredProof] = []
-        /// Peers' proofs this step took, checked as one job (`finish`).
-        var checks: [ChildProofJob] = []
         /// Stream cursors this step moved.
         var cursors: [String: StreamCursor] = [:]
         var mining: [MiningEffect] = []
@@ -519,7 +507,6 @@ public struct ChainCore: Sendable {
             }
         }
         effects += turn.effects
-        if !turn.checks.isEmpty { effects.append(.verifyProofs(ChildProofBatch(jobs: turn.checks))) }
         effects += turn.mining.map { .mining($0) }
         sync.compact()
         // Holes left unasked are asked again on a tick.
