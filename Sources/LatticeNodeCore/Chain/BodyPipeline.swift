@@ -37,6 +37,10 @@ public struct BodyPipeline: Sendable, Equatable {
     /// connected once its parent level holds that fact
     /// (`ChainEvent.parentFactsPresent`). Their bodies stay arrived.
     public internal(set) var awaitingParent: [String: CrossChainEvidenceRequirement] = [:]
+    /// Requested bodies of blocks this node weighed as its own
+    /// (`weighOwn`): their content was stored before they were weighed,
+    /// so each is held while its fetch reads it back from the store.
+    public internal(set) var own: Set<String> = []
     public struct Parked: Sendable, Equatable {
         public let notBefore: Int64
         public let attempts: Int
@@ -85,6 +89,26 @@ extension ChainCore {
             guard let cid = tree.canonicalBlockHash(atHeight: height), bodies.parked[cid] == nil else { return false }
             return bodies.connecting.contains(cid) || (bodies.arrived.contains(cid) && bodies.awaitingParent[cid] == nil)
         }
+    }
+
+    /// Whether this level's next block, the one after its executed prefix
+    /// on its best chain, is here to execute: weighed, its body held (this
+    /// node's own counts from the step that weighed it), waiting on nothing
+    /// but its connect. While it is, a child level and the levels below it
+    /// are left out of templates and of the template digest
+    /// (`NodeRuntime.mined`): a block built on its executed tip now would
+    /// be that block's sibling, and one built from the same inputs the very
+    /// block again. A hold that ends changes the digest, so miners ask again. Bitcoin's `submitblock` connects a block
+    /// before the next template is built on it. A body not held (withheld or
+    /// missing), one whose content could not be read, one waiting on its
+    /// parent level, or an invalid one (excluded when it executes, so no
+    /// longer next) leaves the level mined.
+    public var holdsNextBlock: Bool {
+        let prefix = executedPrefix(actOn: actOnTip)
+        let next = prefix.hash.isEmpty ? 0 : prefix.height + 1
+        guard let cid = tree.canonicalBlockHash(atHeight: next), bodies.parked[cid] == nil else { return false }
+        return bodies.connecting.contains(cid)
+            || ((bodies.arrived.contains(cid) || bodies.own.contains(cid)) && bodies.awaitingParent[cid] == nil)
     }
 
     /// The window's blocks whose parent is executed (`next`): the ones this
@@ -319,6 +343,7 @@ extension ChainCore {
             bodies.requested.insert(cid)
             turn.effects.append(.fetchBody(cid: cid))
         }
+        bodies.own.formIntersection(bodies.requested)
         readiness(parent: parentTree.map { ParentLevelFacts(tree: $0) })
         guard bodies.connecting.isEmpty else { return }
         let batch = nextBatch(window)

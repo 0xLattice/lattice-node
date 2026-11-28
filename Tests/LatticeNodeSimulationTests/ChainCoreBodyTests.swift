@@ -447,6 +447,53 @@ final class ChainCoreBodyTests: XCTestCase {
         XCTAssertFalse(core.holdsBacklog)
     }
 
+    /// A level holds its next block while that block's body is here
+    /// waiting only on its connect, through its connect, until it executes;
+    /// one body arriving at the tip is enough. A body not here, or one only
+    /// after the next, holds nothing.
+    func testALevelHoldsItsNextBlockFromItsBodyArrivingUntilItExecutes() async throws {
+        var (core, _) = weighed(Array(chain.prefix(3)))
+        XCTAssertFalse(core.holdsNextBlock, "no body is here")
+        _ = arrive(chain[1].cid, &core)
+        XCTAssertFalse(core.holdsNextBlock, "the body after the next is no next block")
+        let job = try XCTUnwrap(jobs(arrive(chain[0].cid, &core)).first)
+        XCTAssertTrue(core.holdsNextBlock, "the next block, connecting")
+        let effects = core.step(connected(await run(job)), now: Self.now)
+        try await persist(effects)
+        XCTAssertEqual(core.snapshot.actOnTip, chain[0].cid)
+        XCTAssertTrue(core.holdsNextBlock, "executed, the block after it is next and here")
+        let next = try XCTUnwrap(jobs(effects).first)
+        try await persist(core.step(connected(await run(next)), now: Self.now))
+        XCTAssertEqual(core.snapshot.actOnTip, chain[1].cid)
+        XCTAssertFalse(core.holdsNextBlock, "executed, the next body is not here")
+    }
+
+    /// A next block whose body could not be obtained, whose content could
+    /// not be read, or that executes invalid holds the level no more.
+    func testAnUnavailableUnreadableOrInvalidNextBlockHoldsNothing() async throws {
+        var (unavailable, _) = weighed(Array(chain.prefix(2)))
+        _ = unavailable.step(.bodyUnavailable(cid: chain[0].cid), now: Self.now)
+        XCTAssertFalse(unavailable.holdsNextBlock, "its body could not be obtained")
+
+        var (unreadable, _) = weighed(Array(chain.prefix(2)))
+        let job = try XCTUnwrap(jobs(arrive(chain[0].cid, &unreadable)).first)
+        XCTAssertTrue(unreadable.holdsNextBlock)
+        let verdict = await ChainTree.connect(job, fetcher: SimCAS(), validationContext: ValidationContext(nowMilliseconds: Self.now))
+        XCTAssertNotNil(verdict.retryFailure)
+        _ = unreadable.step(connected(verdict), now: Self.now)
+        XCTAssertFalse(unreadable.holdsNextBlock, "its content could not be read")
+
+        let invalid = try XCTUnwrap(world.blocks[world.invalidBody])
+        var (core, _) = weighed(Array(chain.prefix(2)) + [invalid])
+        _ = try await deliver(chain[0].cid, to: &core)
+        _ = try await deliver(chain[1].cid, to: &core)
+        let invalidJob = try XCTUnwrap(jobs(arrive(invalid.cid, &core)).first)
+        XCTAssertTrue(core.holdsNextBlock)
+        _ = core.step(connected(await run(invalidJob)), now: Self.now)
+        XCTAssertTrue(core.tree.isExcludedRoot(invalid.cid))
+        XCTAssertFalse(core.holdsNextBlock, "excluded, it is not next")
+    }
+
     func testAnInvalidBodyIsExcludedItsWorkStillWeighsAndNoOneIsBlamed() async throws {
         let invalid = try XCTUnwrap(world.blocks[world.invalidBody])
         let child = try XCTUnwrap(world.blocks[world.invalidBodyChild])
